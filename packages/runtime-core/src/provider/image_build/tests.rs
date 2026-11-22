@@ -7,6 +7,7 @@
 use super::*;
 use std::{
     cell::RefCell,
+    collections::BTreeSet,
     os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     sync::{Arc, Mutex},
 };
@@ -61,7 +62,6 @@ impl Fixture {
             args: BTreeMap::from([("GREETING".to_owned(), SECRET.to_owned())]),
             policy,
             timeout_seconds: Some(30),
-            pins: None,
         }
     }
     fn inputs(&self, policy: Policy) -> Inputs {
@@ -107,6 +107,7 @@ cat dockerfile/Dockerfile.dockerignore > seen-dockerignore
 ls -A snapshot/context > seen-entries
 case {mode} in
   ok) printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
+  given) printf '{{"build":{{"containerimage.config.digest":"%s"}}}}' "$(cat image-id)" > "$meta" ;;
   edit)
     target=$(cat edit-target)
     original=$(cat "$target")
@@ -161,11 +162,6 @@ struct FakePool {
     resolve_delay: Duration,
     resolve_deadlines: RefCell<Vec<Instant>>,
     output: Arc<Mutex<Vec<u8>>>,
-    /// The manifest digest every base resolves to.
-    pin: RefCell<String>,
-    /// Digests the fake registry refuses to verify.
-    unverifiable: RefCell<Vec<String>>,
-    now: RefCell<SystemTime>,
     /// Verify the image builder in this home before use, as the real pool does.
     builder_home: Option<PathBuf>,
 }
@@ -183,11 +179,17 @@ impl FakePool {
             resolve_delay: Duration::ZERO,
             resolve_deadlines: RefCell::new(Vec::new()),
             output: Arc::default(),
-            pin: RefCell::new(PIN.into()),
-            unverifiable: RefCell::new(Vec::new()),
-            now: RefCell::new(SystemTime::now()),
             builder_home: None,
         }
+    }
+    /// Register `id` as the image the fake client in mode `given` "builds" for `inputs`.
+    fn built_as(&self, inputs: &Inputs, incarnation: &str, id: &str) {
+        let labels = serde_json::to_value(labels(inputs, &identity(incarnation))).unwrap();
+        self.images.borrow_mut().insert(
+            id.into(),
+            serde_json::json!({"Id": id, "Architecture": "arm64", "Os": "linux",
+                "Size": GIB, "Config": {"Labels": labels, "Volumes": null}}),
+        );
     }
     /// Register the image the fake client "builds", with the labels the build expects.
     fn built(&self, inputs: &Inputs, incarnation: &str, extra: Value) {
@@ -228,18 +230,9 @@ impl BuildPool for FakePool {
         if self.resolve_error {
             return Err(CandidateError::new("registry_image", "offline"));
         }
-        // A digest-pinned reference resolves to exactly that digest, as the resolver does.
-        let pin = base
-            .reference
-            .digest
-            .clone()
-            .unwrap_or_else(|| self.pin.borrow().clone());
-        if self.unverifiable.borrow().contains(&pin) {
-            return Err(CandidateError::new("registry_image", "unverifiable"));
-        }
         Ok(BuildBase {
-            pinned_reference: format!("docker.io/{}@{pin}", base.repository()),
-            source_digest: pin,
+            pinned_reference: format!("docker.io/{}@{PIN}", base.repository()),
+            source_digest: PIN.into(),
             image_id: IMAGE.into(),
         })
     }
@@ -258,9 +251,6 @@ impl BuildPool for FakePool {
     fn prune_cache(&self, _: &(), max_used: u64) -> Result<u64, CandidateError> {
         self.prunes.borrow_mut().push(max_used);
         Ok(7)
-    }
-    fn now(&self) -> SystemTime {
-        *self.now.borrow()
     }
 }
 
@@ -285,12 +275,6 @@ fn target_context(scratch: &Path) -> String {
         .to_owned()
 }
 
-fn with_pins(mut request: BuildRequest, pins: BTreeMap<String, String>) -> BuildRequest {
-    request.version = 2;
-    request.pins = Some(pins);
-    request
-}
-
 fn never() -> bool {
     false
 }
@@ -308,7 +292,7 @@ fn cold_build_passes_values_only_through_the_private_definition_and_records_the_
     assert_eq!(
         outcome.base_pins,
         BTreeMap::from([(
-            "docker.io/library/alpine:3.20".to_owned(),
+            "alpine:3.20".to_owned(),
             format!("docker.io/library/alpine@{PIN}")
         )])
     );
@@ -519,7 +503,8 @@ fn receipts_with_the_most_and_longest_accepted_pins_stay_readable() {
         image_id: Some(IMAGE.into()),
         image_bytes: Some(5 * GIB),
         base_pins: BTreeMap::new(),
-        bases_resolved_at: None,
+        declaration: None,
+        sequence: None,
     };
     // The scanner's bounds: 32 images, Docker Hub paths up to 200 bytes, tags up to
     // 128, each with a digest; the pinned reference keeps the name and adds the pin.
@@ -1022,7 +1007,8 @@ fn a_dead_attempt_is_recorded_indeterminate_and_built_again() {
         image_id: None,
         image_bytes: None,
         base_pins: BTreeMap::new(),
-        bases_resolved_at: None,
+        declaration: None,
+        sequence: None,
     };
     state::write(&path, &leftover).unwrap();
     // Even with an adoptable image present, the dead attempt's receipt is not trusted.
@@ -1158,19 +1144,8 @@ fn requests_refuse_unsafe_paths_arguments_and_bounds() {
     let base = || fixture.request(Policy::Missing);
 
     let mut request = base();
-    request.version = 3;
+    request.version = 2;
     assert_eq!(code(&fixture, request), "native_build_request");
-    // Version 1 never carries pins; version 2 may.
-    let mut request = base();
-    request.pins = Some(BTreeMap::new());
-    assert_eq!(code(&fixture, request), "native_build_request");
-    assert!(
-        prepare(
-            with_pins(base(), BTreeMap::new()),
-            &builds_root(&fixture.candidate)
-        )
-        .is_ok()
-    );
     let mut request = base();
     request.project_root = PathBuf::from("relative");
     assert_eq!(code(&fixture, request), "native_build_request");
@@ -1552,7 +1527,8 @@ fn the_key_is_version_two_and_version_one_receipts_are_never_reused() {
         image_id: Some(IMAGE.into()),
         image_bytes: None,
         base_pins: BTreeMap::new(),
-        bases_resolved_at: None,
+        declaration: None,
+        sequence: None,
     };
     // At its own path it is never read: the version-2 key builds.
     state::write(&directory.join(format!("{old_key}.json")), &old_receipt).unwrap();
@@ -1573,102 +1549,6 @@ fn the_key_is_version_two_and_version_one_receipts_are_never_reused() {
         "native_build_receipt"
     );
     assert_eq!(fixture.calls(&inputs), 1);
-}
-
-#[test]
-fn base_resolutions_are_trusted_for_a_day_then_checked_once() {
-    const MOVED: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-    let fixture = Fixture::new();
-    let inputs = fixture.inputs(Policy::Missing);
-    let pool = FakePool::new("pool-1");
-    pool.built(&inputs, "pool-1", serde_json::json!({}));
-    fixture.client(&inputs, "ok");
-    let start = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
-    let at = |hours: u64| start + Duration::from_secs(hours * 60 * 60);
-    let resolves = || pool.resolve_deadlines.borrow().len();
-    *pool.now.borrow_mut() = at(0);
-    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
-    assert_eq!(resolves(), 1);
-    assert_eq!(
-        fixture.receipt(&inputs).bases_resolved_at,
-        Some(unix_seconds(at(0)))
-    );
-
-    // A fresh resolution is reused without asking the registry.
-    *pool.now.borrow_mut() = at(23);
-    assert!(
-        run(&fixture.candidate, &pool, &inputs, &never)
-            .unwrap()
-            .reused
-    );
-    assert_eq!(resolves(), 1);
-
-    // Older than a day: resolved once; the same digest keeps the image and the time.
-    *pool.now.borrow_mut() = at(25);
-    let kept = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
-    assert!(kept.reused);
-    assert_eq!(resolves(), 2);
-    assert_eq!(fixture.calls(&inputs), 1);
-    assert_eq!(
-        fixture.receipt(&inputs).bases_resolved_at,
-        Some(unix_seconds(at(25)))
-    );
-    *pool.now.borrow_mut() = at(48);
-    assert!(
-        run(&fixture.candidate, &pool, &inputs, &never)
-            .unwrap()
-            .reused
-    );
-    assert_eq!(resolves(), 2);
-
-    // A moved tag builds, resolving only once for the whole operation.
-    *pool.now.borrow_mut() = at(50);
-    *pool.pin.borrow_mut() = MOVED.into();
-    let rebuilt = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
-    assert!(!rebuilt.reused);
-    assert_eq!(resolves(), 3);
-    assert_eq!(fixture.calls(&inputs), 2);
-    assert_eq!(
-        rebuilt.base_pins["docker.io/library/alpine:3.20"],
-        format!("docker.io/library/alpine@{MOVED}")
-    );
-    assert_eq!(
-        fixture.receipt(&inputs).bases_resolved_at,
-        Some(unix_seconds(at(50)))
-    );
-
-    // A receipt from before the field (unknown age) or from the future is expired;
-    // with the shared records removed, its tags resolve again.
-    for recorded in [None, Some(unix_seconds(at(60)))] {
-        let _ = fs::remove_dir_all(
-            builds_root(&fixture.candidate)
-                .join(&inputs.namespace)
-                .join("bases"),
-        );
-        let path = builds_root(&fixture.candidate)
-            .join(&inputs.namespace)
-            .join(format!("{}.json", inputs.key));
-        let mut receipt = fixture.receipt(&inputs);
-        receipt.bases_resolved_at = recorded;
-        fs::remove_file(&path).unwrap();
-        state::write(&path, &receipt).unwrap();
-        let before = resolves();
-        assert!(
-            run(&fixture.candidate, &pool, &inputs, &never)
-                .unwrap()
-                .reused
-        );
-        assert_eq!(resolves(), before + 1);
-        assert_eq!(fixture.calls(&inputs), 2);
-    }
-    assert!(resolution_fresh(
-        Some(10),
-        UNIX_EPOCH + Duration::from_secs(10)
-    ));
-    assert!(!resolution_fresh(
-        Some(10),
-        UNIX_EPOCH + Duration::from_secs(10) + BASE_RESOLUTION_TTL
-    ));
 }
 
 #[test]
@@ -1777,349 +1657,6 @@ fn cancellation_during_the_snapshot_adopts_nothing_and_leaves_no_copy() {
     );
 }
 
-/// A second project directory whose Dockerfile shares the first one's base tag.
-fn second_build(fixture: &Fixture, policy: Policy, pins: BTreeMap<String, String>) -> Inputs {
-    let other = fixture.project.join("other");
-    let _ = fs::create_dir(&other);
-    fs::write(other.join("Dockerfile"), "FROM alpine:3.20\nRUN echo two\n").unwrap();
-    let mut request = fixture.request(policy);
-    request.context = "other".into();
-    let request = with_pins(request, pins);
-    prepare(request, &builds_root(&fixture.candidate)).unwrap()
-}
-
-#[test]
-fn passed_pins_are_hints_used_only_when_a_shared_record_backs_them() {
-    const MOVED: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    let fixture = Fixture::new();
-    let pool = FakePool::new("pool-1");
-    let start = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
-    *pool.now.borrow_mut() = start;
-    let resolves = || pool.resolve_deadlines.borrow().len();
-    let build = |inputs: &Inputs| {
-        pool.built(inputs, "pool-1", serde_json::json!({}));
-        fixture.client(inputs, "ok");
-        run(&fixture.candidate, &pool, inputs, &never).unwrap()
-    };
-    let first = fixture.inputs(Policy::Missing);
-    let passed = build(&first).base_pins;
-    assert_eq!(resolves(), 1);
-    // The tag moves upstream. The shared record of the first resolution backs the
-    // passed pin, so the second Dockerfile gets the same base under either policy.
-    *pool.pin.borrow_mut() = MOVED.into();
-    for policy in [Policy::Missing, Policy::Rebuild] {
-        let second = second_build(&fixture, policy, passed.clone());
-        assert_ne!(second.key, first.key);
-        let built = build(&second);
-        assert_eq!(built.base_pins, passed, "{policy:?}");
-        assert_eq!(resolves(), 1, "{policy:?} resolved");
-        let bake: Value = serde_json::from_slice(
-            &fs::read(fixture.scratch(&second).join("seen-bake.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            bake["target"]["build"]["contexts"]["alpine:3.20"],
-            format!("docker-image://docker.io/library/alpine@{PIN}")
-        );
-    }
-    // A backed pin carries the record's time: 23 hours later it is still the first
-    // resolution's time, not now.
-    *pool.now.borrow_mut() = start + Duration::from_secs(23 * 60 * 60);
-    let late = second_build(&fixture, Policy::Rebuild, passed.clone());
-    build(&late);
-    assert_eq!(resolves(), 1);
-    assert_eq!(
-        fixture.receipt(&late).bases_resolved_at,
-        Some(unix_seconds(start))
-    );
-
-    // No record: the passed pin still binds; the resolver verifies that exact digest.
-    let bases = builds_root(&fixture.candidate)
-        .join(&first.namespace)
-        .join("bases");
-    fs::remove_dir_all(&bases).unwrap();
-    let second = second_build(&fixture, Policy::Rebuild, passed.clone());
-    let verified = build(&second);
-    assert_eq!(resolves(), 2);
-    assert_eq!(verified.base_pins, passed);
-    // The check wrote no tag record, and the receipt carries the time of the earlier
-    // resolution its own previous receipt recorded for this pin, not now.
-    assert!(!bases.exists());
-    assert_eq!(
-        fixture.receipt(&second).bases_resolved_at,
-        Some(unix_seconds(start))
-    );
-    // A record naming another pin (the moved tag) does not replace the passed pin.
-    let moved = BTreeMap::from([(
-        "docker.io/library/alpine:3.20".to_owned(),
-        format!("docker.io/library/alpine@{MOVED}"),
-    )]);
-    assert_eq!(
-        build(&second_build(&fixture, Policy::Rebuild, BTreeMap::new())).base_pins,
-        moved
-    );
-    assert_eq!(resolves(), 3);
-    assert_eq!(
-        build(&second_build(&fixture, Policy::Rebuild, passed.clone())).base_pins,
-        passed
-    );
-    assert_eq!(resolves(), 4);
-
-    // A fresh receipt whose pin differs from the passed pin builds on the passed one.
-    let request = with_pins(fixture.request(Policy::Missing), moved.clone());
-    let repinned = prepare(request, &builds_root(&fixture.candidate)).unwrap();
-    assert_eq!(repinned.key, first.key);
-    let calls = fixture.calls(&first);
-    let rebuilt = build(&repinned);
-    assert!(!rebuilt.reused);
-    assert_eq!(rebuilt.base_pins, moved);
-    assert_eq!(fixture.calls(&first), calls + 1);
-    // A pin of another repository is never substituted: it refuses.
-    let request = with_pins(
-        fixture.request(Policy::Missing),
-        BTreeMap::from([(
-            "docker.io/library/alpine:3.20".to_owned(),
-            format!("docker.io/library/busybox@{PIN}"),
-        )]),
-    );
-    let foreign = prepare(request, &builds_root(&fixture.candidate)).unwrap();
-    let error = run(&fixture.candidate, &pool, &foreign, &never).unwrap_err();
-    assert_eq!(error.code, "native_build_base_pin");
-    assert!(!error.message.contains("busybox"));
-    assert_eq!(fixture.calls(&first), calls + 1);
-}
-
-#[test]
-fn a_passed_pin_binds_even_against_another_fresh_receipt() {
-    const Y: &str = "sha256:abababababababababababababababababababababababababababababababab";
-    let fixture = Fixture::new();
-    let pool = FakePool::new("pool-1");
-    let build = |inputs: &Inputs| {
-        pool.built(inputs, "pool-1", serde_json::json!({}));
-        fixture.client(inputs, "ok");
-        run(&fixture.candidate, &pool, inputs, &never)
-    };
-    // Service A pinned the tag to X; a forced rebuild of B then moved B's receipt and
-    // the shared record to Y. Both receipts are fresh.
-    let a = fixture.inputs(Policy::Missing);
-    let x = build(&a).unwrap().base_pins;
-    *pool.pin.borrow_mut() = Y.into();
-    let y = build(&second_build(&fixture, Policy::Rebuild, BTreeMap::new()))
-        .unwrap()
-        .base_pins;
-    assert_ne!(x, y);
-    let y_resolved_at = unix_seconds(*pool.now.borrow());
-    assert!(build(&a).unwrap().reused, "A's fast path keeps X");
-    // With no pin passed, B keeps its own fresh receipt, as before.
-    let b = second_build(&fixture, Policy::Missing, BTreeMap::new());
-    let calls = fixture.calls(&b);
-    let kept = build(&b).unwrap();
-    assert!(kept.reused);
-    assert_eq!(kept.base_pins, y);
-    // With A's X passed, B builds on X, not its receipt's Y.
-    let b = second_build(&fixture, Policy::Missing, x.clone());
-    let bound = build(&b).unwrap();
-    assert!(!bound.reused);
-    assert_eq!(bound.base_pins, x);
-    assert_eq!(fixture.calls(&b), calls + 1);
-    let bake: Value =
-        serde_json::from_slice(&fs::read(fixture.scratch(&b).join("seen-bake.json")).unwrap())
-            .unwrap();
-    assert_eq!(
-        bake["target"]["build"]["contexts"]["alpine:3.20"],
-        format!("docker-image://docker.io/library/alpine@{PIN}")
-    );
-    // Verifying X by digest left the shared tag record alone: it still says Y, with
-    // the time of the lookup that found Y.
-    let record = base_record_path(
-        &builds_root(&fixture.candidate).join(&b.namespace),
-        "docker.io/library/alpine:3.20",
-    );
-    let shared =
-        read_base_record(&record, "docker.io/library/alpine:3.20", *pool.now.borrow()).unwrap();
-    assert_eq!(shared.pinned_reference, y["docker.io/library/alpine:3.20"]);
-    assert_eq!(shared.resolved_at, y_resolved_at);
-    // No evidence dates X for B (the record and B's receipt held Y), so its time is
-    // unknown and never fresh.
-    assert_eq!(fixture.receipt(&b).bases_resolved_at, None);
-    // A later independent command (no pins) for B follows the registry's Y again.
-    let later = build(&second_build(&fixture, Policy::Missing, BTreeMap::new())).unwrap();
-    assert!(!later.reused);
-    assert_eq!(later.base_pins, y);
-    assert_eq!(fixture.calls(&b), calls + 2);
-    // When X cannot be verified (and no record backs it), B refuses instead of using Y.
-    build(&second_build(&fixture, Policy::Rebuild, BTreeMap::new())).unwrap();
-    pool.unverifiable.borrow_mut().push(PIN.into());
-    let error = build(&second_build(&fixture, Policy::Missing, x.clone())).unwrap_err();
-    assert_eq!(error.code, "native_build_base_pin");
-    assert_eq!(fixture.calls(&b), calls + 3);
-}
-
-#[test]
-fn a_dockerfile_digest_is_never_replaced_by_a_passed_pin() {
-    const OTHER: &str = "sha256:9999999999999999999999999999999999999999999999999999999999999999";
-    let fixture = Fixture::new();
-    fs::write(
-        fixture.project.join("app/Dockerfile"),
-        format!("FROM alpine@{PIN}\nRUN echo hi\n"),
-    )
-    .unwrap();
-    let probe = fixture.inputs(Policy::Rebuild);
-    let reference = probe.images[0].reference.canonical();
-    assert!(reference.ends_with(PIN));
-    // Even a record that holds the passed pin does not back it for a digest base.
-    let forged = format!("docker.io/library/alpine@{OTHER}");
-    let pool = FakePool::new("pool-1");
-    write_base_record(
-        &base_record_path(
-            &builds_root(&fixture.candidate).join(&probe.namespace),
-            &reference,
-        ),
-        &BaseRecord {
-            version: BASE_RECORD_VERSION,
-            reference: reference.clone(),
-            pinned_reference: forged.clone(),
-            source_digest: OTHER.into(),
-            resolved_at: unix_seconds(*pool.now.borrow()),
-        },
-    );
-    let request = fixture.request(Policy::Rebuild);
-    let request = with_pins(
-        request,
-        BTreeMap::from([(reference.clone(), forged.clone())]),
-    );
-    let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
-    pool.built(&inputs, "pool-1", serde_json::json!({}));
-    fixture.client(&inputs, "ok");
-    let outcome = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
-    assert_eq!(
-        pool.resolve_deadlines.borrow().len(),
-        1,
-        "the digest was not resolved"
-    );
-    assert_ne!(outcome.base_pins[&reference], forged);
-}
-
-#[test]
-fn requests_at_every_bound_fit_the_request_reader() {
-    let fixture = Fixture::new();
-    // `count` pins whose references and values total exactly `bytes`.
-    let pins = |count: usize, bytes: usize| -> BTreeMap<String, String> {
-        let value = |index: usize| format!("docker.io/library/i{index:04}@{PIN}");
-        let fixed: usize = (0..count).map(|index| value(index).len()).sum();
-        let per_key = (bytes - fixed) / count;
-        let extra = (bytes - fixed) % count;
-        (0..count)
-            .map(|index| {
-                let length = per_key + usize::from(index < extra);
-                let prefix = format!("docker.io/library/i{index:04}:");
-                let key = format!("{prefix}{}", "t".repeat(length - prefix.len()));
-                (key, value(index))
-            })
-            .collect()
-    };
-    let total = |pins: &BTreeMap<String, String>| -> usize {
-        pins.iter().map(|(k, v)| k.len() + v.len()).sum()
-    };
-    let at_bound = pins(MAX_PINS, MAX_PIN_BYTES);
-    assert_eq!(
-        (at_bound.len(), total(&at_bound)),
-        (MAX_PINS, MAX_PIN_BYTES)
-    );
-    assert!(at_bound.keys().all(|key| key.len() <= 512));
-    // Arguments at their byte bound, every value byte escaped by JSON as `\u00XX`.
-    let mut args = serde_json::Map::new();
-    let per_arg = MAX_ARG_BYTES / MAX_ARGS;
-    for index in 0..MAX_ARGS {
-        let name = format!("A{index:02}");
-        args.insert(name.clone(), "\u{1}".repeat(per_arg - name.len()).into());
-    }
-    let request = |pins: &BTreeMap<String, String>| {
-        serde_json::json!({
-            "version": 2,
-            "project_root": fixture.project,
-            "context": "app",
-            "dockerfile": "Dockerfile",
-            "target": "t".repeat(128),
-            "args": args,
-            "policy": "missing",
-            "timeout_seconds": 30,
-            "pins": pins,
-        })
-    };
-    let path = fixture.root.join("request.json");
-    let write = |value: &Value| {
-        let bytes = serde_json::to_vec(value).unwrap();
-        let _ = fs::remove_file(&path);
-        fs::write(&path, &bytes).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        bytes.len() as u64
-    };
-    let size = write(&request(&at_bound));
-    assert!(size > 500 * 1024 && size <= MAX_REQUEST_BYTES, "{size}");
-    // The same reader `runtime build-image` uses, then the request bounds.
-    let read: BuildRequest = state::read_bounded(&path, MAX_REQUEST_BYTES).unwrap();
-    assert!(validate_request(&read).is_ok());
-
-    // One byte over the pins' total, or one entry over the count, refuses.
-    let over = pins(MAX_PINS, MAX_PIN_BYTES + 1);
-    write(&request(&over));
-    let read: BuildRequest = state::read_bounded(&path, MAX_REQUEST_BYTES).unwrap();
-    assert_eq!(
-        validate_request(&read).unwrap_err().code,
-        "native_build_request"
-    );
-    let mut counted = pins(MAX_PINS, MAX_PIN_BYTES - 100);
-    counted.insert(
-        "docker.io/library/z:1".into(),
-        format!("docker.io/library/z@{PIN}"),
-    );
-    assert_eq!(counted.len(), MAX_PINS + 1);
-    let request = with_pins(fixture.request(Policy::Missing), counted);
-    assert_eq!(code(&fixture, request), "native_build_request");
-    // A file over the reader's limit is refused before parsing.
-    fs::remove_file(&path).unwrap();
-    fs::write(&path, vec![b' '; MAX_REQUEST_BYTES as usize + 1]).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(state::read_bounded::<BuildRequest>(&path, MAX_REQUEST_BYTES).is_err());
-    // Malformed values and quoting characters refuse; other references are ignored.
-    for (key, value) in [
-        ("docker.io/library/alpine:3.20", "alpine".to_owned()),
-        (
-            "docker.io/library/a\"b:1",
-            format!("docker.io/library/a@{PIN}"),
-        ),
-        ("", format!("docker.io/library/a@{PIN}")),
-    ] {
-        let request = with_pins(
-            fixture.request(Policy::Missing),
-            BTreeMap::from([(key.to_owned(), value)]),
-        );
-        assert_eq!(code(&fixture, request), "native_build_request", "{key}");
-    }
-    assert_eq!(MAX_PINS, 1024);
-    assert_eq!(MAX_PIN_BYTES, 128 * 1024);
-    assert_eq!(MAX_REQUEST_BYTES, 640 * 1024);
-}
-
-#[test]
-fn outcomes_report_protocol_two() {
-    let fixture = Fixture::new();
-    let inputs = fixture.inputs(Policy::Missing);
-    let pool = FakePool::new("pool-1");
-    pool.built(&inputs, "pool-1", serde_json::json!({}));
-    fixture.client(&inputs, "ok");
-    for _ in 0..2 {
-        let outcome = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
-        let value = serde_json::to_value(&outcome).unwrap();
-        assert_eq!(value["protocol"], 2);
-        assert_eq!(
-            value["base_pins"]["docker.io/library/alpine:3.20"],
-            format!("docker.io/library/alpine@{PIN}")
-        );
-    }
-}
-
 #[test]
 fn a_cancellation_during_adoption_never_records_a_verified_image() {
     let fixture = Fixture::new();
@@ -2137,83 +1674,6 @@ fn a_cancellation_during_adoption_never_records_a_verified_image() {
     let receipt = fixture.receipt(&inputs);
     assert_eq!(receipt.phase, Phase::Canceled);
     assert!(receipt.image_id.is_none());
-}
-
-#[test]
-fn base_resolutions_are_shared_across_builds_of_a_namespace_for_a_day() {
-    const MOVED: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-    let fixture = Fixture::new();
-    let first = fixture.inputs(Policy::Missing);
-    let mut request = fixture.request(Policy::Missing);
-    request.args.insert("OTHER".into(), "x".into());
-    let second = prepare(request, &builds_root(&fixture.candidate)).unwrap();
-    assert_ne!(first.key, second.key);
-    assert_eq!(first.namespace, second.namespace);
-    let pool = FakePool::new("pool-1");
-    let start = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
-    *pool.now.borrow_mut() = start;
-    let resolves = || pool.resolve_deadlines.borrow().len();
-    for inputs in [&first, &second] {
-        fixture.client(inputs, "ok");
-    }
-    // The fake engine holds one image ID; label it for the key about to build.
-    let build = |inputs: &Inputs| {
-        pool.built(inputs, "pool-1", serde_json::json!({}));
-        run(&fixture.candidate, &pool, inputs, &never).unwrap()
-    };
-    build(&first);
-    assert_eq!(resolves(), 1);
-    // The tag moves upstream; the second build of the same command keeps the first pin.
-    *pool.pin.borrow_mut() = MOVED.into();
-    *pool.now.borrow_mut() = start + Duration::from_secs(60);
-    let outcome = build(&second);
-    assert_eq!(resolves(), 1, "a fresh shared resolution was repeated");
-    assert_eq!(
-        outcome.base_pins["docker.io/library/alpine:3.20"],
-        format!("docker.io/library/alpine@{PIN}")
-    );
-    // Its receipt carries the record's time, not this build's.
-    assert_eq!(
-        fixture.receipt(&second).bases_resolved_at,
-        Some(unix_seconds(start))
-    );
-    let record = base_record_path(
-        &builds_root(&fixture.candidate).join(&first.namespace),
-        "docker.io/library/alpine:3.20",
-    );
-    let mode = fs::metadata(&record).unwrap().mode();
-    assert_eq!(mode & 0o777, 0o600);
-
-    // After 24 hours one build resolves and records; the next one reuses that.
-    *pool.now.borrow_mut() = start + BASE_RESOLUTION_TTL + Duration::from_secs(1);
-    let rebuilt = build(&first);
-    assert!(!rebuilt.reused);
-    assert_eq!(resolves(), 2);
-    let rebuilt = build(&second);
-    assert!(!rebuilt.reused);
-    assert_eq!(resolves(), 2);
-    assert_eq!(
-        rebuilt.base_pins["docker.io/library/alpine:3.20"],
-        format!("docker.io/library/alpine@{MOVED}")
-    );
-
-    // An explicit rebuild always asks the registry; a malformed record is ignored.
-    build(&fixture.inputs(Policy::Rebuild));
-    assert_eq!(resolves(), 3);
-    fs::write(&record, b"{not json").unwrap();
-    fs::remove_file(
-        builds_root(&fixture.candidate)
-            .join(&second.namespace)
-            .join(format!("{}.json", second.key)),
-    )
-    .unwrap();
-    build(&second);
-    assert_eq!(resolves(), 4);
-    let read = read_base_record(&record, "docker.io/library/alpine:3.20", *pool.now.borrow());
-    assert!(read.is_some(), "the malformed record was not rewritten");
-    assert!(read_base_record(&record, "docker.io/library/busybox:1", *pool.now.borrow()).is_none());
-    // Reclamation still reads the namespace directory.
-    assert!(reclaim::run(&fixture.candidate, &pool).is_ok());
 }
 
 #[test]
@@ -2271,4 +1731,240 @@ fn preparation_never_reads_inputs_through_a_swapped_directory() {
         fs::remove_file(&app).unwrap();
         fs::rename(app.with_file_name("app-moved"), &app).unwrap();
     }
+}
+
+/// Build `inputs` with the fake client reporting image `id`.
+fn build_as(fixture: &Fixture, pool: &FakePool, inputs: &Inputs, id: &str) -> BuildOutcome {
+    fixture.client(inputs, "given");
+    fs::write(fixture.scratch(inputs).join("image-id"), id).unwrap();
+    pool.built_as(inputs, "pool-1", id);
+    run(&fixture.candidate, pool, inputs, &never).unwrap()
+}
+
+fn numbered(index: usize) -> String {
+    format!("sha256:{index:064x}")
+}
+
+#[test]
+fn ten_edits_of_one_build_leave_its_current_and_previous_images() {
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    let mut keys = Vec::new();
+    for edit in 1..=10 {
+        fs::write(fixture.project.join("app/main.txt"), format!("edit {edit}")).unwrap();
+        let inputs = fixture.inputs(Policy::Missing);
+        let outcome = build_as(&fixture, &pool, &inputs, &numbered(edit));
+        assert!(!outcome.reused);
+        keys.push(inputs.key.clone());
+    }
+    keys.dedup();
+    assert_eq!(keys.len(), 10, "every edit had its own key");
+    assert_eq!(pool.images.borrow().len(), 10);
+    // A retained run still references the image of edit 3.
+    let graphs = fixture.candidate.state_root.join("run/graphs/0123");
+    state::private_directory(&graphs).unwrap();
+    fs::write(
+        graphs.join("receipt.json"),
+        format!("{{\"image\":\"{}\"}}", numbered(3)),
+    )
+    .unwrap();
+    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
+    assert_eq!(
+        left,
+        BTreeSet::from([numbered(3), numbered(9), numbered(10)])
+    );
+    assert_eq!(report.removed.len(), 7);
+    assert_eq!(report.retained[&numbered(10)], reclaim::Retained::Current);
+    assert_eq!(report.retained[&numbered(9)], reclaim::Retained::Previous);
+    assert_eq!(report.retained[&numbered(3)], reclaim::Retained::Referenced);
+
+    // Without the reference, exactly the current and previous images remain.
+    fs::remove_dir_all(fixture.candidate.state_root.join("run/graphs")).unwrap();
+    reclaim::run(&fixture.candidate, &pool).unwrap();
+    let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
+    assert_eq!(left, BTreeSet::from([numbered(9), numbered(10)]));
+
+    // Reverting to edit 9 reuses it and makes it current; edit 10 becomes previous.
+    fs::write(fixture.project.join("app/main.txt"), "edit 9").unwrap();
+    let reverted = fixture.inputs(Policy::Missing);
+    assert!(
+        run(&fixture.candidate, &pool, &reverted, &never)
+            .unwrap()
+            .reused
+    );
+    fs::write(fixture.project.join("app/main.txt"), "edit 11").unwrap();
+    let eleventh = fixture.inputs(Policy::Missing);
+    build_as(&fixture, &pool, &eleventh, &numbered(11));
+    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    assert_eq!(report.removed, vec![numbered(10)]);
+    let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
+    assert_eq!(left, BTreeSet::from([numbered(9), numbered(11)]));
+}
+
+#[test]
+fn receipts_without_a_declaration_and_other_declarations_keep_their_images() {
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    // Two builds of another target are another declaration, kept on their own.
+    let mut request = fixture.request(Policy::Missing);
+    request.target = Some("other".into());
+    fs::write(
+        fixture.project.join("app/Dockerfile"),
+        "FROM alpine:3.20 AS other\nRUN echo hi\n",
+    )
+    .unwrap();
+    let other = prepare(request, &builds_root(&fixture.candidate)).unwrap();
+    build_as(&fixture, &pool, &other, &numbered(1));
+    for edit in 2..=4 {
+        fs::write(fixture.project.join("app/main.txt"), format!("edit {edit}")).unwrap();
+        build_as(
+            &fixture,
+            &pool,
+            &fixture.inputs(Policy::Missing),
+            &numbered(edit),
+        );
+    }
+    // A receipt from before declarations existed protects its image.
+    let old = fixture.inputs(Policy::Missing);
+    let directory = builds_root(&fixture.candidate).join(&old.namespace);
+    let path = directory.join(format!("{}.json", "0".repeat(64)));
+    let mut receipt = fixture.receipt(&old);
+    receipt.build_key = "0".repeat(64);
+    receipt.image_id = Some(numbered(2));
+    receipt.declaration = None;
+    receipt.sequence = None;
+    state::write(&path, &receipt).unwrap();
+    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    assert_eq!(report.retained[&numbered(1)], reclaim::Retained::Current);
+    assert_eq!(report.retained[&numbered(2)], reclaim::Retained::Current);
+    assert_eq!(report.retained[&numbered(3)], reclaim::Retained::Previous);
+    assert_eq!(report.retained[&numbered(4)], reclaim::Retained::Current);
+    assert!(report.removed.is_empty());
+}
+
+#[test]
+fn best_effort_reclamation_reports_instead_of_refusing() {
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    let build = Flock::try_lock(
+        Flock::open(&builds_root(&fixture.candidate).join("active.lock")).unwrap_or_else(|_| {
+            state::private_directory(&builds_root(&fixture.candidate)).unwrap();
+            Flock::open(&builds_root(&fixture.candidate).join("active.lock")).unwrap()
+        }),
+        libc::LOCK_SH,
+    )
+    .unwrap()
+    .unwrap();
+    let busy = reclaim::best_effort(&fixture.candidate, &pool);
+    let value = serde_json::to_value(&busy).unwrap();
+    assert_eq!(value["skipped"]["code"], "provider_busy");
+    assert_eq!(value["removed"], serde_json::json!([]));
+    drop(build);
+    let value = serde_json::to_value(reclaim::best_effort(&fixture.candidate, &pool)).unwrap();
+    assert!(value.get("skipped").is_none());
+    assert!(value["retained"].is_object());
+}
+
+/// A snapshot tree under `<key>.client` in `namespace`, owned per `owner`.
+fn stranded_tree(namespace: &Path, key: &str, owner: Option<&crate::node::ProcessIdentity>) {
+    let scratch = namespace.join(format!("{key}.client"));
+    let tree = scratch.join("snapshot/context");
+    state::private_directory(&tree).unwrap();
+    fs::write(tree.join("big.bin"), vec![b'x'; 4096]).unwrap();
+    if let Some(owner) = owner {
+        state::write(&scratch.join("snapshot.owner"), owner).unwrap();
+    }
+}
+
+fn own_identity() -> crate::node::ProcessIdentity {
+    match crate::node::inspect_process(i32::try_from(std::process::id()).unwrap()).unwrap() {
+        crate::node::Observed::Present(identity) => identity,
+        crate::node::Observed::Gone => panic!("this process is gone"),
+    }
+}
+
+#[test]
+fn snapshots_of_dead_owners_are_removed_at_the_next_build_of_any_key() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let namespace = builds_root(&fixture.candidate).join(&inputs.namespace);
+    state::private_directory(&namespace).unwrap();
+    let live = own_identity();
+    // A process that has exited and been reaped: its pid has no live process.
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let dead_pid = i32::try_from(child.id()).unwrap();
+    child.wait().unwrap();
+    let dead = crate::node::ProcessIdentity {
+        pid: dead_pid,
+        ..live.clone()
+    };
+    let reused = crate::node::ProcessIdentity {
+        start: live.start + 1,
+        ..live.clone()
+    };
+    let key = |c: char| c.to_string().repeat(64);
+    stranded_tree(&namespace, &key('1'), Some(&dead));
+    stranded_tree(&namespace, &key('2'), Some(&live));
+    stranded_tree(&namespace, &key('3'), Some(&reused));
+    stranded_tree(&namespace, &key('4'), None);
+    // A foreign tree: a symlinked `.client` pointing outside, with a dead owner.
+    let outside = fixture.root.join("outside");
+    stranded_tree(&outside, &key('5'), Some(&dead));
+    std::os::unix::fs::symlink(
+        outside.join(format!("{}.client", key('5'))),
+        namespace.join(format!("{}.client", key('5'))),
+    )
+    .unwrap();
+    // A dead owner whose key is still locked (a surviving client) keeps its tree.
+    stranded_tree(&namespace, &key('6'), Some(&dead));
+    let held = Flock::try_lock(
+        Flock::open(&namespace.join(format!("{}.lock", key('6')))).unwrap(),
+        libc::LOCK_EX,
+    )
+    .unwrap()
+    .unwrap();
+
+    fixture.client(&inputs, "ok");
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    drop(held);
+
+    let tree = |base: &Path, c: char| base.join(format!("{}.client/snapshot", key(c)));
+    assert!(
+        !tree(&namespace, '1').exists(),
+        "a dead owner's tree was kept"
+    );
+    assert!(
+        !namespace
+            .join(format!("{}.client/snapshot.owner", key('1')))
+            .exists()
+    );
+    assert!(
+        tree(&namespace, '2').exists(),
+        "a live owner's tree was removed"
+    );
+    assert!(
+        !tree(&namespace, '3').exists(),
+        "a reused pid kept the tree"
+    );
+    assert!(
+        tree(&namespace, '4').exists(),
+        "an unknown owner's tree was removed"
+    );
+    assert!(
+        tree(&outside, '5').join("context/big.bin").exists(),
+        "a foreign tree was touched"
+    );
+    assert!(
+        tree(&namespace, '6').exists(),
+        "a locked key's tree was removed"
+    );
+    // The build's own snapshot is gone too, and its owner record with it.
+    assert!(!fixture.scratch(&inputs).join("snapshot").exists());
+    assert!(!fixture.scratch(&inputs).join("snapshot.owner").exists());
 }

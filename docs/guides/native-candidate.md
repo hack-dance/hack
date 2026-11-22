@@ -498,14 +498,15 @@ With it:
   an unchanged context is not read again. The cache misses only a change that keeps the
   size, inode, modification time and change time identical, which needs a deliberate
   clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
-- A base-image tag is resolved at most once a day per project and branch, and every
-  build of one `up` uses the same digest for it. A reused image keeps its base-image
-  digests for at most 24 hours; after that the next `up` resolves the tags again (this
-  needs registry access): unchanged digests keep the image, a moved tag builds a new one. Set `HACK_NATIVE_REBUILD=1` to build
-  again now; base-image tags then resolve again too.
+- Only those inputs count. A changed network response (a download in a `RUN` step),
+  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
+  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
+  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
+  `hack restart` to build every image again; base-image tags then resolve again too.
 - When an image is actually built, BuildKit reads a private copy of the included
   context, made and checked against the build key right before it runs, so edits during
-  a build never reach the image. A file that changed between computing the key and
+  a build never reach the image. The copy keeps hard links as links and gives every
+  entry one fixed modification time, so it holds nothing the key does not describe. A file that changed between computing the key and
   making the copy refuses; run `up` again. The copy costs time and disk only when a
   build runs (about 2.7 s for 20,000 files and 632 MiB on a loaded Linux host); reusing
   an image makes no copy.
@@ -1405,8 +1406,11 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the client prints values, terminal control characters are removed, lines are cut at
   16 KiB and output stops after 4 MiB.
 - `missing` reuses a verified image for the same build key without running the client;
-  `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
-  target, arguments and versions, not the context's other files (as with Compose).
+  `rebuild` always builds. The key (version 2) covers the Dockerfile and
+  `.dockerignore` bytes, target, arguments and versions, and every context entry the
+  ignore file lets the build read: its path, kind, permission bits, contents, symlink
+  target and hard-link group, as described with `HACK_NATIVE_BUILDS` above. It does
+  not cover network responses, cache mounts or a moved base-image tag.
 - The runtime must have network egress and the isolated build network that a runtime
   started by this version sets up. An older runtime refuses with
   `native_build_runtime_restart`: stop it and start it again.
@@ -1420,11 +1424,15 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
   images, containers or volumes.
 
-`runtime reclaim-build-images --json` removes build images that a newer build of the
-same key replaced. It keeps every image a build receipt names as current, every image
-that any retained run's saved state mentions, every image a container still uses (the
-engine refuses those), and every image whose ownership labels are not exactly this
-runtime's. Each removal deletes that one image only, never its untagged parent
+`runtime reclaim-build-images --json` removes build images that newer builds
+replaced. For each build declaration (project root and branch, context, Dockerfile and
+target) it keeps the image of the most recently built or reused key (`current`) and of
+the one before it (`previous`, for a quick revert). It also keeps every image that any
+retained run's saved state mentions, every image a container still uses (the engine
+refuses those), every image of a receipt written before this rule, and every image
+whose ownership labels are not exactly this runtime's. An `up` that built an image runs
+it with `--best-effort` once the project is ready: that form never fails, reports a
+refusal as `skipped`, and never delays or fails the start. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 

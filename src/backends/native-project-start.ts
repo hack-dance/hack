@@ -84,6 +84,7 @@ import {
   nativeRebuildRequested,
   nativeServiceActive,
   pinVerifiedNativeBuilds,
+  reclaimNativeBuildImagesAfterRebuild,
   refuseEmulatedBuilds,
   refuseManagedSecretBuildArguments,
 } from "./native-project-builds.ts";
@@ -766,6 +767,7 @@ async function resolveNativeBuildImages(opts: {
   readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeBuild | undefined;
+  readonly onBuilt: () => void;
 }): Promise<ReadonlySet<string>> {
   const remaining = pinVerifiedNativeBuilds(opts);
   const built = await buildNativeProjectImages({
@@ -2722,6 +2724,7 @@ async function startNativeProjectAttempt(
     progress({ phase: "images" });
     // A restore asks the runtime too: its image is reused only under an unchanged
     // build key, so a Dockerfile edited after `down` is built (HACK-2533).
+    let rebuilt = false;
     const built = await resolveNativeBuildImages({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
@@ -2732,6 +2735,9 @@ async function startNativeProjectAttempt(
       verified: opts.verifiedBuildImages,
       signal: controller.signal,
       invoke: deps.build,
+      onBuilt: () => {
+        rebuilt = true;
+      },
     });
     await pinNativeProjectImages({
       runtime: opts.runtime,
@@ -3096,6 +3102,14 @@ async function startNativeProjectAttempt(
                     httpsPort: servedHttpsPort(https, opts.https),
                   })
                 );
+                // Superseded build images go once the new ones run; this never
+                // fails or delays the start (HACK-2533).
+                void reclaimNativeBuildImagesAfterRebuild({
+                  rebuilt,
+                  runtime: opts.runtime,
+                  projectRoot: opts.scope.projectRoot,
+                  invoke: deps.invoke,
+                });
               },
             });
           } catch (error) {

@@ -174,6 +174,43 @@ impl Dir {
         check(unsafe { libc::symlinkat(target.as_ptr(), self.0.as_raw_fd(), child.as_ptr()) })
     }
 
+    /// Create `child` as a hard link to `existing` in `from` (never following a
+    /// symlink in either name).
+    pub(super) fn link(&self, from: &Dir, existing: &[u8], child: &[u8]) -> io::Result<()> {
+        let (existing, child) = (name(existing)?, name(child)?);
+        // SAFETY: two live directory descriptors and two NUL-terminated names; flags 0
+        // links `existing` itself, not a symlink's target.
+        check(unsafe {
+            libc::linkat(
+                from.0.as_raw_fd(),
+                existing.as_ptr(),
+                self.0.as_raw_fd(),
+                child.as_ptr(),
+                0,
+            )
+        })
+    }
+
+    /// Set the access and modification times of `child` itself (a symlink is not
+    /// followed) to `seconds`.
+    pub(super) fn set_times(&self, child: &[u8], seconds: i64) -> io::Result<()> {
+        let child = name(child)?;
+        let time = libc::timespec {
+            tv_sec: seconds,
+            tv_nsec: 0,
+        };
+        let times = [time, time];
+        // SAFETY: a live directory descriptor, a NUL-terminated name and two timespecs.
+        check(unsafe {
+            libc::utimensat(
+                self.0.as_raw_fd(),
+                child.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        })
+    }
+
     /// `fstatat(AT_SYMLINK_NOFOLLOW)` of `child`.
     pub(super) fn stat(&self, child: &[u8]) -> io::Result<Status> {
         let child = name(child)?;

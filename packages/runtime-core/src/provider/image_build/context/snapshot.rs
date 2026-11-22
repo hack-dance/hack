@@ -21,13 +21,21 @@
 //!   snapshot root (`mkdirat`, `openat(O_CREAT | O_EXCL | O_NOFOLLOW)`, `symlinkat`);
 //! - every created file and directory's mode is read back and must equal the record
 //!   (`chmod` may silently drop a setgid bit), else `native_build_context_copy`;
-//! - modification times are carried over so image layers keep the project's times;
-//!   owners are not (BuildKit `COPY` assigns its own unless told otherwise).
+//! - every entry's access and modification times are one fixed value
+//!   ([`SNAPSHOT_TIME`]), since times are not in the key; owners are not carried
+//!   either (BuildKit `COPY` assigns its own unless told otherwise);
+//! - names the key walk recorded as one hard-link group become one hard-link group in
+//!   the copy (later names linked to the copy of the first, with `linkat` beneath the
+//!   held snapshot root), after checking each still shares the first's source inode;
 //!
 //! The copy is private: a mode-0700 holder directory contains the context root, which
 //! takes the recorded root mode. [`Snapshot`] removes the whole tree when dropped (on
-//! every exit path); a tree a killed process left behind is removed by the next attempt
-//! under the same key lock. The copy observes the operation's cancellation and
+//! every exit path). Before any copying, an owner record (`<holder>.owner`: this
+//! process's pid, uid, start time and boot identity) is published beside the holder,
+//! so a tree a killed process left behind can be proven stranded, which lets
+//! the next build of any key in the namespace remove it once its owner is provably
+//! gone (see [`owner_gone`]), and the next attempt of the same key removes it in any
+//! case. The copy observes the operation's cancellation and
 //! deadline before every entry and every chunk of a file.
 use super::{Entry, Kind, changed, fsat::Dir, moved, open_path, unreadable};
 use crate::{CandidateError, provider::state};
@@ -37,10 +45,15 @@ use std::{
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 const COPY_BUFFER: usize = 256 * 1024;
+/// The access and modification time of every snapshot entry (1980-01-01T00:00:00Z, the
+/// earliest time every archive format records). Times are not part of the build key,
+/// so a fixed value keeps the image a function of the key, as a reproducible build's
+/// fixed source date does.
+pub(in crate::provider::image_build) const SNAPSHOT_TIME: i64 = 315_532_800;
 const ROOT: &str = "context";
 
 /// Why a copy stopped before it finished, other than a refusal.
@@ -71,15 +84,29 @@ impl Snapshot {
         stop: &dyn Fn() -> Option<Stopped>,
     ) -> Result<Result<Self, Stopped>, CandidateError> {
         remove_tree(holder)?;
+        // The owner record comes first, so a tree on disk always has one.
+        let owner = crate::node::inspect_process(i32::try_from(std::process::id()).unwrap_or(0))
+            .ok()
+            .and_then(|observed| match observed {
+                crate::node::Observed::Present(identity) => Some(identity),
+                crate::node::Observed::Gone => None,
+            })
+            .ok_or_else(|| {
+                crate::CandidateError::new(
+                    "process_identity_unavailable",
+                    "This process's identity is unavailable; no build snapshot was made.",
+                )
+            })?;
+        state::write(&owner_path(holder), &owner)?;
+        // From here the guard removes whatever was created, on every return.
+        let snapshot = Self {
+            holder: holder.to_owned(),
+        };
         fs::DirBuilder::new()
             .mode(0o700)
             .create(holder)
             .map_err(state::io)?;
         state::check_private_directory(holder)?;
-        // From here the guard removes whatever was created, on every return.
-        let snapshot = Self {
-            holder: holder.to_owned(),
-        };
         let holder_dir = Dir::open(holder).map_err(state::io)?;
         holder_dir
             .mkdir(ROOT.as_bytes(), 0o700)
@@ -90,6 +117,11 @@ impl Snapshot {
         let mut open: Vec<(Vec<u8>, Dir, Dir)> =
             vec![(Vec::new(), open_path(source)?, destination)];
         let mut directories: Vec<&Entry> = Vec::new();
+        // Each copied first name of a hard-link group: its source `(dev, ino)`.
+        let mut sources: std::collections::BTreeMap<&[u8], (u64, u64)> =
+            std::collections::BTreeMap::new();
+        let mut links: Vec<(Vec<u8>, Dir)> =
+            vec![(Vec::new(), copy_root.duplicate().map_err(state::io)?)];
         for entry in recorded {
             if let Some(stopped) = stop() {
                 return Ok(Err(stopped));
@@ -98,10 +130,7 @@ impl Snapshot {
                 directories.push(entry);
                 continue;
             }
-            let (parent, leaf) = match entry.path.iter().rposition(|b| *b == b'/') {
-                Some(at) => (&entry.path[..at], &entry.path[at + 1..]),
-                None => (&entry.path[..0], &entry.path[..]),
-            };
+            let (parent, leaf) = split(&entry.path);
             descend(&mut open, parent)?;
             let (_, from, to) = open.last().ok_or_else(unreadable)?;
             match &entry.kind {
@@ -116,16 +145,35 @@ impl Snapshot {
                         return Err(changed());
                     }
                     to.symlink(target, leaf).map_err(state::io)?;
+                    to.set_times(leaf, SNAPSHOT_TIME).map_err(state::io)?;
+                }
+                Kind::File(..) if entry.link.is_some() => {
+                    // A later name of a hard-link group: still the same source inode as
+                    // the copied first name, then linked to that copy.
+                    let first = entry.link.as_deref().unwrap_or_default();
+                    let expected = sources.get(first).copied().ok_or_else(changed)?;
+                    let status = from.stat(leaf).map_err(|e| moved(&e))?;
+                    if !status.is_file() || (status.dev, status.ino) != expected {
+                        return Err(changed());
+                    }
+                    let (first_parent, first_leaf) = split(first);
+                    descend_copy(&mut links, first_parent)?;
+                    let (_, first_directory) = links.last().ok_or_else(unreadable)?;
+                    to.link(first_directory, first_leaf, leaf)
+                        .map_err(state::io)?;
                 }
                 Kind::File(hash, size) => {
                     let copied = copy_file(
                         (from, to, leaf),
                         &self_path(holder, &entry.path),
-                        (entry.mode, *hash, *size, entry.mtime),
+                        (entry.mode, *hash, *size),
                         stop,
                     )?;
-                    if let Err(stopped) = copied {
-                        return Ok(Err(stopped));
+                    match copied {
+                        Err(stopped) => return Ok(Err(stopped)),
+                        Ok(identity) => {
+                            sources.insert(&entry.path, identity);
+                        }
                     }
                 }
             }
@@ -133,6 +181,7 @@ impl Snapshot {
         // Children first, so a read-only directory is set only once it is full. Each
         // is reached from the held snapshot root, one component at a time.
         drop(open);
+        drop(links);
         let mut copies: Vec<(Vec<u8>, Dir)> = vec![(Vec::new(), copy_root)];
         for entry in directories.iter().rev() {
             descend_copy(&mut copies, &entry.path)?;
@@ -141,13 +190,25 @@ impl Snapshot {
             handle
                 .set_permissions(fs::Permissions::from_mode(entry.mode))
                 .map_err(state::io)?;
-            handle
-                .set_times(FileTimes::new().set_modified(time(entry.mtime)))
-                .map_err(state::io)?;
+            handle.set_times(fixed_times()).map_err(state::io)?;
             require_mode(&handle, &self_path(holder, &entry.path), entry.mode)?;
         }
         Ok(Ok(snapshot))
     }
+}
+
+/// A relative path's parent and last component.
+fn split(path: &[u8]) -> (&[u8], &[u8]) {
+    match path.iter().rposition(|b| *b == b'/') {
+        Some(at) => (&path[..at], &path[at + 1..]),
+        None => (&path[..0], path),
+    }
+}
+
+/// [`SNAPSHOT_TIME`] as both access and modification time.
+fn fixed_times() -> FileTimes {
+    let time = UNIX_EPOCH + Duration::from_secs(SNAPSHOT_TIME.unsigned_abs());
+    FileTimes::new().set_accessed(time).set_modified(time)
 }
 
 /// The snapshot path of one relative entry, for test hooks and nothing else.
@@ -220,8 +281,51 @@ fn descend_copy(open: &mut Vec<(Vec<u8>, Dir)>, path: &[u8]) -> Result<(), Candi
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
-        let _ = remove_tree(&self.holder);
+        if remove_tree(&self.holder).is_ok() {
+            let _ = fs::remove_file(owner_path(&self.holder));
+        }
     }
+}
+
+/// The owner record of the snapshot tree at `holder`.
+fn owner_path(holder: &Path) -> PathBuf {
+    let mut name = holder.as_os_str().to_owned();
+    name.push(".owner");
+    PathBuf::from(name)
+}
+
+/// Whether the snapshot tree at `holder` is provably stranded: its owner record names
+/// a process that is gone (the recorded pid has no live process, or a live process
+/// with that pid has another start time, boot or user). A missing or unreadable record,
+/// a retired boot format, or an identity that cannot be read is not proof. Reads only;
+/// nothing is ever signaled.
+pub(in crate::provider::image_build) fn owner_gone(holder: &Path) -> bool {
+    let Ok(owner) = state::read_bounded::<crate::node::ProcessIdentity>(&owner_path(holder), 4096)
+    else {
+        return false;
+    };
+    if owner.pid <= 1 {
+        return false;
+    }
+    match crate::node::inspect_process(owner.pid) {
+        Ok(crate::node::Observed::Gone) => true,
+        Ok(crate::node::Observed::Present(live)) => {
+            crate::node::canonical_boot(&owner.boot)
+                && (live.start, &live.boot, live.uid) != (owner.start, &owner.boot, owner.uid)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Remove a stranded snapshot tree at `holder`, then its owner record. The caller has
+/// checked the path, proved [`owner_gone`] and holds the key's lock, under which it
+/// rechecks [`owner_gone`] first. Returns whether the tree and record are gone.
+pub(in crate::provider::image_build) fn remove_stranded(holder: &Path) -> bool {
+    remove_tree(holder).is_ok()
+        && match fs::remove_file(owner_path(holder)) {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        }
 }
 
 #[cfg(test)]
@@ -255,24 +359,15 @@ fn require_mode(created: &File, path: &Path, mode: u32) -> Result<(), CandidateE
     Ok(())
 }
 
-fn time(mtime: (i64, i64)) -> SystemTime {
-    match (u64::try_from(mtime.0), u32::try_from(mtime.1)) {
-        (Ok(seconds), Ok(nanos)) if nanos < 1_000_000_000 => {
-            UNIX_EPOCH + Duration::new(seconds, nanos)
-        }
-        _ => UNIX_EPOCH,
-    }
-}
-
 /// Copy one regular file in a single pass, hashing exactly the bytes written, and
 /// require them and the copy's mode to match the record. `stop` is polled before every
 /// chunk, so one large file cannot defer a cancellation or the deadline.
 fn copy_file(
     (from, to, leaf): (&Dir, &Dir, &[u8]),
     path: &Path,
-    (mode, hash, size, mtime): (u32, [u8; 32], u64, (i64, i64)),
+    (mode, hash, size): (u32, [u8; 32], u64),
     stop: &dyn Fn() -> Option<Stopped>,
-) -> Result<Result<(), Stopped>, CandidateError> {
+) -> Result<Result<(u64, u64), Stopped>, CandidateError> {
     let source = from.file(leaf).map_err(|e| moved(&e))?;
     let status = super::fsat::status(&source).map_err(|_| unreadable())?;
     if !status.is_file() || status.mode & 0o7777 != mode || status.size != size {
@@ -304,11 +399,9 @@ fn copy_file(
     target
         .set_permissions(fs::Permissions::from_mode(mode))
         .map_err(state::io)?;
-    target
-        .set_times(FileTimes::new().set_modified(time(mtime)))
-        .map_err(state::io)?;
+    target.set_times(fixed_times()).map_err(state::io)?;
     require_mode(&target, path, mode)?;
-    Ok(Ok(()))
+    Ok(Ok((status.dev, status.ino)))
 }
 
 /// Remove a snapshot tree, first making every directory in it writable (a recorded

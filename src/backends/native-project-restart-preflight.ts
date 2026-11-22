@@ -19,6 +19,7 @@ import {
   type NativeBuildRequest,
   type NativeVerifiedBuild,
   nativeBuildsEnabled,
+  nativeRebuildRequested,
   nativeServiceActive,
   resolveNativeRestartBuilds,
 } from "./native-project-builds.ts";
@@ -352,6 +353,7 @@ async function pinRestartImages(opts: {
     specs: opts.specs,
     images: opts.retainedImages,
     managedSecretValues: opts.managedSecretValues ?? [],
+    rebuild: nativeRebuildRequested(),
     signal: opts.signal ?? new AbortController().signal,
     invoke: opts.build,
   });

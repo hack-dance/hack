@@ -555,6 +555,33 @@ fn a_snapshot_holds_exactly_the_keyed_entries_and_is_removed() {
         .unwrap();
     let mode = fs::metadata(&holder).unwrap().mode();
     assert_eq!(mode & 0o777, 0o700);
+    // Every entry, the root, directories, files and symlinks alike, has the one fixed
+    // time: times are not in the key, so they must not reach the image either.
+    // (Checked before anything reads the copy, which would update access times.)
+    for entry in [
+        "",
+        "main.txt",
+        "sub",
+        "sub/a.txt",
+        "empty",
+        "locked",
+        "locked/inner",
+        "link",
+    ] {
+        let path = snapshot.context().join(entry);
+        let copy = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (
+                copy.mtime(),
+                copy.mtime_nsec(),
+                copy.atime(),
+                copy.atime_nsec()
+            ),
+            (snapshot::SNAPSHOT_TIME, 0, snapshot::SNAPSHOT_TIME, 0),
+            "{entry:?}"
+        );
+    }
+
     // Re-walking the copy with no rules gives the keyed digest: same entries (the
     // ignored file was never copied), kinds, modes, contents and targets.
     let copied = digest(
@@ -567,12 +594,6 @@ fn a_snapshot_holds_exactly_the_keyed_entries_and_is_removed() {
     .unwrap();
     assert_eq!(copied.digest, keyed.digest);
     assert!(!snapshot.context().join("notes.log").exists());
-    let source = fs::metadata(context.join("main.txt")).unwrap();
-    let copy = fs::metadata(snapshot.context().join("main.txt")).unwrap();
-    assert_eq!(
-        (copy.mtime(), copy.mtime_nsec()),
-        (source.mtime(), source.mtime_nsec())
-    );
     drop(snapshot);
     assert!(!holder.exists(), "the snapshot outlived its guard");
     fs::set_permissions(context.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -1041,4 +1062,57 @@ fn rules_after_an_unsupported_pattern_still_count_against_the_bounds() {
         bounds_code(format!("[{}]\n", "*".repeat(ignore::MAX_WILDCARDS)).as_bytes()),
         "native_build_ignore_bounds"
     );
+}
+
+#[test]
+fn hard_links_are_part_of_the_key_and_recreated_in_the_snapshot() {
+    let tree = Tree::new();
+    let context = tree.context();
+    let unlinked = tree.digest("");
+    // `sub/twin` and `main.txt` become one inode: the key changes although every
+    // name's content, mode and path set would otherwise match a copy.
+    fs::hard_link(context.join("main.txt"), context.join("sub/twin")).unwrap();
+    let linked = tree.walk("", None, SystemTime::now());
+    fs::remove_file(context.join("sub/twin")).unwrap();
+    fs::copy(context.join("main.txt"), context.join("sub/twin")).unwrap();
+    let copied = tree.digest("");
+    assert_ne!(linked.digest, copied, "link structure is not in the key");
+    assert_ne!(copied, unlinked);
+    fs::remove_file(context.join("sub/twin")).unwrap();
+    fs::hard_link(context.join("main.txt"), context.join("sub/twin")).unwrap();
+    let relinked = tree.walk("", None, SystemTime::now());
+    assert_eq!(relinked.digest, linked.digest);
+    let twin = relinked
+        .recorded
+        .iter()
+        .find(|entry| entry.path == b"sub/twin")
+        .unwrap();
+    assert_eq!(twin.link.as_deref(), Some(b"main.txt".as_slice()));
+    // A link to a name outside the included set is a plain file.
+    let ignored = tree.walk("main.txt\n", None, SystemTime::now());
+    assert!(ignored.recorded.iter().all(|entry| entry.link.is_none()));
+
+    // The snapshot holds one inode for both names, equal to its key.
+    let holder = tree.root.join("snapshot");
+    let snapshot = snapshot::Snapshot::create(&context, &holder, &relinked.recorded, &|| None)
+        .unwrap()
+        .unwrap();
+    let copy = snapshot.context();
+    let (first, second) = (
+        fs::symlink_metadata(copy.join("main.txt")).unwrap(),
+        fs::symlink_metadata(copy.join("sub/twin")).unwrap(),
+    );
+    assert_eq!((first.dev(), first.ino()), (second.dev(), second.ino()));
+    assert_eq!(first.nlink(), 2);
+    let again = digest(&copy, b"", None, SystemTime::now(), Bounds::DEFAULT).unwrap();
+    assert_eq!(again.digest, relinked.digest);
+    drop(snapshot);
+
+    // A link broken after the key walk refuses instead of copying two files.
+    fs::remove_file(context.join("sub/twin")).unwrap();
+    fs::copy(context.join("main.txt"), context.join("sub/twin")).unwrap();
+    let error =
+        snapshot::Snapshot::create(&context, &holder, &relinked.recorded, &|| None).unwrap_err();
+    assert_eq!(error.code, "native_build_context_changed");
+    assert!(!holder.exists());
 }

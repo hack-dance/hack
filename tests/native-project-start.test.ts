@@ -5411,7 +5411,7 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
 });
 
-test("retained startup asks the runtime for each build, and a restart's resolved images are used as they are (HACK-2533)", async () => {
+test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {
   const saved = {
     run: "1".repeat(32),
     owner: "c".repeat(32),
@@ -5423,7 +5423,11 @@ test("retained startup asks the runtime for each build, and a restart's resolved
   const previous = process.env.HACK_NATIVE_BUILDS;
   process.env.HACK_NATIVE_BUILDS = "1";
   try {
-    for (const restart of [false, true]) {
+    for (const [restart, reused] of [
+      [false, false],
+      [false, true],
+      [true, false],
+    ] as const) {
       const { opts } = await fixture(false);
       const request = admitNativeProjectBuilds({
         services: { web: { build: "." } },
@@ -5471,11 +5475,17 @@ test("retained startup asks the runtime for each build, and a restart's resolved
       let builds = 0;
       opts.dependencies.build = async () => {
         builds += 1;
-        return { imageId: rebuilt, buildKey: "c".repeat(64), reused: false };
+        return { imageId: rebuilt, buildKey: "c".repeat(64), reused };
       };
       const invoke = opts.dependencies.invoke!;
       let beforeReview = true;
+      const reclaims: string[][] = [];
       opts.dependencies.invoke = async (request) => {
+        if (request.args[1] === "reclaim-build-images") {
+          reclaims.push([...request.args]);
+          // A failed reclamation never fails or delays the start.
+          throw new Error("reclaim failed");
+        }
         if (request.args[1] === "inspect" && beforeReview) {
           return observed;
         }
@@ -5501,6 +5511,12 @@ test("retained startup asks the runtime for each build, and a restart's resolved
       // runtime, and a restart's resolved image is pinned without asking again.
       expect(reviewedImage).toBe(rebuilt);
       expect(builds).toBe(verified ? 0 : 1);
+      // Only a start that actually built an image reclaims, once it is ready.
+      expect(reclaims).toEqual(
+        restart || reused
+          ? []
+          : [["runtime", "reclaim-build-images", "--best-effort", "--json"]]
+      );
     }
   } finally {
     if (previous === undefined) {

@@ -206,9 +206,12 @@ pub(super) struct Entry {
     /// Permission bits (`mode & 0o7777`).
     pub mode: u32,
     pub kind: Kind,
-    /// Modification time `(seconds, nanoseconds)`; carried into the snapshot so image
-    /// layers keep the project's times. Not hashed.
-    pub mtime: (i64, i64),
+    /// For a regular file that shares its inode with an earlier included name (by
+    /// sorted path): that first name. Hashed, so a change in link structure changes
+    /// the key, and the snapshot recreates the link.
+    pub link: Option<Vec<u8>>,
+    /// `(dev, ino)` of a regular file with more than one link, to find its group.
+    identity: Option<(u64, u64)>,
 }
 
 pub(super) fn unreadable() -> CandidateError {
@@ -524,7 +527,8 @@ pub(super) fn digest(
         path: Vec::new(),
         mode: status.mode & 0o7777,
         kind: Kind::Directory,
-        mtime: status.mtime,
+        link: None,
+        identity: None,
     })?;
     // Excluded directories walked because a `!` pattern may re-include beneath them.
     let mut excluded_directories: BTreeMap<Vec<u8>, Entry> = BTreeMap::new();
@@ -561,13 +565,13 @@ pub(super) fn digest(
                 _ => (false, None),
             };
             let mode = listed.mode & 0o7777;
-            let mtime = listed.mtime;
             if listed.is_dir() {
                 let entry = Entry {
                     path: child.clone(),
                     mode,
                     kind: Kind::Directory,
-                    mtime,
+                    link: None,
+                    identity: None,
                 };
                 let enter = if excluded {
                     let enter = match text {
@@ -599,7 +603,8 @@ pub(super) fn digest(
                     path: child,
                     mode,
                     kind: Kind::File(hash, listed.size),
-                    mtime,
+                    link: None,
+                    identity: (listed.nlink > 1).then_some((listed.dev, listed.ino)),
                 })?;
             } else if listed.is_symlink() {
                 let target = directory.read_link(&name).map_err(|e| moved(&e))?;
@@ -607,7 +612,8 @@ pub(super) fn digest(
                     path: child,
                     mode,
                     kind: Kind::Symlink(target),
-                    mtime,
+                    link: None,
+                    identity: None,
                 })?;
             } else {
                 return Err(refusal(
@@ -647,6 +653,19 @@ pub(super) fn digest(
     }
     let mut included = std::mem::take(&mut walk.included);
     included.sort_by(|a, b| a.path.cmp(&b.path));
+    // Hard-link groups inside the included set: every later name of an inode links to
+    // its first. A group of one (other names excluded or outside) is a plain file.
+    let mut first: BTreeMap<(u64, u64), Vec<u8>> = BTreeMap::new();
+    for entry in &mut included {
+        if let Some(identity) = entry.identity {
+            match first.get(&identity) {
+                Some(path) => entry.link = Some(path.clone()),
+                None => {
+                    first.insert(identity, entry.path.clone());
+                }
+            }
+        }
+    }
     let mut digest = Sha256::new();
     digest.update(b"hack-build-context-v1\0");
     for entry in &included {
@@ -658,6 +677,11 @@ pub(super) fn digest(
             Kind::File(hash, _) => {
                 digest.update(b"f");
                 digest.update(hash);
+                if let Some(link) = &entry.link {
+                    digest.update(b"h");
+                    digest.update((link.len() as u64).to_le_bytes());
+                    digest.update(link);
+                }
             }
             Kind::Symlink(target) => {
                 digest.update(b"l");

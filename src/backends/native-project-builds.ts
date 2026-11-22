@@ -11,6 +11,7 @@ import {
   nativeBuilderRemedy,
 } from "../lib/native-image-builder.ts";
 import {
+  type invokeNativeRuntime,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -272,18 +273,7 @@ export interface NativeBuiltImage {
   readonly imageId: string;
   readonly buildKey: string;
   readonly reused: boolean;
-  /**
-   * Canonical base reference -> pinned reference with digest, for every base image
-   * the build used. A command passes them to its later builds as `pins`, so each
-   * base tag resolves once per command.
-   */
-  readonly basePins?: Readonly<Record<string, string>>;
-  /** The runtime's build protocol: 2 accepts `pins` in a version-2 request. */
-  readonly protocol?: number;
 }
-/** The runtime's own bound on a request's `pins`. */
-const MAX_BASE_PINS = 1024;
-const MAX_REFERENCE = 512;
 
 function parseBuilt(value: unknown): NativeBuiltImage {
   if (
@@ -304,37 +294,7 @@ function parseBuilt(value: unknown): NativeBuiltImage {
     imageId: value.image_id,
     buildKey: value.build_key,
     reused: value.reused,
-    basePins: parseBasePins(value.base_pins),
-    ...(value.protocol === 2 ? { protocol: 2 } : {}),
   };
-}
-
-/** Bounded string-to-string map of base pins; an older runtime omits it. */
-function parseBasePins(value: unknown): Readonly<Record<string, string>> {
-  if (value === undefined) {
-    return {};
-  }
-  const invalid = () =>
-    new ClosedCliError(
-      "Native runtime returned an invalid image build result; values omitted."
-    );
-  if (!isRecord(value) || Object.keys(value).length > MAX_BASE_PINS) {
-    throw invalid();
-  }
-  const pins: Record<string, string> = {};
-  for (const [reference, pin] of Object.entries(value)) {
-    if (
-      reference.length === 0 ||
-      reference.length > MAX_REFERENCE ||
-      typeof pin !== "string" ||
-      pin.length === 0 ||
-      pin.length > MAX_REFERENCE
-    ) {
-      throw invalid();
-    }
-    pins[reference] = pin;
-  }
-  return pins;
 }
 
 /**
@@ -589,6 +549,8 @@ export async function buildNativeProjectImages(opts: {
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
+  /** Called once for each build the runtime actually ran (not a reused image). */
+  readonly onBuilt?: () => void;
 }): Promise<ReadonlySet<string>> {
   const pending = pendingBuilds(opts);
   if (pending.size > 0) {
@@ -614,6 +576,8 @@ export async function resolveNativeRestartBuilds(opts: {
   readonly specs: Record<string, Record<string, unknown>>;
   readonly images: ReadonlyMap<string, string>;
   readonly managedSecretValues: readonly string[];
+  /** `HACK_NATIVE_REBUILD=1`: every build runs again, as on `up`. */
+  readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
 }): Promise<ReadonlyMap<string, NativeVerifiedBuild>> {
@@ -635,7 +599,6 @@ export async function resolveNativeRestartBuilds(opts: {
     ...opts,
     builds,
     specs: copies,
-    rebuild: false,
   });
   const resolved = new Map<string, NativeVerifiedBuild>();
   for (const service of pinned) {
@@ -732,6 +695,35 @@ function pendingBuilds(opts: {
   return pending;
 }
 
+/** Bound on the reclamation an `up` runs after a rebuild. */
+const RECLAIM_TIMEOUT_MS = 60_000;
+/**
+ * After a start that built at least one image is ready, remove the build images no
+ * longer kept (`runtime reclaim-build-images --best-effort`: per build declaration
+ * the current and one previous image, plus every image a container or retained run
+ * references). Bounded, and it never fails or delays the start: the runtime reports
+ * a refusal instead of failing, and any other error is dropped. Nothing is printed.
+ */
+export async function reclaimNativeBuildImagesAfterRebuild(opts: {
+  /** Whether this start built an image; without one nothing is reclaimed. */
+  readonly rebuilt: boolean;
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  if (!opts.rebuilt) {
+    return;
+  }
+  await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "reclaim-build-images", "--best-effort", "--json"],
+      timeoutMs: RECLAIM_TIMEOUT_MS,
+    })
+    .catch(() => undefined);
+}
+
 async function runPendingBuilds(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
@@ -741,15 +733,12 @@ async function runPendingBuilds(opts: {
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
+  readonly onBuilt?: () => void;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeBuild;
   // The runtime requires the exact canonical root; it also derives the namespace.
   const projectRoot = await realpath(opts.projectRoot);
   const directory = await mkdtemp(join(tmpdir(), "hack-native-build-"));
-  // One pin per base reference for the whole command: each build receives the
-  // pins earlier builds used, so a shared tag resolves once (HACK-2533).
-  const pins: Record<string, string> = {};
-  let pinsAccepted = false;
   try {
     let index = 0;
     for (const { request, services } of opts.pending.values()) {
@@ -763,9 +752,7 @@ async function runPendingBuilds(opts: {
       await writeFile(
         requestFile,
         JSON.stringify({
-          // Version 2 carries `pins`, and is sent only to a runtime that reported
-          // protocol 2 earlier in this command; an older runtime keeps version 1.
-          version: pinsAccepted ? 2 : 1,
+          version: 1,
           project_root: projectRoot,
           branch: opts.branch ?? null,
           context: request.context,
@@ -773,7 +760,6 @@ async function runPendingBuilds(opts: {
           target: request.target,
           args: request.args,
           policy: opts.rebuild ? "rebuild" : "missing",
-          ...(pinsAccepted ? { pins } : {}),
           timeout_seconds: BUILD_TIMEOUT_SECONDS,
         }),
         { mode: 0o600, flag: "wx" }
@@ -788,9 +774,8 @@ async function runPendingBuilds(opts: {
       });
       // The request carries argument values; remove it as soon as it is consumed.
       await rm(requestFile, { force: true });
-      if (built.protocol === 2) {
-        pinsAccepted = true;
-        Object.assign(pins, built.basePins ?? {});
+      if (!built.reused) {
+        opts.onBuilt?.();
       }
       for (const service of services) {
         const spec = opts.specs[service];

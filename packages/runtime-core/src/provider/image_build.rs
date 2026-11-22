@@ -27,17 +27,6 @@
 //!   image, so no context case remains in which the image holds bytes other than the
 //!   keyed ones; a reused image's key misses only what the stat cache can miss (see
 //!   [`context`]). Base images are pinned by digest.
-//! - One pin per base reference per command. A request may pass `pins` (canonical
-//!   reference to pin, from an earlier outcome's `base_pins`, in a version-2 request);
-//!   a passed pin binds under either policy: used directly when a fresh shared record
-//!   holds it, else verified by digest through the resolver, else the build refuses
-//!   `native_build_base_pin`. A Dockerfile's own digest is never replaced. Otherwise,
-//!   with policy `missing`, a fresh receipt's pin or a shared record
-//!   (`run/image-builds/<namespace>/bases/<reference digest>.json`, written atomically
-//!   only when a tag resolves, never by a by-digest check of a passed pin, trusted for
-//!   [`BASE_RESOLUTION_TTL`], 24 hours) is used before the registry; `rebuild` resolves. A receipt is reused only when every pin chosen for the request equals
-//!   its recorded pin, and a receipt's pins are trusted for 24 hours after they were
-//!   resolved (an unknown time counts as expired).
 //! - Every image the Dockerfile can pull (see [`super::build_scan`]) resolves to a digest
 //!   before BuildKit runs and is handed to it as a named build context, so BuildKit pulls
 //!   only those exact manifests. Base images with stored `ONBUILD` triggers refuse.
@@ -90,7 +79,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 mod client_relay;
@@ -111,28 +100,13 @@ const MAX_TIMEOUT_SECONDS: u64 = 2 * 60 * 60;
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(50);
 const LEASE_WAIT: Duration = Duration::from_secs(5);
-/// The request reader's limit. It covers a request at every field bound with room to
-/// spare: arguments at [`MAX_ARG_BYTES`] even if every byte is JSON-escaped as
-/// `\u00XX` (384 KiB), pins at [`MAX_PIN_BYTES`] plus their quoting (134 KiB), and paths
-/// and the remaining fields well under 64 KiB.
-const MAX_REQUEST_BYTES: u64 = 640 * 1024;
+const MAX_REQUEST_BYTES: u64 = 192 * 1024;
 /// Covers a receipt with the most base pins the scanner accepts at their longest
 /// (about 32 KiB pretty-printed), so a receipt the build writes is always readable.
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
 const MAX_ARGS: usize = 64;
-/// Passed base-image pins a request accepts (see [`BuildRequest::pins`]).
-pub const MAX_PINS: usize = 1024;
-/// Total bytes of the passed pins' references and values together.
-pub const MAX_PIN_BYTES: usize = 128 * 1024;
-/// Each passed pin's reference and value are at most this long.
-const MAX_PIN_FIELD_BYTES: usize = 512;
-/// The build-image protocol this runtime speaks; reported as `protocol` in every
-/// outcome. Version 2 requests may carry `pins`.
-pub const BUILD_PROTOCOL: u32 = 2;
-/// How long a reused image's recorded base-image resolution is trusted.
-pub(super) const BASE_RESOLUTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// The build key document version; 2 added the context digest.
 const KEY_VERSION: u32 = 2;
 const MAX_ARG_BYTES: usize = 64 * 1024;
@@ -206,28 +180,6 @@ pub struct BuildRequest {
     pub policy: Policy,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
-    /// Base-image pins this command already chose, keyed by canonical reference (for
-    /// example `docker.io/library/alpine:3.20`), each `docker.io/<repository>@sha256:<hex>`
-    /// as an earlier outcome's `base_pins` reported it. Only a `version: 2` request may
-    /// carry this field (a version-1 request that does refuses `native_build_request`);
-    /// send it only to a runtime whose outcome reported `protocol: 2`.
-    ///
-    /// A passed pin binds: a Dockerfile base found here builds on exactly that digest
-    /// under either policy, or the build refuses `native_build_base_pin`; another digest
-    /// is never substituted. It is used directly when this namespace's fresh shared
-    /// resolution record (which only a verified tag resolution writes) holds exactly that pin,
-    /// taking that record's resolution time; otherwise the resolver verifies that exact
-    /// digest (manifest by digest, platform, size bounds, no `ONBUILD`). That check never
-    /// writes the shared tag record (it says nothing about where the tag points now);
-    /// the receipt carries the time of the resolution that produced the pin when known
-    /// (an older record or this key's receipt holding it), else an unknown time, which
-    /// counts as expired.
-    /// A base the Dockerfile itself pins by digest always uses its own digest and
-    /// ignores a passed pin. Entries for other references are ignored. At most
-    /// [`MAX_PINS`] entries, each reference and value at most 512 printable ASCII bytes
-    /// (no `"` or `\`), and at most [`MAX_PIN_BYTES`] in total.
-    #[serde(default)]
-    pub pins: Option<BTreeMap<String, String>>,
 }
 fn default_dockerfile() -> String {
     "Dockerfile".into()
@@ -236,17 +188,12 @@ fn default_dockerfile() -> String {
 /// The result of one `runtime build-image`.
 #[derive(Debug, Serialize)]
 pub struct BuildOutcome {
-    /// [`BUILD_PROTOCOL`] (2): this runtime accepts version-2 requests with `pins`, and
-    /// `base_pins` below is keyed by canonical reference. A runtime without this field
-    /// speaks protocol 1 and must not be sent `pins`.
-    pub protocol: u32,
     pub image_id: String,
     pub build_key: String,
     pub tag: String,
     /// True when a verified image was reused without running the builder.
     pub reused: bool,
-    /// Every base image this build used (reused or built), canonical reference to its
-    /// pinned reference, in the shape a later request's `pins` accepts.
+    /// Named build context to the pinned reference it resolved to, for this image.
     pub base_pins: BTreeMap<String, String>,
     /// Build cache bytes the post-build prune reclaimed; `None` when no prune ran or
     /// it failed (the build result stands either way).
@@ -283,26 +230,14 @@ pub(super) struct Receipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_bytes: Option<u64>,
     base_pins: BTreeMap<String, String>,
-    /// Unix seconds when `base_pins` were resolved. Receipts from before this field
-    /// read as unknown, which counts as expired.
+    /// The build declaration this key is a revision of (see [`Inputs::declaration`]).
+    /// Receipts from before this field have none and are never reclaimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    bases_resolved_at: Option<u64>,
-}
-
-/// Whether a base-image resolution recorded at `resolved_at` is still trusted at `now`.
-/// Unknown, future or older-than-[`BASE_RESOLUTION_TTL`] resolutions are not.
-fn resolution_fresh(resolved_at: Option<u64>, now: SystemTime) -> bool {
-    let (Some(at), Ok(now)) = (resolved_at, now.duration_since(UNIX_EPOCH)) else {
-        return false;
-    };
-    now.as_secs()
-        .checked_sub(at)
-        .is_some_and(|age| age < BASE_RESOLUTION_TTL.as_secs())
-}
-
-fn unix_seconds(now: SystemTime) -> u64 {
-    now.duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
+    declaration: Option<String>,
+    /// When this key last became the declaration's image in use: larger is more
+    /// recent within its namespace (see [`next_sequence`]). Absent on old receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sequence: Option<u64>,
 }
 
 /// The pool identity a build is admitted against and must find unchanged at adoption.
@@ -339,8 +274,6 @@ pub(super) trait BuildPool {
     fn storage_available(&self, lease: &Self::Lease) -> Result<u64, CandidateError>;
     /// Prune BuildKit cache down to `max_used` bytes; returns the bytes reclaimed.
     fn prune_cache(&self, lease: &Self::Lease, max_used: u64) -> Result<u64, CandidateError>;
-    /// The wall clock base-image resolution ages are measured with.
-    fn now(&self) -> SystemTime;
 }
 
 /// Free storage a cold build of a key requires.
@@ -372,8 +305,10 @@ pub(super) struct Inputs {
     /// Every included context entry the key walk hashed; a build copies exactly these
     /// into its private snapshot.
     recorded: Vec<context::Entry>,
-    /// Passed base-image pins (see [`BuildRequest::pins`]).
-    pins: BTreeMap<String, String>,
+    /// The build declaration this key revises: namespace, context, Dockerfile and
+    /// target, so successive edits of one service's build share it while its key
+    /// changes. Reclamation keeps a declaration's current and previous images only.
+    declaration: String,
     /// The document hashed into `key`.
     #[cfg(test)]
     key_input: Value,
@@ -455,12 +390,8 @@ fn valid_branch(value: &str) -> bool {
 }
 
 fn validate_request(request: &BuildRequest) -> Result<(), CandidateError> {
-    match (request.version, &request.pins) {
-        (1, None) | (2, _) => {}
-        (1, Some(_)) => {
-            return Err(invalid("Base-image pins need a version-2 build request."));
-        }
-        _ => return Err(invalid("Unsupported build request version.")),
+    if request.version != 1 {
+        return Err(invalid("Unsupported build request version."));
     }
     if !request.project_root.is_absolute() {
         return Err(invalid("The project root must be an absolute path."));
@@ -509,34 +440,6 @@ fn validate_request(request: &BuildRequest) -> Result<(), CandidateError> {
         return Err(refusal(
             "native_build_argument",
             "Build arguments exceed 64 KiB in total.",
-        ));
-    }
-    let pins = request.pins.as_ref();
-    let printable = |text: &str| {
-        !text.is_empty()
-            && text.len() <= MAX_PIN_FIELD_BYTES
-            && text
-                .bytes()
-                .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
-    };
-    if pins.is_some_and(|pins| {
-        pins.len() > MAX_PINS
-            || pins
-                .iter()
-                .map(|(reference, pin)| reference.len() + pin.len())
-                .sum::<usize>()
-                > MAX_PIN_BYTES
-            || pins.iter().any(|(reference, pin)| {
-                !printable(reference)
-                    || !printable(pin)
-                    || !pin.starts_with("docker.io/")
-                    || !pin
-                        .rsplit_once('@')
-                        .is_some_and(|(_, digest)| image_id(digest))
-            })
-    }) {
-        return Err(invalid(
-            "Passed base-image pins must be at most 1024 printable `docker.io/<repository>@sha256:<hex>` references, 128 KiB in total.",
         ));
     }
     let timeout = request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
@@ -710,6 +613,16 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
     let key = sha256_hex(
         &serde_json::to_vec(&key_input).map_err(|_| invalid("Cannot encode the build key."))?,
     );
+    let declaration = sha256_hex(
+        &serde_json::to_vec(&serde_json::json!({
+            "v": 1,
+            "namespace": key_input["namespace"],
+            "context": key_input["context"],
+            "dockerfile": key_input["dockerfile"],
+            "target": key_input["target"],
+        }))
+        .map_err(|_| invalid("Cannot encode the build declaration."))?,
+    );
     Ok(Inputs {
         namespace,
         key,
@@ -722,7 +635,7 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
         policy: request.policy,
         timeout: Duration::from_secs(request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
         recorded: context_digest.recorded,
-        pins: request.pins.unwrap_or_default(),
+        declaration,
         #[cfg(test)]
         key_input,
     })
@@ -914,9 +827,6 @@ pub(super) fn run<P: BuildPool>(
     }
     let expected = labels(inputs, &identity);
     let previous = read_receipt(&receipt_path)?;
-    // A verified, still-owned image of this key: reused when every pin chosen for this
-    // request equals its recorded pin.
-    let mut reusable: Option<(String, Receipt)> = None;
     if let Some(previous) = &previous {
         if previous.version != 1
             || previous.namespace != inputs.namespace
@@ -936,26 +846,13 @@ pub(super) fn run<P: BuildPool>(
             && let Some(inspected) = pool.inspect(&lease, id)?
             && owned_image(&inspected, id, &expected).is_ok()
         {
-            // Fast path: a fresh receipt whose pins agree with every passed pin needs
-            // no registry and no second lease.
-            if resolution_fresh(previous.bases_resolved_at, pool.now())
-                && inputs.images.iter().all(|base| {
-                    let recorded = previous.base_pins.get(&base.context_name);
-                    recorded.is_some()
-                        && inputs
-                            .pins
-                            .get(&base.reference.canonical())
-                            .is_none_or(|passed| Some(passed) == recorded)
-                })
-            {
-                if previous.provider_boot_id != identity.boot_id {
-                    let mut current = previous.clone();
-                    current.provider_boot_id = identity.boot_id.clone();
-                    state::write(&receipt_path, &current)?;
-                }
-                return Ok(reused(inputs, id, &previous.base_pins));
-            }
-            reusable = Some((id.to_owned(), previous.clone()));
+            // The reused key becomes its declaration's image in use again.
+            let mut current = previous.clone();
+            current.provider_boot_id = identity.boot_id.clone();
+            current.declaration = Some(inputs.declaration.clone());
+            current.sequence = Some(next_sequence(&directory));
+            state::write(&receipt_path, &current)?;
+            return Ok(reused(inputs, id, &previous.base_pins));
         }
         if previous.phase == Phase::Building {
             // The key lock proves no live holder: that attempt died mid-build.
@@ -966,28 +863,32 @@ pub(super) fn run<P: BuildPool>(
     }
     let previous_bytes = previous.as_ref().and_then(|receipt| receipt.image_bytes);
     drop(lease);
+    // Snapshots other attempts in this namespace stranded when they were killed.
+    remove_stranded_snapshots(&directory);
 
-    // Step 2, unleased: choose one pin per base image (see `choose_pins`).
-    let fresh_receipt = reusable
-        .as_ref()
-        .map(|(_, receipt)| receipt)
-        .filter(|receipt| resolution_fresh(receipt.bases_resolved_at, pool.now()));
-    let (pins, resolved_at) = choose_pins(
-        pool,
-        inputs,
-        &directory,
-        previous.as_ref(),
-        fresh_receipt,
-        deadline,
-        canceled,
-    )?;
-    let reusable = reusable.filter(|(_, previous)| previous.base_pins == pins);
-    // A reuse needs no builder; it is verified under the lease if the reuse falls through.
-    let builder = if reusable.is_some() {
-        None
-    } else {
-        Some(pool.builder()?)
-    };
+    // Step 2, unleased: resolve every base image to a pinned manifest.
+    let mut pins = BTreeMap::new();
+    for base in &inputs.images {
+        if canceled() {
+            return Err(canceled_early());
+        }
+        if Instant::now() >= deadline {
+            return Err(expired_early());
+        }
+        let resolved = pool.resolve(base, deadline, canceled)?;
+        if !image_id(&resolved.source_digest)
+            || !resolved
+                .pinned_reference
+                .ends_with(&format!("@{}", resolved.source_digest))
+        {
+            return Err(refusal(
+                "native_build_base_image",
+                "A build base image did not resolve to a pinned manifest.",
+            ));
+        }
+        pins.insert(base.context_name.clone(), resolved.pinned_reference);
+    }
+    let builder = pool.builder()?;
     if canceled() {
         return Err(canceled_early());
     }
@@ -995,75 +896,37 @@ pub(super) fn run<P: BuildPool>(
         return Err(expired_early());
     }
     // Copy exactly the keyed context bytes into a private snapshot, the only context
-    // BuildKit is given. Unleased; skipped while a reuse is still possible.
+    // BuildKit is given. Unleased.
     let scratch = directory.join(format!("{}.client", inputs.key));
-    let take_snapshot = || -> Result<context::snapshot::Snapshot, CandidateError> {
-        state::private_directory(&scratch)?;
-        let stop = context::snapshot::stop_check(canceled, deadline);
-        match context::snapshot::Snapshot::create(
-            &inputs.context,
-            &scratch.join("snapshot"),
-            &inputs.recorded,
-            &stop,
-        ) {
-            Ok(Ok(snapshot)) => Ok(snapshot),
-            Ok(Err(context::snapshot::Stopped::Canceled)) => Err(canceled_early()),
-            Ok(Err(context::snapshot::Stopped::Expired)) => Err(expired_early()),
-            Err(error) => {
-                if error.code == "native_build_context_changed" {
-                    // The stat cache may hold the stale hash (its documented miss);
-                    // drop it so the next attempt reads every file.
-                    let _ = fs::remove_file(directory.join(context::cache_name(&inputs.context)));
-                }
-                Err(error)
+    state::private_directory(&scratch)?;
+    let stop = context::snapshot::stop_check(canceled, deadline);
+    let snapshot = match context::snapshot::Snapshot::create(
+        &inputs.context,
+        &scratch.join("snapshot"),
+        &inputs.recorded,
+        &stop,
+    ) {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(context::snapshot::Stopped::Canceled)) => return Err(canceled_early()),
+        Ok(Err(context::snapshot::Stopped::Expired)) => return Err(expired_early()),
+        Err(error) => {
+            if error.code == "native_build_context_changed" {
+                // The stat cache may hold the stale hash (its documented miss); drop
+                // it so the next attempt reads every file.
+                let _ = fs::remove_file(directory.join(context::cache_name(&inputs.context)));
             }
+            return Err(error);
         }
     };
-    let mut snapshot = match reusable {
-        Some(_) => None,
-        None => Some(take_snapshot()?),
-    };
 
-    // Step 3, under the lease: same pool, then keep a still-current image or record
-    // the attempt.
-    let (mut lease, current) = pool.lease()?;
+    // Step 3, under the lease: same pool, then record the attempt.
+    let (lease, current) = pool.lease()?;
     if current != identity {
         return Err(refusal(
             "runtime_changed",
             "The runtime changed before the build started; no build was run.",
         ));
     }
-    if let Some((id, previous)) = reusable
-        && let Some(inspected) = pool.inspect(&lease, &id)?
-        && owned_image(&inspected, &id, &expected).is_ok()
-    {
-        let mut current = previous;
-        current.provider_boot_id = identity.boot_id.clone();
-        current.bases_resolved_at = resolved_at;
-        state::write(&receipt_path, &current)?;
-        return Ok(reused(inputs, &id, &pins));
-    }
-    let snapshot = match snapshot.take() {
-        Some(snapshot) => snapshot,
-        None => {
-            // The reusable image vanished: copy now, outside the lease.
-            drop(lease);
-            let taken = take_snapshot()?;
-            let (again, current) = pool.lease()?;
-            if current != identity {
-                return Err(refusal(
-                    "runtime_changed",
-                    "The runtime changed before the build started; no build was run.",
-                ));
-            }
-            lease = again;
-            taken
-        }
-    };
-    let builder = match builder {
-        Some(builder) => builder,
-        None => pool.builder()?,
-    };
     if pool.storage_available(&lease)? < storage_required(previous_bytes) {
         return Err(refusal(
             "native_build_storage",
@@ -1084,7 +947,9 @@ pub(super) fn run<P: BuildPool>(
         // retry is admitted against it rather than the floor.
         image_bytes: previous_bytes,
         base_pins: pins.clone(),
-        bases_resolved_at: resolved_at,
+        declaration: Some(inputs.declaration.clone()),
+        // Kept from the last verified image of this key until this attempt verifies.
+        sequence: previous.as_ref().and_then(|receipt| receipt.sequence),
     };
     state::write(&receipt_path, &receipt)?;
     drop(lease);
@@ -1208,90 +1073,20 @@ pub(super) fn run<P: BuildPool>(
     }
     receipt.phase = Phase::ContentIdVerified;
     receipt.image_id = Some(id.clone());
+    receipt.sequence = Some(next_sequence(&directory));
     receipt.image_bytes = image_bytes.or(receipt.image_bytes);
     state::write(&receipt_path, &receipt)?;
     // The verified image is recorded first; a failed prune leaves only extra cache.
     let cache_reclaimed_bytes = pool.prune_cache(&lease, CACHE_BUDGET).ok();
     drop(lease);
     Ok(BuildOutcome {
-        protocol: BUILD_PROTOCOL,
         image_id: id,
         build_key: inputs.key.clone(),
         tag: inputs.tag(),
         reused: false,
-        base_pins: reference_pins(inputs, &pins),
+        base_pins: pins,
         cache_reclaimed_bytes,
     })
-}
-
-const BASE_RECORD_VERSION: u32 = 1;
-const MAX_BASE_RECORD_BYTES: u64 = 4 * 1024;
-
-/// One shared base-image resolution (see the module documentation). It is only a
-/// consistency and rate aid: a missing, malformed, foreign or expired record resolves
-/// again, and the pin it names is still enforced by the build's source policy.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct BaseRecord {
-    version: u32,
-    /// The canonical reference that was resolved.
-    reference: String,
-    pinned_reference: String,
-    source_digest: String,
-    /// Unix seconds.
-    resolved_at: u64,
-}
-
-fn pinned_manifest(pinned_reference: &str, source_digest: &str) -> bool {
-    image_id(source_digest) && pinned_reference.ends_with(&format!("@{source_digest}"))
-}
-
-fn base_record_path(directory: &Path, reference: &str) -> PathBuf {
-    let mut digest = Sha256::new();
-    digest.update(b"hack-native-build-base-v1\0");
-    digest.update(reference.as_bytes());
-    directory
-        .join("bases")
-        .join(format!("{:x}.json", crate::Hex(digest.finalize())))
-}
-
-/// A well-formed record of `reference`, whatever its age.
-fn valid_base_record(path: &Path, reference: &str) -> Option<BaseRecord> {
-    let record: BaseRecord = state::read_bounded(path, MAX_BASE_RECORD_BYTES).ok()?;
-    (record.version == BASE_RECORD_VERSION
-        && record.reference == reference
-        && pinned_manifest(&record.pinned_reference, &record.source_digest))
-    .then_some(record)
-}
-
-/// A well-formed record of `reference` resolved within [`BASE_RESOLUTION_TTL`].
-fn read_base_record(path: &Path, reference: &str, now: SystemTime) -> Option<BaseRecord> {
-    valid_base_record(path, reference)
-        .filter(|record| resolution_fresh(Some(record.resolved_at), now))
-}
-
-/// Publish a record by rename from a per-process pending file, so concurrent builds
-/// never share one. Best effort: a failure only means a later build resolves again.
-fn write_base_record(path: &Path, record: &BaseRecord) {
-    let Some(parent) = path.parent() else { return };
-    if state::private_directory(parent).is_err() {
-        return;
-    }
-    let Ok(bytes) = serde_json::to_vec(record) else {
-        return;
-    };
-    let pending = path.with_extension(format!("{}.pending", std::process::id()));
-    let _ = fs::remove_file(&pending);
-    let written = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&pending)
-        .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()));
-    if written.is_err() || fs::rename(&pending, path).is_err() {
-        let _ = fs::remove_file(&pending);
-    }
 }
 
 /// The refusal for a cancellation or deadline reached after the client ran.
@@ -1311,173 +1106,86 @@ fn late_stop(canceled: bool) -> CandidateError {
 
 fn reused(inputs: &Inputs, id: &str, pins: &BTreeMap<String, String>) -> BuildOutcome {
     BuildOutcome {
-        protocol: BUILD_PROTOCOL,
         image_id: id.to_owned(),
         build_key: inputs.key.clone(),
         tag: inputs.tag(),
         reused: true,
-        base_pins: reference_pins(inputs, pins),
+        base_pins: pins.clone(),
         cache_reclaimed_bytes: None,
     }
 }
 
-/// Re-key pins from named build contexts (receipts, bake) to canonical references.
-fn reference_pins(inputs: &Inputs, pins: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    inputs
-        .images
-        .iter()
-        .filter_map(|base| {
-            pins.get(&base.context_name)
-                .map(|pin| (base.reference.canonical(), pin.clone()))
-        })
-        .collect()
-}
-
-/// Verify that exactly the passed pin is usable for `base`, through the resolver's own
-/// checks applied to that digest. Every failure, including an unreachable registry,
-/// refuses `native_build_base_pin` (cancellation and the deadline keep their codes):
-/// a passed pin is never replaced by another digest.
-fn verify_passed_pin<P: BuildPool>(
-    pool: &P,
-    base: &BaseImage,
-    passed: &str,
-    deadline: Instant,
-    canceled: &dyn Fn() -> bool,
-) -> Result<BuildBase, CandidateError> {
-    let unusable = || {
-        refusal(
-            "native_build_base_pin",
-            "A base image pinned earlier in this command could not be used for this build; no image was built.",
-        )
+/// Remove the build snapshots in one namespace `directory` whose owning process is
+/// provably gone. Checks run in this order, and the key lock is touched last:
+///
+/// 1. only `<key>.client/snapshot` trees, where `<key>.client` is a real private
+///    directory of this user (never a symlink);
+/// 2. the owner record proves the owner gone ([`context::snapshot::owner_gone`]);
+/// 3. a non-blocking attempt on that key's lock succeeds (a live attempt, or a build
+///    client that outlived its coordinator, holds it; the tree is then skipped);
+/// 4. under the lock the owner is proved gone again, and only then the tree and its
+///    record are removed; the lock is released right after.
+///
+/// So the probe can only coincide with an attempt of the same, already stranded key,
+/// which then refuses `native_build_busy` and can retry. Failures leave the tree for
+/// later. Returns how many trees were removed.
+fn remove_stranded_snapshots(directory: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
     };
-    let digest = passed
-        .strip_prefix(&format!("docker.io/{}@", base.repository()))
-        .filter(|digest| image_id(digest))
-        .ok_or_else(unusable)?;
-    let mut pinned = base.clone();
-    pinned.reference.digest = Some(digest.to_owned());
-    let resolved = match pool.resolve(&pinned, deadline, canceled) {
-        Ok(resolved) => resolved,
-        Err(error) if matches!(error.code, "native_build_canceled" | "native_build_timeout") => {
-            return Err(error);
-        }
-        Err(_) => return Err(unusable()),
-    };
-    if resolved.source_digest != digest || resolved.pinned_reference != passed {
-        return Err(unusable());
-    }
-    Ok(resolved)
-}
-
-/// Choose one pin per base image of this request, in order of preference: a passed
-/// pin, which binds (see [`BuildRequest::pins`]);
-/// under policy `missing`, the fresh receipt's pin or a fresh shared record;
-/// otherwise a registry resolution (recorded for later builds). Returns the pins by
-/// named build context and the oldest resolution time among them, `None` when one is
-/// unknown. `previous` is this key's receipt, whatever its phase.
-fn choose_pins<P: BuildPool>(
-    pool: &P,
-    inputs: &Inputs,
-    directory: &Path,
-    previous: Option<&Receipt>,
-    fresh_receipt: Option<&Receipt>,
-    deadline: Instant,
-    canceled: &dyn Fn() -> bool,
-) -> Result<(BTreeMap<String, String>, Option<u64>), CandidateError> {
-    let now = pool.now();
-    let mut oldest: Option<u64> = None;
-    let mut unknown = false;
-    let mut pins = BTreeMap::new();
-    for base in &inputs.images {
-        if canceled() {
-            return Err(refusal(
-                "native_build_canceled",
-                "The image build was canceled before the build client started; no image was adopted.",
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(refusal(
-                "native_build_timeout",
-                "The image build exceeded its time budget before the build client started; no image was adopted.",
-            ));
-        }
-        let reference = base.reference.canonical();
-        let record = base_record_path(directory, &reference);
-        let missing = inputs.policy == Policy::Missing;
-        // A passed pin binds (see `BuildRequest::pins`), except for a base the
-        // Dockerfile pins by digest itself.
-        let passed = inputs
-            .pins
-            .get(&reference)
-            .filter(|_| base.reference.digest.is_none());
-        let (pinned, at) = if let Some(passed) = passed {
-            match read_base_record(&record, &reference, now)
-                .filter(|known| &known.pinned_reference == passed)
-            {
-                Some(known) => (known.pinned_reference, Some(known.resolved_at)),
-                None => {
-                    // Verified by digest only: this says nothing about where the tag
-                    // points now, so the shared tag record is left alone, and the time
-                    // carried is the one of the resolution that produced this pin, when
-                    // known (an expired record or this key's earlier receipt holding
-                    // it), else unknown (expired for later reuse).
-                    let pinned = verify_passed_pin(pool, base, passed, deadline, canceled)?;
-                    let evidence = valid_base_record(&record, &reference)
-                        .filter(|known| known.pinned_reference == pinned.pinned_reference)
-                        .map(|known| known.resolved_at)
-                        .or_else(|| {
-                            previous
-                                .filter(|receipt| {
-                                    receipt.base_pins.get(&base.context_name)
-                                        == Some(&pinned.pinned_reference)
-                                })
-                                .and_then(|receipt| receipt.bases_resolved_at)
-                        });
-                    (pinned.pinned_reference, evidence)
-                }
-            }
-        } else if let Some((pin, at)) = fresh_receipt.filter(|_| missing).and_then(|receipt| {
-            Some((
-                receipt.base_pins.get(&base.context_name)?.clone(),
-                receipt.bases_resolved_at?,
-            ))
-        }) {
-            (pin, Some(at))
-        } else if let Some(shared) = read_base_record(&record, &reference, now).filter(|_| missing)
-        {
-            (shared.pinned_reference, Some(shared.resolved_at))
-        } else {
-            let resolved = pool.resolve(base, deadline, canceled)?;
-            if !pinned_manifest(&resolved.pinned_reference, &resolved.source_digest) {
-                return Err(refusal(
-                    "native_build_base_image",
-                    "A build base image did not resolve to a pinned manifest.",
-                ));
-            }
-            let at = unix_seconds(now);
-            write_base_record(
-                &record,
-                &BaseRecord {
-                    version: BASE_RECORD_VERSION,
-                    reference,
-                    pinned_reference: resolved.pinned_reference.clone(),
-                    source_digest: resolved.source_digest,
-                    resolved_at: at,
-                },
-            );
-            (resolved.pinned_reference, Some(at))
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(key) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".client"))
+            .filter(|key| hex64(key))
+        else {
+            continue;
         };
-        match at {
-            Some(at) => oldest = Some(oldest.map_or(at, |oldest| oldest.min(at))),
-            None => unknown = true,
+        let scratch = entry.path();
+        // SAFETY: geteuid has no preconditions.
+        let ours = fs::symlink_metadata(&scratch).is_ok_and(|metadata| {
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0
+        });
+        let snapshot = scratch.join("snapshot");
+        if !ours || !context::snapshot::owner_gone(&snapshot) {
+            continue;
         }
-        pins.insert(base.context_name.clone(), pinned);
+        let lock = directory.join(format!("{key}.lock"));
+        let Ok(Some(held)) =
+            Flock::open(&lock).and_then(|file| Flock::try_lock(file, libc::LOCK_EX))
+        else {
+            continue;
+        };
+        if context::snapshot::owner_gone(&snapshot) && context::snapshot::remove_stranded(&snapshot)
+        {
+            removed += 1;
+        }
+        drop(held);
     }
-    // The receipt's resolution time is its oldest pin's; unknown if any pin's is.
-    Ok((
-        pins,
-        (!unknown).then(|| oldest.unwrap_or_else(|| unix_seconds(now))),
-    ))
+    removed
+}
+
+/// The next reuse order for `directory` (one namespace): one more than any sequence its
+/// receipts record. Unreadable receipts are skipped; they are never reclaimed anyway.
+/// Two builds of different keys may race to the same number; reclamation then keeps
+/// both (see `reclaim`).
+fn next_sequence(directory: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 1;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+        .filter_map(|path| state::read_bounded::<Receipt>(&path, MAX_RECEIPT_BYTES).ok())
+        .filter_map(|receipt| receipt.sequence)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
 }
 
 /// Hold the shared build fence as an admitted build does, for the macOS-only lifecycle
@@ -1937,9 +1645,6 @@ impl<'a> BuildPool for LivePool<'a> {
     }
     fn prune_cache(&self, lease: &Self::Lease, max_used: u64) -> Result<u64, CandidateError> {
         prune_build_cache(lease, max_used)
-    }
-    fn now(&self) -> SystemTime {
-        SystemTime::now()
     }
 }
 

@@ -288,74 +288,6 @@ test("every up asks the runtime for each build, a restore too (HACK-2533)", asyn
   expect(keys).toEqual(["same", "changed"]);
 });
 
-test("one command pins each base tag once: later builds receive earlier pins", async () => {
-  const project = await root();
-  const pin = `docker.io/library/node:22@sha256:${"e".repeat(64)}`;
-  const sent: unknown[] = [];
-  const versions: unknown[] = [];
-  await buildNativeProjectImages({
-    runtime,
-    projectRoot: project,
-    branch: null,
-    profiles: [],
-    builds: new Map([
-      ["web", request()],
-      ["worker", { ...request(), target: "worker" }],
-    ]),
-    specs: { web: { build: "app" }, worker: { build: "app" } },
-    rebuild: true,
-    signal: new AbortController().signal,
-    invoke: async ({ requestFile }) => {
-      const body = JSON.parse(await readFile(requestFile, "utf8"));
-      sent.push(body.pins);
-      versions.push(body.version);
-      return {
-        imageId: IMAGE,
-        buildKey: KEY,
-        reused: false,
-        basePins: { "docker.io/library/node:22": pin },
-        protocol: 2,
-      };
-    },
-  });
-  // The first request is version 1; once the runtime reported protocol 2, later
-  // requests are version 2 and carry the command's pins.
-  expect(versions).toEqual([1, 2]);
-  expect(sent).toEqual([undefined, { "docker.io/library/node:22": pin }]);
-});
-
-test("a runtime that does not report protocol 2 never receives pins", async () => {
-  const project = await root();
-  const bodies: Record<string, unknown>[] = [];
-  await buildNativeProjectImages({
-    runtime,
-    projectRoot: project,
-    branch: null,
-    profiles: [],
-    builds: new Map([
-      ["web", request()],
-      ["worker", { ...request(), target: "worker" }],
-    ]),
-    specs: { web: { build: "app" }, worker: { build: "app" } },
-    rebuild: false,
-    signal: new AbortController().signal,
-    // The previous runtime's result: base pins keyed by base name, no protocol.
-    invoke: async ({ requestFile }) => {
-      bodies.push(JSON.parse(await readFile(requestFile, "utf8")));
-      return {
-        imageId: IMAGE,
-        buildKey: KEY,
-        reused: true,
-        basePins: { "node:22": `node@sha256:${"e".repeat(64)}` },
-      };
-    },
-  });
-  expect(bodies.map((body) => [body.version, "pins" in body])).toEqual([
-    [1, false],
-    [1, false],
-  ]);
-});
-
 test("restart resolves its builds before stopping: a rebuilt image is what it runs", async () => {
   const project = await root();
   let calls = 0;
@@ -379,6 +311,7 @@ test("restart resolves its builds before stopping: a rebuilt image is what it ru
     builds,
     specs,
     images: new Map([["web", RETAINED]]),
+    rebuild: false,
     signal: new AbortController().signal,
     invoke: async () => {
       calls += 1;
@@ -442,6 +375,30 @@ test("a restart's replacement start pins only images resolved for the same decla
   ).toBe(all);
 });
 
+test("restart honours a forced rebuild as up does", async () => {
+  const project = await root();
+  const policies: unknown[] = [];
+  for (const rebuild of [false, true]) {
+    await resolveNativeRestartBuilds({
+      runtime,
+      projectRoot: project,
+      branch: null,
+      profiles: [],
+      builds: new Map([["web", request()]]),
+      specs: { web: { build: "app" } },
+      images: new Map([["web", RETAINED]]),
+      managedSecretValues: [],
+      rebuild,
+      signal: new AbortController().signal,
+      invoke: async ({ requestFile }) => {
+        policies.push(JSON.parse(await readFile(requestFile, "utf8")).policy);
+        return { imageId: REBUILT, buildKey: KEY, reused: false };
+      },
+    });
+  }
+  expect(policies).toEqual(["missing", "rebuild"]);
+});
+
 test("restart refuses a managed secret build argument before any build runs", async () => {
   const project = await root();
   let calls = 0;
@@ -454,6 +411,7 @@ test("restart refuses a managed secret build argument before any build runs", as
     specs: { web: { build: "app" } },
     images: new Map([["web", RETAINED]]),
     managedSecretValues: [VALUE],
+    rebuild: false,
     signal: new AbortController().signal,
     invoke: async () => {
       calls += 1;
@@ -484,6 +442,7 @@ test("a restart's stop request reaches its build and no later build starts", asy
       ["worker", RETAINED],
     ]),
     managedSecretValues: [],
+    rebuild: false,
     signal: controller.signal,
     invoke: async ({ signal }) => {
       seen.push(signal?.aborted ?? false);
@@ -671,7 +630,6 @@ test("build output streams through while the runtime's closed error is returned"
     imageId: IMAGE,
     buildKey: KEY,
     reused: false,
-    basePins: {},
   });
 });
 

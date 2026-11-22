@@ -950,6 +950,17 @@ fn ignore_bounds_are_exact() {
     let longer = "a".repeat(ignore::MAX_PATTERN_BYTES + 1);
     assert_eq!(bounds_code(long.as_bytes()), "ok");
     assert_eq!(bounds_code(longer.as_bytes()), "native_build_ignore_bounds");
+    // A line over the scanner limit is refused even as a comment or whitespace.
+    let line_limit = 64 * 1024;
+    let comment = format!("#{}\n", "c".repeat(line_limit));
+    assert_eq!(
+        bounds_code(comment.as_bytes()),
+        "native_build_ignore_bounds"
+    );
+    let blank = format!("{}\n", " ".repeat(line_limit + 1));
+    assert_eq!(bounds_code(blank.as_bytes()), "native_build_ignore_bounds");
+    let crlf = format!("#{}\r\n", "c".repeat(line_limit - 1));
+    assert_eq!(bounds_code(crlf.as_bytes()), "ok");
     // Segments and wildcards per pattern.
     let segments = |count: usize| vec!["s"; count].join("/");
     assert_eq!(bounds_code(segments(ignore::MAX_SEGMENTS).as_bytes()), "ok");

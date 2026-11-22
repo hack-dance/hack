@@ -292,17 +292,21 @@ fn parse_patterns(bytes: &[u8]) -> Result<Option<Vec<Pattern>>, crate::Candidate
     };
     for (index, raw) in text.split('\n').enumerate() {
         let mut line = raw.strip_suffix('\r').unwrap_or(raw);
+        // Docker's scanner fails on a longer line, comment or blank, before any
+        // trimming; refuse it here so it never reaches the build.
+        if line.len() > MAX_LINE_BYTES {
+            return Err(over_bounds());
+        }
         if index == 0 {
             line = line.strip_prefix('\u{feff}').unwrap_or(line);
         }
         if line.starts_with('#') {
             continue;
         }
-        if line.len() > MAX_LINE_BYTES
-            || (line
-                .chars()
-                .any(|c| (c.is_whitespace() && !c.is_ascii()) || (c.is_control() && c != '\t'))
-                && !go_trim(line).is_empty())
+        if line
+            .chars()
+            .any(|c| (c.is_whitespace() && !c.is_ascii()) || (c.is_control() && c != '\t'))
+            && !go_trim(line).is_empty()
         {
             // Docker rejects or reads such a line differently; counted as written.
             fallback = true;

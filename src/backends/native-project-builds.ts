@@ -11,8 +11,8 @@ import {
   nativeBuilderRemedy,
 } from "../lib/native-image-builder.ts";
 import {
+  nativeImagePolicyArgs,
   nativeImageRegistryReason,
-  nativeImageTagTtlSeconds,
 } from "./native-image-policy.ts";
 import {
   type invokeNativeRuntime,
@@ -854,6 +854,7 @@ async function runPendingBuilds(opts: {
   readonly onNotice?: (line: string) => void;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeBuild;
+  const imagePolicyArgs = nativeImagePolicyArgs();
   // The runtime requires the exact canonical root; it also derives the namespace.
   const projectRoot = await realpath(opts.projectRoot);
   const directory = await mkdtemp(join(tmpdir(), "hack-native-build-"));
@@ -881,7 +882,7 @@ async function runPendingBuilds(opts: {
           args: request.args,
           policy: opts.rebuild ? "rebuild" : "missing",
           timeout_seconds: BUILD_TIMEOUT_SECONDS,
-          image_tag_ttl_seconds: nativeImageTagTtlSeconds(),
+          image_policy_args: imagePolicyArgs,
           ...(selections.size
             ? { command_base_pins: Object.fromEntries(selections) }
             : {}),

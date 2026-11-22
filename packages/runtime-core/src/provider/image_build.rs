@@ -182,7 +182,7 @@ pub struct BuildRequest {
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
     #[serde(default)]
-    pub image_tag_ttl_seconds: Option<u64>,
+    pub image_policy_args: Vec<String>,
     #[serde(default)]
     pub command_base_pins: BTreeMap<String, String>,
 }
@@ -1869,13 +1869,15 @@ fn key_with_bases(
 /// `runtime build-image --request <private-file>`: build or reuse one native image.
 pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome, CandidateError> {
     let request: BuildRequest = state::read_bounded(request, MAX_REQUEST_BYTES)?;
-    let mut policy = super::image_policy::ImagePolicy::default();
-    if let Some(ttl) = request.image_tag_ttl_seconds {
-        if ttl > 2_592_000 {
-            return Err(invalid("Image tag lifetime exceeds thirty days."));
-        }
-        policy.tag_ttl_seconds = ttl;
-    }
+    let flags: Vec<_> = request
+        .image_policy_args
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut policy = super::image_policy::ImagePolicy::from_flags(&flags)?;
+    // Dockerfile admission allows Docker Hub only, even when service images
+    // are allowed to use local registries.
+    policy.local_registries.clear();
     let prior_pins = request.command_base_pins.clone();
     let mut inputs = prepare(request, &builds_root(candidate))?;
     let _signals = CancelSignals::install()?;

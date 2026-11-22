@@ -62,7 +62,7 @@ impl Fixture {
             args: BTreeMap::from([("GREETING".to_owned(), SECRET.to_owned())]),
             policy,
             timeout_seconds: Some(30),
-            image_tag_ttl_seconds: None,
+            image_policy_args: Vec::new(),
             command_base_pins: BTreeMap::new(),
         }
     }

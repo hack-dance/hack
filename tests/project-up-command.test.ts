@@ -55,6 +55,14 @@ test("up without .hack prints a project blocker without a stack trace", async ()
   expect(combinedOutput).not.toContain("ERROR Error:");
 });
 
+test("up names an unregistered project without suggesting init", async () => {
+  const result = await runCliWithCapturedOutput(["up", "--project", "absent"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("selected project not registered");
+  expect(result.stderr).toContain("absent");
+  expect(result.stderr).not.toContain("hack init");
+});
+
 test("up still reports unrelated usage errors", async () => {
   const result = await runCliWithCapturedOutput([
     "up",

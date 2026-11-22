@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
@@ -43,15 +43,15 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-async function hack(args: readonly string[]) {
+async function hack(args: readonly string[], cwd = project, path = emptyBin) {
   const child = Bun.spawn(
     [process.execPath, join(repoRoot, "index.ts"), ...args],
     {
-      cwd: project,
+      cwd,
       env: privateCliEnv({
         root,
         env: {
-          PATH: emptyBin,
+          PATH: path,
           HACK_LOGGER: "console",
           NO_COLOR: "1",
           HACK_RUNTIME_BACKEND: "compose",
@@ -93,3 +93,34 @@ test("text-mode up without docker prints the engine blocker", async () => {
   expect(result.all).not.toContain("Executable not found");
   expect(result.all).not.toContain("    at ");
 }, 60_000);
+
+test.each([
+  "before",
+  "after",
+] as const)("a failed %s hook has one refusal and keeps the selected retry", async (phase) => {
+  const cwd = join(root, `hook-project-${phase}`);
+  const configDir = join(cwd, ".hack");
+  await mkdir(configDir, { recursive: true });
+  await Bun.write(
+    join(configDir, "docker-compose.yml"),
+    "services:\n  web:\n    image: example/web:1\n"
+  );
+  await Bun.write(
+    join(configDir, "hack.config.json"),
+    JSON.stringify({
+      name: "hook-fixture",
+      internal: { dns: false, tls: false },
+      lifecycle: { up: { [phase]: [{ name: "check", command: "exit 17" }] } },
+    })
+  );
+  const args = ["up", "--detach", "--path", cwd];
+  const docker = join(configDir, "docker");
+  await Bun.write(docker, "#!/bin/sh\nexit 0\n");
+  await chmod(docker, 0o700);
+  const result = await hack(args, cwd, `${configDir}:/usr/bin:/bin`);
+  expect(result.code, result.all).toBe(17);
+  expect(result.stdout).not.toContain("failed (exit 17)");
+  expect(result.stderr).toEndWith(
+    `! lifecycle  hook failed (${phase}, check, exit 17)\n  fix the failing hook and retry this start. run:\n  hack ${args.join(" ")}\n`
+  );
+});

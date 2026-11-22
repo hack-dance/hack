@@ -406,6 +406,7 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
       ? await listNativeCopyInstances({
           checkout,
           store: authored ? "authored" : "runtime",
+          includePending: true,
         })
       : [];
     const instances = [...new Set([automatic, ...containers.keys(), ...saved])];

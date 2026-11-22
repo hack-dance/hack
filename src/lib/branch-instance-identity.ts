@@ -343,6 +343,7 @@ export type NativeBranchRecord = {
   readonly store: "runtime" | "authored";
 };
 
+const AUTHORED_START_RECORD = /^[a-f0-9]{64}\.start\.json$/;
 const NATIVE_RUN_RECORD = /^[a-f0-9]{64}\.json$/;
 
 /**
@@ -369,6 +370,7 @@ export async function listNativeBranchRecords(opts: {
 export async function listNativeCopyInstances(opts: {
   readonly checkout: BranchInstanceCheckout;
   readonly store: NativeBranchRecord["store"];
+  readonly includePending?: boolean;
 }): Promise<readonly (string | null)[]> {
   const root = join(
     opts.checkout.projectDir,
@@ -376,7 +378,10 @@ export async function listNativeCopyInstances(opts: {
     opts.store === "runtime" ? "native-runs" : "native-authored-runs"
   );
   const instances: (string | null)[] = [];
-  for (const name of await listNativeRunRecordNames(root)) {
+  for (const name of await listNativeRunRecordNames(
+    root,
+    opts.store === "authored" && opts.includePending === true
+  )) {
     const instance = await readNativeRunRecordBranch(join(root, name));
     if (instance !== undefined) {
       instances.push(instance);
@@ -386,10 +391,18 @@ export async function listNativeCopyInstances(opts: {
 }
 
 /** `<digest>.json` mappings in a native run store; none when it is unlistable. */
-async function listNativeRunRecordNames(root: string): Promise<string[]> {
+async function listNativeRunRecordNames(
+  root: string,
+  includePending: boolean
+): Promise<string[]> {
   try {
     return (await readdir(root, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && NATIVE_RUN_RECORD.test(entry.name))
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          (NATIVE_RUN_RECORD.test(entry.name) ||
+            (includePending && AUTHORED_START_RECORD.test(entry.name)))
+      )
       .map((entry) => entry.name)
       .sort();
   } catch {

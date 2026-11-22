@@ -103,19 +103,12 @@ async function checkPrerequisite(
   if (!executable) {
     return { state: "missing", bin, tool: bin };
   }
-  notice?.(bin, executable);
-  const child = Bun.spawn([executable, ...args], {
-    cwd,
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-    detached: true,
-    env: childEnvironment(process.env, { AWS_CLI_AUTO_PROMPT: "off" }),
-  });
+  let child: Bun.Subprocess | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   let stopRequested = false;
   const endGroup = (): void => {
-    if (stopRequested) {
+    if (!child || stopRequested) {
       return;
     }
     stopRequested = true;
@@ -125,10 +118,6 @@ async function checkPrerequisite(
       // The group can already have exited.
     }
   };
-  const deadline = setTimeout(() => {
-    timedOut = true;
-    endGroup();
-  }, CHECK_TIMEOUT_MS);
   let cancelledBy: "SIGINT" | "SIGTERM" | undefined;
   const cancel = (signal: "SIGINT" | "SIGTERM") => {
     cancelledBy ??= signal;
@@ -139,6 +128,26 @@ async function checkPrerequisite(
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", terminate);
   try {
+    notice?.(bin, executable);
+    if (cancelledBy) {
+      return { state: "cancelled", signal: cancelledBy };
+    }
+    child = Bun.spawn([executable, ...args], {
+      cwd,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      detached: true,
+      env: childEnvironment(process.env, { AWS_CLI_AUTO_PROMPT: "off" }),
+    });
+    // A handler invoked during spawn records cancellation before it has a PID.
+    if (cancelledBy) {
+      endGroup();
+    }
+    deadline = setTimeout(() => {
+      timedOut = true;
+      endGroup();
+    }, CHECK_TIMEOUT_MS);
     const exitCode = await child.exited;
     endGroup();
     if (

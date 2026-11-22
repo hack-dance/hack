@@ -427,7 +427,11 @@ test("check exits and timeouts stop descendants and report distinct outcomes", a
   }
 }, 16_000);
 
-test("an interrupt during a prerequisite refuses startup with E_CANCELLED", async () => {
+test.each([
+  "from check",
+  "before spawn",
+  "after spawn",
+] as const)("prerequisite signal %s refuses startup", async (timing) => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-cancel-"));
   try {
     const configDir = join(root, ".hack");
@@ -442,7 +446,13 @@ test("an interrupt during a prerequisite refuses startup with E_CANCELLED", asyn
         min_cli_version: HACK_VERSION,
         requires: {
           cloud: {
-            check: ["sh", "-c", "kill -TERM $PPID; exit 0"],
+            check: [
+              "sh",
+              "-c",
+              timing === "from check"
+                ? "kill -TERM $PPID; sleep 2; touch check-survived"
+                : "sleep 2; touch check-survived",
+            ],
             login: ["true"],
           },
         },
@@ -461,9 +471,26 @@ test("an interrupt during a prerequisite refuses startup with E_CANCELLED", asyn
         startup: [{ name: "marker", run: "touch hook-ran", cwd: root }],
       })
     );
+    const preload = join(root, "signal-at-spawn.js");
+    if (timing !== "from check") {
+      // Synchronous delivery at both edges makes the spawn boundary reproducible.
+      await writeFile(
+        preload,
+        `const spawn = Bun.spawn;
+        Bun.spawn = (argv, options) => {
+          const check = options?.detached && Array.isArray(argv) &&
+            argv.some((arg) => arg.includes("check-survived"));
+          if (check && ${JSON.stringify(timing)} === "before spawn") process.emit("SIGTERM");
+          const child = spawn(argv, options);
+          if (check && ${JSON.stringify(timing)} === "after spawn") process.emit("SIGTERM");
+          return child;
+        };`
+      );
+    }
     const result = spawnSyncBounded(
       [
         process.execPath,
+        ...(timing === "from check" ? [] : ["--preload", preload]),
         resolve(import.meta.dir, "../index.ts"),
         "up",
         "--json",
@@ -482,6 +509,10 @@ test("an interrupt during a prerequisite refuses startup with E_CANCELLED", asyn
       },
     });
     expect(await Bun.file(join(root, "hook-ran")).exists()).toBe(false);
+    if (timing !== "from check") {
+      await Bun.sleep(2100);
+    }
+    expect(await Bun.file(join(root, "check-survived")).exists()).toBe(false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

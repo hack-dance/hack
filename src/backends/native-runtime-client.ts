@@ -1021,6 +1021,7 @@ function startupIntent(args: readonly string[]): StartupIntent | undefined {
 const STARTUP_SESSION_MS = 600_000;
 const STARTUP_REQUEST_LIMIT = 128 * 1024;
 const STARTUP_REPLY_LIMIT = MAX_OUTPUT_BYTES + 32;
+const STARTUP_PROTOCOL_UNAVAILABLE = Symbol("startup-preflight-unavailable");
 
 /** One ordered request in flight. A partial frame or failed transport is
  * terminal and is never replayed through either entry point. */
@@ -1029,9 +1030,10 @@ export function nativeStartupPreflight(opts: {
   readonly projectRoot: string;
 }) {
   let session: ReturnType<typeof startPreflightChild> | undefined;
+  let singleCalls = false;
   const invoke: typeof invokeNativeRuntime = async (request) => {
     const intent = startupIntent(request.args);
-    if (!intent) {
+    if (!intent || singleCalls) {
       return await invokeNativeRuntime(request);
     }
     if (request.signal?.aborted) {
@@ -1041,11 +1043,19 @@ export function nativeStartupPreflight(opts: {
       });
     }
     session ??= startPreflightChild(opts);
-    return await session.request(
+    const reply = await session.request(
       intent,
       request.timeoutMs ?? 180_000,
       request.signal
     );
+    if (reply !== STARTUP_PROTOCOL_UNAVAILABLE) {
+      return reply;
+    }
+    // An older explicitly selected executor can reject only the protocol
+    // command. No operation was written to its pipe before negotiation.
+    singleCalls = true;
+    await session.close();
+    return await invokeNativeRuntime(request);
   };
   return {
     invoke,
@@ -1080,6 +1090,7 @@ function startPreflightChild(opts: {
   let chunk: Uint8Array = new Uint8Array();
   let offset = 0;
   let overallTimedOut = false;
+  let negotiated = false;
   const stop = () => {
     child.kill("SIGKILL");
     void output.cancel().catch(() => undefined);
@@ -1110,6 +1121,101 @@ function startPreflightChild(opts: {
     return bytes;
   }
 
+  async function readFrame() {
+    const length = new DataView((await read(4)).buffer).getUint32(0);
+    if (length === 0 || length > STARTUP_REPLY_LIMIT) {
+      stop();
+      throw new ClosedCliError(
+        "Native runtime control response exceeds its output budget."
+      );
+    }
+    return completionResponse(await read(length), 0, false, undefined);
+  }
+
+  async function exchange(header: Uint8Array, body: Uint8Array) {
+    if (!negotiated) {
+      const hello = await readFrame();
+      if (!(isRecord(hello) && hello.version === 1)) {
+        throw new ClosedCliError(
+          "Native runtime returned an invalid control response."
+        );
+      }
+      negotiated = true;
+    }
+    await input.write(header);
+    await input.write(body);
+    await input.flush();
+    return await readFrame();
+  }
+
+  function canceledRequest() {
+    return new NativeRuntimeRequestError({
+      message:
+        "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
+    });
+  }
+
+  async function failedExchange(opts: {
+    readonly error: unknown;
+    readonly timedOut: () => boolean;
+    readonly signal?: AbortSignal;
+  }) {
+    if (opts.signal?.aborted) {
+      throw canceledRequest();
+    }
+    if (opts.error instanceof ClosedCliError) {
+      stop();
+      throw opts.error;
+    }
+    // A truncated frame can come from an already failed child or a peer that
+    // is still waiting. Close stdin and bound exit before decoding stderr.
+    const kill = setTimeout(stop, NATIVE_EXIT_DRAIN_BOUND_MS);
+    try {
+      try {
+        await input.end();
+      } catch {
+        // The child may have already closed its input while writing stderr.
+      }
+      const code = await child.exited;
+      const detail = await failure;
+      if (opts.signal?.aborted) {
+        throw canceledRequest();
+      }
+      throwIfNativeRuntimeStopped(child.signalCode);
+      const timedOut = opts.timedOut();
+      if (
+        !(negotiated || timedOut) &&
+        code === 2 &&
+        detail?.code === "unsupported_command"
+      ) {
+        return STARTUP_PROTOCOL_UNAVAILABLE;
+      }
+      return completionResponse(new Uint8Array(), code || 2, timedOut, detail);
+    } finally {
+      clearTimeout(kill);
+    }
+  }
+
+  function replyValue(reply: unknown): unknown {
+    if (isRecord(reply) && Object.keys(reply).length === 1) {
+      if ("value" in reply) {
+        return reply.value;
+      }
+      if ("error" in reply) {
+        return completionResponse(
+          new Uint8Array(),
+          2,
+          false,
+          nativeFailureFromReply(reply.error, false)
+        );
+      }
+    }
+    stop();
+    throw new ClosedCliError(
+      "Native runtime returned an invalid control response."
+    );
+  }
+
   async function request(
     intent: StartupIntent,
     timeoutMs: number,
@@ -1118,7 +1224,12 @@ function startPreflightChild(opts: {
     const body = new TextEncoder().encode(
       JSON.stringify({ timeout_ms: timeoutMs, intent })
     );
-    if (body.length > STARTUP_REQUEST_LIMIT) {
+    if (
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 1 ||
+      timeoutMs > STARTUP_SESSION_MS ||
+      body.length > STARTUP_REQUEST_LIMIT
+    ) {
       throw new HackCliError({
         code: "E_CONFIG_INVALID",
         message: REQUEST_BUDGET_REFUSAL,
@@ -1127,82 +1238,32 @@ function startPreflightChild(opts: {
     const header = new Uint8Array(4);
     new DataView(header.buffer).setUint32(0, body.length);
     let timedOut = false;
+    const expired = () => timedOut || overallTimedOut;
     const timer = setTimeout(() => {
       timedOut = true;
       stop();
     }, timeoutMs);
     signal?.addEventListener("abort", stop, { once: true });
-    if (signal?.aborted) {
-      stop();
-    }
-    let bytes: Uint8Array;
+    let reply: unknown;
     try {
-      await input.write(header);
-      await input.write(body);
-      await input.flush();
-      const length = new DataView((await read(4)).buffer).getUint32(0);
-      if (length === 0 || length > STARTUP_REPLY_LIMIT) {
-        stop();
-        throw new ClosedCliError(
-          "Native runtime control response exceeds its output budget."
-        );
-      }
-      bytes = await read(length);
-    } catch (error) {
       if (signal?.aborted) {
-        throw new NativeRuntimeRequestError({
-          message:
-            "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
-        });
+        stop();
+        throw canceledRequest();
       }
-      if (error instanceof ClosedCliError) {
-        throw error;
-      }
-      // A malformed response may leave the peer waiting for another request.
-      // Close stdin and bound the exit before collecting its closed diagnostic.
-      const kill = setTimeout(stop, NATIVE_EXIT_DRAIN_BOUND_MS);
-      try {
-        void Promise.resolve(input.end()).catch(stop);
-        const code = await child.exited;
-        const detail = await failure;
-        throwIfNativeRuntimeStopped(child.signalCode);
-        return completionResponse(
-          new Uint8Array(),
-          code || 2,
-          timedOut || overallTimedOut,
-          detail
-        );
-      } finally {
-        clearTimeout(kill);
-      }
+      reply = await exchange(header, body);
+    } catch (error) {
+      return await failedExchange({ error, timedOut: expired, signal });
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", stop);
     }
-    if (signal?.aborted || overallTimedOut || timedOut) {
-      throw new NativeRuntimeRequestError({
-        message: signal?.aborted
-          ? "Native runtime request was canceled; its outcome may be uncertain. No request was replayed."
-          : "Native runtime request timed out; inspect owned state before retrying.",
-        nativeCode: signal?.aborted ? undefined : "native_request_timeout",
-      });
+    if (signal?.aborted) {
+      throw canceledRequest();
     }
-    const reply = completionResponse(bytes, 0, false, undefined);
-    if (isRecord(reply) && "value" in reply && !("error" in reply)) {
-      return reply.value;
+    if (expired()) {
+      return completionResponse(new Uint8Array(), 2, true, undefined);
     }
-    if (isRecord(reply) && "error" in reply) {
-      return completionResponse(
-        new Uint8Array(),
-        2,
-        false,
-        nativeFailureFromReply(reply.error, false)
-      );
-    }
-    stop();
-    throw new ClosedCliError(
-      "Native runtime returned an invalid control response."
-    );
+    return replyValue(reply);
   }
 
   async function close(): Promise<void> {

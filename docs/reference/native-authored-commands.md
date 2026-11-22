@@ -769,4 +769,6 @@ the same checks and locks as its standalone command. The CLI validates each
 reply before requesting the next operation. The stream retains no provider
 state or authority between requests and closes before hooks or pool startup.
 Pool startup and graph restore still revalidate their inputs under their own
-leases.
+leases. An older runtime that rejects the protocol continues to receive
+standalone requests. Once a stream operation is sent, a transport failure
+ends the attempt without replay.

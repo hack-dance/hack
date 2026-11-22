@@ -11,11 +11,15 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 const REQUEST_MAX: usize = 128 * 1024;
-const REPLY_MAX: usize = 16 * 1024 * 1024 + 32;
+// Keep the same budgets as standalone stdout and stderr. The envelope
+// is transport overhead and does not count against an operation's JSON.
+const STDOUT_MAX: usize = 16 * 1024 * 1024;
+const STDERR_MAX: usize = 1024 * 1024;
+const REPLY_MAX: usize = STDOUT_MAX + 32;
 const SESSION_MS: u64 = 600_000;
 
 #[derive(Deserialize)]
@@ -145,6 +149,18 @@ fn watch_parent(start: Instant, deadline: &AtomicU64) {
     }
 }
 
+fn send(output: &mut impl Write, reply: &[u8]) -> Result<(), CandidateError> {
+    if reply.len() > REPLY_MAX {
+        return Err(invalid());
+    }
+    let len = u32::try_from(reply.len()).map_err(|_| invalid())?;
+    output
+        .write_all(&len.to_be_bytes())
+        .and_then(|()| output.write_all(reply))
+        .and_then(|()| output.flush())
+        .map_err(|_| invalid())
+}
+
 pub(super) fn run(root: &Path) -> Result<(), CandidateError> {
     let start = Instant::now();
     let deadline = Arc::new(AtomicU64::new(SESSION_MS));
@@ -152,8 +168,9 @@ pub(super) fn run(root: &Path) -> Result<(), CandidateError> {
     std::thread::Builder::new()
         .spawn(move || watch_parent(start, &watched))
         .map_err(|_| invalid())?;
-    let mut input = io::stdin().lock();
-    let mut output = io::stdout().lock();
+    let mut input = io::stdin();
+    let mut output = io::stdout();
+    send(&mut output, br#"{"version":1}"#)?;
     while let Some(body) = frame(&mut input)? {
         let request: Request = serde_json::from_slice(&body).map_err(|_| invalid())?;
         if !(1..=SESSION_MS).contains(&request.timeout_ms) {
@@ -167,20 +184,28 @@ pub(super) fn run(root: &Path) -> Result<(), CandidateError> {
             Ordering::Relaxed,
         );
         let mut reply = b"{\"value\":".to_vec();
-        if let Err(error) = request.intent.execute(root, &mut reply) {
-            reply = b"{\"error\":".to_vec();
-            serde_json::to_writer(&mut reply, &error).map_err(|_| invalid())?;
+        match request.intent.execute(root, &mut reply) {
+            Ok(()) if reply.len() - b"{\"value\":".len() > STDOUT_MAX => {
+                // The client sees the oversized frame header and uses its
+                // standalone output-budget diagnostic without reading a body.
+                output
+                    .write_all(&((REPLY_MAX + 1) as u32).to_be_bytes())
+                    .and_then(|()| output.flush())
+                    .map_err(|_| invalid())?;
+                return Ok(());
+            }
+            Ok(()) => {}
+            Err(error) => {
+                reply = b"{\"error\":".to_vec();
+                serde_json::to_writer(&mut reply, &error).map_err(|_| invalid())?;
+                // Standalone stderr has a trailing newline.
+                if reply.len() - b"{\"error\":".len() >= STDERR_MAX {
+                    reply = b"{\"error\":null".to_vec();
+                }
+            }
         }
         reply.push(b'}');
-        if reply.len() > REPLY_MAX {
-            return Err(invalid());
-        }
-        let len = u32::try_from(reply.len()).map_err(|_| invalid())?;
-        output
-            .write_all(&len.to_be_bytes())
-            .and_then(|()| output.write_all(&reply))
-            .and_then(|()| output.flush())
-            .map_err(|_| invalid())?;
+        send(&mut output, &reply)?;
         deadline.store(SESSION_MS, Ordering::Relaxed);
     }
     Ok(())

@@ -463,10 +463,18 @@ fn delivery_context_admits_the_full_compose_budget_and_oversized_files_refuse_be
     }
 }
 
+fn read_startup_frame(input: &mut impl std::io::Read) -> Vec<u8> {
+    let mut length = [0; 4];
+    input.read_exact(&mut length).unwrap();
+    let mut reply = vec![0; u32::from_be_bytes(length) as usize];
+    input.read_exact(&mut reply).unwrap();
+    reply
+}
+
 #[test]
 fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
     use serde_json::json;
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::process::Stdio;
 
     let fixture = Fixture::new();
@@ -604,16 +612,14 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
         .unwrap();
     let mut input = stream.stdin.take().unwrap();
     let mut output = stream.stdout.take().unwrap();
+    assert_eq!(read_startup_frame(&mut output), br#"{"version":1}"#);
     for ((_, intent), old) in cases.iter().zip(expected) {
         let request = serde_json::to_vec(&json!({"timeout_ms":5000,"intent":intent})).unwrap();
         input
             .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
             .unwrap();
         input.write_all(&request).unwrap();
-        let mut length = [0; 4];
-        output.read_exact(&mut length).unwrap();
-        let mut reply = vec![0; u32::from_be_bytes(length) as usize];
-        output.read_exact(&mut reply).unwrap();
+        let reply = read_startup_frame(&mut output);
         let mut same = if old.status.success() {
             let mut same = b"{\"value\":".to_vec();
             same.extend(old.stdout);
@@ -634,7 +640,7 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
 
 #[test]
 fn startup_preflight_frontend_death_retires_the_runtime() {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
@@ -650,22 +656,19 @@ fn startup_preflight_frontend_death_retires_the_runtime() {
             .unwrap();
         let mut input = runtime.stdin.take().unwrap();
         let mut output = runtime.stdout.take().unwrap();
+        assert_eq!(read_startup_frame(&mut output), br#"{"version":1}"#);
         let request = br#"{"timeout_ms":5000,"intent":{"operation":"admit_image","reference":"alpine:3.21","policy":[]}}"#;
         input
             .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
             .unwrap();
         input.write_all(request).unwrap();
-        let mut length = [0; 4];
-        output.read_exact(&mut length).unwrap();
-        let mut reply = vec![0; u32::from_be_bytes(length) as usize];
-        output.read_exact(&mut reply).unwrap();
+        let reply = read_startup_frame(&mut output);
         assert!(serde_json::from_slice::<Value>(&reply).unwrap()["value"].is_object());
         input.write_all(&[0]).unwrap();
         println!("runtime={}", runtime.id());
         std::io::stdout().flush().unwrap();
-        loop {
-            std::thread::park();
-        }
+        let status = runtime.wait().unwrap();
+        panic!("runtime exited before frontend death: {status}");
     }
 
     let fixture = Fixture::new();

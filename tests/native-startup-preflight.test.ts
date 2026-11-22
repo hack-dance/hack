@@ -3,12 +3,14 @@ import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+type WorkerMode = "framed" | "older" | "crash";
+
 const client = new URL(
   "../src/backends/native-runtime-client.ts",
   import.meta.url
 ).pathname;
 
-test("the preflight client closes the environment and preserves runtime failure rendering", async () => {
+async function runPreflight(mode: WorkerMode) {
   const root = await mkdtemp(join(tmpdir(), "hack-startup-preflight-"));
   try {
     const binary = join(root, "runtime");
@@ -32,10 +34,22 @@ if (process.argv.includes("preflight")) {
     }
     return true;
   }
+  if (${JSON.stringify(mode)} === "older") {
+    console.error(JSON.stringify({code: "unsupported_command"}));
+    process.exit(2);
+  }
+  const hello = Buffer.from('{"version":1}');
+  header.writeUInt32BE(hello.length);
+  writeSync(1, header);
+  writeSync(1, hello);
   while (read(header)) {
     const request = Buffer.alloc(header.readUInt32BE());
     if (!read(request)) process.exit(2);
     const { intent } = JSON.parse(request);
+    if (${JSON.stringify(mode)} === "crash" && intent.reference === "broken") {
+      console.error(JSON.stringify(error));
+      process.exit(2);
+    }
     const reply = Buffer.from(JSON.stringify(intent.reference === "broken" ? {error} : {value}));
     header.writeUInt32BE(reply.length);
     writeSync(1, header);
@@ -99,15 +113,31 @@ console.log(JSON.stringify(result));
     expect(stderr).toBe("");
     expect(exit).toBe(0);
     const replies: unknown[] = JSON.parse(stdout);
-    expect(replies.slice(0, 3)).toEqual(replies.slice(3));
-    expect(replies[0]).toEqual(["HOME", "LOGNAME", "PATH", "TMPDIR", "USER"]);
-    expect(replies[2]).toEqual({
-      message:
-        "Native runtime request failed (registry_image); inspect owned state before retrying.",
-      code: "registry_image",
-    });
-    expect(await Bun.file(launches).text()).toBe("xxxx");
+    return { replies, launches: await Bun.file(launches).text() };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+test("the preflight client closes the environment and preserves runtime failure rendering", async () => {
+  const { replies, launches } = await runPreflight("framed");
+  expect(replies.slice(0, 3)).toEqual(replies.slice(3));
+  expect(replies[0]).toEqual(["HOME", "LOGNAME", "PATH", "TMPDIR", "USER"]);
+  expect(replies[2]).toEqual({
+    message:
+      "Native runtime request failed (registry_image); inspect owned state before retrying.",
+    code: "registry_image",
+  });
+  expect(launches).toBe("xxxx");
+});
+
+test("an older runtime refuses negotiation before any staged operation is sent", async () => {
+  const { replies, launches } = await runPreflight("older");
+  expect(replies.slice(0, 3)).toEqual(replies.slice(3));
+  expect(launches).toBe("xxxxxxx");
+});
+
+test("a crash after negotiation keeps the one-shot diagnostic without replaying", async () => {
+  const { replies, launches } = await runPreflight("crash");
+  expect(replies.slice(0, 3)).toEqual(replies.slice(3));
+  expect(launches).toBe("xxxx");
 });

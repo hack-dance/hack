@@ -11,6 +11,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { extractArchive } from "../scripts/installer/bundle.ts";
+import { digest } from "../scripts/installer/integrity.ts";
 import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import { packageNativeStorageTool } from "../scripts/package-native-storage-tool.ts";
 import {
@@ -1069,10 +1071,17 @@ test("packages and extracts the supervisor extension with executable mode", asyn
       bundle,
       output,
     });
+    const archive = join(output, plan.archive);
+    const extracted = join(root, "extracted");
+    extractArchive({
+      archive,
+      checksum: digest(archive),
+      destination: extracted,
+      version: plan.version,
+      signatures: () => {},
+    });
     expect(
-      await Bun.file(
-        join(`${output}-installer-fixture`, "hack-lifecycle-supervisor")
-      ).text()
+      await Bun.file(join(extracted, "hack-lifecycle-supervisor")).text()
     ).toBe("synthetic supervisor\n");
     await chmod(join(bundle, "hack-lifecycle-supervisor"), 0o644);
     await expect(

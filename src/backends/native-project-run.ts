@@ -1768,7 +1768,7 @@ export async function beginNativeProjectStartupObservation(
     throw error;
   }
   let settled = false;
-  return async () => {
+  const finish = async () => {
     if (settled) {
       return;
     }
@@ -1782,6 +1782,69 @@ export async function beginNativeProjectStartupObservation(
       await handle.close();
     }
   };
+  return Object.assign(finish, {
+    select: async (startup: NativeStartupRun) => {
+      if (settled) {
+        return;
+      }
+      const value = JSON.stringify({ version: 1, pid: process.pid, startup });
+      await handle.write(value, 0, "utf8");
+      await handle.truncate(Buffer.byteLength(value));
+    },
+  });
+}
+
+export type NativeStartupRun = Pick<
+  NativeProjectRun,
+  "run" | "namespace" | "planId"
+>;
+
+/** A marker selects a read-only status query. Runtime receipt and socket proofs
+ * still decide what can be displayed. Ambiguous startup markers select nothing. */
+export async function loadNativeStartupRun(
+  opts: NativeProjectRunScope
+): Promise<NativeStartupRun | null> {
+  try {
+    const p = await paths(opts, false);
+    const prefix = `${basename(p.file)}.starting-`;
+    let selected: NativeStartupRun | null = null;
+    for (const name of await readdir(p.root)) {
+      if (!name.startsWith(prefix)) {
+        continue;
+      }
+      const path = join(p.root, name);
+      const value = await read(path).catch(() => null);
+      const pid = startupMarkerPid(value);
+      if (pid !== null && !startupPidMayExist(pid)) {
+        continue;
+      }
+      const startup = isRecord(value) ? value.startup : null;
+      if (
+        selected ||
+        pid === null ||
+        !isRecord(startup) ||
+        typeof startup.run !== "string" ||
+        !HEX32.test(startup.run) ||
+        typeof startup.namespace !== "string" ||
+        !HEX64.test(startup.namespace) ||
+        typeof startup.planId !== "string" ||
+        !HEX64.test(startup.planId)
+      ) {
+        return null;
+      }
+      selected = {
+        run: startup.run,
+        namespace: startup.namespace,
+        planId: startup.planId,
+      };
+    }
+    return selected;
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 /** Missing storage means no observed intent. Other filesystem refusals stay closed. */
@@ -1809,7 +1872,10 @@ export async function nativeProjectStartupPending(
 }
 /** ESRCH alone proves this PID is absent. Reuse/access failures are advisory uncertainty. */
 async function startupOwnerMayExist(path: string): Promise<boolean> {
-  const value = await read(path).catch(() => null);
+  const pid = startupMarkerPid(await read(path).catch(() => null));
+  return pid === null || startupPidMayExist(pid);
+}
+function startupMarkerPid(value: unknown): number | null {
   if (
     !isRecord(value) ||
     value.version !== 1 ||
@@ -1818,10 +1884,13 @@ async function startupOwnerMayExist(path: string): Promise<boolean> {
     value.pid <= 1 ||
     value.pid > 2_147_483_647
   ) {
-    return true;
+    return null;
   }
+  return value.pid;
+}
+function startupPidMayExist(pid: number): boolean {
   try {
-    process.kill(value.pid, 0);
+    process.kill(pid, 0);
     return true;
   } catch (error) {
     return !(isRecord(error) && error.code === "ESRCH");

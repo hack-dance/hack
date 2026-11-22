@@ -2622,7 +2622,7 @@ function emitNativeBranchDroppedNotice(
 
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
-  observeStartup: () => Promise<void>
+  observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>
 ): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -2694,7 +2694,7 @@ async function startNativeProjectAttempt(
   progress({ phase: "input" });
   // Keep ps aware of this frontend while input is read. This advisory marker
   // carries no values and is retired even if admission refuses the input.
-  await observeStartup();
+  const startupObservation = await observeStartup();
   // Read and admit private project inputs before any pool-share or storage
   // mutation. An unsafe env file or public interpolation must have no effects.
   let input = await deps.prepare({
@@ -3257,6 +3257,11 @@ async function startNativeProjectAttempt(
             invoke: deps.invoke,
           });
           try {
+            await startupObservation.select({
+              run,
+              namespace: review.namespace,
+              planId: restore?.planId ?? review.planId,
+            });
             servicesRequested = true;
             code = await deps.serve({
               runtime: opts.runtime,
@@ -3404,6 +3409,7 @@ async function startNativeProjectAttempt(
                 }
                 await hooks?.ready?.(controller.signal);
                 requireActiveStartup(controller.signal);
+                await startupObservation();
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -3658,7 +3664,11 @@ export async function startNativeProject(
       : undefined;
   try {
     return await startNativeProjectAttempt(opts, async () => {
-      finish = await beginNativeProjectStartupObservation(opts.scope);
+      const observation = await beginNativeProjectStartupObservation(
+        opts.scope
+      );
+      finish = observation;
+      return observation;
     });
   } catch (error) {
     throw withStartupLockBlocker(error);

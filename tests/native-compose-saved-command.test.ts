@@ -2,7 +2,6 @@ import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
-  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -103,7 +102,7 @@ async function savedFixture(
       routingResolution: resolution,
       declaredWorkloads: { web: "service" },
     });
-    await mkdir(join(root, "home"), { recursive: true });
+    await mkdirOwnedFixture(join(root, "home"));
     const routing = await prepareNativeComposeRouteOwner({
       owner: owner.identity,
       generationId: reservation.generationId,

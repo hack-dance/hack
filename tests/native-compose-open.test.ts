@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
@@ -60,7 +60,7 @@ async function fixture(): Promise<string> {
   );
   roots.push(root);
   await mkdirOwnedFixture(join(root, ".hack"));
-  await mkdir(join(root, "home"));
+  await mkdirOwnedFixture(join(root, "home"));
   await Bun.write(
     join(root, ".hack", "hack.project.json"),
     "malformed authored input must never be parsed for saved open"

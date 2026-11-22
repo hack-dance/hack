@@ -1,6 +1,14 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  posix,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -35,6 +43,7 @@ import {
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const BUILD_KEY = /^[a-f0-9]{64}$/;
 const ARGUMENT = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const TRAILING_SLASH = /\/$/;
 const TARGET = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 /**
  * The Compose `build` fields native builds implement. The Compose-backend feature
@@ -740,9 +749,20 @@ type PendingBuild = { request: NativeBuildRequest; services: string[] };
 
 /** The declaration a build request stands for: identical ones build once. */
 export function nativeBuildIdentity(request: NativeBuildRequest): string {
+  const { context, dockerfile } = request;
+  // Match the runtime's lexical source resolution for valid relative paths.
+  // Keep the authored path in the request so the runtime still validates it.
+  const keyPath =
+    dockerfile.length > 0 &&
+    !posix.isAbsolute(dockerfile) &&
+    !dockerfile.includes("$") &&
+    !dockerfile.includes("~") &&
+    !dockerfile.includes("\0")
+      ? [posix.join(context, dockerfile).replace(TRAILING_SLASH, "")]
+      : [dockerfile, "invalid"];
   return JSON.stringify([
-    request.context,
-    request.dockerfile,
+    context,
+    keyPath,
     request.target,
     Object.entries(request.args).sort(([a], [b]) => (a < b ? -1 : 1)),
   ]);

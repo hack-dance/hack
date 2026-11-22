@@ -812,7 +812,11 @@ test.each([
   const builds = new Map(
     names.map((target) => [target, { ...request(), target }])
   );
-  builds.set("duplicate", { ...request(), target: "web" });
+  builds.set("duplicate", {
+    ...request(),
+    dockerfile: "./Dockerfile",
+    target: "web",
+  });
   const specs: Record<string, Record<string, unknown>> = Object.fromEntries(
     [...builds.keys()].map((name) => [name, { build: "app" }])
   );

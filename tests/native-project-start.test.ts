@@ -5561,7 +5561,11 @@ test("a registry refusal during the build lists proven images and the retry comm
       `Image unavailable: could not resolve build base ${base} (registry rate limit reached).\nAlready present: ${loaded}.\nRetry hack up when the registry is reachable.`
     );
   } finally {
-    process.env.HACK_NATIVE_BUILDS = previous;
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
   }
 });
 

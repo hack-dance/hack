@@ -86,6 +86,13 @@ pub enum Event<'a> {
         service: &'a str,
         observation: Observation,
     },
+    /// A started service's own readiness goal held on one observation. Emitted at
+    /// most once per service per attempt, never before `Started` and never after a
+    /// failure; no order among siblings. It is a wake-up for publication, not a
+    /// durable state: a later exit is not reported here.
+    ServiceReady {
+        service: &'a str,
+    },
     Ready,
 }
 /// `record(StartIntent)` must durably reserve the service before `start`, rejecting any prior
@@ -257,22 +264,38 @@ impl Graph {
         Ok(order)
     }
 }
+/// Per-attempt observation memory: the last state recorded for each service and
+/// the services already reported ready.
+#[derive(Default)]
+struct Seen {
+    observations: BTreeMap<String, Observation>,
+    ready: BTreeSet<String>,
+}
+/// Observe a started service. Its failure ends the attempt before any further
+/// event; otherwise its first observation satisfying `goal` records `ServiceReady`.
 fn inspect(
     driver: &mut impl Driver,
     name: &str,
-    observations: &mut BTreeMap<String, Observation>,
+    goal: Condition,
+    seen: &mut Seen,
 ) -> Result<Observation, CandidateError> {
     driver.check_cancelled()?;
     let state = driver.observe(name)?;
-    if observations.get(name) != Some(&state) {
+    if seen.observations.get(name) != Some(&state) {
         driver.record(Event::Observed {
             service: name,
             observation: state,
         })?;
-        observations.insert(name.into(), state);
+        seen.observations.insert(name.into(), state);
     }
     if state.failed() {
         return Err(driver.service_failure(name, state));
+    }
+    if state.satisfies(goal) && !seen.ready.contains(name) {
+        // A cancelled attempt reports nothing more, even a goal it just observed.
+        driver.check_cancelled()?;
+        driver.record(Event::ServiceReady { service: name })?;
+        seen.ready.insert(name.into());
     }
     Ok(state)
 }
@@ -343,12 +366,14 @@ fn run_with_clock(
     }
     let deadline = now() + timeout;
     let mut started = BTreeSet::<String>::new();
-    let mut observations = BTreeMap::new();
+    let mut seen = Seen::default();
     loop {
         before_deadline(deadline, now())?;
         driver.check_cancelled()?;
+        // Every started service is observed on every pass, so its own goal is
+        // reported while siblings are still starting.
         for name in &started {
-            inspect(driver, name, &mut observations)?;
+            inspect(driver, name, graph.services[name].ready, &mut seen)?;
             before_deadline(deadline, now())?;
             driver.check_cancelled()?;
         }
@@ -364,7 +389,8 @@ fn run_with_clock(
                     ready = false;
                     break;
                 }
-                let state = inspect(driver, dependency, &mut observations)?;
+                let goal = graph.services[dependency].ready;
+                let state = inspect(driver, dependency, goal, &mut seen)?;
                 before_deadline(deadline, now())?;
                 driver.check_cancelled()?;
                 if !state.satisfies(*condition) {
@@ -386,14 +412,14 @@ fn run_with_clock(
             }
             driver.record(Event::Started { service: name })?;
             started.insert(name.clone());
-            inspect(driver, name, &mut observations)?;
+            inspect(driver, name, service.ready, &mut seen)?;
             before_deadline(deadline, now())?;
             driver.check_cancelled()?;
         }
         if started.len() == graph.services.len() {
             let mut ready = true;
             for (name, service) in &graph.services {
-                let state = inspect(driver, name, &mut observations)?;
+                let state = inspect(driver, name, service.ready, &mut seen)?;
                 before_deadline(deadline, now())?;
                 driver.check_cancelled()?;
                 ready &= state.satisfies(service.ready);
@@ -587,6 +613,136 @@ mod tests {
         .unwrap();
         assert_eq!(driver.starts, ["init", "web", "check"]);
         assert_eq!(driver.events.last().unwrap(), "{\"event\":\"ready\"}");
+    }
+    /// Two independent services: `fast` is ready once running, `slow` waits on its
+    /// health check, which `wait` turns to `later`.
+    struct Siblings {
+        inner: Fake,
+        slow: std::rc::Rc<std::cell::Cell<Observation>>,
+    }
+    impl Driver for Siblings {
+        fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+            self.inner.record(event)
+        }
+        fn start(&mut self, service: &str) -> Result<(), CandidateError> {
+            self.inner.start(service)
+        }
+        fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
+            if service == "slow" {
+                Ok(self.slow.get())
+            } else {
+                self.inner.observe(service)
+            }
+        }
+    }
+    fn siblings(later: Observation) -> (Result<(), CandidateError>, Vec<String>) {
+        let graph = Graph {
+            services: BTreeMap::from([
+                (
+                    "fast".into(),
+                    Service {
+                        dependencies: BTreeMap::new(),
+                        ready: Condition::Started,
+                    },
+                ),
+                (
+                    "slow".into(),
+                    Service {
+                        dependencies: BTreeMap::new(),
+                        ready: Condition::Healthy,
+                    },
+                ),
+            ]),
+        };
+        let slow = std::rc::Rc::new(std::cell::Cell::new(Observation::Running {
+            health: Health::Starting,
+        }));
+        let mut driver = Siblings {
+            inner: Fake {
+                states: BTreeMap::from([(
+                    "fast".into(),
+                    Observation::Running {
+                        health: Health::None,
+                    },
+                )]),
+                ..Fake::default()
+            },
+            slow: slow.clone(),
+        };
+        let mut waits = 0;
+        let outcome = run_with_wait(&graph, &mut driver, Duration::from_secs(1), |_| {
+            waits += 1;
+            if waits == 3 {
+                slow.set(later);
+            }
+        });
+        (outcome, driver.inner.events)
+    }
+    fn position(events: &[String], wanted: &str) -> Option<usize> {
+        events.iter().position(|event| event == wanted)
+    }
+    #[test]
+    fn a_fast_service_is_reported_ready_once_while_a_sibling_still_starts() {
+        let (outcome, events) = siblings(Observation::Running {
+            health: Health::Healthy,
+        });
+        outcome.unwrap();
+        let fast = r#"{"event":"service_ready","service":"fast"}"#;
+        let slow = r#"{"event":"service_ready","service":"slow"}"#;
+        assert_eq!(events.iter().filter(|event| *event == fast).count(), 1);
+        assert_eq!(events.iter().filter(|event| *event == slow).count(), 1);
+        let healthy = position(
+            &events,
+            r#"{"event":"observed","service":"slow","observation":{"state":"running","health":"healthy"}}"#,
+        )
+        .unwrap();
+        // Reported before the sibling became healthy, and only after it started.
+        assert!(position(&events, fast).unwrap() < healthy);
+        assert!(
+            position(&events, r#"{"event":"started","service":"fast"}"#).unwrap()
+                < position(&events, fast).unwrap()
+        );
+        assert!(position(&events, slow).unwrap() > healthy);
+        assert_eq!(events.last().unwrap(), r#"{"event":"ready"}"#);
+    }
+    #[test]
+    fn no_service_is_reported_ready_after_a_failure() {
+        let (outcome, events) = siblings(Observation::Running {
+            health: Health::Unhealthy,
+        });
+        assert_eq!(outcome.unwrap_err().code, "graph_service_failed");
+        assert_eq!(
+            events.last().unwrap(),
+            r#"{"event":"observed","service":"slow","observation":{"state":"running","health":"unhealthy"}}"#
+        );
+        let reported: Vec<_> = events
+            .iter()
+            .filter(|event| event.contains("service_ready"))
+            .collect();
+        assert_eq!(reported, [r#"{"event":"service_ready","service":"fast"}"#]);
+        assert!(!events.iter().any(|event| event == r#"{"event":"ready"}"#));
+    }
+    #[test]
+    fn a_dependency_is_reported_ready_before_its_dependent_starts() {
+        let mut driver = driver();
+        run(&graph(), &mut driver, Duration::from_secs(1)).unwrap();
+        let ready = position(
+            &driver.events,
+            r#"{"event":"service_ready","service":"init"}"#,
+        )
+        .unwrap();
+        assert!(
+            ready
+                < position(
+                    &driver.events,
+                    r#"{"event":"start_intent","service":"web"}"#
+                )
+                .unwrap()
+        );
+        for service in ["init", "web", "check"] {
+            let wanted = format!(r#"{{"event":"service_ready","service":"{service}"}}"#);
+            assert_eq!(driver.events.iter().filter(|e| **e == wanted).count(), 1);
+        }
     }
     #[test]
     fn stalled_dependencies_back_off_and_are_reobserved_before_start() {

@@ -38,15 +38,24 @@ export async function inspectNativeProjectGraph(opts: {
   readonly signal?: AbortSignal;
   /** Bound for retrying `provider_busy`; see {@link INSPECT_BUSY_WAIT_MS}. */
   readonly busyWaitMs?: number;
+  readonly startupWait?: boolean;
 }): Promise<unknown> {
   const deadline =
-    performance.now() + (opts.busyWaitMs ?? INSPECT_BUSY_WAIT_MS);
+    performance.now() +
+    (opts.startupWait ? 0 : (opts.busyWaitMs ?? INSPECT_BUSY_WAIT_MS));
   for (;;) {
     try {
       return await (opts.invoke ?? invokeNativeRuntime)({
         runtime: opts.runtime,
         cwd: opts.projectRoot,
-        args: ["graph", "inspect", "--run-id", opts.run, "--json"],
+        args: [
+          "graph",
+          "inspect",
+          "--run-id",
+          opts.run,
+          "--json",
+          ...(opts.startupWait ? ["--startup-wait"] : []),
+        ],
         timeoutMs: 30_000,
         signal: opts.signal,
       });

@@ -309,6 +309,39 @@ test("explicit service selection checks only remotes with matching environment k
         services: ["api"],
       })
     ).rejects.toMatchObject({ code: "E_PREREQUISITE_CHECK_FAILED" });
+    const interpolationCases = [
+      { environment: ["URL=${DB_HOST}"] },
+      { environment: { URL: "${DB_HOST:-x}" } },
+      { environment: ["URL=${DB_HOST:?missing}"] },
+      { command: ["echo", "$DB_HOST"] },
+      { entrypoint: ["echo", "${DB_HOST}"] },
+      { healthcheck: { test: ["CMD", "echo", "${DB_HOST:-x}"] } },
+      { labels: { endpoint: "${DB_HOST}" } },
+    ];
+    for (const worker of interpolationCases) {
+      await writeFile(composeFile, JSON.stringify({ services: { worker } }));
+      await expect(
+        enforceProjectPrerequisites(cfg.prerequisites, true, root, {
+          composeFile,
+          services: ["worker"],
+        })
+      ).rejects.toMatchObject({ code: "E_PREREQUISITE_CHECK_FAILED" });
+    }
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: {
+          worker: { command: ["echo", "$$DB_HOST", "$DB_HOST_SUFFIX"] },
+          unrelated: { command: ["echo", "$DB_HOST"] },
+        },
+      })
+    );
+    expect(
+      await enforceProjectPrerequisites(cfg.prerequisites, true, root, {
+        composeFile,
+        services: ["worker"],
+      })
+    ).toBe(true);
     await writeFile(join(root, "service.env"), "DB_HOST=db.example.test\n");
     await writeFile(
       composeFile,
@@ -487,12 +520,14 @@ test("Doctor reports a custom prerequisite without executing it", async () => {
     expect(await inspectProjectPrerequisites(config, root)).toEqual([
       {
         name: "cloud",
+        check: "touch check-ran",
         login: "true",
         state: { state: "not checked" },
         tools: ["touch", "true"].map((bin) => ({
           bin,
           path: Bun.which(bin),
           source: "PATH",
+          inProject: false,
         })),
       },
     ]);
@@ -507,7 +542,7 @@ test("the AWS check ignores project dotenv overrides and receives no Hack keys",
   try {
     const checkout = join(root, "project");
     const configDir = join(checkout, ".hack");
-    const binDir = join(root, "bin");
+    const binDir = join(checkout, "bin");
     const override = join(checkout, "fake-aws");
     await mkdir(configDir, { recursive: true });
     await mkdir(binDir);
@@ -560,6 +595,7 @@ test("the AWS check ignores project dotenv overrides and receives no Hack keys",
       env,
     });
     expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain(`${aws} · PATH · in project`);
     expect(JSON.parse(result.stdout.toString())).toMatchObject({
       ok: false,
       error: { code: "E_PREREQUISITE_CHECK_FAILED", detail: { exitCode: 42 } },

@@ -1892,8 +1892,8 @@ Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
 `requires` array names those requirements. Hack checks the default target's
 requirements before running Compose lifecycle hooks for `up`, `restart`, or
 `run`. When you select services explicitly, Hack checks the remotes whose
-mapped env names match an `environment` entry on a selected service or its
-Compose dependencies. With no service selection, Hack checks every default
+mapped env names match an `environment` key or a Compose interpolation
+reference in a selected service or its dependencies. With no service selection, Hack checks every default
 remote. Hack also checks every default remote when it cannot determine the
 selected services' environment keys, including when a service uses `env_file`
 or the checkout has managed env layers.
@@ -1906,7 +1906,9 @@ arrays. Hack runs these directly. A prerequisite's optional `tools` array
 names entries in the same configuration's top-level `tools` block. Each
 entry supplies `bins` and can provide an `install` hint for a missing binary.
 Hack resolves executables through `PATH`. Doctor shows the path and source
-for each prerequisite executable.
+for each prerequisite executable. Doctor shows the full custom check and login
+commands, and marks executables found inside the project. Startup prints a
+notice the first time it uses such an executable.
 
 Checks run from the project root in their own process group, discard both output
 streams, and stop the group after ten seconds. Keep secrets

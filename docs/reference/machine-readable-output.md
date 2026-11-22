@@ -145,6 +145,7 @@ success behavior stays covered by command-specific suites.
 | `hack projects --json` | Legacy bare object (no `data` envelope) |
 | `hack projects prune --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack ps --json` | Backend-dependent: envelope or legacy bare object |
+| `hack pull --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack restart --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack run --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack session capture --json` | NDJSON events / terminal event, not a single envelope |

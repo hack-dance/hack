@@ -1,3 +1,4 @@
+import type { NativeImageTagStatus } from "../backends/native-image-tags.ts";
 import type { NativeProjectPsResult } from "../backends/native-project-observe.ts";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
@@ -20,7 +21,9 @@ export function nativePsState(
  * ps result, matching authored native ps.
  */
 export async function displayNativePs(
-  result: NativeProjectPsResult,
+  result: NativeProjectPsResult & {
+    imageTags?: readonly NativeImageTagStatus[];
+  },
   json: boolean,
   ps?: {
     readonly addresses: ReadonlyMap<string, readonly string[]>;
@@ -65,6 +68,28 @@ export async function displayNativePs(
   }
   if (ps) {
     displayNativeServiceRows(result, ps);
+    if (ps.wide && result.imageTags?.length) {
+      createTextOutput().table({
+        columns: [
+          "IMAGE TAG",
+          "RESOLVED DIGEST",
+          "IMAGE ID",
+          "PLATFORM",
+          "RESOLVED AT",
+        ],
+        rows: result.imageTags.flatMap((tag) =>
+          tag.selections.map((selection) => [
+            tag.reference,
+            selection.source_digest ?? tag.source_digest,
+            selection.image_id,
+            selection.platform,
+            formatResolvedAt(
+              selection.resolved_at_unix_seconds ?? tag.resolved_at_unix_seconds
+            ),
+          ])
+        ),
+      });
+    }
     return;
   }
   await display.table({
@@ -157,4 +182,9 @@ function displayNativeServiceRows(
       "faint"
     );
   }
+}
+
+function formatResolvedAt(seconds: number): string | null {
+  const date = new Date(seconds * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }

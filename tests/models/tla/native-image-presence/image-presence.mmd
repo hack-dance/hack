@@ -5,9 +5,14 @@ stateDiagram-v2
     direction TB
     [*] --> begin
     begin --> begin: Evict [present]
-    begin --> readback: Begin [cached]
+    begin --> tag: Begin [tag]
+    begin --> readback: Begin [digest]
+    tag --> tag: Expire [fresh]
+    tag --> tag: ChangeAvailability
+    tag --> readback: ResolveTag [selected]
+    tag --> refused: ResolveTag [missing]
     begin --> verify: Begin [explicit]
-    readback --> ready: Readback [complete, present]
+    readback --> ready: Readback [proof, present]
     readback --> refused: Readback [refusal]
     readback --> verify: Readback [needs archive]
     verify --> refused: Verify [changed]
@@ -23,9 +28,15 @@ stateDiagram-v2
     create_refused --> [*]
     refused --> [*]
     class begin idle
-    class readback,verify,verified,upload live
+    class tag,readback,verify,verified,upload live
     class ready,created ok
     class refused,create_refused fail
+    note right of tag
+        Fresh normal commands use the record.
+        Refresh or expiry checks the registry.
+        Fallback needs proof and presence.
+        Explicit refresh refuses on error.
+    end note
     note right of ready
         INV: success observed the exact image.
         Upload requires a verified archive.

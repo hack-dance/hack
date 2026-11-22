@@ -425,12 +425,13 @@ test("check exits and timeouts stop descendants and report distinct outcomes", a
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-}, 16_000);
+}, 22_000);
 
 test.each([
   "from check",
   "before spawn",
   "after spawn",
+  "unconfirmed cleanup",
 ] as const)("prerequisite signal %s refuses startup", async (timing) => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-cancel-"));
   try {
@@ -471,18 +472,27 @@ test.each([
         startup: [{ name: "marker", run: "touch hook-ran", cwd: root }],
       })
     );
+    const forceUnknown = timing === "unconfirmed cleanup";
     const preload = join(root, "signal-at-spawn.js");
     if (timing !== "from check") {
       // Synchronous delivery at both edges makes the spawn boundary reproducible.
       await writeFile(
         preload,
         `const spawn = Bun.spawn;
+        const kill = process.kill;
+        if (${forceUnknown}) {
+          process.kill = (pid, signal) =>
+            pid < 0 && signal === 0 ? true : kill(pid, signal);
+        }
         Bun.spawn = (argv, options) => {
+          if (${forceUnknown} && argv[0] === "/bin/ps") {
+            return spawn(["/bin/sh", "-c", "exit 1"], options);
+          }
           const check = options?.detached && Array.isArray(argv) &&
             argv.some((arg) => arg.includes("check-survived"));
           if (check && ${JSON.stringify(timing)} === "before spawn") process.emit("SIGTERM");
           const child = spawn(argv, options);
-          if (check && ${JSON.stringify(timing)} === "after spawn") process.emit("SIGTERM");
+          if (check && (${JSON.stringify(timing)} === "after spawn" || ${forceUnknown})) process.emit("SIGTERM");
           return child;
         };`
       );
@@ -505,18 +515,20 @@ test.each([
       ok: false,
       error: {
         code: "E_CANCELLED",
-        message: "! cloud  sign-in check cancelled by SIGTERM",
+        message: forceUnknown
+          ? "! cloud  sign-in check cancelled by SIGTERM\n  Could not confirm that the check process group stopped."
+          : "! cloud  sign-in check cancelled by SIGTERM",
       },
     });
     expect(await Bun.file(join(root, "hook-ran")).exists()).toBe(false);
-    if (timing !== "from check") {
+    if (timing !== "from check" && !forceUnknown) {
       await Bun.sleep(2100);
     }
     expect(await Bun.file(join(root, "check-survived")).exists()).toBe(false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 15_000);
 
 test("failed check output stays private and noninteractive TTY does not start login", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-tty-"));

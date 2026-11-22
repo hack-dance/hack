@@ -13,6 +13,7 @@ export const JSON_COMMAND_SHAPES = {
   "project task list": "envelope",
   "project task inspect": "envelope",
   up: "envelope",
+  pull: "envelope",
   down: "backend-dependent",
   restart: "envelope",
   ps: "backend-dependent",

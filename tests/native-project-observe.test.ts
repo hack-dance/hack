@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   mkdir,
   mkdtemp,
@@ -23,7 +23,9 @@ import {
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import { displayNativePs } from "../src/commands/native-ps-display.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { scopedHackCommand } from "../src/lib/printed-shell-command.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -301,9 +303,14 @@ test("ps keeps current service rows and marks the reaped publisher's port down",
 });
 
 test.each([
-  "ps",
-  "status",
-])("plain native %s shows the failed port and a working stop command", async (command) => {
+  { command: "ps", wide: false, showsPort: false },
+  { command: "ps", wide: true, showsPort: true },
+  { command: "status", wide: false, showsPort: true },
+])("native $command (wide=$wide) reports degraded status and a recovery command", async ({
+  command,
+  wide,
+  showsPort,
+}) => {
   const opts = await fixture();
   await writeFile(
     join(opts.scope.projectDir, "hack.config.json"),
@@ -346,6 +353,7 @@ test.each([
       process.execPath,
       new URL("../index.ts", import.meta.url).pathname,
       command,
+      ...(wide ? ["--wide"] : []),
       ...(command === "ps" ? ["--path", opts.scope.projectRoot] : []),
     ],
     {
@@ -372,9 +380,17 @@ test.each([
   ]);
   expect(code).toBe(0);
   expect(stdout + stderr).toContain("web");
-  expect(stdout + stderr).toContain("127.0.0.1:18080");
-  expect(stdout + stderr).toContain("down");
-  expect(stdout + stderr).toContain("Run hack down");
+  if (showsPort) {
+    expect(stdout).toMatch(/127\.0\.0\.1:18080[ (]+down/);
+  } else {
+    expect(stdout).not.toContain("127.0.0.1:18080");
+  }
+  if (command === "ps") {
+    expect(stdout).toMatch(/web +no address +port-down/);
+    expect(stdout).toContain(`hack down --path=${opts.scope.projectRoot}`);
+  } else {
+    expect(stdout + stderr).toContain("Run hack down");
+  }
 }, 20_000);
 test("bounded logs verify current container before and after using exact CLI contract", async () => {
   const opts = await fixture();
@@ -678,8 +694,9 @@ exit 2
     ]);
     expect(code).toBe(0);
     expect(stdout).toContain("web");
-    expect(stderr).toContain("owner is unconfirmed");
-    expect(stderr).toContain("not usable readiness");
+    expect(stdout).toContain("owner is unconfirmed");
+    expect(stdout).toContain(`hack down --path=${opts.scope.projectRoot}`);
+    expect(stderr).not.toContain("owner is unconfirmed");
   } finally {
     clearTimeout(timer);
     child.kill("SIGKILL");
@@ -967,11 +984,40 @@ exit 2
   await writeFile(marker, "");
   const busy = await ps();
   expect(busy.code).toBe(0);
-  expect(busy.stderr).toContain(
-    "Native runtime is busy with another operation"
-  );
+  expect(busy.stdout).toBe("service status is being updated\n");
   expect(busy.stderr).not.toContain("provider_busy");
 }, 60_000);
+test("busy native ps keeps known port failures and the exact recovery command", async () => {
+  const chunks: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((line) => {
+    chunks.push(String(line));
+    return true;
+  });
+  const path = "/tmp/fixture\n";
+  const recoveryCommand = scopedHackCommand("down", { path });
+  try {
+    await displayNativePs(
+      {
+        backend: "native",
+        status: "runtime_busy",
+        run: null,
+        phase: null,
+        items: [],
+        ports: [{ service: "web", state: "down", port: 18_080, target: 8080 }],
+      },
+      false,
+      { addresses: new Map(), recoveryCommand }
+    );
+    expect(chunks.join("")).toMatch(/web +no address +port-down/);
+    expect(chunks.join("")).toContain(
+      `retain data and stop with ${recoveryCommand}\n`
+    );
+    expect(chunks.join("")).not.toContain("0 services");
+  } finally {
+    stdout.mockRestore();
+  }
+});
+
 test("logs keep the runtime's interleaved whole lines and refuse malformed ones", async () => {
   const opts = await fixture();
   const lines: NativeLogLine[] = [
@@ -1080,5 +1126,49 @@ test("internal readiness admission reads only closed goals from the owned receip
     expect(internal.items[0]?.readiness).toBe(
       readiness === "unknown" ? undefined : readiness
     );
+  }
+});
+
+test("native image pins and resolution times appear only in wide text and JSON", async () => {
+  const chunks: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((line) => {
+    chunks.push(String(line));
+    return true;
+  });
+  const result: Parameters<typeof displayNativePs>[0] = {
+    backend: "native",
+    status: "runtime_busy",
+    run: null,
+    phase: null,
+    items: [],
+    imageTags: [
+      {
+        reference: "example.invalid/sample:latest",
+        registry: "example.invalid",
+        source_digest: "sha256:fixture",
+        resolved_at_unix_seconds: 1,
+        aliases: [],
+        selections: [
+          { policy: "local", platform: "linux/arm64", image_id: "fixture" },
+        ],
+      },
+    ],
+  };
+  try {
+    const addresses = new Map<string, readonly string[]>();
+    await displayNativePs(result, false, { addresses });
+    expect(chunks.join("")).toBe("service status is being updated\n");
+    chunks.length = 0;
+    await displayNativePs(result, false, { addresses, wide: true });
+    expect(chunks.join("")).toContain("RESOLVED AT");
+    expect(chunks.join("")).toContain("sha256:fixture");
+    expect(chunks.join("")).toContain("1970-01-01T00:00:01.000Z");
+    chunks.length = 0;
+    await displayNativePs(result, true, { addresses });
+    expect(JSON.parse(chunks.join("")).data.imageTags).toEqual(
+      result.imageTags
+    );
+  } finally {
+    stdout.mockRestore();
   }
 });

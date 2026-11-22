@@ -4,6 +4,7 @@ import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../backends/native-project-o
 import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
+import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import type { AutostartGlobalView } from "./autostart-view.ts";
 import {
   emitCliResult,
@@ -160,6 +161,8 @@ import { run } from "./shell.ts";
 
 type Operation = "up" | "restart" | "down" | "ps" | "logs" | "exec" | "run";
 export type NativeComposeCommandOptions = {
+  /** Set by the service view; status callers omit it. */
+  readonly psWide?: boolean;
   /** Add machine policy only for status callers; ordinary ps keeps its existing shape. */
   readonly statusMetadata?: () => Promise<{
     readonly autostart: ReturnType<typeof serializeProjectAutostart>;
@@ -715,6 +718,36 @@ async function runSavedProcess(opts: {
   );
 }
 
+function nativeComposePsAddresses(input: {
+  readonly document: PrivateDocument;
+  readonly generationId: string;
+}): ReadonlyMap<string, readonly string[]> {
+  const addresses = new Map<string, readonly string[]>();
+  const routing = readNativeComposeRouteMetadata(input);
+  for (const route of routing?.routes ?? []) {
+    addresses.set(route.service, [
+      ...new Set([...(addresses.get(route.service) ?? []), ...route.origins]),
+    ]);
+  }
+  return addresses;
+}
+
+function warnSavedPsPending(state: {
+  readonly beforeHooksPending: boolean;
+  readonly storageWitnessesPending: boolean;
+}): void {
+  if (state.beforeHooksPending) {
+    process.stderr.write(
+      "Native host hook completion remains uncertain; hook recovery is not supported in this slice.\n"
+    );
+  }
+  if (state.storageWitnessesPending) {
+    process.stderr.write(
+      "Native storage continuity or helper completion remains uncertain; saved recovery retains its anchors. Values omitted.\n"
+    );
+  }
+}
+
 async function savedCommand(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly store: NativeComposeGenerationStore;
@@ -1020,6 +1053,13 @@ async function savedCommand(opts: {
           ? await observeSavedNativeComposeOwned(selection)
           : await assertNativeComposeOwned(selection);
       if (options.operation === "ps") {
+        const addresses =
+          options.psWide === undefined
+            ? new Map<string, readonly string[]>()
+            : nativeComposePsAddresses({
+                document,
+                generationId: generation.generationId,
+              });
         if (options.json) {
           emitCliResult({
             result: okResult({
@@ -1045,15 +1085,20 @@ async function savedCommand(opts: {
           });
           return 0;
         }
-        if (state.beforeHooksPending) {
-          process.stderr.write(
-            "Native host hook completion remains uncertain; hook recovery is not supported in this slice.\n"
-          );
-        }
-        if (state.storageWitnessesPending) {
-          process.stderr.write(
-            "Native storage continuity or helper completion remains uncertain; saved recovery retains its anchors. Values omitted.\n"
-          );
+        warnSavedPsPending(state);
+        if (options.psWide !== undefined) {
+          renderPs({
+            wide: options.psWide,
+            rows: observed.containers.map((item) => ({
+              service: item.service,
+              address: null,
+              addresses: addresses.get(item.service),
+              container: item.name,
+              exitCode: item.state === "exited" ? item.exitCode : null,
+              state: psServiceState(item),
+            })),
+          });
+          return 0;
         }
         return await run([...composeArgs(generation), "ps"], {
           cwd: base.cwd,
@@ -2510,9 +2555,15 @@ async function dispatchNativeComposeCommand(
   requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });
   const prepare = validateNativeOptions(options);
   const controller = new AbortController();
-  const cancel = () => controller.abort();
-  process.on("SIGINT", cancel);
-  process.on("SIGTERM", cancel);
+  let signalExit: number | undefined;
+  const cancel = (code: number) => {
+    signalExit ??= code;
+    controller.abort();
+  };
+  const interrupt = () => cancel(130);
+  const terminate = () => cancel(143);
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", terminate);
   try {
     if (prepare) {
       return await prepareCommand({
@@ -2532,10 +2583,18 @@ async function dispatchNativeComposeCommand(
       await store.close();
     }
   } catch (error: unknown) {
+    if (
+      signalExit !== undefined &&
+      options.operation === "ps" &&
+      options.psWide !== undefined &&
+      !options.json
+    ) {
+      return signalExit;
+    }
     return throwNativeComposeCommandError(error);
   } finally {
-    process.off("SIGINT", cancel);
-    process.off("SIGTERM", cancel);
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
   }
 }
 

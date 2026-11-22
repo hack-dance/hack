@@ -2226,6 +2226,17 @@ pub fn acquire_with(
     limit: u64,
     platform: PlatformPolicy,
 ) -> Result<AcquiredImage, CandidateError> {
+    acquire_with_disk_admission(reference_text, output, policy, limit, platform, |_| Ok(()))
+}
+
+pub(super) fn acquire_with_disk_admission<T>(
+    reference_text: &str,
+    output: &Path,
+    policy: &ImagePolicy,
+    limit: u64,
+    platform: PlatformPolicy,
+    reserve: impl FnOnce(u64) -> Result<T, CandidateError>,
+) -> Result<AcquiredImage, CandidateError> {
     let pinned = pinned(reference_text, policy)?;
     let limit = limit.min(policy.archive_limit);
     if output.exists() {
@@ -2255,6 +2266,14 @@ pub fn acquire_with(
             "The image exceeds the configured image budget or the remaining image cache budget.",
         ));
     }
+    // The current layer coexists with the growing archive until it is appended.
+    let largest_layer = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.size)
+        .max()
+        .unwrap_or(0);
+    let _disk = reserve(planned.saturating_add(largest_layer))?;
     let config_name = format!("{}.json", config.digest.trim_start_matches("sha256:"));
     let deadline = fetch.deadline;
     let manifest_bytes = serde_json::to_vec(

@@ -1,6 +1,6 @@
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
-import { reportNativeImageTagOffline } from "../lib/native-detached-up.ts";
+import { reportNativeImageNotice } from "../lib/native-detached-up.ts";
 import { describeLivePoolRuns } from "./native-pool-run-names.ts";
 import {
   invokeNativeRuntime,
@@ -172,7 +172,7 @@ async function addNativeProjectShare(opts: {
 }
 
 function writeNotice(line: string): void {
-  if (!reportNativeImageTagOffline(line)) {
+  if (!reportNativeImageNotice(line)) {
     process.stderr.write(`${line}\n`);
   }
 }

@@ -688,6 +688,32 @@ test("HACK-2339: a failed hook's lines reach only a terminal stderr; otherwise o
   ]);
 }, 60_000);
 
+test("detached JSON retains every image refusal and recovery action", async () => {
+  const result = await prestartRun("image-batch-errors");
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_LIFECYCLE_FAILED",
+      detail: {
+        images: [
+          {
+            reference: "fixture/image:a",
+            code: "provider_busy",
+            recovery:
+              "Run hack up again after the current image work finishes.",
+          },
+          {
+            reference: "fixture/image:b",
+            code: "image_disk_space",
+            recovery: "Free disk space and run hack up again.",
+          },
+        ],
+      },
+    },
+  });
+}, 30_000);
+
 test("HACK-2351: image work longer than the budget, with heartbeats, still completes", async () => {
   const started = performance.now();
   const result = await prestartRun("slow-images");

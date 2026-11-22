@@ -146,6 +146,49 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (opts.args[1] === "ensure-images") {
+        const jobs = JSON.parse(
+          new TextDecoder().decode(opts.privateInput)
+        ) as [string, string][];
+        return await Promise.all(
+          jobs.map(async ([reference, policy], index) => {
+            try {
+              const args = [
+                "runtime",
+                "ensure-image",
+                "--reference",
+                reference,
+                ...(policy === "native" ? [] : ["--emulation", policy]),
+                "--json",
+              ];
+              return [
+                index,
+                {
+                  Ok: await dependencies.invoke!({
+                    ...opts,
+                    args,
+                    privateInput: undefined,
+                  }),
+                },
+                1,
+              ];
+            } catch (error) {
+              return [
+                index,
+                {
+                  Err: {
+                    code:
+                      error instanceof NativeRuntimeRequestError
+                        ? error.nativeCode
+                        : "fixture",
+                  },
+                },
+                1,
+              ];
+            }
+          })
+        );
+      }
       if (opts.args[1] === "source-size") {
         return nativeSourceSizeReceipt();
       }
@@ -5137,7 +5180,7 @@ test("startup admits each reference once and reuses validated pins for shared se
     if (request.args[1] === "ensure-image") {
       order.push(`ensure ${request.args[3]}`);
       // Acquisition plus import gets the runtime's whole bounded request budget.
-      expect(request.timeoutMs).toBe(NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
+      expect(request.timeoutMs).toBe(2 * NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
       expect(request.args.slice(0, 5)).toEqual([
         "runtime",
         "ensure-image",
@@ -5159,6 +5202,69 @@ test("startup admits each reference once and reuses validated pins for shared se
     "ensure redis",
   ]);
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
+});
+
+test("one image batch uses the combined deadline and stops before the next wave", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "a:1", worker: "b:1", cache: "c:1", db: "d:1" });
+  const original = opts.dependencies.invoke!;
+  let waves = 0;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] !== "ensure-images") {
+      return await original(request);
+    }
+    waves += 1;
+    expect(request.timeoutMs).toBe(1_800_000);
+    return [
+      [0, { Err: { code: "provider_busy" } }, 1],
+      [1, { Err: { code: "image_disk_space" } }, 2],
+      [2, { Ok: { image_id: `sha256:${"c".repeat(64)}` } }, 3],
+    ];
+  };
+  const error = await startNativeProject(opts).catch(
+    (failure: unknown) => failure
+  );
+  expect(waves).toBe(1);
+  expect(error).toMatchObject({
+    code: "E_LIFECYCLE_FAILED",
+    detail: {
+      images: [
+        {
+          reference: "a:1",
+          code: "provider_busy",
+          recovery: "Run hack up again after the current image work finishes.",
+        },
+        {
+          reference: "b:1",
+          code: "image_disk_space",
+          recovery: "Free disk space and run hack up again.",
+        },
+      ],
+    },
+  });
+});
+
+test("an older runtime falls back to ordinary image selection", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "alpine:1", worker: "redis:1" });
+  const original = opts.dependencies.invoke!;
+  const calls: string[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-images") {
+      calls.push("batch");
+      throw new NativeRuntimeRequestError({
+        nativeCode: "unsupported_command",
+        message: "Older runtime",
+      });
+    }
+    if (request.args[1] === "ensure-image") {
+      calls.push(String(request.args[3]));
+      return { image_id: `sha256:${"c".repeat(64)}` };
+    }
+    return await original(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(calls).toEqual(["batch", "alpine:1", "redis:1"]);
 });
 
 test("a changed 11-service plan uses the loaded selections of two recorded references", async () => {
@@ -6664,6 +6770,9 @@ test("a missing shared tag names the requested image and every affected active s
       };
     }
     if (request.args[1] === "ensure-image") {
+      if (request.args[3] === "another:latest") {
+        return { image_id: `sha256:${"f".repeat(64)}` };
+      }
       throw new NativeRuntimeRequestError({
         nativeCode: "registry_image_not_found",
         message: "private registry detail",

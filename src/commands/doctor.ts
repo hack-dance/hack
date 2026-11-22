@@ -1805,6 +1805,9 @@ async function checkNativeTempAliases(opts: {
     const retained = report.dangling.filter(
       (alias) => !report.removed.includes(alias)
     );
+    const uncertain = report.uncertainVolume.filter(
+      (alias) => !report.removed.includes(alias)
+    );
     const messages: string[] = [];
     if (retained.length > 0) {
       messages.push(`Dangling: ${retained.join(", ")}`);
@@ -1812,9 +1815,9 @@ async function checkNativeTempAliases(opts: {
     if (report.removed.length > 0) {
       messages.push(`Removed: ${report.removed.join(", ")}`);
     }
-    if (report.uncertainVolume.length > 0) {
+    if (uncertain.length > 0) {
       messages.push(
-        `Cannot tell (volume not mounted, or home deleted): ${report.uncertainVolume.join(", ")}. Review with hack native temp-aliases.`
+        `Cannot tell (volume not mounted, or home deleted): ${uncertain.join(", ")}. Review with hack native temp-aliases.`
       );
     }
     if (report.incomplete) {
@@ -1824,7 +1827,7 @@ async function checkNativeTempAliases(opts: {
       name,
       scope: "machine",
       status:
-        report.incomplete || retained.length + report.uncertainVolume.length > 0
+        report.incomplete || retained.length + uncertain.length > 0
           ? "warn"
           : "ok",
       message:

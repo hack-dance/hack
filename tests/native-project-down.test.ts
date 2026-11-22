@@ -1977,6 +1977,8 @@ test.each([
   { foreground: "uncertain", phase: "ready-observed" },
   { foreground: "absent", phase: "ready-observed" },
   { foreground: "exited", phase: "stopped-data-retained" },
+  // A retained stop whose frontend finished its finalization needs nothing more.
+  { foreground: "absent", phase: "stopped-data-retained" },
   // A start that was never confirmed has no supported recovery after a boot,
   // so the pool is not started for it (requireRecoverableOwner).
   { foreground: "exited", phase: "preparing" },
@@ -2023,6 +2025,76 @@ test.each([
     "runtime_not_running"
   );
   expect(calls).toEqual(["inspect", "foreground-owner"]);
+});
+
+/** A frontend that began its finalization and exited without completing it. */
+async function deadFrontend(scope: NativeProjectRunScope): Promise<void> {
+  const module = join(
+    import.meta.dir,
+    "../src/backends/native-project-finalization.ts"
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `const { beginNativeProjectFinalization } = await import(${JSON.stringify(module)});
+       await beginNativeProjectFinalization(JSON.parse(process.argv[1]));`,
+      JSON.stringify({ scope, run }),
+    ],
+    { stdout: "ignore", stderr: "pipe" }
+  );
+  expect(await child.exited).toBe(0);
+}
+
+// HACK-2456, seen on a real VM: a recovery stopped the graph and retired the
+// owner's publication, then failed in the frontend finalization (the shared
+// HTTPS lease), and the pool was stopped again. down --recover must still work.
+test("down --recover starts a stopped pool to finish a recovery whose frontend finalization failed", async () => {
+  const opts = await fixture();
+  await deadFrontend(opts.scope);
+  const calls: string[] = [];
+  let pool = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        return ownerSelection("absent", "stopped-data-retained");
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      expect(command).toBe("inspect");
+      return snapshot(true);
+    },
+  });
+  expect(result).toMatchObject({
+    status: "stopped",
+    dataPreserved: true,
+    runtimeStarted: true,
+  });
+  expect(calls.slice(0, 3)).toEqual(["inspect", "foreground-owner", "up"]);
+  expect(calls.filter((call) => call === "up")).toHaveLength(1);
+  // The dead frontend's finalization is now recovered, so plain up may start.
+  const token = await captureNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+  });
+  await waitNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+    token,
+    timeoutMs: 1,
+  });
 });
 
 test("down --recover sends runtime up at most once when the pool is still not running", async () => {

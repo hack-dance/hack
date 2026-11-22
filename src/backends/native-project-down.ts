@@ -12,6 +12,7 @@ import {
 import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
+  inspectNativeProjectFinalizationLifetime,
   type NativeProjectFinalizationToken,
   recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
@@ -574,19 +575,38 @@ export const NATIVE_RECOVERY_RUNTIME_STARTED_NOTE =
  */
 async function deadOwnerOfLiveRun(opts: {
   readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
   readonly projectRoot: string;
   readonly run: NativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<boolean> {
   try {
     const selection = await selectForegroundOwner(opts);
-    return (
+    // A pending same-boot recovery is resumed by its own selection after the
+    // boot too, through recover-live-owner, which a new boot refuses.
+    if (selection.liveOwnerRecovery !== null) {
+      return false;
+    }
+    if (
       selection.foreground === "exited" &&
-      // A pending same-boot recovery is resumed by its own selection after the
-      // boot too, through recover-live-owner, which a new boot refuses.
-      selection.liveOwnerRecovery === null &&
       (selection.phase === "ready-observed" ||
         selection.deadOwnerRecovery !== null)
+    ) {
+      return true;
+    }
+    // A recovery that stopped the graph and retired the owner's publication,
+    // then failed in its frontend finalization (the shared HTTPS lease, HACK-2456
+    // seen on a real VM), leaves a retained stop with no owner and an
+    // interrupted frontend lifetime. Finishing it needs a running pool.
+    return (
+      selection.foreground === "absent" &&
+      selection.phase === "stopped-data-retained" &&
+      (
+        await inspectNativeProjectFinalizationLifetime({
+          scope: opts.scope,
+          run: opts.run,
+        })
+      ).state === "interrupted"
     );
   } catch {
     return false;
@@ -603,6 +623,7 @@ async function deadOwnerOfLiveRun(opts: {
 async function inspectOrStartStoppedPool(opts: {
   readonly inspect: () => Promise<unknown>;
   readonly startStoppedPool: boolean;
+  readonly scope: NativeProjectRunScope;
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly run: NativeProjectRun;
@@ -727,6 +748,7 @@ async function nativeProjectDownOnce(opts: {
   let initial = await inspectOrStartStoppedPool({
     inspect,
     startStoppedPool: opts.startStoppedPool === true,
+    scope: opts.scope,
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     run,

@@ -68,8 +68,9 @@ For image acquisition, `image.engine.preflight` measures the initial guest
 check and `image.tag.resolve` measures mutable tag resolution.
 `image.cache.inventory` measures receipt and archive metadata checks across
 the local cache.
-`image.pin.verify` covers a pinned archive whose load receipt predates verified
-registry bindings.
+`image.pin.verify` measures digest-bound registry metadata verification. With
+stored metadata it hashes the small manifest, selected child and config. If the
+metadata is missing it includes the registry lookup.
 `image.import.connect` includes provider lease wait and engine authentication.
 `image.inspect` measures exact image readback, including guest ownership checks.
 `image.archive.digest` measures the standalone archive SHA-256 pass and is absent

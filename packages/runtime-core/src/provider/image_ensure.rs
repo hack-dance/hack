@@ -205,6 +205,70 @@ pub struct EnsuredImage {
     /// The platform loaded; `linux/amd64` runs only under the pool's x86_64 translation.
     pub platform: ImagePlatform,
 }
+fn manifest_path(candidate: &Candidate, pin: &str, policy: PlatformPolicy) -> PathBuf {
+    let address = key(&format!("{pin}\n{policy:?}"));
+    candidate
+        .state_root
+        .join("artifacts/image-proofs")
+        .join(format!("{address}.json"))
+}
+
+pub(super) fn recorded_proof(
+    candidate: &Candidate,
+    pin: &str,
+    policy: PlatformPolicy,
+) -> Result<Option<registry_image::ManifestProof>, CandidateError> {
+    let path = manifest_path(candidate, pin, policy);
+    reject_aliased_state(
+        path.parent()
+            .ok_or_else(|| refused("Image proof parent is missing."))?,
+    )?;
+    match fs::symlink_metadata(&path) {
+        Ok(_) => state::read_bounded(&path, registry_image::MANIFEST_PROOF_LIMIT).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(state::io(error)),
+    }
+}
+
+fn publish_proof(
+    candidate: &Candidate,
+    pin: &str,
+    platform: PlatformPolicy,
+    proof: &registry_image::ManifestProof,
+) -> Result<(), CandidateError> {
+    let path = manifest_path(candidate, pin, platform);
+    state::private_directory(
+        path.parent()
+            .ok_or_else(|| refused("Image proof parent is missing."))?,
+    )?;
+    if path.try_exists().map_err(state::io)? {
+        return Ok(());
+    }
+    state::write(&path, proof)
+}
+
+fn check_registry_config(
+    receipt: &CacheReceipt,
+    selected: ImagePlatform,
+    config: &str,
+) -> Result<(), CandidateError> {
+    if receipt.platform != selected || receipt.image_id != config {
+        return Err(refused(
+            "Cached image differs from the verified registry configuration.",
+        ));
+    }
+    Ok(())
+}
+
+fn fresh_registry_config(
+    receipt: &CacheReceipt,
+    selection: &registry_image::ResolvedImage,
+    selected: ImagePlatform,
+) -> Result<String, CandidateError> {
+    check_registry_config(receipt, selected, &selection.image_id)?;
+    Ok(selection.image_id.clone())
+}
+
 /// Resolve tags on every call, reuse their exact immutable archive when available,
 /// and validate/import via the owned guest's existing loader. The engine must already
 /// be running before acquisition. A cache miss acquires at most the policy's per-image
@@ -246,7 +310,8 @@ pub fn ensure_with(
             Ok(observer)
         },
     )?;
-    let (pinned, platform, resolved_config) = if reference.contains('@') {
+    let requested_platform = platform;
+    let (pinned, platform, resolved) = if reference.contains('@') {
         (
             registry_image::pinned(reference, policy)?.canonical(),
             platform,
@@ -260,8 +325,25 @@ pub fn ensure_with(
             "linux/amd64" => PlatformPolicy::Amd64,
             _ => PlatformPolicy::Native,
         };
-        (resolved.pinned_reference, exact, Some(resolved.image_id))
+        (resolved.pinned_reference.clone(), exact, Some(resolved))
     };
+    let acquired_proof = std::cell::RefCell::new(None);
+    let recorded = if resolved.is_none() {
+        recorded_proof(candidate, &pinned, requested_platform)?
+    } else {
+        None
+    };
+    let selection = recorded
+        .as_ref()
+        .map(|proof| {
+            measure(Step::ImagePinVerify, None, |_| {
+                proof.verified_config(&pinned, requested_platform)
+            })
+        })
+        .transpose()?;
+    let platform = selection
+        .as_ref()
+        .map_or(platform, |(selected, _)| PlatformPolicy::exact(*selected));
     ensure_pinned_resolving(
         candidate,
         &pinned,
@@ -269,17 +351,12 @@ pub fn ensure_with(
         platform,
         |reference, platform| registry_image::pinned_platform(reference, policy, platform),
         |reference, path, platform, limit| {
-            registry_image::acquire_with(reference, path, policy, limit, platform)
+            let mut acquired =
+                registry_image::acquire_with(reference, path, policy, limit, platform)?;
+            *acquired_proof.borrow_mut() = acquired.proof.take();
+            Ok(acquired)
         },
-        |candidate, path, receipt, reused| {
-            if resolved_config
-                .as_ref()
-                .is_some_and(|id| *id != receipt.image_id)
-            {
-                return Err(refused(
-                    "Cached image differs from the verified registry configuration.",
-                ));
-            }
+        |candidate, path, receipt, _| {
             let archive = image_load::CachedArchive {
                 path,
                 sha: &receipt.archive_sha256,
@@ -289,16 +366,33 @@ pub fn ensure_with(
                 platform: receipt.platform,
             };
             image_load::load_cached(candidate, &archive, policy, &observer, || {
-                if let Some(config) = resolved_config {
+                if let Some((selected, config)) = selection {
+                    check_registry_config(receipt, selected, &config)?;
                     return Ok(config);
                 }
-                if !reused {
-                    // The acquisition just verified this pin's manifest and config.
-                    return Ok(receipt.image_id.clone());
+
+                if let Some(resolved) = resolved {
+                    let config =
+                        fresh_registry_config(receipt, &resolved, platform.candidates()[0])?;
+                    publish_proof(
+                        candidate,
+                        &receipt.reference,
+                        requested_platform,
+                        &resolved.proof,
+                    )?;
+                    return Ok(config);
                 }
-                measure(Step::ImagePinVerify, None, |_| {
-                    registry_image::pinned_config_id(&receipt.reference, policy, receipt.platform)
-                })
+                let proof = match acquired_proof.borrow_mut().take() {
+                    Some(proof) => proof,
+                    None => measure(Step::ImagePinVerify, None, |_| {
+                        registry_image::pinned_proof(&receipt.reference, policy, requested_platform)
+                    })?,
+                };
+                let (selected, config) =
+                    proof.verified_config(&receipt.reference, requested_platform)?;
+                check_registry_config(receipt, selected, &config)?;
+                publish_proof(candidate, &receipt.reference, requested_platform, &proof)?;
+                Ok(config)
             })
             .map(|_| ())
         },
@@ -499,6 +593,7 @@ mod tests {
         fs::write(path, b"fixture").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         Ok(registry_image::AcquiredImage {
+            proof: None,
             source_digest: registry_image::pinned_syntax(reference)?.1,
             manifest_digest: format!("sha256:{}", "b".repeat(64)),
             image_id: format!("sha256:{}", "c".repeat(64)),
@@ -536,6 +631,36 @@ mod tests {
         assert_eq!(acquired.get(), 1);
         assert_eq!(loaded.get(), 2);
     }
+    #[test]
+    fn fresh_tag_config_must_match_the_acquisition_receipt() {
+        let f = Fixture::new();
+        let resolved = registry_image::test_manifest_resolution();
+        let receipt = CacheReceipt {
+            version: 1,
+            checkout: f.1.checkout.clone(),
+            reference: resolved.pinned_reference.clone(),
+            archive_sha256: "a".repeat(64),
+            image_id: format!("sha256:{}", "e".repeat(64)),
+            archive_bytes: 7,
+            platform: ImagePlatform::LinuxArm64,
+        };
+        let refusal = fresh_registry_config(&receipt, &resolved, ImagePlatform::LinuxArm64)
+            .err()
+            .unwrap();
+        assert_eq!(
+            refusal.message,
+            "Cached image differs from the verified registry configuration."
+        );
+        let matching = CacheReceipt {
+            image_id: resolved.image_id.clone(),
+            ..receipt
+        };
+        assert_eq!(
+            fresh_registry_config(&matching, &resolved, ImagePlatform::LinuxArm64).unwrap(),
+            resolved.image_id
+        );
+    }
+
     #[test]
     fn cache_receipt_at_the_wrong_platform_address_is_rejected() {
         let f = Fixture::new();

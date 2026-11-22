@@ -763,6 +763,11 @@ fn load_cached_with(
         ));
     }
     check_emulation(archive.platform, guest)?;
+    if resolved_config()? != archive.image {
+        return Err(error(
+            "Cached image differs from the verified registry configuration.",
+        ));
+    }
     let requested = receipt(candidate, archive, Some(archive.pin), guest);
     let path = receipt_path(candidate, archive.sha);
     if let Some(old) = read_receipt(&path, &requested)?
@@ -772,10 +777,6 @@ fn load_cached_with(
         if inspect(archive.image, archive.platform, read_image)? {
             return Ok(old);
         }
-    } else if resolved_config()? != archive.image {
-        return Err(error(
-            "Cached image differs from the verified registry configuration.",
-        ));
     }
     // Image is absent, or a legacy receipt has no verified source pin. Read
     // the entire archive before taking a mutation lease in either case.
@@ -1711,7 +1712,7 @@ pub(super) mod tests {
                         serde_json::json!({"Id":fixture.image,"Architecture":architecture,"Os":"linux"}),
                     )
                 },
-                || panic!("verified pin needs no registry"),
+                || Ok(fixture.image.clone()),
                 |_| panic!("a live hit must not take the mutation lease"),
             )
         };
@@ -1746,6 +1747,37 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn matching_local_receipts_cannot_override_the_digest_bound_manifest() {
+        let mut fixture = CacheFixture::new(false);
+        let resolved = super::super::registry_image::test_manifest_resolution();
+        fixture.pin = resolved.pinned_reference;
+        fixture.completed(&fixture.pin);
+        let refusal = load_cached_with(
+            &fixture.candidate,
+            &fixture.archive(),
+            &ImagePolicy::default(),
+            &test_guest(),
+            || panic!("an unrelated loaded config must not be used"),
+            || {
+                resolved
+                    .proof
+                    .verified_config(
+                        &fixture.pin,
+                        super::super::image_platform::PlatformPolicy::Native,
+                    )
+                    .map(|(_, config)| config)
+            },
+            |_| panic!("an unverified image must not be imported"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            refusal.message,
+            "Cached image differs from the verified registry configuration."
+        );
+    }
+
+    #[test]
     fn cache_miss_checks_layers_before_submitting_to_the_owned_guest() {
         let fixture = CacheFixture::new(true);
         fixture.completed(&fixture.pin);
@@ -1757,7 +1789,7 @@ pub(super) mod tests {
             &policy,
             &test_guest(),
             no_image,
-            || panic!("existing pin is already verified"),
+            || Ok(fixture.image.clone()),
             |file| {
                 import(
                     &fixture.candidate,

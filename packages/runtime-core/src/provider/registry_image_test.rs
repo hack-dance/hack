@@ -2521,3 +2521,39 @@ fn a_verified_layer_file_is_removed_when_it_is_dropped() {
     drop(downloaded);
     assert!(layer_temporaries(&directory.0).is_empty());
 }
+
+#[test]
+fn stored_index_proof_binds_raw_metadata_and_the_selected_platform() {
+    let fixture = content();
+    let reference = format!("docker.io/fixture/image@{}", fixture.index_digest);
+    let intact = || {
+        ManifestProof::new(
+            fixture.manifests[&fixture.index_digest].1.clone(),
+            Some(fixture.manifests[&fixture.manifest_digest].1.clone()),
+            fixture.blobs[&fixture.config_digest].clone(),
+        )
+        .unwrap()
+    };
+    let verify =
+        |proof: &ManifestProof| proof.verified_config(&reference, PlatformPolicy::PreferNative);
+    assert_eq!(
+        verify(&intact()).unwrap(),
+        (ImagePlatform::LinuxArm64, fixture.config_digest.clone())
+    );
+    assert!(
+        intact()
+            .verified_config(&reference, PlatformPolicy::Amd64)
+            .is_err(),
+        "another platform must select a different descriptor"
+    );
+    for field in [0, 1, 2] {
+        let mut changed = intact();
+        // Legal JSON whitespace changes the original bytes without changing their parsed value.
+        match field {
+            0 => changed.initial.push(' '),
+            1 => changed.child.as_mut().unwrap().push(' '),
+            _ => changed.config.push(' '),
+        }
+        assert!(verify(&changed).is_err(), "changed component {field}");
+    }
+}

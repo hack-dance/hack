@@ -12,8 +12,13 @@
 //!   record. Anything else refuses `native_build_context_changed`;
 //! - the entry set is the recorded one by construction: entries added to the project
 //!   since the key walk are not copied, and a recorded entry that vanished refuses;
-//! - sources are opened without following symlinks and without blocking, and must still
-//!   be regular files, so a swapped-in symlink, FIFO or device is refused, never read;
+//! - sources are read only through descriptors anchored at the context root (see
+//!   [`super::fsat`]): each directory is entered one component at a time without
+//!   following a symlink, and files are opened without following a symlink or blocking
+//!   and must still be regular files, so a swapped-in symlink, FIFO or device is
+//!   refused, never read, and nothing outside the context is reachable;
+//! - the destination tree is created the same way beneath a held descriptor of the
+//!   snapshot root (`mkdirat`, `openat(O_CREAT | O_EXCL | O_NOFOLLOW)`, `symlinkat`);
 //! - every created file and directory's mode is read back and must equal the record
 //!   (`chmod` may silently drop a setgid bit), else `native_build_context_copy`;
 //! - modification times are carried over so image layers keep the project's times;
@@ -24,17 +29,13 @@
 //! every exit path); a tree a killed process left behind is removed by the next attempt
 //! under the same key lock. The copy observes the operation's cancellation and
 //! deadline before every entry and every chunk of a file.
-use super::{Entry, Kind, changed, unreadable};
+use super::{Entry, Kind, changed, fsat::Dir, moved, open_path, unreadable};
 use crate::{CandidateError, provider::state};
 use sha2::{Digest, Sha256};
 use std::{
-    ffi::OsStr,
-    fs::{self, File, FileTimes, OpenOptions},
+    fs::{self, File, FileTimes},
     io::{Read, Write},
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    },
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -79,51 +80,141 @@ impl Snapshot {
         let snapshot = Self {
             holder: holder.to_owned(),
         };
-        let root = snapshot.context();
-        let mut directories: Vec<(PathBuf, u32, (i64, i64))> = Vec::new();
+        let holder_dir = Dir::open(holder).map_err(state::io)?;
+        holder_dir
+            .mkdir(ROOT.as_bytes(), 0o700)
+            .map_err(state::io)?;
+        let destination = holder_dir.dir(ROOT.as_bytes()).map_err(state::io)?;
+        let copy_root = destination.duplicate().map_err(state::io)?;
+        // Open directories along the current path: (relative path, source, copy).
+        let mut open: Vec<(Vec<u8>, Dir, Dir)> =
+            vec![(Vec::new(), open_path(source)?, destination)];
+        let mut directories: Vec<&Entry> = Vec::new();
         for entry in recorded {
             if let Some(stopped) = stop() {
                 return Ok(Err(stopped));
             }
-            let relative = Path::new(OsStr::from_bytes(&entry.path));
-            let (from, to) = if entry.path.is_empty() {
-                (source.to_owned(), root.clone())
-            } else {
-                (source.join(relative), root.join(relative))
+            if entry.path.is_empty() {
+                directories.push(entry);
+                continue;
+            }
+            let (parent, leaf) = match entry.path.iter().rposition(|b| *b == b'/') {
+                Some(at) => (&entry.path[..at], &entry.path[at + 1..]),
+                None => (&entry.path[..0], &entry.path[..]),
             };
+            descend(&mut open, parent)?;
+            let (_, from, to) = open.last().ok_or_else(unreadable)?;
             match &entry.kind {
                 Kind::Directory => {
                     // Writable while it is filled; the recorded mode is set afterwards.
-                    fs::DirBuilder::new()
-                        .mode(0o700)
-                        .create(&to)
-                        .map_err(state::io)?;
-                    directories.push((to, entry.mode, entry.mtime));
+                    to.mkdir(leaf, 0o700).map_err(state::io)?;
+                    directories.push(entry);
                 }
                 Kind::Symlink(target) => {
-                    let current = fs::read_link(&from).map_err(|_| changed())?;
-                    if current.as_os_str().as_bytes() != target.as_slice() {
+                    let current = from.read_link(leaf).map_err(|e| moved(&e))?;
+                    if &current != target {
                         return Err(changed());
                     }
-                    std::os::unix::fs::symlink(OsStr::from_bytes(target), &to)
-                        .map_err(state::io)?;
+                    to.symlink(target, leaf).map_err(state::io)?;
                 }
                 Kind::File(hash, size) => {
-                    if let Err(stopped) =
-                        copy_file(&from, &to, entry.mode, *hash, *size, entry.mtime, stop)?
-                    {
+                    let copied = copy_file(
+                        (from, to, leaf),
+                        &self_path(holder, &entry.path),
+                        (entry.mode, *hash, *size, entry.mtime),
+                        stop,
+                    )?;
+                    if let Err(stopped) = copied {
                         return Ok(Err(stopped));
                     }
                 }
             }
         }
-        // Children first, so a read-only directory is set only once it is full.
-        for (path, mode, mtime) in directories.iter().rev() {
-            fs::set_permissions(path, fs::Permissions::from_mode(*mode)).map_err(state::io)?;
-            set_mtime(path, *mtime)?;
-            require_mode(path, *mode)?;
+        // Children first, so a read-only directory is set only once it is full. Each
+        // is reached from the held snapshot root, one component at a time.
+        drop(open);
+        let mut copies: Vec<(Vec<u8>, Dir)> = vec![(Vec::new(), copy_root)];
+        for entry in directories.iter().rev() {
+            descend_copy(&mut copies, &entry.path)?;
+            let (_, directory) = copies.last().ok_or_else(unreadable)?;
+            let handle = directory.handle().map_err(state::io)?;
+            handle
+                .set_permissions(fs::Permissions::from_mode(entry.mode))
+                .map_err(state::io)?;
+            handle
+                .set_times(FileTimes::new().set_modified(time(entry.mtime)))
+                .map_err(state::io)?;
+            require_mode(&handle, &self_path(holder, &entry.path), entry.mode)?;
         }
         Ok(Ok(snapshot))
+    }
+}
+
+/// The snapshot path of one relative entry, for test hooks and nothing else.
+fn self_path(holder: &Path, relative: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let root = holder.join(ROOT);
+    if relative.is_empty() {
+        root
+    } else {
+        root.join(std::ffi::OsStr::from_bytes(relative))
+    }
+}
+
+/// Whether `ancestor` is `path` or one of its parent directories.
+fn within(ancestor: &[u8], path: &[u8]) -> bool {
+    ancestor.is_empty()
+        || path == ancestor
+        || (path.starts_with(ancestor) && path.get(ancestor.len()) == Some(&b'/'))
+}
+
+/// Make the top of `open` the directory `parent`, in both trees: close what is not on
+/// its path, then enter each missing component through the held descriptors.
+fn descend(open: &mut Vec<(Vec<u8>, Dir, Dir)>, parent: &[u8]) -> Result<(), CandidateError> {
+    while open.len() > 1 && !within(&open[open.len() - 1].0, parent) {
+        open.pop();
+    }
+    loop {
+        let (current, from, to) = open.last().ok_or_else(unreadable)?;
+        if current.as_slice() == parent {
+            return Ok(());
+        }
+        let start = if current.is_empty() {
+            0
+        } else {
+            current.len() + 1
+        };
+        let rest = &parent[start..];
+        let component = rest.split(|b| *b == b'/').next().unwrap_or(rest);
+        let relative = parent[..start + component.len()].to_vec();
+        #[cfg(test)]
+        super::before_descend(&relative);
+        let from = from.dir(component).map_err(|e| moved(&e))?;
+        let to = to.dir(component).map_err(state::io)?;
+        open.push((relative, from, to));
+    }
+}
+
+/// As [`descend`], in the copy only.
+fn descend_copy(open: &mut Vec<(Vec<u8>, Dir)>, path: &[u8]) -> Result<(), CandidateError> {
+    while open.len() > 1 && !within(&open[open.len() - 1].0, path) {
+        open.pop();
+    }
+    loop {
+        let (current, to) = open.last().ok_or_else(unreadable)?;
+        if current.as_slice() == path {
+            return Ok(());
+        }
+        let start = if current.is_empty() {
+            0
+        } else {
+            current.len() + 1
+        };
+        let rest = &path[start..];
+        let component = rest.split(|b| *b == b'/').next().unwrap_or(rest);
+        let relative = path[..start + component.len()].to_vec();
+        let to = to.dir(component).map_err(state::io)?;
+        open.push((relative, to));
     }
 }
 
@@ -145,15 +236,17 @@ thread_local! {
 /// Read back a created entry's mode (without following a symlink): `chmod` can succeed
 /// while dropping bits (setgid for a group the user is not in, or a filesystem that
 /// does not keep them), and BuildKit must see exactly the keyed mode.
-fn require_mode(path: &Path, mode: u32) -> Result<(), CandidateError> {
+fn require_mode(created: &File, path: &Path, mode: u32) -> Result<(), CandidateError> {
     #[cfg(test)]
     BEFORE_MODE_CHECK.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {
             hook(path);
         }
     });
-    let metadata = fs::symlink_metadata(path).map_err(state::io)?;
-    if metadata.mode() & 0o7777 != mode {
+    #[cfg(not(test))]
+    let _ = path;
+    let status = super::fsat::status(created).map_err(state::io)?;
+    if status.mode & 0o7777 != mode {
         return Err(crate::CandidateError::new(
             "native_build_context_copy",
             "The build context's file permissions cannot be reproduced in the build copy; no image was built.",
@@ -171,41 +264,21 @@ fn time(mtime: (i64, i64)) -> SystemTime {
     }
 }
 
-fn set_mtime(path: &Path, mtime: (i64, i64)) -> Result<(), CandidateError> {
-    let times = FileTimes::new().set_modified(time(mtime));
-    File::open(path)
-        .and_then(|file| file.set_times(times))
-        .map_err(state::io)
-}
-
 /// Copy one regular file in a single pass, hashing exactly the bytes written, and
 /// require them and the copy's mode to match the record. `stop` is polled before every
 /// chunk, so one large file cannot defer a cancellation or the deadline.
 fn copy_file(
-    from: &Path,
-    to: &Path,
-    mode: u32,
-    hash: [u8; 32],
-    size: u64,
-    mtime: (i64, i64),
+    (from, to, leaf): (&Dir, &Dir, &[u8]),
+    path: &Path,
+    (mode, hash, size, mtime): (u32, [u8; 32], u64, (i64, i64)),
     stop: &dyn Fn() -> Option<Stopped>,
 ) -> Result<Result<(), Stopped>, CandidateError> {
-    let source = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(from)
-        .map_err(|_| changed())?;
-    let metadata = source.metadata().map_err(|_| unreadable())?;
-    if !metadata.is_file() || metadata.mode() & 0o7777 != mode || metadata.size() != size {
+    let source = from.file(leaf).map_err(|e| moved(&e))?;
+    let status = super::fsat::status(&source).map_err(|_| unreadable())?;
+    if !status.is_file() || status.mode & 0o7777 != mode || status.size != size {
         return Err(changed());
     }
-    let mut target = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(to)
-        .map_err(state::io)?;
+    let mut target = to.create(leaf, 0o600).map_err(state::io)?;
     let mut reader = (&source).take(size.saturating_add(1));
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; COPY_BUFFER];
@@ -234,8 +307,7 @@ fn copy_file(
     target
         .set_times(FileTimes::new().set_modified(time(mtime)))
         .map_err(state::io)?;
-    drop(target);
-    require_mode(to, mode)?;
+    require_mode(&target, path, mode)?;
     Ok(Ok(()))
 }
 

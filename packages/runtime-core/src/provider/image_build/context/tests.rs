@@ -2,7 +2,11 @@
 //! trees only.
 use super::*;
 use crate::provider::image_build::GIB;
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::{
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::PathBuf,
+    time::Duration,
+};
 
 struct Tree {
     root: PathBuf,
@@ -349,9 +353,15 @@ fn a_flat_directory_over_the_visit_budget_refuses_while_listing() {
 /// Walk with `hook` run on every file between open and read.
 fn walk_with_hook(
     tree: &Tree,
-    hook: impl FnMut(&Path) + 'static,
+    mut hook: impl FnMut(&Path) + 'static,
 ) -> Result<ContextDigest, CandidateError> {
-    AFTER_OPEN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    // The seam reports the entry's relative path; hand the test its full path.
+    let context = tree.context();
+    AFTER_OPEN.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |relative: &Path| {
+            hook(&context.join(relative))
+        }))
+    });
     let result = digest(
         &tree.context(),
         b"",
@@ -654,4 +664,147 @@ fn a_large_file_copy_stops_between_chunks() {
     assert_eq!(stopped, snapshot::Stopped::Expired);
     assert!(!holder.exists());
     fs::remove_dir_all(&root).unwrap();
+}
+
+const HOST_SECRET: &str = "host-only-secret-bytes";
+
+/// A tree whose `sub` holds two files, plus a directory outside the context.
+fn swappable() -> (Tree, PathBuf) {
+    let tree = Tree::new();
+    tree.write("sub/b.txt", "b");
+    let outside = tree.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("a.txt"), HOST_SECRET).unwrap();
+    fs::write(outside.join("b.txt"), HOST_SECRET).unwrap();
+    fs::write(outside.join("secret"), HOST_SECRET).unwrap();
+    (tree, outside)
+}
+
+/// Rename the context's `sub` away and plant a symlink to `outside` in its place.
+fn swap(context: &Path, outside: &Path) {
+    fs::rename(context.join("sub"), context.join("sub-moved")).unwrap();
+    std::os::unix::fs::symlink(outside, context.join("sub")).unwrap();
+}
+
+fn secret_hash() -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(Sha256::digest(HOST_SECRET.as_bytes()).as_slice());
+    out
+}
+
+fn holds_no_secret(recorded: &[Entry]) {
+    for entry in recorded {
+        assert!(
+            !matches!(&entry.kind, Kind::File(hash, _) if *hash == secret_hash()),
+            "outside content was hashed"
+        );
+        assert_ne!(entry.path, b"sub/secret".to_vec());
+    }
+}
+
+#[test]
+fn a_directory_swapped_for_a_symlink_before_the_walk_enters_it_refuses() {
+    let (tree, outside) = swappable();
+    let context = tree.context();
+    let fired = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (hook_context, hook_outside, hook_fired) =
+        (context.clone(), outside.clone(), std::rc::Rc::clone(&fired));
+    BEFORE_DESCEND.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |relative: &[u8]| {
+            if relative == b"sub" {
+                hook_fired.set(hook_fired.get() + 1);
+                swap(&hook_context, &hook_outside);
+            }
+        }))
+    });
+    let result = digest(&context, b"", None, SystemTime::now(), Bounds::DEFAULT);
+    BEFORE_DESCEND.with(|slot| *slot.borrow_mut() = None);
+    assert_eq!(fired.get(), 1, "the swap never happened");
+    match result {
+        Err(error) => assert_eq!(error.code, "native_build_context_changed"),
+        Ok(walked) => holds_no_secret(&walked.recorded),
+    }
+}
+
+#[test]
+fn a_directory_swapped_after_the_walk_entered_it_keeps_being_read() {
+    let (tree, outside) = swappable();
+    let context = tree.context();
+    let (hook_context, hook_outside) = (context.clone(), outside.clone());
+    let mut swapped = false;
+    let walked = walk_with_hook(&tree, move |path| {
+        if !swapped && path.parent().is_some_and(|p| p.ends_with("sub")) {
+            swapped = true;
+            swap(&hook_context, &hook_outside);
+        }
+    })
+    .unwrap();
+    holds_no_secret(&walked.recorded);
+    // Both files of the original directory were read through its descriptor.
+    let paths: Vec<&[u8]> = walked.recorded.iter().map(|e| e.path.as_slice()).collect();
+    assert!(paths.contains(&b"sub/a.txt".as_slice()) && paths.contains(&b"sub/b.txt".as_slice()));
+    assert!(context.join("sub").is_symlink());
+}
+
+#[test]
+fn a_context_path_through_a_symlink_refuses() {
+    let tree = Tree::new();
+    let link = tree.root.join("link");
+    std::os::unix::fs::symlink(tree.context(), &link).unwrap();
+    for path in [link.clone(), link.join("sub")] {
+        let error = digest(&path, b"", None, SystemTime::now(), Bounds::DEFAULT).unwrap_err();
+        assert_eq!(
+            error.code,
+            "native_build_context_changed",
+            "{}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_never_copies_through_a_swapped_directory() {
+    // Swapped before the copy enters it: refused, nothing left.
+    let (tree, outside) = swappable();
+    let context = tree.context();
+    let keyed = tree.walk("", None, SystemTime::now());
+    let holder = tree.root.join("snapshot");
+    let (hook_context, hook_outside) = (context.clone(), outside.clone());
+    BEFORE_DESCEND.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |relative: &[u8]| {
+            if relative == b"sub" {
+                swap(&hook_context, &hook_outside);
+            }
+        }))
+    });
+    let result = snapshot::Snapshot::create(&context, &holder, &keyed.recorded, &|| None);
+    BEFORE_DESCEND.with(|slot| *slot.borrow_mut() = None);
+    assert_eq!(result.unwrap_err().code, "native_build_context_changed");
+    assert!(!holder.exists());
+
+    // Swapped after the copy entered it: the held descriptor keeps reading the
+    // original directory, and no outside byte reaches the copy.
+    let (tree, outside) = swappable();
+    let context = tree.context();
+    let keyed = tree.walk("", None, SystemTime::now());
+    let holder = tree.root.join("snapshot");
+    let (hook_context, hook_outside) = (context.clone(), outside.clone());
+    let mut swapped = false;
+    snapshot::BEFORE_MODE_CHECK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |path: &Path| {
+            if !swapped && path.ends_with("sub/a.txt") {
+                swapped = true;
+                swap(&hook_context, &hook_outside);
+            }
+        }))
+    });
+    let created = snapshot::Snapshot::create(&context, &holder, &keyed.recorded, &|| None);
+    snapshot::BEFORE_MODE_CHECK.with(|slot| *slot.borrow_mut() = None);
+    let created = created.unwrap().unwrap();
+    assert!(context.join("sub").is_symlink(), "the swap never happened");
+    let copy = created.context();
+    assert_eq!(fs::read_to_string(copy.join("sub/a.txt")).unwrap(), "a");
+    assert_eq!(fs::read_to_string(copy.join("sub/b.txt")).unwrap(), "b");
+    assert!(!copy.join("sub/secret").exists());
+    assert!(!copy.join("sub").is_symlink());
 }

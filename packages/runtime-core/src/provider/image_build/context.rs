@@ -7,7 +7,11 @@
 //! symlink), the permission bits, a file's content SHA-256 and a symlink's target
 //! bytes. The context root itself counts as a directory entry, and so does an excluded
 //! directory that holds a re-included entry. The walk never follows a symlink and
-//! never reads outside the context. Owners, timestamps, extended attributes and the
+//! never reads outside the context: the context path is opened one component at a time
+//! from `/` without following a symlink, and everything beneath it is reached only
+//! through held directory descriptors ([`fsat`]), so an entry renamed or replaced by a
+//! symlink while the walk runs is either still read through its descriptor or refused
+//! `native_build_context_changed`. Owners, timestamps, extended attributes and the
 //! contents of excluded entries are not covered.
 //!
 //! It refuses, with a closed code and no paths in the message, an unreadable entry, a
@@ -41,14 +45,13 @@ use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{Read, Write},
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt},
-    },
-    path::{Path, PathBuf},
+    os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+    path::Path,
+    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod fsat;
 pub(super) mod ignore;
 pub(super) mod snapshot;
 #[cfg(test)]
@@ -115,16 +118,16 @@ fn context_id(context: &Path) -> String {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Stat(u64, u64, u64, i64, i64, i64, i64, u32);
 impl Stat {
-    fn of(metadata: &fs::Metadata) -> Self {
+    fn of(status: &fsat::Status) -> Self {
         Self(
-            metadata.dev(),
-            metadata.ino(),
-            metadata.size(),
-            metadata.mtime(),
-            metadata.mtime_nsec(),
-            metadata.ctime(),
-            metadata.ctime_nsec(),
-            metadata.mode(),
+            status.dev,
+            status.ino,
+            status.size,
+            status.mtime.0,
+            status.mtime.1,
+            status.ctime.0,
+            status.ctime.1,
+            status.mode,
         )
     }
     fn nanos(seconds: i64, nanos: i64) -> i128 {
@@ -245,18 +248,19 @@ impl Walk<'_> {
 
     fn file(
         &mut self,
-        path: &Path,
+        directory: &fsat::Dir,
+        name: &[u8],
         relative: &[u8],
-        metadata: &fs::Metadata,
+        listed: &fsat::Status,
     ) -> Result<[u8; 32], CandidateError> {
-        self.bytes = self.bytes.saturating_add(metadata.size());
+        self.bytes = self.bytes.saturating_add(listed.size);
         if self.bytes > self.bounds.bytes {
             return Err(refusal(
                 "native_build_context_bounds",
                 "The build context has more than 4 GiB of file content the ignore file does not exclude; exclude large or generated files.",
             ));
         }
-        let stat = Stat::of(metadata);
+        let stat = Stat::of(listed);
         let key = std::str::from_utf8(relative).ok();
         if let (Some(key), Some(previous)) = (key, &self.previous) {
             let written = Stat::nanos(previous.written_at.0, i64::from(previous.written_at.1));
@@ -269,7 +273,7 @@ impl Walk<'_> {
                 return Ok(bytes);
             }
         }
-        let hash = hash_file(path, metadata)?;
+        let hash = hash_file(directory, name, relative, listed)?;
         self.files_read += 1;
         if let Some(key) = key {
             self.next
@@ -295,26 +299,72 @@ thread_local! {
     pub(super) static AFTER_OPEN: AfterOpen = const { std::cell::RefCell::new(None) };
 }
 
-/// Read one regular file without following a symlink, checking it is the entry that
-/// was listed. At most the listed size plus one byte is read: a file that yields more,
-/// or whose final status differs from the listing, changed during the walk.
-fn hash_file(path: &Path, listed: &fs::Metadata) -> Result<[u8; 32], CandidateError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|_| unreadable())?;
-    let opened = file.metadata().map_err(|_| unreadable())?;
-    if !opened.is_file() || (opened.dev(), opened.ino()) != (listed.dev(), listed.ino()) {
+/// Test seam: runs before the walk or a snapshot enters a directory (by its relative
+/// path), so a test can swap it for a symlink in between.
+#[cfg(test)]
+type BeforeDescend = std::cell::RefCell<Option<Box<dyn FnMut(&[u8])>>>;
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_DESCEND: BeforeDescend = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn before_descend(relative: &[u8]) {
+    BEFORE_DESCEND.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(relative);
+        }
+    });
+}
+
+/// An entry that was listed but is now gone, a symlink or not a directory changed
+/// under the walk; any other failure is unreadable.
+fn moved(error: &std::io::Error) -> CandidateError {
+    match error.raw_os_error() {
+        Some(libc::ELOOP | libc::ENOTDIR | libc::ENOENT) => changed(),
+        _ => unreadable(),
+    }
+}
+
+/// Open `path` (absolute, canonical) one component at a time from `/`, never through a
+/// symlink, so no component of it can be redirected.
+fn open_path(path: &Path) -> Result<fsat::Dir, CandidateError> {
+    use std::path::Component;
+    let mut directory = fsat::Dir::open(Path::new("/")).map_err(|_| unreadable())?;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = directory.dir(name.as_bytes()).map_err(|e| moved(&e))?;
+            }
+            _ => return Err(unreadable()),
+        }
+    }
+    Ok(directory)
+}
+
+/// Read one regular file of `directory` without following a symlink, checking it is
+/// the entry that was listed. At most the listed size plus one byte is read: a file
+/// that yields more, or whose final status differs from the listing, changed.
+fn hash_file(
+    directory: &fsat::Dir,
+    name: &[u8],
+    relative: &[u8],
+    listed: &fsat::Status,
+) -> Result<[u8; 32], CandidateError> {
+    let file = directory.file(name).map_err(|e| moved(&e))?;
+    let opened = fsat::status(&file).map_err(|_| unreadable())?;
+    if !opened.is_file() || (opened.dev, opened.ino) != (listed.dev, listed.ino) {
         return Err(changed());
     }
     #[cfg(test)]
     AFTER_OPEN.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {
-            hook(path);
+            hook(Path::new(std::ffi::OsStr::from_bytes(relative)));
         }
     });
-    let limit = listed.size();
+    #[cfg(not(test))]
+    let _ = relative;
+    let limit = listed.size;
     let mut reader = (&file).take(limit.saturating_add(1));
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; READ_BUFFER];
@@ -330,7 +380,7 @@ fn hash_file(path: &Path, listed: &fs::Metadata) -> Result<[u8; 32], CandidateEr
         }
         digest.update(&buffer[..read]);
     }
-    let after = file.metadata().map_err(|_| unreadable())?;
+    let after = fsat::status(&file).map_err(|_| unreadable())?;
     if total != limit || Stat::of(&after) != Stat::of(listed) {
         return Err(changed());
     }
@@ -346,34 +396,6 @@ fn too_many_visited() -> CandidateError {
     )
 }
 
-/// The directory entries of `path`, after checking it is still the listed directory.
-/// Each name counts against `visited`; enumeration stops at the budget.
-fn list(
-    path: &Path,
-    listed: &fs::Metadata,
-    visited: &mut usize,
-    budget: usize,
-) -> Result<Vec<std::ffi::OsString>, CandidateError> {
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
-        .open(path)
-        .map_err(|_| unreadable())?;
-    let opened = directory.metadata().map_err(|_| unreadable())?;
-    if (opened.dev(), opened.ino()) != (listed.dev(), listed.ino()) {
-        return Err(changed());
-    }
-    let mut names = Vec::new();
-    for entry in fs::read_dir(path).map_err(|_| unreadable())? {
-        *visited += 1;
-        if *visited > budget {
-            return Err(too_many_visited());
-        }
-        names.push(entry.map_err(|_| unreadable())?.file_name());
-    }
-    Ok(names)
-}
-
 fn now_parts(now: SystemTime) -> (i64, u32) {
     match now.duration_since(UNIX_EPOCH) {
         Ok(since) => (
@@ -385,10 +407,17 @@ fn now_parts(now: SystemTime) -> (i64, u32) {
     }
 }
 
-/// A directory still to list: its path, relative path, listed metadata and the
-/// ignore match record its children inherit (`None` beneath a non-UTF-8 name, where
-/// everything is included).
-type Pending = (PathBuf, Vec<u8>, fs::Metadata, Option<Vec<bool>>);
+/// A directory still to enter: its parent's descriptor (shared by its siblings, so the
+/// walk holds about one descriptor per level), its name there, its relative path, its
+/// listed status and the ignore match record its children inherit (`None` beneath a
+/// non-UTF-8 name, where everything is included).
+struct Pending {
+    parent: Rc<fsat::Dir>,
+    name: Vec<u8>,
+    relative: Vec<u8>,
+    listed: fsat::Status,
+    record: Option<Vec<bool>>,
+}
 
 /// Hash the context at `context` under the effective `ignore` bytes. `cache` names
 /// the stat cache file (see the module documentation), `now` the time this walk starts.
@@ -410,34 +439,40 @@ pub(super) fn digest(
         files_read: 0,
         rules: &rules,
     };
-    let root = fs::symlink_metadata(context).map_err(|_| unreadable())?;
-    if !root.is_dir() {
-        return Err(unreadable());
-    }
+    let root = open_path(context)?;
+    let status = root.status().map_err(|_| unreadable())?;
     walk.include(Entry {
         path: Vec::new(),
-        mode: root.mode() & 0o7777,
+        mode: status.mode & 0o7777,
         kind: Kind::Directory,
-        mtime: (root.mtime(), root.mtime_nsec()),
+        mtime: status.mtime,
     })?;
     // Excluded directories walked because a `!` pattern may re-include beneath them.
     let mut excluded_directories: BTreeMap<Vec<u8>, Entry> = BTreeMap::new();
     let mut visited = 0usize;
-    let mut stack: Vec<Pending> = vec![(
-        context.to_owned(),
-        Vec::new(),
-        root,
-        Some(vec![false; rules.len()]),
-    )];
-    while let Some((directory, relative, listed, record)) = stack.pop() {
-        for name in list(&directory, &listed, &mut visited, walk.bounds.visited)? {
+    let mut stack: Vec<Pending> = Vec::new();
+    let mut current = (Rc::new(root), Vec::new(), Some(vec![false; rules.len()]));
+    loop {
+        let (directory, relative, record) = current;
+        let budget = walk.bounds.visited;
+        let names = directory.names(
+            || {
+                visited += 1;
+                if visited > budget {
+                    Err(too_many_visited())
+                } else {
+                    Ok(())
+                }
+            },
+            |_| unreadable(),
+        )?;
+        for name in names {
             let mut child = relative.clone();
             if !child.is_empty() {
                 child.push(b'/');
             }
-            child.extend_from_slice(name.as_bytes());
-            let path = directory.join(&name);
-            let metadata = fs::symlink_metadata(&path).map_err(|_| unreadable())?;
+            child.extend_from_slice(&name);
+            let listed = directory.stat(&name).map_err(|e| moved(&e))?;
             let text = std::str::from_utf8(&child).ok();
             let (excluded, child_record) = match (&record, text) {
                 (Some(record), Some(text)) => {
@@ -446,41 +481,50 @@ pub(super) fn digest(
                 }
                 _ => (false, None),
             };
-            let mode = metadata.mode() & 0o7777;
-            let mtime = (metadata.mtime(), metadata.mtime_nsec());
-            let kind = metadata.file_type();
-            if kind.is_dir() {
+            let mode = listed.mode & 0o7777;
+            let mtime = listed.mtime;
+            if listed.is_dir() {
                 let entry = Entry {
                     path: child.clone(),
                     mode,
                     kind: Kind::Directory,
                     mtime,
                 };
-                if excluded {
-                    if text.is_some_and(|text| walk.rules.may_include_below(text)) {
+                let enter = if excluded {
+                    let enter = text.is_some_and(|text| walk.rules.may_include_below(text));
+                    if enter {
                         excluded_directories.insert(child.clone(), entry);
-                        stack.push((path, child, metadata, child_record));
                     }
+                    enter
                 } else {
                     walk.include(entry)?;
-                    stack.push((path, child, metadata, child_record));
+                    true
+                };
+                if enter {
+                    stack.push(Pending {
+                        parent: Rc::clone(&directory),
+                        name,
+                        relative: child,
+                        listed,
+                        record: child_record,
+                    });
                 }
             } else if excluded {
                 continue;
-            } else if kind.is_file() {
-                let hash = walk.file(&path, &child, &metadata)?;
+            } else if listed.is_file() {
+                let hash = walk.file(&directory, &name, &child, &listed)?;
                 walk.include(Entry {
                     path: child,
                     mode,
-                    kind: Kind::File(hash, metadata.size()),
+                    kind: Kind::File(hash, listed.size),
                     mtime,
                 })?;
-            } else if kind.is_symlink() {
-                let target = fs::read_link(&path).map_err(|_| unreadable())?;
+            } else if listed.is_symlink() {
+                let target = directory.read_link(&name).map_err(|e| moved(&e))?;
                 walk.include(Entry {
                     path: child,
                     mode,
-                    kind: Kind::Symlink(target.as_os_str().as_bytes().to_vec()),
+                    kind: Kind::Symlink(target),
                     mtime,
                 })?;
             } else {
@@ -490,6 +534,18 @@ pub(super) fn digest(
                 ));
             }
         }
+        drop(directory);
+        let Some(next) = stack.pop() else { break };
+        #[cfg(test)]
+        before_descend(&next.relative);
+        // Entered through the parent's descriptor, never through a symlink, and only
+        // if it is still the directory that was listed.
+        let entered = next.parent.dir(&next.name).map_err(|e| moved(&e))?;
+        let status = entered.status().map_err(|_| unreadable())?;
+        if (status.dev, status.ino) != (next.listed.dev, next.listed.ino) {
+            return Err(changed());
+        }
+        current = (Rc::new(entered), next.relative, next.record);
     }
     // An excluded directory holding an included entry is still created by the build.
     if !excluded_directories.is_empty() {

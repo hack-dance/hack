@@ -174,7 +174,7 @@ fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 #[cfg(target_os = "macos")]
-fn peer_uid(stream: &UnixStream) -> Result<u32> {
+pub(crate) fn peer_uid(stream: &UnixStream) -> Result<u32> {
     let (mut uid, mut gid) = (0, 0);
     // SAFETY: valid socket and writable uid/gid pointers.
     if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
@@ -186,7 +186,7 @@ fn peer_uid(stream: &UnixStream) -> Result<u32> {
     Ok(uid)
 }
 #[cfg(target_os = "linux")]
-fn peer_uid(stream: &UnixStream) -> Result<u32> {
+pub(crate) fn peer_uid(stream: &UnixStream) -> Result<u32> {
     let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     // SAFETY: kernel fills correctly sized ucred for this connected socket.

@@ -4,7 +4,7 @@ Release pins reviewed 2026-10-28 against official release APIs (earlier tool/MCP
 
 - TLC 1.7.4 is the latest stable release; [1.8.0](https://github.com/tlaplus/tlaplus/releases/tag/v1.8.0) is a rolling prerelease. Keep the stable checksum pin for reproducible checks.
 - [Apalache 0.62.4](https://github.com/apalache-mc/apalache/releases/tag/v0.62.4) is the current stable release. The helper retains its Java 21 pin; runtime compatibility with this updated artifact was not executed in this change.
-- TLC uses mise `java@temurin-17.0.20+101`; Apalache uses `java@temurin-21.0.12+101.0.LTS`. Pins are centralized in `scripts/tla_agent_checks.py`. Verify the actual `java -version`, since distribution identifiers may differ from displayed patch versions.
+- TLC uses mise `java@temurin-17.0.20.1+1`; Apalache uses `java@temurin-21.0.12+101.0.LTS`. Pins are centralized in `scripts/tla_agent_checks.py`. Verify the actual `java -version`, since distribution identifiers may differ from displayed patch versions.
 
 Before upgrading, check release status and asset digests from official publishers. Update the helper pins and related repository CI pins together if TLC changes. Verify downloads before execution/extraction. Preserve previous installed versions until compatibility is established; do not prune unrelated caches.
 

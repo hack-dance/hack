@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { resolveUserHomeDir } from "./home-dir.ts";
 import { quoteShellWord } from "./logs.ts";
 
@@ -120,6 +121,76 @@ export function launcherCommand(
     ),
     ...[launcher.command, ...args].map((word) => quoteShellWord(word)),
   ].join(" ");
+}
+
+/** The part of a path after the home that a shell passes through unquoted. */
+const UNQUOTED_PATH = /^[A-Za-z0-9._/-]+$/;
+const TRAILING_SLASHES = /\/+$/;
+
+/** The user's home directory, or nothing when the system cannot name one. */
+function systemHomeDir(): string | undefined {
+  try {
+    return homedir();
+  } catch {
+    return;
+  }
+}
+
+/**
+ * `~/<rest>` for a launcher under the home, when `<rest>` needs no quoting.
+ * A tilde expands only at the start of an unquoted word, so a path that must
+ * be quoted, or that steps out of the home with `..`, has no such form.
+ */
+function homeRelativeLauncher(
+  command: string,
+  homeDir: string | undefined
+): string | undefined {
+  if (homeDir === undefined || !isAbsolute(homeDir)) {
+    return;
+  }
+  const home = homeDir.replace(TRAILING_SLASHES, "");
+  if (home === "" || !command.startsWith(`${home}/`)) {
+    return;
+  }
+  const rest = command.slice(home.length + 1);
+  const parts = rest.split("/");
+  if (
+    !UNQUOTED_PATH.test(rest) ||
+    parts.some((part) => part === "" || part === "..")
+  ) {
+    return;
+  }
+  return `~/${rest}`;
+}
+
+/**
+ * A command line for `launcher` that runs as pasted and does not show the
+ * user's home directory:
+ *
+ * - the stable `hack` on PATH stays `hack`;
+ * - a launcher whose absolute path is under `homeDir`, with nothing after the
+ *   home that needs shell quoting (letters, digits, `/`, `.`, `_`, `-`), is
+ *   written `~/<rest>`;
+ * - any other launcher (a path outside the home, or one that needs quotes)
+ *   keeps the quoted rendering of {@link launcherCommand}.
+ *
+ * `launcherCommand` and the messages that use it are unchanged; this form is
+ * for messages that are also stored or passed on.
+ */
+export function homeRelativeLauncherCommand(opts: {
+  readonly launcher: CandidateLauncher;
+  readonly args: readonly string[];
+  /** The user's home directory (default: `os.homedir()`). */
+  readonly homeDir?: string;
+}): string {
+  const shown = homeRelativeLauncher(
+    opts.launcher.command,
+    opts.homeDir ?? systemHomeDir()
+  );
+  if (shown === undefined) {
+    return launcherCommand(opts.launcher, opts.args);
+  }
+  return [shown, ...opts.args.map((word) => quoteShellWord(word))].join(" ");
 }
 
 /**

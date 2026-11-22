@@ -1809,18 +1809,21 @@ const contracts: readonly ModelContract[] = [
     // One start of a pool that is not running: two chained Development samples
     // (the second under the startup lease, a window after the first), Research's
     // three pre-lease samples, the content proofs, the tree recheck under the
-    // lease and the pre-boot check, on a host that can fail and recover once.
+    // lease and the pre-boot check, on a host that can fail and recover once,
+    // and the recorded earlier sample that may replace Development's wait.
+    // This configuration proves the root files under the lease: a start
+    // without an early root files proof.
     name: "pool-start-admission",
     module: "PoolStart",
-    states: 58_022,
+    states: 220_686,
     // Development's second sample taken before the startup lease.
     invariant: "SecondSampleUnderLease",
     action: "Recheck",
     fields: ['pc = "Proven"', 'profile = "development"'],
     additionalControls: [
-      // The follow-up ordering: root files proven in the window, rechecked
-      // under the lease.
-      { name: "root-before-lease", negative: false, states: 73_754 },
+      // The implementation's other path, a cleanly stopped pool's start: root files
+      // proven in the window, rechecked under the lease.
+      { name: "root-before-lease", negative: false, states: 277_194 },
       {
         name: "window-not-enforced",
         negative: true,
@@ -1968,6 +1971,86 @@ const contracts: readonly ModelContract[] = [
         invariant: "BootSampleMatchesBaseline",
         action: "AdmitBoot",
         fields: ['pc = "BootAdmitted"', "baseline = <<0>>", "swapouts = 1"],
+      },
+      // The record of an earlier passing sample that may replace the
+      // admission wait. One control for each condition of its reuse ...
+      {
+        name: "reuse-other-boot",
+        negative: true,
+        invariant: "ReusedRecordSameBoot",
+        action: "Reuse",
+        fields: ['pc = "Qualified"', 'reusedBoot = "other"'],
+      },
+      {
+        name: "reuse-too-young",
+        negative: true,
+        invariant: "WindowRespected",
+        action: "Reuse",
+        fields: [
+          'pc = "Qualified"',
+          'reusedBoot = "this"',
+          'reusedAge = "young"',
+        ],
+      },
+      {
+        name: "reuse-too-old",
+        negative: true,
+        invariant: "ReusedRecordWithinBound",
+        action: "Reuse",
+        fields: [
+          'pc = "Qualified"',
+          'reusedBoot = "this"',
+          'reusedAge = "old"',
+        ],
+      },
+      {
+        name: "reuse-changed-count",
+        negative: true,
+        invariant: "ReusedRecordSameSwapouts",
+        action: "Reuse",
+        fields: [
+          'pc = "Qualified"',
+          'reusedBoot = "this"',
+          "reusedSwap = 0",
+          "swapouts = 1",
+        ],
+      },
+      // ... and one for its writer: a failing sample recorded.
+      {
+        name: "record-unchecked",
+        negative: true,
+        invariant: "RecordsFromPassingSamples",
+        action: "OtherRecords",
+        fields: ['recBoot = "this"', "recOk = FALSE", "hostOk = FALSE"],
+      },
+      // Reachable: a start that replaced its wait with a record, one that
+      // found an unusable record and waited as before, and the weakening of
+      // reuse (the host failed between the recorded sample and the leased one).
+      {
+        name: "reuse-start-reachable",
+        negative: true,
+        invariant: "NeverStartsOnReuse",
+        action: "Start",
+        fields: ['reusedBoot = "this"', 'reusedAge = "ok"', "vm = TRUE"],
+      },
+      {
+        name: "reuse-miss-start-reachable",
+        negative: true,
+        invariant: "NeverStartsPastAnUnusableRecord",
+        action: "Start",
+        fields: ['reusedBoot = "none"', "missed = TRUE", "vm = TRUE"],
+      },
+      {
+        name: "reuse-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsOnReuseAcrossADip",
+        action: "Start",
+        fields: [
+          'reusedBoot = "this"',
+          "reusedDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
       },
     ],
   },

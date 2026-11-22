@@ -128,7 +128,11 @@ async function readNativeCopy(
       return { ...unknownCopy, state: "starting" };
     }
     if (result.status !== "observed") {
-      return unknownCopy;
+      const portDown =
+        result.status === "runtime_degraded" &&
+        "ports" in result &&
+        result.ports?.some((port) => port.state === "down");
+      return portDown ? { ...unknownCopy, state: "port-down" } : unknownCopy;
     }
     const states = new Map<string, string>();
     for (const item of result.items) {

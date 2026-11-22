@@ -612,6 +612,41 @@ printf '%s\n' '${JSON.stringify(nativeStatus)}'
       { instance: null, state: "unknown" },
       { instance: "native-only", state: "running" },
     ]);
+    const degraded = {
+      ...nativeStatus,
+      receipt: {
+        ...nativeStatus.receipt,
+        relay_startup: {},
+        resources: {
+          "container:web": {
+            ...nativeStatus.receipt.resources["container:web"],
+            loopback_ports: [{ host_port: 18_080, target: 8080 }],
+          },
+        },
+      },
+    };
+    const owner = {
+      ok: true,
+      run: nativeStatus.receipt.run,
+      plan: nativeStatus.receipt.plan_id,
+      phase: "ready-observed",
+      foreground_alive: true,
+      runtime_verified: false,
+      publisher_ports: [{ port: 18_080, state: "down" }],
+    };
+    await writeFile(
+      join(f.root, "unexpected-native"),
+      `#!${process.execPath}
+const value = process.argv.includes("owner-status") ? ${JSON.stringify(owner)} : ${JSON.stringify(degraded)};
+console.log(JSON.stringify(value));
+`,
+      { mode: 0o700 }
+    );
+    const portDown = await f.run(["--json"], true);
+    expect(JSON.parse(portDown.stdout).data.copies).toMatchObject([
+      { instance: null, state: "unknown" },
+      { instance: "native-only", state: "port-down", address: null },
+    ]);
     await writeFile(join(f.root, "docker"), "#!/bin/sh\nexit 124\n", {
       mode: 0o700,
     });

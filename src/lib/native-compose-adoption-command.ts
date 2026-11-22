@@ -6,6 +6,7 @@ import { assertAutostartAdoptionAllowed } from "./autostart-refusal.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { warnLocalDirectoriesNotApplied } from "./local-directories-project.ts";
+import { UnregisteredProjectError } from "./missing-project-error.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
 import { legacyComposeOrderedRefusal } from "./native-compose-adoption-diagnostics.ts";
 import { runLegacyComposeRetainedOperation } from "./native-compose-adoption-execution.ts";
@@ -100,10 +101,7 @@ async function registeredAdoptedRoot(project: string) {
       name,
     });
   if (!registered) {
-    throw new HackCliError({
-      code: "E_PROJECT_NOT_FOUND",
-      message: "The selected project is not registered.",
-    });
+    throw new UnregisteredProjectError();
   }
   const state = await inspectLegacyComposeAdoptionSelection({
     projectRoot: registered.repoRoot,

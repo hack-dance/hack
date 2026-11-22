@@ -176,18 +176,22 @@ export function createTextOutput({
       readonly thing: string;
       readonly problem: string;
       readonly which?: string;
-      readonly needs: string;
-      readonly command: string;
+      readonly needs?: string;
+      readonly command?: string;
       /** Optional fourth line, printed only when stdout is a TTY. */
       readonly prompt?: string;
     }): void {
-      requireCommand(input.command);
+      if (input.command !== undefined) {
+        requireCommand(input.command);
+      }
       const which = input.which ? ` (${singleLine(input.which)})` : "";
       writeRenderedLine(
         `${paint("!", "attention")} ${singleLine(input.thing)}  ${singleLine(input.problem)}${which}`
       );
-      line(`  ${input.needs}. run:`);
-      line(`  ${input.command}`);
+      if (input.command !== undefined) {
+        line(`  ${input.needs}. run:`);
+        line(`  ${input.command}`);
+      }
       if (tty && input.prompt) {
         line(`  ${input.prompt}`, "faint");
       }

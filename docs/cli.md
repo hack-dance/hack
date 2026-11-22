@@ -46,7 +46,12 @@ ports take precedence over requested publication intent, so IPv6-disabled hosts 
 IPv4-only forwarders do not gain an implied IPv6 listener. Requested bindings are
 used only when the runtime projection is absent. HTTPS must verify against the running
 proxy's internal CA using its
-schemas hostname; an unrelated TCP listener cannot pass. A warning names the failed
+schemas hostname; an unrelated TCP listener cannot pass. That hostname is the one
+the proxy file routes (as `hack global up` probes it), resolved first with this
+machine's resolver: only the loopback addresses it resolves to are checked, and a
+name that resolves straight to the proxy container (as with OrbStack on macOS)
+skips the loopback check. With no answer, every published loopback binding is
+checked. A warning names the failed
 port and any listener process visible without privilege. Check competing listeners,
 a VPN's serve feature, the container runtime's HTTPS setting, and local DNS overrides.
 This warning has no automatic repair. Hostnames resolving directly to the container
@@ -211,7 +216,8 @@ Historical remote guides are excluded from the supported documentation.
   `config get`/`set`, `env ...`, `host exec`/`shell`, `usage --by-service` and
   `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
-  error envelope; without `--json` it is one closed error message, `E_PROJECT_NOT_FOUND: <message>`,
+  error envelope. In text mode `up` shows a project blocker with the next command. Other commands print
+  a closed error message, `E_PROJECT_NOT_FOUND: <message>`,
   and no stack trace. The logger decides how it looks: the console logger (`HACK_LOGGER=console`)
   prints one line, `ERROR: E_PROJECT_NOT_FOUND: ...`, on stderr; gum prints one line with a styled
   `ERROR` level on stderr; and clack prints two lines on stdout, its `│` guide line and then the

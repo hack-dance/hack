@@ -222,18 +222,20 @@ test("setup inspection reports the image builder apart from readiness", () => {
   }
 });
 
-test("fresh foreground/detached/JSON up refuses before startup with the setup sentence", async () => {
+test("fresh foreground and detached up show a setup blocker and preserve the JSON refusal", async () => {
   const f = await fixture();
   for (const options of [[], ["-d"], ["--json"]]) {
     const reply = await f.cli(["up", ...options]);
     expect(reply.exitCode).toBe(1);
-    expect(reply.stdout + reply.stderr).toContain(
-      "Native runtime is not set up; run hack native setup."
-    );
     expect(reply.stdout + reply.stderr).not.toContain("provider_state");
     if (options.includes("--json")) {
-      expect(JSON.parse(reply.stdout).error.code).toBe(
-        "E_NATIVE_SETUP_REQUIRED"
+      expect(JSON.parse(reply.stdout).error).toMatchObject({
+        code: "E_NATIVE_SETUP_REQUIRED",
+        message: "Native runtime is not set up; run hack native setup.",
+      });
+    } else {
+      expect(reply.stderr).toEndWith(
+        "! native runtime  setup required\n  this start needs the native runtime. run:\n  hack native setup --accept-downloads\n"
       );
     }
     expect(existsSync(f.home)).toBe(false);
@@ -267,7 +269,9 @@ test("noninteractive setup requires consent; accepted JSON passes through and up
   expect(up.exitCode).toBe(1);
   expect(up.stdout + up.stderr).not.toContain("E_NATIVE_SETUP_REQUIRED");
   // No project exists: reaching project resolution proves the install gate passed.
-  expect(up.stdout + up.stderr).toContain("E_PROJECT_NOT_FOUND");
+  expect(up.stderr).toContain(
+    "! project  E_PROJECT_NOT_FOUND: No .hack/ (or legacy .dev/) found."
+  );
 }, 90_000);
 
 test("preflight JSON reports missing runtime as its own blocker", async () => {

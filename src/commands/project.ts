@@ -2,6 +2,7 @@ import type { Writable } from "node:stream";
 import { resolveNativeStartTimeoutSeconds } from "../backends/native-graph-start-budget.ts";
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
+import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
@@ -11,7 +12,11 @@ import {
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
-import { scopedHackCommand } from "../lib/printed-shell-command.ts";
+import {
+  canPrintStartSelection,
+  printedShellCommand,
+  scopedHackCommand,
+} from "../lib/printed-shell-command.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -28,7 +33,16 @@ import {
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
+import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
+import {
+  writeStartBlocker,
+  writeUpHookBlocker,
+} from "../ui/start-refusal-output.ts";
 import { createTextOutput } from "../ui/text-output.ts";
+import {
+  writeComposeStarted,
+  writeComposeStopped,
+} from "./compose-lifecycle-closing.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -2504,6 +2518,7 @@ export async function runLifecycleCommands(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
   readonly routeStdoutToStderr?: boolean;
+  readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly onPersistentCommand?: (opts: {
     readonly command: ProjectLifecycleCommand;
     readonly index: number;
@@ -2536,7 +2551,11 @@ export async function runLifecycleCommands(opts: {
           error instanceof Error
             ? error.message
             : `Failed to start persistent lifecycle command: ${serviceName}`;
-        logger.error({ message });
+        if (opts.summarizeFailure) {
+          opts.summarizeFailure(serviceName, message);
+        } else {
+          logger.error({ message });
+        }
         // The lines the foreground just printed, for a detached owner (HACK-2339).
         nativeDetachedUpHookFailed({
           step: `${opts.title}: ${label}`,
@@ -2599,7 +2618,11 @@ export async function runLifecycleCommands(opts: {
 
     if (exitCode !== 0) {
       const failure = `${opts.title} failed (exit ${exitCode}): ${label}`;
-      logger.error({ message: failure });
+      if (opts.summarizeFailure) {
+        opts.summarizeFailure(serviceName);
+      } else {
+        logger.error({ message: failure });
+      }
       nativeDetachedUpHookFailed({
         step: `${opts.title}: ${label}`,
         output: tail.lines,
@@ -2718,6 +2741,7 @@ function hasPersistentLifecycleCommands(
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly title: string;
+  readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
@@ -2784,6 +2808,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   if (!hasPersistentLifecycleCommands(beforeCommands)) {
     const beforeCode = await runLifecycleCommands({
       title: opts.title,
+      summarizeFailure: opts.summarizeFailure,
       commands: beforeCommands,
       projectRoot: opts.project.projectRoot,
       env: opts.env,
@@ -2843,6 +2868,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   });
   const beforeCode = await runLifecycleCommands({
     title: opts.title,
+    summarizeFailure: opts.summarizeFailure,
     commands: beforeCommands,
     projectRoot: opts.project.projectRoot,
     env: opts.env,
@@ -7063,6 +7089,9 @@ async function restartNativeImageProject({
     }
     reportNativeStartupProgress(event);
   };
+  let verifiedBuildImages:
+    | Awaited<ReturnType<typeof preflightNativeRestart>>
+    | undefined;
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,
@@ -7101,12 +7130,15 @@ async function restartNativeImageProject({
             }),
         }
       : undefined,
-    preflight: async (run, { cleanedRetry, preparedRetry }) => {
+    preflight: async (run, { cleanedRetry, preparedRetry, signal }) => {
       await preflightNativeProjectSource({
         runtime: native,
         projectRoot: startup.scope.projectRoot,
       });
-      await preflightNativeRestart({
+      // The replacement start pins exactly the build images checked here,
+      // so nothing is built after the old graph stopped (HACK-2533).
+      verifiedBuildImages = await preflightNativeRestart({
+        signal,
         runtime: native,
         scope: startup.scope,
         composeFile: startup.composeFile,
@@ -7170,6 +7202,7 @@ async function restartNativeImageProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
+        verifiedBuildImages,
         // The restart's own bookkeeping first, then the startup's ready
         // report: a detached owner (`restart --json`) tells its launcher here.
         onReady: async (services) => {
@@ -7662,6 +7695,38 @@ async function handleUpUnlocked({
   }
 }
 
+const UP_RETRY_VALUE_OPTIONS = new Set([
+  "--path",
+  "-p",
+  "--project",
+  "--branch",
+  "--env",
+  "--profile",
+  "--target",
+]);
+
+function printedUpRetry(argv: readonly string[]): string {
+  const words = [currentCandidateLauncher().command];
+  for (let index = 0; index < argv.length; index += 1) {
+    const word = argv[index];
+    if (word === undefined) {
+      break;
+    }
+    if (word === "--") {
+      words.push(...argv.slice(index));
+      break;
+    }
+    const value = argv[index + 1];
+    if (UP_RETRY_VALUE_OPTIONS.has(word) && value !== undefined) {
+      words.push(`${word === "-p" ? "--path" : word}=${value}`);
+      index += 1;
+    } else {
+      words.push(word);
+    }
+  }
+  return printedShellCommand(words);
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: `up` orchestrates remote routing, lifecycle hooks, compose, and the JSON envelope in one linear flow.
 async function runUpCommand({
   ctx,
@@ -7675,6 +7740,7 @@ async function runUpCommand({
   readonly startedAtMs?: number;
 }): Promise<number> {
   const detach = args.options.detach || json;
+  const startedAt = performance.now();
   let budgets = resolveDetachedComposeBudgets(detach);
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
   try {
@@ -7870,11 +7936,28 @@ async function runUpCommand({
         }),
       keepSharedHelpers,
     });
+  let failedHook: string | undefined;
+  let failedHookReason: string | undefined;
+  const retryCommand = canPrintStartSelection({
+    path: args.options.path,
+    project: args.options.project,
+    branch: args.options.branch,
+    services: args.positionals.services,
+  })
+    ? printedUpRetry(args.raw.argv)
+    : undefined;
+  const summarizeFailure = json
+    ? undefined
+    : (name: string, reason?: string) => {
+        failedHook = name;
+        failedHookReason = reason;
+      };
   try {
     const lifecycleUp: LifecycleUpResult = serviceScoped
       ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
       : await runLifecycleUpBeforeAndProcesses({
           title: "Lifecycle (up before)",
+          summarizeFailure,
           project,
           cfg,
           projectName,
@@ -7893,6 +7976,13 @@ async function runUpCommand({
           exitCode: lifecycleUp.code,
         });
       }
+      writeUpHookBlocker(
+        "before",
+        lifecycleUp.code,
+        failedHook,
+        retryCommand,
+        failedHookReason
+      );
       return lifecycleUp.code;
     }
     if (lifecycleUp.sessionName) {
@@ -7915,7 +8005,13 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
-    logger.error({ message });
+    writeStartBlocker({
+      thing: "lifecycle",
+      problem: "setup failed",
+      which: message,
+      needs: "resolve the setup failure and retry this start",
+      command: retryCommand,
+    });
     return 1;
   }
 
@@ -8160,6 +8256,7 @@ async function runUpCommand({
       return upCode;
     }
 
+    const containersStartedAt = performance.now();
     if (detach) {
       // The containers now run: a later failure keeps their helpers.
       keepSharedHelpers?.();
@@ -8175,6 +8272,7 @@ async function runUpCommand({
       ? 0
       : await runLifecycleCommands({
           title: "Lifecycle (up after)",
+          summarizeFailure,
           commands: cfg.lifecycle?.up?.after,
           projectRoot: project.projectRoot,
           env: envOverrides.lifecycleEnv,
@@ -8185,6 +8283,7 @@ async function runUpCommand({
     if (afterCode !== 0) {
       await lifecycleCleanup?.();
       if (!json) {
+        writeUpHookBlocker("after", afterCode, failedHook, retryCommand);
         return afterCode;
       }
       return emitLifecycleResult({
@@ -8269,6 +8368,30 @@ async function runUpCommand({
       warn: (message) => logger.warn({ message }),
     });
     if (!json) {
+      if (detach) {
+        const addresses = await readProjectServiceAddresses({
+          project,
+          cfg,
+          branch,
+          native: false,
+        });
+        writeComposeStarted({
+          addresses,
+          running: startup.running,
+          primaryHost:
+            branch && devHost
+              ? applyBranchToHost({
+                  branch,
+                  host: devHost,
+                  baseHosts: resolveProjectRouteBaseHosts({
+                    devHost,
+                    aliasHost,
+                  }),
+                })
+              : devHost,
+          durationMs: containersStartedAt - startedAt,
+        });
+      }
       return 0;
     }
     return emitLifecycleResult({
@@ -8706,6 +8829,7 @@ async function runDownCommand({
   readonly startedAtMs?: number;
   readonly flagTimeoutSeconds?: number;
 }): Promise<number> {
+  const startedAt = performance.now();
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -9079,6 +9203,9 @@ async function runDownCommand({
         message: `Project stopped, but cache volume removal failed: ${cacheRemoval.failed.map((failure) => `${failure.name} (${failure.error})`).join(", ")}`,
       });
       return 1;
+    }
+    if (afterCode === 0) {
+      writeComposeStopped(performance.now() - startedAt);
     }
     return afterCode;
   }
@@ -10988,7 +11115,7 @@ async function handlePs({
   let addressUnavailable = false;
   const addresses = json
     ? new Map<string, readonly string[]>()
-    : await readPsServiceAddresses({
+    : await readProjectServiceAddresses({
         project,
         cfg,
         branch,
@@ -11117,6 +11244,7 @@ async function handlePs({
     }),
     entries,
   });
+  const remotes = projectRemoteStatuses(cfg.prerequisites?.config?.selected);
   if (json) {
     const payload = {
       project: baseProjectName,
@@ -11124,6 +11252,7 @@ async function handlePs({
       composeProject: composeProjectName ?? baseProjectName,
       items: await annotateEmulatedPsItems({ items: entries }),
       waiting,
+      ...(remotes.length > 0 ? { remotes } : {}),
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;
@@ -11132,12 +11261,13 @@ async function handlePs({
     entries,
     addresses,
     waiting,
+    remotes,
     wide: args.options.wide === true,
   });
   return 0;
 }
 
-async function readPsServiceAddresses(opts: {
+async function readProjectServiceAddresses(opts: {
   readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly branch: string | null;

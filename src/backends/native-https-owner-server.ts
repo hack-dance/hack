@@ -39,6 +39,10 @@ import {
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
 import {
+  NATIVE_HTTPS_POOL_BOOT_CHECK_MS,
+  readNativeHttpsPoolBootEnded,
+} from "./native-https-pool-boot.ts";
+import {
   type NativeHttpsReleaseStage,
   nativeHttpsReleaseFailureFrame,
   sendNativeHttpsReleaseFailure,
@@ -68,6 +72,16 @@ export interface NativeHttpsOwnerServerDependencies {
     phase: "acquire" | "release"
   ) => Promise<void>;
   readonly verifyIdle: (binding: NativeHttpsOwnerBinding) => Promise<void>;
+  /**
+   * Whether the pool boot this owner is bound to has ended
+   * (`native-https-pool-boot.ts`). A running owner checks it every
+   * `poolBootCheckMs` and, once it has ended, retires with its configuration and
+   * lease records kept for the previous-boot archive (HACK-2456). None: no check.
+   */
+  readonly poolBootEnded?: (
+    binding: NativeHttpsOwnerBinding
+  ) => Promise<boolean>;
+  readonly poolBootCheckMs?: number;
   /**
    * Test seam: runs after the control socket is published and before its first
    * ownership observation. Production passes none.
@@ -658,6 +672,7 @@ export async function serveNativeHttpsOwner(opts: {
     void serialize(failOwner);
   };
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
+  let poolBootTimer: ReturnType<typeof setInterval> | undefined;
   let startupStage: ConstructorParameters<typeof NativeHttpsStartupError>[0] =
     "frontend-start";
   try {
@@ -702,6 +717,18 @@ export async function serveNativeHttpsOwner(opts: {
     }
     state = "running";
     settleStartup();
+    const poolBootEnded = opts.dependencies.poolBootEnded;
+    if (poolBootEnded) {
+      // Serialized with requests, so a release in progress finishes first. A failed
+      // check proves nothing and leaves the owner running.
+      poolBootTimer = setInterval(() => {
+        void serialize(async () => {
+          if (state === "running" && (await poolBootEnded(binding))) {
+            await failOwner();
+          }
+        }).catch(() => undefined);
+      }, opts.dependencies.poolBootCheckMs ?? NATIVE_HTTPS_POOL_BOOT_CHECK_MS);
+    }
     process.on("SIGTERM", onSignal);
     process.on("SIGINT", onSignal);
     startupTimer = setTimeout(() => {
@@ -743,6 +770,9 @@ export async function serveNativeHttpsOwner(opts: {
     if (startupTimer) {
       clearTimeout(startupTimer);
     }
+    if (poolBootTimer) {
+      clearInterval(poolBootTimer);
+    }
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
   }
@@ -778,6 +808,7 @@ async function runPinnedNativeHttpsOwner(opts: {
     dependencies: {
       start: (selected) => startNativeProjectHttps(selected),
       verify: verifyNativeHttpsLeaseGraph,
+      poolBootEnded: readNativeHttpsPoolBootEnded,
       verifyIdle: async (selected) => {
         const claims = await invokeNativeRuntime({
           runtime: selected.runtime,

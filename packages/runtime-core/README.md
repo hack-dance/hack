@@ -2107,6 +2107,17 @@ backend, so the dependency is pinned exactly; read its `src/sha256.rs` again bef
 the pin. To measure a build, run
 `cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
 
+### Step store
+
+The CLI resolves the store base to a canonical path, following symlinks. The
+runtime refuses symlinked ancestors of the path it receives and keeps its
+format in a separate subdirectory, currently `hack.store-1/`. Initialization
+keeps at most the newest `hack.store-1.old-*` directory owned by this user and
+removes it too once it is older than seven days.
+
+The store has no eviction yet. Files left in `tmp/` by a crashed writer stay
+until garbage collection (slice P8).
+
 ### Never wait in a blocking `flock`
 
 On macOS, releasing an exclusive `flock` wakes only one blocked waiter and queues

@@ -76,3 +76,9 @@ overall deadline remains; nextest still performs zero retries. The regression
 now uses a nonblocking listener, forces the accepted nonblocking mode on Linux
 too, sends a delayed split request, and checks that the accepted stream was
 normalized back to blocking mode.
+
+
+The CLI test `bun test --config /dev/null tests/doctor-desktop-check-ids.test.ts`
+checks Doctor IDs on every PR, including CLI-only changes. Classify a new ID in
+`apps/desktop/core/src/doctor.rs` when adding its CLI check metadata. The Rust
+core tests cover the area and scope used to display the resulting findings.

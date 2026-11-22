@@ -15,7 +15,7 @@ export async function checkMacHostTlsTrust(input?: {
   readonly exec?: typeof exec;
   readonly readTextFile?: typeof readTextFile;
 }): Promise<{
-  readonly name: string;
+  readonly name: "host tls trust";
   readonly status: "ok" | "warn";
   readonly message: string;
 }> {

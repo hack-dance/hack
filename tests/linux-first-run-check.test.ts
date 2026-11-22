@@ -189,18 +189,21 @@ test("installer mode installs under the check's HOME and validates its local inp
   }
 });
 
-test("every global container must be running, and the note names the ones that are not (HACK-2381)", () => {
-  const all = [
+test("every global container the logging choice asks for must be running, and the note names the ones that are not (HACK-2381)", () => {
+  const proxy = [
     "hack-dev-proxy hack-dev-proxy-caddy-1 running",
     "hack-dev-proxy hack-dev-proxy-coredns-1 running",
+    "lq-abc123 lq-abc123-web-1 exited",
+  ];
+  const all = [
+    ...proxy,
     "hack-logging hack-logging-loki-1 running",
     "hack-logging hack-logging-alloy-1 running",
     "hack-logging hack-logging-grafana-1 running",
-    "lq-abc123 lq-abc123-web-1 exited",
   ];
-  expect(globalContainersVerdict(all.join("\n"))).toEqual({
+  expect(globalContainersVerdict(all.join("\n"), { logging: "on" })).toEqual({
     ok: true,
-    note: "all 5 global containers running",
+    note: "all 5 global containers running, logging on",
   });
   // The state the release shipped in: Caddy and Alloy up, the three
   // non-root containers exited. The Caddy-only proxy step passed on it.
@@ -209,13 +212,33 @@ test("every global container must be running, and the note names the ones that a
     .replace("coredns-1 running", "coredns-1 exited")
     .replace("loki-1 running", "loki-1 exited")
     .replace("grafana-1 running", "grafana-1 exited");
-  expect(globalContainersVerdict(shipped)).toEqual({
+  expect(globalContainersVerdict(shipped, { logging: "on" })).toEqual({
     ok: false,
-    note: "not running: hack-dev-proxy-coredns-1 exited, hack-logging-loki-1 exited, hack-logging-grafana-1 exited",
+    note: "not as expected: hack-dev-proxy-coredns-1 exited, hack-logging-loki-1 exited, hack-logging-grafana-1 exited",
   });
-  expect(globalContainersVerdict(all.slice(0, 4).join("\n"))).toEqual({
+  expect(
+    globalContainersVerdict(all.slice(0, 5).join("\n"), { logging: "on" })
+  ).toEqual({
     ok: false,
-    note: "not running: hack-logging-grafana-1 missing",
+    note: "not as expected: hack-logging-grafana-1 missing",
   });
-  expect(globalContainersVerdict("").ok).toBe(false);
+  expect(globalContainersVerdict("", { logging: "on" }).ok).toBe(false);
+  // Logging is opt-in: the proxy alone is the default, stopped logging
+  // containers may stay behind, and a running one is a failure.
+  expect(globalContainersVerdict(proxy.join("\n"), { logging: "off" })).toEqual(
+    { ok: true, note: "all 2 global containers running, logging off" }
+  );
+  expect(
+    globalContainersVerdict(
+      all.join("\n").replaceAll(/(hack-logging-\S+) running/g, "$1 exited"),
+      { logging: "off" }
+    ).ok
+  ).toBe(true);
+  expect(globalContainersVerdict(all.join("\n"), { logging: "off" })).toEqual({
+    ok: false,
+    note: "not as expected: hack-logging-loki-1 running with logging off, hack-logging-alloy-1 running with logging off, hack-logging-grafana-1 running with logging off",
+  });
+  expect(globalContainersVerdict(shipped, { logging: "off" }).note).toContain(
+    "hack-dev-proxy-coredns-1 exited"
+  );
 });

@@ -484,12 +484,16 @@ function firstError(ran: Ran): string {
   return line ? line.slice(0, 160) : "no output";
 }
 
-const GLOBAL_PROJECTS = ["hack-dev-proxy", "hack-logging"] as const;
+const LOGGING_PROJECT = "hack-logging";
+const GLOBAL_PROJECTS = ["hack-dev-proxy", LOGGING_PROJECT] as const;
 
 /** How long started global containers get to fail before they are judged. */
 const GLOBAL_SETTLE_MS = 5000;
 
-/** The services `hack global install` starts, by Compose project. */
+/**
+ * The services Hack's global stack can run, by Compose project. The logging
+ * stack is opt-in: `hack global install` starts the proxy project only.
+ */
 const GLOBAL_SERVICES: Readonly<Record<string, readonly string[]>> = {
   "hack-dev-proxy": ["caddy", "coredns"],
   "hack-logging": ["loki", "alloy", "grafana"],
@@ -497,10 +501,15 @@ const GLOBAL_SERVICES: Readonly<Record<string, readonly string[]>> = {
 
 /**
  * Judges `docker ps -a` lines of the form `<project> <name> <state>`: every
- * service of both global projects must have a container, and each must be
- * `running`. The note names each one that is missing or not running.
+ * service of the proxy project must have a container, and each must be
+ * `running`. With logging on that also holds for the logging stack; with
+ * logging off no logging container may be running. The note names each one
+ * that is wrong.
  */
-export function globalContainersVerdict(stdout: string): {
+export function globalContainersVerdict(
+  stdout: string,
+  opts: { readonly logging: "on" | "off" }
+): {
   readonly ok: boolean;
   readonly note: string;
 } {
@@ -511,23 +520,27 @@ export function globalContainersVerdict(stdout: string): {
       seen.set(name, state);
     }
   }
-  const problems: string[] = [];
-  let expected = 0;
-  for (const [project, services] of Object.entries(GLOBAL_SERVICES)) {
-    for (const service of services) {
-      expected++;
-      const name = `${project}-${service}-1`;
-      const state = seen.get(name);
-      if (state === undefined) {
-        problems.push(`${name} missing`);
-      } else if (state !== "running") {
-        problems.push(`${name} ${state}`);
-      }
+  const containers = Object.entries(GLOBAL_SERVICES).flatMap(
+    ([project, services]) =>
+      services.map((service) => ({
+        name: `${project}-${service}-1`,
+        wanted: project !== LOGGING_PROJECT || opts.logging === "on",
+      }))
+  );
+  const expected = containers.filter((c) => c.wanted).length;
+  const problems = containers.flatMap(({ name, wanted }) => {
+    const state = seen.get(name);
+    if (!wanted) {
+      return state === "running" ? [`${name} running with logging off`] : [];
     }
-  }
+    return state === "running" ? [] : [`${name} ${state ?? "missing"}`];
+  });
   return problems.length === 0
-    ? { ok: true, note: `all ${expected} global containers running` }
-    : { ok: false, note: `not running: ${problems.join(", ")}` };
+    ? {
+        ok: true,
+        note: `all ${expected} global containers running, logging ${opts.logging}`,
+      }
+    : { ok: false, note: `not as expected: ${problems.join(", ")}` };
 }
 const REQUIRED_TOOLS = ["docker", "curl", "sh", "grep", "pgrep"] as const;
 
@@ -805,9 +818,34 @@ async function globalSetup(run: FirstRun): Promise<boolean> {
     note: caddy.stdout.trim() || "no proxy container",
   });
   // The proxy step above looks at Caddy only, and Caddy runs as root: it
-  // stayed up while CoreDNS, Loki and Grafana had exited because they could
-  // not read configs written under the prerelease manager's umask
-  // (HACK-2381). Every container of both global projects must be running.
+  // stayed up while CoreDNS had exited because it could not read a config
+  // written under the prerelease manager's umask (HACK-2381).
+  if (run.opts.reuseGlobalStack) {
+    run.record({
+      step: "2 global containers running",
+      command: "docker ps -a",
+      exit: null,
+      result: "info",
+      note: "not judged: the reused stack's logging choice is the operator's",
+    });
+  } else {
+    await checkGlobalContainers(run, {
+      step: "2 global containers running",
+      logging: "off",
+    });
+  }
+  await run.step("2 global trust (no sudo)", ["global", "trust"], (r) => {
+    const code =
+      /code=([a-z_]+)/.exec(plain(r.stdout + r.stderr))?.[1] ?? "none";
+    return { ok: "info", note: `root step not run; Hack reports code=${code}` };
+  });
+  return ok;
+}
+
+async function checkGlobalContainers(
+  run: FirstRun,
+  opts: { readonly step: string; readonly logging: "on" | "off" }
+): Promise<void> {
   // A container that cannot read its config takes a second or two to exit,
   // so look only after they have had time to fail.
   await Bun.sleep(GLOBAL_SETTLE_MS);
@@ -820,21 +858,44 @@ async function globalSetup(run: FirstRun): Promise<boolean> {
     "--format",
     '{{.Label "com.docker.compose.project"}} {{.Names}} {{.State}}',
   ]);
-  const containers = globalContainersVerdict(states.stdout);
+  const containers = globalContainersVerdict(states.stdout, opts);
   run.record({
-    step: "2 global containers running",
-    command: "docker ps -a (hack-dev-proxy, hack-logging)",
+    step: opts.step,
+    command: `docker ps -a (${GLOBAL_PROJECTS.join(", ")})`,
     exit: states.exit,
     seconds: states.seconds,
     result: states.exit === 0 && containers.ok ? "pass" : "fail",
     note: containers.note,
   });
-  await run.step("2 global trust (no sudo)", ["global", "trust"], (r) => {
-    const code =
-      /code=([a-z_]+)/.exec(plain(r.stdout + r.stderr))?.[1] ?? "none";
-    return { ok: "info", note: `root step not run; Hack reports code=${code}` };
-  });
-  return ok;
+}
+
+/**
+ * Turns the opt-in logging stack on and off again. Loki and Grafana do not run
+ * as root, so this is what shows that they can read the configs Hack wrote
+ * (HACK-2381). A reused stack is the operator's: its choice is not changed.
+ */
+async function loggingFlow(run: FirstRun): Promise<void> {
+  if (run.opts.reuseGlobalStack) {
+    run.record({
+      step: "7 global up --logging",
+      command: "hack global up --logging",
+      exit: null,
+      result: "info",
+      note: "skipped: the reused stack's logging choice is the operator's",
+    });
+    return;
+  }
+  for (const logging of ["on", "off"] as const) {
+    const flag = logging === "on" ? "--logging" : "--no-logging";
+    await run.step(`7 global up ${flag}`, ["global", "up", flag], (r) => ({
+      ok: r.exit === 0,
+      note: r.exit === 0 ? `logging turned ${logging}` : firstError(r),
+    }));
+    await checkGlobalContainers(run, {
+      step: `7 global containers, logging ${logging}`,
+      logging,
+    });
+  }
 }
 
 async function projectFlow(run: FirstRun, ca: string): Promise<void> {
@@ -1489,6 +1550,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         await envFlow(run);
         await branchFlow(run, ca);
         await foregroundInterrupt(run);
+        await loggingFlow(run);
       }
       await daemonFlow(run);
       await closingFlow(run);

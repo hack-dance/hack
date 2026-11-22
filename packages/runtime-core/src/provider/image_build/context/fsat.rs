@@ -167,6 +167,16 @@ impl Dir {
         check(unsafe { libc::mkdirat(self.0.as_raw_fd(), child.as_ptr(), mode) })
     }
 
+    /// Remove `child`, an empty directory when `directory` (tests build and remove
+    /// trees deeper than `PATH_MAX` this way).
+    #[cfg(test)]
+    pub(super) fn remove(&self, child: &[u8], directory: bool) -> io::Result<()> {
+        let child = name(child)?;
+        let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
+        // SAFETY: a live directory descriptor and a NUL-terminated name.
+        check(unsafe { libc::unlinkat(self.0.as_raw_fd(), child.as_ptr(), flags) })
+    }
+
     /// Create the symlink `child` with exactly `target`.
     pub(super) fn symlink(&self, target: &[u8], child: &[u8]) -> io::Result<()> {
         let (target, child) = (name(target)?, name(child)?);
@@ -272,10 +282,11 @@ impl Dir {
     }
 
     /// The names in this directory (without `.` and `..`), read from the opened
-    /// directory itself. `each` runs before every name is kept and may stop the listing.
+    /// directory itself. `each` sees every name before it is kept and may stop the
+    /// listing.
     pub(super) fn names<E>(
         &self,
-        mut each: impl FnMut() -> Result<(), E>,
+        mut each: impl FnMut(&[u8]) -> Result<(), E>,
         failed: impl Fn(io::Error) -> E,
     ) -> Result<Vec<Vec<u8>>, E> {
         let duplicate = self.0.try_clone().map_err(&failed)?.into_raw_fd();
@@ -313,7 +324,7 @@ impl Dir {
             if child == b"." || child == b".." {
                 continue;
             }
-            each()?;
+            each(child)?;
             names.push(child.to_vec());
         }
     }

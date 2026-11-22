@@ -492,7 +492,8 @@ With it:
   excluding nothing: that never misses a change, but it can cause extra rebuilds, and
   it can refuse the build when an otherwise ignored entry is unreadable, special or
   pushes the context over its bounds. A context with more than
-  200,000 included entries or 4 GiB of included file content, or with an unreadable
+  200,000 included entries or 4 GiB of included file content, deeper than 256 path
+  components, or whose included paths total more than 32 MiB, or with an unreadable
   entry or a socket, FIFO or device the ignore file does not exclude, refuses.
 - Hack remembers each context file's size, timestamps and inode in a private cache, so
   an unchanged context is not read again. The cache misses only a change that keeps the

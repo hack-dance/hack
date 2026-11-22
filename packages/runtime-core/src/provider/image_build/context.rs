@@ -14,9 +14,11 @@
 //! `native_build_context_changed`. Owners, timestamps, extended attributes and the
 //! contents of excluded entries are not covered.
 //!
-//! It refuses, with a closed code and no paths in the message, an unreadable entry, a
+//! It refuses, with a closed code (bounds messages name at most the first path component), an unreadable entry, a
 //! socket, FIFO or device inside the included set, and more than [`Bounds::DEFAULT`]
-//! entries or content bytes.
+//! entries or content bytes, entries deeper than [`MAX_DEPTH`] components, or more
+//! than [`MAX_PATH_BYTES`] of paths held at once (the walk would otherwise hold the
+//! square of a deep tree's depth).
 //!
 //! ## Stat cache
 //!
@@ -74,13 +76,46 @@ pub(super) struct Bounds {
     /// Every listed entry, excluded ones too: an ignored directory that a `!`
     /// pattern could re-include from is still walked, and this bounds that walk.
     pub visited: usize,
+    /// Path components of the deepest entry examined.
+    pub depth: usize,
+    /// Bytes of relative paths the walk holds at once (included entries, directories
+    /// still to enter, names of the directory being listed), and separately the paths
+    /// the stat cache keeps. A deep tree would otherwise cost the square of its depth.
+    pub path_bytes: usize,
 }
 impl Bounds {
     pub(super) const DEFAULT: Self = Self {
         entries: 200_000,
         bytes: 4 * super::GIB,
         visited: 1_000_000,
+        depth: MAX_DEPTH,
+        path_bytes: MAX_PATH_BYTES,
     };
+}
+
+/// Path components an included or examined entry may have.
+pub(super) const MAX_DEPTH: usize = 256;
+/// Bytes of paths the walk (and, separately, the stat cache) may hold.
+pub(super) const MAX_PATH_BYTES: usize = 32 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// The most path bytes the last walk on this thread held at once.
+    pub(super) static PEAK_PATH_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A depth or path-bytes refusal. Fixed text that names the limit and no path: the
+/// CLI shows a runtime message only when it is fixed text, so a message naming a
+/// component would reach the user as a generic failure instead.
+fn path_bounds(depth: bool) -> CandidateError {
+    refusal(
+        "native_build_context_bounds",
+        if depth {
+            "The build context is nested deeper than 256 path components; flatten it or exclude it in the ignore file."
+        } else {
+            "The build context's included paths total more than 32 MiB; exclude generated or dependency directories in the ignore file."
+        },
+    )
 }
 
 /// The result of one walk. Only `digest` enters the build key; the counts are
@@ -150,11 +185,20 @@ struct CacheFile {
     entries: BTreeMap<String, (Stat, String)>,
 }
 
-fn load_cache(path: &Path, context: &str) -> Option<CacheFile> {
+/// A valid cache for `context` within the walk's bounds (a cache over them, however
+/// written, is ignored: it is only an accelerator).
+fn load_cache(path: &Path, context: &str, bounds: Bounds) -> Option<CacheFile> {
     let cache: CacheFile = state::read_bounded(path, MAX_CACHE_BYTES).ok()?;
+    let paths: usize = cache.entries.keys().map(String::len).sum();
     (cache.version == CACHE_VERSION
         && cache.context == context
         && cache.written_at.1 < 1_000_000_000
+        && cache.entries.len() <= bounds.entries
+        && paths <= bounds.path_bytes
+        && cache
+            .entries
+            .keys()
+            .all(|key| key.split('/').count() <= bounds.depth)
         && cache.entries.values().all(|(_, hash)| super::hex64(hash)))
     .then_some(cache)
 }
@@ -235,9 +279,37 @@ struct Walk<'a> {
     bytes: u64,
     files_read: usize,
     rules: &'a ignore::Rules,
+    /// Path bytes held now (see [`Bounds::path_bytes`]).
+    held: usize,
+    /// Path bytes the next stat cache holds; past the bound it is not written.
+    cache_bytes: usize,
 }
 
 impl Walk<'_> {
+    /// Account for keeping `bytes` more of path; refuse before the bound is crossed.
+    fn keep(&mut self, bytes: usize) -> Result<(), CandidateError> {
+        let held = self.held.saturating_add(bytes);
+        if held > self.bounds.path_bytes {
+            return Err(path_bounds(false));
+        }
+        self.held = held;
+        #[cfg(test)]
+        PEAK_PATH_BYTES.with(|peak| peak.set(peak.get().max(held)));
+        Ok(())
+    }
+
+    fn release(&mut self, bytes: usize) {
+        self.held = self.held.saturating_sub(bytes);
+    }
+
+    /// Remember a file's stat and hash for the next cache, within its own path bound.
+    fn remember(&mut self, key: &str, value: (Stat, String)) {
+        if self.cache_bytes <= self.bounds.path_bytes {
+            self.cache_bytes = self.cache_bytes.saturating_add(key.len());
+            self.next.insert(key.to_owned(), value);
+        }
+    }
+
     fn include(&mut self, entry: Entry) -> Result<(), CandidateError> {
         if self.included.len() >= self.bounds.entries {
             return Err(refusal(
@@ -245,6 +317,7 @@ impl Walk<'_> {
                 "The build context has more than 200000 entries the ignore file does not exclude; exclude generated or dependency directories.",
             ));
         }
+        self.keep(entry.path.len())?;
         self.included.push(entry);
         Ok(())
     }
@@ -272,15 +345,15 @@ impl Walk<'_> {
                 && stat.settled_before(written)
                 && let Some(bytes) = decode_hash(hash)
             {
-                self.next.insert(key.to_owned(), (stat, hash.clone()));
+                let hash = hash.clone();
+                self.remember(key, (stat, hash));
                 return Ok(bytes);
             }
         }
         let hash = hash_file(directory, name, relative, listed)?;
         self.files_read += 1;
         if let Some(key) = key {
-            self.next
-                .insert(key.to_owned(), (stat, format!("{:x}", crate::Hex(hash))));
+            self.remember(key, (stat, format!("{:x}", crate::Hex(hash))));
         }
         Ok(hash)
     }
@@ -497,6 +570,8 @@ struct Pending {
     parent: Rc<fsat::Dir>,
     name: Vec<u8>,
     relative: Vec<u8>,
+    /// Path components of `relative`.
+    depth: usize,
     listed: fsat::Status,
     record: Option<Vec<bool>>,
 }
@@ -514,13 +589,17 @@ pub(super) fn digest(
     let id = context_id(context);
     let mut walk = Walk {
         bounds,
-        previous: cache.and_then(|path| load_cache(path, &id)),
+        previous: cache.and_then(|path| load_cache(path, &id, bounds)),
         next: BTreeMap::new(),
         included: Vec::new(),
         bytes: 0,
         files_read: 0,
         rules: &rules,
+        held: 0,
+        cache_bytes: 0,
     };
+    #[cfg(test)]
+    PEAK_PATH_BYTES.with(|peak| peak.set(0));
     let root = open_path(context)?;
     let status = root.status().map_err(|_| unreadable())?;
     walk.include(Entry {
@@ -534,21 +613,30 @@ pub(super) fn digest(
     let mut excluded_directories: BTreeMap<Vec<u8>, Entry> = BTreeMap::new();
     let mut visited = 0usize;
     let mut stack: Vec<Pending> = Vec::new();
-    let mut current = (Rc::new(root), Vec::new(), Some(vec![false; rules.len()]));
+    let mut current = (Rc::new(root), Vec::new(), Some(vec![false; rules.len()]), 0);
     loop {
-        let (directory, relative, record) = current;
+        let (directory, relative, record, depth) = current;
+        // Every child is one component deeper: refuse before building its path.
+        if depth >= walk.bounds.depth {
+            return Err(path_bounds(true));
+        }
         let budget = walk.bounds.visited;
+        let (room, mut listing) = (walk.bounds.path_bytes.saturating_sub(walk.held), 0_usize);
         let names = directory.names(
-            || {
+            |name| {
                 visited += 1;
+                listing = listing.saturating_add(name.len());
                 if visited > budget {
                     Err(too_many_visited())
+                } else if listing > room {
+                    Err(path_bounds(false))
                 } else {
                     Ok(())
                 }
             },
             |_| unreadable(),
         )?;
+        walk.keep(listing)?;
         for name in names {
             let mut child = relative.clone();
             if !child.is_empty() {
@@ -579,6 +667,7 @@ pub(super) fn digest(
                         None => false,
                     };
                     if enter {
+                        walk.keep(2 * child.len())?;
                         excluded_directories.insert(child.clone(), entry);
                     }
                     enter
@@ -587,10 +676,12 @@ pub(super) fn digest(
                     true
                 };
                 if enter {
+                    walk.keep(child.len() + name.len())?;
                     stack.push(Pending {
                         parent: Rc::clone(&directory),
                         name,
                         relative: child,
+                        depth: depth + 1,
                         listed,
                         record: child_record,
                     });
@@ -623,6 +714,8 @@ pub(super) fn digest(
             }
         }
         drop(directory);
+        // The listing and this directory's own pending path are no longer held.
+        walk.release(listing + relative.len());
         let Some(next) = stack.pop() else { break };
         #[cfg(test)]
         before_descend(&next.relative);
@@ -633,7 +726,8 @@ pub(super) fn digest(
         if (status.dev, status.ino) != (next.listed.dev, next.listed.ino) {
             return Err(changed());
         }
-        current = (Rc::new(entered), next.relative, next.record);
+        walk.release(next.name.len());
+        current = (Rc::new(entered), next.relative, next.record, next.depth);
     }
     // An excluded directory holding an included entry is still created by the build.
     if !excluded_directories.is_empty() {
@@ -690,11 +784,13 @@ pub(super) fn digest(
             }
         }
     }
-    let rewrite = walk.files_read > 0
-        || walk
-            .previous
-            .as_ref()
-            .is_none_or(|previous| previous.entries.len() != walk.next.len());
+    // A cache past its path bound is incomplete and is not written.
+    let rewrite = walk.cache_bytes <= walk.bounds.path_bytes
+        && (walk.files_read > 0
+            || walk
+                .previous
+                .as_ref()
+                .is_none_or(|previous| previous.entries.len() != walk.next.len()));
     if let Some(path) = cache
         && rewrite
     {

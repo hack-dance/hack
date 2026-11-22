@@ -293,6 +293,7 @@ fn bounds_refuse_without_naming_paths() {
         entries: 3,
         bytes: GIB,
         visited: 1_000,
+        ..Bounds::DEFAULT
     });
     assert_eq!(error.code, "native_build_context_bounds");
     assert!(error.message.contains("200000 entries") && !error.message.contains("main"));
@@ -300,6 +301,7 @@ fn bounds_refuse_without_naming_paths() {
         entries: 100,
         bytes: 4,
         visited: 1_000,
+        ..Bounds::DEFAULT
     });
     assert_eq!(error.code, "native_build_context_bounds");
     assert!(error.message.contains("4 GiB"));
@@ -327,6 +329,7 @@ fn a_walk_through_ignored_directories_is_bounded_too() {
             entries: 1_000,
             bytes: GIB,
             visited: 10,
+            ..Bounds::DEFAULT
         },
     )
     .unwrap_err();
@@ -346,6 +349,7 @@ fn a_flat_directory_over_the_visit_budget_refuses_while_listing() {
         entries: 1_000,
         bytes: GIB,
         visited,
+        ..Bounds::DEFAULT
     };
     // Root (4 names) + sub (1) + flat (50) = 55 names in all.
     let error = digest(&tree.context(), b"", None, SystemTime::now(), bounds(20)).unwrap_err();
@@ -1115,4 +1119,140 @@ fn hard_links_are_part_of_the_key_and_recreated_in_the_snapshot() {
         snapshot::Snapshot::create(&context, &holder, &relinked.recorded, &|| None).unwrap_err();
     assert_eq!(error.code, "native_build_context_changed");
     assert!(!holder.exists());
+}
+
+/// Nest `levels` directories named `d` under `root` with `mkdirat`, one component at a
+/// time, as a container writing a shared folder would (the full path can exceed
+/// `PATH_MAX`), with a file `leaf` at the bottom.
+fn deep_tree(root: &Path, levels: usize) {
+    let mut directory = fsat::Dir::open(root).unwrap();
+    for _ in 0..levels {
+        directory.mkdir(b"d", 0o755).unwrap();
+        directory = directory.dir(b"d").unwrap();
+    }
+    directory
+        .create(b"leaf", 0o644)
+        .unwrap()
+        .write_all(b"x")
+        .unwrap();
+}
+
+/// Remove what [`deep_tree`] made, bottom up through descriptors.
+fn remove_deep_tree(root: &Path, levels: usize) {
+    let mut directory = fsat::Dir::open(root).unwrap();
+    for _ in 0..levels {
+        directory = directory.dir(b"d").unwrap();
+    }
+    directory.remove(b"leaf", false).unwrap();
+    for _ in 0..levels {
+        let parent = directory.dir(b"..").unwrap();
+        parent.remove(b"d", true).unwrap();
+        directory = parent;
+    }
+}
+
+fn peak_path_bytes() -> usize {
+    PEAK_PATH_BYTES.with(std::cell::Cell::get)
+}
+
+#[test]
+fn a_tree_deeper_than_the_bound_refuses_with_little_held() {
+    let tree = Tree::new();
+    let context = tree.context();
+    deep_tree(&context, 3_000);
+    let result = digest(&context, b"", None, SystemTime::now(), Bounds::DEFAULT);
+    let peak = peak_path_bytes();
+    remove_deep_tree(&context, 3_000);
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "native_build_context_bounds");
+    assert!(
+        error.message.contains("256 path components"),
+        "{}",
+        error.message
+    );
+    // Fixed text: it names the limit, never a path.
+    assert!(error.message_fixed && !error.message.contains("d/d"));
+    // It stopped at the depth bound: about 256 paths of up to 512 bytes, never the
+    // 9 MB a 3,000-level walk would hold.
+    assert!(peak < 256 * 1024, "{peak} path bytes held");
+}
+
+#[test]
+fn a_tree_within_the_depth_bound_hashes_and_snapshots() {
+    let tree = Tree::new();
+    let context = tree.context();
+    deep_tree(&context, 200);
+    let keyed = digest(&context, b"", None, SystemTime::now(), Bounds::DEFAULT).unwrap();
+    assert!(peak_path_bytes() <= MAX_PATH_BYTES);
+    let leaf = format!("{}leaf", "d/".repeat(200));
+    assert!(
+        keyed
+            .recorded
+            .iter()
+            .any(|entry| entry.path == leaf.as_bytes())
+    );
+    let holder = tree.root.join("snapshot");
+    let snapshot = snapshot::Snapshot::create(&context, &holder, &keyed.recorded, &|| None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fs::read(snapshot.context().join(&leaf)).unwrap(), b"x");
+    drop(snapshot);
+    remove_deep_tree(&context, 200);
+    // One level past the bound refuses; exactly at it passes.
+    deep_tree(&context, MAX_DEPTH - 1);
+    assert!(digest(&context, b"", None, SystemTime::now(), Bounds::DEFAULT).is_ok());
+    remove_deep_tree(&context, MAX_DEPTH - 1);
+    deep_tree(&context, MAX_DEPTH);
+    let refused = digest(&context, b"", None, SystemTime::now(), Bounds::DEFAULT);
+    remove_deep_tree(&context, MAX_DEPTH);
+    assert_eq!(refused.unwrap_err().code, "native_build_context_bounds");
+}
+
+#[test]
+fn included_paths_over_their_byte_bound_refuse() {
+    let tree = Tree::new();
+    let wide = tree.context().join("wide");
+    fs::create_dir(&wide).unwrap();
+    for index in 0..40 {
+        fs::write(wide.join(format!("{index:03}{}", "n".repeat(200))), "x").unwrap();
+    }
+    let walk = |path_bytes| {
+        digest(
+            &tree.context(),
+            b"",
+            None,
+            SystemTime::now(),
+            Bounds {
+                path_bytes,
+                ..Bounds::DEFAULT
+            },
+        )
+    };
+    let error = walk(4_000).unwrap_err();
+    assert_eq!(error.code, "native_build_context_bounds");
+    assert!(error.message.contains("32 MiB"), "{}", error.message);
+    assert!(peak_path_bytes() <= 4_000);
+    assert!(!error.message.contains("nnnn"));
+    assert!(walk(64 * 1024).is_ok());
+    assert_eq!(MAX_DEPTH, 256);
+    assert_eq!(MAX_PATH_BYTES, 32 * 1024 * 1024);
+}
+
+#[test]
+fn a_cache_with_paths_over_the_bounds_is_ignored() {
+    let tree = Tree::new();
+    let cache = tree.cache();
+    tree.settled();
+    assert_eq!(tree.settled().files_read, 0);
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    let template = value["entries"]["main.txt"].clone();
+    value["entries"][format!("{}x", "a/".repeat(MAX_DEPTH))] = template;
+    fs::write(&cache, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(
+        tree.settled().files_read,
+        3,
+        "an over-deep cache was trusted"
+    );
+    // It was rewritten within the bounds and is trusted again.
+    assert_eq!(tree.settled().files_read, 0);
 }

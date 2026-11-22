@@ -3,10 +3,6 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { HackCliError } from "./cli-result.ts";
 import {
-  readComposeInterpolationEnv,
-  readComposeOneShotGraph,
-} from "./compose-oneshot-progress.ts";
-import {
   readAtomicWriteTargetText,
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
@@ -369,39 +365,6 @@ export function remoteServiceTargets(
     : [...new Set([...included, ...selected])];
 }
 
-export async function assertNoInactiveRemoteDependencies(opts: {
-  readonly env: Readonly<Record<string, string>>;
-  readonly noDeps?: boolean;
-  readonly files: readonly string[];
-  readonly services: readonly string[];
-  readonly choices: readonly EffectiveRemote[];
-}): Promise<void> {
-  const inactive = inactiveRemoteServices(opts.choices);
-  if (!inactive.length) {
-    return;
-  }
-  const graph = opts.noDeps
-    ? undefined
-    : await readComposeOneShotGraph(opts.files, {
-        includeImplicitDependencies: true,
-        interpolationEnv: await readComposeInterpolationEnv({
-          composeFiles: opts.files,
-          env: { ...process.env, ...opts.env },
-        }),
-      });
-  const pending = new Set(opts.services);
-  for (const service of pending) {
-    if (inactive.includes(service)) {
-      throw new HackCliError({
-        code: "E_CONFIG_INVALID",
-        message: `Compose would start ${service}, a service for an unselected remote target.`,
-      });
-    }
-    for (const dependency of graph?.dependsOn.get(service) ?? []) {
-      pending.add(dependency);
-    }
-  }
-}
 export function remoteSelectionLabels(
   choices: readonly EffectiveRemote[] = []
 ): Record<string, string> {

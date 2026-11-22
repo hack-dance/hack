@@ -786,6 +786,11 @@ fn load_cached_with(
             "Cached image differs from the verified registry configuration.",
         ));
     }
+    if resolved_config()? != archive.image {
+        return Err(error(
+            "Cached image differs from the verified registry configuration.",
+        ));
+    }
     let mut requested = receipt(candidate, archive, Some(archive.pin), guest);
     let path = receipt_path(candidate, archive.sha);
     let old = read_receipt(&path, &requested)?;
@@ -802,11 +807,6 @@ fn load_cached_with(
         return Err(CandidateError::new(
             "image_archive_offline_missing",
             "Registry unavailable and the recorded image is not loaded in the guest.",
-        ));
-    }
-    if !verified && resolved_config()? != archive.image {
-        return Err(error(
-            "Cached image differs from the verified registry configuration.",
         ));
     }
     // Image is absent, or a legacy receipt has no verified source pin. Read
@@ -1747,7 +1747,7 @@ pub(super) mod tests {
                         serde_json::json!({"Id":fixture.image,"Architecture":architecture,"Os":"linux"}),
                     )
                 },
-                || panic!("verified pin needs no registry"),
+                || Ok(fixture.image.clone()),
                 |_| panic!("a live hit must not take the mutation lease"),
             )
         };
@@ -1803,7 +1803,7 @@ pub(super) mod tests {
             &ImagePolicy::default(),
             &test_guest(),
             || Ok(serde_json::json!({"Id":image,"Architecture":"arm64","Os":"linux"})),
-            || panic!("recorded tag must not touch the registry"),
+            || Ok(image.into()),
             |_| panic!("live observation must not import"),
         )
         .map(|receipt| receipt.image_id)
@@ -1822,7 +1822,7 @@ pub(super) mod tests {
             &ImagePolicy::default(),
             &test_guest(),
             || Ok(serde_json::json!({"Id":fixture.image,"Architecture":"arm64","Os":"linux"})),
-            || panic!("fallback must not call a registry"),
+            || Ok(fixture.image.clone()),
             |_| panic!("fallback must not load an archive"),
         )
         .unwrap();
@@ -1833,12 +1833,43 @@ pub(super) mod tests {
             &ImagePolicy::default(),
             &test_guest(),
             no_image,
-            || panic!("fallback must not call a registry"),
+            || Ok(fixture.image.clone()),
             |_| panic!("fallback must not load an archive"),
         )
         .err()
         .unwrap();
         assert_eq!(refused.code, "image_archive_offline_missing");
+    }
+
+    #[test]
+    fn matching_local_receipts_cannot_override_the_digest_bound_manifest() {
+        let mut fixture = CacheFixture::new(false);
+        let resolved = super::super::registry_image::test_manifest_resolution();
+        fixture.pin = resolved.pinned_reference;
+        fixture.completed(&fixture.pin);
+        let refusal = load_cached_with(
+            &fixture.candidate,
+            &fixture.archive(),
+            &ImagePolicy::default(),
+            &test_guest(),
+            || panic!("an unrelated loaded config must not be used"),
+            || {
+                resolved
+                    .proof
+                    .verified_config(
+                        &fixture.pin,
+                        super::super::image_platform::PlatformPolicy::Native,
+                    )
+                    .map(|(_, config)| config)
+            },
+            |_| panic!("an unverified image must not be imported"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            refusal.message,
+            "Cached image differs from the verified registry configuration."
+        );
     }
 
     #[test]
@@ -1853,7 +1884,7 @@ pub(super) mod tests {
             &policy,
             &test_guest(),
             no_image,
-            || panic!("existing pin is already verified"),
+            || Ok(fixture.image.clone()),
             |file| {
                 import(
                     &fixture.candidate,

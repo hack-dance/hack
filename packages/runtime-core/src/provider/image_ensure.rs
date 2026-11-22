@@ -217,6 +217,62 @@ pub struct EnsuredImage {
     /// The platform loaded; `linux/amd64` runs only under the pool's x86_64 translation.
     pub platform: ImagePlatform,
 }
+fn manifest_path(candidate: &Candidate, pin: &str, policy: PlatformPolicy) -> PathBuf {
+    let address = key(&format!("{pin}\n{policy:?}"));
+    candidate
+        .state_root
+        .join("artifacts/image-proofs")
+        .join(format!("{address}.json"))
+}
+
+pub(super) fn recorded_proof(
+    candidate: &Candidate,
+    pin: &str,
+    policy: PlatformPolicy,
+) -> Result<Option<registry_image::ManifestProof>, CandidateError> {
+    let path = manifest_path(candidate, pin, policy);
+    reject_aliased_state(
+        path.parent()
+            .ok_or_else(|| refused("Image proof parent is missing."))?,
+    )?;
+    match fs::symlink_metadata(&path) {
+        Ok(_) => state::read_bounded(&path, registry_image::MANIFEST_PROOF_LIMIT).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(state::io(error)),
+    }
+}
+
+pub(super) fn publish_proof(
+    candidate: &Candidate,
+    pin: &str,
+    platform: PlatformPolicy,
+    proof: &registry_image::ManifestProof,
+) -> Result<(), CandidateError> {
+    let path = manifest_path(candidate, pin, platform);
+    state::private_directory(
+        path.parent()
+            .ok_or_else(|| refused("Image proof parent is missing."))?,
+    )?;
+    if path.try_exists().map_err(state::io)? {
+        return Ok(());
+    }
+    state::write(&path, proof)
+}
+
+fn check_registry_config(
+    receipt: &CacheReceipt,
+    selected: ImagePlatform,
+    config: &str,
+) -> Result<(), CandidateError> {
+    if receipt.platform != selected || receipt.image_id != config {
+        return Err(refused(
+            "Cached image differs from the verified registry configuration.",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve tags on every call, reuse their exact immutable archive when available,
 /// Select a tag resolution, reuse its exact immutable archive when available,
 /// and validate/import via the owned guest's existing loader. The engine must already
 /// be running before acquisition. A cache miss acquires at most the policy's per-image
@@ -322,6 +378,7 @@ fn acquire_for_use(
             candidate, reference, policy, platform,
         )?)
     };
+    let requested_platform = platform;
     let (pinned, platform) = match &tag {
         Some(tag) => (
             tag.pinned_reference.clone(),
@@ -342,15 +399,31 @@ fn acquire_for_use(
             "Registry unavailable and the selected immutable image archive is unavailable locally.",
         )
     };
-    let requested_platform = platform;
-    let recorded = if tag.is_none() {
-        image_tag_store::recorded_pin(candidate, &pinned, platform)?
-    } else {
-        None
-    };
-    let platform = recorded
+    let proof_policy = tag
+        .as_ref()
+        .map_or(requested_platform, |tag| tag.proof_policy);
+    let recorded = recorded_proof(candidate, &pinned, proof_policy)?;
+    let selection = recorded
+        .as_ref()
+        .map(|proof| {
+            measure(Step::ImagePinVerify, None, |_| {
+                proof.verified_config(&pinned, requested_platform)
+            })
+        })
+        .transpose()?;
+    if let Some(tag) = &tag
+        && !selection
+            .as_ref()
+            .is_some_and(|(selected, config)| *selected == tag.platform && *config == tag.image_id)
+    {
+        return Err(refused(
+            "The recorded tag differs from its digest-bound registry metadata.",
+        ));
+    }
+    let platform = selection
         .as_ref()
         .map_or(platform, |(selected, _)| PlatformPolicy::exact(*selected));
+    let acquired_proof = std::cell::RefCell::new(None);
     let mut ensured = ensure_pinned_resolving(
         candidate,
         &pinned,
@@ -366,19 +439,39 @@ fn acquire_for_use(
             if offline {
                 return Err(no_archive());
             }
-            registry_image::acquire_with(reference, path, policy, limit, platform)
+            let mut acquired =
+                registry_image::acquire_with(reference, path, policy, limit, platform)?;
+            *acquired_proof.borrow_mut() = acquired.proof.take();
+            Ok(acquired)
         },
-        |candidate, path, receipt, reused| {
-            let config = tag
-                .as_ref()
-                .map(|tag| tag.image_id.as_str())
-                .or_else(|| recorded.as_ref().map(|(_, config)| config.as_str()));
-            if config.is_some_and(|id| id != receipt.image_id) {
-                return Err(refused(
-                    "Cached image differs from the verified registry configuration.",
-                ));
-            }
+        |candidate, path, receipt, _| {
+            let config = || {
+                if let Some((selected, config)) = &selection {
+                    check_registry_config(receipt, *selected, config)?;
+                    return Ok(config.clone());
+                }
+                if offline {
+                    return Err(no_archive());
+                }
+                let proof = match acquired_proof.borrow_mut().take() {
+                    Some(proof) => proof,
+                    None => measure(Step::ImagePinVerify, None, |_| {
+                        registry_image::resolve_pinned(
+                            &receipt.reference,
+                            policy,
+                            requested_platform,
+                        )
+                        .map(|resolved| resolved.proof)
+                    })?,
+                };
+                let (selected, config) =
+                    proof.verified_config(&receipt.reference, requested_platform)?;
+                check_registry_config(receipt, selected, &config)?;
+                publish_proof(candidate, &receipt.reference, requested_platform, &proof)?;
+                Ok(config)
+            };
             let Some(observer) = &observer else {
+                config()?;
                 return image_load::validate_file_for(
                     path,
                     &receipt.archive_sha256,
@@ -395,45 +488,12 @@ fn acquire_for_use(
                 bytes: receipt.archive_bytes,
                 pin: &receipt.reference,
                 platform: receipt.platform,
-                recorded_config: config,
+                recorded_config: selection.as_ref().map(|(_, config)| config.as_str()),
                 require_present: offline,
             };
-            image_load::load_cached(candidate, &archive, policy, observer, || {
-                if let Some(config) = config {
-                    return Ok(config.into());
-                }
-                if !reused {
-                    return Ok(receipt.image_id.clone());
-                }
-                if offline {
-                    return Err(no_archive());
-                }
-                measure(Step::ImagePinVerify, None, |_| {
-                    registry_image::resolve_pinned(
-                        &receipt.reference,
-                        policy,
-                        PlatformPolicy::exact(receipt.platform),
-                    )
-                    .map(|value| value.image_id)
-                })
-            })
-            .map(|_| ())
+            image_load::load_cached(candidate, &archive, policy, observer, config).map(|_| ())
         },
     )?;
-    if !offline
-        && (!ensured.archive_reused || (observer.is_some() && tag.is_none() && recorded.is_none()))
-    {
-        // Publication is complete. A pin-record failure cannot leave an
-        // archive without its acquisition receipt.
-        image_tag_store::remember_pin(
-            candidate,
-            &ensured.pinned_reference,
-            requested_platform,
-            ensured.platform,
-            &ensured.image_id,
-            image_tag_store::epoch_seconds()?,
-        )?;
-    }
     if !import {
         ensured.phase = "archive-verified";
     }
@@ -642,6 +702,7 @@ mod tests {
         fs::write(path, b"fixture").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         Ok(registry_image::AcquiredImage {
+            proof: None,
             source_digest: registry_image::pinned_syntax(reference)?.1,
             manifest_digest: format!("sha256:{}", "b".repeat(64)),
             image_id: format!("sha256:{}", "c".repeat(64)),
@@ -679,6 +740,34 @@ mod tests {
         assert_eq!(acquired.get(), 1);
         assert_eq!(loaded.get(), 2);
     }
+    #[test]
+    fn fresh_tag_config_must_match_the_acquisition_receipt() {
+        let f = Fixture::new();
+        let resolved = registry_image::test_manifest_resolution();
+        let receipt = CacheReceipt {
+            version: 1,
+            checkout: f.1.checkout.clone(),
+            reference: resolved.pinned_reference.clone(),
+            archive_sha256: "a".repeat(64),
+            image_id: format!("sha256:{}", "e".repeat(64)),
+            archive_bytes: 7,
+            platform: ImagePlatform::LinuxArm64,
+        };
+        let refusal =
+            check_registry_config(&receipt, ImagePlatform::LinuxArm64, &resolved.image_id)
+                .err()
+                .unwrap();
+        assert_eq!(
+            refusal.message,
+            "Cached image differs from the verified registry configuration."
+        );
+        let matching = CacheReceipt {
+            image_id: resolved.image_id.clone(),
+            ..receipt
+        };
+        check_registry_config(&matching, ImagePlatform::LinuxArm64, &resolved.image_id).unwrap();
+    }
+
     #[test]
     fn cache_receipt_at_the_wrong_platform_address_is_rejected() {
         let f = Fixture::new();

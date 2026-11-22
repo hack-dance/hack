@@ -43,6 +43,7 @@ pub(super) struct TagResolution {
     pub record: TagRecord,
     pub pinned_reference: String,
     pub platform: ImagePlatform,
+    pub proof_policy: PlatformPolicy,
     pub image_id: String,
     pub source: TagSource,
 }
@@ -131,6 +132,7 @@ impl TagRecord {
         Ok(TagResolution {
             pinned_reference: pin(named, &self.source_digest),
             platform: selection.platform,
+            proof_policy: selection.policy,
             image_id: selection.image_id.clone(),
             record: self,
             source,
@@ -204,6 +206,20 @@ pub fn present(candidate: &Candidate, references: &[&str]) -> Result<Vec<String>
     let mut loaded = Vec::new();
     for status in status(candidate, references)? {
         for selection in &status.record.selections {
+            let named = match normalize(&status.record.reference).map_err(|_| invalid())? {
+                ImageReference::Named(named) => named,
+                _ => return Err(invalid()),
+            };
+            let pin = pin(&named, &status.record.source_digest);
+            let Some(proof) =
+                super::image_ensure::recorded_proof(candidate, &pin, selection.policy)?
+            else {
+                continue;
+            };
+            let (platform, config) = proof.verified_config(&pin, selection.policy)?;
+            if platform != selection.platform || config != selection.image_id {
+                return Err(invalid());
+            }
             let key = (selection.image_id.as_str(), selection.platform.name());
             let key = (key.0.to_owned(), key.1);
             let present = match observed.get(&key) {
@@ -225,64 +241,6 @@ pub fn present(candidate: &Candidate, references: &[&str]) -> Result<Vec<String>
         }
     }
     Ok(loaded)
-}
-
-pub(super) fn recorded_pin(
-    candidate: &Candidate,
-    reference: &str,
-    platform: PlatformPolicy,
-) -> Result<Option<(ImagePlatform, String)>, CandidateError> {
-    let named = match normalize(reference).map_err(|_| invalid())? {
-        ImageReference::Named(named) if named.digest.is_some() => named,
-        _ => return Err(invalid()),
-    };
-    let root = record_directory(candidate, &named.canonical());
-    crate::reject_aliased_state(&root)?;
-    Ok(
-        read(&root.join("resolution.json"), &named)?.and_then(|entry| {
-            entry
-                .selection(platform)
-                .map(|selection| (selection.platform, selection.image_id.clone()))
-        }),
-    )
-}
-
-pub(super) fn remember_pin(
-    candidate: &Candidate,
-    reference: &str,
-    platform: PlatformPolicy,
-    selected: ImagePlatform,
-    image_id: &str,
-    at: u64,
-) -> Result<(), CandidateError> {
-    let named = match normalize(reference).map_err(|_| invalid())? {
-        ImageReference::Named(named) if named.digest.is_some() => named,
-        _ => return Err(invalid()),
-    };
-    let canonical = named.canonical();
-    let root = record_directory(candidate, &canonical);
-    let lock = state::Lock::acquire(&root)?;
-    let path = root.join("resolution.json");
-    let mut entry = read(&path, &named)?.unwrap_or_else(|| TagRecord {
-        version: 1,
-        reference: canonical,
-        registry: named.domain.clone(),
-        source_digest: named.digest.clone().unwrap_or_default(),
-        resolved_at_unix_seconds: at,
-        selections: Vec::new(),
-    });
-    if let Some(previous) = entry.selection(platform) {
-        if previous.platform != selected || previous.image_id != image_id {
-            return Err(invalid());
-        }
-        return Ok(());
-    }
-    entry.selections.push(Selection {
-        policy: platform,
-        platform: selected,
-        image_id: image_id.into(),
-    });
-    write_record(&entry, &named, &lock, &root, &path)
 }
 
 pub(super) fn resolve(
@@ -375,13 +333,11 @@ fn resolve_with(
         .selections
         .retain(|selection| selection.policy != platform);
     let selection = selected(&resolved, platform)?;
-    remember_pin(
+    super::image_ensure::publish_proof(
         candidate,
         &resolved.pinned_reference,
         platform,
-        selection.platform,
-        &selection.image_id,
-        entry.resolved_at_unix_seconds,
+        &resolved.proof,
     )?;
     entry.selections.push(selection);
     write_record(&entry, &named, &lock, &root, &path)?;
@@ -467,6 +423,7 @@ mod tests {
     fn result(byte: char) -> ResolvedImage {
         let source_digest = digest(byte);
         ResolvedImage {
+            proof: registry_image::test_manifest_resolution().proof,
             pinned_reference: format!("docker.io/fixture/image@{source_digest}"),
             source_digest,
             manifest_digest: digest('c'),

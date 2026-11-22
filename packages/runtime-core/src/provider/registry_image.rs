@@ -1598,6 +1598,8 @@ fn member_bytes(size: u64) -> u64 {
 
 #[derive(Debug, Serialize)]
 pub struct AcquiredImage {
+    #[serde(skip)]
+    pub(super) proof: Option<ManifestProof>,
     pub source_digest: String,
     pub manifest_digest: String,
     pub image_id: String,
@@ -1645,12 +1647,113 @@ pub fn admit(value: &str, policy: &ImagePolicy) -> Result<AdmittedImage, Candida
 
 #[derive(Debug, Serialize)]
 pub struct ResolvedImage {
+    #[serde(skip)]
+    pub(super) proof: ManifestProof,
     pub pinned_reference: String,
     pub source_digest: String,
     pub manifest_digest: String,
     pub image_id: String,
     pub platform: &'static str,
 }
+
+/// The original bytes that bind a registry digest to one selected config.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ManifestProof {
+    initial: String,
+    child: Option<String>,
+    config: String,
+}
+
+/// JSON escaping can expand any one of the three bounded metadata objects.
+pub(super) const MANIFEST_PROOF_LIMIT: u64 = (3 * MAX_METADATA * 6 + 1024) as u64;
+
+impl ManifestProof {
+    fn new(
+        initial: Vec<u8>,
+        child: Option<Vec<u8>>,
+        config: Vec<u8>,
+    ) -> Result<Self, CandidateError> {
+        fn utf8(bytes: Vec<u8>) -> Result<String, CandidateError> {
+            String::from_utf8(bytes).map_err(|_| error("Registry image metadata is not UTF-8."))
+        }
+        Ok(Self {
+            initial: utf8(initial)?,
+            child: child.map(utf8).transpose()?,
+            config: utf8(config)?,
+        })
+    }
+
+    pub(super) fn verified_config(
+        &self,
+        pin: &str,
+        policy: PlatformPolicy,
+    ) -> Result<(ImagePlatform, String), CandidateError> {
+        let (_, expected) = pinned_syntax(pin)?;
+        let initial = parse_manifest(self.initial.as_bytes(), &expected)?;
+        let (manifest, indexed) = if initial.manifests.is_empty() {
+            if self.child.is_some() {
+                return Err(error(
+                    "Stored image proof has an unexpected child manifest.",
+                ));
+            }
+            (initial, None)
+        } else {
+            let (descriptor, selected) = select_platform(&initial, policy)?;
+            Fetch::checked(descriptor, MAX_METADATA as u64)?;
+            let child = self
+                .child
+                .as_ref()
+                .ok_or_else(|| error("Stored image proof lacks the selected child manifest."))?;
+            verify_object(descriptor, child.as_bytes())?;
+            (
+                parse_manifest(child.as_bytes(), &descriptor.digest)?,
+                Some(selected),
+            )
+        };
+        check_selected_manifest(&manifest)?;
+        let config = manifest
+            .config
+            .ok_or_else(|| error("Image config descriptor is missing."))?;
+        Fetch::checked(&config, MAX_METADATA as u64)?;
+        verify_object(&config, self.config.as_bytes())?;
+        let selected = config_platform(self.config.as_bytes(), policy, indexed)?;
+        Ok((selected, config.digest))
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_manifest_resolution() -> ResolvedImage {
+    let config = br#"{"architecture":"arm64","os":"linux"}"#;
+    let image_id = digest(config);
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": image_id,
+            "size": config.len(),
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar",
+            "digest": format!("sha256:{}", "d".repeat(64)),
+            "size": 1,
+        }],
+    })
+    .to_string()
+    .into_bytes();
+    let source = digest(&manifest);
+    ResolvedImage {
+        source_digest: source.clone(),
+        manifest_digest: source.clone(),
+        pinned_reference: format!("docker.io/fixture/image@{source}"),
+        platform: "linux/arm64",
+        image_id,
+        proof: ManifestProof::new(manifest, None, config.to_vec()).unwrap(),
+    }
+}
+
+type SelectedManifest = (Manifest, String, Option<ImagePlatform>, Option<Vec<u8>>);
 
 /// The selected single-image manifest, its digest and, for an index, the platform the
 /// index selection chose under `platform`.
@@ -1659,10 +1762,11 @@ fn select(
     initial: &[u8],
     source_digest: &str,
     platform: PlatformPolicy,
-) -> Result<(Manifest, String, Option<ImagePlatform>), CandidateError> {
+) -> Result<SelectedManifest, CandidateError> {
     let mut manifest = parse_manifest(initial, source_digest)?;
     let mut manifest_digest = source_digest.to_owned();
     let mut indexed = None;
+    let mut child = None;
     if !manifest.manifests.is_empty() {
         let (selected, selected_platform) = select_platform(&manifest, platform)?;
         let selected = selected.clone();
@@ -1670,7 +1774,13 @@ fn select(
         manifest_digest = selected.digest.clone();
         let bytes = fetch.object("manifests", &selected)?;
         manifest = parse_manifest(&bytes, &manifest_digest)?;
+        child = Some(bytes);
     }
+    check_selected_manifest(&manifest)?;
+    Ok((manifest, manifest_digest, indexed, child))
+}
+
+fn check_selected_manifest(manifest: &Manifest) -> Result<(), CandidateError> {
     if !manifest.manifests.is_empty()
         || manifest.layers.is_empty()
         || manifest.layers.len() > MAX_LAYERS
@@ -1684,7 +1794,7 @@ fn select(
     if !config.media_type.is_empty() && !CONFIG_TYPES.contains(&config.media_type.as_str()) {
         return Err(error("The manifest does not describe a container image."));
     }
-    Ok((manifest, manifest_digest, indexed))
+    Ok(())
 }
 
 /// Resolve mutable metadata once and return an explicit immutable identity. No image
@@ -1744,13 +1854,15 @@ fn resolve_metadata(
     source_digest: String,
     platform: PlatformPolicy,
 ) -> Result<ResolvedImage, CandidateError> {
-    let (manifest, manifest_digest, indexed) = select(fetch, &initial, &source_digest, platform)?;
+    let (manifest, manifest_digest, indexed, child) =
+        select(fetch, &initial, &source_digest, platform)?;
     let config = manifest
         .config
         .ok_or_else(|| error("Image config descriptor is missing."))?;
     let config_bytes = fetch.object("blobs", &config)?;
     let selected = config_platform(&config_bytes, platform, indexed)?;
     Ok(ResolvedImage {
+        proof: ManifestProof::new(initial, child, config_bytes)?,
         pinned_reference: format!("{}/{path}@{source_digest}", registry.domain),
         source_digest,
         manifest_digest,
@@ -1850,7 +1962,7 @@ pub fn resolve_build_base(
     if expected.is_some_and(|expected| expected != source_digest) {
         return Err(error("Registry manifest digest or size mismatch."));
     }
-    let (manifest, _, indexed) =
+    let (manifest, _, indexed, _) =
         select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;
     let pinned_reference = format!("{}/{}@{source_digest}", registry.domain, named.path);
     // BuildKit pulls the base itself, outside acquisition's archive budget, so the sizes
@@ -2042,7 +2154,7 @@ pub fn acquire_with(
     }
     let mut fetch = Fetch::new(&pinned.registry, &pinned.path, policy)?;
     let initial = fetch.manifest(&pinned.digest)?;
-    let (manifest, manifest_digest, indexed) =
+    let (manifest, manifest_digest, indexed, child) =
         select(&mut fetch, &initial, &pinned.digest, platform)?;
     let config = manifest
         .config
@@ -2130,6 +2242,7 @@ pub fn acquire_with(
         },
     )?;
     Ok(AcquiredImage {
+        proof: Some(ManifestProof::new(initial, child, config_bytes)?),
         source_digest: pinned.digest,
         manifest_digest,
         image_id: config.digest,

@@ -2098,9 +2098,10 @@ reused for arm64, and imports only into a pool booted with translation; see
 
 A completed load receipt bound to the requested registry pin lets
 `ensure-image` check the running guest by exact image ID and platform without
-a provider mutation lease or an archive read. An older pinned receipt without a
-verified registry binding checks the immutable manifest and config once to record
-that binding. A guest miss hashes the entire archive before taking the import
+a provider mutation lease or an archive read. A digest reference hashes the
+stored registry manifest against the requested pin, then checks the configuration
+digest. For indexes it also verifies the selected child manifest and platform.
+A cache entry without the metadata fetches it once to establish the binding. A guest miss hashes the entire archive before taking the import
 lease and checks the guest again before upload. Explicit `load-image` verifies
 its input even if the guest already has that image.
 

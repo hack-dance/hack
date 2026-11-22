@@ -203,6 +203,7 @@ import {
   resolveGlobalLoggingForHome,
 } from "../lib/global-logging.ts";
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
+import { routeProbeName } from "../lib/global-route-probe.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -315,7 +316,10 @@ import {
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import { withIngressChange } from "../lib/proxy-ingress-addresses.ts";
-import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
+import {
+  inspectProxyLoopback,
+  resolveProxyLoopbackAddresses,
+} from "../lib/proxy-loopback.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import {
@@ -1140,9 +1144,15 @@ async function runDoctorAudit(
 
   // Authenticate loopback independently of direct container reachability.
   results.push(
-    await runCheck(s, "proxy ports", () => inspectProxyLoopback(), {
-      timeoutMs: 8000,
-    })
+    await runCheck(
+      s,
+      "proxy ports",
+      async () =>
+        inspectProxyLoopback({ servedName: await doctorServedName() }),
+      {
+        timeoutMs: 8000,
+      }
+    )
   );
   results.push(
     await runCheck(s, PROXY_NETWORK_CHECK, () => checkProxyNetwork(), {
@@ -6544,3 +6554,20 @@ import {
   preflightLifecycleSupervisor,
   resolveLifecycleSupervisorBinary,
 } from "../lib/lifecycle-supervisor.ts";
+
+/**
+ * The name the proxy serves (the proxy file's schemas route, as `hack
+ * global up` selects it) and this machine's resolver, for the proxy-ports
+ * check: loopback is checked only where that name resolves.
+ */
+async function doctorServedName(): Promise<{
+  readonly name: string;
+  readonly resolve: (hostname: string) => Promise<readonly string[]>;
+}> {
+  return {
+    name: routeProbeName(
+      (await readTextFile(getGlobalPaths().caddyCompose)) ?? ""
+    ),
+    resolve: (hostname) => resolveProxyLoopbackAddresses({ hostname }),
+  };
+}

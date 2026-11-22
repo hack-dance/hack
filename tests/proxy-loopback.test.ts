@@ -77,6 +77,74 @@ test("IPv4 timeout and foreign IPv6 TLS warn despite healthy port 80; visible li
   expect(report.message).not.toContain("--fix");
 });
 
+test("HACK-2552: a served name resolving straight to the proxy container skips loopback, so a foreign loopback listener is not a warning", async () => {
+  // macOS with OrbStack: schemas.hack resolves to the container; loopback 443
+  // times out (IPv4) and another process answers TLS alerts (IPv6).
+  const calls: string[] = [];
+  const asked: string[] = [];
+  const report = await inspectProxyLoopback({
+    loadCa,
+    probe: async ({ address, port }) => {
+      calls.push(`${address}/${port}`);
+      return address === "127.0.0.1" ? "timeout" : "tls-error";
+    },
+    listListeners: noListeners,
+    servedName: {
+      name: "schemas.hack",
+      resolve: async (hostname) => {
+        asked.push(hostname);
+        return ["172.30.0.2"];
+      },
+    },
+  });
+  expect(asked).toEqual(["schemas.hack"]);
+  expect(calls).toEqual([]);
+  expect(report).toMatchObject({ status: "ok", verified: false });
+  expect(report.message).toContain(
+    "schemas.hack resolves to 172.30.0.2 on this machine, not to loopback"
+  );
+});
+
+test("HACK-2552: a served name resolving to loopback is checked there, under that name, and a failure there warns", async () => {
+  const calls: string[] = [];
+  const report = await inspectProxyLoopback({
+    loadCa,
+    probe: async ({ address, port, servername }) => {
+      calls.push(`${address}/${port}/${servername}`);
+      return port === 443 ? "tls-error" : "ok";
+    },
+    listListeners: noListeners,
+    servedName: {
+      name: "schemas.hack.local",
+      resolve: async () => ["127.0.0.1"],
+    },
+  });
+  // Only the loopback address the name resolves to, and the served name as
+  // the TLS name instead of the fixed legacy one.
+  expect(calls.sort()).toEqual([
+    "127.0.0.1/443/schemas.hack.local",
+    "127.0.0.1/80/schemas.hack.local",
+  ]);
+  expect(report.status).toBe("warn");
+  expect(report.message).toContain(
+    "127.0.0.1:443: certificate or TLS verification failed"
+  );
+
+  // No answer for the name: the published loopback endpoints, as before.
+  const unresolved: string[] = [];
+  const fallback = await inspectProxyLoopback({
+    loadCa,
+    probe: async ({ address, port }) => {
+      unresolved.push(`${address}/${port}`);
+      return "ok";
+    },
+    listListeners: noListeners,
+    servedName: { name: "schemas.hack.local", resolve: async () => [] },
+  });
+  expect(unresolved).toHaveLength(4);
+  expect(fallback.status).toBe("ok");
+});
+
 test("neither address family can mask the other, and port 80 has a separate result", async () => {
   for (const failure of ["127.0.0.1/443", "::1/443", "127.0.0.1/80"]) {
     const report = await inspectProxyLoopback({

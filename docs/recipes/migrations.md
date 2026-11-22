@@ -27,10 +27,13 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
-      interval: 2s
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "app", "-d", "app"]
+      start_period: 30s
+      # Requires Docker Engine 25+. On older engines, remove start_interval to check at interval.
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
 
   # Runs once per start, after the database is healthy, then exits.
   migrate:
@@ -46,6 +49,8 @@ services:
   # Starts only after the migrations succeeded.
   app:
     image: postgres:17.6-alpine
+    init: true
+    stop_grace_period: 2s
     command: ["sleep", "infinity"]
     depends_on:
       migrate:

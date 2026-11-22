@@ -11,6 +11,7 @@ stateDiagram-v2
   Proven --> Proven : ProveRootEarly
   Proven --> Leased : AcquireLease [lease = free]
   Leased --> Qualified : Recheck [WindowElapsed]
+  Leased --> Qualified : Reuse [RecordUsable]
   Leased --> Qualified : Qualify [research]
   Qualified --> Qualified : RestoreAliasLeased
   Qualified --> Settled : Settle [SameOwner, treeOk]
@@ -36,6 +37,13 @@ stateDiagram-v2
     Open starts the window
     Development: one sample here
     Research: three, before lease
+  end note
+  note right of Leased
+    Reuse replaces the wait
+    never a sample
+    INV ReusedRecordSameBoot
+    INV ReusedRecordWithinBound
+    INV ReusedRecordSameSwapouts
   end note
   note right of Qualified
     INV SecondSampleUnderLease

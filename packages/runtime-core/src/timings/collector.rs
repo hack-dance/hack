@@ -342,13 +342,30 @@ pub(crate) fn observe_with_code<T, E>(
     action: impl FnOnce(Option<Parent>) -> Result<T, E>,
     error_code: impl FnOnce(&E) -> Option<Code>,
 ) -> Result<T, E> {
+    observe_attributed(
+        collector,
+        step,
+        parent,
+        |handle, _| action(handle),
+        error_code,
+    )
+}
+/// The work may set reviewed attributes; they are emitted with its span on either outcome.
+pub(crate) fn observe_attributed<T, E>(
+    collector: Option<&Arc<Collector>>,
+    step: Step,
+    parent: Option<Parent>,
+    action: impl FnOnce(Option<Parent>, &mut Attrs) -> Result<T, E>,
+    error_code: impl FnOnce(&E) -> Option<Code>,
+) -> Result<T, E> {
+    let mut attrs = Attrs::default();
     let Some(collector) = collector else {
-        return action(None);
+        return action(None, &mut attrs);
     };
     let span = collector.start(step, parent);
     let handle = span.as_ref().and_then(Span::parent);
     let _scope = Scope(CURRENT.with(|current| current.replace(handle.clone())));
-    let result = action(handle);
+    let result = action(handle, &mut attrs);
     if let Some(span) = span {
         span.finish(
             if result.is_ok() {
@@ -358,7 +375,7 @@ pub(crate) fn observe_with_code<T, E>(
             },
             false,
             result.as_ref().err().and_then(error_code),
-            Attrs::default(),
+            attrs,
         );
     }
     result

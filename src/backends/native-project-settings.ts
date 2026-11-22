@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { sanitizeProjectSlug } from "../lib/project.ts";
+import { nativeAdmissionReuseEnvironment } from "./native-admission-reuse.ts";
 import { isNativeAwsSelector } from "./native-aws-environment.ts";
 import {
   type NativeGcloudSelection,
@@ -646,8 +647,10 @@ export async function resolveNativeHostSettings(opts: {
   const env = opts.env;
   // Checked with the other variables, before any hook, stop or runtime
   // request: a mistyped value must not stop a running project first. The
-  // value itself travels to `runtime up` at that request (HACK-2409).
+  // value itself travels to `runtime up` at that request (HACK-2409). The
+  // admission reuse bound travels and is checked the same way.
   nativeHotReloadEnvironment(["runtime", "up"], env);
+  nativeAdmissionReuseEnvironment(["runtime", "up"], env);
   const machine = await readMachineSettings({
     env,
     projectName: opts.projectName,

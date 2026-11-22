@@ -11,6 +11,7 @@ import {
 } from "../lib/native-process-wrappers.ts";
 import { stepStoreRuntimeArgs } from "../lib/step-store/location.ts";
 import type { SubprocessSignal } from "../lib/subprocess-signal.ts";
+import { nativeAdmissionReuseEnvironment } from "./native-admission-reuse.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
 import {
@@ -850,9 +851,11 @@ export async function invokeNativeRuntime(opts: {
       env[key] = value;
     }
   }
-  // The one user setting a runtime request carries in its environment; an
-  // invalid value throws here, before the subprocess exists.
+  // The two user settings a runtime request carries in its environment, both
+  // for `runtime up` only; an invalid value throws here, before the
+  // subprocess exists.
   Object.assign(env, nativeHotReloadEnvironment(opts.args));
+  Object.assign(env, nativeAdmissionReuseEnvironment(opts.args));
   const child = Bun.spawn(
     [
       opts.runtime.binary,

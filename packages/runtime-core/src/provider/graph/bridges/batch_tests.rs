@@ -257,6 +257,7 @@ fn start(batch: &Batch, guest: &Guest) -> Result<Vec<(u8, Assignment)>, Candidat
         RUN,
         &selected,
         &"9".repeat(64),
+        None,
     )
 }
 
@@ -441,6 +442,7 @@ fn a_changed_or_repeated_reservation_refuses_before_any_guest_call() {
                 RUN,
                 &selected,
                 &"9".repeat(64),
+                None,
             )
             .is_err()
         );

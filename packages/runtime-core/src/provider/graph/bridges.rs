@@ -233,6 +233,16 @@ pub(super) fn inspect_targets(
     run: &str,
     services: &std::collections::BTreeSet<&str>,
 ) -> Result<Targets, CandidateError> {
+    inspect_targets_scoped(candidate, engine, run, services, None)
+}
+
+fn inspect_targets_scoped(
+    candidate: &Candidate,
+    engine: &impl Inspection,
+    run: &str,
+    services: &std::collections::BTreeSet<&str>,
+    ready_service: Option<(&str, &str)>,
+) -> Result<Targets, CandidateError> {
     let (receipt, root) = load_at(directory(candidate, run)?, run, engine.incarnation())?;
     let mut targets = Targets {
         receipt,
@@ -241,8 +251,21 @@ pub(super) fn inspect_targets(
         pids: BTreeMap::new(),
     };
     let receipt = &targets.receipt;
-    // Same admission as inspect_using's endpoints: a committed, ready graph.
-    if receipt.phase != "ready-observed"
+    // The startup lease holder may inspect exactly the generation reported
+    // ready by its scheduler. Standalone publishers still require a ready graph.
+    let admitted = match ready_service {
+        Some((service, id)) => {
+            matches!(receipt.phase.as_str(), "preparing" | "restoring")
+                && services.len() == 1
+                && services.contains(service)
+                && receipt
+                    .resources
+                    .get(&format!("container:{service}"))
+                    .is_some_and(|r| r.id.as_deref() == Some(id) && r.phase == "started")
+        }
+        None => receipt.phase == "ready-observed",
+    };
+    if !admitted
         || root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
         || startup::require_dependency_rebind_complete(&root, receipt).is_err()
@@ -273,6 +296,14 @@ pub(super) fn inspect_targets(
             continue;
         };
         let observation = probes::observe(engine, receipt, service, &value)?;
+        if ready_service.is_some()
+            && !receipt
+                .readiness
+                .get(*service)
+                .is_some_and(|goal| observation.satisfies(*goal))
+        {
+            continue;
+        }
         if !matches!(observation, Observation::Running { .. })
             || endpoint_network(receipt, &value, &networks)?.is_none()
         {
@@ -584,6 +615,63 @@ struct Observed<'a> {
     boot_id: &'a str,
 }
 
+/// Reserve and start only the service named by the scheduler's ready event.
+/// The scheduler keeps its provider lease throughout inspection and mutation.
+#[cfg(target_os = "macos")]
+pub(super) fn admit_ready_service(
+    engine: &Engine<'_>,
+    run: &str,
+    service: &str,
+    container_id: &str,
+    route: Option<RouteSlot>,
+) -> Result<Vec<(u8, Assignment)>, CandidateError> {
+    let candidate = engine.guest().candidate();
+    let scope = Some((service, container_id));
+    let mut targets =
+        inspect_targets_scoped(candidate, engine, run, &BTreeSet::from([service]), scope)?;
+    let key = format!("container:{service}");
+    targets.receipt.resources.retain(|name, _| name == &key);
+    let requested = BTreeMap::from_iter(route.map(|slot| (service.to_owned(), slot)));
+    let capacity = engine.guest().bridge_intent().ok_or_else(invalid)?.slots;
+    let reserved = reserve_all(
+        candidate,
+        load_store(candidate, engine, false)?,
+        &requested,
+        capacity,
+        &Observed {
+            receipt: &targets.receipt,
+            endpoints: &targets.endpoints,
+            port_endpoints: &targets.port_endpoints,
+            observations: &BTreeMap::new(),
+            boot_id: engine.guest().boot_id(),
+        },
+    )?;
+    let selected = reserved
+        .routes
+        .values()
+        .chain(reserved.ports.values())
+        .map(|route| (route.slot, route.assignment.reservation.as_str()))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (digest, input) = relay::payload()?;
+    start_selected(
+        candidate,
+        engine,
+        &LeasedRelays {
+            candidate,
+            engine,
+            input: &input,
+        },
+        &mut load_store(candidate, engine, false)?,
+        run,
+        &selected,
+        &digest,
+        scope,
+    )
+}
+
 #[cfg(any(test, target_os = "macos"))]
 fn reserve_all(
     candidate: &Candidate,
@@ -874,6 +962,7 @@ pub(in crate::provider::graph) fn start_bridges(
         run,
         selected,
         &digest,
+        None,
     )
 }
 
@@ -929,7 +1018,11 @@ fn start_selected(
     run: &str,
     selected: &[(u8, &str)],
     digest: &str,
+    ready_service: Option<(&str, &str)>,
 ) -> Result<Vec<(u8, Assignment)>, CandidateError> {
+    let inspect = |services: &std::collections::BTreeSet<&str>| {
+        inspect_targets_scoped(candidate, inspection, run, services, ready_service)
+    };
     let mut picked = BTreeMap::new();
     for (slot, reservation) in selected {
         let a = store
@@ -958,7 +1051,7 @@ fn start_selected(
             .map(|(slot, _)| *slot)
             .collect::<Vec<_>>()
     };
-    let fenced = inspect_targets(candidate, inspection, run, &services)?;
+    let fenced = inspect(&services)?;
     if !stale(&fenced).is_empty() {
         return Err(error(
             "bridge_generation_stale",
@@ -977,7 +1070,7 @@ fn start_selected(
             "Cannot establish target process identity.",
         ));
     }
-    if !stale(&inspect_targets(candidate, inspection, run, &services)?).is_empty() {
+    if !stale(&inspect(&services)?).is_empty() {
         return Err(error(
             "bridge_generation_stale",
             "Endpoint changed during target verification.",
@@ -1013,7 +1106,7 @@ fn start_selected(
         .map(|slot| (*slot, &store.slots[slot]))
         .collect::<Vec<_>>();
     guest.start_relays(&launched)?;
-    let changed = stale(&inspect_targets(candidate, inspection, run, &services)?);
+    let changed = stale(&inspect(&services)?);
     for slot in picked.keys().filter(|slot| !changed.contains(slot)) {
         store.slots.get_mut(slot).expect("picked slot").phase = "running".into();
     }

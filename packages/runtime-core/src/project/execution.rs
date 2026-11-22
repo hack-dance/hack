@@ -40,7 +40,7 @@ pub enum Observation {
     Restarting,
 }
 impl Observation {
-    fn satisfies(self, condition: Condition) -> bool {
+    pub(crate) fn satisfies(self, condition: Condition) -> bool {
         match condition {
             Condition::Started => matches!(self, Self::Running { .. } | Self::Exited { code: 0 }),
             Condition::Healthy => {

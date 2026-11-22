@@ -1,13 +1,7 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { resolveGlobalHackDir } from "./config-paths.ts";
-import { writeTextFileAtomicIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
-import {
-  ensurePrivateDirectory,
-  readBoundedPrivateFile,
-} from "./private-file.ts";
 import type { RuntimeProject } from "./runtime-projects.ts";
 import { exec } from "./shell.ts";
 
@@ -20,10 +14,10 @@ export type MountedNamedVolumeCandidate = {
   readonly name: string;
   readonly destinations: readonly string[];
   readonly services: readonly string[];
-  readonly fingerprint?: string;
 };
 
 export type DisposableCacheVolumeCandidate = MountedNamedVolumeCandidate & {
+  readonly fingerprint: string;
   readonly reason: "explicit-label" | "next-destination";
 };
 
@@ -132,7 +126,7 @@ export async function verifyDisposableCacheVolumes(opts: {
     if (
       labels?.[COMPOSE_PROJECT_LABEL] !== opts.composeProject ||
       (getString(labels, COMPOSE_VOLUME_LABEL) ?? "").trim().length === 0 ||
-      (candidate.fingerprint && candidate.fingerprint !== proof?.fingerprint)
+      !proof?.fingerprint
     ) {
       opts.kept?.push({ name: candidate.name, reason: "ownership-unverified" });
       continue;
@@ -144,12 +138,17 @@ export async function verifyDisposableCacheVolumes(opts: {
       candidate.destinations.length > 0 &&
       candidate.destinations.every(isNextCacheDestination);
     if (!(explicitlyDisposable || nextDestinationOnly)) {
-      opts.kept?.push({ name: candidate.name, reason: "not-disposable" });
+      opts.kept?.push({
+        name: candidate.name,
+        reason: candidate.destinations.length
+          ? "not-disposable"
+          : "no-live-mount",
+      });
       continue;
     }
     verified.push({
       ...candidate,
-      fingerprint: proof?.fingerprint,
+      fingerprint: proof.fingerprint,
       reason: explicitlyDisposable ? "explicit-label" : "next-destination",
     });
   }
@@ -160,19 +159,14 @@ export async function verifyDisposableCacheVolumes(opts: {
 /** Remove only the exact verified volume names and report every failure. */
 export async function removeDisposableCacheVolumes(opts: {
   readonly candidates: readonly DisposableCacheVolumeCandidate[];
+  readonly kept: CacheVolumeKept[];
 }): Promise<DisposableCacheVolumeRemoval> {
   const removed: string[] = [];
   const failed: Array<{ readonly name: string; readonly error: string }> = [];
 
   for (const candidate of opts.candidates) {
-    if (
-      candidate.fingerprint &&
-      (await volumeFingerprint(candidate.name)) !== candidate.fingerprint
-    ) {
-      failed.push({
-        name: candidate.name,
-        error: "Volume identity could not be verified after preview.",
-      });
+    if ((await volumeFingerprint(candidate.name)) !== candidate.fingerprint) {
+      opts.kept.push({ name: candidate.name, reason: "identity-changed" });
       continue;
     }
     const result = await exec(["docker", "volume", "rm", candidate.name], {
@@ -182,6 +176,7 @@ export async function removeDisposableCacheVolumes(opts: {
       removed.push(candidate.name);
       continue;
     }
+    opts.kept.push({ name: candidate.name, reason: "removal-failed" });
     failed.push({
       name: candidate.name,
       error:
@@ -204,11 +199,14 @@ export type CacheVolumeKept = {
   readonly reason:
     | "ownership-unverified"
     | "not-disposable"
-    | "mounted-elsewhere";
+    | "mounted-elsewhere"
+    | "no-live-mount"
+    | "identity-changed"
+    | "removal-failed"
+    | "not-confirmed";
 };
 
 const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
-const RECEIPT_LIMIT = 128 * 1024;
 const fingerprint = (text: string) =>
   new Bun.CryptoHasher("sha256").update(text).digest("hex");
 
@@ -262,89 +260,26 @@ async function volumeFingerprint(name: string): Promise<string | undefined> {
   return proof ? proof.fingerprint : undefined;
 }
 
-async function cacheReceipt(opts: {
-  composeProject: string;
-  currentProjectDir: string;
-}) {
-  const id = await exec(["docker", "info", "--format", "{{.ID}}"], {
-    stdin: "ignore",
-    timeoutMs: 5000,
-  });
-  if (id.exitCode !== 0 || !id.stdout.trim()) {
-    throw new Error("Could not identify the Docker engine.");
-  }
-  const directory = resolve(resolveGlobalHackDir(), "compose-cache-receipts");
-  const key = fingerprint(
-    JSON.stringify([id.stdout.trim(), opts.composeProject])
+/** Detached volumes have no destination evidence. Only their own label can qualify them. */
+export async function listComposeVolumeNames(composeProject: string) {
+  const result = await exec(
+    [
+      "docker",
+      "volume",
+      "ls",
+      "--filter",
+      `label=${COMPOSE_PROJECT_LABEL}=${composeProject}`,
+      "--format",
+      "{{.Name}}",
+    ],
+    { stdin: "ignore", timeoutMs: 5000 }
   );
-  return {
-    directory,
-    path: resolve(directory, `${key}.json`),
-    checkout: canonicalPath(opts.currentProjectDir),
-  };
-}
-
-function isRecordedMount(value: unknown): value is MountedNamedVolumeCandidate {
-  return (
-    isRecord(value) &&
-    typeof value.name === "string" &&
-    VOLUME_NAME.test(value.name) &&
-    typeof value.fingerprint === "string" &&
-    [value.services, value.destinations].every(
-      (list) =>
-        Array.isArray(list) && list.every((item) => typeof item === "string")
-    )
-  );
-}
-
-/** Persist fresh mounted-volume observations before Compose removes their containers. */
-export async function retainDownCacheMounts(
-  opts: Parameters<typeof findMountedNamedVolumeCandidates>[0]
-): Promise<void> {
-  const mounts = findMountedNamedVolumeCandidates(opts);
-  if (!mounts.length) {
-    return;
-  }
-  const receipt = await cacheReceipt(opts);
-  const recorded: MountedNamedVolumeCandidate[] = [];
-  for (const mount of mounts) {
-    const identity = await volumeFingerprint(mount.name);
-    if (identity) {
-      recorded.push({ ...mount, fingerprint: identity });
-    }
-  }
-  const text = JSON.stringify({ checkout: receipt.checkout, mounts: recorded });
-  if (Buffer.byteLength(text) <= RECEIPT_LIMIT) {
-    await ensurePrivateDirectory(receipt.directory);
-    await writeTextFileAtomicIfChanged(receipt.path, text, {
-      createMode: 0o600,
-      noFollowTarget: true,
-      tightenExisting: true,
-    });
-  }
-}
-
-export async function readDownCacheMounts(
-  opts: Parameters<typeof cacheReceipt>[0]
-): Promise<readonly MountedNamedVolumeCandidate[]> {
-  try {
-    const receipt = await cacheReceipt(opts);
-    const text = await readBoundedPrivateFile({
-      path: receipt.path,
-      directories: [receipt.directory],
-      canonical: false,
-      maxBytes: RECEIPT_LIMIT,
-      refusal: () => new Error("Cache receipt could not be verified."),
-    });
-    const recorded: unknown = text ? JSON.parse(text) : null;
-    return isRecord(recorded) &&
-      recorded.checkout === receipt.checkout &&
-      Array.isArray(recorded.mounts)
-      ? recorded.mounts.filter(isRecordedMount)
-      : [];
-  } catch {
-    return [];
-  }
+  return result.exitCode === 0
+    ? result.stdout
+        .split("\n")
+        .map((name) => name.trim())
+        .filter((name) => VOLUME_NAME.test(name))
+    : null;
 }
 
 export function foreignCacheMounts(

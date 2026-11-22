@@ -350,7 +350,6 @@ import {
 import {
   type CacheVolumeKept,
   removeDisposableCacheVolumes,
-  retainDownCacheMounts,
 } from "../lib/disposable-cache-volumes.ts";
 import { dockerHelperRunEnvironment } from "../lib/docker-helper-environment.ts";
 import { parseDurationMs } from "../lib/duration.ts";
@@ -9176,19 +9175,6 @@ async function runDownCommand({
       return beforeCode;
     }
 
-    if (!pruneCaches) {
-      await retainDownCacheMounts({
-        composeProject: composeProjectName ?? baseProjectName,
-        currentProjectDir: project.projectDir,
-        runtime: (await readRuntimeProjects({ includeGlobal: false })).runtime,
-      }).catch(() =>
-        writeDownNotice({
-          json,
-          level: "warn",
-          message: "Could not record cache ownership before down.",
-        })
-      );
-    }
     await markLifecycleSharedHelpersStopping({
       cfg,
       composeProject: lifecycleComposeProject,
@@ -9312,10 +9298,20 @@ async function runDownCommand({
     logger.error({ message });
     return 1;
   }
-  cacheVolumesKept.sort((left, right) => left.name.localeCompare(right.name));
   const cacheRemoval = await removeDisposableCacheVolumes({
     candidates: cachePruneCandidates,
+    kept: cacheVolumesKept,
   });
+  for (const volume of cacheVolumesKept) {
+    if (volume.reason === "identity-changed") {
+      writeDownNotice({
+        json,
+        level: "warn",
+        message: `Kept volume "${volume.name}": its identity could not be verified after stopping.`,
+      });
+    }
+  }
+  cacheVolumesKept.sort((left, right) => left.name.localeCompare(right.name));
   await removeProjectRuntimeStateEntry({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,

@@ -5,7 +5,8 @@ import {
   type DisposableCacheVolumeCandidate,
   findMountedNamedVolumeCandidates,
   foreignCacheMounts,
-  readDownCacheMounts,
+  listComposeVolumeNames,
+  type MountedNamedVolumeCandidate,
   verifyDisposableCacheVolumes,
 } from "../lib/disposable-cache-volumes.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
@@ -63,12 +64,21 @@ export async function prepareDisposableCachePrune(opts: {
   readonly kept: CacheVolumeKept[];
 }): Promise<readonly DisposableCacheVolumeCandidate[]> {
   const selection = { ...opts, currentProjectDir: opts.projectDir };
-  const saved = await readDownCacheMounts(selection);
-  const observed = findMountedNamedVolumeCandidates(selection);
+  const names = await listComposeVolumeNames(opts.composeProject);
+  if (names === null) {
+    opts.writeNotice({
+      level: "warn",
+      message:
+        "Could not list Compose volumes. Only current mounts can be checked.",
+    });
+  }
   const mountedElsewhere = foreignCacheMounts(selection);
-  const selected = new Map(
-    [...saved, ...observed].map((candidate) => [candidate.name, candidate])
+  const selected = new Map<string, MountedNamedVolumeCandidate>(
+    names?.map((name) => [name, { name, destinations: [], services: [] }])
   );
+  for (const mount of findMountedNamedVolumeCandidates(selection)) {
+    selected.set(mount.name, mount);
+  }
   const candidates = [...selected.values()].filter((candidate) => {
     if (!mountedElsewhere.has(candidate.name)) {
       return true;
@@ -81,6 +91,13 @@ export async function prepareDisposableCachePrune(opts: {
     candidates,
     kept: opts.kept,
   });
+  const detached = opts.kept.filter(({ reason }) => reason === "no-live-mount");
+  if (detached.length > 0) {
+    opts.writeNotice({
+      level: "info",
+      message: `Kept volumes without current mounts: ${detached.map(({ name }) => name).join(", ")}. For disposable caches, run down --prune-caches before stopping, or add hack.cache.disposable=true to the volume.`,
+    });
+  }
   if (verified.length === 0) {
     opts.writeNotice({
       level: "info",
@@ -120,5 +137,13 @@ export async function prepareDisposableCachePrune(opts: {
     nonInteractive: "fail",
     hint: "Re-run with --prune-caches --yes to confirm non-interactively.",
   });
+  if (!confirmed) {
+    opts.kept.push(
+      ...verified.map(({ name }) => ({
+        name,
+        reason: "not-confirmed" as const,
+      }))
+    );
+  }
   return confirmed ? verified : [];
 }

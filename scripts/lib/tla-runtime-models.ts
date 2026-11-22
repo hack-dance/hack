@@ -181,6 +181,14 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "project-remote-selection",
+    module: "ProjectRemoteSelection",
+    states: 22,
+    invariant: "ReaderSeesWholeChoice",
+    action: "Claim",
+    fields: ['saved = "partial"'],
+  },
+  {
     name: "project-prerequisites",
     module: "ProjectPrerequisites",
     states: 13,

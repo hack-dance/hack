@@ -1,0 +1,20 @@
+---
+title: ProjectRemoteSelection · stopped save
+---
+stateDiagram-v2
+  [*] --> stopped
+  stopped --> writing: Claim
+  writing --> stopped: Publish
+  writing --> stopped: Crash
+  stopped --> running: Start
+  running --> stopped: Stop
+  writing --> runningWriting: Start
+  runningWriting --> running: Publish
+  runningWriting --> running: Crash
+  runningWriting --> writing: Stop
+  class stopped idle
+  class writing,runningWriting wait
+  class running live
+  note right of writing
+    INV Reader sees whole choice
+  end note

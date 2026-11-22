@@ -29,7 +29,7 @@ const PROBE_TIMEOUT_MS = 1000;
 const MAPPED_LOOPBACK = /^::ffff:(7f[\da-f]{2}):([\da-f]{1,4})$/i;
 const WHITESPACE = /\s+/;
 type ProbeState = "ok" | "timeout" | "unreachable" | "tls-error";
-type Endpoint = { readonly address: string; readonly port: number };
+export type Endpoint = { readonly address: string; readonly port: number };
 type ProbeOptions = Endpoint & {
   readonly caPem: string;
   readonly timeoutMs?: number;
@@ -53,20 +53,71 @@ export type ProxyLoopbackReport = {
  * The wall-clock timer covers the entire handshake, including a silent peer;
  * all outcomes destroy this probe's socket. HTTP only checks TCP reachability.
  */
-export function probeProxyLoopback(opts: ProbeOptions): Promise<ProbeState> {
+export async function probeProxyLoopback(
+  opts: ProbeOptions
+): Promise<ProbeState> {
+  return (await probeEndpoint(opts)).state;
+}
+
+/**
+ * Certificate verification failures: a server answered TLS with a
+ * certificate that the running proxy's CA did not issue for the schemas
+ * name. Something other than this home's proxy is answering there.
+ */
+const UNTRUSTED_CERTIFICATE_CODES: ReadonlySet<string> = new Set([
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "CERT_SIGNATURE_FAILURE",
+  "CERT_UNTRUSTED",
+  "CERT_REJECTED",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+/** HTTPS to the proxy, as `hack global up` reads it. */
+export type ProxyHttpsState = ProbeState | "untrusted";
+
+/**
+ * Doctor's HTTPS check, with one more distinction for `hack global up`:
+ * `untrusted` when the handshake completed with a certificate that is not
+ * the running proxy's (another server answers on that address), separate
+ * from `tls-error`, a handshake that did not complete (a container runtime
+ * that does not forward the port cleanly), which doctor tolerates.
+ */
+export async function probeProxyHttps(
+  opts: Omit<ProbeOptions, "protocol">
+): Promise<ProxyHttpsState> {
+  const result = await probeEndpoint({ ...opts, protocol: "https" });
+  if (
+    result.state === "tls-error" &&
+    result.code !== undefined &&
+    UNTRUSTED_CERTIFICATE_CODES.has(result.code)
+  ) {
+    return "untrusted";
+  }
+  return result.state;
+}
+
+function probeEndpoint(
+  opts: ProbeOptions
+): Promise<{ readonly state: ProbeState; readonly code?: string }> {
   const https =
     (opts.protocol ?? (opts.port === 443 ? "https" : "http")) === "https";
   return new Promise((resolve) => {
     let settled = false;
     let connected = false;
-    const done = (state: ProbeState) => {
+    const done = (state: ProbeState, code?: string) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      resolve(state);
+      resolve(code === undefined ? { state } : { state, code });
     };
     const socket = https
       ? connect({
@@ -91,8 +142,8 @@ export function probeProxyLoopback(opts: ProbeOptions): Promise<ProbeState> {
     } else {
       socket.once("connect", () => done("ok"));
     }
-    socket.once("error", () => {
-      done(connected && https ? "tls-error" : "unreachable");
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      done(connected && https ? "tls-error" : "unreachable", error.code);
     });
   });
 }
@@ -176,15 +227,10 @@ export async function inspectProxyLoopback(
         "Cannot verify loopback forwarding: the running proxy's published port bindings are unavailable.",
     };
   }
-  const endpoints = (opts.ports ?? ([80, 443] as const)).flatMap((port) => {
-    const published =
-      port === 80 || port === 443 ? (identity.loopbackPorts?.[port] ?? []) : [];
-    const candidates = opts.addresses ?? published.map(defaultLoopbackAddress);
-    return [...new Set(candidates)]
-      .filter((address) =>
-        published.some((binding) => sameLoopbackAddress(address, binding))
-      )
-      .map((address) => ({ address, port }));
+  const endpoints = proxyLoopbackEndpoints({
+    loopbackPorts: identity.loopbackPorts,
+    ports: opts.ports ?? [80, 443],
+    addresses: opts.addresses,
   });
   if (!endpoints.length) {
     return {
@@ -224,6 +270,30 @@ export async function inspectProxyLoopback(
       ? failureMessage(failed, listeners ?? [])
       : `Loopback ports reachable (${observations.map(hostPort).join(", ")}); HTTPS verifies against the running Hack proxy's internal CA.`,
   };
+}
+
+/**
+ * The loopback endpoints to check, from the running proxy's live published
+ * bindings (not the Compose file or the setting): each published loopback
+ * binding's default address (`0.0.0.0` → `127.0.0.1`, `::` → `::1`), or the
+ * given `addresses` that a binding covers. Shared by doctor and `hack global
+ * up`, so both look at the same endpoints. An unpublished port has none.
+ */
+export function proxyLoopbackEndpoints(opts: {
+  readonly loopbackPorts: Readonly<Record<80 | 443, readonly string[]>>;
+  readonly ports: readonly number[];
+  readonly addresses?: readonly string[];
+}): Endpoint[] {
+  return opts.ports.flatMap((port) => {
+    const published =
+      port === 80 || port === 443 ? (opts.loopbackPorts[port] ?? []) : [];
+    const candidates = opts.addresses ?? published.map(defaultLoopbackAddress);
+    return [...new Set(candidates)]
+      .filter((address) =>
+        published.some((binding) => sameLoopbackAddress(address, binding))
+      )
+      .map((address) => ({ address, port }));
+  });
 }
 
 function defaultLoopbackAddress(binding: string): string {

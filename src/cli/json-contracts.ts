@@ -1,6 +1,7 @@
 /** Canonical --json inventory. New command paths require an explicit shape decision. */
 export const JSON_COMMAND_SHAPES = {
   "global install": "schema-envelope",
+  "global up": "schema-envelope",
   "global dns preview": "envelope",
   "global status": "legacy-object",
   "global trust": "schema-envelope",
@@ -118,6 +119,7 @@ export const SCHEMA_JSON_VARIANTS = [
     flags: ["--observe"],
     schema: "hack.global-status.observe.v1",
   },
+  { command: "global up", flags: [], schema: "hack.global-up.v1" },
   {
     command: "global install",
     flags: ["--plan"],

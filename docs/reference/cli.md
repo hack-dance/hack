@@ -1462,6 +1462,7 @@ hack global up [options]
 | --- | --- |
 | `--logging` | Turn the logging stack (Loki, Alloy, Grafana) on, save logging.enabled=true and start it |
 | `--no-logging` | Turn the logging stack off, save logging.enabled=false and stop it; its logs are kept |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

@@ -1,7 +1,8 @@
 /**
  * End-to-end readiness of the global proxy, after its containers are
- * healthy: a `.hack` name resolved through CoreDNS, and an HTTPS request
- * answered through the published port.
+ * healthy: a `.hack` name resolved through CoreDNS to the proxy's own
+ * address, and TLS through the published port answered by the proxy itself
+ * (a certificate its CA issued).
  *
  * Each step ends in one of three ways, and only one of them fails `hack
  * global up`:
@@ -13,11 +14,18 @@
  *   whose address is not known). `up` then succeeds and says what it did not
  *   check.
  */
+import { isIP } from "node:net";
 import { DEFAULT_SCHEMAS_HOST } from "../constants.ts";
+import {
+  type ProxyHttpsState,
+  proxyLoopbackEndpoints,
+} from "./proxy-loopback.ts";
 
 const DNS_REFUSAL = /NXDOMAIN|can't find|SERVFAIL|REFUSED/i;
-const HTTP_STATUS = /^[1-5]\d\d$/;
+const NAME_LINE = /^\s*Name:/;
+const ADDRESS_LINE = /^\s*Address(?:\s+\d+)?:\s*([0-9a-fA-F:.]+)\s*$/;
 const TCP_SCHEME = /^tcp:/;
+const BRACKETS = /^\[|\]$/g;
 
 export type RouteProbeStep = "dns" | "https";
 
@@ -175,13 +183,51 @@ export async function waitForRoutes(
   }
 }
 
-/** `nslookup` exit and output, as one look at the DNS step. */
+/** The addresses in `nslookup`'s answer (after the server's own lines). */
+export function parseNslookupAnswers(output: string): string[] {
+  const answers: string[] = [];
+  let inAnswer = false;
+  for (const line of output.split("\n")) {
+    if (NAME_LINE.test(line)) {
+      inAnswer = true;
+      continue;
+    }
+    const address = ADDRESS_LINE.exec(line)?.[1];
+    if (inAnswer && address && isIP(address) !== 0) {
+      answers.push(address);
+    }
+  }
+  return answers;
+}
+
+/**
+ * `nslookup` exit and output, as one look at the DNS step. An answer counts
+ * only when it is one of `expected`, the proxy container's own addresses
+ * (CoreDNS answers routed names with Caddy's address); any other address is
+ * a wrong answer. With `expected` unknown the answer cannot be compared.
+ */
 export function classifyNslookup(opts: {
   readonly exitCode: number;
   readonly output: string;
+  readonly expected: readonly string[] | null;
 }): StepLook {
   if (opts.exitCode === 0) {
-    return { kind: "answered" };
+    const answers = parseNslookupAnswers(opts.output);
+    if (opts.expected === null || opts.expected.length === 0) {
+      return {
+        kind: "unknown",
+        detail:
+          "the proxy container's address could not be read, so the DNS answer was not compared",
+        retry: false,
+      };
+    }
+    if (answers.some((address) => opts.expected?.includes(address))) {
+      return { kind: "answered" };
+    }
+    return {
+      kind: "refused",
+      detail: `CoreDNS answered ${answers.length > 0 ? answers.join(", ") : "with no address"}, not the proxy's address (${opts.expected.join(", ")})`,
+    };
   }
   // 126/127: the image has no runnable nslookup (a v4 proxy file's image).
   if (opts.exitCode === 126 || opts.exitCode === 127) {
@@ -205,42 +251,65 @@ export function classifyNslookup(opts: {
   };
 }
 
-/** `curl` exit and `%{http_code}`, as one look at the HTTPS step. */
-export function classifyCurl(opts: {
-  readonly exitCode: number;
-  readonly status: string;
-  readonly address: string;
-}): StepLook {
-  if (opts.exitCode === 0 && HTTP_STATUS.test(opts.status.trim())) {
-    return { kind: "answered" };
-  }
-  // 7: connection refused. Retried, since the proxy may not listen yet.
-  if (opts.exitCode === 7) {
+/**
+ * HTTPS looks at each endpoint, as one look at the HTTPS step. Another
+ * server's certificate at any endpoint is a refusal: names resolving to that
+ * address reach it instead of the proxy. Otherwise ready when an endpoint
+ * completed TLS with a certificate the running proxy's CA issued for the
+ * schemas name (one family is enough, as in doctor). A refused port is a
+ * refusal; a handshake that did not complete, or a timeout, is the path
+ * doctor tolerates (a container runtime that does not forward the port
+ * cleanly): not checked.
+ */
+export function classifyHttps(
+  looks: readonly {
+    readonly address: string;
+    readonly state: ProxyHttpsState;
+  }[]
+): StepLook {
+  const impostor = looks.find((look) => look.state === "untrusted");
+  if (impostor) {
     return {
       kind: "refused",
-      detail: `port 443 on ${opts.address} refused the connection`,
+      detail: `port 443 on ${impostor.address} answered with a certificate this home's proxy did not issue (another server is answering there)`,
     };
   }
-  // A timeout or TLS failure on this path is what doctor tolerates (a
-  // container runtime that does not forward loopback): not checked.
+  if (looks.some((look) => look.state === "ok")) {
+    return { kind: "answered" };
+  }
+  const refused = looks.find((look) => look.state === "unreachable");
+  if (refused) {
+    return {
+      kind: "refused",
+      detail: `port 443 on ${refused.address} refused the connection`,
+    };
+  }
+  const where = looks.map((look) => look.address).join(", ");
   return {
     kind: "unknown",
-    detail: `HTTPS through port 443 on ${opts.address} did not reach the proxy (curl exit ${opts.exitCode}), so it was not checked; hack doctor reports this path`,
+    detail: `HTTPS through port 443 on ${where} did not complete (${looks.map((look) => look.state).join(", ")}), so it was not checked; hack doctor reports this path`,
     retry: false,
   };
 }
 
 /**
- * The host address for the HTTPS step. A local engine (unix socket, npipe)
- * uses `localAddress`, doctor's choice from the published bindings; a TCP
- * engine uses its host when the proxy publishes on every interface; an SSH
- * or other remote engine cannot be reached from here, so null.
+ * Where to send the HTTPS step, from the running proxy's live 443
+ * bindings: for a local engine (unix socket, npipe) the loopback endpoints
+ * doctor checks (`proxyLoopbackEndpoints`); for a TCP engine given by
+ * address, that address when the proxy publishes 443 on every interface.
+ * Anything else cannot be reached from here: `skipped` says why.
  */
-export function routeProbeAddress(opts: {
+export function routeHttpsTargets(opts: {
   readonly engine: string;
-  readonly localAddress: string | null;
-  readonly publishesAllInterfaces: boolean;
-}): string | null {
+  /** Live loopback bindings of the proxy, or null when unknown. */
+  readonly loopbackPorts: Readonly<Record<80 | 443, readonly string[]>> | null;
+}): { readonly addresses: readonly string[] } | { readonly skipped: string } {
+  if (opts.loopbackPorts === null) {
+    return {
+      skipped:
+        "the running proxy's published ports could not be read, so HTTPS through the proxy was not checked",
+    };
+  }
   const host = opts.engine.startsWith("host:")
     ? opts.engine.slice("host:".length)
     : null;
@@ -249,11 +318,38 @@ export function routeProbeAddress(opts: {
     host.startsWith("unix://") ||
     host.startsWith("npipe://")
   ) {
-    return opts.localAddress;
+    const endpoints = proxyLoopbackEndpoints({
+      loopbackPorts: opts.loopbackPorts,
+      ports: [443],
+    });
+    return endpoints.length > 0
+      ? { addresses: endpoints.map((endpoint) => endpoint.address) }
+      : {
+          skipped:
+            "the proxy does not publish port 443 on a loopback address, so HTTPS through the proxy was not checked (as in hack doctor)",
+        };
   }
-  if (host.startsWith("tcp://") && opts.publishesAllInterfaces) {
-    const hostname = new URL(host.replace(TCP_SCHEME, "http:")).hostname;
-    return hostname === "" ? null : hostname;
+  if (host.startsWith("tcp://")) {
+    const everywhere = opts.loopbackPorts[443].some(
+      (binding) => binding === "0.0.0.0" || binding === "::"
+    );
+    const hostname = new URL(
+      host.replace(TCP_SCHEME, "http:")
+    ).hostname.replace(BRACKETS, "");
+    if (!everywhere) {
+      return {
+        skipped:
+          "the Docker engine is remote and the proxy does not publish port 443 on every interface, so HTTPS through the proxy was not checked",
+      };
+    }
+    return isIP(hostname) !== 0
+      ? { addresses: [hostname] }
+      : {
+          skipped: `the Docker engine is given by host name (${hostname}), which is not resolved here, so HTTPS through the proxy was not checked`,
+        };
   }
-  return null;
+  return {
+    skipped:
+      "the Docker engine is not local and its address is not known here, so HTTPS through the proxy was not checked",
+  };
 }

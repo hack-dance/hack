@@ -4,10 +4,11 @@ import {
   parseEngineMajor,
 } from "../src/lib/docker-engine-features.ts";
 import {
-  classifyCurl,
+  classifyHttps,
   classifyNslookup,
+  parseNslookupAnswers,
   ROUTE_PROBE_NAME,
-  routeProbeAddress,
+  routeHttpsTargets,
   routeProbeName,
   type StepLook,
   waitForRoutes,
@@ -134,7 +135,13 @@ test("a look that cannot be checked stops that step at once as unknown, not a fa
     {
       resolveName: () => {
         dnsLooks++;
-        return Promise.resolve(classifyNslookup({ exitCode: 127, output: "" }));
+        return Promise.resolve(
+          classifyNslookup({
+            exitCode: 127,
+            output: "",
+            expected: ["10.0.0.2"],
+          })
+        );
       },
       requestHttps: () => Promise.resolve(answered),
       ...c,
@@ -153,7 +160,13 @@ test("an unknown that may clear is retried, and is unknown (not not-ready) at th
   const result = await waitForRoutes(
     {
       resolveName: () =>
-        Promise.resolve(classifyNslookup({ exitCode: 1, output: "timed out" })),
+        Promise.resolve(
+          classifyNslookup({
+            exitCode: 1,
+            output: "timed out",
+            expected: ["10.0.0.2"],
+          })
+        ),
       requestHttps: () => Promise.reject(new Error("spawn failed")),
       ...c,
     },
@@ -179,13 +192,40 @@ test("without an HTTPS look only DNS is waited for, and the skip is reported", a
   });
 });
 
-test("nslookup: an answer, a v4 image without the tool, a refusal, anything else", () => {
+const NSLOOKUP = (address: string) =>
+  `Server:\t\tcoredns\nAddress:\t127.0.0.11:53\n\nNon-authoritative answer:\nName:\tschemas.hack\nAddress: ${address}\n`;
+
+test("nslookup's answer is read after the server lines", () => {
+  expect(parseNslookupAnswers(NSLOOKUP("10.0.0.2"))).toEqual(["10.0.0.2"]);
   expect(
-    classifyNslookup({ exitCode: 0, output: "Address: 10.0.0.2" })
+    parseNslookupAnswers("Server:\t\tcoredns\nAddress:\t127.0.0.11:53\n")
+  ).toEqual([]);
+});
+
+test("nslookup: only the proxy's own address answers; a wrong address is a refusal; a v4 image without the tool is not checked", () => {
+  const expected = ["10.0.0.2"];
+  expect(
+    classifyNslookup({ exitCode: 0, output: NSLOOKUP("10.0.0.2"), expected })
   ).toEqual(answered);
+  // An answer that is not Caddy's: CoreDNS (or something in its place) is
+  // sending the name elsewhere.
+  expect(
+    classifyNslookup({ exitCode: 0, output: NSLOOKUP("192.0.2.99"), expected })
+  ).toEqual({
+    kind: "refused",
+    detail: "CoreDNS answered 192.0.2.99, not the proxy's address (10.0.0.2)",
+  });
+  // The proxy's address cannot be read: the answer cannot be compared.
+  expect(
+    classifyNslookup({
+      exitCode: 0,
+      output: NSLOOKUP("10.0.0.2"),
+      expected: null,
+    })
+  ).toMatchObject({ kind: "unknown", retry: false });
   // A v4 proxy file's image: `exec: "nslookup": executable file not found`.
   for (const exitCode of [126, 127]) {
-    expect(classifyNslookup({ exitCode, output: "" })).toMatchObject({
+    expect(classifyNslookup({ exitCode, output: "", expected })).toMatchObject({
       kind: "unknown",
       retry: false,
     });
@@ -194,51 +234,98 @@ test("nslookup: an answer, a v4 image without the tool, a refusal, anything else
     classifyNslookup({
       exitCode: 1,
       output: "** server can't find schemas.hack.local: NXDOMAIN",
+      expected,
     }).kind
   ).toBe("refused");
   expect(
-    classifyNslookup({ exitCode: 1, output: ";; connection timed out" })
+    classifyNslookup({
+      exitCode: 1,
+      output: ";; connection timed out",
+      expected,
+    })
   ).toMatchObject({ kind: "unknown", retry: true });
 });
 
-test("curl: any HTTP status answers; a refused port is a refusal; a timeout or TLS failure is not checked", () => {
-  const look = (exitCode: number, status: string) =>
-    classifyCurl({ exitCode, status, address: "127.0.0.1" });
-  expect(look(0, "404")).toEqual(answered);
-  expect(look(0, "000").kind).not.toBe("answered");
-  expect(look(7, "000").kind).toBe("refused");
-  // 28: timeout (loopback a container runtime does not forward to Caddy);
-  // 35: TLS handshake failed. Doctor tolerates both; up does not fail on them.
-  for (const exitCode of [28, 35, 52, 56]) {
-    expect(look(exitCode, "000")).toMatchObject({
+test("HTTPS: only the proxy's own certificate answers; a refused port or another server's certificate is a refusal; an incomplete handshake is not checked", () => {
+  expect(classifyHttps([{ address: "127.0.0.1", state: "ok" }])).toEqual(
+    answered
+  );
+  // One family answering is enough, as in doctor's reachable.
+  expect(
+    classifyHttps([
+      { address: "127.0.0.1", state: "ok" },
+      { address: "::1", state: "tls-error" },
+    ])
+  ).toEqual(answered);
+  expect(
+    classifyHttps([{ address: "127.0.0.1", state: "untrusted" }])
+  ).toMatchObject({ kind: "refused" });
+  // Another server on one family is a refusal even when the proxy answers on
+  // the other: names resolving to 127.0.0.1 would reach it.
+  expect(
+    classifyHttps([
+      { address: "127.0.0.1", state: "untrusted" },
+      { address: "::1", state: "ok" },
+    ])
+  ).toEqual({
+    kind: "refused",
+    detail:
+      "port 443 on 127.0.0.1 answered with a certificate this home's proxy did not issue (another server is answering there)",
+  });
+  expect(
+    classifyHttps([{ address: "127.0.0.1", state: "unreachable" }])
+  ).toEqual({
+    kind: "refused",
+    detail: "port 443 on 127.0.0.1 refused the connection",
+  });
+  // A timeout or a handshake that did not complete (a container runtime
+  // that does not forward loopback cleanly): what doctor tolerates.
+  for (const state of ["timeout", "tls-error"] as const) {
+    expect(classifyHttps([{ address: "::1", state }])).toMatchObject({
       kind: "unknown",
       retry: false,
     });
   }
 });
 
-test("the HTTPS address follows the engine: local uses doctor's choice, TCP its host, others none", () => {
-  const address = (engine: string, publishesAllInterfaces = true) =>
-    routeProbeAddress({
-      engine,
-      localAddress: "127.0.0.1",
-      publishesAllInterfaces,
-    });
-  expect(address("host:unix:///var/run/docker.sock")).toBe("127.0.0.1");
-  expect(address("host:npipe:////./pipe/docker_engine")).toBe("127.0.0.1");
-  expect(address("host:tcp://10.1.2.3:2376")).toBe("10.1.2.3");
-  // A TCP engine whose proxy publishes on one address only: not reachable here.
-  expect(address("host:tcp://10.1.2.3:2376", false)).toBeNull();
-  expect(address("host:ssh://builder@remote")).toBeNull();
-  expect(address("host:unknown://")).toBeNull();
-  // Doctor found no address in the Compose file: none invented.
+test("HTTPS endpoints come from the proxy's live bindings: doctor's loopback choice locally, the engine's address over TCP, none otherwise", () => {
+  const ports = (b443: readonly string[]) => ({ 80: [], 443: b443 });
+  const local = "host:unix:///var/run/docker.sock";
   expect(
-    routeProbeAddress({
-      engine: "host:unix:///var/run/docker.sock",
-      localAddress: null,
-      publishesAllInterfaces: true,
+    routeHttpsTargets({ engine: local, loopbackPorts: ports(["0.0.0.0"]) })
+  ).toEqual({ addresses: ["127.0.0.1"] });
+  expect(
+    routeHttpsTargets({
+      engine: local,
+      loopbackPorts: ports(["0.0.0.0", "::"]),
     })
-  ).toBeNull();
+  ).toEqual({ addresses: ["127.0.0.1", "::1"] });
+  expect(
+    routeHttpsTargets({ engine: local, loopbackPorts: ports(["127.81.0.5"]) })
+  ).toEqual({ addresses: ["127.81.0.5"] });
+  // 443 not published (or only on a non-loopback address): nothing to probe.
+  expect(
+    "skipped" in routeHttpsTargets({ engine: local, loopbackPorts: ports([]) })
+  ).toBe(true);
+  expect(
+    "skipped" in routeHttpsTargets({ engine: local, loopbackPorts: null })
+  ).toBe(true);
+  expect(
+    routeHttpsTargets({
+      engine: "host:tcp://10.1.2.3:2376",
+      loopbackPorts: ports(["0.0.0.0"]),
+    })
+  ).toEqual({ addresses: ["10.1.2.3"] });
+  for (const [engine, b443] of [
+    ["host:tcp://10.1.2.3:2376", ["127.0.0.1"]],
+    ["host:tcp://builder.example:2376", ["0.0.0.0"]],
+    ["host:ssh://builder@remote", ["0.0.0.0"]],
+    ["host:unknown://", ["0.0.0.0"]],
+  ] as const) {
+    expect(
+      "skipped" in routeHttpsTargets({ engine, loopbackPorts: ports(b443) })
+    ).toBe(true);
+  }
 });
 
 test("the probe asks for the schemas name the proxy file routes, so an older file is probed by its own name", () => {

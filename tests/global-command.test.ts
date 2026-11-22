@@ -138,10 +138,42 @@ const linuxDnsHostMock = await registerScopedModuleMock({
   },
 });
 
+// The route probe's Docker and TLS reads (src/lib/global-route-checks.ts).
+// Unset responders answer as Docker does under the shell mock above: the
+// proxy's runtime and addresses cannot be read, so both steps are reported
+// as not checked and `up` does not wait on them.
+type ProxyRuntimeAnswer = {
+  readonly caPem: string | null;
+  readonly loopbackPorts: Readonly<Record<80 | 443, readonly string[]>> | null;
+};
+let proxyRuntimeAnswer: ProxyRuntimeAnswer | null = null;
+let caddyAddressesAnswer: string[] | null = null;
+let httpsStateAnswer: ((address: string) => string) | null = null;
+const httpsProbeCalls: string[][] = [];
+const routeChecksMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/global-route-checks.ts",
+  overrides: {
+    readProxyRuntime: async () =>
+      proxyRuntimeAnswer ?? { caPem: null, loopbackPorts: null },
+    readCaddyAddresses: async () => caddyAddressesAnswer,
+    probeProxyHttpsAt: async (opts: {
+      readonly addresses: readonly string[];
+    }) => {
+      httpsProbeCalls.push([...opts.addresses]);
+      return opts.addresses.map((address) => ({
+        address,
+        state: httpsStateAnswer?.(address) ?? "ok",
+      }));
+    },
+  },
+});
+
 beforeAll(() => {
   shellMock.activate();
   osMock.activate();
   linuxDnsHostMock.activate();
+  routeChecksMock.activate();
 });
 
 beforeEach(async () => {
@@ -189,6 +221,7 @@ afterAll(() => {
   shellMock.deactivate();
   osMock.deactivate();
   linuxDnsHostMock.deactivate();
+  routeChecksMock.deactivate();
 });
 
 async function writeComposeFile(path: string): Promise<void> {
@@ -1818,53 +1851,104 @@ test(
   { timeout: 60_000 }
 );
 
-describe("global up's route probe never fails on what it cannot check (HACK-2468)", () => {
+describe("global up's route probe: only Hack's own proxy passes, and what cannot be checked never fails (HACK-2468)", () => {
   const savedDockerHost = process.env.DOCKER_HOST;
+  const CADDY = "172.30.0.2";
+  const answer = (address: string) => ({
+    exitCode: 0,
+    stdout: `Server:\t\tcoredns\nAddress:\t127.0.0.11:53\n\nNon-authoritative answer:\nName:\tschemas.hack\nAddress: ${address}\n`,
+    stderr: "",
+  });
   afterEach(() => {
     if (savedDockerHost === undefined) {
       Reflect.deleteProperty(process.env, "DOCKER_HOST");
     } else {
       process.env.DOCKER_HOST = savedDockerHost;
     }
+    proxyRuntimeAnswer = null;
+    caddyAddressesAnswer = null;
+    httpsStateAnswer = null;
+    httpsProbeCalls.length = 0;
   });
 
   async function upWith(opts: {
     readonly dockerHost: string;
     readonly nslookup?: { exitCode: number; stdout: string; stderr: string };
-    readonly curl?: { exitCode: number; stdout: string; stderr: string };
+    readonly published443?: readonly string[];
+    readonly https?: (address: string) => string;
+    readonly args?: readonly string[];
   }) {
     process.env.DOCKER_HOST = opts.dockerHost;
+    proxyRuntimeAnswer = {
+      caPem: "PEM",
+      loopbackPorts: { 80: ["0.0.0.0"], 443: opts.published443 ?? ["0.0.0.0"] },
+    };
+    caddyAddressesAnswer = [CADDY];
+    httpsStateAnswer = opts.https ?? null;
     const caddyCompose = globalCaddyComposePath();
     await mkdir(dirname(caddyCompose), { recursive: true });
-    // The rendered file, so the probe reads the published bindings from it.
     await writeFile(caddyCompose, renderGlobalCaddyCompose());
     await writeFile(join(dirname(caddyCompose), "Corefile"), ".:53 {}\n");
-    execMockResponder = (cmd) => {
-      if (cmd.includes("nslookup")) {
-        return opts.nslookup ?? { exitCode: 0, stdout: "", stderr: "" };
+    execMockResponder = (cmd) =>
+      cmd.includes("nslookup") ? (opts.nslookup ?? answer(CADDY)) : null;
+    const out: string[] = [];
+    const err: string[] = [];
+    const outSpy = spyOn(process.stdout, "write").mockImplementation(
+      (chunk: string | Uint8Array) => {
+        out.push(String(chunk));
+        return true;
       }
-      if (cmd.includes("--resolve")) {
-        return opts.curl ?? { exitCode: 0, stdout: "404", stderr: "" };
+    );
+    const errSpy = spyOn(process.stderr, "write").mockImplementation(
+      (chunk: string | Uint8Array) => {
+        err.push(String(chunk));
+        return true;
       }
-      return null;
-    };
-    const lines: string[] = [];
-    const capture = (chunk: string | Uint8Array) => {
-      lines.push(String(chunk));
-      return true;
-    };
-    const outSpy = spyOn(process.stdout, "write").mockImplementation(capture);
-    const errSpy = spyOn(process.stderr, "write").mockImplementation(capture);
+    );
     try {
       const { runCli } = await import("../src/cli/run.ts");
-      const code = await runCli(["global", "up"]);
-      const curls = execCalls.filter((call) => call.includes("--resolve"));
-      return { code, output: lines.join(""), curls };
+      const code = await runCli(["global", "up", ...(opts.args ?? [])]);
+      return {
+        code,
+        stdout: out.join(""),
+        output: `${out.join("")}${err.join("")}`,
+      };
     } finally {
       outSpy.mockRestore();
       errSpy.mockRestore();
     }
   }
+
+  test("Hack's proxy answering at doctor's loopback endpoint, with CoreDNS naming the proxy: ready", async () => {
+    const result = await upWith({ dockerHost: "unix:///var/run/docker.sock" });
+    expect(result.code).toBe(0);
+    expect(result.output).not.toContain("Not checked");
+    // The endpoint comes from the live 443 binding (0.0.0.0 → 127.0.0.1).
+    expect(httpsProbeCalls).toEqual([["127.0.0.1"]]);
+  });
+
+  test("another server answering HTTPS (a certificate the proxy's CA did not issue) fails up with E_GLOBAL_NOT_READY", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      https: () => "untrusted",
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("E_GLOBAL_NOT_READY");
+    expect(result.output).toContain(
+      "port 443 on 127.0.0.1 answered with a certificate this home's proxy did not issue"
+    );
+  }, 60_000);
+
+  test("CoreDNS answering with another address fails up with E_GLOBAL_NOT_READY", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      nslookup: answer("192.0.2.99"),
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(
+      `CoreDNS answered 192.0.2.99, not the proxy's address (${CADDY})`
+    );
+  }, 60_000);
 
   test("a v4 proxy image without nslookup: up succeeds and says DNS was not checked", async () => {
     const result = await upWith({
@@ -1885,45 +1969,87 @@ describe("global up's route probe never fails on what it cannot check (HACK-2468
     );
   });
 
-  test("loopback 443 that does not reach Caddy (timeout, TLS failure): up succeeds, not checked", async () => {
-    for (const exitCode of [28, 35]) {
-      execCalls.length = 0;
+  test("loopback 443 that does not complete TLS (timeout, reset): up succeeds, not checked", async () => {
+    for (const state of ["timeout", "tls-error"]) {
       const result = await upWith({
         dockerHost: "unix:///var/run/docker.sock",
-        curl: { exitCode, stdout: "000", stderr: "" },
+        https: () => state,
       });
       expect(result.code).toBe(0);
       expect(result.output).toContain(
-        `did not reach the proxy (curl exit ${exitCode}), so it was not checked`
+        `HTTPS through port 443 on 127.0.0.1 did not complete (${state}), so it was not checked`
       );
-      expect(result.curls).toHaveLength(1);
     }
   });
 
-  test("the request bypasses HTTPS_PROXY and goes to doctor's loopback address", async () => {
-    const result = await upWith({ dockerHost: "unix:///var/run/docker.sock" });
+  test("443 not published on loopback: not checked, as in doctor, and nothing is probed", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      published443: [],
+    });
     expect(result.code).toBe(0);
-    expect(result.curls).toHaveLength(1);
-    const curl = result.curls[0]!;
-    expect(curl[curl.indexOf("--noproxy") + 1]).toBe("*");
-    expect(curl[curl.indexOf("--resolve") + 1]).toBe(
-      "schemas.hack.local:443:127.0.0.1"
+    expect(httpsProbeCalls).toEqual([]);
+    expect(result.output).toContain(
+      "Not checked: the proxy does not publish port 443 on a loopback address"
     );
   });
 
-  test("a TCP engine is probed at its host; an SSH engine is not probed and says so", async () => {
+  test("a TCP engine is probed at its address; one given by host name, or an SSH engine, is not probed and says so", async () => {
     const tcp = await upWith({ dockerHost: "tcp://10.1.2.3:2376" });
     expect(tcp.code).toBe(0);
-    expect(tcp.curls[0]).toContain("schemas.hack.local:443:10.1.2.3");
+    expect(httpsProbeCalls).toEqual([["10.1.2.3"]]);
 
-    execCalls.length = 0;
+    httpsProbeCalls.length = 0;
+    const named = await upWith({ dockerHost: "tcp://builder.example:2376" });
+    expect(named.code).toBe(0);
+    expect(httpsProbeCalls).toEqual([]);
+    expect(named.output).toContain(
+      "the Docker engine is given by host name (builder.example), which is not resolved here"
+    );
+
     const ssh = await upWith({ dockerHost: "ssh://builder@remote" });
     expect(ssh.code).toBe(0);
-    expect(ssh.curls).toEqual([]);
+    expect(httpsProbeCalls).toEqual([]);
     expect(ssh.output).toContain(
       "Not checked: the Docker engine is not local and its address is not known here"
     );
   });
+
+  test("global up --json: stdout is one envelope, with the route outcome, or the readiness code on failure", async () => {
+    const ok = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      args: ["--json"],
+    });
+    expect(ok.code).toBe(0);
+    const envelope = JSON.parse(ok.stdout);
+    expect(envelope).toMatchObject({
+      ok: true,
+      data: {
+        schema: "hack.global-up.v1",
+        failedStage: null,
+        logging: { enabled: false },
+        routes: { dns: { state: "ready" }, https: { state: "ready" } },
+      },
+    });
+
+    const failed = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      https: () => "untrusted",
+      args: ["--json"],
+    });
+    expect(failed.code).toBe(1);
+    expect(JSON.parse(failed.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_GLOBAL_NOT_READY",
+        detail: {
+          schema: "hack.global-up.v1",
+          failedStage: "routing",
+          routes: { https: { state: "not-ready" } },
+        },
+      },
+    });
+  }, 60_000);
 });
 
 describe("the opt-in logging stack (HACK-2468)", () => {

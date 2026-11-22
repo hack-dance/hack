@@ -127,7 +127,7 @@ Source: `src/commands/env.ts:437 (backendUseSpec)`. No command alias is declared
 | `hack global dns preview` | `--json`; `--domain v5.hack.gy` | Missing; drafted above |
 | `hack global dns activate` | `--domain v5.hack.gy` | Missing; drafted above |
 | `hack global dns deactivate` | `--domain v5.hack.gy` | Missing; drafted above |
-| `hack global up` | none | Present |
+| `hack global up` | `--logging`; `--no-logging`; `--json` | Present |
 | `hack global down` | none | Present |
 | `hack global status` | `--json` | Present |
 | `hack global logs [service]` | `--follow, -f`; `--no-follow`; `--tail <n>`; `--pretty` | Present |

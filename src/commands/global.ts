@@ -11,7 +11,12 @@ import type {
   CommandArgs,
   CommandHandlerFor,
 } from "../cli/command.ts";
-import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import {
+  CliUsageError,
+  defineCommand,
+  defineOption,
+  withHandler,
+} from "../cli/command.ts";
 import {
   optFollow,
   optJson,
@@ -68,7 +73,12 @@ import {
   inspectCaddyCaIdentity,
 } from "../lib/caddy-ca-identity.ts";
 import { observeGlobalCaddyIp } from "../lib/caddy-hosts.ts";
-import { emitCliResult, errorResult, HackCliError } from "../lib/cli-result.ts";
+import {
+  emitCliResult,
+  errorResult,
+  HackCliError,
+  okResult,
+} from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import {
   resolveGlobalConfigPath,
@@ -106,10 +116,12 @@ import {
   resolveLoggingFlag,
 } from "../lib/global-logging.ts";
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
+import * as routeChecks from "../lib/global-route-checks.ts";
 import {
-  classifyCurl,
+  classifyHttps,
   classifyNslookup,
-  routeProbeAddress,
+  type RouteProbeResult,
+  routeHttpsTargets,
   routeProbeName,
   waitForRoutes,
 } from "../lib/global-route-probe.ts";
@@ -140,7 +152,6 @@ import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
   isHackRenderedLoggingCompose,
-  readProxyBindScope,
   removeUnstartedProxyContainers,
   resolveManagedProxyBind,
   writeManagedProxyCompose,
@@ -183,7 +194,6 @@ import {
   selectedDockerEngine,
   withIngressChange,
 } from "../lib/proxy-ingress-addresses.ts";
-import { proxyConnectAddress } from "../lib/proxy-loopback.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
 import {
@@ -210,7 +220,11 @@ import {
 import { display } from "../ui/display.ts";
 import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
 import { ensureBundledGumInstalled } from "../ui/gum.ts";
-import { logger } from "../ui/logger.ts";
+import {
+  captureLoggedProblems,
+  logger,
+  setLoggerBackendOverride,
+} from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
 import {
   type AdminPlan,
@@ -441,6 +455,7 @@ const globalUpOptions = [
     description:
       "Turn the logging stack off, save logging.enabled=false and stop it; its logs are kept",
   } as const),
+  optJson,
 ] as const;
 
 const globalUpSpec = defineCommand({
@@ -570,26 +585,20 @@ export const globalCommand = defineCommand({
     withHandler(globalUpSpec, async ({ args }) => {
       const choice = resolveLoggingFlag(args.options);
       if (choice === "conflict") {
+        if (args.options.json === true) {
+          throw new CliUsageError(
+            "Use either --logging or --no-logging, not both."
+          );
+        }
         logger.error({
           message: "Use either --logging or --no-logging, not both.",
         });
         return 1;
       }
-      if (choice !== null) {
-        try {
-          await updateGlobalConfig({
-            path: LOGGING_ENABLED_CONFIG_KEY,
-            value: choice,
-          });
-        } catch (error) {
-          // Not saved: this run still follows the flag, and routing starts.
-          logger.warn({
-            message: `${LOGGING_ENABLED_CONFIG_KEY}=${choice} was not saved: ${error instanceof Error ? error.message : String(error)}. This run uses it; later runs follow the saved setting.`,
-          });
-          return await globalUpCommand({ loggingOverride: choice });
-        }
-      }
-      return await globalUpCommand({});
+      return await globalUpCommand({
+        choice,
+        json: args.options.json === true,
+      });
     }),
     withHandler(globalDownSpec, async () => await globalDown()),
     withHandler(globalStatusSpec, handleGlobalStatus),
@@ -2351,31 +2360,34 @@ const ROUTES_READY_TIMEOUT_MS = 15_000;
 
 /**
  * After the proxy's containers are ready: waits, bounded and with progress,
- * until a `.hack` name resolves through CoreDNS and an HTTPS request answers
- * through the published port (see src/lib/global-route-probe.ts). A step
- * Hack cannot check is reported and does not fail `global up`; only a real
- * refusal or a wrong answer does; that is returned as a coded error.
+ * until a `.hack` name resolves through CoreDNS to the proxy's own address
+ * and TLS through the published port is answered by the proxy itself (see
+ * src/lib/global-route-probe.ts). The HTTPS endpoints are the ones doctor
+ * checks, from the proxy's live bindings. A step Hack cannot check is
+ * reported and does not fail `global up`; only a real refusal or a wrong
+ * answer does, returned as a coded error.
  */
 async function globalRoutesNotReady(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly login: boolean;
-}): Promise<HackCliError | null> {
+}): Promise<{
+  readonly error: HackCliError | null;
+  readonly routes: RouteProbeResult;
+}> {
   const { paths, login } = opts;
   const proxyCompose = (await readTextFile(paths.caddyCompose)) ?? "";
-  const scope = readProxyBindScope(proxyCompose);
-  const address = routeProbeAddress({
-    engine: `host:${await dockerEngineEndpoint()}`,
-    localAddress: proxyConnectAddress(scope),
-    publishesAllInterfaces:
-      scope.kind === "all" ||
-      (scope.kind === "address" &&
-        (scope.address === "0.0.0.0" || scope.address === "::")),
+  const engine = `host:${await dockerEngineEndpoint()}`;
+  let runtime = await routeChecks.readProxyRuntime();
+  const targets = routeHttpsTargets({
+    engine,
+    loopbackPorts: runtime.loopbackPorts,
   });
-  const curl = findExecutableInPath("curl");
+  let caddyAddresses = await routeChecks.readCaddyAddresses();
   const result = await waitForRoutes(
     {
       name: routeProbeName(proxyCompose),
       resolveName: async (name) => {
+        caddyAddresses ??= await routeChecks.readCaddyAddresses();
         const answer = await exec(
           [
             "docker",
@@ -2395,39 +2407,32 @@ async function globalRoutesNotReady(opts: {
         return classifyNslookup({
           exitCode: answer.exitCode,
           output: `${answer.stdout}\n${answer.stderr}`,
+          expected: caddyAddresses,
         });
       },
       requestHttps:
-        curl && address
-          ? async (name) => {
-              const response = await exec(
-                [
-                  curl,
-                  "-sk",
-                  "--noproxy",
-                  "*",
-                  "--max-time",
-                  "2",
-                  "--resolve",
-                  `${name}:443:${address}`,
-                  "-o",
-                  "/dev/null",
-                  "-w",
-                  "%{http_code}",
-                  `https://${name}/`,
-                ],
-                { stdin: "ignore", timeoutMs: 4000 }
+        "addresses" in targets
+          ? async () => {
+              if (runtime.caPem === null) {
+                runtime = await routeChecks.readProxyRuntime();
+              }
+              if (runtime.caPem === null) {
+                return {
+                  kind: "unknown",
+                  detail:
+                    "the running proxy's CA could not be read, so HTTPS through the proxy was not checked",
+                  retry: true,
+                };
+              }
+              return classifyHttps(
+                await routeChecks.probeProxyHttpsAt({
+                  addresses: targets.addresses,
+                  caPem: runtime.caPem,
+                })
               );
-              return classifyCurl({
-                exitCode: response.exitCode,
-                status: response.stdout,
-                address,
-              });
             }
           : null,
-      httpsSkipped: curl
-        ? "the Docker engine is not local and its address is not known here, so HTTPS through the proxy was not checked"
-        : "curl is not on PATH, so HTTPS through the proxy was not checked",
+      httpsSkipped: "skipped" in targets ? targets.skipped : undefined,
       progress: login
         ? undefined
         : ({ waitingFor, elapsedMs }) =>
@@ -2447,20 +2452,23 @@ async function globalRoutesNotReady(opts: {
     }
   }
   if (notReady.length === 0) {
-    return null;
+    return { error: null, routes: result };
   }
-  return new HackCliError({
-    code: GLOBAL_NOT_READY_CODE,
-    message: [
-      `The global proxy's containers are running, but within ${Math.round(ROUTES_READY_TIMEOUT_MS / 1000)} s ${notReady
-        .map((step) => {
-          const outcome = result[step];
-          return outcome.state === "not-ready" ? outcome.detail : "";
-        })
-        .join(", and ")}.`,
-      "See why: docker logs --tail 50 hack-dev-proxy-caddy-1; docker logs --tail 50 hack-dev-proxy-coredns-1; hack doctor",
-    ].join("\n"),
-  });
+  return {
+    routes: result,
+    error: new HackCliError({
+      code: GLOBAL_NOT_READY_CODE,
+      message: [
+        `The global proxy's containers are running, but within ${Math.round(ROUTES_READY_TIMEOUT_MS / 1000)} s ${notReady
+          .map((step) => {
+            const outcome = result[step];
+            return outcome.state === "not-ready" ? outcome.detail : "";
+          })
+          .join(", and ")}.`,
+        "See why: docker logs --tail 50 hack-dev-proxy-caddy-1; docker logs --tail 50 hack-dev-proxy-coredns-1; hack doctor",
+      ].join("\n"),
+    }),
+  };
 }
 
 /**
@@ -2499,6 +2507,10 @@ type GlobalUpResult = {
   readonly failedStage: "routing" | "logging" | null;
   /** A coded readiness failure (E_GLOBAL_NOT_READY / E_GLOBAL_STOPPED). */
   readonly error?: HackCliError;
+  /** The route probe's outcome per step, once it ran. */
+  readonly routes?: RouteProbeResult;
+  /** Whether this run kept the logging stack on. */
+  readonly logging?: boolean;
 };
 
 /** For callers that continue on failure: prints a coded failure, returns the code. */
@@ -2513,12 +2525,97 @@ export async function globalUp(): Promise<number> {
 }
 
 /** `hack global up`: a coded failure is thrown, for its text line or JSON envelope. */
-async function globalUpCommand(opts: UpOptions): Promise<number> {
-  const result = await runGlobalUp(opts);
-  if (result.error) {
-    throw result.error;
+/**
+ * `hack global up`. A `--logging`/`--no-logging` choice is saved first; if
+ * the save fails this run still follows it. Without `--json` a coded
+ * failure is thrown for its text line. With `--json`, human lines go to
+ * stderr and stdout holds one envelope: `{ok: true, data}` or `{ok: false,
+ * error: {code, message, detail}}`, where `code` is E_GLOBAL_NOT_READY or
+ * E_GLOBAL_STOPPED for a readiness failure, else E_GLOBAL_INFRA_DOWN, and
+ * `data`/`detail` is `hack.global-up.v1` (see {@link globalUpData}). Exit
+ * codes are the same in both modes.
+ */
+async function globalUpCommand(opts: {
+  readonly choice: boolean | null;
+  readonly json: boolean;
+}): Promise<number> {
+  if (opts.json) {
+    setLoggerBackendOverride({ backend: "console" });
   }
+  const problems = opts.json ? captureLoggedProblems() : null;
+  let result: GlobalUpResult;
+  try {
+    const loggingOverride = await saveLoggingChoice(opts.choice);
+    result = await runGlobalUp(
+      loggingOverride === undefined ? {} : { loggingOverride }
+    );
+  } finally {
+    problems?.stop();
+    if (opts.json) {
+      setLoggerBackendOverride({ backend: null });
+    }
+  }
+  if (!opts.json) {
+    if (result.error) {
+      throw result.error;
+    }
+    return result.exit;
+  }
+  const data = globalUpData(result);
+  emitCliResult({
+    result:
+      result.exit === 0
+        ? okResult({ data })
+        : errorResult({
+            code: result.error?.code ?? "E_GLOBAL_INFRA_DOWN",
+            message:
+              result.error?.message ??
+              problems?.last() ??
+              "hack global up failed",
+            detail: data,
+          }),
+  });
   return result.exit;
+}
+
+/**
+ * Saves a `--logging`/`--no-logging` choice. Returns it when the save
+ * failed, so this run follows it anyway (reported), else undefined.
+ */
+async function saveLoggingChoice(
+  choice: boolean | null
+): Promise<boolean | undefined> {
+  if (choice === null) {
+    return undefined;
+  }
+  try {
+    await updateGlobalConfig({
+      path: LOGGING_ENABLED_CONFIG_KEY,
+      value: choice,
+    });
+    return undefined;
+  } catch (error) {
+    // Not saved: this run still follows the flag, and routing starts.
+    logger.warn({
+      message: `${LOGGING_ENABLED_CONFIG_KEY}=${choice} was not saved: ${error instanceof Error ? error.message : String(error)}. This run uses it; later runs follow the saved setting.`,
+    });
+    return choice;
+  }
+}
+
+/**
+ * `hack global up --json` data (`hack.global-up.v1`): which stage failed
+ * (`routing`, `logging` or null), whether logging ran on, and the route
+ * probe's outcome per step (`ready`, `not-ready` or `unknown` with its
+ * detail; null when the probe did not run).
+ */
+function globalUpData(result: GlobalUpResult) {
+  return {
+    schema: MACHINE_SCHEMAS.globalUp,
+    failedStage: result.failedStage,
+    logging: result.logging === undefined ? null : { enabled: result.logging },
+    routes: result.routes ?? null,
+  } as const;
 }
 
 /**
@@ -2669,16 +2766,22 @@ async function runGlobalUpChange(opts: UpOptions): Promise<GlobalUpResult> {
     });
     return { exit: 1, failedStage: "routing" };
   }
-  const routingError =
-    (await globalStackNotReady({
-      composeFile: paths.caddyCompose,
-      stack: "The global proxy (Caddy and CoreDNS)",
-      login,
-      timeoutMs: ROUTING_READY_TIMEOUT_MS,
-      legacyWatchMs: ROUTING_LEGACY_WATCH_MS,
-    })) ?? (await globalRoutesNotReady({ paths, login }));
-  if (routingError) {
-    return { exit: 1, failedStage: "routing", error: routingError };
+  const stackError = await globalStackNotReady({
+    composeFile: paths.caddyCompose,
+    stack: "The global proxy (Caddy and CoreDNS)",
+    login,
+    timeoutMs: ROUTING_READY_TIMEOUT_MS,
+    legacyWatchMs: ROUTING_LEGACY_WATCH_MS,
+  });
+  if (stackError) {
+    return { exit: 1, failedStage: "routing", error: stackError };
+  }
+  const { error: routesError, routes } = await globalRoutesNotReady({
+    paths,
+    login,
+  });
+  if (routesError) {
+    return { exit: 1, failedStage: "routing", error: routesError, routes };
   }
   await reconcileGlobalRoutingBridge({ enabled: !login });
 
@@ -2688,10 +2791,15 @@ async function runGlobalUpChange(opts: UpOptions): Promise<GlobalUpResult> {
     enabled: logging.enabled,
   });
   if (loggingResult.exit !== 0) {
-    return { ...loggingResult, failedStage: "logging" };
+    return {
+      ...loggingResult,
+      failedStage: "logging",
+      routes,
+      logging: logging.enabled,
+    };
   }
   logger.success({ message: "Global infra is up" });
-  return { exit: 0, failedStage: null };
+  return { exit: 0, failedStage: null, routes, logging: logging.enabled };
 }
 
 /**

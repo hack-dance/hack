@@ -20,12 +20,14 @@ const SUPPORTED = new Set([
   "properties",
   "additionalProperties",
   "required",
+  "dependentRequired",
   "enum",
   "items",
   "anyOf",
   "minItems",
   "uniqueItems",
   "minimum",
+  "maximum",
 ]);
 
 type Schema = Readonly<Record<string, unknown>>;
@@ -117,6 +119,13 @@ function validateAt(
   ) {
     issues.push({ pointer, code: "minimum" });
   }
+  if (
+    typeof schema.maximum === "number" &&
+    typeof value === "number" &&
+    value > schema.maximum
+  ) {
+    issues.push({ pointer, code: "maximum" });
+  }
   if (Array.isArray(schema.anyOf)) {
     const matched = schema.anyOf.some(
       (option) => validateAt(option, value, pointer).length === 0
@@ -150,6 +159,20 @@ function validateAt(
             pointer: `${pointer}/${escapePointer(key)}`,
             code: "required",
           });
+        }
+      }
+    }
+    if (isSchema(schema.dependentRequired)) {
+      for (const [trigger, keys] of Object.entries(schema.dependentRequired)) {
+        if (Object.hasOwn(value, trigger) && Array.isArray(keys)) {
+          for (const key of keys) {
+            if (typeof key === "string" && !Object.hasOwn(value, key)) {
+              issues.push({
+                pointer: `${pointer}/${escapePointer(key)}`,
+                code: "required",
+              });
+            }
+          }
         }
       }
     }

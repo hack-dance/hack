@@ -81,9 +81,9 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 How it is maintained:
 
 Tracked legacy overlays are shared project inputs. `hack doctor --fix` leaves
-their index entries and tracked templates/backups alone. Run
-`hack doctor --migrate-env-config` to preserve overlay values before considering
-removal; committing an automatic index removal would delete teammates' copies.
+their index entries and tracked templates/backups alone. Preview with
+`hack env migrate --json` and apply with `hack env migrate --apply` to preserve
+overlay values before considering removal; committing an automatic index removal would delete teammates' copies.
 
 - created by `hack init` for a new project, and refreshed when you write
   machine-local env overrides (`hack env set --local`, `hack env hydrate`)
@@ -1384,7 +1384,7 @@ creates a private snapshot outside the working tree and records idempotent steps
 in a journal. Re-run it after interruption; a finished migration is a no-op.
 `doctor --migrate-env-config` still applies migration; its existing hygiene
 repairs can run before the migration snapshot and are reported separately.
-Use `hack env migrate --apply` for migration-only preview and rollback.
+Use `hack env migrate` to preview, apply or roll back the migration itself.
 Both backends use the
 same file migration; Compose users need no native runtime, and neither preview
 nor apply needs Docker or a daemon.
@@ -1448,8 +1448,8 @@ Once this is committed, a teammate's own `.hack/.env` and overlays may stop reac
 because their checkout now uses env layers. Hack compares those files with what the layers
 deliver. For any value the layers don't deliver, `hack up` warns and doctor reports it. For a
 value in `.hack/.env`, `hack env materialize` also refuses, so the file isn't replaced; it doesn't
-write overlay files, so an overlay value doesn't stop it. They run
-`hack doctor --migrate-env-config` to move those values to their own local layers, adding to a
+write overlay files, so an overlay value doesn't stop it. They preview with
+`hack env migrate --json` and apply with `hack env migrate --apply` to move those values to their own local layers, adding to a
 local layer that already exists and making it private (mode 0600). A value equal to what the
 layers deliver isn't copied, so later team changes still reach them. A key the local layer sets
 differently refuses (`E_PATH_CONFLICT`), and so does a local layer that can't be read as an env
@@ -1555,7 +1555,7 @@ files, when:
   file, creating it if needed; the Compose `env_file` checks above then apply to that file;
 - env layers include a symlink while legacy values remain undelivered (`E_PATH_CONFLICT`).
   Replace linked layers with regular files containing the intended layer content, then retry
-  `hack doctor --migrate-env-config`. The migration does not write through a linked layer;
+  `hack env migrate --apply`. The migration does not write through a linked layer;
 - `.hack/.env` has a state file, env layers exist, and its text isn't what `hack env materialize`
   would write (`E_PATH_CONFLICT`). The file is out of date or was edited by hand, and Hack can't
   tell which. If it's generated, move any value of your own with `hack env set --local`, then run
@@ -1727,8 +1727,9 @@ The legacy `.hack/.env` holds one value per key, with no per-service values. In 
 project, `hack env set` and `hack env unset` change only that global value, so they refuse
 `--service <service>` with a usage error instead of ignoring it (an invalid scope is refused
 the same way in both formats). `--service global`, or no `--service`, still works. Migrate to
-env layers first with `hack doctor --migrate-env-config`, which also converts a project that
-has only `.hack/.env` (see above), then set or unset the service-scoped value.
+env layers first. Preview with `hack env migrate --json`, then use
+`hack env migrate --apply`, which also converts projects with only `.hack/.env`.
+Then set or unset the service-scoped value.
 
 Values migrated from `.hack/.env` live in the machine-local layer, and a later layer wins
 over a more specific scope in an earlier one. So to override a migrated key for one service,
@@ -1885,3 +1886,39 @@ with an in-memory backend. Tests that exercise keychain behavior can temporarily
 clear the flag; the preload still prevents native keychain access. Child CLI
 processes inherit the flag, so tests must pass it through when supplying a custom
 process environment. The in-memory backend is cleared after each test.
+
+## Sign-in prerequisites for Compose projects
+
+Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
+`requires` array names those requirements. Hack checks the default target's
+requirements before running Compose lifecycle hooks for `up`, `restart`, or
+`run`. When you select services explicitly, Hack checks the remotes whose
+mapped env names match an `environment` key or a Compose interpolation
+reference in a selected service or its dependencies. With no service selection, Hack checks every default
+remote. Hack also checks every default remote when it cannot determine the
+selected services' environment keys, including when a service uses `env_file`
+or the checkout has managed env layers.
+Doctor runs preset checks and shows each declared login command. It reports
+custom checks as `not checked` after looking up their executables.
+
+A prerequisite can use the `aws-sso` preset with a `profile`, or the
+`gcloud-adc` preset. For other providers, give `check` and `login` as argv
+arrays. Hack runs these directly. A prerequisite's optional `tools` array
+names entries in the same configuration's top-level `tools` block. Each
+entry supplies `bins` and can provide an `install` hint for a missing binary.
+Hack resolves executables through `PATH`. Doctor shows the path and source
+for each prerequisite executable. Doctor shows the full custom check and login
+commands, and marks executables found inside the project. Startup prints a
+notice the first time it uses such an executable.
+
+Checks run from the project root in their own process group, discard both output
+streams, and stop the group after ten seconds. Keep secrets
+out of command arguments. Hack can offer to run a login in an interactive
+terminal after a failed check. With `--no-interactive`, use the displayed
+command yourself and retry.
+
+A config with `requires`, `remotes`, or `tools` needs `min_cli_version`. Set it to the
+first Hack release that supports the declarations the project uses. Upgrade
+all earlier Hack installations before adopting this configuration. Versions
+released before `min_cli_version` enforcement can silently ignore these
+declarations.

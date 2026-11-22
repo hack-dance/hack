@@ -6,6 +6,37 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 
+/// Maximum input count, so a key and its metadata can fit in one record.
+pub(super) const MAX_STEP_INPUTS: usize = 256;
+
+/// The identity of a runtime build, embedded in the executable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Build(String);
+
+impl Build {
+    /// The running image's version and build-input hash.
+    pub fn current() -> Result<Self> {
+        Self::validated(format!(
+            "{}+{}:{}",
+            crate::CANDIDATE_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            env!("HACK_RUNTIME_BUILD_ID")
+        ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn named(name: &str) -> Result<Self> {
+        Self::validated(name.to_owned())
+    }
+
+    fn validated(name: String) -> Result<Self> {
+        if !valid_identifier(&name) {
+            return Err(invalid("Invalid step build identifier."));
+        }
+        Ok(Self(name))
+    }
+}
+
 /// Which evidence a lookup needs to reuse a step.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -41,13 +72,16 @@ impl StepKey {
         class: StepClass,
         inputs: &BTreeMap<String, InputDigest>,
         epoch: Option<&str>,
-        build: &str,
+        build: &Build,
     ) -> Result<Self> {
+        if inputs.len() > MAX_STEP_INPUTS {
+            return Err(invalid("Too many step inputs."));
+        }
         if !valid_name(step) || !inputs.keys().all(|name| valid_name(name)) {
             return Err(invalid("Invalid step or input name."));
         }
-        if !valid_identifier(build) || !epoch.is_none_or(valid_identifier) {
-            return Err(invalid("Invalid step build or epoch identifier."));
+        if !epoch.is_none_or(valid_identifier) {
+            return Err(invalid("Invalid step epoch identifier."));
         }
         let identity = json!({
             "step": step,
@@ -55,7 +89,7 @@ impl StepKey {
             "class": class,
             "inputs": inputs,
             "epoch": epoch,
-            "build": build,
+            "build": build.0,
         });
         let digest = canonical_digest::digest(STEP, &identity)
             .map_err(|_| invalid("Cannot encode the step key."))?;
@@ -65,7 +99,7 @@ impl StepKey {
             class,
             inputs: inputs.clone(),
             epoch: epoch.map(str::to_owned),
-            build: build.to_owned(),
+            build: build.0.clone(),
             digest,
         })
     }

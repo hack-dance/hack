@@ -146,6 +146,11 @@ import {
   doctorMetadata,
 } from "../lib/doctor-metadata.ts";
 import {
+  checkNativeImageBuilder,
+  NATIVE_BUILDER_CHECK,
+  type NativeBuilderReport,
+} from "../lib/doctor-native-builder.ts";
+import {
   AMD64_EMULATION_CHECK,
   type Amd64EmulationReport,
   amd64EmulationCheckResult,
@@ -292,6 +297,7 @@ import {
   inspectProjectLifecycleHygiene,
   repairProjectLifecycleSessions,
 } from "../lib/project-lifecycle-hygiene.ts";
+import { inspectProjectPrerequisites } from "../lib/project-prerequisites.ts";
 import {
   findIncompleteRuntimeProjects,
   findMissingRegistryEntries,
@@ -385,6 +391,8 @@ interface CheckResult {
   readonly devPerformance?: DevPerformanceReport;
   /** Native pool idleness: state, graph count and memory; no paths. */
   readonly nativePool?: NativePoolReport;
+  /** A count of build services and the image builder's closed state. */
+  readonly nativeBuilder?: NativeBuilderReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -1269,7 +1277,61 @@ async function collectDoctorProjectChecks(opts: {
     }))
   );
 
+  if (!adopted && projectCtx.status === "ok") {
+    results.push(...(await collectPrerequisiteChecks(startDir, s)));
+  }
+
   return results;
+}
+
+async function collectPrerequisiteChecks(
+  startDir: string,
+  progress: DoctorProgress
+): Promise<TimedCheckResult[]> {
+  const project = await findProjectContext(startDir);
+  if (!project) {
+    return [];
+  }
+  const { prerequisites } = await readProjectConfig(project);
+  if (prerequisites?.error) {
+    const { code, message } = prerequisites.error;
+    return [
+      await runCheck(progress, "prerequisites", () =>
+        Promise.resolve({
+          name: "prerequisites",
+          status: "error",
+          message: `${code}: ${message}`,
+        })
+      ),
+    ];
+  }
+  if (!prerequisites?.config) {
+    return [];
+  }
+  const observed = await inspectProjectPrerequisites(
+    prerequisites.config,
+    project.projectRoot
+  );
+  return await Promise.all(
+    observed.map(({ name, state, check, login, tools }) => {
+      const checkName = `prerequisite ${name}`;
+      const label =
+        state.state === "missing" ? `${state.bin} not found` : state.state;
+      return runCheck(progress, checkName, () =>
+        Promise.resolve({
+          name: checkName,
+          status: state.state === "ok" ? "ok" : "warn",
+          message: [
+            `${label}${check ? ` · check: ${check}` : ""} · login: ${login}`,
+            ...tools.map(
+              ({ bin, path, source, inProject }) =>
+                `  ${bin}  ${path ?? "not found"} · ${source}${inProject ? " · in project" : ""}`
+            ),
+          ].join("\n"),
+        })
+      );
+    })
+  );
 }
 
 function assertMachineDoctorOptions(
@@ -1674,6 +1736,20 @@ async function handleNativeDoctor(opts: {
         { timeoutMs: 25_000 }
       )
     );
+    // Read-only, with --fix too: adding the builder needs download consent.
+    results.push(
+      await runCheck(
+        progress,
+        NATIVE_BUILDER_CHECK,
+        async () =>
+          await checkNativeImageBuilder({
+            runtime: opts.runtime,
+            cwd: nativeProject.projectRoot,
+            compose: await readNativeComposeDocument(nativeProject.composeFile),
+          }),
+        { timeoutMs: 35_000 }
+      )
+    );
   }
   await appendNativeMachineChecks({ ...opts, progress, results });
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
@@ -1933,6 +2009,8 @@ export type DoctorJsonCheck = DoctorMetadata & {
   readonly devPerformance?: DevPerformanceReport;
   /** Present only on the native pool idle machine check. */
   readonly nativePool?: NativePoolReport;
+  /** Present only on the native image builder check: a count and a closed state. */
+  readonly nativeBuilder?: NativeBuilderReport;
 };
 
 export type DoctorJsonData = {
@@ -1964,6 +2042,7 @@ const DOCTOR_REPORT_FIELDS = [
   "nativeSource",
   "devPerformance",
   "nativePool",
+  "nativeBuilder",
 ] as const satisfies readonly (keyof CheckResult)[];
 
 type DoctorReportFields = Pick<

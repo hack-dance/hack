@@ -643,7 +643,6 @@ pub(super) struct Observer<'a> {
     transport: Transport,
 }
 impl<'a> Observer<'a> {
-    #[cfg(target_os = "macos")]
     pub(in crate::provider) fn guest(&self) -> &ObservedGuest<'a> {
         &self.guest
     }
@@ -668,6 +667,17 @@ impl<'a> Observer<'a> {
         Ok(value)
     }
 
+    /// Fixed read-only image endpoint. Recheck ownership on both success and
+    /// 404 so an absence after a guest change cannot authorize a load.
+    pub(super) fn image(&self, image: &str) -> Result<Value, CandidateError> {
+        self.guest.verify()?;
+        let result =
+            self.transport
+                .request(Method::GET, &format!("/v1.53/images/{image}/json"), None);
+        self.guest.verify()?;
+        result
+    }
+
     /// Recheck after failures too: a new-boot 404 cannot prove old-boot absence.
     #[cfg(target_os = "macos")]
     pub(super) fn get_until(&self, path: &str, deadline: Instant) -> Result<Value, CandidateError> {
@@ -690,7 +700,7 @@ impl<'a> Observer<'a> {
         Ok(value)
     }
 
-    fn info(&self) -> Result<EngineInfo, CandidateError> {
+    pub(super) fn info(&self) -> Result<EngineInfo, CandidateError> {
         self.guest.verify()?;
         let value = self.transport.request(Method::GET, "/version", None)?;
         self.guest.verify()?;

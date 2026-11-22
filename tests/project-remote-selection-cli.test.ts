@@ -22,7 +22,11 @@ test("the six --use entry points deliver the invocation target without saving it
       await mkdir(hack, { recursive: true });
       await Bun.write(
         join(hack, "docker-compose.yml"),
-        "services:\n  api:\n    image: alpine\n  postgres:\n    image: postgres\n"
+        "include: [worker.yml]\nservices:\n  api:\n    image: alpine\n  postgres:\n    image: postgres\n  migrate:\n    image: alpine\n    profiles: [maintenance]\n"
+      );
+      await Bun.write(
+        join(hack, "worker.yml"),
+        "services:\n  worker:\n    image: alpine\n"
       );
       await Bun.write(
         join(hack, "hack.config.json"),
@@ -64,6 +68,9 @@ test("the six --use entry points deliver the invocation target without saving it
       "docker",
       [
         'case " $* " in',
+        '  *" config --services "*)',
+        '    printf "%s\\n" api postgres worker',
+        '    case " $* " in *" --profile maintenance "*) printf "%s\\n" migrate ;; esac ;;',
         '  *" down "*) rm -f "$TEST_STACK_STATE" ;;',
         '  *" ps "*) if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" up "*|*" run "*)',
@@ -151,6 +158,14 @@ test("the six --use entry points deliver the invocation target without saving it
       expect(delivery).toContain("live.example.test:5432\n");
       expect(delivery).not.toMatch(/ up .* postgres/);
     }
+    await Bun.write(log, "");
+    ok(["up", "--detach", ...choice]);
+    const defaultStartup = await Bun.file(log).text();
+    expect(defaultStartup).toMatch(/ up .* worker/);
+    expect(defaultStartup).not.toMatch(/ up .* migrate/);
+    await Bun.write(log, "");
+    ok(["restart", "--profile", "maintenance", ...choice]);
+    expect(await Bun.file(log).text()).toMatch(/ up .* worker migrate/);
     expect(ok(["use"]).stdout).toContain(
       "running: live (--use) · pending: qa (checkout)"
     );

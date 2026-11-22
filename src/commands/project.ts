@@ -317,6 +317,7 @@ import {
   effectiveComposeProfiles,
   readComposeInterpolationEnv,
   readComposeOneShotGraph,
+  readIncludedComposeServiceNames,
   runningOneShots,
   waitingDependents,
 } from "../lib/compose-oneshot-progress.ts";
@@ -4123,6 +4124,47 @@ function resolveInternalSettings(
   };
 }
 
+async function resolveRemoteStartupServices(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly composeProjectName: string | null;
+  readonly profiles: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+  readonly choices: readonly EffectiveRemote[];
+}): Promise<readonly string[]> {
+  const cwd = dirname(opts.project.composeFile);
+  const result = await exec(
+    [
+      ...buildComposeArgs({
+        composeFiles: [opts.project.composeFile],
+        composeProject: opts.composeProjectName,
+        profiles: opts.profiles,
+        cwd,
+      }),
+      "config",
+      "--services",
+    ],
+    { cwd, env: opts.env, timeoutMs: 15_000, forwardSignals: true }
+  );
+  if (result.exitCode !== 0) {
+    throw new HackCliError({
+      code: "E_COMPOSE_FAILED",
+      message:
+        "Could not resolve active Compose services for remote selection.",
+    });
+  }
+  const active = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const services = remoteServiceTargets(opts.choices, active);
+  await assertNoInactiveRemoteDependencies({
+    files: [opts.project.composeFile],
+    services,
+    choices: opts.choices,
+  });
+  return services;
+}
+
 async function readComposeServiceNames(
   composeFile: string
 ): Promise<readonly string[]> {
@@ -7627,6 +7669,11 @@ async function handleUpUnlocked({
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
   if (process.env.HACK_RUNTIME_BACKEND === "native") {
+    refuseUnsupportedNativeUpOptions({
+      restart: false,
+      target: args.options.target,
+      services: args.positionals.services,
+    });
     const remoteProject =
       args.options.project === undefined
         ? await findProjectContext(resolveStartDir(ctx, args.options.path))
@@ -8024,7 +8071,9 @@ async function runUpCommand({
   const internalSettings = resolveInternalSettings(cfg);
   await maybePromptToStartGlobal({ internal: internalSettings });
 
-  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const allServiceNames = await (remoteChoices.length
+    ? readIncludedComposeServiceNames
+    : readComposeServiceNames)(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
     requested: args.positionals.services,
     available: allServiceNames,
@@ -8038,36 +8087,43 @@ async function runUpCommand({
         composeFile: project.composeFile,
       })
     : null;
-  const targetServices = remoteServiceTargets(
+  const initialServices = remoteServiceTargets(
     remoteChoices,
     serviceScoped ? requestedServices : allServiceNames,
     serviceScoped
   );
-  if (!serviceScoped) {
-    await assertNoInactiveRemoteDependencies({
-      files: [project.composeFile],
-      services: targetServices,
-      choices: remoteChoices,
-    });
-  }
   const cacheBootstrapServices = scopedDependencyCache
     ? await resolveDependencyCacheBootstrapServices({
         composeFile: project.composeFile,
         cache: scopedDependencyCache,
-        targetServices,
+        targetServices: initialServices,
       })
     : [];
-  const preparedServices = [
-    ...new Set([...targetServices, ...cacheBootstrapServices]),
+  const initialPreparedServices = [
+    ...new Set([...initialServices, ...cacheBootstrapServices]),
   ];
   const envOverrides = await resolveComposeEnvOverrides({
     remoteChoices,
     project,
     projectName,
-    targetServices: preparedServices,
+    targetServices: initialPreparedServices,
     allServiceNames,
     envName,
   });
+
+  const targetServices =
+    !serviceScoped && remoteChoices.length
+      ? await resolveRemoteStartupServices({
+          project,
+          composeProjectName,
+          profiles,
+          env: envOverrides.env,
+          choices: remoteChoices,
+        })
+      : initialServices;
+  const preparedServices = serviceScoped
+    ? initialPreparedServices
+    : targetServices;
 
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
@@ -9859,6 +9915,7 @@ async function runRestartUpPhase(opts: {
   readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
+  readonly remoteStartupServices?: readonly string[];
   readonly remoteChoices?: readonly EffectiveRemote[];
   readonly envName?: string | null;
   readonly detach?: boolean;
@@ -9878,13 +9935,10 @@ async function runRestartUpPhase(opts: {
   });
   const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
 
-  const allServiceNames = await readComposeServiceNames(
-    opts.project.composeFile
-  );
-  const targetServices = remoteServiceTargets(
-    opts.remoteChoices,
-    allServiceNames
-  );
+  const allServiceNames = await (opts.remoteChoices?.length
+    ? readIncludedComposeServiceNames
+    : readComposeServiceNames)(opts.project.composeFile);
+  const targetServices = opts.remoteStartupServices ?? allServiceNames;
   const envOverrides = await resolveComposeEnvOverrides({
     remoteChoices: opts.remoteChoices,
     project: opts.project,
@@ -10675,7 +10729,9 @@ async function runRestartCommand({
   });
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
   const projectName = sanitizeProjectSlug(baseProjectName);
-  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const allServiceNames = await (remoteChoices.length
+    ? readIncludedComposeServiceNames
+    : readComposeServiceNames)(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
     requested: args.positionals.services,
     available: allServiceNames,
@@ -10737,11 +10793,6 @@ async function runRestartCommand({
       exitCode: 0,
     });
   }
-  await assertNoInactiveRemoteDependencies({
-    files: [project.composeFile],
-    services: remoteServiceTargets(remoteChoices, allServiceNames),
-    choices: remoteChoices,
-  });
   const preflightEnv = await resolveComposeEnvOverrides({
     remoteChoices,
     project,
@@ -10750,6 +10801,15 @@ async function runRestartCommand({
     allServiceNames,
     envName: effectiveEnvName,
   });
+  const remoteStartupServices = remoteChoices.length
+    ? await resolveRemoteStartupServices({
+        project,
+        composeProjectName,
+        profiles,
+        env: preflightEnv.env,
+        choices: remoteChoices,
+      })
+    : undefined;
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
@@ -10822,6 +10882,7 @@ async function runRestartCommand({
   });
 
   const upOutcome = await runRestartUpPhase({
+    remoteStartupServices,
     remoteChoices,
     budgets,
     project,

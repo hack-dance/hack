@@ -594,6 +594,12 @@ export async function readComposeOneShotGraph(
   composeFiles: readonly string[],
   options: OneShotGraphOptions = {}
 ): Promise<ComposeOneShotGraph> {
+  const { documents, resolution } = await readComposeDocuments(composeFiles);
+  const graph = mergeOneShotGraphs(documents, options);
+  return resolution.incomplete ? { ...graph, incomplete: true } : graph;
+}
+
+async function readComposeDocuments(composeFiles: readonly string[]) {
   const documents: unknown[] = [];
   const resolution = { incomplete: false };
   for (const file of composeFiles) {
@@ -604,8 +610,20 @@ export async function readComposeOneShotGraph(
       includeChain: [file],
     });
   }
-  const graph = mergeOneShotGraphs(documents, options);
-  return resolution.incomplete ? { ...graph, incomplete: true } : graph;
+  return { documents, resolution };
+}
+
+export async function readIncludedComposeServiceNames(
+  file: string
+): Promise<readonly string[]> {
+  const { documents } = await readComposeDocuments([file]);
+  return [
+    ...new Set(
+      documents.flatMap((doc) =>
+        isRecord(doc) && isRecord(doc.services) ? Object.keys(doc.services) : []
+      )
+    ),
+  ];
 }
 
 /**

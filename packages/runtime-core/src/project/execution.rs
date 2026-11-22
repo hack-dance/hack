@@ -293,6 +293,8 @@ fn inspect(
 /// Observe a started service, then check the deadline and cancellation. Only an
 /// observation that passed both can report the service's own goal: its first one
 /// records `ServiceReady`, so a failed, late or cancelled attempt reports nothing more.
+/// The cancellation check can wait (a driver may verify guest state there), so the
+/// deadline is checked again before the event.
 fn observe_started(
     driver: &mut impl Driver,
     name: &str,
@@ -305,6 +307,7 @@ fn observe_started(
     before_deadline(deadline, now())?;
     driver.check_cancelled()?;
     if state.satisfies(goal) && !seen.ready.contains(name) {
+        before_deadline(deadline, now())?;
         driver.record(Event::ServiceReady { service: name })?;
         seen.ready.insert(name.into());
     }
@@ -731,11 +734,21 @@ mod tests {
     #[test]
     fn an_observation_that_crosses_the_deadline_reports_nothing_ready() {
         use std::{cell::Cell, rc::Rc};
+        /// The healthy answer, or the cancellation check after it, returns after
+        /// the deadline.
         struct Late {
             inner: Fake,
             late: Rc<Cell<bool>>,
+            in_cancel_check: bool,
+            observed: Cell<bool>,
         }
         impl Driver for Late {
+            fn check_cancelled(&self) -> Result<(), CandidateError> {
+                if self.in_cancel_check && self.observed.get() {
+                    self.late.set(true);
+                }
+                Ok(())
+            }
             fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
                 self.inner.record(event)
             }
@@ -743,8 +756,10 @@ mod tests {
                 self.inner.start(service)
             }
             fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
-                // The healthy answer arrives after the deadline.
-                self.late.set(true);
+                if !self.in_cancel_check {
+                    self.late.set(true);
+                }
+                self.observed.set(true);
                 self.inner.observe(service)
             }
         }
@@ -757,44 +772,48 @@ mod tests {
                 },
             )]),
         };
-        let late = Rc::new(Cell::new(false));
-        let mut driver = Late {
-            inner: Fake {
-                states: BTreeMap::from([(
-                    "web".into(),
-                    Observation::Running {
-                        health: Health::Healthy,
-                    },
-                )]),
-                ..Fake::default()
-            },
-            late: late.clone(),
-        };
-        let start = Instant::now();
-        let outcome = run_with_clock(
-            &graph,
-            &mut driver,
-            Duration::from_secs(1),
-            |_| panic!("no wait before the deadline"),
-            || {
-                if late.get() {
-                    start + Duration::from_secs(2)
-                } else {
-                    start
-                }
-            },
-        );
-        assert_eq!(outcome.unwrap_err().code, "graph_timeout");
-        assert_eq!(driver.inner.starts, ["web"]);
-        assert!(
-            !driver
-                .inner
-                .events
-                .iter()
-                .any(|event| event.contains("ready")),
-            "{:?}",
-            driver.inner.events
-        );
+        for in_cancel_check in [false, true] {
+            let late = Rc::new(Cell::new(false));
+            let mut driver = Late {
+                inner: Fake {
+                    states: BTreeMap::from([(
+                        "web".into(),
+                        Observation::Running {
+                            health: Health::Healthy,
+                        },
+                    )]),
+                    ..Fake::default()
+                },
+                late: late.clone(),
+                in_cancel_check,
+                observed: Cell::new(false),
+            };
+            let start = Instant::now();
+            let outcome = run_with_clock(
+                &graph,
+                &mut driver,
+                Duration::from_secs(1),
+                |_| panic!("no wait before the deadline"),
+                || {
+                    if late.get() {
+                        start + Duration::from_secs(2)
+                    } else {
+                        start
+                    }
+                },
+            );
+            assert_eq!(
+                outcome.unwrap_err().code,
+                "graph_timeout",
+                "{in_cancel_check}"
+            );
+            assert_eq!(driver.inner.starts, ["web"]);
+            let events = &driver.inner.events;
+            assert!(
+                !events.iter().any(|event| event.contains("ready")),
+                "{in_cancel_check}: {events:?}"
+            );
+        }
     }
     #[test]
     fn a_dependency_is_reported_ready_before_its_dependent_starts() {

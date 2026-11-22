@@ -1256,3 +1256,62 @@ fn a_cache_with_paths_over_the_bounds_is_ignored() {
     // It was rewritten within the bounds and is trusted again.
     assert_eq!(tree.settled().files_read, 0);
 }
+
+#[test]
+fn deep_snapshot_uses_bounded_descriptor_headroom() {
+    crate::provider::test_executable::run_isolated(
+        "provider::image_build::context::tests::deep_snapshot_at_fixed_descriptor_limits",
+        crate::provider::test_executable::ISOLATED_HANG_GUARD,
+    );
+}
+
+#[test]
+#[ignore = "isolated descriptor-limit fixture launched by deep_snapshot_uses_bounded_descriptor_headroom"]
+fn deep_snapshot_at_fixed_descriptor_limits() {
+    let limit = libc::rlimit {
+        rlim_cur: 256,
+        rlim_max: 10_240,
+    };
+    // SAFETY: this is a single-test child and limit points to initialized storage.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    let tree = Tree::new();
+    let leaf = tree.context().join("d/".repeat(200));
+    fs::create_dir_all(&leaf).unwrap();
+    fs::write(leaf.join("file"), "payload").unwrap();
+    let keyed = tree.walk("", None, SystemTime::now());
+    let error = snapshot::Snapshot::create(
+        &tree.context(),
+        &tree.root.join("low"),
+        &keyed.recorded,
+        &|| None,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "native_build_context_descriptor_limit");
+
+    crate::raise_open_file_limit();
+    let mut observed = limit;
+    // SAFETY: observed is writable storage for the current child's limit.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut observed) },
+        0
+    );
+    assert_eq!((observed.rlim_cur, observed.rlim_max), (10_240, 10_240));
+    let snapshot = snapshot::Snapshot::create(
+        &tree.context(),
+        &tree.root.join("raised"),
+        &keyed.recorded,
+        &|| None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        fs::read(snapshot.context().join("d/".repeat(200)).join("file")).unwrap(),
+        b"payload"
+    );
+
+    let system_limit = std::io::Error::from_raw_os_error(libc::ENFILE);
+    assert_eq!(
+        read_error(system_limit).code,
+        "native_build_context_descriptor_limit"
+    );
+}

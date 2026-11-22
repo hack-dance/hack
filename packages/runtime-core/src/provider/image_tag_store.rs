@@ -430,7 +430,8 @@ fn resolve_pending(
                 "1" => eprintln!("hack.image-wait:begin"),
                 _ => (),
             }
-            let lock = super::lifecycle::startup_lease(&root, std::time::Duration::from_secs(590));
+            let lock =
+                state::Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(590));
             match report_wait.as_str() {
                 "batch" => eprintln!("hack.image-wait:end {canonical}"),
                 "1" => eprintln!("hack.image-wait:end"),

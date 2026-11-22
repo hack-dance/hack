@@ -80,6 +80,112 @@ export function nativeImageBlockerDetail(
   );
 }
 
+export type ImageFailure = {
+  reference: string;
+  code: string;
+  reason: string;
+  recovery: string;
+  services: readonly string[];
+};
+
+const IMAGE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const IMAGE_FAILURE_TEXT = /^[ -~]{1,400}$/;
+const IMAGE_FAILURE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
+
+export function imageBatchFailures(value: unknown): value is ImageFailure[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 3 &&
+    value.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        typeof entry.reference === "string" &&
+        DISPLAY_REFERENCE.test(entry.reference) &&
+        typeof entry.code === "string" &&
+        IMAGE_FAILURE_CODE.test(entry.code) &&
+        typeof entry.reason === "string" &&
+        IMAGE_FAILURE_TEXT.test(entry.reason) &&
+        typeof entry.recovery === "string" &&
+        IMAGE_FAILURE_TEXT.test(entry.recovery) &&
+        Array.isArray(entry.services) &&
+        entry.services.length <= 64 &&
+        entry.services.every(
+          (service: unknown) =>
+            typeof service === "string" && IMAGE_FAILURE_SERVICE.test(service)
+        )
+    )
+  );
+}
+
+export class NativeImageBatchError extends HackCliError {
+  readonly failures: readonly ImageFailure[];
+
+  constructor(failures: readonly ImageFailure[]) {
+    super({
+      code: "E_LIFECYCLE_FAILED",
+      detail: { images: failures },
+      message: [
+        "Image preparation failed.",
+        ...failures.map((image) => {
+          const services = image.services.length
+            ? ` for service${image.services.length > 1 ? "s" : ""} ${image.services.join(", ")} field image`
+            : "";
+          return `- ${image.reference}${services} (${image.code}): ${image.reason}. ${image.recovery}`;
+        }),
+      ].join("\n"),
+    });
+    this.failures = failures;
+  }
+}
+
+export function batchImageFailure(
+  reference: string,
+  value: unknown,
+  services: readonly string[]
+): ImageFailure {
+  const error =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const code =
+    typeof error.code === "string" && IMAGE_FAILURE_CODE.test(error.code)
+      ? error.code
+      : "image_reply_invalid";
+  let reason = nativeImageRegistryReason(error.cause_code);
+  if (
+    !reason &&
+    (error.message_fixed === true || code === "image_staging_entry") &&
+    typeof error.message === "string" &&
+    IMAGE_FAILURE_TEXT.test(error.message)
+  ) {
+    reason = error.message.endsWith(".")
+      ? error.message.slice(0, -1)
+      : error.message;
+  }
+  reason ??=
+    code === "registry_image_not_found"
+      ? "tag no longer exists in the registry (404)"
+      : code.replaceAll("_", " ");
+  let recovery = "Inspect hack doctor, then retry hack up.";
+  if (code === "image_tag_download_busy" || code === "provider_busy") {
+    recovery = "Run hack up again after the current image work finishes.";
+  } else if (code === "image_disk_space") {
+    recovery = "Free disk space and run hack up again.";
+  } else if (code.startsWith("registry_") || code.includes("offline_missing")) {
+    recovery =
+      "Run hack pull when the registry is reachable, then retry hack up.";
+  }
+  return {
+    reference,
+    code,
+    reason,
+    recovery,
+    services: services.filter((name) => IMAGE_FAILURE_SERVICE.test(name)),
+  };
+}
+
 export class NativeImageBlocker extends ClosedCliError {
   readonly observation: NativeImageBlockerDetail;
 

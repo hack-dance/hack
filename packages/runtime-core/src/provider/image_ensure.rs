@@ -28,6 +28,7 @@ const IMAGE_WORKERS: usize = 3;
 struct CacheState {
     lease: Option<state::Lock>,
     reservations: BTreeMap<String, u64>,
+    disk_reserved: u64,
 }
 
 #[derive(Default)]
@@ -39,6 +40,30 @@ struct ImageCache {
 }
 
 impl ImageCache {
+    fn reserve_disk(
+        &self,
+        needed: u64,
+        available: impl Fn() -> Result<u64, CandidateError>,
+    ) -> Result<DiskReservation<'_>, CandidateError> {
+        let mut cache = self.state.lock().unwrap();
+        loop {
+            if available()?.saturating_sub(cache.disk_reserved) >= needed {
+                cache.disk_reserved += needed;
+                return Ok(DiskReservation {
+                    cache: self,
+                    bytes: needed,
+                });
+            }
+            if cache.disk_reserved == 0 {
+                return Err(CandidateError::new(
+                    "image_disk_space",
+                    "The image archive and its temporary layer exceed available disk space.",
+                ));
+            }
+            cache = self.changed.wait(cache).unwrap();
+        }
+    }
+
     fn enter(&self, root: &Path) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
         let mut cache = self.state.lock().unwrap();
         if cache.lease.is_none() {
@@ -52,6 +77,33 @@ impl ImageCache {
         cache.lease.as_ref().unwrap().verify_path(root)?;
         Ok(cache)
     }
+}
+
+struct DiskReservation<'a> {
+    cache: &'a ImageCache,
+    bytes: u64,
+}
+impl Drop for DiskReservation<'_> {
+    fn drop(&mut self) {
+        self.cache.state.lock().unwrap().disk_reserved -= self.bytes;
+        self.cache.changed.notify_all();
+    }
+}
+
+fn disk_available(path: &Path) -> Result<u64, CandidateError> {
+    const RESERVE: u64 = 512 * 1024 * 1024;
+    let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| refused("Invalid image staging path."))?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: The path is terminated and stat points to writable storage.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(state::io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: statvfs initialized the buffer on success.
+    let stat = unsafe { stat.assume_init() };
+    let bytes = u64::try_from((stat.f_bavail as u128) * (stat.f_frsize as u128))
+        .map_err(|_| refused("Invalid image disk headroom."))?;
+    Ok(bytes.saturating_sub(RESERVE))
 }
 
 fn clean_staging(path: &Path, root: bool) -> Result<(), CandidateError> {
@@ -74,17 +126,20 @@ fn clean_staging(path: &Path, root: bool) -> Result<(), CandidateError> {
                     .and_then(|tail| tail.strip_suffix(".tmp"))
                     .and_then(|tail| tail.split_once('-'))
                     .is_some_and(|(pid, sequence)| {
-                        pid.parse::<u32>().is_ok_and(|pid| pid > 0)
-                            && !sequence.is_empty()
-                            && sequence.bytes().all(|byte| byte.is_ascii_digit())
+                        pid.parse::<u32>()
+                            .is_ok_and(|value| value > 0 && value.to_string() == pid)
+                            && sequence
+                                .parse::<u64>()
+                                .is_ok_and(|value| value.to_string() == sequence)
                     })
             });
         if !root && generated && metadata.is_file() && metadata.uid() == current_uid() {
             fs::remove_file(entry.path()).map_err(state::io)?;
         } else {
-            return Err(refused(format!(
-                "Unexpected image staging entry {name:?} was left in place."
-            )));
+            return Err(CandidateError::new(
+                "image_staging_entry",
+                format!("Unexpected image staging entry {name:?} was left in place."),
+            ));
         }
     }
     fs::remove_dir(path).map_err(state::io)
@@ -741,8 +796,14 @@ fn confirm_selection(
                 if offline {
                     return Err(no_archive());
                 }
-                let mut acquired =
-                    registry_image::acquire_with(reference, path, policy, limit, platform)?;
+                let mut acquired = registry_image::acquire_with_disk_admission(
+                    reference,
+                    path,
+                    policy,
+                    limit,
+                    platform,
+                    |needed| cache.reserve_disk(needed, || disk_available(path.parent().unwrap())),
+                )?;
                 *acquired_proof.borrow_mut() = acquired.proof.take();
                 Ok(acquired)
             },
@@ -1028,6 +1089,32 @@ mod tests {
             platform: platform.candidates()[0],
         })
     }
+    #[test]
+    fn disk_budget_waits_for_the_current_fetch_and_refuses_an_oversized_archive() {
+        let cache = ImageCache::default();
+        let first = cache.reserve_disk(7, || Ok(10)).unwrap();
+        std::thread::scope(|scope| {
+            let (started, waiting) = std::sync::mpsc::channel();
+            let cache = &cache;
+            let second = scope.spawn(move || {
+                cache
+                    .reserve_disk(7, || {
+                        let _ = started.send(());
+                        Ok(10)
+                    })
+                    .unwrap()
+            });
+            waiting
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            assert!(!second.is_finished());
+            drop(first);
+            drop(second.join().unwrap());
+        });
+        let error = cache.reserve_disk(11, || Ok(10)).err().unwrap();
+        assert_eq!(error.code, "image_disk_space");
+    }
+
     #[test]
     #[ignore = "subprocess fixture"]
     fn stopped_proof_writer() {

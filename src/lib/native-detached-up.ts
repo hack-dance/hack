@@ -6,6 +6,9 @@ import {
   renderNativeHotReloadNotice,
 } from "../backends/native-hot-reload-notice.ts";
 import {
+  type ImageFailure,
+  imageBatchFailures,
+  NativeImageBatchError,
   NativeImageBlocker,
   type NativeImageBlockerDetail,
   nativeImageBlockerDetail,
@@ -63,7 +66,9 @@ type Ready = {
 };
 let publishReady: ((ready: Ready) => void) | undefined;
 let publishImageBlocker:
-  | ((detail: NativeImageBlockerDetail) => Promise<void>)
+  | ((
+      detail: NativeImageBlockerDetail | readonly ImageFailure[]
+    ) => Promise<void>)
   | undefined;
 let publishImageDownloadWait: ((reference: string | null) => void) | undefined;
 let publishImageNotice: ((notice: string) => void) | undefined;
@@ -353,6 +358,10 @@ export function nativeDetachedUpFailedServices(names: readonly string[]): void {
 /** Only the runtime's validated fixed detail crosses IPC; never an Error's text or logs. */
 export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   if (!publishFailure) {
+    return;
+  }
+  if (error instanceof NativeImageBatchError) {
+    await publishImageBlocker?.(error.failures);
     return;
   }
   if (error instanceof NativeImageBlocker) {
@@ -726,7 +735,7 @@ export async function runNativeDetachedOwner(opts: {
         }
       | {
           readonly kind: "image-blocker";
-          readonly detail: NativeImageBlockerDetail;
+          readonly detail: NativeImageBlockerDetail | readonly ImageFailure[];
         }
       | {
           readonly kind: "image-download-wait";
@@ -1106,13 +1115,14 @@ export async function startNativeDetachedUp(opts: {
     if (failed) {
       return;
     }
-    const imageBlocked =
-      !ready &&
-      isRecord(value) &&
-      value.kind === "image-blocker" &&
-      nativeImageBlockerDetail(value.detail)
-        ? new NativeImageBlocker(value.detail)
-        : undefined;
+    let imageBlocked: NativeImageBatchError | NativeImageBlocker | undefined;
+    if (!ready && isRecord(value) && value.kind === "image-blocker") {
+      if (imageBatchFailures(value.detail)) {
+        imageBlocked = new NativeImageBatchError(value.detail);
+      } else if (nativeImageBlockerDetail(value.detail)) {
+        imageBlocked = new NativeImageBlocker(value.detail);
+      }
+    }
     const refused = ready ? undefined : (imageBlocked ?? startupRefusal(value));
     if (refused) {
       failed = true;

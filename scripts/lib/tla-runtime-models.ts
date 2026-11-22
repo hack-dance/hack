@@ -1783,6 +1783,34 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-start-lock-wait",
+    module: "LeaseWait",
+    states: 19,
+    invariant: "NoEffectWhileHeld",
+    action: "Acquire",
+    fields: ['holder = "second"', 'waiter = "acquired"', "earlyEffect = TRUE"],
+    additionalControls: [
+      {
+        name: "acquisition-reachable",
+        negative: true,
+        invariant: "NeverAcquired",
+        action: "Acquire",
+        fields: [
+          'holder = "second"',
+          'waiter = "acquired"',
+          "earlyEffect = FALSE",
+        ],
+      },
+      {
+        name: "expiry-reachable",
+        negative: true,
+        invariant: "NeverExpired",
+        action: "Expire",
+        fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,
@@ -2150,6 +2178,78 @@ const contracts: readonly ModelContract[] = [
           "reviewed = TRUE",
           "admitted = FALSE",
         ],
+      },
+    ],
+  },
+  {
+    // src/lib/global-logging.ts and `hack global install/up`: the logging
+    // stack is opt-in; a home that had it keeps it, a new one never starts
+    // it unasked, and turning it off never removes its logs.
+    name: "global-logging-optin",
+    module: "LoggingOptIn",
+    states: 1014,
+    invariant: "FreshNeverStartsUnasked",
+    action: "Install",
+    fields: [
+      "existing = FALSE",
+      "asked = FALSE",
+      "running = TRUE",
+      'setting = "unset"',
+    ],
+    additionalControls: [
+      {
+        name: "legacy-unset-off",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+          },
+        ],
+      },
+      {
+        name: "off-removes-volumes",
+        negative: true,
+        invariant: "NoSurpriseDataLoss",
+        action: "UpFlag",
+        fields: ["prevData = TRUE", "data = FALSE", 'setting = "off"'],
+      },
+      {
+        // The first start does not save an existing home's choice: with its
+        // logging directory moved aside, the next start turns it off.
+        name: "decision-not-saved",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: [
+          "existing = TRUE",
+          'setting = "unset"',
+          "dir = FALSE",
+          "running = FALSE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: [
+              "existing = TRUE",
+              'setting = "unset"',
+              "dir = FALSE",
+              "running = FALSE",
+            ],
+          },
+        ],
+      },
+      {
+        // A failed save of `--logging` that is not reported: the stack runs
+        // with the setting still off, and nothing told the user.
+        name: "unsaved-silent",
+        negative: true,
+        invariant: "OffMeansStopped",
+        action: "UpFlag",
+        fields: ['setting = "off"', "unsaved = FALSE", "running = TRUE"],
       },
     ],
   },

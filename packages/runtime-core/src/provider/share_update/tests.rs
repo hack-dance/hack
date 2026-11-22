@@ -473,3 +473,15 @@ fn interrupted_addition_resumes_its_recorded_share_after_the_root_is_removed() {
     fs::remove_dir_all(&f.third.project).unwrap();
     assert!(addition(&candidate, &f.third.project, true).is_err());
 }
+
+#[test]
+fn replaced_project_selected_before_acquisition_is_refused() {
+    let f = fixture();
+    let candidate = Candidate::discover(&f.directory).unwrap();
+    fs::rename(&f.second.project, f.directory.join("moved-app")).unwrap();
+    let replacement = project(&f.directory, "second-app");
+    assert_ne!(replacement, f.second);
+    let outcome = update(&candidate, Operation::Add, f.second.clone());
+    assert!(matches!(outcome, Err(error) if error.code == "project_share_update"));
+    assert!(!root(&candidate).join(JOURNAL).exists());
+}

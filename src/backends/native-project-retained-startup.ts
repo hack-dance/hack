@@ -118,6 +118,7 @@ export async function verifyNativeResumedRetainedGraph(opts: {
     return;
   }
   const observed = await inspectNativeProjectGraph({
+    startupWait: true,
     ...opts,
     run: opts.run.run,
   });

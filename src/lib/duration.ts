@@ -44,6 +44,27 @@ export function parseDurationMs(input: string): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+const HOURS_PER_UNIT: Readonly<Record<string, number>> = { d: 24, w: 168 };
+
+/**
+ * A `--since`/`--until` value in the form `docker logs` accepts. Hack's
+ * durations allow `d` and `w`, which Docker (Go durations) does not, so
+ * `2d` becomes `48h` and `1w` `168h`; `10 m` becomes `10m`. Anything else
+ * (a timestamp, a Go duration such as `1h30m`) is passed unchanged.
+ */
+export function dockerLogsTime(input: string): string {
+  const raw = input.trim();
+  const match = raw.match(DURATION_PATTERN);
+  if (!(match?.[1] && match[2])) {
+    return raw;
+  }
+  const unit = match[2].toLowerCase();
+  const hours = HOURS_PER_UNIT[unit];
+  return hours === undefined
+    ? `${match[1]}${unit}`
+    : `${Number.parseInt(match[1], 10) * hours}h`;
+}
+
 /** Shortest deadline accepted from a millisecond override variable. */
 export const MIN_TIMEOUT_OVERRIDE_MS = 1000;
 

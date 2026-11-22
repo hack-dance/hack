@@ -35,6 +35,21 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning: "Shared global infrastructure the command needs is offline.",
     readFirst: "`hack global status`",
   },
+  E_GLOBAL_NOT_READY: {
+    meaning:
+      "A global proxy or logging container did not become ready, or routes did not answer, within its bound.",
+    readFirst: "`hack doctor`",
+  },
+  E_GLOBAL_STOPPED: {
+    meaning:
+      "A global proxy or logging container stopped right after it started.",
+    readFirst: "`docker logs --tail 50 <container>`",
+  },
+  E_LOGGING_OFF: {
+    meaning:
+      "The command needs the opt-in global logging stack (Loki, Grafana), which is off.",
+    readFirst: "`hack global up --logging`",
+  },
   E_CONFIG_PARSE: {
     meaning: "A Hack configuration file could not be parsed.",
     readFirst: "`hack doctor --json`",

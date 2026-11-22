@@ -183,11 +183,25 @@ const contracts: readonly ModelContract[] = [
   {
     name: "guest-execution",
     module: "GuestAgent",
-    states: 3900,
+    states: 6860,
     invariant: "ResultBeforeRelease",
-    action: "Release",
+    action: "Next",
     fields: ['job = "released"', 'saved = "none"'],
     additionalControls: [
+      {
+        name: "unclean-restart",
+        negative: true,
+        invariant: "NoOrphan",
+        action: "AgentRestart",
+        fields: ['agent = "online"', "survivor = TRUE", "epoch = 1"],
+      },
+      {
+        name: "wait-eof",
+        negative: true,
+        invariant: "TerminalReleasable",
+        action: "Next",
+        fields: ['job = "exit37"', 'saved = "exit37"', "writerOpen = TRUE"],
+      },
       {
         name: "duplicate",
         negative: true,
@@ -199,7 +213,7 @@ const contracts: readonly ModelContract[] = [
         name: "record-running",
         negative: true,
         invariant: "SavedOutcome",
-        action: "Record",
+        action: "Next",
         fields: ['belief = "running"', 'saved = "running"'],
       },
     ],

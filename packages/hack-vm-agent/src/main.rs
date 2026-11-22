@@ -7,11 +7,11 @@ use std::{
     collections::HashMap,
     fs, io,
     os::unix::{
-        fs::PermissionsExt,
+        fs::MetadataExt,
         net::{UnixListener, UnixStream},
     },
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -21,7 +21,7 @@ use std::{
 #[derive(Default)]
 struct Registry {
     admitted: Option<u128>,
-    live: HashMap<String, Job>,
+    live: HashMap<String, Option<Job>>,
 }
 
 struct Agent {
@@ -29,6 +29,7 @@ struct Agent {
     incarnation: String,
     kernel: String,
     jobs: Mutex<Registry>,
+    work: Condvar,
 }
 
 impl Agent {
@@ -95,17 +96,26 @@ impl Agent {
                 return Response::Full {};
             }
             jobs.admitted = Some(counter);
-            return jobs
-                .live
-                .entry(handle.id)
-                .or_insert_with(|| Job::start(argv, env, cwd, stdin))
-                .inspect();
+            jobs.live.insert(handle.id.clone(), None);
+            drop(jobs);
+            let job = Job::start(argv, env, cwd, stdin);
+            let status = job.inspect();
+            self.jobs.lock().unwrap().live.insert(handle.id, Some(job));
+            self.work.notify_one();
+            return status;
         }
-        let Some(job) = jobs.live.get_mut(&handle.id) else {
+        let Some(entry) = jobs.live.get_mut(&handle.id) else {
             return if retired_or_live {
                 Response::Released {}
             } else {
                 Response::Absent {}
+            };
+        };
+        let Some(job) = entry else {
+            return if matches!(req, Inspect { .. }) {
+                Response::Unknown {}
+            } else {
+                Response::Conflict {}
             };
         };
         job.refresh();
@@ -114,6 +124,9 @@ impl Agent {
             Signal { signal, .. } => job.signal(signal),
             Output { stream, offset, .. } => job.output(stream, offset),
             Release { .. } if job.finished() => {
+                if job.release().is_err() {
+                    return Response::Unknown {};
+                }
                 jobs.live.remove(&handle.id);
                 Response::Released {}
             }
@@ -136,6 +149,7 @@ fn serve(stream: UnixStream, agent: &Agent) {
     else {
         return;
     };
+    io.deadline = Instant::now() + Duration::from_secs(10);
     let Some(version) = negotiate(min, max) else {
         let _ = write_frame(&mut io, 0, true, &Response::Invalid {});
         return;
@@ -173,7 +187,9 @@ fn serve(stream: UnixStream, agent: &Agent) {
             return;
         }
         last = channel;
-        if write_frame(&mut io, channel, true, &agent.dispatch(message)).is_err() {
+        let reply = agent.dispatch(message);
+        io.deadline = Instant::now() + Duration::from_secs(10);
+        if write_frame(&mut io, channel, true, &reply).is_err() {
             return;
         }
     }
@@ -196,33 +212,60 @@ fn run() -> io::Result<()> {
             .trim()
             .to_owned(),
         jobs: Mutex::default(),
+        work: Condvar::new(),
     });
-    // SAFETY: single-threaded startup. All later socket creation inherits owner-only permissions.
-    unsafe { libc::umask(0o077) };
-    let listener = UnixListener::bind(&socket)?;
-    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+    let parent = std::path::Path::new(&socket)
+        .parent()
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let meta = fs::symlink_metadata(parent)?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o777 != 0o700 {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    // Single-threaded startup. An inherited SIG_IGN would auto-reap children.
+    if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    let previous = unsafe { libc::umask(0o177) };
+    let bound = UnixListener::bind(&socket);
+    unsafe { libc::umask(previous) };
+    let listener = bound?;
     let supervisor = agent.clone();
-    thread::spawn(move || {
+    thread::Builder::new().spawn(move || {
         loop {
-            for job in supervisor.jobs.lock().unwrap().live.values_mut() {
+            let mut jobs = supervisor
+                .work
+                .wait_while(supervisor.jobs.lock().unwrap(), |registry| {
+                    !registry.live.values().flatten().any(Job::needs_refresh)
+                })
+                .unwrap();
+            for job in jobs.live.values_mut().flatten() {
                 job.refresh();
             }
-            thread::sleep(Duration::from_millis(100));
+            drop(jobs);
+            thread::sleep(Duration::from_millis(5));
         }
-    });
+    })?;
     let peers = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
-        let stream = stream?;
+        let Ok(stream) = stream else {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        };
         if peers.load(Ordering::Relaxed) >= 16 {
             continue;
         }
         peers.fetch_add(1, Ordering::Relaxed);
-        let peers = peers.clone();
+        let active = peers.clone();
         let agent = agent.clone();
-        thread::spawn(move || {
-            serve(stream, &agent);
+        if thread::Builder::new()
+            .spawn(move || {
+                serve(stream, &agent);
+                active.fetch_sub(1, Ordering::Relaxed);
+            })
+            .is_err()
+        {
             peers.fetch_sub(1, Ordering::Relaxed);
-        });
+        }
     }
     Ok(())
 }

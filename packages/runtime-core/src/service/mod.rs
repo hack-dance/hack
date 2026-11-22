@@ -31,6 +31,12 @@
 //! wait for requests already admitted, then shut every session socket down and
 //! wait for its thread.
 //!
+//! Signals: the entry point's `serve` (`Options::signals`) turns SIGTERM,
+//! SIGINT and SIGHUP into the same drained stop as retire, so a signal never
+//! leaves the socket file behind. Its one notify line is written without
+//! blocking past `NOTIFY_WAIT`; a starter that cannot take "listening" in time
+//! makes the service end before it serves anyone, with everything released.
+//!
 //! Memory is never authority: a kill at any moment loses only open sessions. The
 //! advisory `service.json` is for diagnostics and is never read for decisions.
 mod client;
@@ -43,7 +49,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -76,7 +82,26 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 const QUEUED_WAIT: Duration = Duration::from_millis(50);
 /// The whole time shutdown spends refusing queued connections.
 const QUEUED_BUDGET: Duration = Duration::from_millis(500);
-const OPS: [&str; 3] = ["hello", "service.status", "service.retire"];
+#[cfg(not(feature = "service-test-hooks"))]
+const OPS: &[&str] = &["hello", "service.status", "service.retire"];
+/// With the test-only hooks: `test.hold` keeps a request in progress (to make a
+/// drain run out of time) and `test.env` names the service's environment.
+#[cfg(feature = "service-test-hooks")]
+const OPS: &[&str] = &[
+    "hello",
+    "service.status",
+    "service.retire",
+    "test.hold",
+    "test.env",
+];
+#[cfg(all(feature = "service-test-hooks", not(debug_assertions)))]
+compile_error!("the service-test-hooks feature is test-only and refused in optimized builds");
+/// How long `test.hold` keeps its request in progress.
+#[cfg(feature = "service-test-hooks")]
+const TEST_HOLD: Duration = Duration::from_secs(60);
+/// The most the one notify line may take to write. A starter that does not
+/// read it in time never holds the service: the service gives up and exits.
+const NOTIFY_WAIT: Duration = Duration::from_secs(1);
 
 /// Files of the service under a home's state root, all inside one 0700 directory.
 pub struct Paths {
@@ -99,6 +124,12 @@ pub fn paths(state_root: &Path) -> Paths {
 pub struct Options {
     /// Exit after this long with no session and no request in progress.
     pub idle: Duration,
+    /// The bound on shutdown's waits for requests and sessions (`SHUTDOWN_WAIT`
+    /// unless the starter chose another).
+    pub drain: Duration,
+    /// Stop on SIGTERM, SIGINT and SIGHUP with a full drain. Process-wide: set
+    /// it only for the one `serve` a process runs (the entry point does).
+    pub signals: bool,
     /// Tests only: while this is set, the idle timer never fires, so a test can
     /// arrange its sessions without racing it.
     #[cfg(test)]
@@ -120,6 +151,171 @@ pub enum Outcome {
     Idle,
     /// Asked to retire: unlinked the socket, refused new requests, exited.
     Retired,
+    /// Stopped by SIGTERM, SIGINT or SIGHUP, with the same drain as retire.
+    Signalled,
+}
+
+/// The default for `Options::drain`.
+pub const DEFAULT_DRAIN: Duration = SHUTDOWN_WAIT;
+
+/// Write `line` and a newline to the starter's descriptor without blocking past
+/// `NOTIFY_WAIT`. Only a FIFO or a socket is a notify transport: anything else
+/// (a regular file on a stalled filesystem, say) cannot be bounded and gets
+/// nothing. A socket is written with `MSG_NOSIGNAL`; a FIFO whose reader has
+/// gone relies on SIGPIPE being ignored, as Rust programs do from the start.
+/// The descriptor is made non-blocking; it is the starter's handed-over write
+/// end. Returns whether the whole line was written in time.
+pub fn notify(file: &File, line: &Value) -> bool {
+    let bytes = format!("{line}\n").into_bytes();
+    let fd = file.as_raw_fd();
+    let socket = match notify_kind(fd) {
+        Some(NotifyKind::Socket) => true,
+        Some(NotifyKind::Fifo) => false,
+        None => return false,
+    };
+    // SAFETY: scalar fcntl calls on a descriptor `file` owns.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0 {
+        return false;
+    }
+    let deadline = Instant::now() + NOTIFY_WAIT;
+    let mut sent = 0;
+    while sent < bytes.len() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let rest = &bytes[sent..];
+        // SAFETY: a valid pointer and length into `bytes`.
+        let n = unsafe {
+            if socket {
+                libc::send(fd, rest.as_ptr().cast(), rest.len(), libc::MSG_NOSIGNAL)
+            } else {
+                libc::write(fd, rest.as_ptr().cast(), rest.len())
+            }
+        };
+        if n > 0 {
+            sent += n as usize;
+            continue;
+        }
+        match std::io::Error::last_os_error().kind() {
+            ErrorKind::Interrupted => continue,
+            ErrorKind::WouldBlock => {}
+            _ => return false,
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let millis = left.as_millis().clamp(1, i32::MAX as u128) as i32;
+        // SAFETY: one initialized pollfd that outlives the call.
+        if unsafe { libc::poll(&mut pfd, 1, millis) } < 0
+            && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// What a notify descriptor is, if it is a supported transport.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NotifyKind {
+    Fifo,
+    Socket,
+}
+
+/// Whether `fd` is a FIFO or a socket, the only notify transports.
+pub fn notify_kind(fd: std::os::fd::RawFd) -> Option<NotifyKind> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstat initializes `stat` only on success, which is checked.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: fstat succeeded.
+    match unsafe { stat.assume_init() }.st_mode & libc::S_IFMT {
+        libc::S_IFIFO => Some(NotifyKind::Fifo),
+        libc::S_IFSOCK => Some(NotifyKind::Socket),
+        _ => None,
+    }
+}
+
+/// Set by the signal handler; read by the accept loop of the one `serve` with
+/// `Options::signals`. Registration lasts the life of the process: one serve
+/// per process installs it, and nothing ever uninstalls it.
+static SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The write end of the process's own signal channel, created once with the
+/// handlers and never closed, so the handler can never write to a descriptor
+/// number that was reused. -1 until installed.
+static SIGNAL_WRITE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+/// Its read end, polled by the accept loop.
+static SIGNAL_READ: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+static SIGNALS_INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: always valid for the calling thread.
+    unsafe { libc::__errno_location() }
+}
+#[cfg(target_os = "macos")]
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: always valid for the calling thread.
+    unsafe { libc::__error() }
+}
+
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    // Only async-signal-safe work: atomics and one write(2), with the
+    // interrupted code's errno kept as it was.
+    let errno = errno_location();
+    // SAFETY: the calling thread's errno.
+    let saved = unsafe { *errno };
+    SIGNALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let fd = SIGNAL_WRITE.load(std::sync::atomic::Ordering::SeqCst);
+    if fd >= 0 {
+        // SAFETY: write(2) is async-signal-safe; the descriptor is never closed.
+        unsafe { libc::write(fd, b"s".as_ptr().cast(), 1) };
+    }
+    // SAFETY: as above.
+    unsafe { *errno = saved };
+}
+
+/// Route SIGTERM, SIGINT and SIGHUP to a drained stop instead of death, once
+/// for the life of the process.
+fn install_stop_signals() -> Result<(), CandidateError> {
+    let installed = SIGNALS_INSTALLED.get_or_init(|| {
+        let Ok((read, write)) = UnixStream::pair() else {
+            return false;
+        };
+        if read.set_nonblocking(true).is_err() || write.set_nonblocking(true).is_err() {
+            return false;
+        }
+        // Process lifetime: deliberately never closed.
+        SIGNAL_READ.store(read.into_raw_fd(), std::sync::atomic::Ordering::SeqCst);
+        SIGNAL_WRITE.store(write.into_raw_fd(), std::sync::atomic::Ordering::SeqCst);
+        [libc::SIGTERM, libc::SIGINT, libc::SIGHUP]
+            .into_iter()
+            .all(|signal| {
+                // SAFETY: a zeroed sigaction is valid; the handler only does async-signal-safe work.
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = on_stop_signal as *const () as usize;
+                action.sa_flags = libc::SA_RESTART;
+                // SAFETY: a valid action and signal number; the old action is not needed.
+                unsafe {
+                    libc::sigemptyset(&mut action.sa_mask) == 0
+                        && libc::sigaction(signal, &action, std::ptr::null_mut()) == 0
+                }
+            })
+    });
+    if *installed {
+        Ok(())
+    } else {
+        Err(failure(
+            "service_signals",
+            "Could not route stop signals to a drained stop.",
+        ))
+    }
 }
 
 fn failure(code: &'static str, message: impl ToString) -> CandidateError {
@@ -143,12 +339,19 @@ pub fn serve(
     options: Options,
     mut ready: Option<File>,
 ) -> Result<Outcome, CandidateError> {
+    // "lost" and "refused" are best effort, and bounded: the starter may have
+    // given up. "listening" must arrive, or the service ends (below).
     let mut announce = |line: Value| {
-        if let Some(mut file) = ready.take() {
-            // The starter may already have given up; that never stops the service.
-            let _ = writeln!(file, "{line}");
+        if let Some(file) = ready.take() {
+            let _ = notify(&file, &line);
         }
     };
+    if options.signals {
+        if let Err(error) = install_stop_signals() {
+            announce(json!({"refused": {"code": error.code}}));
+            return Err(error);
+        }
+    }
     let paths = paths(state_root);
     let (listener, lock, socket_id) = match start_or_retry(&paths, &options) {
         Ok(Some(started)) => started,
@@ -171,9 +374,27 @@ pub fn serve(
             return Err(error);
         }
     };
-    announce(json!({"listening": shared.identity.public()}));
+    if let Some(file) = ready.take() {
+        if !notify(&file, &json!({"listening": shared.identity.public()})) {
+            // The starter cannot learn that this service listens, so nobody
+            // waits on it: stop before serving anyone, and let go of everything.
+            drop(listener);
+            unlink_if(&paths.socket, socket_id);
+            remove_own_record(&paths.record, &shared.identity.epoch);
+            drop(lock);
+            return Err(failure(
+                "service_notify_failed",
+                "The starter's notify descriptor did not take the listening line in time.",
+            ));
+        }
+    }
     let (outcome, drained) = run(&shared, listener, &wake);
-    remove_own_record(&paths.record, &shared.identity.epoch);
+    // After a drain that ran out of time nothing more happens here: no file
+    // I/O stands between that and the entry point's exit. The next owner
+    // replaces the advisory record.
+    if drained {
+        remove_own_record(&paths.record, &shared.identity.epoch);
+    }
     settle(lock, drained)?;
     Ok(outcome)
 }
@@ -209,7 +430,7 @@ fn start_or_retry(paths: &Paths, options: &Options) -> Result<Option<Bound>, Can
     // One window from the first loss, the probe included: no attempt begins
     // after it, however this thread was scheduled.
     let deadline = Instant::now() + wait;
-    match client::connect(&paths.socket, deadline.min(Instant::now() + LIVE_PROBE)) {
+    match client::connect_checked(paths, deadline.min(Instant::now() + LIVE_PROBE)) {
         Err(e) if e.code == "service_absent" => {}
         _ => return Ok(None),
     }
@@ -275,7 +496,7 @@ fn start(paths: &Paths) -> Result<Option<Bound>, CandidateError> {
             // Holding the lock normally proves the socket is stale. It does not
             // when the lock file was removed while another service held it: that
             // service still listens. Never unlink a socket something answers on.
-            match client::connect(&paths.socket, Instant::now() + LIVE_PROBE) {
+            match client::connect_checked(paths, Instant::now() + LIVE_PROBE) {
                 Err(e) if e.code == "service_absent" => {}
                 Ok(_) => return Err(live()),
                 Err(e) if e.code == "service_busy" => return Err(live()),
@@ -347,6 +568,7 @@ fn prepare(
     let shared = Arc::new(Shared {
         identity,
         idle: options.idle,
+        signals: options.signals,
         #[cfg(test)]
         hold_idle: options.hold_idle.clone(),
         socket: paths.socket.clone(),
@@ -358,7 +580,7 @@ fn prepare(
             refuse_until: None,
             refused: 0,
             queued_wait: QUEUED_WAIT,
-            shutdown_wait: SHUTDOWN_WAIT,
+            shutdown_wait: options.drain,
             last_activity: Instant::now(),
             streams: HashMap::new(),
             next_session: 0,
@@ -544,9 +766,19 @@ fn write_record(record: &Path, identity: &Identity) -> Result<(), CandidateError
 }
 
 fn remove_own_record(record: &Path, epoch: &str) {
-    let ours = std::fs::read(record)
+    // Read it only as a regular file, without following a link or waiting on
+    // a FIFO planted in its place, and only as much as a record can be.
+    let ours = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(record)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|file| file.metadata().is_ok_and(|m| m.is_file()))
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(64 * 1024).read_to_end(&mut bytes).ok()?;
+            serde_json::from_slice::<Value>(&bytes).ok()
+        })
         .is_some_and(|value| value["epoch"] == epoch);
     if ours {
         let _ = std::fs::remove_file(record);
@@ -577,6 +809,8 @@ struct State {
 struct Shared {
     identity: Identity,
     idle: Duration,
+    /// This is the one `serve` that stops on signals.
+    signals: bool,
     #[cfg(test)]
     hold_idle: Option<Arc<std::sync::atomic::AtomicBool>>,
     socket: PathBuf,
@@ -587,6 +821,14 @@ struct Shared {
 }
 
 impl Shared {
+    /// Begin a drained stop if this is the signal-handling serve and a stop
+    /// signal has arrived. Checked at the top of the accept loop and before
+    /// every accept.
+    fn take_signal(&self) {
+        if self.signals && SIGNALLED.load(std::sync::atomic::Ordering::SeqCst) {
+            self.stop(Outcome::Signalled);
+        }
+    }
     /// Whether a test holds the idle timer. Always false outside tests.
     fn idle_held(&self) -> bool {
         #[cfg(test)]
@@ -650,6 +892,7 @@ impl Shared {
 /// The outcome, and whether every request and session finished before exit.
 fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> (Outcome, bool) {
     loop {
+        shared.take_signal();
         let timeout = {
             let state = shared.state();
             if state.stopping.is_some() {
@@ -673,6 +916,16 @@ fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> (Outc
                 events: libc::POLLIN,
                 revents: 0,
             },
+            // The process's signal channel, or -1 (ignored by poll).
+            libc::pollfd {
+                fd: if shared.signals {
+                    SIGNAL_READ.load(std::sync::atomic::Ordering::SeqCst)
+                } else {
+                    -1
+                },
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
         let millis = timeout.map_or(-1, |t| t.as_millis().clamp(1, i32::MAX as u128) as i32);
         // While a test holds the idle timer, poll in short steps to see it released.
@@ -682,11 +935,15 @@ fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> (Outc
         } else {
             millis
         };
-        // SAFETY: two initialized pollfd entries that outlive the call. An error
+        // SAFETY: three initialized pollfd entries that outlive the call. An error
         // (EINTR) simply re-runs the loop.
-        unsafe { libc::poll(fds.as_mut_ptr(), 2, millis) };
+        unsafe { libc::poll(fds.as_mut_ptr(), 3, millis) };
         let mut sink = [0u8; 64];
         while matches!((&*wake).read(&mut sink), Ok(n) if n > 0) {}
+        if fds[2].fd >= 0 {
+            // SAFETY: a valid buffer; the descriptor is the never-closed signal channel.
+            while unsafe { libc::read(fds[2].fd, sink.as_mut_ptr().cast(), sink.len()) } > 0 {}
+        }
         if accept_queued(shared, &listener).is_err() {
             std::thread::sleep(ACCEPT_BACKOFF);
         }
@@ -753,6 +1010,9 @@ fn refuse(shared: &Shared, mut stream: UnixStream, by: Instant) {
 /// resources; the queue is left for a later attempt.
 fn accept_queued(shared: &Arc<Shared>, listener: &UnixListener) -> Result<(), ()> {
     loop {
+        // A signal during a busy accept round stops this service before the
+        // next connection is handed to a worker.
+        shared.take_signal();
         let mut stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
@@ -986,7 +1246,7 @@ fn answer(shared: &Shared, greeted: &mut bool, request: &Request) -> Result<Valu
                 "schema": "hack.runtime.service.hello.v1",
                 "frame": FRAME_VERSION,
                 "service": identity,
-                "ops": OPS.map(|op| json!({"name": op, "versions": [1]})),
+                "ops": OPS.iter().map(|op| json!({"name": op, "versions": [1]})).collect::<Vec<_>>(),
                 "limits": {"sessions": MAX_SESSIONS, "control_frame_bytes": CONTROL_FRAME_LIMIT},
             }))
         }
@@ -995,8 +1255,22 @@ fn answer(shared: &Shared, greeted: &mut bool, request: &Request) -> Result<Valu
             "service": identity,
             "started_at_ms": shared.identity.started_at_ms as u64,
             "sessions": shared.state().sessions,
+            "busy": shared.state().busy,
             "idle_seconds": shared.idle.as_secs(),
         })),
+        #[cfg(feature = "service-test-hooks")]
+        "test.hold" => {
+            std::thread::sleep(TEST_HOLD);
+            Ok(json!({"held": true}))
+        }
+        #[cfg(feature = "service-test-hooks")]
+        "test.env" => {
+            let mut names: Vec<String> = std::env::vars_os()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            Ok(json!({"names": names}))
+        }
         _ => {
             // `Retire`: everything after this reply is refused.
             shared.stop(Outcome::Retired);

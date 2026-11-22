@@ -28,7 +28,8 @@ Usage:
   hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph inspect|status|observe|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
-  hack-local service serve [--idle-seconds <1..86400>] [--notify-fd <3..1023>]
+  hack-local service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]
+      (exit 0 after idle, stop or SIGTERM/SIGINT/SIGHUP; 2 on an error; 3 after a drain that ran out of time)
   hack-local service status|stop
   hack-local graph native plan --source-file <absolute-v2-native-source.json> [--json]
   hack-local graph native run|serve --source-file <absolute-v2-native-source.json> --expect-review <64-hex> [--environment-stdin] [--timeout-seconds <1..300>] [--json]
@@ -258,11 +259,20 @@ fn run() -> Result<(), CandidateError> {
     // (root resolution and discovery included) reaches its starter as a line.
     let mut serving = match command.as_slice() {
         ["service", "serve", rest @ ..] => {
+            // In this order: core dumps off, the closed environment, then the
+            // arguments with the notify descriptor first. From there on every
+            // refusal reaches the starter as one line.
+            let core = disable_core_dumps();
+            keep_closed_environment();
             let reserved = std::env::args_os()
                 .nth(1)
                 .and_then(|argument| argument.into_string().ok())
                 .and_then(|argument| hack_runtime_core::timings::requested_fd(&argument));
-            Some(service_serve_arguments(rest, reserved)?)
+            let mut serving = Some(service_serve_arguments(rest, reserved)?);
+            if let Err(error) = core {
+                return Err(refuse_starter(&mut serving, error));
+            }
+            serving
         }
         _ => None,
     };
@@ -352,49 +362,32 @@ fn run() -> Result<(), CandidateError> {
         ["service", "serve", ..] => {
             let candidate = discover_candidate(&requested)
                 .map_err(|error| refuse_starter(&mut serving, error))?;
-            let (idle, notify) = serving
+            let Serving {
+                idle,
+                drain,
+                notify,
+            } = serving
                 .take()
                 .expect("service serve arguments are parsed before dispatch");
-            // Private input will pass through this process; keep it out of core dumps.
-            let no_core = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            // SAFETY: a valid rlimit value; lowering a limit needs no privilege.
-            if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &no_core) } != 0 {
-                let refused = serde_json::json!({"refused": {"code": "service_core_limit"}});
-                if let Some(mut file) = notify {
-                    use std::io::Write;
-                    let _ = writeln!(file, "{refused}");
-                }
-                return Err(CandidateError::new(
-                    "service_core_limit",
-                    "Could not disable core dumps for the runtime service.",
-                ));
-            }
             let served = hack_runtime_core::service::serve(
                 &candidate.state_root,
-                hack_runtime_core::service::Options { idle },
+                hack_runtime_core::service::Options {
+                    idle,
+                    drain,
+                    signals: true,
+                },
                 notify,
             );
-            match served {
-                // A drain that ran out of time keeps both locks for a worker
-                // that may still run. Exit now, with nothing in between: the
-                // kernel then ends that worker and frees the locks, so the
-                // next client can start a service. Returning to a caller that
-                // stays alive would leave the home without a socket while
-                // every starter loses the lock.
-                Err(error) if error.code == "service_drain_timeout" => {
-                    eprintln!(
-                        "{}",
-                        serde_json::to_string(&error).expect("error is serializable")
-                    );
-                    hack_runtime_core::timings::exit(2);
-                }
-                other => {
-                    other?;
-                }
+            // A drain that ran out of time keeps both locks for a worker that
+            // may still run. Exit now, with nothing in between (no message, no
+            // flush that a full stderr or stdout could block): the kernel then
+            // ends that worker and frees the locks, so the next client can
+            // start a service. The exit code says what happened.
+            if matches!(&served, Err(error) if error.code == "service_drain_timeout") {
+                // SAFETY: _exit ends the process at once; nothing here relies on cleanup.
+                unsafe { libc::_exit(SERVICE_DRAIN_TIMEOUT_EXIT) }
             }
+            served?;
         }
         ["service", action @ ("status" | "stop")] => {
             let candidate = discover_candidate(&requested)?;
@@ -403,11 +396,40 @@ fn run() -> Result<(), CandidateError> {
             } else {
                 "service.retire"
             };
-            print_json(&hack_runtime_core::service::call(
-                &candidate.state_root,
-                op,
-                serde_json::json!({}),
-            )?)?;
+            let answer =
+                hack_runtime_core::service::call(&candidate.state_root, op, serde_json::json!({}));
+            // Two stops at once: the second may reach the service while it
+            // drains and lose its connection. With the socket already gone that
+            // is a service that is stopping or stopped, not an I/O failure.
+            let answer = match answer {
+                // The service refused this stop because it is already stopping:
+                // what `stop` asked for is under way.
+                Err(error)
+                    if *action == "stop"
+                        && error.code == "service_refused"
+                        && error.message.starts_with("E_SERVICE_DRAINING:") =>
+                {
+                    Ok(serde_json::json!({
+                        "schema": "hack.runtime.service.retire.v1",
+                        "draining": true,
+                    }))
+                }
+                Err(error)
+                    if *action == "stop"
+                        && error.code == "service_closed"
+                        && hack_runtime_core::service::paths(&candidate.state_root)
+                            .socket
+                            .symlink_metadata()
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    Err(CandidateError::new(
+                        "service_absent",
+                        "No runtime service is serving this home; it was already stopping.",
+                    ))
+                }
+                other => other,
+            };
+            print_json(&answer?)?;
         }
         ["node", "serve"] => {
             let candidate = discover_candidate(&requested)?;
@@ -1791,74 +1813,132 @@ fn image_policy(
     hack_runtime_core::provider::image_policy::ImagePolicy::from_flags(flags)
 }
 
-/// Tell a `service serve` starter why this process refuses, once, then pass the
-/// error on. A no-op for every other command.
-fn refuse_starter(
-    serving: &mut Option<(std::time::Duration, Option<std::fs::File>)>,
-    error: CandidateError,
-) -> CandidateError {
-    if let Some(mut file) = serving.as_mut().and_then(|(_, notify)| notify.take()) {
-        use std::io::Write;
+/// The exit code of a service whose drain ran out of time.
+const SERVICE_DRAIN_TIMEOUT_EXIT: i32 = 3;
+
+/// A parsed `service serve`.
+struct Serving {
+    idle: std::time::Duration,
+    drain: std::time::Duration,
+    notify: Option<std::fs::File>,
+}
+
+/// Tell a `service serve` starter why this process refuses, once and without
+/// blocking, then pass the error on. A no-op for every other command.
+fn refuse_starter(serving: &mut Option<Serving>, error: CandidateError) -> CandidateError {
+    if let Some(file) = serving.as_mut().and_then(|serving| serving.notify.take()) {
         let refused = serde_json::json!({"refused": {"code": error.code}});
-        let _ = writeln!(file, "{refused}");
+        let _ = hack_runtime_core::service::notify(&file, &refused);
     }
     error
 }
 
-/// `service serve [--idle-seconds <1..86400>] [--notify-fd <3..1023>]`.
+/// Private input will pass through the service; keep it out of core dumps.
+fn disable_core_dumps() -> Result<(), CandidateError> {
+    let none = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a valid rlimit value; lowering a limit needs no privilege.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
+        return Err(CandidateError::new(
+            "service_core_limit",
+            "Could not disable core dumps for the runtime service.",
+        ));
+    }
+    Ok(())
+}
+
+/// The service keeps only the closed environment (PATH, HOME, TMPDIR, USER,
+/// LOGNAME), whatever its starter passed, so nothing it runs later inherits
+/// more. Called while this process is still single-threaded.
+fn keep_closed_environment() {
+    const KEEP: [&str; 5] = ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"];
+    let others: Vec<std::ffi::OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| !KEEP.iter().any(|keep| name == keep))
+        .collect();
+    for name in others {
+        // SAFETY: no other thread exists yet to read the environment.
+        unsafe { std::env::remove_var(name) };
+    }
+}
+
+/// `service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]`.
+/// Each option at most once. The notify descriptor is taken first, so a later
+/// argument error reaches the starter as a refused line.
 fn service_serve_arguments(
     arguments: &[&str],
     reserved: Option<i32>,
-) -> Result<(std::time::Duration, Option<std::fs::File>), CandidateError> {
+) -> Result<Serving, CandidateError> {
     let invalid = || {
         CandidateError::new(
             "invalid_arguments",
-            "Use service serve [--idle-seconds <1..86400>] [--notify-fd <3..1023>].",
+            "Use service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>], each at most once.",
         )
     };
-    let (mut idle, mut ready) = (300u64, None);
-    let mut rest = arguments;
-    while let [flag, value, tail @ ..] = rest {
-        match *flag {
-            "--idle-seconds" => {
-                idle = value
-                    .parse()
-                    .ok()
-                    .filter(|s| (1..=86_400).contains(s))
-                    .ok_or_else(invalid)?
-            }
-            "--notify-fd" if ready.is_none() => {
-                let fd: i32 = value
-                    .parse()
-                    .ok()
-                    .filter(|fd| (3..=1023).contains(fd))
-                    .ok_or_else(invalid)?;
-                // Never a second owner of the timings descriptor.
-                if Some(fd) == reserved {
-                    return Err(invalid());
-                }
-                // Open, and open for writing: the one line must be deliverable.
-                // SAFETY: F_GETFL only queries the descriptor's status flags.
-                let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-                if flags < 0 || !matches!(flags & libc::O_ACCMODE, libc::O_WRONLY | libc::O_RDWR) {
-                    return Err(invalid());
-                }
-                // Never inherited by anything the service starts later.
-                // SAFETY: F_SETFD on a descriptor just checked to be open.
-                if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-                    return Err(invalid());
-                }
-                // SAFETY: an open descriptor the starter handed over for this one line; owned here.
-                ready = Some(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) });
-            }
-            _ => return Err(invalid()),
+    // Wherever `--notify-fd <n>` stands, even after a malformed option, so that
+    // the grammar error found in the second pass still reaches the starter.
+    let notify_values: Vec<&str> = arguments
+        .windows(2)
+        .filter(|pair| pair[0] == "--notify-fd")
+        .map(|pair| pair[1])
+        .collect();
+    let mut serving = Serving {
+        idle: std::time::Duration::from_secs(300),
+        drain: hack_runtime_core::service::DEFAULT_DRAIN,
+        notify: None,
+    };
+    if let Some(value) = notify_values.first() {
+        serving.notify = Some(notify_descriptor(value, reserved).ok_or_else(invalid)?);
+    }
+    let mut serving = Some(serving);
+    let mut seen: Vec<&str> = Vec::new();
+    for pair in arguments.chunks(2) {
+        let [flag, value] = pair else {
+            return Err(refuse_starter(&mut serving, invalid()));
+        };
+        if seen.contains(flag) {
+            return Err(refuse_starter(&mut serving, invalid()));
         }
-        rest = tail;
+        seen.push(flag);
+        let parsed = serving.as_mut().expect("present until returned");
+        match *flag {
+            "--idle-seconds" => match value.parse().ok().filter(|s| (1..=86_400).contains(s)) {
+                Some(seconds) => parsed.idle = std::time::Duration::from_secs(seconds),
+                None => return Err(refuse_starter(&mut serving, invalid())),
+            },
+            "--drain-seconds" => match value.parse().ok().filter(|s| (1..=60).contains(s)) {
+                Some(seconds) => parsed.drain = std::time::Duration::from_secs(seconds),
+                None => return Err(refuse_starter(&mut serving, invalid())),
+            },
+            "--notify-fd" => {}
+            _ => return Err(refuse_starter(&mut serving, invalid())),
+        }
     }
-    if !rest.is_empty() {
-        return Err(invalid());
+    Ok(serving.expect("present until returned"))
+}
+
+/// Take the starter's notify descriptor: a FIFO or a socket (the transports the
+/// bounded notify write supports), open for writing, made close-on-exec, never
+/// the descriptor the timings collector owns. `None` if it is unusable.
+fn notify_descriptor(value: &str, reserved: Option<i32>) -> Option<std::fs::File> {
+    let fd: i32 = value.parse().ok().filter(|fd| (3..=1023).contains(fd))?;
+    if Some(fd) == reserved {
+        return None;
     }
-    Ok((std::time::Duration::from_secs(idle), ready))
+    hack_runtime_core::service::notify_kind(fd)?;
+    // SAFETY: F_GETFL only queries the descriptor's status flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || !matches!(flags & libc::O_ACCMODE, libc::O_WRONLY | libc::O_RDWR) {
+        return None;
+    }
+    // SAFETY: F_SETFD on a descriptor just checked to be open.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        return None;
+    }
+    // SAFETY: an open descriptor the starter handed over for this one line; owned here.
+    Some(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) })
 }
 
 fn print_json(value: &impl Serialize) -> Result<(), CandidateError> {

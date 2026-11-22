@@ -1,217 +1,17 @@
 #![cfg(feature = "installed-candidate")]
 //! Real-process contract for `hack-native service serve|status|stop` (HACK-2460 S1):
 //! a SIGKILL at any moment loses nothing, and the next start serves again.
+mod service_support;
+
 use serde_json::Value;
-use std::fs::{self, File};
+use service_support::*;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
-
-static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// A hang guard only: every wait the test makes is bounded by it, and nothing
-/// asserts how fast a loaded machine is.
-const WAIT: Duration = Duration::from_secs(30);
-/// Held around every fork in this test binary and around creating a pipe until
-/// its ends are close-on-exec: without pipe2 (macOS), a fork between `pipe` and
-/// `FD_CLOEXEC` would otherwise let a child inherit a writer across exec.
-static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// A private native home short enough for the service socket path.
-struct Home(PathBuf);
-impl Home {
-    fn new() -> Self {
-        let mut parent = std::env::temp_dir().canonicalize().unwrap();
-        if parent.as_os_str().len() > 40 {
-            parent = Path::new("/tmp").canonicalize().unwrap();
-        }
-        let path = parent.join(format!(
-            "hrsc-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-        Self(path)
-    }
-    fn socket(&self) -> PathBuf {
-        self.0.join(".hack-local/run/service/hack-runtime.sock")
-    }
-}
-impl Drop for Home {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A service process this test started. Dropping it kills and reaps it, so a
-/// failed assertion never leaves a detached service behind.
-struct Service(Child);
-impl Service {
-    fn pid(&self) -> u32 {
-        self.0.id()
-    }
-    /// Wait for the process to end, at most `WAIT`.
-    fn exit(&mut self) -> ExitStatus {
-        let started = Instant::now();
-        loop {
-            if let Some(status) = self.0.try_wait().unwrap() {
-                return status;
-            }
-            assert!(started.elapsed() < WAIT, "the service did not exit");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-}
-impl Drop for Service {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-}
-
-fn command(home: &Home, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_hack-native"));
-    command
-        .arg("--candidate-root")
-        .arg(&home.0)
-        .args(args)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", &home.0)
-        .current_dir(&home.0);
-    command
-}
-
-/// Run a one-shot command, at most `WAIT`; the spawn lock is held only for the
-/// spawn, and the child is killed and reaped if it overruns.
-fn run(home: &Home, args: &[&str]) -> Output {
-    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
-    let mut child = Service(
-        command(home, args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    drop(spawning);
-    let drain = |mut pipe: Box<dyn Read + Send>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes);
-            bytes
-        })
-    };
-    let stdout = drain(Box::new(child.0.stdout.take().unwrap()));
-    let stderr = drain(Box::new(child.0.stderr.take().unwrap()));
-    let status = child.exit();
-    Output {
-        status,
-        stdout: stdout.join().unwrap(),
-        stderr: stderr.join().unwrap(),
-    }
-}
-
-fn json(output: &Output) -> Value {
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
-
-/// A pipe whose two ends are close-on-exec.
-fn pipe() -> (File, File) {
-    let mut fds = [0; 2];
-    // SAFETY: a writable two-element array.
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-    for fd in fds {
-        // SAFETY: F_SETFD on a descriptor just created.
-        assert_eq!(
-            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
-            0
-        );
-    }
-    // SAFETY: fresh descriptors from pipe(2), each wrapped once.
-    unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
-}
-
-/// Run `serve` with `fd` placed at descriptor 3 as the only extra descriptor
-/// that survives exec, in its own session, with the closed environment.
-fn spawn_serve(home: &Home, fd: i32, args: &[&str]) -> Service {
-    let mut command = command(home, args);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // SAFETY: only async-signal-safe calls between fork and exec.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::setsid() < 0 || libc::dup2(fd, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            // dup2 onto itself keeps close-on-exec; clear it on 3 explicitly.
-            if libc::fcntl(3, libc::F_SETFD, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    Service(command.spawn().unwrap())
-}
-
-/// Start the service the way a client will and return its one notify line. The
-/// notify channel must reach end-of-file right after that line, while the
-/// service keeps running: nobody else holds a writer.
-fn start(home: &Home) -> (Service, Value) {
-    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
-    let (reader, writer) = pipe();
-    let service = spawn_serve(
-        home,
-        writer.as_raw_fd(),
-        &[
-            "service",
-            "serve",
-            "--idle-seconds",
-            "60",
-            "--notify-fd",
-            "3",
-        ],
-    );
-    drop(writer);
-    drop(spawning);
-    let (sender, received) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        let first = reader.read_line(&mut line).map(|_| line);
-        let _ = sender.send(first);
-        let mut rest = Vec::new();
-        let _ = sender.send(
-            reader
-                .read_to_end(&mut rest)
-                .map(|_| String::from_utf8_lossy(&rest).into()),
-        );
-    });
-    let line = received
-        .recv_timeout(WAIT)
-        .expect("no notify line")
-        .unwrap();
-    let rest = received
-        .recv_timeout(WAIT)
-        .expect("the notify channel stayed open")
-        .unwrap();
-    assert_eq!(rest, "", "exactly one notify line");
-    (service, serde_json::from_str(&line).unwrap())
-}
-
 #[test]
 fn a_killed_service_is_replaced_and_a_stopped_one_exits_cleanly() {
     let home = Home::new();
@@ -489,4 +289,161 @@ fn a_starter_learns_why_serve_refused_a_home_that_cannot_be_resolved() {
     reader.read_to_string(&mut rest).unwrap();
     assert_eq!(rest, "", "exactly one refused line");
     assert!(!missing.exists());
+}
+
+#[test]
+fn serve_refuses_a_repeated_option_and_tells_the_starter() {
+    let home = Home::new();
+    for args in [
+        &[
+            "service",
+            "serve",
+            "--notify-fd",
+            "3",
+            "--idle-seconds",
+            "60",
+            "--idle-seconds",
+            "61",
+        ][..],
+        &["service", "serve", "--notify-fd", "3", "--notify-fd", "3"],
+        &[
+            "service",
+            "serve",
+            "--notify-fd",
+            "3",
+            "--drain-seconds",
+            "1",
+            "--drain-seconds",
+            "2",
+        ],
+        &[
+            "service",
+            "serve",
+            "--notify-fd",
+            "3",
+            "--idle-seconds",
+            "0",
+        ],
+        &["service", "serve", "--idle-seconds", "--notify-fd", "3"],
+    ] {
+        let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+        let (reader, writer) = pipe();
+        let mut service = spawn_serve(&home, writer.as_raw_fd(), args);
+        drop(writer);
+        drop(spawning);
+        assert!(!service.exit().success(), "{args:?}");
+        let mut line = String::new();
+        BufReader::new(reader).read_line(&mut line).unwrap();
+        let refused: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            refused,
+            serde_json::json!({"refused": {"code": "invalid_arguments"}}),
+            "{args:?}"
+        );
+    }
+    assert!(home.socket().symlink_metadata().is_err());
+}
+
+#[test]
+fn a_starter_that_never_reads_cannot_hold_the_service() {
+    // The notify pipe is full and nobody reads it, blocking or not: the service
+    // must not serve, must exit, and must leave the home free.
+    let home = Home::new();
+    for blocking in [false, true] {
+        let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+        let (reader, writer) = full_pipe(blocking);
+        let mut service = spawn_serve(
+            &home,
+            writer.as_raw_fd(),
+            &[
+                "service",
+                "serve",
+                "--idle-seconds",
+                "60",
+                "--notify-fd",
+                "3",
+            ],
+        );
+        drop(writer);
+        drop(spawning);
+        assert_eq!(service.exit().code(), Some(2), "blocking: {blocking}");
+        assert!(home.socket().symlink_metadata().is_err());
+        drop(reader);
+        assert!(serves_again(&home), "blocking: {blocking}");
+    }
+}
+
+#[test]
+fn two_stops_at_once_give_success_or_absent_never_an_io_error() {
+    let home = std::sync::Arc::new(Home::new());
+    for _ in 0..30 {
+        let (mut service, ready) = start(&home);
+        assert!(ready["listening"].is_object(), "{ready}");
+        let first = {
+            let home = std::sync::Arc::clone(&home);
+            std::thread::spawn(move || run(&home, &["service", "stop"]))
+        };
+        let second = run(&home, &["service", "stop"]);
+        let first = first.join().unwrap();
+        for output in [first, second] {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains("service_absent"), "{stderr}");
+            }
+        }
+        assert!(service.exit().success());
+    }
+}
+
+#[test]
+fn a_full_socket_as_the_notify_descriptor_cannot_hold_the_service() {
+    let home = Home::new();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (ours, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    ours.set_nonblocking(true).unwrap();
+    let chunk = [0u8; 4096];
+    while std::io::Write::write(&mut &ours, &chunk).is_ok() {}
+    let mut service = spawn_serve(
+        &home,
+        ours.as_raw_fd(),
+        &[
+            "service",
+            "serve",
+            "--idle-seconds",
+            "60",
+            "--notify-fd",
+            "3",
+        ],
+    );
+    drop(ours);
+    drop(spawning);
+    assert_eq!(service.exit().code(), Some(2));
+    assert!(home.socket().symlink_metadata().is_err());
+    assert!(serves_again(&home));
+}
+
+#[test]
+fn a_regular_file_is_not_a_notify_transport() {
+    let home = Home::new();
+    let file = File::create(home.0.join("notify.txt")).unwrap();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let mut service = spawn_serve(
+        &home,
+        file.as_raw_fd(),
+        &[
+            "service",
+            "serve",
+            "--idle-seconds",
+            "60",
+            "--notify-fd",
+            "3",
+        ],
+    );
+    drop(spawning);
+    assert!(!service.exit().success());
+    // Refused by the argument check, before any service starts.
+    let stderr = stderr_of(&mut service);
+    assert!(stderr.contains("invalid_arguments"), "{stderr}");
+    assert!(home.socket().symlink_metadata().is_err());
+    assert_eq!(std::fs::read(home.0.join("notify.txt")).unwrap(), b"");
 }

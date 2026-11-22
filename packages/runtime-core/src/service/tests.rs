@@ -38,6 +38,8 @@ fn spawn(
 ) {
     let options = Options {
         idle,
+        drain: DEFAULT_DRAIN,
+        signals: false,
         hold_idle: None,
         release_wait: None,
         retrying: None,
@@ -58,6 +60,8 @@ fn spawn_after_release(
 ) {
     let options = Options {
         idle: Duration::from_secs(30),
+        drain: DEFAULT_DRAIN,
+        signals: false,
         hold_idle: None,
         release_wait: Some(Duration::from_secs(20)),
         retrying: None,
@@ -276,6 +280,8 @@ fn concurrent_starts_leave_exactly_one_serving_process() {
                 }
                 let options = Options {
                     idle: Duration::from_millis(1),
+                    drain: DEFAULT_DRAIN,
+                    signals: false,
                     hold_idle: Some(hold),
                     release_wait: None,
                     retrying: None,
@@ -384,6 +390,8 @@ fn an_open_session_keeps_the_service_until_it_closes() {
         let hold = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let options = Options {
             idle: Duration::from_millis(1),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: Some(Arc::clone(&hold)),
             release_wait: None,
             retrying: None,
@@ -461,6 +469,8 @@ fn connections_queued_at_shutdown_are_refused_and_cannot_hold_it_open() {
             &paths,
             Options {
                 idle: Duration::from_secs(30),
+                drain: DEFAULT_DRAIN,
+                signals: false,
                 hold_idle: None,
                 release_wait: None,
                 retrying: None,
@@ -698,6 +708,8 @@ fn a_request_queued_before_idle_expiry_gets_a_refusal_not_silence() {
         let (listener, lock, id) = start(&paths).unwrap().unwrap();
         let options = Options {
             idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: None,
             release_wait: None,
             retrying: None,
@@ -753,6 +765,8 @@ fn partial_requests_queued_at_shutdown_cannot_hold_the_lock() {
         let (listener, lock, id) = start(&paths).unwrap().unwrap();
         let options = Options {
             idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: None,
             release_wait: None,
             retrying: None,
@@ -801,6 +815,8 @@ fn a_connection_accepted_after_stop_is_refused_not_handed_to_a_worker() {
         let (listener, lock, id) = start(&paths).unwrap().unwrap();
         let options = Options {
             idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: None,
             release_wait: None,
             retrying: None,
@@ -876,6 +892,8 @@ fn a_panicking_session_or_request_still_gives_back_its_count() {
         let (_listener, lock, id) = start(&paths).unwrap().unwrap();
         let options = Options {
             idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: None,
             release_wait: None,
             retrying: None,
@@ -911,6 +929,8 @@ fn a_drain_that_runs_out_of_time_says_so_and_keeps_the_lock() {
         let (listener, lock, id) = start(&paths).unwrap().unwrap();
         let options = Options {
             idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: None,
             release_wait: None,
             retrying: None,
@@ -1017,6 +1037,8 @@ fn a_starter_that_loses_in_the_release_gap_serves_once_the_owner_lets_go() {
         let (retrying, entered) = std::sync::mpsc::channel();
         let options = Options {
             idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: None,
             release_wait: Some(Duration::from_secs(20)),
             retrying: Some(retrying),
@@ -1047,6 +1069,8 @@ fn a_starter_that_loses_to_an_answering_owner_reports_lost_at_once() {
         let (retrying, entered) = std::sync::mpsc::channel();
         let options = Options {
             idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: None,
             release_wait: Some(HANG_GUARD * 2),
             retrying: Some(retrying),
@@ -1073,6 +1097,8 @@ fn no_attempt_begins_after_the_release_window() {
         let (retrying, attempts) = std::sync::mpsc::channel();
         let options = Options {
             idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
             hold_idle: None,
             release_wait: Some(Duration::ZERO),
             retrying: Some(retrying),
@@ -1080,5 +1106,137 @@ fn no_attempt_begins_after_the_release_window() {
         assert_eq!(serve(&root.0, options, None).unwrap(), Outcome::Lost);
         assert_eq!(attempts.try_iter().collect::<Vec<_>>(), vec!["window"]);
         drop((listener, ownership));
+    });
+}
+
+#[test]
+fn the_retry_probe_never_follows_a_symlinked_socket_path() {
+    within(move || {
+        // Both locks are held and the socket path is a symlink to nothing. The
+        // checked probe refuses the path, so the starter loses at once; a probe
+        // that followed the link would read "absent" and enter the window.
+        let root = Root::new();
+        let paths = paths(&root.0);
+        let (listener, ownership, id) = start(&paths).unwrap().unwrap();
+        unlink_if(&paths.socket, id);
+        std::os::unix::fs::symlink(root.0.join("nowhere.sock"), &paths.socket).unwrap();
+        let (retrying, attempts) = std::sync::mpsc::channel();
+        let options = Options {
+            idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
+            hold_idle: None,
+            release_wait: Some(HANG_GUARD * 2),
+            retrying: Some(retrying),
+        };
+        assert_eq!(serve(&root.0, options, None).unwrap(), Outcome::Lost);
+        assert!(attempts.try_recv().is_err(), "no retry window was entered");
+        drop((listener, ownership));
+    });
+}
+
+#[test]
+fn a_listening_line_nobody_takes_ends_the_service_with_everything_released() {
+    within(move || {
+        let root = Root::new();
+        let (reader, writer) = pipe();
+        // SAFETY: scalar fcntl and write calls on this test's own descriptor.
+        unsafe {
+            let fd = writer.as_raw_fd();
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            let byte = [0u8; 1];
+            while libc::write(fd, byte.as_ptr().cast(), 1) > 0 {}
+            libc::fcntl(fd, libc::F_SETFL, flags);
+        }
+        let options = Options {
+            idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
+            hold_idle: None,
+            release_wait: None,
+            retrying: None,
+        };
+        let error = serve(&root.0, options, Some(writer)).unwrap_err();
+        assert_eq!(error.code, "service_notify_failed");
+        assert!(!paths(&root.0).socket.exists());
+        assert!(!paths(&root.0).record.exists());
+        assert!(lock_frees(&paths(&root.0).lock));
+        drop(reader);
+    });
+}
+
+/// A fake service at `root`'s socket path: it accepts one connection, reads
+/// the hello frame, then runs `then` on the stream.
+fn fake_service(
+    root: &Path,
+    then: impl FnOnce(UnixStream) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    let paths = paths(root);
+    private_directory(&paths.dir).unwrap();
+    let listener = UnixListener::bind(&paths.socket).unwrap();
+    std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        frame::read(&mut stream, Duration::from_secs(5), CONTROL_FRAME_LIMIT).unwrap();
+        then(stream);
+    })
+}
+
+#[test]
+fn a_connection_that_closes_without_a_reply_is_service_closed() {
+    within(move || {
+        let root = Root::new();
+        let server = fake_service(&root.0, drop);
+        assert_eq!(
+            call(&root.0, "service.retire", json!({})).unwrap_err().code,
+            "service_closed"
+        );
+        server.join().unwrap();
+    });
+}
+
+#[test]
+fn a_malformed_reply_stays_a_protocol_error() {
+    within(move || {
+        let root = Root::new();
+        let server = fake_service(&root.0, |mut stream| {
+            let reply = json!({"v": 1, "id": "not-the-request", "ok": true, "result": {}});
+            frame::write(
+                &mut stream,
+                &serde_json::to_vec(&reply).unwrap(),
+                CONTROL_FRAME_LIMIT,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            call(&root.0, "service.retire", json!({})).unwrap_err().code,
+            "service_protocol"
+        );
+        server.join().unwrap();
+    });
+}
+
+#[test]
+fn a_partial_reply_from_a_peer_that_stays_connected_is_not_service_closed() {
+    within(move || {
+        let root = Root::new();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let server = fake_service(&root.0, move |mut stream| {
+            stream.write_all(&[0, 0]).unwrap();
+            // Keep the connection open until the client has given up.
+            let _ = released.recv();
+            drop(stream);
+        });
+        let error = super::client::call_within(
+            &root.0,
+            "service.retire",
+            json!({}),
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "service_io", "{}", error.message);
+        release.send(()).unwrap();
+        server.join().unwrap();
     });
 }

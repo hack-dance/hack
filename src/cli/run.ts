@@ -10,6 +10,7 @@ import { setNoInteractiveFlag } from "../lib/interactivity.ts";
 import { closeLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { reserveStdoutForMachineOutput } from "../lib/machine-stdout.ts";
 import { nativeDetachedUpFailure } from "../lib/native-detached-up.ts";
+import { canPrintPathSelector } from "../lib/printed-shell-command.ts";
 import { logger } from "../ui/logger.ts";
 import {
   startRefusalBlocker,
@@ -350,7 +351,9 @@ function selectedProjectBlocker(
       thing: "project",
       problem:
         "no project found at the selected path · use a configured project path",
-      which: JSON.stringify(selection.path),
+      which: canPrintPathSelector(selection.path)
+        ? JSON.stringify(selection.path)
+        : undefined,
     };
   }
 }

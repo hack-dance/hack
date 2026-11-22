@@ -158,7 +158,7 @@ import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { renderNativeEnvironmentNameError } from "./native-environment-name-error.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import {
-  canPrintProjectSelector,
+  canPrintStartSelection,
   scopedHackCommand,
 } from "./printed-shell-command.ts";
 import type { serializeProjectAutostart } from "./project-views.ts";
@@ -2350,7 +2350,14 @@ function nativeComposeHookCommand(
   action: "ps" | "up",
   options: NativeComposeCommandOptions
 ): string | undefined {
-  if (!canPrintProjectSelector(options.project)) {
+  if (
+    !canPrintStartSelection({
+      path: options.path,
+      project: options.project,
+      branch: options.instance,
+      services: options.services,
+    })
+  ) {
     return;
   }
   const flags: string[] = [];

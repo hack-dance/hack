@@ -1,7 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { handleRunCliError } from "../src/cli/run.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
-import { printedShellCommand } from "../src/lib/printed-shell-command.ts";
+import {
+  canPrintStartSelection,
+  printedShellCommand,
+} from "../src/lib/printed-shell-command.ts";
 import { writeUpHookBlocker } from "../src/ui/start-refusal-output.ts";
 
 import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
@@ -136,4 +139,21 @@ test.each([
   });
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toBe(value);
+});
+
+test("retry text excludes pasted assignments and noncanonical project aliases", () => {
+  expect(canPrintStartSelection({ project: "Demo_Private" })).toBe(false);
+  expect(
+    canPrintStartSelection({ project: "demo", branch: "TOKEN=value" })
+  ).toBe(false);
+  expect(canPrintStartSelection({ path: "TOKEN=value" })).toBe(false);
+  expect(canPrintStartSelection({ services: ["TOKEN=value"] })).toBe(false);
+  expect(
+    canPrintStartSelection({
+      project: "demo",
+      branch: "feature/example",
+      services: ["web"],
+      path: "-fixture\n",
+    })
+  ).toBe(true);
 });

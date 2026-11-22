@@ -13,7 +13,7 @@ import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import {
-  canPrintProjectSelector,
+  canPrintStartSelection,
   printedShellCommand,
   scopedHackCommand,
 } from "../lib/printed-shell-command.ts";
@@ -7888,14 +7888,21 @@ async function runUpCommand({
     });
   let failedHook: string | undefined;
   let failedHookReason: string | undefined;
-  const retryCommand = canPrintProjectSelector(args.options.project)
+  const retryCommand = canPrintStartSelection({
+    path: args.options.path,
+    project: args.options.project,
+    branch: args.options.branch,
+    services: args.positionals.services,
+  })
     ? printedUpRetry(args.raw.argv)
     : undefined;
   const summarizeFailure = json
     ? undefined
     : (name: string, reason?: string) => {
         failedHook = name;
-        failedHookReason = reason;
+        failedHookReason = reason
+          ? "persistent hook startup refused"
+          : undefined;
       };
   try {
     const lifecycleUp: LifecycleUpResult = serviceScoped

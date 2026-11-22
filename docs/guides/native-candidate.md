@@ -2112,7 +2112,7 @@ Set `HACK_NATIVE_IMAGE_TAG_TTL_SECONDS` to change that interval. A value of
 archives without starting services. `hack up --refresh-images` refreshes the
 tags when starting services.
 
-Use `hack up --offline` to use recorded tag resolutions and local archives
+Use `hack up --offline` to use recorded resolutions of images already loaded
 without contacting a registry. The runtime can also use a recorded resolution
 of any age when it cannot reach the registry. The command reports that fallback
 once. A tag without a usable recorded resolution refuses with
@@ -2123,6 +2123,10 @@ the refusal is `image_archive_offline_missing`. Invalid registry metadata is ref
 image configuration IDs and last resolution time for the project's mutable
 tags. A running container keeps the image ID it was created with.
 
+During native project startup, active services with the same canonical image reference
+and platform policy share one validated image selection. If services request
+different platforms for the same tag, their selections use the same immutable
+registry digest.
 
 ### Explicit writable development source
 

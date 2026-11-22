@@ -767,14 +767,20 @@ fn load_cached_with(
         ));
     }
     check_emulation(archive.platform, guest)?;
-    if archive.recorded_config.is_some_and(|id| id != archive.image) {
-        return Err(error("Cached image differs from the verified registry configuration."));
+    if archive
+        .recorded_config
+        .is_some_and(|id| id != archive.image)
+    {
+        return Err(error(
+            "Cached image differs from the verified registry configuration.",
+        ));
     }
     let mut requested = receipt(candidate, archive, Some(archive.pin), guest);
     let path = receipt_path(candidate, archive.sha);
     let old = read_receipt(&path, &requested)?;
     let bound = old.as_ref().is_some_and(|receipt| {
-        reusable_validation(receipt, &requested) && receipt.source_pin.as_deref() == Some(archive.pin)
+        reusable_validation(receipt, &requested)
+            && receipt.source_pin.as_deref() == Some(archive.pin)
     });
     let verified = bound || archive.recorded_config == Some(archive.image);
     if verified && inspect(archive.image, archive.platform, read_image)? {
@@ -1772,18 +1778,27 @@ pub(super) mod tests {
         archive.require_present = true;
         std::fs::remove_file(&fixture.path).unwrap();
         let observed = load_cached_with(
-            &fixture.candidate, &archive, &ImagePolicy::default(), &test_guest(),
+            &fixture.candidate,
+            &archive,
+            &ImagePolicy::default(),
+            &test_guest(),
             || Ok(serde_json::json!({"Id":fixture.image,"Architecture":"arm64","Os":"linux"})),
             || panic!("fallback must not call a registry"),
             |_| panic!("fallback must not load an archive"),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(observed.image_id, fixture.image);
         let refused = load_cached_with(
-            &fixture.candidate, &archive, &ImagePolicy::default(), &test_guest(),
+            &fixture.candidate,
+            &archive,
+            &ImagePolicy::default(),
+            &test_guest(),
             no_image,
             || panic!("fallback must not call a registry"),
             |_| panic!("fallback must not load an archive"),
-        ).err().unwrap();
+        )
+        .err()
+        .unwrap();
         assert_eq!(refused.code, "image_archive_offline_missing");
     }
 

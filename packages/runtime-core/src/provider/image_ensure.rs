@@ -303,11 +303,15 @@ fn acquire_for_use(
         registry_image::tagged(reference, policy)?;
     }
     let observer = if import {
-        Some(measure(Step::ImageEnginePreflight, None, |_| -> Result<_, CandidateError> {
-            let observer = engine::Observer::connect(candidate)?;
-            observer.info()?;
-            Ok(observer)
-        })?)
+        Some(measure(
+            Step::ImageEnginePreflight,
+            None,
+            |_| -> Result<_, CandidateError> {
+                let observer = engine::Observer::connect(candidate)?;
+                observer.info()?;
+                Ok(observer)
+            },
+        )?)
     } else {
         None
     };
@@ -358,12 +362,19 @@ fn acquire_for_use(
         |candidate, path, receipt, reused| {
             let config = tag.as_ref().map(|tag| tag.image_id.as_str());
             if config.is_some_and(|id| id != receipt.image_id) {
-                return Err(refused("Cached image differs from the verified registry configuration."));
+                return Err(refused(
+                    "Cached image differs from the verified registry configuration.",
+                ));
             }
             let Some(observer) = &observer else {
                 return image_load::validate_file_for(
-                    path, &receipt.archive_sha256, &receipt.image_id, policy, receipt.platform,
-                ).map(|_| ());
+                    path,
+                    &receipt.archive_sha256,
+                    &receipt.image_id,
+                    policy,
+                    receipt.platform,
+                )
+                .map(|_| ());
             };
             let archive = image_load::CachedArchive {
                 path,
@@ -387,11 +398,14 @@ fn acquire_for_use(
                 }
                 measure(Step::ImagePinVerify, None, |_| {
                     registry_image::resolve_pinned(
-                        &receipt.reference, policy, PlatformPolicy::exact(receipt.platform),
-                    ).map(|value| value.image_id)
+                        &receipt.reference,
+                        policy,
+                        PlatformPolicy::exact(receipt.platform),
+                    )
+                    .map(|value| value.image_id)
                 })
-            }).map(|_| ())
-        },
+            })
+            .map(|_| ())
         },
     )?;
     if !import {

@@ -1353,6 +1353,25 @@ fn start_pool_observed(
     // A mistyped setting is refused before any effect.
     let hot_reload = super::hot_reload::Setting::from_environment()?;
     let admission_reuse = admission::opening::Reuse::from_environment()?;
+    // Reject an oversized selection before restoring aliases or retaining a start.
+    let pool = root(candidate);
+    if pool.join("owner.json").try_exists().map_err(io)? {
+        let owner = Owner::load_for_alias_restore(candidate)?;
+        if owner.phase != "running" {
+            super::boot_budget::check_owner(&owner)?;
+            super::boot_budget::check(
+                owner.project_shares().len(),
+                bridge_request.initial(),
+                dependency_request.initial(),
+            )?;
+        }
+    } else {
+        super::boot_budget::check(
+            usize::from(project_share.is_some()),
+            bridge_request.initial(),
+            dependency_request.initial(),
+        )?;
+    }
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
     // any strict owner read below refuses it.
     restore_released_short_home_before_use(candidate)?;
@@ -1547,6 +1566,22 @@ fn start_pool_observed(
     // not on a qualified filesystem, nothing is proven here and `prepare_rootfs` decides.
     // The recheck writes nothing; an alias repaired before admission stays repaired.
     let leased_rootfs = rootfs_proof::recheck(candidate, &lock, early_rootfs)?;
+    if root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        let owner = Owner::load_for_alias_restore(candidate)?;
+        if owner.phase != "running" {
+            super::boot_budget::check_owner(&owner)?;
+        }
+    } else {
+        super::boot_budget::check(
+            usize::from(existing_share.is_some()),
+            existing,
+            existing_dependencies,
+        )?;
+    }
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;

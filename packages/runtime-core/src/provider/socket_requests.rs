@@ -42,10 +42,10 @@ pub(super) fn fresh_project_capacity(
     bridge: bridge::Request,
     dependency: dependency_socket::Request,
 ) -> Result<(Option<BridgeIntent>, Option<DependencySocketIntent>), CandidateError> {
-    // Projects and branches draw from the same pool. Use the full budget by
-    // default, favoring published services while reserving room for dependencies.
-    const DEFAULT_BRIDGES: u8 = 24;
-    const DEFAULT_DEPENDENCIES: u8 = 8;
+    // Leave room for the maximum eight project mounts in the provider's
+    // boot command line. Actual project requirements take precedence.
+    const DEFAULT_BRIDGES: u8 = 2;
+    const DEFAULT_DEPENDENCIES: u8 = 1;
 
     let mut bridges = bridge.initial();
     let mut dependencies = dependency.initial();
@@ -63,6 +63,14 @@ pub(super) fn fresh_project_capacity(
             .max(DEFAULT_DEPENDENCIES.min(dependency_socket::MAX_POOL_SOCKETS - bridge_slots));
         dependencies = (slots > 0).then_some(DependencySocketIntent { slots });
     }
+    if !super::boot_budget::fits(
+        1,
+        bridges.map_or(0, |value| value.slots),
+        dependencies.map_or(0, |value| value.slots),
+    ) {
+        // Spare capacity must never make an otherwise admissible request fail.
+        return Ok((bridge.initial(), dependency.initial()));
+    }
     Ok((bridges, dependencies))
 }
 
@@ -79,21 +87,21 @@ mod tests {
                 dependency.map_or(0, |v| v.slots),
             )
         };
-        assert_eq!(size(SocketRequests::default()), (24, 8));
+        assert_eq!(size(SocketRequests::default()), (2, 1));
         assert_eq!(
             size(SocketRequests {
                 bridges: Some(BridgeIntent::new(1).unwrap()),
                 minimum_dependencies: Some(DependencySocketIntent::new(5).unwrap()),
                 ..Default::default()
             }),
-            (1, 8)
+            (1, 5)
         );
         assert_eq!(
             size(SocketRequests {
-                minimum_bridges: Some(BridgeIntent::new(31).unwrap()),
+                minimum_bridges: Some(BridgeIntent::new(21).unwrap()),
                 ..Default::default()
             }),
-            (31, 1)
+            (21, 0)
         );
         assert_eq!(
             size(SocketRequests {

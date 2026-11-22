@@ -17,6 +17,8 @@ stateDiagram-v2
     grace --> done : [start finished]
     exit --> gone
     gone --> recovered : next up proves it gone
+    grace --> waited : a new up arrives
+    waited --> gone : owner exited, ≤15 s
     done --> [*]
     recovered --> [*]
 
@@ -27,6 +29,11 @@ stateDiagram-v2
     note left of gone
         The next up waits for this,
         then recovers the run.
+    end note
+    note right of waited
+        Only while the pool record
+        shows the pool stopped.
+        One line says so.
     end note
 
     class recovered ok

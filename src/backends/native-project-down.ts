@@ -5,6 +5,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { awaitNativeEndedBootOwner } from "./native-ended-boot-owner.ts";
 import {
   nativeFrontendGone,
   nativeFrontendGoneSettled,
@@ -637,17 +638,34 @@ async function inspectOrStartStoppedPool(opts: {
   readonly projectRoot: string;
   readonly run: NativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
+  /** Where the one-line wait notice goes; stderr by default. */
+  readonly notice?: (line: string) => void;
+  readonly poolBootEnded?: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs?: number;
 }): Promise<unknown> {
   try {
     return await opts.inspect();
   } catch (error) {
-    if (
-      !(
-        opts.startStoppedPool &&
-        isNativeRuntimeNotRunning(error) &&
-        (await deadOwnerOfLiveRun(opts))
-      )
-    ) {
+    if (!isNativeRuntimeNotRunning(error)) {
+      throw error;
+    }
+    // HACK-2572: the run's owner of a boot that has ended may still be exiting;
+    // wait for it, bounded, before deciding as before.
+    const ended = opts.poolBootEnded;
+    await awaitNativeEndedBootOwner({
+      home: opts.runtime.home,
+      waitMs: opts.endedBootOwnerWaitMs,
+      read: ended
+        ? async (home) =>
+            (await ended(home)) ? { token: "", phase: "stopped" } : undefined
+        : undefined,
+      notice:
+        opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)),
+      ownerRunning: async () =>
+        (await selectForegroundOwner(opts).catch(() => undefined))
+          ?.foreground === "running",
+    });
+    if (!(opts.startStoppedPool && (await deadOwnerOfLiveRun(opts)))) {
       throw error;
     }
   }
@@ -737,6 +755,9 @@ async function nativeProjectDownOnce(opts: {
    * under a dead owner's live run may be started once (HACK-2456).
    */
   readonly startStoppedPool?: boolean;
+  /** Test seams of the HACK-2572 wait: the pool record proof and its bound. */
+  readonly poolBootEnded?: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs?: number;
 }) {
   const run = await downRun(opts);
   if (!run) {
@@ -762,6 +783,8 @@ async function nativeProjectDownOnce(opts: {
     projectRoot: opts.scope.projectRoot,
     run,
     invoke,
+    poolBootEnded: opts.poolBootEnded,
+    endedBootOwnerWaitMs: opts.endedBootOwnerWaitMs,
   });
   verify(initial, run, false);
   const finalization = opts.deferFinalization

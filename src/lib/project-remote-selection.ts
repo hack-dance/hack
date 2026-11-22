@@ -87,7 +87,7 @@ export function resolveRemoteChoices(
 }
 
 async function confirmChoice(choice: EffectiveRemote): Promise<void> {
-  if (!canPrompt()) {
+  if (!(canPrompt() && process.stderr.isTTY)) {
     if (choice.source === "--use") {
       return;
     }
@@ -274,16 +274,24 @@ export const CONTAINER_ONLY_HOSTS: ReadonlySet<string> = new Set([
 export function applyRemoteEnv(
   env: Readonly<Record<string, string>>,
   choices: readonly EffectiveRemote[] = [],
-  options?: { readonly bindingsOnly?: boolean; readonly host?: boolean }
+  options?: {
+    readonly bindingsOnly?: boolean;
+    readonly host?: boolean;
+    readonly missing?: (remote: string, name: string) => void;
+  }
 ): Record<string, string> {
   const result = options?.bindingsOnly ? {} : { ...env };
-  for (const { address, bindings, port } of choices) {
+  for (const { remote, address, bindings, port } of choices) {
     let host: string;
     if (address.kind === "env_ref") {
       const value = Object.hasOwn(env, address.name)
         ? env[address.name]
         : undefined;
       if (!value) {
+        if (options?.missing) {
+          options.missing(remote, address.name);
+          continue;
+        }
         throw new HackCliError({
           code: "E_CONFIG_INVALID",
           message: `Missing managed environment value for ${address.name}.`,
@@ -342,66 +350,53 @@ export function inactiveRemoteServices(
 
 export function remoteServiceTargets(
   choices: readonly EffectiveRemote[] | undefined,
-  services: readonly string[],
-  scope: "whole" | "start" | "restart" = "whole"
+  services: readonly string[]
 ): readonly string[] {
-  if (!choices?.length) {
-    return services;
-  }
-  const { selected, inactive } = backingServices(choices);
-  const included = services.filter((service) => !inactive.includes(service));
-  if (
-    (scope !== "whole" && included.length !== services.length) ||
-    included.length + selected.size === 0
-  ) {
+  const { selected, inactive } = backingServices(choices ?? []);
+  const targets = [
+    ...new Set([
+      ...services.filter((service) => !inactive.includes(service)),
+      ...selected,
+    ]),
+  ];
+  if (!targets.length) {
     throw new HackCliError({
       code: "E_USAGE",
-      message:
-        "No requested Compose service is available with this remote selection.",
+      message: "No Compose service is available with this remote selection.",
     });
   }
-  return scope === "restart"
-    ? included
-    : [...new Set([...included, ...selected])];
+  return targets;
 }
 
 export function remoteSelectionLabels(
-  choices: readonly EffectiveRemote[] = []
+  choices: readonly EffectiveRemote[]
 ): Record<string, string> {
   return Object.fromEntries(
-    choices.map(({ remote, target, source }) => [
-      `dev.hack.remote.${remote}`,
-      `${target}:${source}`,
-    ])
+    choices.map(({ remote, target }) => [`dev.hack.remote.${remote}`, target])
   );
 }
 
-export function runningRemoteChoice(
+/** Undefined means no observed label; null means observations disagree. */
+export function runningRemoteTarget(
   entries: readonly Record<string, unknown>[],
-  remote: SelectedProjectRemote
-): { target: string; source: EffectiveRemote["source"] } | null {
-  const prefix = `dev.hack.remote.${remote.remote}=`;
-  const labels = new Set(
-    entries.flatMap(({ State, Labels }) => {
-      if (State !== "running") {
-        return [];
-      }
-      const fields = typeof Labels === "string" ? Labels.split(",") : [];
-      if (fields.includes("com.docker.compose.oneoff=True")) {
-        return [];
-      }
-      return [
-        fields.find((label) => label.startsWith(prefix))?.slice(prefix.length),
-      ];
-    })
-  );
-  if (labels.size !== 1) {
-    return null;
+  remote: string
+): string | null | undefined {
+  const prefix = `dev.hack.remote.${remote}=`;
+  const observed = new Set<string>();
+  for (const { State, Labels } of entries) {
+    if (State !== "running" || typeof Labels !== "string") {
+      continue;
+    }
+    const fields = Labels.split(",");
+    if (fields.includes("com.docker.compose.oneoff=True")) {
+      continue;
+    }
+    const target = fields
+      .find((label) => label.startsWith(prefix))
+      ?.slice(prefix.length);
+    if (target) {
+      observed.add(target.split(":")[0] ?? target);
+    }
   }
-  const [target, source] = ([...labels][0] ?? "").split(":");
-  return target &&
-    remote.targets.has(target) &&
-    (source === "--use" || source === "checkout" || source === "default")
-    ? { target, source }
-    : null;
+  return observed.size > 1 ? null : [...observed][0];
 }

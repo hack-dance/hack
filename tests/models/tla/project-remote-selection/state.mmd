@@ -1,0 +1,21 @@
+---
+title: ProjectRemoteSelection · Teardown after startup
+---
+stateDiagram-v2
+  direction TB
+  [*] --> stopped
+  stopped --> starting: Begin
+  starting --> started: Started
+  starting --> failed: Fail
+  started --> failed: Fail
+  started --> done: Teardown
+  failed --> done: Teardown
+  class stopped idle
+  class starting wait
+  class started live
+  class failed fail
+  class done ok
+  note right of done
+    INV Hook target is absent or was started.
+    Wrong fallback uses saved live.
+  end note

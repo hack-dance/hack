@@ -356,6 +356,7 @@ hack up [services...] [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--use <remote=target>` | Select a remote target for this Compose start |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--detach, -d` | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |

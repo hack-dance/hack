@@ -16,10 +16,11 @@ import {
   parseRemoteChoices,
   readRemoteChoices,
   resolveRemoteChoices,
-  runningRemoteChoice,
+  runningRemoteTarget,
   saveRemoteChoices,
 } from "../lib/project-remote-selection.ts";
 import { formatProjectRemoteAddress } from "../lib/project-remote-status.ts";
+import { readProjectRuntimeStateEntry } from "../lib/project-runtime-state.ts";
 
 const spec = defineCommand({
   name: "use",
@@ -88,11 +89,17 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
   };
   if (args.positionals.selection === undefined) {
     const active = await readActive().catch(() => null);
+    const runtime = await readProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    });
     for (const choice of pending) {
-      const running = active && runningRemoteChoice(active, choice);
+      const running = active && runningRemoteTarget(active, choice.remote);
+      const [target, source] =
+        runtime?.remoteTargets?.[choice.remote]?.split(":") ?? [];
       const fallback = active?.length === 0 ? "stopped" : "unknown";
       const description = running
-        ? `${running.target} (${running.source})`
+        ? `${running} (${target === running && source ? source : "source unknown"})`
         : fallback;
       process.stdout.write(
         `${choice.remote} · running: ${description} · pending: ${choice.target} (${choice.source}) · ${formatProjectRemoteAddress({ ...choice.address, port: choice.port })}${choice.via ? " · tunnel not started by this version" : ""}\n`

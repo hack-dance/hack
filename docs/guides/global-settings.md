@@ -38,12 +38,15 @@ Common settings:
   `hack global logs-reset` removes them. With logging off and no logging
   files, `logs-reset` lists any `hack-logging` volumes Docker still has with
   the `docker volume rm` to run, deletes none (Compose does not record which
-  home made a volume) and exits non-zero. The logging Compose file
-  (`~/.hack/logging/docker-compose.yml`) is Hack's output, like the proxy's:
-  install and `up --logging` rewrite it without asking (an engine upgrade
-  changes its healthchecks), keeping a `.bak-<UTC time>` copy when it was not
-  Hack's rendering. The configs beside it (Loki, Alloy, Grafana) still ask
-  before an overwrite. With it off, plain
+  home made a volume) and exits non-zero. `hack global install` rewrites the
+  logging Compose file (`~/.hack/logging/docker-compose.yml`) without asking
+  only while it is one of Hack's own renderings (an engine upgrade changes
+  its healthchecks). A file that differs (edited by hand, or written by an
+  older Hack) decides whether Loki and Grafana, which have no
+  authentication, are routed through the proxy, so install asks first
+  (default no), backs it up as `.bak-<UTC time>` before replacing it, and
+  without a terminal keeps it with a warning. The configs beside it (Loki,
+  Alloy, Grafana) also ask before an overwrite. With it off, plain
   `hack logs` and `hack logs --since/--until` read container logs (`d` and
   `w` units become hours, which Docker accepts), and
   `hack logs --loki`/`--query` and `hack open logs` fail with `E_LOGGING_OFF`,

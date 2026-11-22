@@ -1131,6 +1131,9 @@ function globalCaddyComposePath(): string {
   );
 }
 
+/** Prompts `runNonInteractiveInstall` saw for the logging Compose file. */
+const loggingComposePrompts: string[] = [];
+
 /** Runs `hack global install` with no terminal, capturing stdout and stderr. */
 async function runNonInteractiveInstall(
   opts: {
@@ -1158,12 +1161,23 @@ async function runNonInteractiveInstall(
   };
   const stdout = spyOn(process.stdout, "write").mockImplementation(capture);
   const stderr = spyOn(process.stderr, "write").mockImplementation(capture);
-  // The proxy and logging Compose files (both docker-compose.yml) are
-  // Hack-managed: no run may ask before replacing them.
+  // The proxy Compose file is Hack-managed: no run may ask before
+  // replacing it. (The logging one asks only when it is not Hack's own.)
   const confirm = spyOn(interactivity, "confirmSafe").mockImplementation(
     async (opts) => {
-      if (String(opts.message).includes(GLOBAL_CADDY_COMPOSE_FILENAME)) {
-        throw new Error("A global Compose file must not prompt");
+      if (
+        String(opts.message).includes(
+          `${GLOBAL_CADDY_DIR_NAME}/${GLOBAL_CADDY_COMPOSE_FILENAME}`
+        )
+      ) {
+        throw new Error("The proxy Compose file must not prompt");
+      }
+      if (
+        String(opts.message).includes(
+          `${GLOBAL_LOGGING_DIR_NAME}/${GLOBAL_LOGGING_COMPOSE_FILENAME}`
+        )
+      ) {
+        loggingComposePrompts.push(String(opts.message));
       }
       return overwrite;
     }
@@ -2043,7 +2057,7 @@ describe("the opt-in logging stack (HACK-2468)", () => {
     ).toBe(true);
   });
 
-  test("after an engine upgrade the logging Compose file is replaced like the proxy's: no prompt, a backup only for a hand edit", async () => {
+  test("after an engine upgrade Hack's own logging Compose file is replaced silently; a hand edit only after a yes", async () => {
     await writeInstallStubs();
     // The file an older engine got (no start_interval), and now Engine 29.
     await mkdir(dirname(loggingCompose()), { recursive: true });
@@ -2056,29 +2070,46 @@ describe("the opt-in logging stack (HACK-2468)", () => {
       (await readdir(dirname(loggingCompose()))).filter((name) =>
         name.startsWith(`${GLOBAL_LOGGING_COMPOSE_FILENAME}.bak-`)
       );
-    // Declining every prompt does not keep the old file: none is asked.
+    const rendered = renderGlobalLoggingCompose({ startInterval: true });
+    loggingComposePrompts.length = 0;
+    // Hack's own rendering: replaced with no prompt, even when every prompt
+    // would be declined, and with no backup.
     const upgraded = await runNonInteractiveInstall({ interactive: true });
     expect(upgraded.code).toBe(0);
-    expect(readFileSync(loggingCompose(), "utf8")).toBe(
-      renderGlobalLoggingCompose({ startInterval: true })
-    );
+    expect(readFileSync(loggingCompose(), "utf8")).toBe(rendered);
+    expect(loggingComposePrompts).toEqual([]);
     expect(await backups()).toEqual([]);
 
-    // A hand edit (or an older Hack's file) is replaced too, after a backup.
-    const edited = `${renderGlobalLoggingCompose({ startInterval: true })}# mine\n`;
+    // A hardened hand edit (here: Loki's proxy route removed) is kept
+    // without a terminal, and the warning says how to take Hack's file.
+    const edited = rendered.replace(/^\s+caddy[^\n]*\n/gm, "");
+    expect(edited).not.toBe(rendered);
     await writeFile(loggingCompose(), edited);
-    const replaced = await runNonInteractiveInstall();
-    expect(replaced.code).toBe(0);
-    expect(readFileSync(loggingCompose(), "utf8")).toBe(
-      renderGlobalLoggingCompose({ startInterval: true })
+    const kept = await runNonInteractiveInstall();
+    expect(kept.code).toBe(0);
+    expect(readFileSync(loggingCompose(), "utf8")).toBe(edited);
+    expect(await backups()).toEqual([]);
+    expect(kept.output).toContain(
+      "it differs from Hack's rendering, so `hack global up` keeps its fixed waits unless it has healthchecks"
     );
+
+    // Declined in a terminal: kept, and the question named the file.
+    const declined = await runNonInteractiveInstall({ interactive: true });
+    expect(declined.code).toBe(0);
+    expect(readFileSync(loggingCompose(), "utf8")).toBe(edited);
+    expect(loggingComposePrompts.at(-1)).toContain(loggingCompose());
+
+    // Accepted: backed up, then replaced.
+    const replaced = await runNonInteractiveInstall({
+      interactive: true,
+      overwrite: true,
+    });
+    expect(replaced.code).toBe(0);
+    expect(readFileSync(loggingCompose(), "utf8")).toBe(rendered);
     const [backup] = await backups();
     expect(backup).toBeDefined();
     expect(readFileSync(join(dirname(loggingCompose()), backup!), "utf8")).toBe(
       edited
-    );
-    expect(replaced.output).toContain(
-      "differed from Hack's current rendering (edited by hand, or written by an older Hack)"
     );
   });
 

@@ -1500,10 +1500,13 @@ async function writeGlobalInstallAssets(opts: {
 
 /**
  * The logging stack's files, written only when logging is on. Its compose
- * file is Hack's, like the proxy's: replaced without a prompt (an engine
- * upgrade changes its healthchecks), with a backup when it was not Hack's
- * rendering. The configs beside it (Loki, Alloy, Grafana) are ones users
- * customise, so they still ask before an overwrite.
+ * file is replaced without a prompt only while it is one of Hack's own
+ * renderings (an engine upgrade changes its healthchecks). Any other file
+ * (edited by hand, or written by an older Hack) is replaced only after a
+ * confirmation that defaults to no, with a backup first: that file decides
+ * whether the unauthenticated Loki and Grafana are routed through the proxy,
+ * so a hardened copy is never undone, and started, unasked. The configs
+ * beside it (Loki, Alloy, Grafana) also ask before an overwrite.
  */
 async function writeGlobalLoggingAssets(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
@@ -1511,10 +1514,9 @@ async function writeGlobalLoggingAssets(opts: {
   readonly startInterval: boolean;
 }): Promise<void> {
   const { paths, templates } = opts;
-  await writeGlobalManagedCompose({
+  await writeLoggingCompose({
     path: paths.loggingCompose,
     content: renderGlobalLoggingCompose({ startInterval: opts.startInterval }),
-    isHackRendered: isHackRenderedLoggingCompose,
   });
   await writeWithPromptIfDifferent(
     paths.alloyConfig,
@@ -2119,6 +2121,37 @@ export async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
  * The proxy Compose file is rendered from settings, so it is replaced without
  * a prompt (HACK-2328); see {@link writeManagedProxyCompose}.
  */
+/** See {@link writeGlobalLoggingAssets}: silent only for Hack's renderings. */
+async function writeLoggingCompose(opts: {
+  readonly path: string;
+  readonly content: string;
+}): Promise<void> {
+  const existing = await readTextFile(opts.path);
+  if (
+    existing !== null &&
+    existing !== opts.content &&
+    !isHackRenderedLoggingCompose(existing)
+  ) {
+    const replace = await confirmSafe({
+      message: `Replace ${opts.path}?\nIt differs from Hack's rendering (edited by hand, or written by an older Hack). The current file is backed up first. It controls whether Loki and Grafana are routed through the proxy.`,
+      initialValue: false,
+      nonInteractive: "accept-default",
+    });
+    if (!replace) {
+      logger.warn({
+        message: `Kept ${opts.path}: it differs from Hack's rendering, so \`hack global up\` keeps its fixed waits unless it has healthchecks. To take Hack's file, run \`hack global install\` in a terminal and accept, or move the file aside first.`,
+      });
+      return;
+    }
+  }
+  await writeGlobalManagedCompose({
+    path: opts.path,
+    content: opts.content,
+    // Confirmed above, or Hack's own: replace, backing up a non-rendering.
+    isHackRendered: isHackRenderedLoggingCompose,
+  });
+}
+
 async function writeGlobalManagedCompose(opts: {
   readonly path: string;
   readonly content: string;

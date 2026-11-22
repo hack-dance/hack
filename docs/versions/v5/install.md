@@ -110,6 +110,11 @@ For a new machine, set up Compose routing once:
 hack global install
 ```
 
+On macOS, if Homebrew dependencies are missing, a non-interactive
+`hack global install` exits with `E_INTERACTIVE_REQUIRED` and prints the
+`brew install` command. Run the printed command yourself, or pass
+`hack global install --install-brew-deps` to authorize those installs.
+
 Read the prompts for DNS and certificate trust. Host changes can require your
 approval. This starts the proxy and DNS only. The logging stack (Loki, Alloy and
 Grafana, for log history and queries) is opt-in: add it any time with

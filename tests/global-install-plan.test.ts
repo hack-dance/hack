@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   type AdminPlan,
   type InstallPlanDeps,
@@ -12,6 +15,55 @@ import {
   type LinuxDnsHost,
 } from "../src/lib/linux-dns-setup.ts";
 import { runTrustedSudo, type SudoFs } from "../src/lib/privileged-sudo.ts";
+
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
+
+test("headless macOS global install prints missing Homebrew argv before effects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "global-brew-consent-"));
+  try {
+    await writeFile(
+      join(root, "brew"),
+      '#!/bin/sh\nprintf "%s\\n" "$*" >> brew-calls\n[ "$*" = "list mkcert" ]\n',
+      { mode: 0o700 }
+    );
+    const cli = resolve("packages/cli/index.ts");
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `
+        const { runCli } = await import(${JSON.stringify(cli)});
+        Object.defineProperty(process, "platform", { value: "darwin" });
+        process.exit(await runCli(["global", "install"]));
+      `,
+      ],
+      {
+        cwd: root,
+        env: privateCliEnv({
+          root,
+          env: { PATH: root, HACK_NO_INTERACTIVE: "1", HACK_LOGGER: "console" },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 15_000,
+      }
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(stdout + stderr).toContain("E_INTERACTIVE_REQUIRED");
+    expect(stdout + stderr).toContain("Run: brew install chafa dnsmasq");
+    expect(await Bun.file(join(root, "brew-calls")).text()).toBe(
+      "list chafa\nlist mkcert\nlist dnsmasq\n"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 20_000);
 
 const DOMAINS = ["hack", "hack.local", "hack.gy"];
 const SUDO = "/usr/bin/sudo";

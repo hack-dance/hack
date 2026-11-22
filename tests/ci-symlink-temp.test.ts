@@ -13,6 +13,14 @@ import { join, resolve } from "node:path";
 const repository = resolve(import.meta.dir, "..");
 const listPath = "scripts/test-shard-symlink-temp-files.json";
 
+function isolatedShardEnv() {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => !name.startsWith("HACK_TEST_")
+    )
+  );
+}
+
 test("the fixed list names existing tracked tests and runs exactly those files", async () => {
   const selection = await Bun.file(resolve(repository, listPath)).text();
   const files: unknown = JSON.parse(selection);
@@ -29,7 +37,7 @@ test("the fixed list names existing tracked tests and runs exactly those files",
     ],
     {
       cwd: repository,
-      env: { ...process.env, HACK_TEST_SELECTION: selection },
+      env: { ...isolatedShardEnv(), HACK_TEST_SELECTION: selection },
       timeout: 5000,
     }
   );
@@ -65,6 +73,7 @@ test("the Linux variant runs the fixed list behind a real temp symlink and clean
     (entry) => entry.name === "Tests (symlinked TMPDIR)"
   );
   expect(step?.if).toBe("matrix.shard == 8 && runner.os == 'Linux'");
+  expect(step?.env).toBeUndefined();
   if (!step?.run) {
     throw new Error("Missing symlink temp variant");
   }
@@ -79,6 +88,7 @@ test("the Linux variant runs the fixed list behind a real temp symlink and clean
       `#!${process.execPath}
 import { lstatSync, realpathSync } from "node:fs";
 if (!lstatSync(process.env.TMPDIR).isSymbolicLink()) process.exit(2);
+if (Object.keys(process.env).some(name => name.startsWith("HACK_TEST_") && name !== "HACK_TEST_SELECTION")) process.exit(4);
 if (realpathSync(process.env.TMPDIR) === process.env.TMPDIR) process.exit(3);
 console.log(JSON.stringify({ args: process.argv.slice(2), selection: process.env.HACK_TEST_SELECTION }));
 process.exit(Number(process.env.STUB_EXIT));
@@ -89,12 +99,11 @@ process.exit(Number(process.env.STUB_EXIT));
       const result = Bun.spawnSync(["bash", "-e", "-u", "-c", step.run], {
         cwd: repository,
         env: {
-          ...process.env,
+          ...isolatedShardEnv(),
           PATH: `${bin}:${process.env.PATH}`,
           RUNNER_TEMP: runner,
           STUB_EXIT: String(exit),
           TMPDIR: runner,
-          HACK_TEST_SELECTION: '["tests/example.test.ts"]',
         },
         stdout: "pipe",
         stderr: "pipe",

@@ -333,6 +333,14 @@ test("teardown after a crash preserves the observed target and tolerates missing
           })
         );
       }
+      if (mode === "running" || mode === "deleted") {
+        const status = await f.cli(["ps", "--json"]);
+        expect(status.code, status.stderr).toBe(0);
+        const { remotes } = JSON.parse(status.stdout);
+        expect(remotes[0].target).toBe(mode === "running" ? "x" : "unknown");
+        expect(status.stdout).not.toContain("live.example.test");
+        expect(status.stderr).toBe("");
+      }
       if (mode !== "removed") {
         for (const args of [
           ["restart"],

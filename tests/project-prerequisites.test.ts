@@ -14,6 +14,7 @@ import {
   inspectProjectPrerequisites,
 } from "../src/lib/project-prerequisites.ts";
 import { renderProjectConfigSchemaJson } from "../src/templates.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { validateJsonSchemaSubset } from "./helpers/json-schema-subset.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { runPrivateTtyCli } from "./helpers/private-cli-tty.ts";
@@ -144,7 +145,7 @@ test("Compose lifecycle refuses before running hooks with a missing prerequisite
       ["run", "api"],
       ["run", "--detach", "--json", "api"],
     ]) {
-      const result = Bun.spawnSync([process.execPath, cli, ...argv], {
+      const result = spawnSyncBounded([process.execPath, cli, ...argv], {
         cwd: root,
         env,
       });
@@ -432,7 +433,7 @@ test("failed check output stays private and noninteractive TTY does not start lo
       })
     );
     const env = privateCliEnv({ root, env: { HACK_NO_INTERACTIVE: "1" } });
-    const piped = Bun.spawnSync(
+    const piped = spawnSyncBounded(
       [
         process.execPath,
         resolve(import.meta.dir, "../index.ts"),
@@ -554,7 +555,7 @@ test("the AWS check ignores project dotenv overrides and receives no Hack keys",
       },
     });
     const cli = resolve(import.meta.dir, "../index.ts");
-    const result = Bun.spawnSync([process.execPath, cli, "up", "--json"], {
+    const result = spawnSyncBounded([process.execPath, cli, "up", "--json"], {
       cwd: checkout,
       env,
     });

@@ -219,11 +219,13 @@ repair.
 ### Root-owned checkout files on Linux
 
 `hack doctor` checks the checkout for root-owned files left by container tools.
-It includes ignored directories and reports when the scan hits its entry or time
-bound. It never follows symlinks. Where a writable Compose bind mount and an
+It scans breadth first, includes ignored directories, and skips `.git` and
+symlinks. A scan that finds nothing stays OK and reports any bound it hit. Where a writable Compose bind mount and an
 unset `user:` match a path, Doctor lists possible services and shows the
-`user:` line to set. Review the printed `sudo chown` command and run it yourself
-if appropriate. Doctor never runs it.
+`user:` line to set for those services. Doctor lists topmost root-owned
+directories and suggests recursive ownership repair for those directories,
+with separate nonrecursive repair for files. Review the printed commands
+before running them yourself. Doctor never runs them.
 
 When the global router is unavailable on Compose, the routing warning shows a
 published port when it can identify one, or a running container address on

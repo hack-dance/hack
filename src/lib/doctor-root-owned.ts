@@ -14,70 +14,95 @@ const WALK_MS = 500;
 const DIRECTORY_FLAGS =
   constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 
-/** Linux directory descriptors keep traversals pinned across renames. */
+type OwnedPath = { path: string; directory: boolean };
+
+/** Reopen a queued directory without following any checkout-relative component. */
+async function openBelow(base: string, parts: readonly string[]) {
+  let handle = await open(`${base}/${parts[0] ?? "."}`, DIRECTORY_FLAGS);
+  for (const part of parts.slice(1)) {
+    const parent = handle;
+    try {
+      handle = await open(
+        `/proc/self/fd/${parent.fd}/${part}`,
+        DIRECTORY_FLAGS
+      );
+    } finally {
+      await parent.close();
+    }
+  }
+  return handle;
+}
+
 export async function findCheckoutFilesOwnedBy(opts: {
   readonly root: string;
   readonly uid: number;
-}): Promise<{ paths: string[]; incomplete: boolean }> {
+  readonly owns?: (path: string, uid: number) => boolean;
+}): Promise<{ paths: OwnedPath[]; incomplete: boolean }> {
   const deadline = performance.now() + WALK_MS;
   let remaining = ENTRY_LIMIT;
   let incomplete = false;
-  const paths: string[] = [];
+  const paths: OwnedPath[] = [];
+  const queue: string[][] = [[]];
+  const withinBudget = () =>
+    remaining > 0 &&
+    paths.length < REPORT_LIMIT &&
+    performance.now() < deadline;
 
-  function withinBudget() {
-    return (
-      remaining > 0 &&
-      paths.length < REPORT_LIMIT &&
-      performance.now() < deadline
-    );
-  }
-
-  async function walk(path: string, displayPath: string, depth: number) {
-    if (depth >= 32) {
-      incomplete = true;
-      return;
-    }
-    const handle = await open(path, DIRECTORY_FLAGS);
-    try {
-      const base = `/proc/self/fd/${handle.fd}`;
-      const dir = await opendir(base);
-      try {
-        while (withinBudget()) {
-          const entry = await dir.read();
-          if (!entry) {
-            return;
-          }
-          remaining -= 1;
-          const source = join(base, entry.name);
-          const shown = join(displayPath, entry.name);
-          await visit(source, shown, depth);
-        }
+  async function scan(base: string, parts: string[]) {
+    for await (const entry of await opendir(base)) {
+      if (!withinBudget()) {
         incomplete = true;
-      } finally {
-        await dir.close();
+        break;
       }
-    } finally {
-      await handle.close();
+      remaining -= 1;
+      if (entry.name !== ".git") {
+        await visit(base, parts, entry.name).catch(() => {
+          incomplete = true;
+        });
+      }
     }
   }
 
-  async function visit(source: string, shown: string, depth: number) {
-    try {
-      const stat = await lstat(source);
-      if (stat.uid === opts.uid && (stat.isDirectory() || stat.isFile())) {
-        paths.push(shown);
-      }
-      if (stat.isDirectory() && withinBudget()) {
-        await walk(source, shown, depth + 1);
-      }
-    } catch {
+  async function visit(base: string, parts: string[], name: string) {
+    const path = join(opts.root, ...parts, name);
+    const stat = await lstat(join(base, name));
+    const directory = stat.isDirectory();
+    if (
+      (directory || stat.isFile()) &&
+      (opts.owns?.(path, stat.uid) ?? stat.uid === opts.uid)
+    ) {
+      paths.push({ path, directory });
+    } else if (directory && parts.length < 31) {
+      queue.push([...parts, name]);
+    } else if (directory) {
       incomplete = true;
     }
   }
 
-  await walk(opts.root, opts.root, 0).catch(() => {
-    incomplete = true;
-  });
+  const root = await open(opts.root, DIRECTORY_FLAGS).catch(() => null);
+  if (!root) {
+    return { paths, incomplete: true };
+  }
+  try {
+    for (const parts of queue) {
+      if (!withinBudget()) {
+        incomplete = true;
+        break;
+      }
+      try {
+        const handle = await openBelow(`/proc/self/fd/${root.fd}`, parts);
+        try {
+          await scan(`/proc/self/fd/${handle.fd}`, parts);
+        } finally {
+          await handle.close();
+        }
+      } catch {
+        incomplete = true;
+      }
+    }
+  } finally {
+    await root.close();
+  }
   return { paths, incomplete };
 }
 
@@ -92,9 +117,9 @@ export async function checkRootOwnedCheckout(
   if (observed.paths.length === 0) {
     return {
       name: ROOT_OWNED_CHECK,
-      status: observed.incomplete ? ("warn" as const) : ("ok" as const),
+      status: "ok" as const,
       message: observed.incomplete
-        ? "No root-owned checkout paths found in the bounded scan. The scan did not cover the entire checkout."
+        ? `No root-owned checkout paths found in a partial scan (up to ${ENTRY_LIMIT.toLocaleString("en-US")} entries, ${WALK_MS} ms, and 32 directory levels).`
         : "No root-owned checkout paths found.",
     };
   }
@@ -106,7 +131,8 @@ export async function checkRootOwnedCheckout(
     isRecord(compose) && isRecord(compose.services)
       ? Object.entries(compose.services)
       : [];
-  const paths = observed.paths.map((path) => {
+  const servicesToFix = new Set<string>();
+  const paths = observed.paths.map(({ path }) => {
     const owners = services
       .filter(
         ([, spec]) =>
@@ -121,10 +147,13 @@ export async function checkRootOwnedCheckout(
           )
       )
       .map(([name]) => name);
+    for (const name of owners) {
+      servicesToFix.add(name);
+    }
     return `${JSON.stringify(relative(opts.projectRoot, path)).replace(UNSAFE_TERMINAL_TEXT, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}${owners.length ? ` (possible services: ${owners.join(", ")})` : ""}`;
   });
   const safePaths = observed.paths.filter(
-    (path) => path.search(UNSAFE_TERMINAL_TEXT) === -1
+    ({ path }) => path.search(UNSAFE_TERMINAL_TEXT) === -1
   );
   return {
     name: ROOT_OWNED_CHECK,
@@ -134,13 +163,22 @@ export async function checkRootOwnedCheckout(
       observed.incomplete
         ? "This list may be partial. The command only changes the paths it names. Rerun Doctor to find more."
         : "",
-      `Set user: "${process.getuid?.()}:${process.getgid?.()}" in the Compose service definition.`,
+      servicesToFix.size
+        ? `Set user: "${process.getuid?.()}:${process.getgid?.()}" on ${[...servicesToFix].join(", ")} in the Compose file.`
+        : "",
       safePaths.length < paths.length
         ? "The repair command omits paths with terminal control characters. Review those paths separately."
         : "",
-      safePaths.length
-        ? `To return these paths to your user: sudo chown -h -- "$(id -u):$(id -g)" ${safePaths.map(quoteShellWord).join(" ")}`
-        : "",
+      ...[true, false].flatMap((directory) => {
+        const targets = safePaths.filter(
+          (entry) => entry.directory === directory
+        );
+        return targets.length
+          ? [
+              `sudo chown ${directory ? "-hR" : "-h"} -- "$(id -u):$(id -g)" ${targets.map(({ path }) => quoteShellWord(path)).join(" ")}`,
+            ]
+          : [];
+      }),
     ]
       .filter(Boolean)
       .join("\n"),

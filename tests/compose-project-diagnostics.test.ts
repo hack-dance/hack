@@ -76,7 +76,10 @@ test.skipIf(process.platform !== "linux")(
           root: checkout,
           uid: process.getuid?.() ?? -1,
         })
-      ).toEqual({ paths: [ignored, owned], incomplete: false });
+      ).toEqual({
+        paths: [{ path: ignored, directory: true }],
+        incomplete: false,
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -109,6 +112,7 @@ test.skipIf(process.platform !== "linux")(
       );
       expect(result.status).toBe("warn");
       expect(result.message).toContain("(possible services: writer)");
+      expect(result.message).toContain("on writer in the Compose file.");
       expect(result.message).not.toContain("(possible services: reader");
       expect(result.message).not.toContain("services: override");
       expect(result.message).toContain("only changes the paths it names");
@@ -136,6 +140,7 @@ test.skipIf(process.platform !== "linux")(
         { projectRoot: root, composeFile },
         process.getuid?.() ?? -1
       );
+      expect(message).not.toContain("Set user:");
       expect(message).toContain("bad\\u001bfile");
       expect(message).toContain("omits paths with terminal control characters");
       const repair = message
@@ -144,6 +149,81 @@ test.skipIf(process.platform !== "linux")(
       expect(repair).toContain("a'\\''file");
       expect(repair).not.toContain("bad");
       expect(message).not.toContain("\u001b");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+);
+
+test.skipIf(process.platform !== "linux")(
+  "scan checks shallow paths first, skips Git internals and prunes owned subtrees",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "checkout-owner-breadth-"));
+    try {
+      await mkdir(join(root, "src", "deep"), { recursive: true });
+      await mkdir(join(root, ".git", "objects"), { recursive: true });
+      const build = join(root, "dist");
+      await mkdir(build);
+      const files = Array.from({ length: 16 }, (_, index) =>
+        join(build, `entry-${index}`)
+      );
+      const deep = join(root, "src", "deep", "artifact");
+      for (const file of [
+        ...files,
+        deep,
+        join(root, ".git", "objects", "object"),
+      ]) {
+        await writeFile(file, "");
+      }
+      const observed = await findCheckoutFilesOwnedBy({
+        root,
+        uid: -1,
+        owns: (path) =>
+          path !== join(root, "src") && path !== join(root, "src", "deep"),
+      });
+      expect(observed).toEqual({
+        paths: [
+          { path: build, directory: true },
+          { path: deep, directory: false },
+        ],
+        incomplete: false,
+      });
+      const result = await checkRootOwnedCheckout(
+        { projectRoot: build, composeFile: join(root, "absent.yml") },
+        -1
+      );
+      expect(result.status).toBe("ok");
+      const repair = await checkRootOwnedCheckout(
+        { projectRoot: root, composeFile: join(root, "absent.yml") },
+        process.getuid?.() ?? -1
+      );
+      expect(repair.message).toContain('"dist"');
+      expect(repair.message).not.toContain("entry-");
+      expect(repair.message).toContain('sudo chown -hR -- "$(id -u):$(id -g)"');
+      expect(repair.message).not.toContain("Set user:");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+);
+
+test.skipIf(process.platform !== "linux")(
+  "an incomplete scan with no matching owner reports OK with the bounds",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "checkout-owner-limit-"));
+    try {
+      await mkdir(join(root, ...Array.from({ length: 33 }, () => "nested")), {
+        recursive: true,
+      });
+      const report = await checkRootOwnedCheckout(
+        { projectRoot: root, composeFile: join(root, "absent.yml") },
+        -1
+      );
+      expect(report.status).toBe("ok");
+      expect(report.message).toContain("partial scan");
+      expect(report.message).toContain(
+        "4,096 entries, 500 ms, and 32 directory levels"
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

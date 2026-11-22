@@ -2810,6 +2810,30 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-build-alias",
+    module: "BuildAlias",
+    states: 9,
+    invariant: "BaseSurvives",
+    action: "Cleanup",
+    fields: ["base = FALSE", "alias = FALSE"],
+    additionalControls: [
+      {
+        name: "unsafe-remote",
+        negative: true,
+        invariant: "NoRegistryFallback",
+        action: "ResolveMissing",
+        fields: ["wire = TRUE", 'phase = "solving"'],
+      },
+      {
+        name: "unsafe-sweep",
+        negative: true,
+        invariant: "NoLiveSweep",
+        action: "Cleanup",
+        fields: ["sweptLive = TRUE", "alias = FALSE"],
+      },
+    ],
+  },
+  {
     name: "native-build-retention",
     module: "BuildRetention",
     states: 6181,

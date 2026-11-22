@@ -62,6 +62,8 @@ impl Fixture {
             args: BTreeMap::from([("GREETING".to_owned(), SECRET.to_owned())]),
             policy,
             timeout_seconds: Some(30),
+            image_tag_ttl_seconds: None,
+            command_base_pins: BTreeMap::new(),
         }
     }
     fn inputs(&self, policy: Policy) -> Inputs {
@@ -235,6 +237,19 @@ impl BuildPool for FakePool {
             source_digest: PIN.into(),
             image_id: IMAGE.into(),
         })
+    }
+    fn tag_base(&self, _: &(), id: &str, tag: &str) -> Result<(), CandidateError> {
+        let mut images = self.images.borrow_mut();
+        let image = images
+            .get(id)
+            .cloned()
+            .ok_or_else(|| refusal("engine_not_found", "Missing base."))?;
+        images.insert(tag.into(), image);
+        Ok(())
+    }
+    fn untag_base(&self, _: &(), tag: &str) -> Result<(), CandidateError> {
+        self.images.borrow_mut().remove(tag);
+        Ok(())
     }
     fn builder(&self) -> Result<PathBuf, CandidateError> {
         if let Some(home) = &self.builder_home {
@@ -1975,4 +1990,106 @@ fn snapshots_of_dead_owners_are_removed_at_the_next_build_of_any_key() {
     // The build's own snapshot is gone too, and its owner record with it.
     assert!(!fixture.scratch(&inputs).join("snapshot").exists());
     assert!(!fixture.scratch(&inputs).join("snapshot.owner").exists());
+}
+
+#[test]
+fn a_dead_build_alias_is_swept_only_after_the_worker_releases_its_key() {
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    pool.images
+        .borrow_mut()
+        .insert(IMAGE.into(), serde_json::json!({"Id":IMAGE}));
+    let (_, identity) = pool.lease().unwrap();
+    let namespace = fixture.root.join("a".repeat(64));
+    let key = "b".repeat(64);
+    let scratch = namespace.join(format!("{key}.client"));
+    state::private_directory(&scratch).unwrap();
+    let path = scratch.join("base-aliases.json");
+    let lock = Flock::try_lock(
+        Flock::open(&namespace.join(format!("{key}.lock"))).unwrap(),
+        libc::LOCK_EX,
+    )
+    .unwrap()
+    .unwrap();
+    let bases = BTreeMap::from([(
+        "fixture".into(),
+        BuildBase {
+            pinned_reference: format!("docker.io/library/alpine@{PIN}"),
+            source_digest: PIN.into(),
+            image_id: IMAGE.into(),
+        },
+    )]);
+    let (attempt, references) =
+        aliases::Aliases::prepare(&pool, &(), &identity, path.clone(), &bases).unwrap();
+    let alias = &references["fixture"];
+    assert!(aliases::allowed(alias));
+    assert!(pool.inspect(&(), alias).unwrap().is_some());
+    std::mem::forget(attempt);
+    aliases::sweep_stranded(&fixture.root, &pool, &(), &identity, Path::new(""));
+    assert!(pool.inspect(&(), alias).unwrap().is_some());
+    drop(lock);
+    aliases::sweep_stranded(&fixture.root, &pool, &(), &identity, Path::new(""));
+    assert!(pool.inspect(&(), alias).unwrap().is_none());
+    assert!(pool.inspect(&(), IMAGE).unwrap().is_some());
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_verified_base_selects_the_build_key_and_only_a_local_worker_source() {
+    let fixture = Fixture::new();
+    let mut inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    let base = BuildBase {
+        pinned_reference: format!("docker.io/library/alpine@{PIN}"),
+        source_digest: PIN.into(),
+        image_id: PIN.into(),
+    };
+    let mut bases = BTreeMap::from([("alpine:3.20".into(), base.clone())]);
+    let key = key_with_bases(&inputs.key, &bases).unwrap();
+    bases.get_mut("alpine:3.20").unwrap().pinned_reference =
+        format!("docker.io/library/alpine@{IMAGE}");
+    assert_ne!(key_with_bases(&inputs.key, &bases).unwrap(), key);
+    bases.insert("alpine:3.20".into(), base);
+    inputs.key = key;
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    pool.images
+        .borrow_mut()
+        .insert(PIN.into(), serde_json::json!({"Id":PIN}));
+    let outcome = run_with_bases(
+        &fixture.candidate,
+        &pool,
+        &inputs,
+        &never,
+        Some(&bases),
+        Instant::now() + inputs.timeout,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.base_pins["alpine:3.20"],
+        format!("docker.io/library/alpine@{PIN}")
+    );
+    assert!(pool.resolve_deadlines.borrow().is_empty());
+    let scratch = fixture.scratch(&inputs);
+    let bake: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
+    let reference = bake["target"]["build"]["contexts"]["alpine:3.20"]
+        .as_str()
+        .unwrap();
+    let policy: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-policy.json")).unwrap()).unwrap();
+    assert_eq!(policy_decision(&policy, reference), "ALLOW");
+    assert_eq!(
+        policy_decision(
+            &policy,
+            &format!("docker-image://docker.io/library/alpine@{PIN}")
+        ),
+        "DENY"
+    );
+    assert!(
+        pool.inspect(&(), reference.trim_start_matches("docker-image://"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(pool.inspect(&(), PIN).unwrap().is_some());
 }

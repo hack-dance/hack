@@ -1871,3 +1871,16 @@ Not covered:
 - readiness (healthchecks, their bounds and the end-to-end route probe are in `tests/global-stack-state.test.ts` and `tests/global-readiness.test.ts`);
 - the login path, which only reads the setting and starts routing;
 - a home whose whole logging directory is removed before its first manual start, which then counts as new.
+
+## Native build base aliases
+
+`native-build-alias/BuildAlias.tla` models one loaded base and one attempt.
+`Record` represents the cache tag and the durable alias journal written before
+`Tag`. The build-key lock is inherited by the builder. `Crash` can leave an alias
+and a live child; `Cleanup` is admitted only after the lock is free, or by the
+live owner after the solver is done. The source allowlist contains only that
+attempt's local alias. The negative controls remove the cache reference, allow
+remote resolution, or sweep while the child still holds the lock. The model
+does not simulate Docker's transport, key uniqueness, the registry, or disk
+durability. The Rust alias sweep regression and the classic-worker wire count
+cover separate implementation boundaries.

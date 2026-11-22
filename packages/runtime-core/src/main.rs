@@ -1301,6 +1301,18 @@ fn run() -> Result<(), CandidateError> {
                 references,
             )?)?;
         }
+        [
+            "runtime",
+            "build-image",
+            "--request",
+            request,
+            "--bases",
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::image_build::build_bases(
+                Path::new(request),
+            )?)?;
+        }
         ["runtime", "build-image", "--request", request, "--json"] => {
             // Build output streams to stderr; only the result is printed on stdout.
             print_json(&hack_runtime_core::provider::image_build::build_image(

@@ -1767,6 +1767,36 @@ impl ManifestProof {
         pin: &str,
         policy: PlatformPolicy,
     ) -> Result<(ImagePlatform, String), CandidateError> {
+        let (manifest, selected) = self.verified_manifest(pin, policy)?;
+        Ok((selected, manifest.config.expect("checked manifest").digest))
+    }
+
+    pub(super) fn verified_build_base(
+        &self,
+        pin: &str,
+        archive_limit: u64,
+    ) -> Result<BuildBase, CandidateError> {
+        let (_, source_digest) = pinned_syntax(pin)?;
+        let (manifest, _) = self.verified_manifest(pin, PlatformPolicy::Native)?;
+        bounded_build_base(&manifest, pin, archive_limit)?;
+        if declares_onbuild(self.config.as_bytes())? {
+            return Err(CandidateError::new(
+                "native_build_base_image",
+                "A build base image declares ONBUILD triggers; native builds refuse stored triggers.",
+            ));
+        }
+        Ok(BuildBase {
+            pinned_reference: pin.into(),
+            source_digest,
+            image_id: manifest.config.expect("checked manifest").digest,
+        })
+    }
+
+    fn verified_manifest(
+        &self,
+        pin: &str,
+        policy: PlatformPolicy,
+    ) -> Result<(Manifest, ImagePlatform), CandidateError> {
         let (_, expected) = pinned_syntax(pin)?;
         let initial = parse_manifest(self.initial.as_bytes(), &expected)?;
         let (manifest, indexed) = if initial.manifests.is_empty() {
@@ -1792,11 +1822,12 @@ impl ManifestProof {
         check_selected_manifest(&manifest)?;
         let config = manifest
             .config
+            .as_ref()
             .ok_or_else(|| error("Image config descriptor is missing."))?;
-        Fetch::checked(&config, MAX_METADATA as u64)?;
-        verify_object(&config, self.config.as_bytes())?;
+        Fetch::checked(config, MAX_METADATA as u64)?;
+        verify_object(config, self.config.as_bytes())?;
         let selected = config_platform(self.config.as_bytes(), policy, indexed)?;
-        Ok((selected, config.digest))
+        Ok((manifest, selected))
     }
 }
 
@@ -2041,7 +2072,7 @@ pub fn resolve_build_base(
         return Err(error("Registry manifest digest or size mismatch.")
             .with_cause_code("registry_digest_mismatch".into()));
     }
-    let (manifest, _, indexed, _) =
+    let (manifest, _, _, child) =
         select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;
     let pinned_reference = format!("{}/{}@{source_digest}", registry.domain, named.path);
     // BuildKit pulls the base itself, outside acquisition's archive budget, so the sizes
@@ -2051,18 +2082,8 @@ pub fn resolve_build_base(
         .config
         .ok_or_else(|| error("Image config descriptor is missing."))?;
     let config_bytes = fetch.object("blobs", &config)?;
-    config_platform(&config_bytes, PlatformPolicy::Native, indexed)?;
-    if declares_onbuild(&config_bytes)? {
-        return Err(CandidateError::new(
-            "native_build_base_image",
-            "A build base image declares ONBUILD triggers; native builds refuse stored triggers.",
-        ));
-    }
-    Ok(BuildBase {
-        pinned_reference,
-        source_digest,
-        image_id: config.digest,
-    })
+    ManifestProof::new(initial, child, config_bytes)?
+        .verified_build_base(&pinned_reference, policy.archive_limit)
 }
 
 /// Refuse a build base whose manifest declares more than `limit` compressed bytes of

@@ -9,7 +9,11 @@ import {
   nativeImageRegistryReason,
 } from "./native-image-policy.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
-import { nativeServiceActive } from "./native-project-builds.ts";
+import {
+  admitNativeProjectBuilds,
+  nativeBuildBases,
+  nativeServiceActive,
+} from "./native-project-builds.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   prepareNativeProjectInput,
@@ -107,12 +111,33 @@ export async function pullNativeProjectImages(opts: {
     invoke,
   });
 
-  for (const [name, spec] of specs) {
-    if (typeof spec.image !== "string") {
-      continue;
-    }
-    const reference = canonical.get(spec.image) ?? spec.image;
-    const policy = nativeEmulationPolicy(adapted.amd64Emulation, name);
+  const builds = admitNativeProjectBuilds({
+    services: Object.fromEntries(specs),
+    projectRoot: opts.project.projectRoot,
+    composeFile: opts.project.composeFile,
+    enabled: true,
+  });
+  const bases = await nativeBuildBases({
+    projectRoot: opts.project.projectRoot,
+    runtime: opts.runtime,
+    builds,
+    invoke,
+  });
+  const images = specs.flatMap(([name, spec]) =>
+    typeof spec.image === "string"
+      ? [
+          {
+            image: spec.image,
+            policy: nativeEmulationPolicy(adapted.amd64Emulation, name),
+          },
+        ]
+      : []
+  );
+  for (const base of bases) {
+    images.push({ image: base, policy: undefined });
+  }
+  for (const { image, policy } of images) {
+    const reference = canonical.get(image) ?? image;
     const selection = `${reference}\n${policy ?? "native"}`;
     if (seen.has(selection)) {
       continue;

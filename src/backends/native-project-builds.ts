@@ -4,13 +4,17 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { reportNativeImageTagOffline } from "../lib/native-detached-up.ts";
 import {
   NATIVE_BUILDER_MISSING,
   NATIVE_BUILDER_NOT_PREPARED,
   type NativeBuilderCommandOptions,
   nativeBuilderRemedy,
 } from "../lib/native-image-builder.ts";
-import { nativeImageRegistryReason } from "./native-image-policy.ts";
+import {
+  nativeImageRegistryReason,
+  nativeImageTagTtlSeconds,
+} from "./native-image-policy.ts";
 import {
   type invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -328,6 +332,8 @@ export interface NativeBuiltImage {
   readonly imageId: string;
   readonly buildKey: string;
   readonly reused: boolean;
+  readonly baseFallbacks?: readonly string[];
+  readonly baseSelections?: Readonly<Record<string, string>>;
 }
 
 function parseBuilt(value: unknown): NativeBuiltImage {
@@ -345,10 +351,46 @@ function parseBuilt(value: unknown): NativeBuiltImage {
       "Native runtime returned an invalid image build result; values omitted."
     );
   }
+  const fallbacks = Array.isArray(value.base_fallbacks)
+    ? value.base_fallbacks.flatMap((entry: unknown) => {
+        if (
+          !(
+            isRecord(entry) &&
+            typeof entry.reference === "string" &&
+            BUILD_BASE_REFERENCE.test(entry.reference) &&
+            typeof entry.resolved_at_unix_seconds === "number"
+          )
+        ) {
+          return [];
+        }
+        const time = new Date(entry.resolved_at_unix_seconds * 1000);
+        const reason =
+          nativeImageRegistryReason(entry.fallback_reason) ??
+          "registry refresh failed";
+        return Number.isFinite(time.getTime())
+          ? [
+              `${reason}, using the loaded build base ${entry.reference} resolved ${time.toISOString()}`,
+            ]
+          : [];
+      })
+    : [];
+  const selections = isRecord(value.base_selections)
+    ? (Object.fromEntries(
+        Object.entries(value.base_selections).filter(
+          ([reference, pin]) =>
+            BUILD_BASE_REFERENCE.test(reference) &&
+            typeof pin === "string" &&
+            BUILD_BASE_REFERENCE.test(pin) &&
+            BUILD_BASE_PIN.test(pin)
+        )
+      ) as Record<string, string>)
+    : undefined;
   return {
     imageId: value.image_id,
     buildKey: value.build_key,
     reused: value.reused,
+    ...(fallbacks.length ? { baseFallbacks: fallbacks } : {}),
+    ...(selections ? { baseSelections: selections } : {}),
   };
 }
 
@@ -395,6 +437,7 @@ async function forwardBuildOutput(
   return held;
 }
 
+const BUILD_BASE_PIN = /@sha256:[a-f0-9]{64}$/;
 const BUILD_BASE_REFERENCE = /^[A-Za-z0-9._:/@-]{1,512}$/;
 
 export class NativeBuildRegistryError extends NativeRuntimeRequestError {
@@ -425,7 +468,7 @@ function buildFailure(line: string | undefined): NativeRuntimeRequestError {
       ? detail.code
       : undefined;
   if (
-    code?.startsWith("registry_") &&
+    (code?.startsWith("registry_") || code === "image_tag_offline_missing") &&
     typeof detail.cause_code === "string" &&
     nativeImageRegistryReason(detail.cause_code) &&
     typeof detail.build_base_reference === "string" &&
@@ -814,6 +857,8 @@ async function runPendingBuilds(opts: {
   const directory = await mkdtemp(join(tmpdir(), "hack-native-build-"));
   try {
     let index = 0;
+    const notices = new Set<string>();
+    const selections = new Map<string, string>();
     for (const { request, services } of opts.pending.values()) {
       if (opts.signal.aborted) {
         throw new ClosedCliError(
@@ -834,6 +879,10 @@ async function runPendingBuilds(opts: {
           args: request.args,
           policy: opts.rebuild ? "rebuild" : "missing",
           timeout_seconds: BUILD_TIMEOUT_SECONDS,
+          image_tag_ttl_seconds: nativeImageTagTtlSeconds(),
+          ...(selections.size
+            ? { command_base_pins: Object.fromEntries(selections) }
+            : {}),
         }),
         { mode: 0o600, flag: "wx" }
       );
@@ -845,6 +894,19 @@ async function runPendingBuilds(opts: {
       }).catch((error: unknown) => {
         throw nameBuildFailure(services, error);
       });
+      for (const [reference, pin] of Object.entries(
+        built.baseSelections ?? {}
+      )) {
+        selections.set(reference, pin);
+      }
+      for (const notice of built.baseFallbacks ?? []) {
+        if (!notices.has(notice)) {
+          notices.add(notice);
+          if (!reportNativeImageTagOffline(notice)) {
+            process.stderr.write(`${notice}\n`);
+          }
+        }
+      }
       // The request carries argument values; remove it as soon as it is consumed.
       await rm(requestFile, { force: true });
       if (!built.reused) {
@@ -890,6 +952,69 @@ const BUILD_SOURCE_POLICY: Readonly<Record<string, string>> = {
  * classify failures. Cancellation and closed client errors carry no
  * service-specific cause and pass through unchanged.
  */
+export async function nativeBuildBases(opts: {
+  readonly projectRoot: string;
+  readonly runtime: NativeRuntimeSelection;
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly invoke: typeof import("./native-runtime-client.ts").invokeNativeRuntime;
+}): Promise<readonly string[]> {
+  if (opts.builds.size === 0) {
+    return [];
+  }
+  const projectRoot = await realpath(opts.projectRoot);
+  const directory = await mkdtemp(join(tmpdir(), "hack-native-build-scan-"));
+  const file = join(directory, "request.json");
+  const bases = new Set<string>();
+  try {
+    for (const build of opts.builds.values()) {
+      await writeFile(
+        file,
+        JSON.stringify({
+          version: 1,
+          project_root: projectRoot,
+          context: build.context,
+          dockerfile: build.dockerfile,
+          target: build.target,
+          args: build.args,
+          policy: "missing",
+        }),
+        { mode: 0o600 }
+      );
+      const result = await opts.invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: [
+          "runtime",
+          "build-image",
+          "--request",
+          file,
+          "--bases",
+          "--json",
+        ],
+      });
+      if (
+        !(
+          Array.isArray(result) &&
+          result.every(
+            (item: unknown) =>
+              typeof item === "string" && BUILD_BASE_REFERENCE.test(item)
+          )
+        )
+      ) {
+        throw new ClosedCliError(
+          "Native runtime returned an invalid build base list."
+        );
+      }
+      for (const reference of result) {
+        bases.add(reference);
+      }
+    }
+    return [...bases];
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 function nameBuildFailure(
   services: readonly string[],
   error: unknown

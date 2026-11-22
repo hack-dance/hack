@@ -337,6 +337,13 @@ pub(super) fn run<P: ReclaimPool>(
 ) -> Result<ReclaimReport, CandidateError> {
     let (lease, identity) = pool.lease()?;
     require_no_active_build(candidate)?;
+    super::aliases::sweep_stranded(
+        &builds_root(candidate),
+        pool,
+        &lease,
+        &identity,
+        Path::new(""),
+    );
     // Under the lease no build can start, adopt or write a receipt.
     let current = current_images(candidate)?;
     let referenced = referenced_images(candidate)?;

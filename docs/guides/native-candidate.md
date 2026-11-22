@@ -1495,11 +1495,14 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the resolved base references that the receipt and the result report. Never pass a
   secret as a build argument. BuildKit build secrets are the right mechanism for
   secrets; native builds do not support them yet.
-- Every build runs under a BuildKit source policy: only the pinned base images
-  resolve as images, and network sources (`ADD` of an `http`, `https` or git URL, and
-  image blob sources) are denied. The engine would otherwise fetch those from outside
-  the isolated build network. The policy also covers sources that a base image's
-  stored `ONBUILD` triggers add; such bases refuse before the build anyway.
+- A fresh recorded base resolution whose verified image is in the guest makes
+  no registry request. An expired resolution checks the registry and can use the
+  proven loaded base if the registry is unavailable. `hack pull` refreshes build
+  bases as well as service images. The build key includes each base digest.
+- BuildKit receives only attempt-owned local references to the verified bases.
+  The source policy denies other image sources and remote `ADD`, git and image
+  blob sources. A private cache tag keeps the base while attempt aliases are
+  removed, including on recovery after an interrupted build.
 - Argument values reach the client only through a private definition file (mode
   `0600`, removed after the build), never its command line or its environment; the
   client's environment is a fixed list of its own settings. Names must be plain

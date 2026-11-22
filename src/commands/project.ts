@@ -38,7 +38,9 @@ import {
   extendRemoteEnv,
   prepareRemoteStartup,
   recordStartedRemotes,
+  refuseRemoteStart,
   remotePrerequisites,
+  remotePsRows,
   remoteRuntimeStatuses,
   runtimeRemoteEnv,
   teardownHookEnv,
@@ -7615,6 +7617,9 @@ async function handleUpUnlocked({
   if (args.options.refreshImages && args.options.offline) {
     throw new CliUsageError("Use either --refresh-images or --offline.");
   }
+  if (native && args.options.use !== undefined) {
+    throw new CliUsageError("--use requires the Compose backend.");
+  }
   if (native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,
@@ -9121,7 +9126,7 @@ async function runDownCommand({
   const {
     choices,
     env: interpolationEnv,
-    recoveryFile,
+    recovery: initialRecovery,
   } = await runtimeRemoteEnv(
     { project, cfg, baseProjectName, branch },
     effectiveEnvName
@@ -9214,28 +9219,54 @@ async function runDownCommand({
       composeProject: lifecycleComposeProject,
     });
     reportLifecycleProgress({ service: null, phase: "stopping" });
-    code = await composeRuntimeBackend.down({
-      composeFiles: [recoveryFile ?? project.composeFile],
-      composeProject: composeProjectName,
-      profiles: stopSelection.profiles,
-      cwd: dirname(project.composeFile),
-      env: interpolationEnv ?? lifecycleEnv,
-      routeStdoutToStderr: json,
-      timeoutSeconds: downTimeoutSeconds,
-      capMs: downCapMs,
-      onOutcome: (outcome) => {
-        downTimedOut = outcome.timedOut;
-      },
-    });
-    if (code === 0) {
-      const finish = await finishInstanceStop({
-        project: recoveryFile
-          ? { ...project, composeFile: recoveryFile }
-          : project,
-        composeProjectName,
-        composeProjectLabel: composeProjectName ?? baseProjectName,
+    let recovery = initialRecovery;
+    const stop = (
+      file: string,
+      name: string | null,
+      env: Readonly<Record<string, string>>
+    ) =>
+      composeRuntimeBackend.down({
+        composeFiles: [file],
+        composeProject: name,
         profiles: stopSelection.profiles,
-        env: interpolationEnv ?? lifecycleEnv,
+        cwd: dirname(project.composeFile),
+        env,
+        routeStdoutToStderr: json,
+        timeoutSeconds: downTimeoutSeconds,
+        capMs: downCapMs,
+        onOutcome: (outcome) => {
+          downTimedOut = outcome.timedOut;
+        },
+      });
+    let stopEnv = interpolationEnv ?? lifecycleEnv;
+    if (recovery) {
+      code = 0;
+    } else {
+      code = await stop(project.composeFile, composeProjectName, stopEnv);
+      if (code !== 0 && !downTimedOut && code < 128 && !interpolationEnv) {
+        const fallback = await runtimeRemoteEnv(
+          { project, cfg, baseProjectName, branch, recovery: true },
+          effectiveEnvName
+        );
+        recovery = fallback.recovery;
+        stopEnv = fallback.env ?? stopEnv;
+      }
+    }
+    if (recovery) {
+      code = recovery.empty
+        ? 0
+        : await stop(recovery.path, recovery.name, stopEnv);
+    }
+    if (code === 0 && !recovery?.empty) {
+      const finish = await finishInstanceStop({
+        project: recovery
+          ? { ...project, composeFile: recovery.path }
+          : project,
+        composeProjectName: recovery?.name ?? composeProjectName,
+        composeProjectLabel:
+          recovery?.name ?? composeProjectName ?? baseProjectName,
+        profiles: stopSelection.profiles,
+        env: stopEnv,
         routeStdoutToStderr: json,
         timeoutSeconds: downTimeoutSeconds,
       });
@@ -10482,6 +10513,7 @@ async function runRestartCommand({
     projectOpt: args.options.project,
   });
   const cfg = await readProjectConfig(project);
+  refuseRemoteStart(cfg, "hack restart");
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
@@ -10655,10 +10687,6 @@ async function runRestartCommand({
     return 1;
   }
   reportLifecycleProgress({ service: null, phase: "stopping" });
-  const running = await runtimeRemoteEnv(
-    { project, cfg, baseProjectName, branch },
-    effectiveEnvName
-  );
   const downPhase = await runRestartDownPhase({
     project,
     cfg,
@@ -10668,7 +10696,7 @@ async function runRestartCommand({
     lifecycleComposeProject,
     profiles,
     branch,
-    envForCompose: teardownHookEnv(lifecycleEnv, running.choices),
+    envForCompose: lifecycleEnv,
     routeStdoutToStderr: json,
     preserveComposeRuntime: true,
   });
@@ -11358,23 +11386,29 @@ async function handlePs({
   // lag behind a failed startup. Both formats must observe the same containers.
   // A failed or unparsable read throws a coded error with the engine's cause
   // (envelope under --json, one line otherwise); see compose-ps-result.ts.
-  const { choices, env, recoveryFile } = await runtimeRemoteEnv({
+  const { choices, env, rows } = await runtimeRemoteEnv({
     project,
     cfg,
     baseProjectName,
     branch,
+    quiet: true,
+    recovery: false,
   });
   const read = await readComposePs({
     redactValues: env && Object.values(env),
-    run: () =>
-      composeRuntimeBackend.psJson({
-        composeFiles: [recoveryFile ?? project.composeFile],
+    run: async () => {
+      const result = await composeRuntimeBackend.psJson({
+        composeFiles: [project.composeFile],
         composeProject: composeProjectName,
         profiles,
         env,
         cwd,
         all: true,
-      }),
+      });
+      return result.exitCode !== 0 && rows
+        ? { ...result, exitCode: 0, stdout: JSON.stringify(remotePsRows(rows)) }
+        : result;
+    },
   });
   if (!read.ok) {
     if (!json && read.error.code === "E_DOCKER_UNAVAILABLE") {
@@ -11592,6 +11626,7 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
+  refuseRemoteStart(cfg, "hack run");
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
@@ -11965,7 +12000,7 @@ async function handleExec({
     envName,
     persist: false,
   });
-  const { env, recoveryFile } = await runtimeRemoteEnv(
+  const { env, recovery } = await runtimeRemoteEnv(
     { project, cfg, baseProjectName, branch },
     envName
   );
@@ -11973,13 +12008,14 @@ async function handleExec({
     ...managedOverrides,
     env: { ...managedOverrides.env, ...env },
   };
-  const composeFilesWithEnv = recoveryFile
-    ? [recoveryFile]
-    : [
-        ...composeFilesWithInternal,
-        ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-        ...envOverrides.composeFiles,
-      ];
+  const composeFilesWithEnv =
+    recovery && !recovery.empty
+      ? [recovery.path]
+      : [
+          ...composeFilesWithInternal,
+          ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+          ...envOverrides.composeFiles,
+        ];
   const readiness = {
     composeFiles: composeFilesWithEnv,
     composeProjectKey: lifecycleComposeProject,

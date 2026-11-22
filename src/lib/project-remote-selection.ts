@@ -357,12 +357,16 @@ export function runningRemoteTarget(
 ): string | null | undefined {
   const prefix = `dev.hack.remote.${remote}=`;
   const observed = new Set<string>();
-  for (const { State, Labels } of entries) {
-    if (State !== "running" || typeof Labels !== "string") {
+  for (const { Labels } of entries) {
+    if (typeof Labels !== "string") {
       continue;
     }
     const fields = Labels.split(",");
-    if (fields.includes("com.docker.compose.oneoff=True")) {
+    if (
+      fields.some(
+        (label) => label.toLowerCase() === "com.docker.compose.oneoff=true"
+      )
+    ) {
       continue;
     }
     const target = fields

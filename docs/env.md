@@ -1892,13 +1892,11 @@ process environment. The in-memory backend is cleared after each test.
 
 Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
 `requires` array names those requirements. Hack checks the default target's
-requirements before running Compose lifecycle hooks for `up`, `restart`, or
-`run`. When you select services explicitly, Hack checks the remotes whose
-mapped env names match an `environment` key or a Compose interpolation
-reference in a selected service or its dependencies. With no service selection, Hack checks every default
-remote. Hack also checks every default remote when it cannot determine the
-selected services' environment keys, including when a service uses `env_file`
-or the checkout has managed env layers.
+requirements before starting the whole project with `hack up`. Use
+`hack up --use db=TARGET` to choose a target for one start, or save a checkout
+preference with `hack use db=TARGET` while the project is stopped. For projects
+with remotes, scoped `up`, `restart`, and `run` refuse until they can preserve
+remote bindings. Use `hack down` followed by whole-project `hack up` to restart.
 Doctor runs preset checks and shows each declared login command. It reports
 custom checks as `not checked` after looking up their executables.
 
@@ -1928,7 +1926,8 @@ declarations.
 ### Declared remote targets in Compose status
 
 When a project declares remotes, `hack ps` adds a row for each configured
-default target beside the Compose service rows. The `USE` column names the
+remote beside the Compose service rows. The running selection is shown as
+`unknown` when it cannot be recovered. The `USE` column names the
 target and `POINTS AT` shows its address and port. An environment-backed
 hostname appears as the variable name, such as `$REMOTE_DB_HOST:5432`.
 

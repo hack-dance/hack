@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import YAML from "yaml";
 import { buildComposeArgs } from "../backends/runtime-backend.ts";
@@ -87,7 +87,7 @@ export async function resolveUseInstance(opts: {
   };
 }
 
-/** Read application interpolation values without adopting checkout client settings. */
+/** Resolve the managed Compose env. Inspecting an untrusted checkout can filter client settings. */
 export async function resolveRemoteInspectionEnv(opts: {
   readonly project: ProjectContext;
   readonly baseProjectName: string;
@@ -95,6 +95,7 @@ export async function resolveRemoteInspectionEnv(opts: {
   readonly requestedEnvName: string | null | undefined;
   readonly choices: readonly EffectiveRemote[];
   readonly tolerant?: typeof warnMissingRemoteEnv;
+  readonly filterControlEnv?: boolean;
 }): Promise<Record<string, string>> {
   const { project } = opts;
   const envName = selectEnvForRunningInstance({
@@ -126,11 +127,12 @@ export async function resolveRemoteInspectionEnv(opts: {
       applyRemoteEnv(managed, opts.choices, {
         missing: opts.tolerant,
       })
-    ).filter(([key]) => !isHostControlEnvKey(key))
+    ).filter(([key]) => !(opts.filterControlEnv && isHostControlEnvKey(key)))
   );
 }
 
-const REMOTE_INSTANCE_LABEL = "dev.hack.remote.instance";
+const REMOTE_INSTANCE_LABEL = "dev.hack.remote-instance";
+const LEGACY_INSTANCE_LABEL = "dev.hack.remote.instance";
 
 async function remoteInstanceIdentity(
   project: ProjectContext,
@@ -178,39 +180,79 @@ function implicitDependencies(spec: Record<string, unknown>): string[] {
   return refs;
 }
 
+function excludedDependency(
+  model: Record<string, unknown>,
+  name: string,
+  inactive: readonly string[],
+  visited = new Set<string>()
+): string | undefined {
+  if (visited.has(name)) {
+    return undefined;
+  }
+  visited.add(name);
+  const service = model[name];
+  if (!isRecord(service)) {
+    return undefined;
+  }
+  const dependencies = [
+    ...(isRecord(service.depends_on) ? Object.keys(service.depends_on) : []),
+    ...implicitDependencies(service),
+  ];
+  for (const dependency of dependencies) {
+    if (inactive.includes(dependency)) {
+      return dependency;
+    }
+    const indirect = excludedDependency(model, dependency, inactive, visited);
+    if (indirect) {
+      return indirect;
+    }
+  }
+  return undefined;
+}
+
 async function observeRemoteInstance(opts: {
   readonly project: ProjectContext;
   readonly composeProjectName: string | null;
+  readonly env: Readonly<Record<string, string>>;
 }) {
   const cwd = dirname(opts.project.composeFile);
   const identity = await remoteInstanceIdentity(
     opts.project,
     opts.composeProjectName
-  ).catch(() => undefined);
-  const filter = `${REMOTE_INSTANCE_LABEL}=${identity}`;
-  const result = identity
-    ? await exec(
-        [
-          "docker",
-          "ps",
-          "--all",
-          "--filter",
-          `label=${filter}`,
-          "--format",
-          "{{json .}}",
-        ],
-        { cwd, timeoutMs: 5000 }
-      ).catch(() => undefined)
-    : undefined;
-  const rows =
-    result?.exitCode === 0 ? (parseComposePsJson(result.stdout) ?? []) : [];
+  );
+  const owns = (row: Record<string, unknown>) =>
+    dockerLabel(row, REMOTE_INSTANCE_LABEL) === identity ||
+    dockerLabel(row, LEGACY_INSTANCE_LABEL) === identity;
+  const read = async (filter: string) => {
+    const result = await exec(
+      [
+        "docker",
+        "ps",
+        "--all",
+        "--filter",
+        `label=${filter}`,
+        "--format",
+        "{{json .}}",
+      ],
+      { cwd, env: opts.env, timeoutMs: 5000 }
+    ).catch(() => undefined);
+    return result?.exitCode === 0 ? parseComposePsJson(result.stdout) : null;
+  };
+  const current = await read(`${REMOTE_INSTANCE_LABEL}=${identity}`);
+  const legacy = current?.some(owns)
+    ? []
+    : await read(`${LEGACY_INSTANCE_LABEL}=${identity}`);
   return {
-    rows: rows.filter(
-      ({ Labels }) =>
-        typeof Labels === "string" && Labels.split(",").includes(filter)
-    ),
-    filter,
+    rows:
+      current || legacy
+        ? [...(current ?? []), ...(legacy ?? [])].filter(
+            (row) => owns(row) && !isOneOff(row)
+          )
+        : undefined,
+    read,
     cwd,
+    identity,
+    owns,
   };
 }
 
@@ -226,61 +268,97 @@ function dockerLabel(
     : undefined;
 }
 
+function isOneOff(row: Record<string, unknown>): boolean {
+  return (
+    dockerLabel(row, "com.docker.compose.oneoff")?.toLowerCase() === "true"
+  );
+}
+
 async function recoveryComposeFile(
   project: ProjectContext,
-  observation: Awaited<ReturnType<typeof observeRemoteInstance>>
+  observation: Awaited<ReturnType<typeof observeRemoteInstance>>,
+  env: Readonly<Record<string, string>>,
+  expectedName: string
 ) {
   const names = new Set(
-    observation.rows.map((row) =>
+    (observation.rows ?? []).map((row) =>
       dockerLabel(row, "com.docker.compose.project")
     )
   );
-  const name = [...names][0];
-  if (names.size !== 1 || !name) {
+  const name = [...names][0] ?? expectedName;
+  if (names.size > 1 || !name) {
     return undefined;
   }
-  const result = await exec(
+  const peers = (
+    await observation.read(`com.docker.compose.project=${name}`)
+  )?.filter((row) => !isOneOff(row));
+  if (!peers || peers.some((row) => !observation.owns(row))) {
+    return undefined;
+  }
+  if (!peers.length) {
+    return { empty: true as const };
+  }
+  const serviceNames = peers.map((row) =>
+    dockerLabel(row, "com.docker.compose.service")
+  );
+  if (serviceNames.some((service) => !service)) {
+    return undefined;
+  }
+  const networksResult = await exec(
     [
       "docker",
-      "ps",
-      "--all",
+      "network",
+      "ls",
       "--filter",
       `label=com.docker.compose.project=${name}`,
       "--format",
       "{{json .}}",
     ],
-    {
-      cwd: observation.cwd,
-      timeoutMs: 5000,
-    }
+    { cwd: observation.cwd, env, timeoutMs: 5000 }
   );
-  const peers =
-    result.exitCode === 0 ? parseComposePsJson(result.stdout) : null;
-  if (
-    !peers?.length ||
-    peers.some(
-      (row) => !String(row.Labels).split(",").includes(observation.filter)
-    )
-  ) {
+  const networkRows =
+    networksResult.exitCode === 0
+      ? parseComposePsJson(networksResult.stdout)
+      : null;
+  if (!networkRows) {
     return undefined;
   }
-  const services = Object.fromEntries(
-    peers.flatMap((row) => {
-      const service = dockerLabel(row, "com.docker.compose.service");
-      return service ? [[service, { image: "scratch" }]] : [];
+  const networks = Object.fromEntries(
+    networkRows.flatMap((row) => {
+      const key = dockerLabel(row, "com.docker.compose.network");
+      return key &&
+        dockerLabel(row, "com.docker.compose.project") === name &&
+        typeof row.Name === "string"
+        ? [[key, { name: row.Name }]]
+        : [];
     })
+  );
+  const services = Object.fromEntries(
+    serviceNames.map((service) => [
+      service,
+      {
+        image: "scratch",
+        ...(Object.keys(networks).length
+          ? { networks: Object.keys(networks) }
+          : {}),
+      },
+    ])
   );
   const path = resolve(
     project.projectDir,
     ".internal",
-    "compose.remote-recovery.json"
+    `compose.remote-recovery.${observation.identity}.json`
   );
   await ensureDir(dirname(path));
-  await writeTextFileAtomicIfChanged(path, JSON.stringify({ name, services }), {
-    createMode: 0o600,
-    noFollowTarget: true,
-  });
-  return path;
+  await writeTextFileAtomicIfChanged(
+    path,
+    JSON.stringify({ name, services, networks }),
+    {
+      createMode: 0o600,
+      noFollowTarget: true,
+    }
+  );
+  return { empty: false as const, path, name };
 }
 
 async function recoverRemoteChoices(opts: {
@@ -288,6 +366,7 @@ async function recoverRemoteChoices(opts: {
   readonly cfg: ProjectConfig;
   readonly lifecycleComposeProject: string;
   readonly entries: readonly Record<string, unknown>[];
+  readonly quiet?: boolean;
 }): Promise<EffectiveRemote[]> {
   const defaults = opts.cfg.prerequisites?.config?.selected ?? [];
   const state = await readProjectRuntimeStateEntry({
@@ -302,9 +381,11 @@ async function recoverRemoteChoices(opts: {
         : observed;
     const target = name ? remote.targets.get(name) : undefined;
     if (!(name && target)) {
-      process.stderr.write(
-        `! ${remote.remote} · running target unavailable · bindings omitted · start with a declared target to restore them\n`
-      );
+      if (!opts.quiet) {
+        process.stderr.write(
+          `! ${remote.remote} · running target unavailable · bindings omitted · start with a declared target to restore them\n`
+        );
+      }
       return [];
     }
     return [
@@ -325,14 +406,26 @@ export function warnMissingRemoteEnv(remote: string, name: string): void {
   );
 }
 
+export function refuseRemoteStart(cfg: ProjectConfig, command: string): void {
+  if (cfg.prerequisites?.config?.selected?.length) {
+    throw new HackCliError({
+      code: "E_INVALID_REMOTE",
+      message: `${command} cannot start a project that declares remotes. Run hack up --detach for the whole project.`,
+    });
+  }
+}
+
 export async function wholeProjectRemoteChoices(
   project: ProjectContext,
   cfg: ProjectConfig,
   services: readonly string[],
   use: string | undefined
 ) {
-  if (services.length && use !== undefined) {
-    throw new CliUsageError("--use currently requires whole-project up.");
+  if (services.length) {
+    refuseRemoteStart(cfg, "Service-scoped hack up");
+    if (use !== undefined) {
+      throw new CliUsageError("--use currently requires whole-project up.");
+    }
   }
   return services.length
     ? []
@@ -385,6 +478,8 @@ export async function runtimeRemoteEnv(
     cfg: ProjectConfig;
     baseProjectName: string;
     branch: string | null;
+    recovery?: boolean;
+    quiet?: boolean;
   },
   envName?: string | null
 ) {
@@ -396,48 +491,104 @@ export async function runtimeRemoteEnv(
     branch: input.branch,
   });
   const defaults = input.cfg.prerequisites?.config?.selected ?? [];
-  if (!defaults.length) {
-    return { choices: [], env: undefined, recoveryFile: undefined };
+  const identity = await remoteInstanceIdentity(
+    input.project,
+    composeProjectName
+  );
+  const generated = resolve(
+    input.project.projectDir,
+    ".internal",
+    `compose.remote.override.${identity}.yml`
+  );
+  if (
+    !(
+      defaults.length ||
+      input.recovery ||
+      (await stat(generated).catch(() => null))
+    )
+  ) {
+    return {
+      choices: [],
+      env: undefined,
+      recovery: undefined,
+      rows: undefined,
+    };
   }
+  const inspection = {
+    ...input,
+    composeProject: lifecycleComposeProject,
+    requestedEnvName: envName,
+  };
+  const managed = await resolveRemoteInspectionEnv({
+    ...inspection,
+    choices: [],
+  });
   const observation = await observeRemoteInstance({
     ...input,
     composeProjectName,
+    env: managed,
   });
-  const choices = await recoverRemoteChoices({
-    ...input,
-    lifecycleComposeProject,
-    entries: observation.rows,
-  });
-  let missing = choices.length < defaults.length;
-  const env = await resolveRemoteInspectionEnv({
-    project: input.project,
-    baseProjectName: input.baseProjectName,
-    composeProject: lifecycleComposeProject,
-    requestedEnvName: envName,
-    choices,
-    tolerant: (remote, key) => {
+  const choices =
+    input.quiet && !observation.rows?.length
+      ? []
+      : await recoverRemoteChoices({
+          ...input,
+          lifecycleComposeProject,
+          entries: observation.rows ?? [],
+        });
+  let missing = choices.length < defaults.length || !defaults.length;
+  const env = applyRemoteEnv(managed, choices, {
+    missing: (remote, key) => {
       missing = true;
-      warnMissingRemoteEnv(remote, key);
+      if (!input.quiet) {
+        warnMissingRemoteEnv(remote, key);
+      }
     },
   });
-  const recoveryFile = missing
-    ? await recoveryComposeFile(input.project, observation).catch(
-        () => undefined
-      )
-    : undefined;
-  return { choices, env, recoveryFile };
+  const recovery =
+    missing && input.recovery !== false
+      ? await recoveryComposeFile(
+          input.project,
+          observation,
+          managed,
+          composeProjectName ??
+            managed.COMPOSE_PROJECT_NAME ??
+            process.env.COMPOSE_PROJECT_NAME ??
+            input.baseProjectName
+        ).catch(() => undefined)
+      : undefined;
+  return { choices, env, recovery, rows: observation.rows };
+}
+
+export function remotePsRows(rows: readonly Record<string, unknown>[]) {
+  return rows.map((row) => ({
+    ...row,
+    Service: dockerLabel(row, "com.docker.compose.service"),
+    Name: row.Name ?? row.Names,
+    Project: dockerLabel(row, "com.docker.compose.project"),
+  }));
 }
 
 export function remoteRuntimeStatuses(
   cfg: ProjectConfig,
   choices: readonly EffectiveRemote[]
 ) {
-  return projectRemoteStatuses(
-    cfg.prerequisites?.config?.selected?.map(
-      (remote) =>
-        choices.find((choice) => choice.remote === remote.remote) ?? remote
-    )
-  );
+  return (cfg.prerequisites?.config?.selected ?? []).flatMap(({ remote }) => {
+    const choice = choices.find((entry) => entry.remote === remote);
+    return choice
+      ? projectRemoteStatuses([choice])
+      : [
+          {
+            service: remote,
+            kind: "remote" as const,
+            target: "unknown",
+            address: null,
+            via: null,
+            state: "unknown" as const,
+            probe: "not checked" as const,
+          },
+        ];
+  });
 }
 
 export function teardownHookEnv(
@@ -510,12 +661,16 @@ export async function prepareRemoteStartup(opts: {
   );
   const inactive = inactiveRemoteServices(opts.choices);
   const active = await command(opts.profiles, ["config", "--services"]);
+  if (active.exitCode !== 0) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Could not resolve active Compose services for remote selection.",
+    });
+  }
   const names = active.stdout.trim().split("\n").filter(Boolean);
   const targets = remoteServiceTargets(opts.choices, names);
-  if (
-    active.exitCode !== 0 ||
-    [...targets, ...inactive].some((name) => !Object.hasOwn(model, name))
-  ) {
+  if ([...targets, ...inactive].some((name) => !Object.hasOwn(model, name))) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
       message:
@@ -528,22 +683,18 @@ export async function prepareRemoteStartup(opts: {
     envName: opts.envName,
     serviceNames: Object.keys(model),
   });
+  const identity = await remoteInstanceIdentity(
+    opts.project,
+    opts.composeProject
+  );
   const labels = {
     ...remoteSelectionLabels(opts.choices),
-    [REMOTE_INSTANCE_LABEL]: await remoteInstanceIdentity(
-      opts.project,
-      opts.composeProject
-    ),
+    [REMOTE_INSTANCE_LABEL]: identity,
   };
   const serviceEnv = Object.fromEntries(
     Object.entries(model).map(([name, spec]) => {
       if (targets.includes(name) && isRecord(spec)) {
-        const explicit = isRecord(spec.depends_on)
-          ? Object.keys(spec.depends_on)
-          : [];
-        const dependency = [...explicit, ...implicitDependencies(spec)].find(
-          (dep) => inactive.includes(dep)
-        );
+        const dependency = excludedDependency(model, name, inactive);
         if (dependency) {
           const choice = opts.choices.find(({ targets }) =>
             [...targets.values()].some(
@@ -589,7 +740,7 @@ export async function prepareRemoteStartup(opts: {
   const path = resolve(
     opts.project.projectDir,
     ".internal",
-    "compose.remote.override.yml"
+    `compose.remote.override.${identity}.yml`
   );
   await ensureDir(dirname(path));
   await writeTextFileAtomicIfChanged(path, text, {

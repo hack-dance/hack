@@ -55,6 +55,7 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
     changes
   );
   if (!pending.length) {
+    process.stdout.write("No remotes declared for this project.\n");
     return 0;
   }
   const base = await resolveComposeProjectName({ project, cfg });
@@ -62,6 +63,7 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
     await resolveUseInstance({ project, cfg, base });
   const readActive = async () => {
     const env = await resolveRemoteInspectionEnv({
+      filterControlEnv: true,
       project,
       baseProjectName: base,
       composeProject: lifecycleComposeProject,

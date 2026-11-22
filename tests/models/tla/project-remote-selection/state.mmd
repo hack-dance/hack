@@ -3,19 +3,26 @@ title: ProjectRemoteSelection · Teardown after startup
 ---
 stateDiagram-v2
   direction TB
+  state "restart refused" as refused
   [*] --> stopped
   stopped --> starting: Begin
   starting --> started: Started
   starting --> failed: Fail
   started --> failed: Fail
+  started --> started: RemoveConfig / ObservePeer
+  failed --> failed: RemoveConfig / ObservePeer
+  started --> refused: Restart [declared]
+  failed --> refused: Restart [declared]
   started --> done: Teardown
   failed --> done: Teardown
+  refused --> done: Teardown
   class stopped idle
   class starting wait
   class started live
   class failed fail
+  class refused fail
   class done ok
   note right of done
     INV Hook target is absent or was started.
-    Wrong fallback uses saved live.
+    INV Recovery requires owned containers.
   end note

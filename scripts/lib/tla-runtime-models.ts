@@ -183,10 +183,19 @@ const contracts: readonly ModelContract[] = [
   {
     name: "project-remote-selection",
     module: "ProjectRemoteSelection",
-    states: 8,
+    states: 47,
     invariant: "TeardownUsesStartedTarget",
     action: "Teardown",
     fields: ['hook = "live"', 'started = "none"', 'record = "none"'],
+    additionalControls: [
+      {
+        name: "ownership-negative",
+        negative: true,
+        invariant: "RecoveryRequiresOwnership",
+        action: "Teardown",
+        fields: ["declared = FALSE", 'peer = "foreign"', 'stop = "owned"'],
+      },
+    ],
   },
   {
     name: "project-prerequisites",

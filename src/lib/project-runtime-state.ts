@@ -134,14 +134,11 @@ export async function removeProjectRuntimeStateEntry(opts: {
  * Refresh or forget the env digests of `services` after a service-scoped
  * (re)create, preserving the rest of the stack's entry.
  *
- * - A scoped start with remote targets can create the teardown record.
- *   Other scoped operations leave an absent record alone.
  * - `applied` with the entry's env selection: digests are recorded.
  * - Otherwise (`unknown` outcome, or a different env selection): the digests
  *   are dropped so exec reports nothing rather than a wrong comparison.
  */
 export async function updateProjectRuntimeServiceEnvFingerprints(opts: {
-  readonly remoteTargets?: Readonly<Record<string, string>>;
   readonly projectDir: string;
   readonly composeProject: string;
   readonly effectiveEnvName: string | null;
@@ -155,14 +152,10 @@ export async function updateProjectRuntimeServiceEnvFingerprints(opts: {
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
-  if (!(previous || opts.remoteTargets)) {
+  if (!previous) {
     return;
   }
-  const entry: ProjectRuntimeStateEntry = previous ?? {
-    composeProject: opts.composeProject,
-    envName: opts.effectiveEnvName,
-    updatedAt: new Date().toISOString(),
-  };
+  const entry = previous;
   const envFingerprint =
     opts.outcome === "applied" && entry.envName === opts.effectiveEnvName
       ? withComposeServiceEnvFingerprints({
@@ -179,7 +172,6 @@ export async function updateProjectRuntimeServiceEnvFingerprints(opts: {
     projectDir: opts.projectDir,
     entry: {
       ...rest,
-      ...(opts.remoteTargets ? { remoteTargets: opts.remoteTargets } : {}),
       ...(envFingerprint ? { envFingerprint } : {}),
     },
   });

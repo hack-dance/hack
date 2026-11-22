@@ -7,9 +7,9 @@ export interface ProjectRemoteStatus {
   readonly service: string;
   readonly kind: "remote";
   readonly target: string;
-  readonly address: ProjectRemoteAddress & { readonly port: number };
+  readonly address: (ProjectRemoteAddress & { readonly port: number }) | null;
   readonly via: "aws-ssm" | null;
-  readonly state: "declared" | "tunnel not started by this version";
+  readonly state: "unknown" | "declared" | "tunnel not started by this version";
   readonly probe: "not checked";
 }
 
@@ -31,6 +31,9 @@ export function projectRemoteStatuses(
 export function formatProjectRemoteAddress(
   address: ProjectRemoteStatus["address"]
 ): string {
+  if (!address) {
+    return "unknown";
+  }
   switch (address.kind) {
     case "service":
       return `${address.service}:${address.port}`;

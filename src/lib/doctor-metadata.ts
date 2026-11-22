@@ -40,6 +40,7 @@ const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "sessions mux": "project_files",
   "generated files": "project_files",
   "hack gitignore": "project_files",
+  "root-owned checkout files": "project_files",
   "runtime hygiene": "engine",
   "lifecycle hygiene": "engine",
   "worktree instances": "engine",

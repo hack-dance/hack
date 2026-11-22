@@ -259,6 +259,7 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import { runningComposeDirectAccess } from "../lib/compose-direct-access.ts";
 import {
   buildComposeDownFailure,
   countDistinctRunningServices,
@@ -3788,6 +3789,7 @@ async function renderInternalComposeOverrideText(opts: {
     project: opts.project,
     composeFile: opts.project.composeFile,
     enabled: internal.dns,
+    cfg: opts.cfg,
     branch: opts.branch ?? null,
     devHost: opts.devHost ?? null,
     aliasHost: opts.aliasHost ?? null,
@@ -3833,6 +3835,7 @@ type InternalDnsSettings = {
 
 async function resolveInternalDnsSettings(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly composeFile: string;
   readonly enabled: boolean;
   readonly branch: string | null;
@@ -3845,7 +3848,10 @@ async function resolveInternalDnsSettings(opts: {
   }
 
   const addresses = await resolveGlobalIngressAddresses(opts.addresses);
-  warnUnreachableIngress(addresses);
+  if (!(addresses.coreDns && addresses.caddy)) {
+    const fallback = await describeDirectIngressAccess(opts);
+    warnUnreachableIngress(addresses, fallback);
+  }
   const dnsServer = addresses.coreDns;
   const caddyIp = addresses.caddy;
   const caddyHosts = await resolveCaddyHostsForBranch({
@@ -3859,17 +3865,41 @@ async function resolveInternalDnsSettings(opts: {
   return { dnsServer, caddyIp, caddyHosts };
 }
 
-function warnUnreachableIngress(addresses: IngressAddressResult): void {
+async function describeDirectIngressAccess(
+  opts: Parameters<typeof resolveInternalDnsSettings>[0]
+): Promise<string> {
+  const fallback =
+    "Publish a service port with Compose `ports:`, for example `127.0.0.1:8080:80`, then run `hack up`.";
+  const base = await resolveComposeProjectName(opts);
+  const name = opts.branch ? `${base}--${opts.branch}` : base;
+  const runtime = await readRuntimeProjects({ includeGlobal: false });
+  const project = runtime.runtime.find((item) => item.project === name);
+  return (
+    (project &&
+      runningComposeDirectAccess(
+        [...project.services.values()].flatMap((service) =>
+          service.containers.filter(
+            (container) => container.workingDir === opts.project.projectDir
+          )
+        ),
+        process.platform === "linux"
+      )) ||
+    fallback
+  );
+}
+
+function warnUnreachableIngress(
+  addresses: IngressAddressResult,
+  fallback: string
+): void {
   if (!addresses.coreDns) {
     logger.warn({
-      message:
-        "CoreDNS is not reachable; internal DNS for *.hack is disabled. Run `hack global install` (or `hack global up`).",
+      message: `CoreDNS is not reachable; internal DNS for *.hack is disabled. ${fallback} For managed routing, run \`hack global install\` (or \`hack global up\`).`,
     });
   }
   if (!addresses.caddy) {
     logger.warn({
-      message:
-        "Caddy is not reachable; internal *.hack host mappings are disabled. Run `hack global install` (or `hack global up`).",
+      message: `Caddy is not reachable; internal *.hack host mappings are disabled. ${addresses.coreDns ? `${fallback} ` : ""}Run \`hack global install\` (or \`hack global up\`).`,
     });
   }
 }

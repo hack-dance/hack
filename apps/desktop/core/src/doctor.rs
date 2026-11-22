@@ -100,6 +100,7 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         "project" | "runtime hygiene" | "lifecycle hygiene" | "compose networks"
         | "generated files" | "hack gitignore" | "worktree instances" | "sessions mux"
         | "polling watchers" | "dev image tags" => (ProjectFiles, Project),
+        "root-owned checkout files" => (ProjectFiles, Project),
         "native host dns"
         | "native hack.local route"
         | "native hack.local repair"

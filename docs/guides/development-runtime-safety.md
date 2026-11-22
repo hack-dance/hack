@@ -215,3 +215,16 @@ repair.
 - [Next.js Turbopack reference](https://nextjs.org/docs/app/api-reference/turbopack)
 - [OrbStack volumes and mounts](https://docs.orbstack.dev/docker/file-sharing)
 - [OrbStack efficiency](https://docs.orbstack.dev/efficiency)
+
+### Root-owned checkout files on Linux
+
+`hack doctor` checks the checkout for root-owned files left by container tools.
+It includes ignored directories and reports when the scan hits its entry or time
+bound. It never follows symlinks. Where a writable Compose bind mount and an
+unset `user:` match a path, Doctor lists possible services and shows the
+`user:` line to set. Review the printed `sudo chown` command and run it yourself
+if appropriate. Doctor never runs it.
+
+When the global router is unavailable on Compose, the routing warning shows a
+published port when it can identify one, or a running container address on
+Linux. If it has neither, it shows how to publish a local port.

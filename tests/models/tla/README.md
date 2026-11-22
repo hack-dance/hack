@@ -1892,7 +1892,7 @@ registry fallback, or sweeping while the child holds the key lock.
 | `LoseKeeper` | An external deletion removes the keeper tag and leaves the alias |
 | `RestoreKeeper` | `aliases::sweep` verifies the alias ID and restores its keeper |
 | `Cleanup` | `Aliases::drop` or `aliases::sweep_stranded` untags and removes the journal after the worker releases the key |
-| `Reuse` | `run_with_bases` returns a verified receipt before the alias sweep |
+| `Reuse` | `run_with_bases` decides verified reuse before a best-effort alias sweep |
 | `Refuse`, `Retry` | Old sweep runs before reuse and leaves the same journal on every refusal |
 | `ChangeIncarnation` | The guest is replaced after the attempt ends |
 | `DiscardJournal` | `aliases::sweep` discards the journal without using its tags in the replacement guest |

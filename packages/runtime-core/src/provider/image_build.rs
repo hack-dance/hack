@@ -49,8 +49,8 @@
 //!   bounds.
 //! - The client builds from a private copy of the Dockerfile and ignore bytes that were
 //!   scanned and hashed, never from the project paths again.
-//! - Every build runs under [`build_policy::document`] for its pins, a BuildKit source
-//!   policy the client sends with the solve: only the pinned base references resolve as
+//! - Every build runs under [`build_policy::build_document`] for its aliases, a BuildKit source
+//!   policy the client sends with the solve: only the attempt's local base aliases resolve as
 //!   images, and network sources (`ADD` URLs, git, image blobs) are denied, including
 //!   ones a base image's stored `ONBUILD` triggers add.
 //! - Build arguments are not secrets, as with Docker: an image records their values in
@@ -270,6 +270,9 @@ pub(super) trait BuildPool {
     type Lease;
     /// Take the provider lease, verify the running pool, its build network and engine.
     fn lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError>;
+    fn cleanup_lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
+        self.lease()
+    }
     /// Inspect one image by content ID or tag; `None` when the engine reports it absent.
     fn inspect(&self, lease: &Self::Lease, image: &str) -> Result<Option<Value>, CandidateError>;
     fn tag_base(&self, lease: &Self::Lease, id: &str, tag: &str) -> Result<(), CandidateError>;
@@ -1454,7 +1457,7 @@ fn command(
     let encoded = serde_json::to_vec(&bake_definition(inputs, context, &dockerfile, pins, labels))
         .map_err(|_| invalid("Cannot encode the build definition."))?;
     write_private(&definition, &encoded)?;
-    // The policy allows exactly the pinned references the definition names as
+    // The policy allows exactly the private aliases the definition names as
     // contexts, and denies every other image and network source.
     let policy = bake.join(SOURCE_POLICY);
     let policy_bytes = serde_json::to_vec(&build_policy::build_document(
@@ -1645,7 +1648,7 @@ fn connect(
     super::engine::Engine::connect_until(
         candidate,
         deadline.unwrap_or_else(|| Instant::now() + LEASE_WAIT),
-        || CANCEL_REQUESTED.load(Ordering::Acquire),
+        || deadline.is_some() && CANCEL_REQUESTED.load(Ordering::Acquire),
     )
 }
 #[cfg(not(target_os = "macos"))]
@@ -1726,6 +1729,13 @@ impl<'a> BuildPool for LivePool<'a> {
             socket: engine.guest().engine_socket()?,
         };
         Ok((engine, identity))
+    }
+    fn cleanup_lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
+        Self {
+            candidate: self.candidate,
+            build_deadline: None,
+        }
+        .lease()
     }
     fn inspect(&self, lease: &Self::Lease, image: &str) -> Result<Option<Value>, CandidateError> {
         match lease.request(
@@ -1915,6 +1925,22 @@ fn base_registry_failed(error: &CandidateError) -> bool {
                 .is_some_and(|code| code.starts_with("registry_")))
 }
 
+fn recover_base_error(
+    error: CandidateError,
+    mode: super::image_policy::ImageTagMode,
+    deadline: Instant,
+    reuse: impl FnOnce() -> Result<Option<BuildOutcome>, CandidateError>,
+) -> Result<BuildOutcome, CandidateError> {
+    if mode == super::image_policy::ImageTagMode::Normal
+        && Instant::now() < deadline
+        && base_registry_failed(&error)
+        && let Ok(Some(outcome)) = reuse()
+    {
+        return Ok(outcome);
+    }
+    Err(error)
+}
+
 /// `runtime build-image --request <private-file>`: build or reuse one native image.
 pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome, CandidateError> {
     let request: BuildRequest = state::read_bounded(request, MAX_REQUEST_BYTES)?;
@@ -1949,6 +1975,7 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
             },
         )?;
     drop(lease);
+    let tag_mode = policy.tag_mode;
     let BaseSelections {
         selected,
         fallbacks,
@@ -1962,13 +1989,9 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
     ) {
         Ok(bases) => bases,
         Err(error) => {
-            if Instant::now() < deadline
-                && base_registry_failed(&error)
-                && let Some(outcome) = reuse_legacy(candidate, &pool, &inputs)?
-            {
-                return Ok(outcome);
-            }
-            return Err(error);
+            return recover_base_error(error, tag_mode, deadline, || {
+                reuse_legacy(candidate, &pool, &inputs)
+            });
         }
     };
     // Acquisition keeps the default signal dispositions, like ensure-image.

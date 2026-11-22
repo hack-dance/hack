@@ -137,7 +137,7 @@ impl<'a, P: BuildPool> Aliases<'a, P> {
 impl<P: BuildPool> Drop for Aliases<'_, P> {
     fn drop(&mut self) {
         if self.path.exists()
-            && let Ok((lease, identity)) = self.pool.lease()
+            && let Ok((lease, identity)) = self.pool.cleanup_lease()
         {
             let _ = sweep(self.pool, &lease, &identity, &self.path);
         }
@@ -186,18 +186,20 @@ pub(super) fn sweep<P: BuildPool>(
         {
             return quarantine(path);
         }
+        let mut mismatch = false;
         for (alias, id) in journal.aliases {
             if let Some(image) = pool.inspect(lease, &alias)? {
                 if image["Id"] != id {
-                    return Err(refusal(
-                        "native_build_base_image",
-                        "The recorded build alias differs from its image ID.",
-                    ));
+                    mismatch = true;
+                    continue;
                 }
                 let keeper = format!("{DOMAIN}/{CACHE}:{}", id.trim_start_matches("sha256:"));
                 tag(pool, lease, &id, &keeper)?;
                 pool.untag_base(lease, &alias)?;
             }
+        }
+        if mismatch {
+            return quarantine(path);
         }
     }
     fs::remove_file(path).map_err(state::io)
@@ -210,10 +212,7 @@ fn quarantine(path: &Path) -> Result<(), CandidateError> {
         .map_err(state::io)?;
     let saved = path.with_extension(format!("invalid-{:x}.json", crate::Hex(nonce)));
     fs::rename(path, &saved).map_err(state::io)?;
-    eprintln!(
-        "Set aside a malformed build alias journal at {}",
-        saved.display()
-    );
+    eprintln!("Set aside an invalid build alias journal at {saved:?}");
     Ok(())
 }
 

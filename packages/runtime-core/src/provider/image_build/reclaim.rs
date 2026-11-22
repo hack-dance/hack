@@ -374,7 +374,7 @@ pub(super) fn run<P: ReclaimPool>(
             }
         }
     }
-    for image in pool.base_images(&lease)? {
+    for image in pool.base_images(&lease).unwrap_or_default() {
         let Some(id) = image["Id"].as_str() else {
             continue;
         };
@@ -382,12 +382,13 @@ pub(super) fn run<P: ReclaimPool>(
             continue;
         };
         if !current.bases.contains(id)
+            && !referenced.contains(id)
             && image["RepoTags"]
                 .as_array()
                 .is_some_and(|tags| tags.iter().any(|tag| tag == &keeper))
             && pool
-                .inspect(&lease, &keeper)?
-                .is_some_and(|image| image["Id"] == id)
+                .inspect(&lease, &keeper)
+                .is_ok_and(|value| value.is_some_and(|image| image["Id"] == id))
         {
             let _ = pool.untag_base(&lease, &keeper);
         }

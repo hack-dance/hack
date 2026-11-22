@@ -166,6 +166,7 @@ struct FakePool {
     /// Verify the image builder in this home before use, as the real pool does.
     builder_home: Option<PathBuf>,
     unavailable: std::cell::Cell<bool>,
+    build_lease_ends: std::cell::Cell<Option<Instant>>,
 }
 impl FakePool {
     fn new(incarnation: &str) -> Self {
@@ -180,6 +181,7 @@ impl FakePool {
             output: Arc::default(),
             builder_home: None,
             unavailable: std::cell::Cell::new(false),
+            build_lease_ends: std::cell::Cell::new(None),
         }
     }
     /// Register `id` as the image the fake client in mode `given` "builds" for `inputs`.
@@ -207,6 +209,16 @@ impl FakePool {
 impl BuildPool for FakePool {
     type Lease = ();
     fn lease(&self) -> Result<((), PoolIdentity), CandidateError> {
+        if self
+            .build_lease_ends
+            .get()
+            .is_some_and(|end| Instant::now() >= end)
+        {
+            return Err(late_stop(false));
+        }
+        self.cleanup_lease()
+    }
+    fn cleanup_lease(&self) -> Result<((), PoolIdentity), CandidateError> {
         if self.unavailable.get() {
             return Err(refusal("provider_busy", "Fake provider lease unavailable."));
         }
@@ -954,10 +966,13 @@ fn timeout_and_cancellation_stop_the_whole_client_group() {
     let pool = FakePool::new("pool-1");
     fixture.client(&inputs, "sleep");
     let started = Instant::now();
+    pool.build_lease_ends.set(Some(started + inputs.timeout));
     let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
     assert_eq!(error.code, "native_build_timeout");
     assert!(started.elapsed() < Duration::from_secs(20));
     assert_eq!(fixture.receipt(&inputs).phase, Phase::Canceled);
+    assert!(!fixture.scratch(&inputs).join("base-aliases.json").exists());
+    assert!(!pool.images.borrow().keys().any(|tag| aliases::allowed(tag)));
     // On a loaded host the client may not have forked its child within the budget.
     let child = fixture.scratch(&inputs).join("child");
     if let Ok(pid) = fs::read_to_string(&child) {
@@ -968,13 +983,23 @@ fn timeout_and_cancellation_stop_the_whole_client_group() {
     fixture.client(&inputs, "sleep");
     let _ = fs::remove_file(&child);
     let marker = child.clone();
-    let cancel = move || marker.exists();
+    pool.build_lease_ends.set(None);
+    let cancel = || {
+        if marker.exists() {
+            pool.build_lease_ends.set(Some(Instant::now()));
+            return true;
+        }
+        false
+    };
     let error = run(&fixture.candidate, &pool, &inputs, &cancel).unwrap_err();
     assert_eq!(error.code, "native_build_canceled");
     assert_eq!(fixture.receipt(&inputs).phase, Phase::Canceled);
+    assert!(!fixture.scratch(&inputs).join("base-aliases.json").exists());
+    assert!(!pool.images.borrow().keys().any(|tag| aliases::allowed(tag)));
     // Cancellation was requested only once the child existed (published atomically).
     wait_dead(&fs::read_to_string(&child).unwrap());
 
+    pool.build_lease_ends.set(None);
     // A request canceled before the client starts never runs it.
     let error = run(&fixture.candidate, &pool, &inputs, &|| true).unwrap_err();
     assert_eq!(error.code, "native_build_canceled");
@@ -2134,6 +2159,17 @@ fn reclaim_keeps_only_two_of_ten_base_keepers_for_one_build() {
         )
         .unwrap();
     }
+    let graphs = fixture.candidate.state_root.join("run/graphs/0123");
+    state::private_directory(&graphs).unwrap();
+    let retained_base = format!("sha256:{:064x}", 1);
+    state::write(
+        &graphs.join("receipt.json"),
+        &serde_json::json!({"image": retained_base}),
+    )
+    .unwrap();
+    reclaim::run(&fixture.candidate, &pool).unwrap();
+    assert_eq!(pool.base_images(&()).unwrap().len(), 3);
+    fs::remove_file(graphs.join("receipt.json")).unwrap();
     reclaim::run(&fixture.candidate, &pool).unwrap();
     let kept = pool.base_images(&()).unwrap();
     assert_eq!(kept.len(), 2);
@@ -2179,6 +2215,14 @@ fn command_build_pins_are_applied_under_the_requested_acquisition_policy() {
     .unwrap();
     assert_eq!(selected.selections[&reference], pin);
     assert_eq!(selected.selected["alpine:3.20"].image_id, IMAGE);
+    let expired = acquire_bases(
+        &inputs,
+        &BTreeMap::new(),
+        Default::default(),
+        |_, _| panic!("an expired build must not acquire a base"),
+        Instant::now(),
+    );
+    assert_eq!(expired.err().unwrap().code, "native_build_timeout");
 }
 
 #[test]
@@ -2247,9 +2291,32 @@ fn legacy_reuse_requires_the_original_context_and_a_verified_image() {
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
     run(&fixture.candidate, &pool, &inputs, &never).unwrap();
-    let result = reuse_legacy(&fixture.candidate, &pool, &inputs)
-        .unwrap()
-        .unwrap();
+    use super::super::image_policy::ImageTagMode::{Normal, Offline, Refresh};
+    let registry_error = || missing().with_cause_code("registry_unreachable".into());
+    let soon = Instant::now() + Duration::from_secs(5);
+    for mode in [Offline, Refresh] {
+        let error =
+            recover_base_error(registry_error(), mode, soon, || panic!("must refuse")).unwrap_err();
+        assert_eq!(error.code, "image_tag_offline_missing");
+    }
+    assert_eq!(
+        recover_base_error(registry_error(), Normal, Instant::now(), || panic!(
+            "must refuse"
+        ))
+        .unwrap_err()
+        .code,
+        "image_tag_offline_missing"
+    );
+    assert_eq!(
+        recover_base_error(registry_error(), Normal, soon, || Err(late_stop(false)))
+            .unwrap_err()
+            .code,
+        "image_tag_offline_missing"
+    );
+    let result = recover_base_error(registry_error(), Normal, soon, || {
+        reuse_legacy(&fixture.candidate, &pool, &inputs)
+    })
+    .unwrap();
     assert!(result.reused && result.reused_legacy_key);
     fs::write(fixture.project.join("app/main.txt"), "edited").unwrap();
     let changed = fixture.inputs(Policy::Missing);

@@ -4,7 +4,7 @@ mod transport;
 pub use collector::{Collector, Config, Parent, Sink, Span, TimeSource, observe};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-pub use transport::{REQUEST_PREFIX, enable_argument, exit, shutdown};
+pub use transport::{REQUEST_PREFIX, enable_argument, exit, requested_fd, shutdown};
 
 pub const SCHEMA: &str = "hack.timings/1";
 pub const RECORD_LIMIT: usize = 2048;

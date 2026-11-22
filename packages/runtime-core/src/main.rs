@@ -336,8 +336,25 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["service", "serve", arguments @ ..] => {
-            let candidate = discover_candidate(&requested)?;
-            let (idle, notify) = service_serve_arguments(arguments)?;
+            // Parse first, before this process opens anything else: the notify
+            // descriptor must be one the starter handed over. The one a leading
+            // timings argument names already belongs to the collector.
+            let reserved = std::env::args_os()
+                .nth(1)
+                .and_then(|argument| argument.into_string().ok())
+                .and_then(|argument| hack_runtime_core::timings::requested_fd(&argument));
+            let (idle, mut notify) = service_serve_arguments(arguments, reserved)?;
+            let candidate = match discover_candidate(&requested) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    if let Some(mut file) = notify.take() {
+                        use std::io::Write;
+                        let refused = serde_json::json!({"refused": {"code": error.code}});
+                        let _ = writeln!(file, "{refused}");
+                    }
+                    return Err(error);
+                }
+            };
             // Private input will pass through this process; keep it out of core dumps.
             let no_core = libc::rlimit {
                 rlim_cur: 0,
@@ -1777,6 +1794,7 @@ fn image_policy(
 /// `service serve [--idle-seconds <1..86400>] [--notify-fd <3..1023>]`.
 fn service_serve_arguments(
     arguments: &[&str],
+    reserved: Option<i32>,
 ) -> Result<(std::time::Duration, Option<std::fs::File>), CandidateError> {
     let invalid = || {
         CandidateError::new(
@@ -1801,6 +1819,10 @@ fn service_serve_arguments(
                     .ok()
                     .filter(|fd| (3..=1023).contains(fd))
                     .ok_or_else(invalid)?;
+                // Never a second owner of the timings descriptor.
+                if Some(fd) == reserved {
+                    return Err(invalid());
+                }
                 // Open, and open for writing: the one line must be deliverable.
                 // SAFETY: F_GETFL only queries the descriptor's status flags.
                 let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };

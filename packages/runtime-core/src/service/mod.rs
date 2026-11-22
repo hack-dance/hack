@@ -8,7 +8,10 @@
 //! directory `run/service/` and on `service.lock` (see `Ownership`), is the only
 //! one that may remove a stale socket path and bind it (`OneOwner`). Both are
 //! held until `serve` returns, which happens only after every session thread
-//! has ended, and the kernel frees them on a crash. The socket path is unlinked
+//! has ended, and the kernel frees them on a crash. The one exception is a
+//! drain that ran out of time: `serve` then returns `service_drain_timeout`
+//! with both locks still held, and the process must exit at once (the entry
+//! point does). The socket path is unlinked
 //! only while it still names this process's own socket.
 //!
 //! The release gap: a lock can stay held for a moment after its owner let go,
@@ -16,9 +19,12 @@
 //! owner forked has not yet run `exec` (it shares every open file description
 //! until then, close-on-exec ones included). A starter that loses while no
 //! socket answers may be in that gap, or the owner may be draining. It retries
-//! within one bounded window (`RELEASE_WAIT`) and then reports `lost`; its
-//! client then runs that command on the one-shot path. A starter that loses
-//! while a socket answers reports `lost` at once.
+//! within one bounded window (`RELEASE_WAIT`) and then reports `lost`. A
+//! starter that loses while a socket answers reports `lost` at once. `lost`
+//! describes the start only, never an earlier request: after it, a client
+//! runs on the one-shot path only a request it never sent or one refused
+//! before admission. A request whose frame it may already have written keeps
+//! its intent id and follows recovery.
 //!
 //! Shutdown, for idle exit and retire alike: stop accepting new requests, unlink
 //! the socket, accept what is already queued only to refuse it before admission,
@@ -192,14 +198,6 @@ fn start_or_retry(paths: &Paths, options: &Options) -> Result<Option<Bound>, Can
     if let Some(bound) = start(paths)? {
         return Ok(Some(bound));
     }
-    match client::connect(&paths.socket, Instant::now() + LIVE_PROBE) {
-        Err(e) if e.code == "service_absent" => {}
-        _ => return Ok(None),
-    }
-    #[cfg(test)]
-    if let Some(retrying) = &options.retrying {
-        let _ = retrying.send(());
-    }
     #[cfg(test)]
     let wait = options.release_wait.unwrap_or(RELEASE_WAIT);
     #[cfg(not(test))]
@@ -207,14 +205,28 @@ fn start_or_retry(paths: &Paths, options: &Options) -> Result<Option<Bound>, Can
         let _ = options;
         RELEASE_WAIT
     };
+    // One window from the first loss, the probe included: no attempt begins
+    // after it, however this thread was scheduled.
     let deadline = Instant::now() + wait;
+    match client::connect(&paths.socket, deadline.min(Instant::now() + LIVE_PROBE)) {
+        Err(e) if e.code == "service_absent" => {}
+        _ => return Ok(None),
+    }
+    #[cfg(test)]
+    if let Some(retrying) = &options.retrying {
+        let _ = retrying.send(());
+    }
     loop {
-        std::thread::sleep(RELEASE_POLL);
-        if let Some(bound) = start(paths)? {
-            return Ok(Some(bound));
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
         }
+        std::thread::sleep(left.min(RELEASE_POLL));
         if Instant::now() >= deadline {
             return Ok(None);
+        }
+        if let Some(bound) = start(paths)? {
+            return Ok(Some(bound));
         }
     }
 }

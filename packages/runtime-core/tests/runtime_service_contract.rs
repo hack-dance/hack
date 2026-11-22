@@ -355,3 +355,92 @@ fn serve_refuses_a_notify_descriptor_open_for_neither_reading_nor_writing() {
     assert!(stderr.contains("invalid_arguments"), "{stderr}");
     assert!(home.socket().symlink_metadata().is_err());
 }
+
+/// `serve` with a leading timings argument naming `timings` and `--notify-fd
+/// <notify>`; `fds` are placed at those numbers in the child, nothing else.
+fn spawn_with_timings(home: &Home, timings: i32, notify: i32, fds: Vec<(i32, i32)>) -> Service {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hack-native"));
+    command
+        .arg(format!(
+            "--internal-timings={timings}:{}:{}:1:runtime",
+            "a".repeat(32),
+            "b".repeat(16)
+        ))
+        .arg("--candidate-root")
+        .arg(&home.0)
+        .args(["service", "serve", "--idle-seconds", "60", "--notify-fd"])
+        .arg(notify.to_string())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home.0)
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for &(from, to) in &fds {
+                if libc::dup2(from, to) < 0 || libc::fcntl(to, libc::F_SETFD, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    Service(command.spawn().unwrap())
+}
+
+#[test]
+fn serve_never_takes_the_timings_descriptor_as_its_notify_descriptor() {
+    let home = Home::new();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (_reader, writer) = pipe();
+    let mut service = spawn_with_timings(&home, 77, 77, vec![(writer.as_raw_fd(), 77)]);
+    drop(writer);
+    drop(spawning);
+    assert!(!service.exit().success());
+    let mut stderr = String::new();
+    service
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("invalid_arguments"), "{stderr}");
+    assert!(home.socket().symlink_metadata().is_err());
+}
+
+#[test]
+fn serve_with_distinct_timings_and_notify_descriptors_listens() {
+    let home = Home::new();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (reader, writer) = pipe();
+    let (_spans, spans_writer) = pipe();
+    let service = spawn_with_timings(
+        &home,
+        78,
+        77,
+        vec![(writer.as_raw_fd(), 77), (spans_writer.as_raw_fd(), 78)],
+    );
+    drop((writer, spans_writer));
+    drop(spawning);
+    let (sender, received) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = sender.send(BufReader::new(reader).read_line(&mut line).map(|_| line));
+    });
+    let line = received
+        .recv_timeout(WAIT)
+        .expect("no notify line")
+        .unwrap();
+    let ready: Value = serde_json::from_str(&line).unwrap();
+    assert!(ready["listening"].is_object(), "{ready}");
+    json(&run(&home, &["service", "stop"]));
+    let mut service = service;
+    assert!(service.exit().success());
+}

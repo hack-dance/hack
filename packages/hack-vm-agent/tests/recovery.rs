@@ -417,3 +417,41 @@ fn agent_crash_leaves_running_child_for_launcher_cleanup() {
     fs::write(gate, b"").unwrap();
     until(|| observed.exists().then_some(()));
 }
+
+#[test]
+fn kill_running_shell_reaches_its_worker() {
+    let agent = Agent::boot("running-group");
+    let handle = agent.handle(1);
+    let marker = agent.dir.join("worker");
+    let cmd = start(
+        &handle,
+        &[
+            "/bin/sh",
+            "-c",
+            "sleep 8 & echo $! > \"$1\"; wait",
+            "sh",
+            marker.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(agent.request(cmd), Response::Running {});
+    let pid: u32 = until(|| fs::read_to_string(&marker).ok()?.trim().parse().ok());
+    assert_eq!(
+        agent.request(Request::Signal {
+            handle: handle.clone(),
+            signal: hack_vm_protocol::Signal::Kill
+        }),
+        Response::Ack {}
+    );
+    agent.await_reply(
+        inspect(&handle),
+        Response::Signaled {
+            signal: libc::SIGKILL,
+        },
+    );
+    // Check before Release, which sends a second group kill.
+    until(|| match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat.contains(") Z ").then_some(()),
+        Err(e) => (e.kind() == std::io::ErrorKind::NotFound).then_some(()),
+    });
+    assert_eq!(agent.request(release(&handle)), Response::Released {});
+}

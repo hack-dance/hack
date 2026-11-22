@@ -116,7 +116,7 @@ process.exit(23);
   return root;
 }
 
-async function invoke(root: string) {
+async function invoke(root: string, json = true) {
   const child = Bun.spawn(
     [
       process.execPath,
@@ -125,10 +125,10 @@ async function invoke(root: string) {
       root,
       "up",
       "--detach",
-      "--json",
+      ...(json ? ["--json"] : []),
     ],
     {
-      cwd: root,
+      cwd: json ? root : tmpdir(),
       env: privateCliEnv({
         root,
         env: {
@@ -240,6 +240,18 @@ test("source CLI preserves nonzero hook status and makes no Docker request or ge
     ok: false,
     error: { code: "E_LIFECYCLE_FAILED" },
   });
+  expect(await Bun.file(join(root, "docker-requests")).exists()).toBe(false);
+  expect(await generations(root)).toEqual([]);
+}, 20_000);
+
+test("source CLI prints one scoped blocker for a known authored before-hook exit", async () => {
+  const root = await fixture("process.exit(17)");
+  const result = await invoke(root, false);
+  expect(result.code, result.stderr).toBe(17);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe(
+    `! lifecycle  hook failed (before, exit 17)\n  fix the failing hook and retry this start. run:\n  hack up --path ${root} --detach\n`
+  );
   expect(await Bun.file(join(root, "docker-requests")).exists()).toBe(false);
   expect(await generations(root)).toEqual([]);
 }, 20_000);

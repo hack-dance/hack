@@ -793,7 +793,7 @@ test.each([
     names.map((target) => [target, { ...request(), target }])
   );
   builds.set("duplicate", { ...request(), target: "web" });
-  const specs = Object.fromEntries(
+  const specs: Record<string, Record<string, unknown>> = Object.fromEntries(
     [...builds.keys()].map((name) => [name, { build: "app" }])
   );
   const started: string[] = [];

@@ -812,6 +812,7 @@ async function runPendingBuilds(opts: {
       ? Math.min(MAX_CONCURRENT_PROJECT_BUILDS, cpus)
       : 1;
   const parallel = cap > 1 && opts.pending.size > 1;
+  const onBuildSettled = parallel ? opts.onBuildSettled : undefined;
   const controller = new AbortController();
   const running = new Set<Promise<void>>();
   const interrupt = () =>
@@ -857,16 +858,14 @@ async function runPendingBuilds(opts: {
       if (controller.signal.aborted) {
         outcome = "cancelled";
       } else {
-        controller.abort(nameBuildFailure(services, error));
+        controller.abort(nameBuildFailure(services, error, parallel));
       }
     } finally {
-      if (parallel) {
-        opts.onBuildSettled?.({
-          services,
-          outcome,
-          durationMs: performance.now() - started,
-        });
-      }
+      onBuildSettled?.({
+        services,
+        outcome,
+        durationMs: performance.now() - started,
+      });
       await rm(requestFile, { force: true });
     }
   };
@@ -912,7 +911,9 @@ async function runPendingBuilds(opts: {
   } finally {
     await Promise.all(running);
     opts.signal.removeEventListener("abort", interrupt);
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true }).catch(
+      (error: unknown) => controller.abort(error)
+    );
   }
   controller.signal.throwIfAborted();
 }
@@ -947,12 +948,17 @@ const BUILD_SOURCE_POLICY: Readonly<Record<string, string>> = {
  */
 function nameBuildFailure(
   services: readonly string[],
-  error: unknown
+  error: unknown,
+  parallel: boolean
 ): unknown {
-  if (!(error instanceof NativeRuntimeRequestError)) {
-    return error;
-  }
   const which = serviceList(services);
+  if (!(error instanceof NativeRuntimeRequestError)) {
+    return parallel
+      ? new ClosedCliError(
+          `Native foreground up could not build ${which}. ${error instanceof ClosedCliError ? error.message : "Build result unavailable; values omitted."}`
+        )
+      : error;
+  }
   const code = error.nativeCode;
   const change =
     code !== undefined && Object.hasOwn(BUILD_SOURCE_POLICY, code)

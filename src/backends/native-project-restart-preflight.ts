@@ -16,6 +16,7 @@ import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   admitNativeProjectBuilds,
   invokeNativeBuild,
+  type NativeBuildRequest,
   nativeBuildsEnabled,
   nativeServiceActive,
   requireUnchangedNativeBuilds,
@@ -327,12 +328,28 @@ async function stoppedRestartMode(opts: {
 async function pinRestartImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
+  readonly branch: string | null | undefined;
   readonly profiles: readonly string[];
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly invoke: typeof invokeNativeRuntime;
+  readonly build: typeof invokeNativeBuild;
 }): Promise<void> {
+  // Restart reuses containers: a build service must still resolve, under its
+  // current build key, to the image the graph runs (HACK-2533).
+  await requireUnchangedNativeBuilds({
+    runtime: opts.runtime,
+    projectRoot: opts.projectRoot,
+    branch: opts.branch,
+    profiles: opts.profiles,
+    builds: opts.builds,
+    specs: opts.specs,
+    images: opts.retainedImages,
+    signal: new AbortController().signal,
+    invoke: opts.build,
+  });
   for (const [name, spec] of Object.entries(opts.specs)) {
     const retainedImage = opts.retainedImages.get(name);
     if (retainedImage) {
@@ -634,25 +651,17 @@ export async function preflightNativeRestart(opts: {
         invoke: deps.invoke,
       })
     : (activeImages?.images ?? new Map<string, string>());
-  await requireUnchangedNativeBuilds({
+  await pinRestartImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     branch: opts.scope.branch,
     profiles: selected.profiles ?? [],
     builds,
     specs,
-    images: retainedImages,
-    signal: new AbortController().signal,
-    invoke: deps.build,
-  });
-  await pinRestartImages({
-    runtime: opts.runtime,
-    projectRoot: opts.scope.projectRoot,
-    profiles: selected.profiles ?? [],
-    specs,
     retainedImages,
     amd64Emulation: input.amd64Emulation,
     invoke: deps.invoke,
+    build: deps.build,
   });
   const compose = JSON.parse(input.normalizedComposeJson);
   compose.services = specs;

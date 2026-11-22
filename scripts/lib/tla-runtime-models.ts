@@ -181,6 +181,14 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "project-prerequisites",
+    module: "ProjectPrerequisites",
+    states: 13,
+    invariant: "CheckedBeforeHooks",
+    action: "Login",
+    fields: ['phase = "allowed"', "checked = FALSE", "loggedIn = TRUE"],
+  },
+  {
     name: "autostart-start-stop",
     module: "StartStop",
     states: 41,

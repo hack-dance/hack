@@ -749,7 +749,7 @@ impl Drop for Flock {
 pub(super) fn image_fence(
     candidate: &Candidate,
     mode: libc::c_int,
-) -> Result<impl Drop, CandidateError> {
+) -> Result<impl Drop + use<>, CandidateError> {
     let root = builds_root(candidate);
     state::private_directory(&root)?;
     Flock::try_lock(Flock::open(&root.join("active.lock"))?, mode)?.ok_or_else(|| {
@@ -764,7 +764,7 @@ pub(super) fn image_fence(
 pub(super) fn wait_for_image_fence(
     candidate: &Candidate,
     policy: &super::image_policy::ImagePolicy,
-) -> Result<impl Drop, CandidateError> {
+) -> Result<impl Drop + use<>, CandidateError> {
     let limit = Duration::from_secs(60);
     state::wait_for_image_lock(
         policy.image_wait(limit)?.min(limit),

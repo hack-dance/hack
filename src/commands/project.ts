@@ -2412,7 +2412,7 @@ export async function runLifecycleCommands(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
   readonly routeStdoutToStderr?: boolean;
-  readonly summarizeFailure?: (name: string) => void;
+  readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly onPersistentCommand?: (opts: {
     readonly command: ProjectLifecycleCommand;
     readonly index: number;
@@ -2446,7 +2446,7 @@ export async function runLifecycleCommands(opts: {
             ? error.message
             : `Failed to start persistent lifecycle command: ${serviceName}`;
         if (opts.summarizeFailure) {
-          opts.summarizeFailure(serviceName);
+          opts.summarizeFailure(serviceName, message);
         } else {
           logger.error({ message });
         }
@@ -2635,7 +2635,7 @@ function hasPersistentLifecycleCommands(
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly title: string;
-  readonly summarizeFailure?: (name: string) => void;
+  readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
@@ -7638,14 +7638,16 @@ async function runUpCommand({
       keepSharedHelpers,
     });
   let failedHook: string | undefined;
+  let failedHookReason: string | undefined;
   const retryCommand = [
     "hack",
     ...args.raw.argv.map(quoteSingleLineShellWord),
   ].join(" ");
   const summarizeFailure = json
     ? undefined
-    : (name: string) => {
+    : (name: string, reason?: string) => {
         failedHook = name;
+        failedHookReason = reason;
       };
   try {
     const lifecycleUp: LifecycleUpResult = serviceScoped
@@ -7671,7 +7673,13 @@ async function runUpCommand({
           exitCode: lifecycleUp.code,
         });
       }
-      writeUpHookBlocker("before", lifecycleUp.code, failedHook, retryCommand);
+      writeUpHookBlocker(
+        "before",
+        lifecycleUp.code,
+        failedHook,
+        retryCommand,
+        failedHookReason
+      );
       return lifecycleUp.code;
     }
     if (lifecycleUp.sessionName) {

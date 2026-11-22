@@ -68,13 +68,18 @@ export function writeUpHookBlocker(
   phase: "before" | "after",
   exitCode: number,
   name: string | undefined,
-  command: string
+  command: string,
+  reason?: string
 ): void {
   writeStartBlocker({
     thing: "lifecycle",
-    problem: "hook failed",
-    which: [phase, name, `exit ${exitCode}`].filter(Boolean).join(", "),
-    needs: "fix the failing hook and retry this start",
+    problem: reason ? "hook could not start" : "hook failed",
+    which: [phase, name, reason ?? `exit ${exitCode}`]
+      .filter(Boolean)
+      .join(", "),
+    needs: reason
+      ? "resolve the startup refusal and retry this start"
+      : "fix the failing hook and retry this start",
     command,
   });
 }

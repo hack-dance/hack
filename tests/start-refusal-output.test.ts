@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { handleRunCliError } from "../src/cli/run.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { writeUpHookBlocker } from "../src/ui/start-refusal-output.ts";
 
 const cases = [
   [
@@ -90,5 +91,27 @@ test.each(
   } finally {
     err.mockRestore();
     out.mockRestore();
+  }
+});
+
+test("a persistent hook startup refusal keeps the reason in one blocker", () => {
+  const lines: string[] = [];
+  const stderr = spyOn(process.stderr, "write").mockImplementation((line) => {
+    lines.push(String(line));
+    return true;
+  });
+  try {
+    writeUpHookBlocker(
+      "before",
+      1,
+      "worker",
+      "hack up",
+      "session already exists"
+    );
+    expect(lines.join("")).toBe(
+      "! lifecycle  hook could not start (before, worker, session already exists)\n  resolve the startup refusal and retry this start. run:\n  hack up\n"
+    );
+  } finally {
+    stderr.mockRestore();
   }
 });

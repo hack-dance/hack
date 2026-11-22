@@ -14,7 +14,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, MutexGuard},
 };
@@ -70,7 +70,7 @@ impl ImageCache {
             let lease = lifecycle::startup_lease(root, lifecycle::STARTUP_LEASE_WAIT)?;
             let staging = root.with_file_name("image-staging");
             if staging.try_exists().map_err(state::io)? {
-                clean_staging(&staging, true)?;
+                clean_staging(&staging, 0)?;
             }
             cache.lease = Some(lease);
         }
@@ -106,7 +106,17 @@ fn disk_available(path: &Path) -> Result<u64, CandidateError> {
     Ok(bytes.saturating_sub(RESERVE))
 }
 
-fn clean_staging(path: &Path, root: bool) -> Result<(), CandidateError> {
+fn generated_sequence(name: &str) -> bool {
+    name.split_once('-').is_some_and(|(pid, sequence)| {
+        pid.parse::<u32>()
+            .is_ok_and(|value| value > 0 && value.to_string() == pid)
+            && sequence
+                .parse::<u64>()
+                .is_ok_and(|value| value.to_string() == sequence)
+    })
+}
+
+fn clean_staging(path: &Path, level: u8) -> Result<(), CandidateError> {
     if !path.try_exists().map_err(state::io)? {
         return Ok(());
     }
@@ -116,33 +126,47 @@ fn clean_staging(path: &Path, root: bool) -> Result<(), CandidateError> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let metadata = fs::symlink_metadata(entry.path()).map_err(state::io)?;
-        if root && hex(&name) && metadata.is_dir() && metadata.uid() == current_uid() {
-            clean_staging(&entry.path(), false)?;
+        if metadata.uid() != current_uid() {
             continue;
         }
-        let generated = matches!(&*name, "image.tar" | "receipt.json" | "receipt.pending")
+        let generated_dir = (level == 0 && hex(&name))
+            || (level == 1
+                && name
+                    .strip_prefix("attempt-")
+                    .is_some_and(generated_sequence));
+        if generated_dir && metadata.is_dir() && metadata.mode() & 0o077 == 0 {
+            clean_staging(&entry.path(), level + 1)?;
+        }
+        let generated_file = matches!(&*name, "image.tar" | "receipt.json" | "receipt.pending")
             || [".hack-image-", ".hack-layer-"].iter().any(|prefix| {
                 name.strip_prefix(prefix)
                     .and_then(|tail| tail.strip_suffix(".tmp"))
-                    .and_then(|tail| tail.split_once('-'))
-                    .is_some_and(|(pid, sequence)| {
-                        pid.parse::<u32>()
-                            .is_ok_and(|value| value > 0 && value.to_string() == pid)
-                            && sequence
-                                .parse::<u64>()
-                                .is_ok_and(|value| value.to_string() == sequence)
-                    })
+                    .is_some_and(generated_sequence)
             });
-        if !root && generated && metadata.is_file() && metadata.uid() == current_uid() {
+        if level > 0 && generated_file && metadata.is_file() {
             fs::remove_file(entry.path()).map_err(state::io)?;
-        } else {
-            return Err(CandidateError::new(
-                "image_staging_entry",
-                format!("Unexpected image staging entry {name:?} was left in place."),
-            ));
         }
     }
-    fs::remove_dir(path).map_err(state::io)
+    match fs::remove_dir(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
+        result => result.map_err(state::io),
+    }
+}
+
+fn create_staging(root: &Path, reference: &str) -> Result<PathBuf, CandidateError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let key_dir = root.with_file_name("image-staging").join(key(reference));
+    state::private_directory(&key_dir)?;
+    loop {
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let attempt = key_dir.join(format!("attempt-{}-{sequence}", std::process::id()));
+        match fs::DirBuilder::new().mode(0o700).create(&attempt) {
+            Ok(()) => return Ok(attempt),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(state::io(error)),
+        }
+    }
 }
 
 struct Reservation<'a> {
@@ -153,7 +177,10 @@ struct Reservation<'a> {
 
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
-        let _ = clean_staging(&self.path, false);
+        let _ = clean_staging(&self.path, 2);
+        if let Some(key_dir) = self.path.parent() {
+            let _ = fs::remove_dir(key_dir);
+        }
         self.cache
             .state
             .lock()
@@ -410,7 +437,15 @@ pub(super) fn publish_proof(
             lock.verify_path(parent)?;
             fs::remove_file(pending).map_err(state::io)?;
         }
-        Ok(_) => return Err(refused("Unsafe pending image proof was left in place.")),
+        Ok(_) => {
+            let name = pending.file_name().unwrap().to_string_lossy();
+            let location = format!("artifacts/image-proofs/{name}");
+            return Err(CandidateError::new(
+                "image_proof_pending",
+                format!("Unsafe pending image proof at {location} was left in place."),
+            )
+            .with_state_component(&location));
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(state::io(error)),
     }
@@ -976,8 +1011,7 @@ fn ensure_pinned_coordinated(
             state = coordinator.changed.wait(state).unwrap();
             occupied = inventory()?;
         };
-        let staging = root.with_file_name("image-staging").join(key(&reference));
-        state::private_directory(&staging)?;
+        let staging = create_staging(&root, &reference)?;
         state.reservations.insert(reference.clone(), limit);
         let reservation = Reservation {
             cache: coordinator,
@@ -1012,6 +1046,7 @@ fn ensure_pinned_coordinated(
             return Err(refused("New archive differs from its acquisition receipt."));
         }
         state::write(&dir.join("receipt.json"), &receipt)?;
+        inspect_entry(candidate, dir, &reference, acquired.platform)?;
         let state = coordinator.enter(&root)?;
         let target = root.join(entry_key(&reference, acquired.platform));
         if target.try_exists().map_err(state::io)? {
@@ -1170,16 +1205,71 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_staging_files_are_named_and_preserved() {
+    fn a_batch_reuses_staging_without_moving_or_deleting_stray_entries() {
         let f = Fixture::new();
         let root = f.1.state_root.join("artifacts/images");
-        let staged = root.with_file_name("image-staging").join(key(&pin(1)));
-        state::private_directory(&staged).unwrap();
-        let unrelated = staged.join("unrelated");
-        fs::write(&unrelated, b"fixture").unwrap();
-        let error = ImageCache::default().enter(&root).err().unwrap();
-        assert!(error.message.contains("unrelated"));
-        assert_eq!(fs::read(unrelated).unwrap(), b"fixture");
+        let staging = root.with_file_name("image-staging");
+        let key_dir = staging.join(key(&pin(1)));
+        let foreign = key_dir.join("foreign");
+        state::private_directory(&foreign).unwrap();
+        for path in [
+            staging.join(".DS_Store"),
+            key_dir.join(".DS_Store"),
+            foreign.join(".hack-image-1-0.tmp"),
+        ] {
+            fs::write(path, b"stray").unwrap();
+        }
+        let leftover = key_dir.join(".hack-image-1-0.tmp");
+        fs::write(&leftover, b"partial").unwrap();
+        let attempt = key_dir.join("attempt-1-0");
+        state::private_directory(&attempt).unwrap();
+        fs::write(attempt.join(".hack-layer-1-0.tmp"), b"partial").unwrap();
+
+        let cache = ImageCache::default();
+        for id in [1, 2] {
+            ensure_pinned_coordinated(
+                (&f.1, &cache),
+                &pin(id),
+                &ImagePolicy::default(),
+                PlatformPolicy::Native,
+                |_, _| panic!("no platform lookup"),
+                acquire,
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap();
+        }
+        assert_eq!(usage(&f.1, &root).unwrap(), (2, 14));
+        for path in [
+            staging.join(".DS_Store"),
+            key_dir.join(".DS_Store"),
+            foreign.join(".hack-image-1-0.tmp"),
+        ] {
+            assert_eq!(fs::read(path).unwrap(), b"stray");
+        }
+        assert!(!leftover.exists());
+        assert!(!attempt.exists());
+    }
+
+    #[test]
+    fn an_unsafe_pending_proof_names_the_preserved_entry() {
+        let f = Fixture::new();
+        let pending =
+            manifest_path(&f.1, &pin(1), PlatformPolicy::Native).with_extension("pending");
+        state::private_directory(&pending).unwrap();
+        let failure = publish_proof(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::Native,
+            &registry_image::test_manifest_resolution().proof,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "image_proof_pending");
+        assert!(
+            failure
+                .message
+                .contains(pending.file_name().unwrap().to_str().unwrap())
+        );
+        assert!(pending.is_dir());
     }
 
     #[test]

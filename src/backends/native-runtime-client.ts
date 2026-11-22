@@ -19,7 +19,10 @@ import {
   readNativeConfigurationRefusals,
 } from "./native-configuration-refusals.ts";
 import { nativeHotReloadEnvironment } from "./native-hot-reload-notice.ts";
-import { nativeImageRegistryReason } from "./native-image-policy.ts";
+import {
+  nativeImageRegistryReason,
+  pendingImageProofReason,
+} from "./native-image-policy.ts";
 import {
   type NativePlanChange,
   nativePlanChangeGuidance,
@@ -499,6 +502,7 @@ export function nativeFailureDetail(value: Record<string, unknown>): {
   const message =
     networkRequestFailureMessage(value) ??
     stateComponentFailureMessage(value) ??
+    pendingImageProofReason(value) ??
     bridgeSocketsFailureMessage(value) ??
     execStageFailureMessage(value) ??
     routeProbeFailureMessage(value, service) ??

@@ -140,6 +140,27 @@ export class NativeImageBatchError extends HackCliError {
   }
 }
 
+const PENDING_PROOF_PATH = /^artifacts\/image-proofs\/[a-f0-9]{64}\.pending$/;
+
+export function pendingImageProofReason(
+  value: Record<string, unknown>
+): string | undefined {
+  const component = value.state_component;
+  if (
+    !(
+      value.code === "image_proof_pending" &&
+      component &&
+      typeof component === "object" &&
+      "path" in component &&
+      typeof component.path === "string" &&
+      PENDING_PROOF_PATH.test(component.path)
+    )
+  ) {
+    return;
+  }
+  return `Unsafe pending image proof at ${component.path} was left in place`;
+}
+
 export function batchImageFailure(
   reference: string,
   value: unknown,
@@ -153,10 +174,12 @@ export function batchImageFailure(
     typeof error.code === "string" && IMAGE_FAILURE_CODE.test(error.code)
       ? error.code
       : "image_reply_invalid";
-  let reason = nativeImageRegistryReason(error.cause_code);
+  let reason =
+    nativeImageRegistryReason(error.cause_code) ??
+    pendingImageProofReason(error);
   if (
     !reason &&
-    (error.message_fixed === true || code === "image_staging_entry") &&
+    error.message_fixed === true &&
     typeof error.message === "string" &&
     IMAGE_FAILURE_TEXT.test(error.message)
   ) {

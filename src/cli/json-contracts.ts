@@ -61,6 +61,7 @@ export const JSON_COMMAND_SHAPES = {
   "setup migrate": "envelope",
   "native setup": "runtime-passthrough",
   "native recover": "runtime-passthrough",
+  "native temp-aliases": "legacy-object",
   "session panes": "ndjson",
   "session capture": "ndjson",
   "session tail": "ndjson",

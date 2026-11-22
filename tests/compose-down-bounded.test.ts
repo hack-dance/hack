@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -6,8 +6,6 @@ import {
   buildComposeDownCommand,
   composeRuntimeBackend,
 } from "../src/backends/runtime-backend.ts";
-import { CLI_SPEC } from "../src/cli/spec.ts";
-import { downCommand } from "../src/commands/project.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
   buildComposeDownFailure,
@@ -19,12 +17,16 @@ import {
   resolveComposeDownTimeoutSeconds,
 } from "../src/lib/compose-down-budget.ts";
 import { classifyComposeStartupState } from "../src/lib/compose-startup-state.ts";
-import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
-import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const CLI_ENTRY = join(REPO_ROOT, "index.ts");
+const RUNTIME_BACKEND_ENTRY = join(
+  REPO_ROOT,
+  "src",
+  "backends",
+  "runtime-backend.ts"
+);
 const CLI_TIMEOUT_MS = 25_000;
 const HERMETIC_SYSTEM_PATH = "/usr/bin:/bin";
 
@@ -71,6 +73,7 @@ async function createComposeFixture(opts?: {
   readonly homeDir: string;
   readonly binDir: string;
   readonly dockerLogPath: string;
+  readonly dockerConfigPath: string;
   readonly setDockerConfig: (next: FakeDockerConfig) => Promise<void>;
 }> {
   const root = await makeTempDir("hack-down-bounded-");
@@ -146,7 +149,15 @@ async function createComposeFixture(opts?: {
   );
   await chmod(dockerShim, 0o755);
 
-  return { root, projectDir, homeDir, binDir, dockerLogPath, setDockerConfig };
+  return {
+    root,
+    projectDir,
+    homeDir,
+    binDir,
+    dockerLogPath,
+    dockerConfigPath,
+    setDockerConfig,
+  };
 }
 
 async function runCli(opts: {
@@ -154,13 +165,17 @@ async function runCli(opts: {
   readonly cwd: string;
   readonly homeDir: string;
   readonly binDir: string;
+  readonly preloadPath?: string;
   readonly extraEnv?: Readonly<Record<string, string>>;
 }): Promise<{
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
 }> {
-  const proc = Bun.spawn([process.execPath, CLI_ENTRY, ...opts.args], {
+  const argv = opts.preloadPath
+    ? [process.execPath, "--preload", opts.preloadPath, CLI_ENTRY, ...opts.args]
+    : [process.execPath, CLI_ENTRY, ...opts.args];
+  const proc = Bun.spawn(argv, {
     cwd: opts.cwd,
     env: privateCliEnv({
       root: opts.cwd,
@@ -617,115 +632,70 @@ describe("compose down stop timeout validation, argv, and cap", () => {
       readonly capMs: number | undefined;
     }[];
   }> {
-    const isolatedEnv = privateCliEnv({
-      root: opts.fixture.root,
-      home: opts.fixture.homeDir,
-      env: {
-        PATH: hermeticPath(opts.fixture.binDir),
-        HACK_HOME: join(opts.fixture.homeDir, ".hack"),
-        XDG_CONFIG_HOME: join(opts.fixture.homeDir, ".config"),
-        HACK_GLOBAL_CONFIG_PATH: join(
-          opts.fixture.homeDir,
-          ".hack",
-          "hack.config.json"
-        ),
-        HACK_NO_INTERACTIVE: "1",
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-      },
-    });
-    const previousEnv = new Map<string, string | undefined>();
-    for (const key of Object.keys(process.env)) {
-      previousEnv.set(key, process.env[key]);
-      delete process.env[key];
-    }
-    for (const [key, value] of Object.entries(isolatedEnv)) {
-      process.env[key] = value;
-    }
-    setLoggerBackendOverride({ backend: null });
-    resetGumPathCacheForTests();
+    const downCallsPath = join(opts.fixture.root, "compose-down-calls.jsonl");
+    const preloadPath = join(opts.fixture.root, "compose-down-spy-preload.ts");
+    await rm(downCallsPath, { force: true });
+    await writeFile(
+      preloadPath,
+      [
+        'import { appendFileSync, writeFileSync } from "node:fs";',
+        `import { composeRuntimeBackend } from ${JSON.stringify(RUNTIME_BACKEND_ENTRY)};`,
+        `const downCallsPath = ${JSON.stringify(downCallsPath)};`,
+        `const dockerConfigPath = ${JSON.stringify(opts.fixture.dockerConfigPath)};`,
+        "(composeRuntimeBackend as { down: typeof composeRuntimeBackend.down }).down = async (downOpts) => {",
+        "  appendFileSync(",
+        "    downCallsPath,",
+        '    JSON.stringify({ timeoutSeconds: downOpts.timeoutSeconds, capMs: downOpts.capMs }) + "\\n"',
+        "  );",
+        '  writeFileSync(dockerConfigPath, JSON.stringify({ psJson: "[]\\n" }));',
+        "  downOpts.onOutcome?.({ exitCode: 0, timedOut: false });",
+        "  return 0;",
+        "};",
+        "",
+      ].join("\n")
+    );
 
+    const result = await runCli({
+      args: [
+        "down",
+        "--path",
+        opts.fixture.root,
+        ...(opts.timeout !== undefined ? ["--timeout", opts.timeout] : []),
+        ...(opts.json ? ["--json"] : []),
+      ],
+      cwd: opts.fixture.root,
+      homeDir: opts.fixture.homeDir,
+      binDir: opts.fixture.binDir,
+      preloadPath,
+    });
+
+    const downCallsFile = Bun.file(downCallsPath);
     const downCalls: Array<{
       readonly timeoutSeconds: number | undefined;
       readonly capMs: number | undefined;
-    }> = [];
-    const downSpy = spyOn(composeRuntimeBackend, "down").mockImplementation(
-      async (downOpts) => {
-        downCalls.push({
-          timeoutSeconds: downOpts.timeoutSeconds,
-          capMs: downOpts.capMs,
-        });
-        await opts.fixture.setDockerConfig({ psJson: "[]\n" });
-        downOpts.onOutcome?.({ exitCode: 0, timedOut: false });
-        return 0;
-      }
-    );
+    }> = (await downCallsFile.exists())
+      ? (await downCallsFile.text())
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+          .map((line) => {
+            const parsed = JSON.parse(line) as {
+              readonly timeoutSeconds?: number;
+              readonly capMs?: number;
+            };
+            return {
+              timeoutSeconds: parsed.timeoutSeconds,
+              capMs: parsed.capMs,
+            };
+          })
+      : [];
 
-    let stdout = "";
-    let stderr = "";
-    const originalStdoutWrite = process.stdout.write;
-    const originalStderrWrite = process.stderr.write;
-    process.stdout.write = ((chunk: string | Uint8Array) => {
-      stdout +=
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      return true;
-    }) as typeof process.stdout.write;
-    process.stderr.write = ((chunk: string | Uint8Array) => {
-      stderr +=
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      return true;
-    }) as typeof process.stderr.write;
-
-    try {
-      const input = {
-        ctx: { cwd: opts.fixture.root, cli: CLI_SPEC },
-        args: {
-          options: {
-            path: opts.fixture.root,
-            project: undefined,
-            env: undefined,
-            branch: undefined,
-            profile: undefined,
-            target: undefined,
-            timeout: opts.timeout,
-            pruneCaches: undefined,
-            removeData: undefined,
-            yes: undefined,
-            progress: undefined,
-            recoverNativeCompose: undefined,
-            json: opts.json === true,
-          },
-          positionals: {},
-          raw: {
-            argv: [
-              "--path",
-              opts.fixture.root,
-              ...(opts.timeout !== undefined
-                ? ["--timeout", opts.timeout]
-                : []),
-              ...(opts.json ? ["--json"] : []),
-            ],
-            positionals: [],
-          },
-        },
-      } as unknown as Parameters<typeof downCommand.handler>[0];
-      const exitCode = await downCommand.handler(input);
-      return { exitCode, stdout, stderr, downCalls };
-    } finally {
-      process.stdout.write = originalStdoutWrite;
-      process.stderr.write = originalStderrWrite;
-      downSpy.mockRestore();
-      setLoggerBackendOverride({ backend: null });
-      resetGumPathCacheForTests();
-      for (const key of Object.keys(process.env)) {
-        if (!previousEnv.has(key)) {
-          delete process.env[key];
-        }
-      }
-      for (const [key, previous] of previousEnv.entries()) {
-        restoreEnv(key, previous);
-      }
-    }
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      downCalls,
+    };
   }
 
   test("CLI down arms 90s cap for three replicas of one service and 210s for three distinct services at --timeout 60", async () => {
@@ -774,7 +744,7 @@ describe("compose down stop timeout validation, argv, and cap", () => {
     expect(distinctRun.downCalls).toEqual([
       { timeoutSeconds: 60, capMs: 210_000 },
     ]);
-  }, 30_000);
+  }, 60_000);
 
   test("CLI down produces the same cap and stopped list whether compose ps prints JSON lines or a JSON array", async () => {
     const fixture = await createComposeFixture({ name: "ps-encoding" });
@@ -826,7 +796,7 @@ describe("compose down stop timeout validation, argv, and cap", () => {
     });
     expect(results[1]).toEqual(results[0]);
     expect(results[2]).toEqual(results[0]);
-  }, 30_000);
+  }, 60_000);
 
   test("HACK_RUNTIME_BACKEND selection agrees with --timeout refusal for both 'native' and 'NATIVE'", async () => {
     const fixture = await createComposeFixture({ name: "backend-case" });

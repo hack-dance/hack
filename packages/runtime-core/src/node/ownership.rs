@@ -156,7 +156,7 @@ mod host {
 }
 
 /// A canonical lowercase, nonzero UUID: the only boot form either platform records.
-fn canonical_boot(value: &str) -> bool {
+pub(crate) fn canonical_boot(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 36
         && bytes.iter().enumerate().all(|(i, byte)| {

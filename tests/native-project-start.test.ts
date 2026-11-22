@@ -19,6 +19,10 @@ import {
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
+import {
+  admitNativeProjectBuilds,
+  nativeBuildIdentity,
+} from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
 import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
@@ -5519,6 +5523,122 @@ test("retained startup asks the runtime to confirm the tag before review", async
     return await review(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {
+  const saved = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const retained = `sha256:${"e".repeat(64)}`;
+  const rebuilt = `sha256:${"7".repeat(64)}`;
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    for (const [restart, reused] of [
+      [false, false],
+      [false, true],
+      [true, false],
+    ] as const) {
+      const { opts } = await fixture(false);
+      const request = admitNativeProjectBuilds({
+        services: { web: { build: "." } },
+        projectRoot: opts.scope.projectRoot,
+        composeFile: opts.composeFile,
+        enabled: true,
+      }).get("web");
+      if (!request) {
+        throw new Error("the fixture's build service was not admitted");
+      }
+      const verified = restart
+        ? new Map([
+            [
+              "web",
+              { imageId: rebuilt, identity: nativeBuildIdentity(request) },
+            ],
+          ])
+        : undefined;
+      const stopped = stoppedGraph(saved);
+      const observed = {
+        ...stopped,
+        receipt: {
+          ...stopped.receipt,
+          normalized_input: {
+            namespace: saved.namespace,
+            original_compose_sha256: "d".repeat(64),
+            normalized_compose_sha256: "f".repeat(64),
+          },
+          resources: {
+            "container:web": {
+              ...stopped.receipt.resources["container:web"],
+              image: retained,
+            },
+          },
+        },
+      };
+      opts.dependencies.retainedImages = selectNativeRetainedImages;
+      const prepare = opts.dependencies.prepare!;
+      opts.dependencies.prepare = async (request) => ({
+        ...(await prepare(request)),
+        normalizedComposeJson: JSON.stringify({
+          services: { web: { build: "." } },
+        }),
+      });
+      let builds = 0;
+      opts.dependencies.build = async () => {
+        builds += 1;
+        return { imageId: rebuilt, buildKey: "c".repeat(64), reused };
+      };
+      const invoke = opts.dependencies.invoke!;
+      let beforeReview = true;
+      const reclaims: string[][] = [];
+      opts.dependencies.invoke = async (request) => {
+        if (request.args[1] === "reclaim-build-images") {
+          reclaims.push([...request.args]);
+          // A failed reclamation never fails or delays the start.
+          throw new Error("reclaim failed");
+        }
+        if (request.args[1] === "inspect" && beforeReview) {
+          return observed;
+        }
+        if (request.args[1] === "restore-selection") {
+          return { ...saved, plan: saved.planId, generation: "2".repeat(64) };
+        }
+        return await invoke(request);
+      };
+      const review = opts.dependencies.review!;
+      let reviewedImage: unknown;
+      opts.dependencies.review = async (request) => {
+        beforeReview = false;
+        reviewedImage = JSON.parse(request.input.normalizedComposeJson).services
+          .web.image;
+        return await review(request);
+      };
+      await startNativeProject({
+        ...opts,
+        restore: saved,
+        verifiedBuildImages: verified,
+      });
+      // The retained image never stands in for the build: a restore asks the
+      // runtime, and a restart's resolved image is pinned without asking again.
+      expect(reviewedImage).toBe(rebuilt);
+      expect(builds).toBe(verified ? 0 : 1);
+      // Only a start that actually built an image reclaims, once it is ready.
+      expect(reclaims).toEqual(
+        restart || reused
+          ? []
+          : [["runtime", "reclaim-build-images", "--best-effort", "--json"]]
+      );
+    }
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+  }
 });
 
 test("retained startup confirms the image under the currently selected emulation policy", async () => {

@@ -11,6 +11,7 @@ import {
   nativeBuilderRemedy,
 } from "../lib/native-image-builder.ts";
 import {
+  type invokeNativeRuntime,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -24,8 +25,10 @@ import {
  * closed, coded refusal. After the runtime is up, each distinct build runs once
  * through `runtime build-image`; the service is then pinned to the returned content
  * ID, so review, graph admission, receipts and restore treat it as an image
- * service. Restore and restart never build: they use the retained content ID or
- * refuse before any graph effect.
+ * service. Every `up`, including one that restores a stopped run, asks the runtime
+ * for each build: an unchanged build key reuses its image without building, a changed
+ * one builds (HACK-2533). Restart resolves its builds the same way before it stops the
+ * old graph, and its replacement start runs the resolved images.
  */
 
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
@@ -528,20 +531,13 @@ export function refuseManagedSecretBuildArguments(opts: {
   }
 }
 
-/** A refusal when a retained run's built image is gone: restore never builds. */
-function retainedMissing(service: string): ClosedCliError {
-  return new ClosedCliError(
-    `The retained built image for ${service} was removed; start fresh instead of restoring. Nothing was built.`
-  );
-}
-
 /**
  * Build (or reuse) every admitted build service in the selected profiles and pin it to
- * its content ID. As with Compose `up`, a build service outside the selected profiles
- * is neither built nor pinned: it keeps its `build` declaration, which review accepts
- * for inactive services, so restore and restart never need an image for it. Identical
- * declarations build once. Retained content IDs always win, and a restore with a
- * missing retained image refuses instead of building.
+ * its content ID; returns the pinned services. As with Compose `up`, a build service
+ * outside the selected profiles is neither built nor pinned: it keeps its `build`
+ * declaration, which review accepts for inactive services. Identical declarations build
+ * once. A retained run's image never stands in for a build: the runtime reuses it only
+ * while its build key is unchanged, so an edited Dockerfile is built after `down` too.
  */
 export async function buildNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -550,28 +546,135 @@ export async function buildNativeProjectImages(opts: {
   readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
-  readonly retainedImages: ReadonlyMap<string, string>;
-  readonly restore: boolean;
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
-}): Promise<void> {
+  /** Called once for each build the runtime actually ran (not a reused image). */
+  readonly onBuilt?: () => void;
+}): Promise<ReadonlySet<string>> {
   const pending = pendingBuilds(opts);
-  if (pending.size === 0) {
-    return;
+  if (pending.size > 0) {
+    await runPendingBuilds({ ...opts, pending });
   }
-  await runPendingBuilds({ ...opts, pending });
+  return new Set([...pending.values()].flatMap((entry) => entry.services));
+}
+
+/**
+ * Resolve a restart's builds before anything is stopped: refuse a build argument equal
+ * to a managed secret (as startup does), then ask the runtime for each active build of
+ * a running service (an unchanged build key reuses its image without building; a
+ * changed one builds, so a failed build refuses while the old graph still runs).
+ * Returns the resolved images; the replacement start pins exactly these, so nothing is
+ * built after the old graph stopped and a rebuilt image is what the new graph runs.
+ */
+export async function resolveNativeRestartBuilds(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly branch: string | null | undefined;
+  readonly profiles: readonly string[];
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly images: ReadonlyMap<string, string>;
+  readonly managedSecretValues: readonly string[];
+  /** `HACK_NATIVE_REBUILD=1`: every build runs again, as on `up`. */
+  readonly rebuild: boolean;
+  readonly signal: AbortSignal;
+  readonly invoke?: typeof invokeNativeBuild;
+}): Promise<ReadonlyMap<string, NativeVerifiedBuild>> {
+  refuseManagedSecretBuildArguments({
+    builds: opts.builds,
+    managedSecretValues: opts.managedSecretValues,
+  });
+  const copies: Record<string, Record<string, unknown>> = {};
+  for (const service of opts.builds.keys()) {
+    const spec = opts.specs[service];
+    if (spec && opts.images.has(service)) {
+      copies[service] = { ...spec };
+    }
+  }
+  const builds = new Map(
+    [...opts.builds].filter(([service]) => service in copies)
+  );
+  const pinned = await buildNativeProjectImages({
+    ...opts,
+    builds,
+    specs: copies,
+  });
+  const resolved = new Map<string, NativeVerifiedBuild>();
+  for (const service of pinned) {
+    const image = copies[service]?.image;
+    const request = builds.get(service);
+    if (typeof image !== "string" || !IMAGE_ID.test(image) || !request) {
+      throw new ClosedCliError(
+        "Native restart build selection is invalid; nothing was stopped."
+      );
+    }
+    resolved.set(service, {
+      imageId: image,
+      identity: nativeBuildIdentity(request),
+    });
+  }
+  return resolved;
+}
+
+/**
+ * Pin build services to the images a restart preflight resolved, so the replacement
+ * start runs exactly those images and builds nothing after the old graph stopped.
+ * Every active build service must be covered by an image resolved for the same
+ * declaration; a build service added or changed between preflight and start refuses
+ * instead of building. Returns the builds that still need the runtime: the inactive
+ * ones (never built), or all of them when there is no restart selection.
+ */
+export function pinVerifiedNativeBuilds(opts: {
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly profiles: readonly string[];
+  readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
+}): ReadonlyMap<string, NativeBuildRequest> {
+  if (opts.verified === undefined) {
+    return opts.builds;
+  }
+  const remaining = new Map<string, NativeBuildRequest>();
+  for (const [service, request] of opts.builds) {
+    const spec = opts.specs[service];
+    if (!(spec && nativeServiceActive(spec, opts.profiles))) {
+      remaining.set(service, request);
+      continue;
+    }
+    const verified = opts.verified.get(service);
+    if (verified?.identity !== nativeBuildIdentity(request)) {
+      throw new ClosedCliError(
+        `The build declaration of ${service} changed during the restart; nothing was built after the old graph stopped. Run hack up to start it.`
+      );
+    }
+    pin(spec, verified.imageId);
+  }
+  return remaining;
 }
 
 type PendingBuild = { request: NativeBuildRequest; services: string[] };
 
-/** Pin retained images, refuse a restore without one, and group identical builds. */
+/** The declaration a build request stands for: identical ones build once. */
+export function nativeBuildIdentity(request: NativeBuildRequest): string {
+  return JSON.stringify([
+    request.context,
+    request.dockerfile,
+    request.target,
+    Object.entries(request.args).sort(([a], [b]) => (a < b ? -1 : 1)),
+  ]);
+}
+
+/** A restart's resolved build image, bound to the declaration it was resolved for. */
+export interface NativeVerifiedBuild {
+  readonly imageId: string;
+  readonly identity: string;
+}
+
+/** Group identical builds of the active build services. */
 function pendingBuilds(opts: {
   readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
-  readonly retainedImages: ReadonlyMap<string, string>;
-  readonly restore: boolean;
 }): Map<string, PendingBuild> {
   const pending = new Map<string, PendingBuild>();
   for (const [service, request] of opts.builds) {
@@ -584,27 +687,41 @@ function pendingBuilds(opts: {
     if (!nativeServiceActive(spec, opts.profiles)) {
       continue;
     }
-    const retained = opts.retainedImages.get(service);
-    if (retained !== undefined) {
-      pin(spec, retained);
-      continue;
-    }
-    // A retained run selects retained images only while its configuration is
-    // unchanged; then a build service without one refuses instead of building.
-    if (opts.restore && opts.retainedImages.size > 0) {
-      throw retainedMissing(service);
-    }
-    const identity = JSON.stringify([
-      request.context,
-      request.dockerfile,
-      request.target,
-      Object.entries(request.args).sort(([a], [b]) => (a < b ? -1 : 1)),
-    ]);
+    const identity = nativeBuildIdentity(request);
     const entry = pending.get(identity) ?? { request, services: [] };
     entry.services.push(service);
     pending.set(identity, entry);
   }
   return pending;
+}
+
+/** Bound on the reclamation an `up` runs after a rebuild. */
+const RECLAIM_TIMEOUT_MS = 60_000;
+/**
+ * After a start that built at least one image is ready, remove the build images no
+ * longer kept (`runtime reclaim-build-images --best-effort`: per build declaration
+ * the current and one previous image, plus every image a container or retained run
+ * references). Bounded, and it never fails or delays the start: the runtime reports
+ * a refusal instead of failing, and any other error is dropped. Nothing is printed.
+ */
+export async function reclaimNativeBuildImagesAfterRebuild(opts: {
+  /** Whether this start built an image; without one nothing is reclaimed. */
+  readonly rebuilt: boolean;
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  if (!opts.rebuilt) {
+    return;
+  }
+  await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "reclaim-build-images", "--best-effort", "--json"],
+      timeoutMs: RECLAIM_TIMEOUT_MS,
+    })
+    .catch(() => undefined);
 }
 
 async function runPendingBuilds(opts: {
@@ -616,6 +733,7 @@ async function runPendingBuilds(opts: {
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
+  readonly onBuilt?: () => void;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeBuild;
   // The runtime requires the exact canonical root; it also derives the namespace.
@@ -656,6 +774,9 @@ async function runPendingBuilds(opts: {
       });
       // The request carries argument values; remove it as soon as it is consumed.
       await rm(requestFile, { force: true });
+      if (!built.reused) {
+        opts.onBuilt?.();
+      }
       for (const service of services) {
         const spec = opts.specs[service];
         if (spec) {

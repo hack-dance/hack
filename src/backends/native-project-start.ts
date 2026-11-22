@@ -413,7 +413,7 @@ export function reviewedNativeHttpsRoutes(
 }
 type Hooks = {
   readonly cleanup: () => Promise<void>;
-  readonly ready?: () => Promise<void>;
+  readonly ready?: (signal: AbortSignal) => Promise<void>;
   /**
    * The project's `down.before`/`down.after` commands, present only when it
    * declares them. Each resolves to the exit status after its child exited;
@@ -2224,7 +2224,10 @@ type NativeProjectStartOptions = {
   readonly gcloudWithheld?: boolean;
   /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
-  readonly before: (input: NativeProjectInput) => Promise<Hooks>;
+  readonly before: (
+    input: NativeProjectInput,
+    signal: AbortSignal
+  ) => Promise<Hooks>;
   /**
    * Advisory stale-env bookkeeping (HACK-1140): after the run mapping is
    * published, receives the run id and value-free digests of the env
@@ -2673,7 +2676,8 @@ async function startNativeProjectAttempt(
   try {
     stopSignals.admitPending();
     requireActiveStartup(controller.signal);
-    hooks = await opts.before(input);
+    hooks = await opts.before(input, controller.signal);
+    requireActiveStartup(controller.signal);
     const credentials = await adaptNativeCredentials({
       input,
       selection,
@@ -2889,6 +2893,7 @@ async function startNativeProjectAttempt(
       warn: deps.warn,
       invoke: deps.invoke,
     });
+    requireActiveStartup(controller.signal);
     // Image work is done: what follows counts against a detached start's
     // budget again (HACK-2351).
     progress({ phase: "plan" });
@@ -3213,7 +3218,8 @@ async function startNativeProjectAttempt(
                     })
                     .catch(() => undefined);
                 }
-                await hooks?.ready?.();
+                await hooks?.ready?.(controller.signal);
+                requireActiveStartup(controller.signal);
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -3283,6 +3289,13 @@ async function startNativeProjectAttempt(
                 processRefusals: nativeProcessRefusals,
               });
               graphCleanupConfirmed = settled.nothingReserved;
+              if (
+                graphCleanupConfirmed &&
+                controller.signal.aborted &&
+                !httpsFailure
+              ) {
+                return stopSignals.interruptedExit();
+              }
               throw settled.error;
             }
             const confirmed = await confirmCleanupOrRecordOwner({

@@ -2534,6 +2534,11 @@ mapping write was attempted (its reply may have been lost), keep their data. Whe
 removal is not confirmed, `up` prints one line naming the run and the explicit
 `graph cleanup --run-id RUN --remove-data --json` request, and keeps the graph.
 
+Ctrl-C during startup exits with status 130 once the frontend's existing cleanup
+checks confirm the interruption. The CLI reports that startup was interrupted.
+An image fetch or a before hook can be interrupted before a graph is reserved.
+Any existing retained data stays subject to the usual ownership and cleanup rules.
+
 Ctrl-C (or SIGTERM) on a ready graph whose `up.after` completed stops the project the
 way `hack down` does on the Compose backend: `down.before` runs first, then graph
 cleanup, then lifecycle-process retirement, then `down.after`. Hooks use the

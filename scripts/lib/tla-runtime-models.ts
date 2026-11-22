@@ -3302,7 +3302,10 @@ const contracts: readonly ModelContract[] = [
     states: 3233,
     invariant: "Safe",
     action: "Import",
-    fields: ['phase = <<"import", "import", "queued", "queued">>'],
+    fields: [
+      'phase = <<"import", "import", "queued", "queued">>',
+      "verified = {1, 2}",
+    ],
   },
   {
     name: "native-image-presence",

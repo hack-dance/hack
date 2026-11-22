@@ -110,12 +110,17 @@ test("Compose ps shows failed and completed services after failed up", async () 
     expect((await cli(["up", "--detach", "--json"])).exitCode).toBe(1);
     const text = await cli(["ps"]);
     expect(text.exitCode).toBe(0);
-    expect(text.stdout).toContain("STATE");
-    expect(text.stdout).toMatch(/SERVICE +ADDRESS +STATE/);
-    expect(text.stdout).toMatch(/web +https:\/\/sample.hack.local +running/);
-    expect(text.stdout).toMatch(/worker +no address +exited \(127\)/);
-    expect(text.stdout).toMatch(/install +no address +exited \(0\)/);
-    expect(text.stdout).not.toContain("sample-worker-1");
+    expect(text.stdout).toBe(
+      [
+        "SERVICE  ADDRESS                    STATE",
+        "web      https://sample.hack.local  running",
+        "worker   no address                 exited (127)",
+        "install  no address                 exited (0)",
+        "",
+        "3 services",
+        "",
+      ].join("\n")
+    );
     const wide = await cli(["ps", "--wide"]);
     expect(wide.exitCode).toBe(0);
     expect(wide.stdout).toContain("EXIT CODE");

@@ -39,7 +39,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture(opts: { readonly nativeCode: string }) {
+async function fixture(opts: { readonly nativeCode?: string }) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-not-running-cli-"))
   );
@@ -52,7 +52,13 @@ async function fixture(opts: { readonly nativeCode: string }) {
   await writeFile(
     join(projectDir, "docker-compose.yml"),
     JSON.stringify({
-      services: { web: { image: "docker.io/library/busybox:1.37" } },
+      services: {
+        web: {
+          image: "docker.io/library/busybox:1.37",
+          labels: { caddy: "sample.hack.local" },
+        },
+        worker: { image: "docker.io/library/busybox:1.37" },
+      },
     })
   );
   await writeFile(
@@ -63,12 +69,37 @@ async function fixture(opts: { readonly nativeCode: string }) {
     })
   );
   const binary = join(root, "native-runtime");
+  const graph = {
+    receipt: {
+      ...run,
+      plan_id: run.planId,
+      phase: "ready-observed",
+      resources: Object.fromEntries(
+        ["web", "worker"].map((service) => [
+          `container:${service}`,
+          {
+            kind: "container",
+            key: service,
+            id: "e".repeat(64),
+            phase: "started",
+          },
+        ])
+      ),
+    },
+    journal_incomplete: false,
+    observations: {
+      "container:web": { state: "running", health: "healthy" },
+      "container:worker": { state: "exited", code: 1 },
+    },
+  };
+  const reply = opts.nativeCode
+    ? `printf '%s' '${JSON.stringify({ code: opts.nativeCode })}' >&2\nexit 1`
+    : `printf '%s' '${JSON.stringify(graph)}'`;
   await writeFile(
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$HOME/native-calls"
-printf '%s' '{"code":"${opts.nativeCode}"}' >&2
-exit 1
+${reply}
 `,
     { mode: 0o700 }
   );
@@ -138,19 +169,43 @@ async function nativeCalls(root: string): Promise<string[]> {
 
 test("native ps reports a stopped runtime as a status, not a failure", async () => {
   const f = await fixture({ nativeCode: "runtime_not_running" });
-  const result = await cli({ fixture: f, args: ["ps"] });
+  const result = await cli({
+    fixture: f,
+    args: ["ps"],
+    env: { NO_COLOR: "1", COLUMNS: "20" },
+  });
   const output = result.stdout + result.stderr;
   expect(result.code).toBe(0);
   expect(output).toContain(
     "Native runtime is not running; no services are running."
   );
-  expect(output).toContain("SERVICE  ADDRESS  STATE");
+  expect(result.stdout).toContain("SERVICE  ADDRESS  STATE\n\n0 services\n");
   expect(output).not.toContain("Native runtime request failed");
   expect(output).not.toMatch(STACK_FRAME);
   // The read reached the runtime exactly once (graph status for the mapping).
   expect(await nativeCalls(f.root)).toEqual([
     `--candidate-root ${join(f.root, "native-home")} graph status --run-id ${run.run} --json`,
   ]);
+});
+
+test("native ps keeps the complete address on a narrow plain terminal", async () => {
+  const f = await fixture({});
+  const result = await cli({
+    fixture: f,
+    args: ["ps"],
+    env: { NO_COLOR: "1", COLUMNS: "20" },
+  });
+  expect(result.code).toBe(0);
+  expect(result.stdout).toBe(
+    [
+      "SERVICE  ADDRESS                    STATE",
+      "web      https://sample.hack.local  healthy",
+      "worker   no address                 exited (1)",
+      "",
+      "2 services",
+      "",
+    ].join("\n")
+  );
 });
 
 test("native ps --json returns the ok envelope with runtime_not_running", async () => {

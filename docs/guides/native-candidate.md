@@ -484,19 +484,34 @@ With it:
   `runtime build-image` (below), and its filtered output streams to your terminal.
   Every service with that build is then pinned to the built content ID, so review,
   readiness and restore treat it like an image service.
-- An existing image for the same build inputs is reused without building. Set
-  `HACK_NATIVE_REBUILD=1` to build again; base-image tags then resolve again too.
-  Edits to other files in the context do not trigger a rebuild, as with Compose.
+- An existing image for the same build inputs is reused without building. The build
+  inputs include every file and directory in the build context that the effective
+  ignore file (`<Dockerfile>.dockerignore`, else the context's `.dockerignore`) lets
+  the build read: paths, file contents, permission bits and symlink targets. Editing a
+  copied file builds a new image; editing an ignored file does not. An ignore file with
+  syntax Hack does not reproduce exactly (character classes or `\` escapes) counts as
+  excluding nothing, which can only cause extra rebuilds. A context with more than
+  200,000 included entries or 4 GiB of included file content, or with an unreadable
+  entry or a socket, FIFO or device the ignore file does not exclude, refuses.
+- Hack remembers each context file's size, timestamps and inode in a private cache, so
+  an unchanged context is not read again. The cache misses only a change that keeps the
+  size, inode, modification time and change time identical, which needs a deliberate
+  clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
+- A reused image keeps its base-image digests for at most 24 hours. After that the
+  next `up` resolves the tags again, once (this needs registry access): unchanged
+  digests keep the image, a moved tag builds a new one. Set `HACK_NATIVE_REBUILD=1` to build again now; base-image
+  tags then resolve again too.
 - Every `up` asks the runtime for each build, including an `up` that restores a run
   stopped with `hack down`. The retained image is reused only while its build inputs
-  are unchanged (Dockerfile, ignore file, target, args); an edited Dockerfile builds a
-  new image and the run's containers are recreated from it, keeping named volumes.
+  are unchanged (Dockerfile, ignore file, target, args, build context); an edited
+  Dockerfile or copied file builds a new image and the run's containers are recreated
+  from it, keeping named volumes.
   `hack restart` reuses the running or retained containers, so it checks the same build
   inputs first and refuses, before stopping anything, when an image would change: run
   `hack down` and then `hack up` to recreate it from the new image.
 - "Unchanged" means the same Compose bytes. A run that mounts no project source and
   uses no dependency cache still restores after its Compose file was edited and put
-  back, or after any project file was touched; build-context edits do not rebuild it.
+  back, or after any project file was touched that its builds do not read.
   Its review then differs only in the project source inventory (file sizes and
   modification times), which such a run never reads, and restore keeps the retained
   ownership plan, images and data.

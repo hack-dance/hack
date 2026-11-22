@@ -10,11 +10,19 @@
 //!
 //! Authority and ownership:
 //!
-//! - The build key binds the local inputs: namespace (project root and branch), context
-//!   and Dockerfile paths, the Dockerfile and `.dockerignore` bytes, target, salted
-//!   argument hashes, platform, and the builder and engine versions. Context file
-//!   contents are not hashed, as with Compose: an existing image is reused until an
-//!   explicit rebuild. Base-image tags resolve only when a build runs.
+//! - The build key (version 2) binds the local inputs: namespace (project root and
+//!   branch), context and Dockerfile paths, the Dockerfile and `.dockerignore` bytes,
+//!   target, salted argument hashes, platform, the builder and engine versions, and a
+//!   digest of every context entry the effective ignore rules let the build read
+//!   (paths, kinds, permission bits, file contents and symlink targets; see
+//!   [`context`]). Editing a copied file therefore builds a new image; editing an
+//!   ignored one does not. A private stat cache keeps an unchanged context cheap to
+//!   hash; [`context`] documents the change it can miss. Key version 1 lacked the
+//!   context digest, so no receipt written under it can match a version-2 key.
+//! - Base-image tags resolve before every build. A reused image keeps its recorded pins
+//!   for at most [`BASE_RESOLUTION_TTL`] (24 hours) after they were resolved; an older or
+//!   unrecorded resolution resolves the tags again, once per operation: unchanged
+//!   digests keep the image and refresh the resolution time, a moved digest builds.
 //! - Every image the Dockerfile can pull (see [`super::build_scan`]) resolves to a digest
 //!   before BuildKit runs and is handed to it as a named build context, so BuildKit pulls
 //!   only those exact manifests. Base images with stored `ONBUILD` triggers refuse.
@@ -67,10 +75,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 mod client_relay;
+mod context;
 mod output;
 pub mod reclaim;
 #[cfg(test)]
@@ -94,6 +103,10 @@ const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
 const MAX_ARGS: usize = 64;
+/// How long a reused image's recorded base-image resolution is trusted.
+pub(super) const BASE_RESOLUTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// The build key document version; 2 added the context digest.
+const KEY_VERSION: u32 = 2;
 const MAX_ARG_BYTES: usize = 64 * 1024;
 const GIB: u64 = 1024 * 1024 * 1024;
 /// A cold build needs this much free guest storage, or twice the key's last verified
@@ -215,6 +228,26 @@ pub(super) struct Receipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_bytes: Option<u64>,
     base_pins: BTreeMap<String, String>,
+    /// Unix seconds when `base_pins` were resolved. Receipts from before this field
+    /// read as unknown, which counts as expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bases_resolved_at: Option<u64>,
+}
+
+/// Whether a base-image resolution recorded at `resolved_at` is still trusted at `now`.
+/// Unknown, future or older-than-[`BASE_RESOLUTION_TTL`] resolutions are not.
+fn resolution_fresh(resolved_at: Option<u64>, now: SystemTime) -> bool {
+    let (Some(at), Ok(now)) = (resolved_at, now.duration_since(UNIX_EPOCH)) else {
+        return false;
+    };
+    now.as_secs()
+        .checked_sub(at)
+        .is_some_and(|age| age < BASE_RESOLUTION_TTL.as_secs())
+}
+
+fn unix_seconds(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// The pool identity a build is admitted against and must find unchanged at adoption.
@@ -251,6 +284,8 @@ pub(super) trait BuildPool {
     fn storage_available(&self, lease: &Self::Lease) -> Result<u64, CandidateError>;
     /// Prune BuildKit cache down to `max_used` bytes; returns the bytes reclaimed.
     fn prune_cache(&self, lease: &Self::Lease, max_used: u64) -> Result<u64, CandidateError>;
+    /// The wall clock base-image resolution ages are measured with.
+    fn now(&self) -> SystemTime;
 }
 
 /// Free storage a cold build of a key requires.
@@ -279,6 +314,9 @@ pub(super) struct Inputs {
     images: Vec<BaseImage>,
     policy: Policy,
     timeout: Duration,
+    /// The document hashed into `key`.
+    #[cfg(test)]
+    key_input: Value,
 }
 
 impl Inputs {
@@ -487,8 +525,10 @@ impl IgnoreFiles {
 }
 
 /// Validate the request, resolve paths inside the project without following symlinks,
-/// read and scan the Dockerfile and derive the build key. Pure local reads.
-pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
+/// read and scan the Dockerfile, hash the build context and derive the build key.
+/// Local reads only, apart from the context stat cache under `builds` (the
+/// `run/image-builds` state directory), which is best effort.
+pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, CandidateError> {
     validate_request(&request)?;
     let root = fs::canonicalize(&request.project_root).map_err(|_| {
         refusal(
@@ -545,13 +585,24 @@ pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
         })
         .collect();
     let ignore = IgnoreFiles::read(&context, &dockerfile)?;
+    let ignore_digests = ignore.digests();
+    let ignore = ignore.effective();
+    let cache = builds.join(&namespace).join(context::cache_name(&context));
+    let context_digest = context::digest(
+        &context,
+        &ignore,
+        Some(&cache),
+        SystemTime::now(),
+        context::Bounds::DEFAULT,
+    )?;
     let key_input = serde_json::json!({
-        "v": 1,
+        "v": KEY_VERSION,
         "namespace": namespace,
         "context": relative(&context, &root),
         "dockerfile": relative(&dockerfile, &context),
         "dockerfile_sha256": sha256_hex(&bytes),
-        "dockerignore": ignore.digests(),
+        "dockerignore": ignore_digests,
+        "context_sha256": context_digest.digest,
         "target": request.target,
         "args": salted_args,
         "platform": "linux/arm64",
@@ -565,12 +616,14 @@ pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
         key,
         context,
         dockerfile: bytes,
-        ignore: ignore.effective(),
+        ignore,
         target: request.target,
         args: request.args,
         images: scan.images,
         policy: request.policy,
         timeout: Duration::from_secs(request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
+        #[cfg(test)]
+        key_input,
     })
 }
 
@@ -760,6 +813,9 @@ pub(super) fn run<P: BuildPool>(
     }
     let expected = labels(inputs, &identity);
     let previous = read_receipt(&receipt_path)?;
+    // A verified image whose base resolution expired: kept if the tags still resolve
+    // to its recorded pins.
+    let mut stale: Option<(String, Receipt)> = None;
     if let Some(previous) = &previous {
         if previous.version != 1
             || previous.namespace != inputs.namespace
@@ -779,19 +835,16 @@ pub(super) fn run<P: BuildPool>(
             if let Some(id) = previous.image_id.as_deref().filter(|id| image_id(id)) {
                 if let Some(inspected) = pool.inspect(&lease, id)? {
                     if owned_image(&inspected, id, &expected).is_ok() {
-                        if previous.provider_boot_id != identity.boot_id {
-                            let mut current = previous.clone();
-                            current.provider_boot_id = identity.boot_id.clone();
-                            state::write(&receipt_path, &current)?;
+                        if !resolution_fresh(previous.bases_resolved_at, pool.now()) {
+                            stale = Some((id.to_owned(), previous.clone()));
+                        } else {
+                            if previous.provider_boot_id != identity.boot_id {
+                                let mut current = previous.clone();
+                                current.provider_boot_id = identity.boot_id.clone();
+                                state::write(&receipt_path, &current)?;
+                            }
+                            return Ok(reused(inputs, id, previous.base_pins.clone()));
                         }
-                        return Ok(BuildOutcome {
-                            image_id: id.to_owned(),
-                            build_key: inputs.key.clone(),
-                            tag: inputs.tag(),
-                            reused: true,
-                            base_pins: previous.base_pins.clone(),
-                            cache_reclaimed_bytes: None,
-                        });
                     }
                 }
             }
@@ -806,7 +859,8 @@ pub(super) fn run<P: BuildPool>(
     let previous_bytes = previous.as_ref().and_then(|receipt| receipt.image_bytes);
     drop(lease);
 
-    // Step 2, unleased: resolve every base image to a pinned manifest.
+    // Step 2, unleased: resolve every base image to a pinned manifest, once.
+    let resolved_at = unix_seconds(pool.now());
     let mut pins = BTreeMap::new();
     for base in &inputs.images {
         if canceled() {
@@ -828,7 +882,13 @@ pub(super) fn run<P: BuildPool>(
         }
         pins.insert(base.context_name.clone(), resolved.pinned_reference);
     }
-    let builder = pool.builder()?;
+    let stale = stale.filter(|(_, previous)| previous.base_pins == pins);
+    // A reuse needs no builder; it is verified under the lease if the reuse falls through.
+    let builder = if stale.is_some() {
+        None
+    } else {
+        Some(pool.builder()?)
+    };
     if canceled() {
         return Err(canceled_early());
     }
@@ -836,7 +896,8 @@ pub(super) fn run<P: BuildPool>(
         return Err(expired_early());
     }
 
-    // Step 3, under the lease: same pool, then record the attempt.
+    // Step 3, under the lease: same pool, then keep a still-current image or record
+    // the attempt.
     let (lease, current) = pool.lease()?;
     if current != identity {
         return Err(refusal(
@@ -844,6 +905,20 @@ pub(super) fn run<P: BuildPool>(
             "The runtime changed before the build started; no build was run.",
         ));
     }
+    if let Some((id, previous)) = stale
+        && let Some(inspected) = pool.inspect(&lease, &id)?
+        && owned_image(&inspected, &id, &expected).is_ok()
+    {
+        let mut current = previous;
+        current.provider_boot_id = identity.boot_id.clone();
+        current.bases_resolved_at = Some(resolved_at);
+        state::write(&receipt_path, &current)?;
+        return Ok(reused(inputs, &id, pins));
+    }
+    let builder = match builder {
+        Some(builder) => builder,
+        None => pool.builder()?,
+    };
     if pool.storage_available(&lease)? < storage_required(previous_bytes) {
         return Err(refusal(
             "native_build_storage",
@@ -864,6 +939,7 @@ pub(super) fn run<P: BuildPool>(
         // retry is admitted against it rather than the floor.
         image_bytes: previous_bytes,
         base_pins: pins.clone(),
+        bases_resolved_at: Some(resolved_at),
     };
     state::write(&receipt_path, &receipt)?;
     drop(lease);
@@ -988,6 +1064,17 @@ pub(super) fn run<P: BuildPool>(
         base_pins: pins,
         cache_reclaimed_bytes,
     })
+}
+
+fn reused(inputs: &Inputs, id: &str, base_pins: BTreeMap<String, String>) -> BuildOutcome {
+    BuildOutcome {
+        image_id: id.to_owned(),
+        build_key: inputs.key.clone(),
+        tag: inputs.tag(),
+        reused: true,
+        base_pins,
+        cache_reclaimed_bytes: None,
+    }
 }
 
 /// Hold the shared build fence as an admitted build does, for the macOS-only lifecycle
@@ -1445,6 +1532,9 @@ impl<'a> BuildPool for LivePool<'a> {
     fn prune_cache(&self, lease: &Self::Lease, max_used: u64) -> Result<u64, CandidateError> {
         prune_build_cache(lease, max_used)
     }
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
 }
 
 /// Free bytes on the guest `/storage` ext4 disk, which holds `/var/lib/docker`.
@@ -1529,7 +1619,7 @@ fn interruptible<T: Send + 'static>(
 /// `runtime build-image --request <private-file>`: build or reuse one native image.
 pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome, CandidateError> {
     let request: BuildRequest = state::read_bounded(request, MAX_REQUEST_BYTES)?;
-    let inputs = prepare(request)?;
+    let inputs = prepare(request, &builds_root(candidate))?;
     let _signals = CancelSignals::install()?;
     run(candidate, &LivePool { candidate }, &inputs, &|| {
         CANCEL_REQUESTED.load(Ordering::Acquire)

@@ -64,7 +64,7 @@ impl Fixture {
         }
     }
     fn inputs(&self, policy: Policy) -> Inputs {
-        prepare(self.request(policy)).unwrap()
+        prepare(self.request(policy), &builds_root(&self.candidate)).unwrap()
     }
     fn scratch(&self, inputs: &Inputs) -> PathBuf {
         builds_root(&self.candidate)
@@ -152,6 +152,9 @@ struct FakePool {
     resolve_delay: Duration,
     resolve_deadlines: RefCell<Vec<Instant>>,
     output: Arc<Mutex<Vec<u8>>>,
+    /// The manifest digest every base resolves to.
+    pin: RefCell<String>,
+    now: RefCell<SystemTime>,
 }
 impl FakePool {
     fn new(incarnation: &str) -> Self {
@@ -167,6 +170,8 @@ impl FakePool {
             resolve_delay: Duration::ZERO,
             resolve_deadlines: RefCell::new(Vec::new()),
             output: Arc::default(),
+            pin: RefCell::new(PIN.into()),
+            now: RefCell::new(SystemTime::now()),
         }
     }
     /// Register the image the fake client "builds", with the labels the build expects.
@@ -208,9 +213,10 @@ impl BuildPool for FakePool {
         if self.resolve_error {
             return Err(CandidateError::new("registry_image", "offline"));
         }
+        let pin = self.pin.borrow().clone();
         Ok(BuildBase {
-            pinned_reference: format!("docker.io/{}@{PIN}", base.repository()),
-            source_digest: PIN.into(),
+            pinned_reference: format!("docker.io/{}@{pin}", base.repository()),
+            source_digest: pin,
             image_id: IMAGE.into(),
         })
     }
@@ -226,6 +232,9 @@ impl BuildPool for FakePool {
     fn prune_cache(&self, _: &(), max_used: u64) -> Result<u64, CandidateError> {
         self.prunes.borrow_mut().push(max_used);
         Ok(7)
+    }
+    fn now(&self) -> SystemTime {
+        *self.now.borrow()
     }
 }
 
@@ -351,7 +360,7 @@ fn environment_names_are_plain_arguments_that_never_reach_the_client_environment
             .args
             .insert(name.to_owned(), format!("{SECRET}-{name}"));
     }
-    let inputs = prepare(request).unwrap();
+    let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     let pool = FakePool::new("pool-1");
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
@@ -456,6 +465,7 @@ fn receipts_with_the_most_and_longest_accepted_pins_stay_readable() {
         image_id: Some(IMAGE.into()),
         image_bytes: Some(5 * GIB),
         base_pins: BTreeMap::new(),
+        bases_resolved_at: None,
     };
     // The scanner's bounds: 32 images, Docker Hub paths up to 200 bytes, tags up to
     // 128, each with a digest; the pinned reference keeps the name and adds the pin.
@@ -486,7 +496,11 @@ fn remote_add_sources_refuse_before_any_build_effect() {
         "FROM alpine:3.20 AS base\nONBUILD ADD https://example.test/a /a\n",
     ] {
         fs::write(fixture.project.join("app/Dockerfile"), dockerfile).unwrap();
-        let error = prepare(fixture.request(Policy::Missing)).unwrap_err();
+        let error = prepare(
+            fixture.request(Policy::Missing),
+            &builds_root(&fixture.candidate),
+        )
+        .unwrap_err();
         assert_eq!(error.code, "native_build_dockerfile", "{dockerfile}");
         assert!(!error.message.contains("100.96.0.1") && !error.message.contains("example.test"));
     }
@@ -495,7 +509,13 @@ fn remote_add_sources_refuse_before_any_build_effect() {
         "FROM alpine:3.20\nADD main.txt /main.txt\n",
     )
     .unwrap();
-    assert!(prepare(fixture.request(Policy::Missing)).is_ok());
+    assert!(
+        prepare(
+            fixture.request(Policy::Missing),
+            &builds_root(&fixture.candidate)
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -634,7 +654,7 @@ fn bake_definitions_never_evaluate_project_text() {
     request
         .args
         .insert("TEMPLATE".into(), "${HOME}%{ if true }".into());
-    let inputs = prepare(request).unwrap();
+    let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     let definition = bake_definition(
         &inputs,
         Path::new("/s/Dockerfile"),
@@ -883,7 +903,7 @@ fn timeout_and_cancellation_stop_the_whole_client_group() {
     let fixture = Fixture::new();
     let mut request = fixture.request(Policy::Missing);
     request.timeout_seconds = Some(1);
-    let inputs = prepare(request).unwrap();
+    let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     let pool = FakePool::new("pool-1");
     fixture.client(&inputs, "sleep");
     let started = Instant::now();
@@ -935,6 +955,7 @@ fn a_dead_attempt_is_recorded_indeterminate_and_built_again() {
         image_id: None,
         image_bytes: None,
         base_pins: BTreeMap::new(),
+        bases_resolved_at: None,
     };
     state::write(&path, &leftover).unwrap();
     // Even with an adoptable image present, the dead attempt's receipt is not trusted.
@@ -1037,8 +1058,10 @@ fn base_resolution_failures_run_nothing() {
     assert_eq!(fixture.calls(&inputs), 0);
 }
 
-fn code(request: BuildRequest) -> &'static str {
-    prepare(request).unwrap_err().code
+fn code(fixture: &Fixture, request: BuildRequest) -> &'static str {
+    prepare(request, &builds_root(&fixture.candidate))
+        .unwrap_err()
+        .code
 }
 
 #[test]
@@ -1048,36 +1071,36 @@ fn requests_refuse_unsafe_paths_arguments_and_bounds() {
 
     let mut request = base();
     request.version = 2;
-    assert_eq!(code(request), "native_build_request");
+    assert_eq!(code(&fixture, request), "native_build_request");
     let mut request = base();
     request.project_root = PathBuf::from("relative");
-    assert_eq!(code(request), "native_build_request");
+    assert_eq!(code(&fixture, request), "native_build_request");
     let mut request = base();
     request.project_root = fixture.project.join("app/..");
-    assert_eq!(code(request), "native_build_source");
+    assert_eq!(code(&fixture, request), "native_build_source");
     let mut request = base();
     request.context = "../outside".into();
-    assert_eq!(code(request), "source_escape");
+    assert_eq!(code(&fixture, request), "source_escape");
     let mut request = base();
     request.dockerfile = "../../Dockerfile".into();
-    assert_eq!(code(request), "source_escape");
+    assert_eq!(code(&fixture, request), "source_escape");
     std::os::unix::fs::symlink(fixture.project.join("app"), fixture.project.join("link")).unwrap();
     let mut request = base();
     request.context = "link".into();
-    assert_eq!(code(request), "source_symlink");
+    assert_eq!(code(&fixture, request), "source_symlink");
     let mut request = base();
     request.context = "missing".into();
-    assert_eq!(code(request), "missing_source");
+    assert_eq!(code(&fixture, request), "missing_source");
     let mut request = base();
     request.branch = Some("Not_A_Label".into());
-    assert_eq!(code(request), "native_build_request");
+    assert_eq!(code(&fixture, request), "native_build_request");
     let mut request = base();
     request.target = Some("-bad".into());
-    assert_eq!(code(request), "native_build_request");
+    assert_eq!(code(&fixture, request), "native_build_request");
     for timeout in [0, MAX_TIMEOUT_SECONDS + 1] {
         let mut request = base();
         request.timeout_seconds = Some(timeout);
-        assert_eq!(code(request), "native_build_request");
+        assert_eq!(code(&fixture, request), "native_build_request");
     }
     for name in [
         "BUILDX_CONFIG",
@@ -1091,41 +1114,52 @@ fn requests_refuse_unsafe_paths_arguments_and_bounds() {
     ] {
         let mut request = base();
         request.args = BTreeMap::from([(name.to_owned(), "x".to_owned())]);
-        assert_eq!(code(request), "native_build_argument", "{name}");
+        assert_eq!(code(&fixture, request), "native_build_argument", "{name}");
     }
     let mut request = base();
     request.args = BTreeMap::from([("GREETING".to_owned(), "a\0b".to_owned())]);
-    assert_eq!(code(request), "native_build_argument");
+    assert_eq!(code(&fixture, request), "native_build_argument");
     let mut request = base();
     request.args = (0..=MAX_ARGS)
         .map(|i| (format!("A{i}"), "x".into()))
         .collect();
-    assert_eq!(code(request), "native_build_argument");
+    assert_eq!(code(&fixture, request), "native_build_argument");
     let mut request = base();
     request.args = BTreeMap::from([("BIG".to_owned(), "x".repeat(MAX_ARG_BYTES))]);
-    assert_eq!(code(request), "native_build_argument");
+    assert_eq!(code(&fixture, request), "native_build_argument");
     // Refusals never echo argument values.
     let mut request = base();
     request.args = BTreeMap::from([("BUILDKIT_SYNTAX".to_owned(), SECRET.to_owned())]);
-    assert!(!prepare(request).unwrap_err().message.contains(SECRET));
+    assert!(
+        !prepare(request, &builds_root(&fixture.candidate))
+            .unwrap_err()
+            .message
+            .contains(SECRET)
+    );
 }
 
 #[test]
-fn the_build_key_binds_local_inputs_but_not_context_contents() {
+fn the_build_key_binds_local_inputs_and_context_contents() {
     let fixture = Fixture::new();
-    let key = |request: BuildRequest| prepare(request).unwrap().key;
+    let key = |request: BuildRequest| {
+        prepare(request, &builds_root(&fixture.candidate))
+            .unwrap()
+            .key
+    };
     let original = key(fixture.request(Policy::Missing));
     assert_eq!(original, key(fixture.request(Policy::Rebuild)));
 
     fs::write(fixture.project.join("app/main.txt"), "two").unwrap();
-    assert_eq!(original, key(fixture.request(Policy::Missing)));
+    let edited = key(fixture.request(Policy::Missing));
+    assert_ne!(original, edited, "a copied file edit kept the key");
+    let original = edited;
 
     let mut request = fixture.request(Policy::Missing);
     request.args.insert("GREETING".into(), "other".into());
     assert_ne!(original, key(request));
     let mut request = fixture.request(Policy::Missing);
     request.branch = Some("feature".into());
-    let branched = prepare(request).unwrap();
+    let branched = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     assert_ne!(original, branched.key);
     assert_ne!(
         branched.namespace,
@@ -1164,7 +1198,7 @@ fn dockerfile_and_ignore_inputs_must_be_plain_files() {
     )
     .unwrap();
     assert_eq!(
-        code(fixture.request(Policy::Missing)),
+        code(&fixture, fixture.request(Policy::Missing)),
         "native_build_source"
     );
     fs::remove_file(fixture.project.join("app/.dockerignore")).unwrap();
@@ -1174,7 +1208,7 @@ fn dockerfile_and_ignore_inputs_must_be_plain_files() {
     )
     .unwrap();
     assert_eq!(
-        code(fixture.request(Policy::Missing)),
+        code(&fixture, fixture.request(Policy::Missing)),
         "native_build_source"
     );
 }
@@ -1383,4 +1417,181 @@ fn reclamation_keeps_current_referenced_in_use_and_foreign_images() {
             .values()
             .all(|r| *r == reclaim::Retained::NotOwned)
     );
+}
+
+#[test]
+fn the_key_is_version_two_and_version_one_receipts_are_never_reused() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    assert_eq!(inputs.key_input["v"], 2);
+    assert!(
+        inputs.key_input["context_sha256"]
+            .as_str()
+            .is_some_and(hex64)
+    );
+    // The same inputs under the version-1 document, which had no context digest.
+    let mut old = inputs.key_input.clone();
+    old["v"] = 1.into();
+    old.as_object_mut().unwrap().remove("context_sha256");
+    let old_key = sha256_hex(&serde_json::to_vec(&old).unwrap());
+    assert_ne!(old_key, inputs.key);
+
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let directory = builds_root(&fixture.candidate).join(&inputs.namespace);
+    state::private_directory(&directory).unwrap();
+    let old_receipt = Receipt {
+        version: 1,
+        checkout: fixture.candidate.checkout.clone(),
+        namespace: inputs.namespace.clone(),
+        build_key: old_key.clone(),
+        provider_incarnation: "pool-1".into(),
+        provider_boot_id: "boot-1".into(),
+        engine_id: "engine-1".into(),
+        phase: Phase::ContentIdVerified,
+        image_id: Some(IMAGE.into()),
+        image_bytes: None,
+        base_pins: BTreeMap::new(),
+        bases_resolved_at: None,
+    };
+    // At its own path it is never read: the version-2 key builds.
+    state::write(&directory.join(format!("{old_key}.json")), &old_receipt).unwrap();
+    assert!(
+        !run(&fixture.candidate, &pool, &inputs, &never)
+            .unwrap()
+            .reused
+    );
+    assert_eq!(fixture.calls(&inputs), 1);
+    // At the version-2 path it refuses rather than being adopted.
+    let path = directory.join(format!("{}.json", inputs.key));
+    fs::remove_file(&path).unwrap();
+    state::write(&path, &old_receipt).unwrap();
+    assert_eq!(
+        run(&fixture.candidate, &pool, &inputs, &never)
+            .unwrap_err()
+            .code,
+        "native_build_receipt"
+    );
+    assert_eq!(fixture.calls(&inputs), 1);
+}
+
+#[test]
+fn base_resolutions_are_trusted_for_a_day_then_checked_once() {
+    const MOVED: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let start = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+    let at = |hours: u64| start + Duration::from_secs(hours * 60 * 60);
+    let resolves = || pool.resolve_deadlines.borrow().len();
+    *pool.now.borrow_mut() = at(0);
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert_eq!(resolves(), 1);
+    assert_eq!(
+        fixture.receipt(&inputs).bases_resolved_at,
+        Some(unix_seconds(at(0)))
+    );
+
+    // A fresh resolution is reused without asking the registry.
+    *pool.now.borrow_mut() = at(23);
+    assert!(
+        run(&fixture.candidate, &pool, &inputs, &never)
+            .unwrap()
+            .reused
+    );
+    assert_eq!(resolves(), 1);
+
+    // Older than a day: resolved once; the same digest keeps the image and the time.
+    *pool.now.borrow_mut() = at(25);
+    let kept = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert!(kept.reused);
+    assert_eq!(resolves(), 2);
+    assert_eq!(fixture.calls(&inputs), 1);
+    assert_eq!(
+        fixture.receipt(&inputs).bases_resolved_at,
+        Some(unix_seconds(at(25)))
+    );
+    *pool.now.borrow_mut() = at(48);
+    assert!(
+        run(&fixture.candidate, &pool, &inputs, &never)
+            .unwrap()
+            .reused
+    );
+    assert_eq!(resolves(), 2);
+
+    // A moved tag builds, resolving only once for the whole operation.
+    *pool.now.borrow_mut() = at(50);
+    *pool.pin.borrow_mut() = MOVED.into();
+    let rebuilt = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert!(!rebuilt.reused);
+    assert_eq!(resolves(), 3);
+    assert_eq!(fixture.calls(&inputs), 2);
+    assert_eq!(
+        rebuilt.base_pins["alpine:3.20"],
+        format!("docker.io/library/alpine@{MOVED}")
+    );
+    assert_eq!(
+        fixture.receipt(&inputs).bases_resolved_at,
+        Some(unix_seconds(at(50)))
+    );
+
+    // A receipt from before the field (unknown age) or from the future is expired.
+    for recorded in [None, Some(unix_seconds(at(60)))] {
+        let path = builds_root(&fixture.candidate)
+            .join(&inputs.namespace)
+            .join(format!("{}.json", inputs.key));
+        let mut receipt = fixture.receipt(&inputs);
+        receipt.bases_resolved_at = recorded;
+        fs::remove_file(&path).unwrap();
+        state::write(&path, &receipt).unwrap();
+        let before = resolves();
+        assert!(
+            run(&fixture.candidate, &pool, &inputs, &never)
+                .unwrap()
+                .reused
+        );
+        assert_eq!(resolves(), before + 1);
+        assert_eq!(fixture.calls(&inputs), 2);
+    }
+    assert!(resolution_fresh(
+        Some(10),
+        UNIX_EPOCH + Duration::from_secs(10)
+    ));
+    assert!(!resolution_fresh(
+        Some(10),
+        UNIX_EPOCH + Duration::from_secs(10) + BASE_RESOLUTION_TTL
+    ));
+}
+
+#[test]
+fn context_edits_rebuild_and_ignored_edits_reuse() {
+    let fixture = Fixture::new();
+    let app = fixture.project.join("app");
+    fs::write(app.join(".dockerignore"), "*.log\n").unwrap();
+    fs::write(app.join("debug.log"), "1").unwrap();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    fs::write(app.join("debug.log"), "2").unwrap();
+    let ignored = fixture.inputs(Policy::Missing);
+    assert_eq!(ignored.key, inputs.key);
+    assert!(
+        run(&fixture.candidate, &pool, &ignored, &never)
+            .unwrap()
+            .reused
+    );
+    fs::write(app.join("main.txt"), "changed").unwrap();
+    let edited = fixture.inputs(Policy::Missing);
+    assert_ne!(edited.key, inputs.key);
+    // The context cache lives beside the receipts and is not one.
+    let cache = builds_root(&fixture.candidate)
+        .join(&inputs.namespace)
+        .join(context::cache_name(&app));
+    assert!(cache.exists());
+    assert!(reclaim::run(&fixture.candidate, &pool).is_ok());
 }

@@ -1,9 +1,12 @@
-import { readdir, realpath } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { constants } from "node:fs";
+import { access, readdir, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import { nativeAuthoredProjectPs } from "../backends/native-authored-project-observe.ts";
+import { NATIVE_BETA_DOCS_URL } from "../backends/native-beta.ts";
 import { nativeProjectPs } from "../backends/native-project-observe.ts";
 import { isNativeForeignHomeRefusal } from "../backends/native-project-run.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
+import { parseProjectSelectorOption } from "../cli/project-selector.ts";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import {
   type BranchInstanceCheckout,
@@ -13,6 +16,7 @@ import {
 } from "../lib/branch-instance-identity.ts";
 import { readBranchUsage } from "../lib/branch-usage.ts";
 import { autoWorktreeBranch } from "../lib/branches.ts";
+import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
 import { emitCliResult, HackCliError, okResult } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { listGitWorktrees } from "../lib/git-worktree.ts";
@@ -20,7 +24,7 @@ import { isRecord } from "../lib/guards.ts";
 import { expectedNativeComposeProject } from "../lib/native-compose-generation.ts";
 import { jsonPrivate } from "../lib/native-compose-private-state.ts";
 import { selectNativeComposeProject } from "../lib/native-compose-selection.ts";
-import { scopedHackCommand } from "../lib/printed-shell-command.ts";
+import { printedShellCommand } from "../lib/printed-shell-command.ts";
 import {
   defaultProjectSlugFromPath,
   type ProjectContext,
@@ -28,7 +32,10 @@ import {
   resolveWorktreeAutoBranch,
 } from "../lib/project.ts";
 import { inspectProjectInputsAtRoot } from "../lib/project-input-selection.ts";
-import { readProjectsRegistry } from "../lib/projects-registry.ts";
+import {
+  readProjectsRegistry,
+  selectRegisteredProjectByName,
+} from "../lib/projects-registry.ts";
 import {
   type RuntimeProject,
   readRuntimeProjects,
@@ -78,7 +85,8 @@ const RELEASE_SELECTION = /^[a-f0-9]{64}$/;
 
 function nativeRecovery(
   error: unknown,
-  instance: string | null
+  instance: string | null,
+  path: string
 ): string | undefined {
   if (!(isNativeForeignHomeRefusal(error) && error instanceof HackCliError)) {
     return undefined;
@@ -87,7 +95,15 @@ function nativeRecovery(
   const selection = isRecord(detail) ? detail.selectionSha256 : null;
   const release =
     typeof selection === "string" && RELEASE_SELECTION.test(selection);
-  return scopedHackCommand("doctor", {}, [
+  const command = {
+    stable: "hack",
+    "hack-next": "hack-next",
+    bundle: "hack-v5",
+  }[currentCandidateLauncher().kind];
+  return printedShellCommand([
+    command,
+    "doctor",
+    `--path=${path}`,
     "--native-run-mapping",
     release ? "release" : "inspect",
     ...(release ? ["--expect-selection", selection] : []),
@@ -101,11 +117,13 @@ const unknownCopy: Observation = { states: emptyStates, state: "unknown" };
 async function readNativeCopy(
   runtime: NonNullable<ReturnType<typeof resolveNativeRuntimeSelection>>,
   scope: Parameters<typeof nativeProjectPs>[0]["scope"],
-  authored: boolean
+  authored: boolean,
+  signal: AbortSignal,
+  path: string
 ): Promise<Observation> {
   try {
     const ps = authored ? nativeAuthoredProjectPs : nativeProjectPs;
-    const result = await ps({ runtime, scope });
+    const result = await ps({ runtime, scope, signal });
     if (result.status === "pending") {
       return { ...unknownCopy, state: "starting" };
     }
@@ -127,7 +145,10 @@ async function readNativeCopy(
     }
     return { states, state: copyState([...states.values()]) };
   } catch (error) {
-    return { ...unknownCopy, recovery: nativeRecovery(error, scope.branch) };
+    return {
+      ...unknownCopy,
+      recovery: nativeRecovery(error, scope.branch, path),
+    };
   }
 }
 
@@ -186,7 +207,7 @@ function renderCopies(
     rows: rows.map((row, index) => [
       row.branch ? { text: row.branch, role: "identity" } : null,
       duplicates.has(keys[index] ?? "")
-        ? `${row.checkout.name} (${row.instance ?? "base"})`
+        ? `${row.checkout.name} (${row.instance ?? "default instance"})`
         : row.checkout.name,
       row.state,
       row.address
@@ -220,34 +241,97 @@ type CopiesOptions = {
   ) => Promise<ReadonlyMap<string, readonly string[]>>;
 };
 
+function containsRoot(top: string, root: string): boolean {
+  const subpath = relative(top, root);
+  return subpath !== ".." && !subpath.startsWith("../") && !isAbsolute(subpath);
+}
+
 async function selectCopies(opts: CopiesOptions) {
   const authored = await selectNativeComposeProject(opts);
   const legacy = authored ? null : await opts.legacyContext();
   const root = await canonical(
     authored?.projectRoot ?? legacy?.projectRoot ?? opts.cwd
   );
-  const registry = await readProjectsRegistry();
-  const registration = registry.projects.find((item) =>
-    listRegistrationCheckouts(item).some(
-      ({ root: checkout }) => resolve(checkout) === root
+  const listed = await listGitWorktrees({ repoRoot: root });
+  const worktrees = await Promise.all(
+    (listed ?? []).map(async (item) => ({
+      ...item,
+      path: await canonical(item.path),
+    }))
+  );
+  const gitFor = (path: string) =>
+    worktrees
+      .filter((item) => containsRoot(item.path, path))
+      .reduce<(typeof worktrees)[number] | undefined>(
+        (best, item) =>
+          !best || item.path.length > best.path.length ? item : best,
+        undefined
+      );
+  const selectedTree = gitFor(root);
+  const peers = new Set(
+    worktrees.map(({ path }) =>
+      resolve(path, selectedTree ? relative(selectedTree.path, root) : "")
     )
   );
+  const { projects } = await readProjectsRegistry();
+  const entries = await Promise.all(
+    projects.map(async (project) => ({
+      project,
+      root: await canonical(project.repoRoot),
+    }))
+  );
+  const exact = entries.find((entry) => entry.root === root)?.project;
+  const registered =
+    opts.project !== undefined
+      ? selectRegisteredProjectByName({
+          projects,
+          name: parseProjectSelectorOption({ projectOpt: opts.project }).name,
+        })
+      : (exact ??
+        entries.find(({ project }) =>
+          project.worktrees?.some((item) => resolve(item.path) === root)
+        )?.project ??
+        entries.find((entry) => peers.has(entry.root))?.project);
   const projectDirName =
-    registration?.projectDirName ??
+    registered?.projectDirName ??
     legacy?.projectDirName ??
     HACK_PROJECT_DIR_PRIMARY;
-  const primary: BranchInstanceCheckout = {
+  const selected: BranchInstanceCheckout = {
     root,
     projectDir: resolve(root, projectDirName),
     kind: "primary",
   };
+  const checkouts = new Map<string, BranchInstanceCheckout>();
+  const foreign = new Set(
+    entries
+      .filter(({ project }) => project !== registered)
+      .map((entry) => entry.root)
+  );
+  const candidates = registered
+    ? [...listRegistrationCheckouts(registered), selected]
+    : [selected];
+  for (const candidate of candidates) {
+    const canonicalRoot = await canonical(candidate.root);
+    if (
+      checkouts.has(canonicalRoot) ||
+      (registered &&
+        candidate.kind === "worktree" &&
+        foreign.has(canonicalRoot))
+    ) {
+      continue;
+    }
+    const tree = gitFor(canonicalRoot);
+    const gitKind = tree === worktrees[0] ? "primary" : "worktree";
+    const kind = tree ? gitKind : candidate.kind;
+    checkouts.set(canonicalRoot, { ...candidate, root: canonicalRoot, kind });
+  }
   return {
-    registration,
+    registration: registered,
     projectDirName,
-    checkouts: registration
-      ? listRegistrationCheckouts(registration)
-      : [primary],
-    project: registration?.name ?? defaultProjectSlugFromPath(root),
+    checkouts: [...checkouts.values()],
+    project: registered?.name ?? defaultProjectSlugFromPath(root),
+    gitFor,
+    worktrees,
   };
 }
 
@@ -325,14 +409,27 @@ async function authoredComposeInstances(
     ) {
       continue;
     }
-    const entry = inventory.find(
+    const matches = inventory.filter(
       (item) =>
         item.project === expected &&
         item.workingDir !== null &&
         GENERATION_DIR.test(relative(root, item.workingDir))
     );
-    if (entry) {
-      instances.set(instance, entry);
+    const first = matches[0];
+    if (first) {
+      const services = new Map(first.services);
+      for (const entry of matches.slice(1)) {
+        for (const [name, service] of entry.services) {
+          services.set(name, {
+            service: name,
+            containers: [
+              ...(services.get(name)?.containers ?? []),
+              ...service.containers,
+            ],
+          });
+        }
+      }
+      instances.set(instance, { ...first, services });
     }
   }
   return instances;
@@ -358,11 +455,23 @@ async function addressFor(
 }
 
 export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
-  const { registration, projectDirName, checkouts, project } =
-    await selectCopies(opts);
+  const {
+    registration,
+    projectDirName,
+    checkouts,
+    project,
+    gitFor,
+    worktrees,
+  } = await selectCopies(opts);
   const native = process.env.HACK_RUNTIME_BACKEND === "native";
   const runtime = await Promise.resolve()
-    .then(() => resolveNativeRuntimeSelection())
+    .then(async () => {
+      const selected = resolveNativeRuntimeSelection();
+      if (selected) {
+        await access(selected.binary, constants.X_OK);
+      }
+      return selected;
+    })
     .catch(() => null);
   const inventory = native
     ? null
@@ -372,16 +481,15 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
   const recoveries: string[] = [];
   const names = new Map<string, number>();
 
-  const worktrees = await listGitWorktrees({
-    repoRoot: checkouts[0]?.root ?? opts.cwd,
-  });
-  const gitByRoot = new Map(worktrees?.map((entry) => [entry.path, entry]));
+  const jobs: ((
+    signal: AbortSignal
+  ) => Promise<{ row: Copy; recovery?: string }>)[] = [];
   for (const checkout of checkouts) {
     const root = await canonical(checkout.root);
     const registeredBranch =
       registration?.worktrees?.find((item) => item.path === checkout.root)
         ?.branch ?? null;
-    const current = gitByRoot.get(root);
+    const current = gitFor(root);
     const gitBranch = current ? current.branch : registeredBranch;
     const label =
       checkout.kind === "primary" ? "primary" : (gitBranch ?? "worktree");
@@ -423,20 +531,26 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
             ...(byDir.get(root) ?? []),
             ...(byDir.get(dir) ?? []),
           ]);
-    const saved = native
-      ? await listNativeCopyInstances({
-          checkout,
-          store: authored ? "authored" : "runtime",
-          includePending: true,
-        })
-      : [];
+    const saved = await listNativeCopyInstances({
+      checkout,
+      store: authored ? "authored" : "runtime",
+      includePending: true,
+    });
     const instances = [...new Set([automatic, ...containers.keys(), ...saved])];
-    const observe = async (branch: string | null) => {
+    const authoredConfigOk =
+      !authored ||
+      (await Bun.file(family.nativeFile)
+        .json()
+        .then(isRecord)
+        .catch(() => false));
+    const observe = async (branch: string | null, signal: AbortSignal) => {
       if (
         !family ||
         family.kind === "none" ||
         family.kind === "conflict" ||
         !usage ||
+        !authoredConfigOk ||
+        signal.aborted ||
         (!authored && (!cfg || cfg.parseError))
       ) {
         return unknownCopy;
@@ -453,43 +567,79 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
               nativeHome: runtime.home,
               branch,
             },
-            authored
+            authored,
+            signal,
+            relative(opts.cwd, root) || "."
           )
         : unknownCopy;
     };
-    for (let i = 0; i < instances.length; i += 4) {
-      const batch = await Promise.all(
-        instances.slice(i, i + 4).map(async (instance) => {
-          const observed = await observe(instance);
-          const address =
-            !authored && LIVE_STATES.has(observed.state)
-              ? await addressFor(opts, context, instance, native, observed)
-              : null;
-          const branch =
-            instance === null
-              ? gitBranch
-              : (usage?.get(instance)?.name ??
-                (instance === automatic ? gitBranch : null) ??
-                instance);
-          const row: Copy = {
-            branch,
-            checkout: { ...checkout, name },
-            instance,
-            backend: native ? "native" : "compose",
-            state: observed.state,
-            address,
-            authored,
-          };
-          return { row, recovery: observed.recovery };
-        })
-      );
-      for (const { row, recovery } of batch) {
-        rows.push(row);
-        if (recovery && (row.instance !== null || automatic === null)) {
-          recoveries.push(`from ${name}, run: ${recovery}`);
+    for (const instance of instances) {
+      jobs.push(async (signal) => {
+        const observed = await observe(instance, signal);
+        const address =
+          !authored && LIVE_STATES.has(observed.state)
+            ? await addressFor(opts, context, instance, native, observed)
+            : null;
+        const branch =
+          instance === null
+            ? gitBranch
+            : (usage?.get(instance)?.name ??
+              (instance === automatic ? gitBranch : null) ??
+              instance);
+        const row: Copy = {
+          branch,
+          checkout: { ...checkout, name },
+          instance,
+          backend: native ? "native" : "compose",
+          state: observed.state,
+          address,
+          authored,
+        };
+        const recovery = observed.recovery;
+        return {
+          row,
+          recovery:
+            recovery &&
+            (instance !== null || (automatic === null && !current?.detached))
+              ? `from ${name} (${instance ?? "base"}), run: ${recovery}`
+              : undefined,
+        };
+      });
+    }
+  }
+  const signal = AbortSignal.timeout(45_000);
+  let next = 0;
+  const observations: Awaited<ReturnType<(typeof jobs)[number]>>[] = [];
+  await Promise.all(
+    Array.from({ length: 4 }, async () => {
+      for (let index = next++; index < jobs.length; index = next++) {
+        const job = jobs[index];
+        if (job) {
+          observations[index] = await job(signal);
         }
       }
+    })
+  );
+  for (const { row, recovery } of observations) {
+    rows.push(row);
+    if (recovery) {
+      recoveries.push(recovery);
     }
+  }
+  let code: string | null = null;
+  if (native && !runtime) {
+    code = "E_NATIVE_SETUP_REQUIRED";
+  } else if (signal.aborted) {
+    code = "E_TIMEOUT";
+  } else if (!(native || inventory?.ok)) {
+    code = inventory?.code ?? "E_DOCKER_UNAVAILABLE";
+  }
+  if (code) {
+    const hint =
+      code === "E_NATIVE_SETUP_REQUIRED"
+        ? `native runtime unavailable · install the hack-next candidate ${NATIVE_BETA_DOCS_URL}`
+        : `${native ? "native" : "compose"} status could not be fully observed`;
+    recoveries.unshift(hint);
   }
 
   if (opts.json) {
@@ -497,7 +647,8 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
       result: okResult({
         data: {
           project,
-          copies: rows.map(({ authored: _authored, ...row }) => row),
+          copies: rows,
+          observation: { ok: code === null, code },
         },
       }),
     });

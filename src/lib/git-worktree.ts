@@ -214,7 +214,7 @@ export async function listGitWorktrees(opts: {
   try {
     result = await exec(
       ["git", "-C", opts.repoRoot, "worktree", "list", "--porcelain"],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs: 10_000 }
     );
   } catch {
     return null;

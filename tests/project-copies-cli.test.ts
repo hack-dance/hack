@@ -65,17 +65,17 @@ cat "$COPY_TEST_REPLY"
   );
   const nativeHome = join(root, "candidate");
   await mkdir(nativeHome, { mode: 0o700 });
-  async function run(args: readonly string[], native = false) {
+  await writeFile(join(root, "unexpected-native"), "#!/bin/sh\nexit 17\n", {
+    mode: 0o700,
+  });
+  async function run(
+    args: readonly string[],
+    native = false,
+    selection = "--project=sample"
+  ) {
     const startedAt = performance.now();
     const proc = Bun.spawn(
-      [
-        process.execPath,
-        "index.ts",
-        "ps",
-        "--project=sample",
-        "--copies",
-        ...args,
-      ],
+      [process.execPath, "index.ts", "ps", selection, "--copies", ...args],
       {
         env: privateCliEnv({
           root,
@@ -221,7 +221,7 @@ test("a foreign native home leaves an unknown row and a scoped recovery hint", a
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("2 copies on native · 2 unknown");
     expect(result.stdout).not.toContain(f.root);
-    expect(result.stdout).toContain("from feature-1, run:");
+    expect(result.stdout).toContain("from feature-1 (feature-1), run:");
     expect(result.stdout).toContain("--native-run-mapping");
     expect(result.stdout).toContain("--branch=feature-1");
   } finally {
@@ -230,7 +230,7 @@ test("a foreign native home leaves an unknown row and a scoped recovery hint", a
 });
 
 test("native copies hold at most four observation slots and keep other rows", async () => {
-  const f = await fixture(1);
+  const f = await fixture(6);
   try {
     const nativeHome = join(f.root, "candidate");
     const run = {
@@ -241,10 +241,10 @@ test("native copies hold at most four observation slots and keep other rows", as
     };
     for (let i = 0; i < 6; i++) {
       await saveNativeProjectRun({
-        projectRoot: f.checkout(0),
-        projectDir: join(f.checkout(0), ".hack"),
+        projectRoot: f.checkout(i),
+        projectDir: join(f.checkout(i), ".hack"),
         nativeHome,
-        branch: `instance-${i}`,
+        branch: i === 0 ? null : `feature-${i}`,
         run,
       });
     }
@@ -267,7 +267,7 @@ process.exit(1);
     const result = await f.run([], true);
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("7 copies on native · 7 unknown");
+    expect(result.stdout).toContain("6 copies on native · 6 unknown");
     const events = await readFile(trace, "utf8");
     let inFlight = 0;
     let peak = 0;
@@ -324,19 +324,40 @@ test("authored Compose copies match the generated base and branch inventory", as
         })
       );
     }
+    const base = JSON.parse(inventory[0] ?? "{}");
+    const older = base.Labels.replace(
+      `/generations/${"a".repeat(32)}`,
+      `/generations/${"b".repeat(32)}`
+    );
+    inventory.push(
+      JSON.stringify({
+        ...base,
+        ID: "older",
+        State: "exited",
+        Status: "Exited (1) 1 second ago",
+        Labels: older,
+      })
+    );
     await writeFile(f.reply, inventory.join("\n"));
     const result = await f.run([]);
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("feature/example");
     expect(result.stdout).toContain(
-      "2 copies on compose · 1 healthy · 1 starting"
+      "2 copies on compose · 1 exited (1) · 1 starting"
     );
     expect(result.stdout).not.toContain("hack-nc-");
     expect(result.stdout).not.toContain("no address");
     expect((await readFile(f.calls, "utf8")).trim().split("\n")).toHaveLength(
       1
     );
+    await writeFile(join(dir, "hack.project.json"), "{");
+    const broken = await f.run(["--json"]);
+    expect(broken.code).toBe(0);
+    expect(JSON.parse(broken.stdout).data.copies).toMatchObject([
+      { authored: true, state: "unknown" },
+      { authored: true, state: "unknown" },
+    ]);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
@@ -389,6 +410,11 @@ WORKTREES
       { mode: 0o700 }
     );
     await writeFile(join(f.checkout(1), ".hack", "hack.config.json"), "{");
+    await writeFile(
+      join(f.checkout(1), ".hack", "docker-compose.yml"),
+      "name: sample\nservices: {web: {image: web}}\n"
+    );
+
     const entries = [
       ["sample", "web", "running", "Up 7 seconds", 0],
       ["sample", "jobs", "exited", "Exited (1) 2 seconds ago", 0],
@@ -410,7 +436,7 @@ WORKTREES
     );
     const result = await f.run([]);
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("primary (base)");
+    expect(result.stdout).toContain("primary (default instance)");
     expect(result.stdout).toContain("primary (main)");
     expect(result.stdout).toContain(
       "4 copies on compose · 1 exited (1) · 1 running · 2 unknown"
@@ -421,6 +447,186 @@ WORKTREES
     expect((await readFile(f.calls, "utf8")).trim().split("\n")).toHaveLength(
       1
     );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+async function gitList(root: string, entries: readonly [string, string][]) {
+  const listing = entries
+    .map(([path, branch]) => `worktree ${path}\nbranch refs/heads/${branch}\n`)
+    .join("\n");
+  await writeFile(
+    join(root, "git"),
+    `#!/bin/sh
+cat <<'WORKTREES'
+${listing}
+WORKTREES
+`,
+    { mode: 0o700 }
+  );
+}
+
+test("explicit registration wins over another project's saved worktree", async () => {
+  const f = await fixture(2);
+  try {
+    const path = join(f.root, "projects.json");
+    const registry = JSON.parse(await readFile(path, "utf8"));
+    registry.projects.push({
+      ...registry.projects[0],
+      id: "other-id",
+      name: "other",
+      repoRoot: f.checkout(1),
+      projectDir: join(f.checkout(1), ".hack"),
+      worktrees: [],
+    });
+    await writeFile(path, JSON.stringify(registry));
+    const other = await f.run(["--json"], false, "--project=other");
+    expect(other.code).toBe(0);
+    expect(JSON.parse(other.stdout).data).toMatchObject({
+      project: "other",
+      copies: [{ checkout: { root: f.checkout(1) } }],
+    });
+    const original = await f.run(["--json"]);
+    expect(JSON.parse(original.stdout).data.copies).toHaveLength(1);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("nested checkouts use Git main and linked identity and deduplicate moved roots", async () => {
+  const f = await fixture(2);
+  try {
+    const path = join(f.root, "projects.json");
+    const registry = JSON.parse(await readFile(path, "utf8"));
+    const primary = registry.projects[0];
+    primary.repoRoot = f.checkout(1);
+    primary.projectDir = join(f.checkout(1), ".hack");
+    primary.worktrees.push({ ...primary.worktrees[0], path: f.checkout(0) });
+    await writeFile(path, JSON.stringify(registry));
+    await gitList(f.root, [
+      [f.checkout(0), "main"],
+      [f.checkout(1), "linked"],
+    ]);
+    const result = await f.run(["--json"]);
+    expect(JSON.parse(result.stdout).data.copies).toMatchObject([
+      { checkout: { kind: "worktree" }, branch: "linked", instance: "linked" },
+      { checkout: { kind: "primary" }, branch: "main", instance: null },
+    ]);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("a fresh nested worktree joins the corresponding registered project", async () => {
+  const f = await fixture(2);
+  try {
+    const project = (i: number) => join(f.checkout(i), "apps", "web");
+    for (let i = 0; i < 2; i++) {
+      await mkdir(project(i), { recursive: true });
+      await Bun.write(join(project(i), ".keep"), "");
+      await mkdir(join(project(i), ".hack"));
+      await writeFile(
+        join(project(i), ".hack", "docker-compose.yml"),
+        "name: sample\nservices: {web: {image: web}}\n"
+      );
+    }
+    const path = join(f.root, "projects.json");
+    const registry = JSON.parse(await readFile(path, "utf8"));
+    Object.assign(registry.projects[0], {
+      repoRoot: project(0),
+      projectDir: join(project(0), ".hack"),
+      worktrees: [],
+    });
+    await writeFile(path, JSON.stringify(registry));
+    await gitList(f.root, [
+      [f.checkout(0), "main"],
+      [f.checkout(1), "fresh/branch"],
+    ]);
+    const result = await f.run(["--json"], false, `--path=${project(1)}`);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).data).toMatchObject({
+      project: "sample",
+      copies: [
+        { branch: "main", checkout: { kind: "primary" }, instance: null },
+        {
+          branch: "fresh/branch",
+          checkout: { kind: "worktree" },
+          instance: "fresh-branch",
+        },
+      ],
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("Compose keeps a saved native branch visible and reports inventory failure", async () => {
+  const f = await fixture(1);
+  try {
+    await saveNativeProjectRun({
+      projectRoot: f.checkout(0),
+      projectDir: join(f.checkout(0), ".hack"),
+      nativeHome: join(f.root, "candidate"),
+      branch: "native-only",
+      run: {
+        run: "a".repeat(32),
+        owner: "b".repeat(32),
+        namespace: "c".repeat(64),
+        planId: "d".repeat(64),
+      },
+    });
+    const liveElsewhere = await f.run(["--json"]);
+    expect(JSON.parse(liveElsewhere.stdout).data.copies).toMatchObject([
+      { instance: null, state: "unknown" },
+      { instance: "native-only", state: "unknown" },
+    ]);
+    const nativeStatus = {
+      receipt: {
+        run: "a".repeat(32),
+        owner: "b".repeat(32),
+        namespace: "c".repeat(64),
+        plan_id: "d".repeat(64),
+        phase: "ready-observed",
+        resources: {
+          "container:web": {
+            kind: "container",
+            key: "web",
+            id: "e".repeat(64),
+            phase: "started",
+          },
+        },
+      },
+      journal_incomplete: false,
+      observations: { "container:web": { state: "running" } },
+    };
+    await writeFile(
+      join(f.root, "unexpected-native"),
+      `#!/bin/sh
+printf '%s\n' '${JSON.stringify(nativeStatus)}'
+`,
+      { mode: 0o700 }
+    );
+    const confirmed = await f.run(["--json"], true);
+    expect(JSON.parse(confirmed.stdout).data.copies).toMatchObject([
+      { instance: null, state: "unknown" },
+      { instance: "native-only", state: "running" },
+    ]);
+    await writeFile(join(f.root, "docker"), "#!/bin/sh\nexit 124\n", {
+      mode: 0o700,
+    });
+    const timedOut = await f.run(["--json"]);
+    expect(timedOut.code).toBe(0);
+    expect(JSON.parse(timedOut.stdout)).toMatchObject({
+      ok: true,
+      data: { observation: { ok: false, code: "E_TIMEOUT" } },
+    });
+    const text = await f.run([]);
+    expect(text.stdout).toContain("compose status could not be fully observed");
+    await rm(join(f.root, "unexpected-native"));
+    const missing = await f.run([], true);
+    expect(missing.code).toBe(0);
+    expect(missing.stdout).toContain("install the hack-next candidate");
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

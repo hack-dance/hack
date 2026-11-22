@@ -78,6 +78,7 @@ export type RuntimeProjectsResult =
     }
   | {
       readonly ok: false;
+      readonly code?: "E_TIMEOUT" | "E_DOCKER_UNAVAILABLE";
       readonly runtime: readonly RuntimeProject[];
       readonly error: string;
       readonly checkedAtMs: number;
@@ -203,6 +204,14 @@ export async function readRuntimeProjects(opts: {
     return {
       ok: false,
       runtime: [],
+      ...(opts.inventoryOnly
+        ? {
+            code:
+              res.exitCode === 124
+                ? ("E_TIMEOUT" as const)
+                : ("E_DOCKER_UNAVAILABLE" as const),
+          }
+        : {}),
       error: formatDockerError({
         exitCode: res.exitCode,
         stdout: res.stdout,

@@ -86,8 +86,12 @@ address followed by `+1` has one more configured address. Use `hack ps --wide`
 for all addresses, container names, exit codes and port details.
 Use `hack ps --copies` to list the project's checkouts and branch instances
 together. The count names the backend that was observed. A copy whose runtime
-state cannot be confirmed on that backend shows `unknown`.
+state cannot be confirmed on that backend shows `unknown`. Saved native
+instances stay listed when Compose is selected. Authored projects leave the
+address cell empty because the copies view cannot resolve their saved routes.
 Use `hack ps --copies --json` for the same inventory in structured form.
+The result includes `observation: {ok, code}` for inventory, setup, or
+deadline failures. The command still returns the known copies in those cases.
 
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;

@@ -110,6 +110,7 @@ for (const native of [false, true]) {
             "env key",
             "hack gitignore",
             "native settings",
+            "native temporary aliases",
             "lifecycle hygiene",
           ].includes(check.id)
         )

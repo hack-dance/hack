@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildComposeDownRetryFailure,
   classifyDownObservation,
   downIncompleteMessage,
   type InstanceContainer,
@@ -252,5 +253,224 @@ test("one-off run containers are never stopped and never make a down incomplete"
   ).toEqual([]);
   expect(classifyDownObservation({ listing, projectDir })).toEqual({
     complete: true,
+  });
+});
+
+test("retry failure formats cap timeout with remaining project network and next steps", async () => {
+  const { projectDir } = await checkout();
+  const failure = buildComposeDownRetryFailure({
+    exitCode: 124,
+    timedOut: true,
+    capMs: 90_000,
+    listing: { ok: true, containers: [] },
+    networks: { ok: true, networks: ["demo_default", "demo_default", " "] },
+    projectDir,
+  });
+  expect(failure).toEqual({
+    exitCode: 124,
+    message:
+      "docker compose down retry reached its 90s cap before finishing; network still present (demo_default). Run `hack ps --json` to inspect and `hack down` again (pass `--timeout <seconds>` or set `compose.downTimeoutSeconds` if cleanup needs more time).",
+    detail: {
+      exitCode: 124,
+      retry: true,
+      timedOut: true,
+      capMs: 90_000,
+      containers: [],
+      networks: ["demo_default"],
+    },
+  });
+});
+
+test("retry failure includes stopped containers, foreign checkouts, networks, and ignores one-off containers", async () => {
+  const { root, projectDir } = await checkout();
+  const other = join(root, "other", ".hack");
+  const failure = buildComposeDownRetryFailure({
+    exitCode: 1,
+    timedOut: false,
+    capMs: 90_000,
+    listing: {
+      ok: true,
+      containers: [
+        container({
+          id: "c1",
+          service: "worker",
+          state: "exited",
+          workingDir: projectDir,
+        }),
+        container({
+          id: "c2",
+          service: "api",
+          state: "running",
+          workingDir: projectDir,
+        }),
+        container({
+          id: "c3",
+          service: "web",
+          state: "running",
+          workingDir: other,
+        }),
+        container({
+          id: "c4",
+          service: "oneshot",
+          state: "running",
+          workingDir: projectDir,
+          oneOff: true,
+        }),
+      ],
+    },
+    networks: { ok: true, networks: ["demo_internal", "demo_default"] },
+    projectDir,
+  });
+  expect(failure.exitCode).toBe(1);
+  expect(failure.detail).toEqual({
+    exitCode: 1,
+    retry: true,
+    containers: ["api", "worker"],
+    foreign: [{ service: "web", workingDir: other }],
+    networks: ["demo_default", "demo_internal"],
+  });
+  expect(failure.message).toBe(
+    `docker compose down retry failed (exit 1); containers still present (api, worker), container from another checkout (web), networks still present (demo_default, demo_internal). Run \`hack down\` from ${other}, then \`hack ps --json\` to inspect and \`hack down\` again.`
+  );
+});
+
+test("retry failure reports unknown checks and clean remainders without faking cap timeout", async () => {
+  const { projectDir } = await checkout();
+  const unknown = buildComposeDownRetryFailure({
+    exitCode: 124,
+    timedOut: false,
+    capMs: 90_000,
+    listing: { ok: false, reason: "docker compose ps timed out" },
+    networks: { ok: false, reason: "docker network ls failed (exit 1)" },
+    projectDir,
+  });
+  expect(unknown.detail).toEqual({
+    exitCode: 124,
+    retry: true,
+    containers: [],
+    networks: [],
+    containersUnknownReason: "docker compose ps timed out",
+    networksUnknownReason: "docker network ls failed (exit 1)",
+  });
+  expect(unknown.message).toContain(
+    "docker compose down retry failed (exit 124)"
+  );
+  expect(unknown.message).not.toContain("reached its");
+  expect(unknown.message).toContain(
+    "containers could not be checked (docker compose ps timed out)"
+  );
+  expect(unknown.message).toContain(
+    "networks could not be checked (docker network ls failed (exit 1))"
+  );
+
+  const clean = buildComposeDownRetryFailure({
+    exitCode: 1,
+    timedOut: false,
+    capMs: 90_000,
+    listing: { ok: true, containers: [] },
+    networks: { ok: true, networks: [] },
+    projectDir,
+  });
+  expect(clean.message).toBe(
+    "docker compose down retry failed (exit 1); no containers or project networks remain. Run `hack ps --json` to inspect and `hack down` again."
+  );
+});
+
+test("retry success observation is incomplete while a project network remains or cannot be checked", async () => {
+  const { projectDir } = await checkout();
+  expect(
+    classifyDownObservation({
+      listing: { ok: true, containers: [] },
+      networks: { ok: true, networks: [] },
+      projectDir,
+    })
+  ).toEqual({ complete: true });
+
+  const withNetwork = classifyDownObservation({
+    listing: { ok: true, containers: [] },
+    networks: { ok: true, networks: ["demo_default", "demo_default"] },
+    projectDir,
+  });
+  expect(withNetwork).toEqual({
+    complete: false,
+    running: [],
+    foreign: [],
+    networks: ["demo_default"],
+  });
+  if (!withNetwork.complete) {
+    expect(downIncompleteMessage({ observation: withNetwork })).toBe(
+      "docker compose down left a project network still present (demo_default); run `hack ps --json` to inspect, then `hack down` again."
+    );
+  }
+
+  const unknownNet = classifyDownObservation({
+    listing: { ok: true, containers: [] },
+    networks: { ok: false, reason: "docker network ls timed out" },
+    projectDir,
+  });
+  expect(unknownNet).toEqual({
+    complete: false,
+    running: [],
+    foreign: [],
+    networksUnknownReason: "docker network ls timed out",
+  });
+  if (!unknownNet.complete) {
+    expect(downIncompleteMessage({ observation: unknownNet })).toBe(
+      "Could not confirm that this instance stopped: docker network ls timed out. Run `hack ps --json` to inspect, then `hack down` again."
+    );
+  }
+});
+
+test("remaining network is ignored when held by a one-off or foreign container, while unknown network stays incomplete", async () => {
+  const { root, projectDir } = await checkout();
+  const oneOff = container({
+    id: "run1",
+    service: "web",
+    state: "running",
+    workingDir: projectDir,
+    oneOff: true,
+  });
+  expect(
+    classifyDownObservation({
+      listing: { ok: true, containers: [oneOff] },
+      networks: { ok: true, networks: ["demo_default"] },
+      projectDir,
+    })
+  ).toEqual({ complete: true });
+
+  expect(
+    classifyDownObservation({
+      listing: { ok: true, containers: [oneOff] },
+      networks: { ok: false, reason: "docker network ls timed out" },
+      projectDir,
+    })
+  ).toEqual({
+    complete: false,
+    running: [],
+    foreign: [],
+    networksUnknownReason: "docker network ls timed out",
+  });
+
+  const other = join(root, "other", ".hack");
+  expect(
+    classifyDownObservation({
+      listing: {
+        ok: true,
+        containers: [
+          container({
+            id: "f1",
+            service: "worker",
+            state: "running",
+            workingDir: other,
+          }),
+        ],
+      },
+      networks: { ok: true, networks: ["demo_default"] },
+      projectDir,
+    })
+  ).toEqual({
+    complete: false,
+    running: [],
+    foreign: [{ service: "worker", workingDir: other }],
   });
 });

@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { COMPOSE_DOWN_TIMEOUT_CONFIG } from "./compose-down-budget.ts";
 import { isRecord } from "./guards.ts";
 
 /**
@@ -235,6 +236,37 @@ export function selectOwnedInstanceContainers(opts: {
  */
 const NOT_RUNNING_STATES = new Set(["created", "exited", "dead"]);
 
+/** Project networks listed by `docker network ls`, or why they could not be listed. */
+export type InstanceNetworkListing =
+  | { readonly ok: true; readonly networks: readonly string[] }
+  | { readonly ok: false; readonly reason: string };
+
+/** Failure payload returned when `finishInstanceStop`'s retry down fails or times out. */
+export type ComposeDownRetryFailure = {
+  readonly exitCode: number;
+  readonly message: string;
+  readonly detail: Record<string, unknown>;
+};
+
+function normalizeNetworkListing(
+  networks: InstanceNetworkListing | undefined
+): {
+  readonly names: readonly string[];
+  readonly unknownReason?: string;
+} {
+  if (!networks) {
+    return { names: [] };
+  }
+  if (!networks.ok) {
+    return { names: [], unknownReason: networks.reason };
+  }
+  return {
+    names: [
+      ...new Set(networks.networks.map((name) => name.trim()).filter(Boolean)),
+    ].sort((a, b) => a.localeCompare(b)),
+  };
+}
+
 /** The observed result of a down. */
 export type DownObservation =
   | { readonly complete: true }
@@ -247,35 +279,62 @@ export type DownObservation =
         readonly service: string;
         readonly workingDir: string;
       }[];
+      /** Project networks still present after the leftover-cleanup retry. */
+      readonly networks?: readonly string[];
       /** Set when the containers could not be listed at all. */
       readonly unknownReason?: string;
+      /** Set when project networks could not be listed after the retry. */
+      readonly networksUnknownReason?: string;
     };
 
 /**
  * Complete only when nothing labelled with the instance's project may still
- * run. A container of another checkout is never stopped here, but it is not
- * hidden either: it makes the down incomplete and is named. An unknown
- * listing is incomplete, never "none left".
+ * run and (when checked) no project network remains. A container of another
+ * checkout is never stopped here, but it is not hidden either: it makes the
+ * down incomplete and is named. An unknown listing is incomplete, never
+ * "none left".
  */
 export function classifyDownObservation(opts: {
   readonly listing: InstanceContainerListing;
+  readonly networks?: InstanceNetworkListing;
   readonly projectDir: string;
+  readonly includeStopped?: boolean;
 }): DownObservation {
+  const net = normalizeNetworkListing(opts.networks);
+  const netFields = {
+    ...(net.names.length > 0 ? { networks: net.names } : {}),
+    ...(net.unknownReason === undefined
+      ? {}
+      : { networksUnknownReason: net.unknownReason }),
+  };
   if (!opts.listing.ok) {
     return {
       complete: false,
       running: [],
       foreign: [],
       unknownReason: opts.listing.reason,
+      ...netFields,
     };
   }
   // One-off run containers outlive a down on purpose (a background
   // `hack run` keeps running through it), so they never make it incomplete.
   const mayRun = opts.listing.containers.filter(
     (container) =>
-      container.oneOff !== true && !NOT_RUNNING_STATES.has(container.state)
+      container.oneOff !== true &&
+      (opts.includeStopped === true || !NOT_RUNNING_STATES.has(container.state))
   );
-  if (mayRun.length === 0) {
+  const networkHeldByAllowed = opts.listing.containers.some(
+    (container) =>
+      container.oneOff === true ||
+      containerOwnership({ container, projectDir: opts.projectDir }) ===
+        "foreign"
+  );
+  const countedNetworks = networkHeldByAllowed ? [] : net.names;
+  if (
+    mayRun.length === 0 &&
+    countedNetworks.length === 0 &&
+    net.unknownReason === undefined
+  ) {
     return { complete: true };
   }
   const running = new Set<string>();
@@ -298,6 +357,10 @@ export function classifyDownObservation(opts: {
     complete: false,
     running: [...running].sort((a, b) => a.localeCompare(b)),
     foreign,
+    ...(countedNetworks.length > 0 ? { networks: countedNetworks } : {}),
+    ...(net.unknownReason === undefined
+      ? {}
+      : { networksUnknownReason: net.unknownReason }),
   };
 }
 
@@ -306,9 +369,10 @@ export function downIncompleteMessage(opts: {
   readonly observation: Extract<DownObservation, { complete: false }>;
 }): string {
   const { observation } = opts;
-  if (observation.unknownReason !== undefined) {
-    return `Could not confirm that this instance stopped: ${observation.unknownReason}. Run \`hack ps --json\` to inspect, then \`hack down\` again.`;
-  }
+  const unknownReasons = [
+    observation.unknownReason,
+    observation.networksUnknownReason,
+  ].filter((reason): reason is string => reason !== undefined);
   const parts: string[] = [];
   if (observation.running.length > 0) {
     parts.push(
@@ -323,5 +387,89 @@ export function downIncompleteMessage(opts: {
       `running containers of the same Compose project started from another checkout (${observation.foreign.map((entry) => entry.service).join(", ")}); run \`hack down\` from ${dirs.join(" or ")}`
     );
   }
+  if (observation.networks && observation.networks.length > 0) {
+    parts.push(
+      `${observation.networks.length === 1 ? "a project network" : "project networks"} still present (${observation.networks.join(", ")}); run \`hack ps --json\` to inspect, then \`hack down\` again`
+    );
+  }
+  if (unknownReasons.length > 0 && parts.length === 0) {
+    return `Could not confirm that this instance stopped: ${unknownReasons.join("; ")}. Run \`hack ps --json\` to inspect, then \`hack down\` again.`;
+  }
+  if (unknownReasons.length > 0) {
+    parts.push(
+      `remaining state could not be confirmed (${unknownReasons.join("; ")}); run \`hack ps --json\` to inspect, then \`hack down\` again`
+    );
+  }
   return `docker compose down left ${parts.join("; and ")}.`;
+}
+
+function formatRemaining(
+  kind: "container" | "network",
+  items: readonly string[],
+  unknownReason?: string
+): string | null {
+  if (unknownReason !== undefined) {
+    return `${kind}s could not be checked (${unknownReason})`;
+  }
+  return items.length > 0
+    ? `${kind}${items.length === 1 ? "" : "s"} still present (${items.join(", ")})`
+    : null;
+}
+
+/** Format E_COMPOSE_FAILED message and detail when finishInstanceStop's retry fails or times out. */
+export function buildComposeDownRetryFailure(opts: {
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly capMs: number;
+  readonly listing: InstanceContainerListing;
+  readonly networks: InstanceNetworkListing;
+  readonly projectDir: string;
+}): ComposeDownRetryFailure {
+  const obs = classifyDownObservation({
+    listing: opts.listing,
+    projectDir: opts.projectDir,
+    includeStopped: true,
+  });
+  const containers = obs.complete ? [] : obs.running;
+  const foreign = obs.complete ? [] : obs.foreign;
+  const containerReason = opts.listing.ok ? undefined : opts.listing.reason;
+  const { names: networks, unknownReason: networkReason } =
+    normalizeNetworkListing(opts.networks);
+  const cap =
+    opts.capMs < 1000
+      ? `${Math.max(1, Math.round(opts.capMs))}ms`
+      : `${Math.round(opts.capMs / 1000)}s`;
+  const headline = opts.timedOut
+    ? `docker compose down retry reached its ${cap} cap before finishing`
+    : `docker compose down retry failed (exit ${opts.exitCode})`;
+  const parts = [
+    formatRemaining("container", containers, containerReason),
+    foreign.length > 0
+      ? `container${foreign.length === 1 ? "" : "s"} from another checkout (${[...new Set(foreign.map((e) => e.service))].join(", ")})`
+      : null,
+    formatRemaining("network", networks, networkReason),
+  ].filter((part): part is string => part !== null);
+  const foreignDirs = [...new Set(foreign.map((e) => e.workingDir))];
+  const nextStep =
+    (foreignDirs.length > 0
+      ? `Run \`hack down\` from ${foreignDirs.join(" or ")}, then `
+      : "Run ") +
+    "`hack ps --json` to inspect and `hack down` again" +
+    (opts.timedOut
+      ? ` (pass \`--timeout <seconds>\` or set \`${COMPOSE_DOWN_TIMEOUT_CONFIG}\` if cleanup needs more time)`
+      : "");
+  return {
+    exitCode: opts.exitCode,
+    message: `${headline}; ${parts.length > 0 ? parts.join(", ") : "no containers or project networks remain"}. ${nextStep}.`,
+    detail: {
+      exitCode: opts.exitCode,
+      retry: true,
+      ...(opts.timedOut ? { timedOut: true, capMs: opts.capMs } : {}),
+      containers,
+      ...(foreign.length > 0 ? { foreign } : {}),
+      networks,
+      ...(containerReason ? { containersUnknownReason: containerReason } : {}),
+      ...(networkReason ? { networksUnknownReason: networkReason } : {}),
+    },
+  };
 }

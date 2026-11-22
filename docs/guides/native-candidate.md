@@ -788,6 +788,27 @@ within the macOS length limit. A clean `runtime down` keeps this alias, so no ot
 local user can take its name while the pool is stopped. It removes only the provider
 socket files the stop proved closed, through the real data directory.
 
+On macOS, successful native setup and runtime startup check for old dangling provider
+HOME links. The check keeps links to existing homes, including stopped homes and homes
+with interrupted updates. It removes only this user's verified links for absent homes
+that have been unchanged for at least five minutes. `hack native temp-aliases` lists
+eligible names. Add `--fix` to remove them, or use `hack doctor --fix` where the native
+runtime is installed. Ordinary doctor shows a count after its diagnostic checks.
+The scan stops at its time
+or entry limit and reports an incomplete scan when it cannot finish. Fix scans
+resume from the previous batch, although repeated listing timeouts can still
+leave some entries unseen. A later fix also recovers entries moved aside by an
+interrupted sweep. Updating the link's timestamp with `touch -h`
+extends its retention.
+
+Automatic cleanup requires the recorded native home path to lie under the user's
+home or the host temporary root. Doctor counts aliases outside those roots.
+`hack native temp-aliases` lists their names and explains that the volume may be
+unmounted or the home may be deleted. The automatic sweep and
+`doctor --fix` keep these entries. After checking the volume yourself,
+add `--include-unverified-volumes` to either command with `--fix` to include them.
+The command still checks age, owner, identity and target absence.
+
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
 bridge socket to appear with the required private ownership and mode.

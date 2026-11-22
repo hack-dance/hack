@@ -28,6 +28,7 @@ import {
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
+import { createTextOutput } from "../ui/text-output.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -119,6 +120,7 @@ import {
   nativeAdaptationCandidates,
   resolveNativeAdaptationSelection,
   resolveNativeHostSettings,
+  resolveNativeStatusHttpsPort,
 } from "../backends/native-project-settings.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
@@ -259,10 +261,13 @@ import {
 } from "../lib/compose-env-at-rest.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import {
+  buildComposeDownRetryFailure,
+  type ComposeDownRetryFailure,
   classifyDownObservation,
   type DownObservation,
   downIncompleteMessage,
   type InstanceContainerListing,
+  type InstanceNetworkListing,
   parseComposePsInstanceContainers,
   resolveInstanceStopProfiles,
   selectOwnedInstanceContainers,
@@ -8832,6 +8837,7 @@ async function runDownCommand({
   let code: number;
   let downTimedOut = false;
   let stopObservation: DownObservation = { complete: true };
+  let retryFailure: ComposeDownRetryFailure | null = null;
   let helperReleaseFailures: readonly string[] = [];
   try {
     const beforeCode = await runLifecycleCommands({
@@ -8874,14 +8880,21 @@ async function runDownCommand({
       },
     });
     if (code === 0) {
-      stopObservation = await finishInstanceStop({
+      const finish = await finishInstanceStop({
         project,
         composeProjectName,
+        composeProjectLabel: composeProjectName ?? baseProjectName,
         profiles: stopSelection.profiles,
         env: lifecycleEnv,
         routeStdoutToStderr: json,
         timeoutSeconds: downTimeoutSeconds,
       });
+      if (finish.ok) {
+        stopObservation = finish.observation;
+      } else {
+        code = finish.exitCode;
+        retryFailure = finish;
+      }
     }
     helperReleaseFailures = await lifecycleDownCleanup(
       await confirmComposeDownForHelpers({
@@ -8896,12 +8909,16 @@ async function runDownCommand({
   }
 
   if (code !== 0) {
-    const failure = buildComposeDownFailure({
-      exitCode: code,
-      timedOut: downTimedOut,
-      capMs: downCapMs,
-    });
-    if (failure.capWarning && !json) {
+    const failure =
+      retryFailure ??
+      buildComposeDownFailure({
+        exitCode: code,
+        timedOut: downTimedOut,
+        capMs: downCapMs,
+      });
+    if (!json && retryFailure) {
+      logger.error({ message: failure.message });
+    } else if (!json && "capWarning" in failure && failure.capWarning) {
       logger.warn({ message: failure.capWarning });
     }
     if (json) {
@@ -8931,9 +8948,18 @@ async function runDownCommand({
               service: entry.service,
               workingDir: entry.workingDir,
             })),
+            ...(stopObservation.networks && stopObservation.networks.length > 0
+              ? { networks: [...stopObservation.networks] }
+              : {}),
             ...(stopObservation.unknownReason === undefined
               ? {}
               : { unknown: true, reason: stopObservation.unknownReason }),
+            ...(stopObservation.networksUnknownReason === undefined
+              ? {}
+              : {
+                  networksUnknown: true,
+                  networksUnknownReason: stopObservation.networksUnknownReason,
+                }),
           },
         }),
         exitCode: 1,
@@ -10618,21 +10644,62 @@ async function listInstanceContainers(opts: {
   return parseComposePsInstanceContainers(res.stdout);
 }
 
+/** Docker networks labelled with this Compose project; failed/timed-out read is unknown. */
+async function listInstanceNetworks(opts: {
+  readonly composeProject: string;
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<InstanceNetworkListing> {
+  const res = await exec(
+    [
+      "docker",
+      "network",
+      "ls",
+      "--filter",
+      `label=com.docker.compose.project=${opts.composeProject}`,
+      "--format",
+      "{{.Name}}",
+    ],
+    {
+      stdin: "ignore",
+      env: { ...opts.env },
+      timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
+    }
+  ).catch(() => null);
+  if (res === null || res.exitCode !== 0) {
+    const reason =
+      res?.exitCode === 124
+        ? "docker network ls timed out"
+        : `docker network ls failed${res ? ` (exit ${res.exitCode})` : ""}`;
+    return { ok: false, reason };
+  }
+  return {
+    ok: true,
+    networks: res.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  };
+}
+
 /**
  * After `docker compose down`: stop and remove the containers of the
  * instance that this checkout owns and Compose left behind (a profile the
  * down did not enable, an orphan), run down once more so the network goes
- * too, and report what was observed. Containers of another checkout are
- * never stopped; while they run, the down is incomplete.
+ * too, and carry its outcome together with what was observed. Containers of
+ * another checkout are never stopped; while they run, the down is incomplete.
  */
 async function finishInstanceStop(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly composeProjectName: string | null;
+  readonly composeProjectLabel: string;
   readonly profiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly routeStdoutToStderr: boolean;
   readonly timeoutSeconds?: number;
-}): Promise<DownObservation> {
+}): Promise<
+  | { readonly ok: true; readonly observation: DownObservation }
+  | ({ readonly ok: false } & ComposeDownRetryFailure)
+> {
   const leftovers = await listInstanceContainers(opts);
   if (leftovers.ok) {
     const owned = selectOwnedInstanceContainers({
@@ -10665,7 +10732,11 @@ async function finishInstanceStop(opts: {
         env: { ...opts.env },
         timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
       });
-      await composeRuntimeBackend.down({
+      const retryCapMs = resolveComposeDownCapMs({
+        timeoutSeconds: opts.timeoutSeconds,
+      });
+      let retryTimedOut = false;
+      const retryExitCode = await composeRuntimeBackend.down({
         composeFiles: [opts.project.composeFile],
         composeProject: opts.composeProjectName,
         profiles: opts.profiles,
@@ -10673,13 +10744,48 @@ async function finishInstanceStop(opts: {
         env: opts.env,
         routeStdoutToStderr: opts.routeStdoutToStderr,
         timeoutSeconds: opts.timeoutSeconds,
+        capMs: retryCapMs,
+        onOutcome: (outcome) => {
+          retryTimedOut = outcome.timedOut;
+        },
       });
+      const [listing, networks] = await Promise.all([
+        listInstanceContainers(opts),
+        listInstanceNetworks({
+          composeProject: opts.composeProjectLabel,
+          env: opts.env,
+        }),
+      ]);
+      if (retryExitCode !== 0) {
+        return {
+          ok: false,
+          ...buildComposeDownRetryFailure({
+            exitCode: retryExitCode,
+            timedOut: retryTimedOut,
+            capMs: retryCapMs,
+            listing,
+            networks,
+            projectDir: opts.project.projectDir,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        observation: classifyDownObservation({
+          listing,
+          networks,
+          projectDir: opts.project.projectDir,
+        }),
+      };
     }
   }
-  return classifyDownObservation({
-    listing: await listInstanceContainers(opts),
-    projectDir: opts.project.projectDir,
-  });
+  return {
+    ok: true,
+    observation: classifyDownObservation({
+      listing: await listInstanceContainers(opts),
+      projectDir: opts.project.projectDir,
+    }),
+  };
 }
 
 async function maybeManageProjectLogsAfterDown(opts: {
@@ -10813,6 +10919,7 @@ async function handlePs({
   });
   const cfg = await readProjectConfig(project);
   const native = resolveNativeRuntimeSelection();
+  let addressUnavailable = false;
   const addresses = json
     ? new Map<string, readonly string[]>()
     : await readPsServiceAddresses({
@@ -10820,6 +10927,18 @@ async function handlePs({
         cfg,
         branch,
         native: native !== null,
+      }).catch((error: unknown) => {
+        if (
+          !(
+            native &&
+            error instanceof HackCliError &&
+            (error.code === "E_CONFIG_INVALID" || error.code === "E_PERMISSION")
+          )
+        ) {
+          throw error;
+        }
+        addressUnavailable = true;
+        return new Map<string, readonly string[]>();
       });
   if (native) {
     if (args.options.profile) {
@@ -10855,6 +10974,12 @@ async function handlePs({
         }),
       }
     );
+    if (addressUnavailable) {
+      createTextOutput().line(
+        "native https settings invalid · addresses unavailable",
+        "faint"
+      );
+    }
     return 0;
   }
   const profiles = parseCsvList(args.options.profile);
@@ -10965,7 +11090,11 @@ async function readPsServiceAddresses(opts: {
       ? resolveProjectRouteBaseHosts({ devHost, aliasHost })
       : [],
     httpsPort: opts.native
-      ? await resolveNativeProjectHttpsPort({ project, cfg })
+      ? await resolveNativeStatusHttpsPort({
+          env: process.env,
+          projectName: await resolveComposeProjectName({ project, cfg }),
+          projectRoot: project.projectRoot,
+        })
       : null,
   });
 }

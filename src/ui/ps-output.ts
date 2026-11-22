@@ -40,6 +40,10 @@ function psAddressText(row: PsRow, wide?: boolean): string | undefined {
     : first;
 }
 
+function psRowKey(row: PsRow): string {
+  return `${row.remote ? "remote" : "service"}:${row.service}`;
+}
+
 export function renderPs(input: {
   readonly rows: readonly PsRow[];
   readonly wide?: boolean;
@@ -57,12 +61,14 @@ export function renderPs(input: {
   const totals = new Map<string, number>();
   const replicas = new Map<string, number>();
   for (const row of input.rows) {
-    totals.set(row.service, (totals.get(row.service) ?? 0) + 1);
+    const key = psRowKey(row);
+    totals.set(key, (totals.get(key) ?? 0) + 1);
   }
   const rows = input.rows.map((row) => {
-    const n = (replicas.get(row.service) ?? 0) + 1;
-    replicas.set(row.service, n);
-    const total = totals.get(row.service) ?? 1;
+    const key = psRowKey(row);
+    const n = (replicas.get(key) ?? 0) + 1;
+    replicas.set(key, n);
+    const total = totals.get(key) ?? 1;
     const service = total > 1 ? `${row.service} (${n}/${total})` : row.service;
     const addressText = psAddressText(row, input.wide);
     const address = addressText

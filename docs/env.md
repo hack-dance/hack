@@ -1922,3 +1922,17 @@ first Hack release that supports the declarations the project uses. Upgrade
 all earlier Hack installations before adopting this configuration. Versions
 released before `min_cli_version` enforcement can silently ignore these
 declarations.
+
+
+### Declared remote targets in Compose status
+
+When a project declares remotes, `hack ps` adds a row for each configured
+default target beside the Compose service rows. The `USE` column names the
+target and `POINTS AT` shows its address and port. An environment-backed
+hostname appears as the variable name, such as `$REMOTE_DB_HOST:5432`.
+
+`hack ps --json` and detailed `hack projects --json` append a `remotes` array
+to their existing output. Each entry includes the target name, address
+descriptor, tunnel kind, state, and probe status. `declared` means the target
+is configured. `not checked` means Hack has not attempted a connection.
+Targets that need a tunnel say `tunnel not started by this version`.

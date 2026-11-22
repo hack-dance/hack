@@ -1240,3 +1240,35 @@ fn a_partial_reply_from_a_peer_that_stays_connected_is_not_service_closed() {
         server.join().unwrap();
     });
 }
+
+#[test]
+fn no_refusal_starts_after_shutdown_closed_the_sessions() {
+    within(move || {
+        // Shutdown has marked the sessions closing. An unreadable request then
+        // gets no reply at all: the client sees a clean close, not a frame
+        // that shutdown could cut.
+        let root = Root::new();
+        let paths = paths(&root.0);
+        let (listener, lock, id) = start(&paths).unwrap().unwrap();
+        let options = Options {
+            idle: Duration::from_secs(30),
+            drain: DEFAULT_DRAIN,
+            signals: false,
+            hold_idle: None,
+            release_wait: None,
+            retrying: None,
+        };
+        let (shared, _wake) = prepare(&paths, options, id).unwrap();
+        let mut stream = connect(&root.0);
+        accept_queued(&shared, &listener).unwrap();
+        assert_eq!(hello(&mut stream)["ok"], true);
+        shared.state().closing = true;
+        frame::write(&mut stream, b"not json", CONTROL_FRAME_LIMIT).unwrap();
+        assert_eq!(
+            frame::read(&mut stream, Duration::from_secs(5), CONTROL_FRAME_LIMIT).unwrap_err(),
+            frame::FrameError::Closed
+        );
+        drop(stream);
+        drop((listener, lock));
+    });
+}

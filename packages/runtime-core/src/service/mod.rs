@@ -1176,6 +1176,20 @@ fn parse(body: &[u8]) -> Option<Request> {
 
 type Refusal = (&'static str, &'static str);
 
+/// Reserve one refusal reply: counted as busy, so shutdown waits for it before
+/// it closes the session's socket. `None` once shutdown has closed the
+/// sessions: write nothing then, so the client sees a close at a frame
+/// boundary, never a cut frame.
+fn reserve_reply(shared: &Shared) -> Option<Busy<'_>> {
+    let mut state = shared.state();
+    if state.closing {
+        return None;
+    }
+    state.busy += 1;
+    drop(state);
+    Some(Busy(shared))
+}
+
 fn session(shared: &Shared, mut stream: UnixStream) {
     if crate::node::peer_uid(&stream).ok() != Some(euid()) {
         return;
@@ -1185,37 +1199,35 @@ fn session(shared: &Shared, mut stream: UnixStream) {
         let body = match frame::read(&mut stream, SESSION_IDLE, CONTROL_FRAME_LIMIT) {
             Ok(body) => body,
             Err(frame::FrameError::TooLarge(_)) => {
-                let _ = reply(
-                    &mut stream,
-                    &Value::Null,
-                    Err(("E_FRAME_TOO_LARGE", "Frame too large.")),
-                );
+                if let Some(_reply) = reserve_reply(shared) {
+                    let _ = reply(
+                        &mut stream,
+                        &Value::Null,
+                        Err(("E_FRAME_TOO_LARGE", "Frame too large.")),
+                    );
+                }
                 return;
             }
             Err(_) => return,
         };
         let Some(request) = parse(&body) else {
-            let _ = reply(
-                &mut stream,
-                &Value::Null,
-                Err(("E_BAD_FRAME", "Unreadable request.")),
-            );
+            if let Some(_reply) = reserve_reply(shared) {
+                let _ = reply(
+                    &mut stream,
+                    &Value::Null,
+                    Err(("E_BAD_FRAME", "Unreadable request.")),
+                );
+            }
             return;
         };
         let id = json!(request.id);
         {
             let mut state = shared.state();
             if state.stopping.is_some() {
-                // Once shutdown has closed the sessions, write nothing: the
-                // client sees a close at a frame boundary, never a cut frame.
-                if state.closing {
-                    return;
-                }
-                // The refusal counts as a reply in progress, so shutdown waits
-                // for it before it closes this session's socket.
-                state.busy += 1;
                 drop(state);
-                let refusing = Busy(shared);
+                let Some(refusing) = reserve_reply(shared) else {
+                    return;
+                };
                 let refused = Err(("E_SERVICE_DRAINING", "The service is stopping."));
                 let written = reply(&mut stream, &id, refused);
                 drop(refusing);

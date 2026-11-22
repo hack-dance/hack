@@ -1728,24 +1728,60 @@ esac
         },
       }),
     };
-    await Bun.write(listing, JSON.stringify([assets]));
-    await createAndVerifyPrerelease(options);
-    const dropped = assets.at(-1);
-    await Bun.write(listing, JSON.stringify([assets.slice(0, -1)]));
-    await expect(createAndVerifyPrerelease(options)).rejects.toThrow(
-      `Published prerelease is missing assets: ${dropped?.name}`
+    const last = assets.at(-1);
+    const other = assets.slice(0, -1);
+    const elapsed: number[] = [];
+    const writeListing = (entries: unknown[]) =>
+      Bun.write(listing, JSON.stringify([entries]));
+    const clock =
+      (next?: (retry: number) => Promise<unknown>) =>
+      async (milliseconds: number) => {
+        elapsed.push(milliseconds);
+        await next?.(elapsed.length);
+      };
+
+    await writeListing(other);
+    await createAndVerifyPrerelease({
+      ...options,
+      sleep: clock((retry) =>
+        writeListing([
+          ...other,
+          ...[
+            { ...last, state: "starter" },
+            { ...last, digest: null },
+            last,
+          ].slice(retry - 1, retry),
+        ])
+      ),
+    });
+    expect(elapsed.splice(0)).toEqual([5000, 5000, 5000]);
+
+    await writeListing(other);
+    await expect(
+      createAndVerifyPrerelease({ ...options, sleep: clock() })
+    ).rejects.toThrow(
+      `The release exists at ${plan.tag}. Inspect it and do not re-dispatch the same version.`
     );
-    for (const mismatch of [{ size: 0 }, { digest: null }]) {
-      await Bun.write(
-        listing,
-        JSON.stringify([[...assets.slice(0, -1), { ...dropped, ...mismatch }]])
+    expect(elapsed.splice(0)).toEqual([5000, 5000, 5000, 5000, 5000]);
+
+    for (const mismatch of [
+      { size: 0, state: "starter" },
+      { digest: "sha256:wrong", state: "starter" },
+    ]) {
+      await writeListing([...other, { ...last, ...mismatch }]);
+      await expect(
+        createAndVerifyPrerelease({ ...options, sleep: clock() })
+      ).rejects.toThrow(
+        `Published prerelease asset does not match the local set: ${last?.name}`
       );
-      await expect(createAndVerifyPrerelease(options)).rejects.toThrow(
-        `Published prerelease asset does not match the local set: ${dropped?.name}`
-      );
+      expect(elapsed).toEqual([]);
     }
     expect(await Bun.file(effects).text()).toBe(
-      "tag\ncreate\nlist\n".repeat(4)
+      "tag\ncreate\n" +
+        "list\n".repeat(4) +
+        "tag\ncreate\n" +
+        "list\n".repeat(6) +
+        "tag\ncreate\nlist\n".repeat(2)
     );
   } finally {
     await rm(root, { recursive: true, force: true });

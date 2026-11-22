@@ -1573,15 +1573,65 @@ async function releaseApi(
   return JSON.parse(json);
 }
 
+async function pendingReleaseAssets({
+  repository,
+  releaseId,
+  expected,
+  env,
+}: {
+  repository: string;
+  releaseId: number;
+  expected: ReadonlyMap<string, { size: number; digest: string }>;
+  env?: NodeJS.ProcessEnv;
+}): Promise<string[]> {
+  const pages = array(
+    await releaseApi(
+      [
+        "--paginate",
+        "--slurp",
+        `${repository}/releases/${releaseId}/assets?per_page=100`,
+      ],
+      env
+    )
+  );
+  const remaining = new Map(expected);
+  const pending: string[] = [];
+  for (const raw of pages.flatMap(array)) {
+    const asset = object(raw);
+    const local =
+      typeof asset.name === "string" ? remaining.get(asset.name) : undefined;
+    if (!local || typeof asset.name !== "string") {
+      throw new Error(
+        "Published prerelease contains an unexpected or duplicate asset"
+      );
+    }
+    if (
+      asset.size !== local.size ||
+      (asset.digest !== null && asset.digest !== local.digest)
+    ) {
+      throw new Error(
+        `Published prerelease asset does not match the local set: ${asset.name}`
+      );
+    }
+    remaining.delete(asset.name);
+    if (asset.state !== "uploaded" || asset.digest === null) {
+      pending.push(asset.name);
+    }
+  }
+  return [...pending, ...remaining.keys()];
+}
+
 /** Post-create verification reports failures without deleting or replacing the release. */
 export async function createAndVerifyPrerelease({
   plan,
   output,
   env,
+  sleep = Bun.sleep,
 }: {
   readonly plan: PrereleasePlan;
   readonly output: string;
   readonly env?: NodeJS.ProcessEnv;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 }) {
   const names = releaseAssets(plan);
   const expected = new Map<string, { size: number; digest: string }>();
@@ -1627,50 +1677,40 @@ export async function createAndVerifyPrerelease({
     ],
     { env }
   );
-  const repository = "repos/hack-dance/hack";
-  const release = object(
-    await releaseApi([`${repository}/releases/tags/${plan.tag}`], env)
-  );
-  if (
-    release.tag_name !== plan.tag ||
-    !Number.isSafeInteger(release.id) ||
-    Number(release.id) <= 0
-  ) {
-    throw new Error("Read-back did not identify the published prerelease");
-  }
-  const pages = array(
-    await releaseApi(
-      [
-        "--paginate",
-        "--slurp",
-        `${repository}/releases/${release.id}/assets?per_page=100`,
-      ],
-      env
-    )
-  );
-  for (const raw of pages.flatMap(array)) {
-    const asset = object(raw);
-    const local =
-      typeof asset.name === "string" ? expected.get(asset.name) : undefined;
-    if (!local || typeof asset.name !== "string") {
-      throw new Error(
-        "Published prerelease contains an unexpected or duplicate asset"
-      );
-    }
+  try {
+    const repository = "repos/hack-dance/hack";
+    const release = object(
+      await releaseApi([`${repository}/releases/tags/${plan.tag}`], env)
+    );
     if (
-      asset.state !== "uploaded" ||
-      asset.size !== local.size ||
-      asset.digest !== local.digest
+      release.tag_name !== plan.tag ||
+      !Number.isSafeInteger(release.id) ||
+      Number(release.id) <= 0
     ) {
-      throw new Error(
-        `Published prerelease asset does not match the local set: ${asset.name}`
-      );
+      throw new Error("Read-back did not identify the published prerelease");
     }
-    expected.delete(asset.name);
-  }
-  if (expected.size > 0) {
+    for (let retry = 0; ; retry++) {
+      const pending = await pendingReleaseAssets({
+        repository,
+        releaseId: Number(release.id),
+        expected,
+        env,
+      });
+      if (pending.length === 0) {
+        return;
+      }
+      if (retry === 5) {
+        throw new Error(
+          `Published prerelease assets are missing or still settling: ${pending.join(", ")}`
+        );
+      }
+      await sleep(5000);
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Published prerelease is missing assets: ${[...expected.keys()].join(", ")}`
+      `${reason}. The release exists at ${plan.tag}. Inspect it and do not re-dispatch the same version.`,
+      { cause: error }
     );
   }
 }

@@ -144,3 +144,36 @@ fn incompatible_selection_or_reply_channel_is_refused() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn stalled_reader_cannot_hold_a_write_past_the_deadline() {
+    use std::os::fd::AsRawFd;
+    let (sender, peer) = UnixStream::pair().unwrap();
+    let size: libc::c_int = 4096;
+    // SAFETY: sender is open and size is a properly sized socket option.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                sender.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&size as *const libc::c_int).cast(),
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let writer = thread::spawn(move || {
+        let mut io = Exchange {
+            stream: &sender,
+            deadline: Instant::now() + Duration::from_millis(150),
+        };
+        let result = io.write_all(&vec![0; 1024 * 1024]).map_err(|e| e.kind());
+        let _ = tx.send(result);
+    });
+    let result = rx.recv_timeout(Duration::from_secs(5));
+    drop(peer);
+    writer.join().unwrap();
+    assert_eq!(result.unwrap(), Err(std::io::ErrorKind::TimedOut));
+}

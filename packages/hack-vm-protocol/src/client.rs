@@ -43,6 +43,9 @@ impl Exchange<'_> {
                 return Err(err);
             }
             // HUP can coexist with readable bytes. recv decides EOF.
+            if Instant::now() >= self.deadline {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
             let n = op();
             if n >= 0 {
                 return Ok(n as usize);
@@ -79,6 +82,25 @@ impl Write for Exchange<'_> {
         if b.is_empty() {
             return Ok(0);
         }
+        // Darwin can block on a large Unix socket send despite MSG_DONTWAIT.
+        // A single writer can use the space guaranteed by POLLOUT.
+        #[cfg(target_vendor = "apple")]
+        let b = {
+            let mut low: libc::c_int = 0;
+            let mut len = std::mem::size_of_val(&low) as libc::socklen_t;
+            // SAFETY: the live socket and both out-parameters remain valid.
+            let status = unsafe {
+                libc::getsockopt(
+                    self.stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDLOWAT,
+                    (&mut low as *mut libc::c_int).cast(),
+                    &mut len,
+                )
+            };
+            let limit = if status == 0 { low.max(1) as usize } else { 1 };
+            &b[..b.len().min(limit)]
+        };
         // SAFETY: b is readable and the stream lives through send.
         self.transfer(libc::POLLOUT, || unsafe {
             libc::send(

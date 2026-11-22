@@ -1528,7 +1528,8 @@ JSON file (a singly linked, mode-`0600` file owned by you):
 replaced. For each build declaration (project root and branch, context, Dockerfile and
 target) it keeps the image of the most recently built or reused key (`current`) and of
 the one before it (`previous`, for a quick revert). It also keeps every image that any
-retained run's saved state mentions, every image a container still uses (the engine
+retained run's saved state mentions, apart from its restore history (a diagnostic
+record recovery only compares against; nothing starts a container from it), every image a container still uses (the engine
 refuses those), every image of a receipt written before this rule, and every image
 whose ownership labels are not exactly this runtime's. An `up` that built an image runs
 it with `--best-effort` once the project is ready: that form never fails, reports a

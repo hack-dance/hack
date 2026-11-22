@@ -227,7 +227,8 @@ impl Targets {
     }
 }
 
-pub(super) fn inspect_targets(
+#[cfg(test)]
+fn inspect_targets(
     candidate: &Candidate,
     engine: &impl Inspection,
     run: &str,
@@ -1216,8 +1217,16 @@ pub fn publish_bridge(
     hostnames: &[String],
 ) -> Result<(), CandidateError> {
     let engine = connect_waiting(candidate)?;
-    let upstream =
-        publication_upstream(candidate, &engine, run, slot, reservation, port, hostnames)?;
+    let upstream = publication_upstream(
+        candidate,
+        &engine,
+        run,
+        slot,
+        reservation,
+        port,
+        hostnames,
+        None,
+    )?;
     super::super::publication::launch(
         candidate,
         super::super::publication::Launch {
@@ -1233,7 +1242,7 @@ pub fn publish_bridge(
 }
 
 /// Revalidate the exact frontend and relay under the caller's provider lease.
-fn publication_upstream(
+pub(super) fn publication_upstream(
     candidate: &Candidate,
     engine: &Engine<'_>,
     run: &str,
@@ -1241,6 +1250,7 @@ fn publication_upstream(
     reservation: &str,
     port: Option<u16>,
     hostnames: &[String],
+    ready_service: Option<(&str, &str)>,
 ) -> Result<std::path::PathBuf, CandidateError> {
     let store = load_store(candidate, engine, false)?;
     let a = store
@@ -1255,11 +1265,12 @@ fn publication_upstream(
                     .is_some_and(|r| r.transport == relay::Transport::ReservationV1)
         })
         .ok_or_else(invalid)?;
-    let targets = inspect_targets(
+    let targets = inspect_targets_scoped(
         candidate,
         engine,
         run,
         &std::collections::BTreeSet::from([a.service.as_str()]),
+        ready_service,
     )?;
     if !targets.current(a, engine.guest().boot_id())
         || relay::operate(engine, slot, a, "inspect", None)? != "running"

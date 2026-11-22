@@ -47,11 +47,145 @@ enum Frontend<'a> {
 }
 
 #[derive(Default)]
-pub(super) struct Publishers {
+pub(in crate::provider::graph) struct Publishers {
     children: Vec<Owned>,
     probe_generations: BTreeMap<String, String>,
     owner: String,
     announce: bool,
+}
+
+pub(in crate::provider::graph) struct EarlyPublications {
+    pub(super) publishers: Publishers,
+    slots: BTreeMap<String, graph::RouteSlot>,
+    deadline: Instant,
+}
+
+impl EarlyPublications {
+    pub(super) fn new(slots: &BTreeMap<String, graph::RouteSlot>, deadline: Instant) -> Self {
+        Self {
+            publishers: Publishers::default(),
+            slots: slots.clone(),
+            deadline,
+        }
+    }
+
+    pub(in crate::provider::graph) fn publish(
+        &mut self,
+        engine: &graph::Engine<'_>,
+        receipt: &Receipt,
+        service: &str,
+        container_id: &str,
+    ) -> Result<(), CandidateError> {
+        let resource = receipt
+            .resources
+            .get(&format!("container:{service}"))
+            .ok_or_else(refused)?;
+        if resource.routing.is_none() && resource.loopback_ports.is_empty() {
+            return Ok(());
+        }
+        if resource.routing.is_some() != self.slots.contains_key(service) {
+            return Err(refused());
+        }
+        let candidate = engine.guest().candidate();
+        let run = &receipt.run;
+        let check = || {
+            if signals::startup_pending() || Instant::now() >= self.deadline {
+                Err(refused())
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
+        self.publishers.owner.clone_from(&receipt.owner);
+        let selected = graph::bridges::admit_ready_service(
+            engine,
+            run,
+            service,
+            container_id,
+            self.slots.get(service).copied(),
+        )?;
+        for (slot, assignment) in selected {
+            let port = assignment.loopback_port.map(|binding| binding.host_port);
+            let hostnames = if port.is_none() {
+                resource
+                    .routing
+                    .as_ref()
+                    .ok_or_else(refused)?
+                    .hostnames
+                    .clone()
+            } else {
+                Vec::new()
+            };
+            let upstream = || {
+                graph::bridges::publication_upstream(
+                    candidate,
+                    engine,
+                    run,
+                    slot,
+                    &assignment.reservation,
+                    port,
+                    &hostnames,
+                    Some((service, container_id)),
+                )
+            };
+            let endpoint = upstream()?;
+            let child = publication::launch_child(
+                candidate,
+                &publication::Launch {
+                    owner: &receipt.owner,
+                    run,
+                    reservation: &assignment.reservation,
+                    slot,
+                    port,
+                    hostnames: &hostnames,
+                    upstream: &endpoint,
+                },
+                || {
+                    check()?;
+                    if upstream()? != endpoint {
+                        return Err(refused());
+                    }
+                    check()
+                },
+            )?;
+            self.publishers.children.push(Owned {
+                child,
+                run: run.clone(),
+                reservation: assignment.reservation,
+                service: service.to_owned(),
+                hostnames,
+                port,
+                target: assignment.loopback_port.map(|binding| binding.target),
+                exited: None,
+                exit_proof: None,
+                exit_pending: false,
+            });
+            let owned = self.publishers.children.last_mut().ok_or_else(refused)?;
+            let observed = (|| {
+                loop {
+                    check()?;
+                    if publication::child_exit_pending(&owned.child)? {
+                        return Err(refused());
+                    }
+                    if published(candidate, owned).is_ok() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(PUBLISHED_POLL);
+                }
+            })();
+            if let Err(error) = observed {
+                // The direct child is unreaped, so its PID cannot be reused.
+                // Stop before returning to graph cleanup: an authorized
+                // child might otherwise bind after cleanup observes no socket.
+                if !publication::child_exit_pending(&owned.child)? {
+                    owned.child.kill().map_err(|_| refused())?;
+                }
+                owned.exited = Some(owned.child.wait().map_err(|_| refused())?);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
 }
 
 fn command(
@@ -88,6 +222,39 @@ fn command(
 }
 
 impl Publishers {
+    pub(super) fn finish_early_start(
+        &mut self,
+        candidate: &Candidate,
+        receipt: &Receipt,
+        signals: &signals::Events,
+        deadline: Instant,
+        slots: &BTreeMap<String, graph::RouteSlot>,
+    ) -> Result<(), CandidateError> {
+        let count: usize = receipt
+            .resources
+            .values()
+            .map(|resource| resource.loopback_ports.len() + usize::from(resource.routing.is_some()))
+            .sum();
+        if count != self.children.len() {
+            return Err(refused());
+        }
+        if count == 0 && slots.is_empty() {
+            return Ok(());
+        }
+        for owned in &self.children {
+            signals.watch_child(&owned.child)?;
+        }
+        graph::bridges::supervise_probes(
+            candidate,
+            &receipt.run,
+            &mut self.probe_generations,
+            Some(deadline),
+            &BTreeSet::new(),
+            &|| check_deadline(signals, deadline),
+        )?;
+        self.verify_live(candidate)
+    }
+
     /// Notices may follow only the successfully flushed foreground readiness frame.
     pub(super) fn announce(&mut self) {
         self.announce = true;

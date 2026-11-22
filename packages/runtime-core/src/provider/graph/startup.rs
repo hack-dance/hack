@@ -235,6 +235,16 @@ pub(super) trait Driver {
     fn service_ready(&mut self, _service: &str, _container_id: &str) -> Result<(), CandidateError> {
         Ok(())
     }
+
+    fn service_ready_leased(
+        &mut self,
+        _engine: &Engine<'_>,
+        _receipt: &Receipt,
+        service: &str,
+        container_id: &str,
+    ) -> Result<(), CandidateError> {
+        self.service_ready(service, container_id)
+    }
 }
 
 /// Named routes rely on the engine-owned hosts file and the image resolver policy.

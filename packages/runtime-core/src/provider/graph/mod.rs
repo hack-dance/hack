@@ -1085,7 +1085,7 @@ impl Driver for Session<'_, '_> {
                             "A ready service has no confirmed container ID.",
                         )
                     })?;
-                startup.service_ready(service, id)
+                startup.service_ready_leased(&self.engine, &self.receipt, service, id)
             }
             Event::Ready => {
                 if let Some(startup) = self.startup.as_mut() {

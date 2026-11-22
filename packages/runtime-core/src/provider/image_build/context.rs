@@ -46,7 +46,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -340,6 +340,85 @@ fn open_path(path: &Path) -> Result<fsat::Dir, CandidateError> {
         }
     }
     Ok(directory)
+}
+
+/// The project root, held open, for reading the build's own input files (Dockerfile and
+/// ignore files) through descriptors: no component of their paths is followed as a
+/// symlink, so a directory swapped after the request was validated cannot redirect a
+/// read outside the project.
+pub(super) struct ProjectRoot {
+    root: PathBuf,
+    directory: fsat::Dir,
+}
+
+impl ProjectRoot {
+    pub(super) fn open(root: &Path) -> Result<Self, CandidateError> {
+        Ok(Self {
+            root: root.to_owned(),
+            directory: open_path(root)?,
+        })
+    }
+
+    /// Read the optional singly linked regular file at `path` (beneath the root), at
+    /// most `limit` bytes. `None` when it does not exist; anything else that is not
+    /// such a file refuses `native_build_source`, as do symlinks on its path.
+    pub(super) fn read(&self, path: &Path, limit: u64) -> Result<Option<Vec<u8>>, CandidateError> {
+        use std::path::Component;
+        let refuse = || {
+            refusal(
+                "native_build_source",
+                "A build input is a symlink or cannot be opened.",
+            )
+        };
+        let relative = path.strip_prefix(&self.root).map_err(|_| refuse())?;
+        let mut names = Vec::new();
+        for component in relative.components() {
+            match component {
+                Component::Normal(name) => names.push(name.as_bytes()),
+                _ => return Err(refuse()),
+            }
+        }
+        let Some((leaf, parents)) = names.split_last() else {
+            return Err(refuse());
+        };
+        let mut held: Option<fsat::Dir> = None;
+        let mut walked = Vec::new();
+        for name in parents {
+            if !walked.is_empty() {
+                walked.push(b'/');
+            }
+            walked.extend_from_slice(name);
+            #[cfg(test)]
+            before_descend(&walked);
+            let parent = held.as_ref().unwrap_or(&self.directory);
+            held = Some(parent.dir(name).map_err(|_| refuse())?);
+        }
+        let parent = held.as_ref().unwrap_or(&self.directory);
+        let file = match parent.file(leaf) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(refuse()),
+        };
+        let status = fsat::status(&file).map_err(|_| refuse())?;
+        if !status.is_file() || status.nlink != 1 || status.size > limit {
+            return Err(refusal(
+                "native_build_source",
+                "Build inputs must be singly linked regular files within their size limits.",
+            ));
+        }
+        let mut bytes = Vec::new();
+        (&file)
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(state::io)?;
+        if bytes.len() as u64 > limit {
+            return Err(refusal(
+                "native_build_source",
+                "A build input grew beyond its size limit.",
+            ));
+        }
+        Ok(Some(bytes))
+    }
 }
 
 /// Read one regular file of `directory` without following a symlink, checking it is

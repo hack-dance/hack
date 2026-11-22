@@ -40,6 +40,7 @@ pub(super) struct Status {
     pub ino: u64,
     pub size: u64,
     pub mode: u32,
+    pub nlink: u64,
     pub mtime: (i64, i64),
     pub ctime: (i64, i64),
 }
@@ -54,6 +55,7 @@ impl Status {
             ino: raw.st_ino as u64,
             size: u64::try_from(raw.st_size).unwrap_or(0),
             mode: raw.st_mode as u32,
+            nlink: raw.st_nlink as u64,
             mtime: (raw.st_mtime as i64, raw.st_mtime_nsec as i64),
             ctime: (raw.st_ctime as i64, raw.st_ctime_nsec as i64),
         }
@@ -264,8 +266,13 @@ impl Dir {
                 }
                 return Ok(names);
             }
-            // SAFETY: readdir returned a live entry whose name is NUL-terminated.
-            let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            // SAFETY: readdir returned a live entry that stays valid until the next
+            // readdir. Its record may be shorter than the declared `d_name` array, so
+            // only the field's address is formed (never a reference to the array);
+            // the kernel NUL-terminates the name within the record.
+            let name = unsafe { std::ptr::addr_of!((*entry).d_name) }.cast::<libc::c_char>();
+            // SAFETY: `name` points at the NUL-terminated name of the live entry.
+            let child = unsafe { CStr::from_ptr(name) }.to_bytes();
             if child == b"." || child == b".." {
                 continue;
             }

@@ -2215,3 +2215,60 @@ fn base_resolutions_are_shared_across_builds_of_a_namespace_for_a_day() {
     // Reclamation still reads the namespace directory.
     assert!(reclaim::run(&fixture.candidate, &pool).is_ok());
 }
+
+#[test]
+fn preparation_never_reads_inputs_through_a_swapped_directory() {
+    let fixture = Fixture::new();
+    let app = fixture.project.join("app");
+    fs::write(app.join(".dockerignore"), "*.log\n").unwrap();
+    let outside = fixture.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    let foreign = "FROM busybox:1.36\nRUN echo outside\n";
+    fs::write(outside.join("Dockerfile"), foreign).unwrap();
+    fs::write(outside.join(".dockerignore"), "outside-rules\n").unwrap();
+    fs::write(outside.join("Dockerfile.dockerignore"), "outside-rules\n").unwrap();
+    let original = fs::read(app.join("Dockerfile")).unwrap();
+    // The swap happens after the request's paths were validated, as the input reads
+    // enter `app`, once for each kind of input in turn.
+    for (fires_on, label) in [(1, "Dockerfile"), (2, "ignore files")] {
+        let (hook_app, hook_outside) = (app.clone(), outside.clone());
+        let mut seen = 0;
+        context::BEFORE_DESCEND.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |relative: &[u8]| {
+                if relative == b"app" {
+                    seen += 1;
+                    if seen == fires_on {
+                        fs::rename(&hook_app, hook_app.with_file_name("app-moved")).unwrap();
+                        std::os::unix::fs::symlink(&hook_outside, &hook_app).unwrap();
+                    }
+                }
+            }))
+        });
+        let prepared = prepare(
+            fixture.request(Policy::Missing),
+            &builds_root(&fixture.candidate),
+        );
+        context::BEFORE_DESCEND.with(|slot| *slot.borrow_mut() = None);
+        assert!(app.is_symlink(), "{label}: the swap never happened");
+        match prepared {
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error.code,
+                        "native_build_source" | "native_build_context_changed"
+                    ),
+                    "{label}: {}",
+                    error.code
+                );
+                assert!(!error.message.contains("outside"));
+            }
+            Ok(inputs) => {
+                assert_eq!(inputs.dockerfile, original, "{label}");
+                assert_ne!(inputs.ignore, b"outside-rules\n", "{label}");
+            }
+        }
+        // Put the project back for the next case.
+        fs::remove_file(&app).unwrap();
+        fs::rename(app.with_file_name("app-moved"), &app).unwrap();
+    }
+}

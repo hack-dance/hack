@@ -591,12 +591,16 @@ struct IgnoreFiles {
     dockerfile: Option<Vec<u8>>,
 }
 impl IgnoreFiles {
-    fn read(context: &Path, dockerfile: &Path) -> Result<Self, CandidateError> {
+    fn read(
+        project: &context::ProjectRoot,
+        context: &Path,
+        dockerfile: &Path,
+    ) -> Result<Self, CandidateError> {
         let mut specific = dockerfile.as_os_str().to_owned();
         specific.push(".dockerignore");
         Ok(Self {
-            context: read_bounded_file(&context.join(".dockerignore"), MAX_IGNORE_BYTES)?,
-            dockerfile: read_bounded_file(Path::new(&specific), MAX_IGNORE_BYTES)?,
+            context: project.read(&context.join(".dockerignore"), MAX_IGNORE_BYTES)?,
+            dockerfile: project.read(Path::new(&specific), MAX_IGNORE_BYTES)?,
         })
     }
     fn digests(&self) -> Value {
@@ -642,7 +646,10 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
         ));
     }
     let dockerfile = crate::project::resolve_source(&root, &context, &request.dockerfile, false)?;
-    let bytes = read_bounded_file(&dockerfile, build_scan::MAX_DOCKERFILE_BYTES as u64)?
+    // Every input file is read through descriptors held from the project root down.
+    let project = context::ProjectRoot::open(&root)?;
+    let bytes = project
+        .read(&dockerfile, build_scan::MAX_DOCKERFILE_BYTES as u64)?
         .ok_or_else(|| {
             refusal(
                 "native_build_source",
@@ -676,7 +683,7 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
             )
         })
         .collect();
-    let ignore = IgnoreFiles::read(&context, &dockerfile)?;
+    let ignore = IgnoreFiles::read(&project, &context, &dockerfile)?;
     let ignore_digests = ignore.digests();
     let ignore = ignore.effective();
     let cache = builds.join(&namespace).join(context::cache_name(&context));

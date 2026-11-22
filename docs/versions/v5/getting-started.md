@@ -84,6 +84,9 @@ names the blocker and shows the command to run next.
 `hack ps` lists services with their primary address and current state. An
 address followed by `+1` has one more configured address. Use `hack ps --wide`
 for all addresses, container names, exit codes and port details.
+Use `hack ps --copies` to list the project's checkouts and branch instances
+together. A copy whose runtime state cannot be confirmed shows `unknown`.
+Use `hack ps --copies --json` for the same inventory in structured form.
 
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;

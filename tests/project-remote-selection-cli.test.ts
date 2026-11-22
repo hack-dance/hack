@@ -21,7 +21,7 @@ test("the six --use entry points deliver the invocation target without saving it
       await mkdir(hack, { recursive: true });
       await Bun.write(
         join(hack, "docker-compose.yml"),
-        'include: [worker.yml]\nservices:\n  api:\n    image: alpine\n    depends_on: [worker]\n    environment: ["DB_HOST=${DB_HOST:?required}"]\n  postgres:\n    image: postgres\n  migrate:\n    image: alpine\n    profiles: [maintenance]\n'
+        'include: ["${WORKER_FILE:-missing.yml}"]\nservices:\n  api:\n    image: alpine\n    depends_on: [worker]\n    environment: ["DB_HOST=${DB_HOST:?required}"]\n  postgres:\n    image: postgres\n  migrate:\n    image: alpine\n    profiles: [maintenance]\n'
       );
       await Bun.write(
         join(hack, "worker.yml"),
@@ -64,7 +64,7 @@ test("the six --use entry points deliver the invocation target without saving it
       );
       await Bun.write(
         join(hack, "hack.env.default.yaml"),
-        "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    LIVE_HOST: live.example.test\n  host:\n    LIVE_HOST: host.example.test\n"
+        "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    LIVE_HOST: live.example.test\n    WORKER_FILE: worker.yml\n  host:\n    LIVE_HOST: host.example.test\n"
       );
     }
     const script = (name: string, body: string) =>
@@ -160,6 +160,13 @@ test("the six --use entry points deliver the invocation target without saving it
     const targetedRestart = await Bun.file(log).text();
     expect(targetedRestart).toMatch(/ up .*--force-recreate.* api/);
     expect(targetedRestart).not.toMatch(/ up .* postgres/);
+    await Bun.write(log, "");
+    ok(["up", "--detach", "--use", "db=local", "api"]);
+    const scopedLocal = await Bun.file(log).text();
+    expect(scopedLocal).toMatch(
+      / up --detach --no-deps --no-recreate postgres/
+    );
+    expect(scopedLocal).not.toMatch(/ up .* api postgres/);
     expect(
       ok(["host", "exec", ...choice, "--", "/usr/bin/printenv", "DB_HOST"])
         .stdout

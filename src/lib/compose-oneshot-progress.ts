@@ -539,11 +539,18 @@ const BRACED = /^([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)(.*))?$/s;
  */
 export function interpolateComposeValue(
   value: string,
-  env: Readonly<Record<string, string | undefined>>
+  env: Readonly<Record<string, string | undefined>>,
+  allowMissingDefault = false
 ): string | null {
   let unknown = false;
   const out = value.replace(INTERPOLATION, (match, braced, bare) => {
-    const resolved = resolveReference({ match, braced, bare, env });
+    const resolved = resolveReference({
+      match,
+      braced,
+      bare,
+      env,
+      allowMissingDefault,
+    });
     if (resolved === null) {
       unknown = true;
       return "";
@@ -558,6 +565,7 @@ function resolveReference(input: {
   readonly match: string;
   readonly braced: unknown;
   readonly bare: unknown;
+  readonly allowMissingDefault: boolean;
   readonly env: Readonly<Record<string, string | undefined>>;
 }): string | null {
   if (input.match === "$$") {
@@ -574,7 +582,7 @@ function resolveReference(input: {
   const [, name, operator, fallback] = parts;
   const current = input.env[name as string];
   if (current === undefined) {
-    return null;
+    return input.allowMissingDefault ? (fallback ?? null) : null;
   }
   if (operator === ":-") {
     return current ? current : (fallback ?? "");
@@ -641,12 +649,18 @@ export async function readComposeOneShotGraph(
   composeFiles: readonly string[],
   options: OneShotGraphOptions = {}
 ): Promise<ComposeOneShotGraph> {
-  const { documents, resolution } = await readComposeDocuments(composeFiles);
+  const { documents, resolution } = await readComposeDocuments(
+    composeFiles,
+    options.interpolationEnv
+  );
   const graph = mergeOneShotGraphs(documents, options);
   return resolution.incomplete ? { ...graph, incomplete: true } : graph;
 }
 
-async function readComposeDocuments(composeFiles: readonly string[]) {
+async function readComposeDocuments(
+  composeFiles: readonly string[],
+  interpolationEnv?: OneShotGraphOptions["interpolationEnv"]
+) {
   const documents: unknown[] = [];
   const resolution = { incomplete: false };
   for (const file of composeFiles) {
@@ -655,15 +669,22 @@ async function readComposeDocuments(composeFiles: readonly string[]) {
       documents,
       resolution,
       includeChain: [file],
+      interpolationEnv,
     });
   }
   return { documents, resolution };
 }
 
 export async function readIncludedComposeServiceNames(
-  file: string
+  file: string,
+  env: OneShotGraphOptions["interpolationEnv"] = process.env
 ): Promise<readonly string[]> {
-  const { documents } = await readComposeDocuments([file]);
+  const files = [file];
+  const interpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: files,
+    env,
+  });
+  const { documents } = await readComposeDocuments(files, interpolationEnv);
   return [
     ...new Set(
       documents.flatMap((doc) =>
@@ -684,6 +705,7 @@ async function collectComposeDocuments(input: {
   readonly documents: unknown[];
   readonly resolution: ExtendsResolution;
   readonly includeChain: readonly string[];
+  readonly interpolationEnv?: OneShotGraphOptions["interpolationEnv"];
 }): Promise<void> {
   const document = await readComposeDocument(input.file);
   if (document === null) {
@@ -695,7 +717,8 @@ async function collectComposeDocuments(input: {
   for (const included of includedFiles(
     document,
     input.file,
-    input.resolution
+    input.resolution,
+    input.interpolationEnv
   )) {
     if (
       input.includeChain.includes(included) ||
@@ -709,6 +732,7 @@ async function collectComposeDocuments(input: {
       documents: input.documents,
       resolution: input.resolution,
       includeChain: [...input.includeChain, included],
+      interpolationEnv: input.interpolationEnv,
     });
   }
   input.documents.push(
@@ -724,7 +748,8 @@ async function collectComposeDocuments(input: {
 function includedFiles(
   document: unknown,
   file: string,
-  resolution: ExtendsResolution
+  resolution: ExtendsResolution,
+  interpolationEnv?: OneShotGraphOptions["interpolationEnv"]
 ): string[] {
   if (!(isRecord(document) && document.include !== undefined)) {
     return [];
@@ -740,7 +765,14 @@ function includedFiles(
       resolution.incomplete = true;
       continue;
     }
-    for (const path of named) {
+    for (const raw of named) {
+      const path = interpolationEnv
+        ? interpolateComposeValue(raw, interpolationEnv, true)
+        : raw;
+      if (path === null) {
+        resolution.incomplete = true;
+        continue;
+      }
       paths.push(isAbsolute(path) ? path : resolve(dirname(file), path));
     }
   }

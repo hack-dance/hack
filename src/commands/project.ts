@@ -2075,28 +2075,43 @@ export async function resolveModernComposeEnvOverrides(opts: {
   >;
   readonly effectiveEnvName: string | null;
 } | null> {
-  const modern = await resolveProjectEnvConfig({
+  const envInput = {
     projectRoot: opts.project.projectRoot,
     projectDir: opts.project.projectDir,
     envName: opts.envName,
     serviceNames: opts.allServiceNames,
-  });
+  };
+  let modern = await resolveProjectEnvConfig(envInput);
   // After a successful read, so a refusal stays one line.
   await reportLooseEnvLayerModes({ projectDir: opts.project.projectDir });
   if (!modern) {
     return null;
   }
+  const globalEnv = applyRemoteEnv(modern.globalEnv, opts.remoteChoices);
+  const allServiceNames = opts.remoteChoices?.length
+    ? await readIncludedComposeServiceNames(opts.project.composeFile, {
+        ...process.env,
+        ...globalEnv,
+      })
+    : opts.allServiceNames;
+  if (allServiceNames.some((name) => !opts.allServiceNames.includes(name))) {
+    modern =
+      (await resolveProjectEnvConfig({
+        ...envInput,
+        serviceNames: allServiceNames,
+      })) ?? modern;
+  }
+  const serviceScope = { ...opts, allServiceNames };
   const unmigrated = await findUnmigratedLegacyDotenv({
     projectRoot: opts.project.projectRoot,
     projectDir: opts.project.projectDir,
-    serviceNames: opts.allServiceNames,
+    serviceNames: allServiceNames,
   });
   if (hasUnmigratedLegacyDotenv(unmigrated)) {
     logger.warn({
       message: `This checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so services that rely on them may not get them. Run \`hack doctor --migrate-env-config\`, which moves them to this checkout's local layers or says what to change first.`,
     });
   }
-  const globalEnv = applyRemoteEnv(modern.globalEnv, opts.remoteChoices);
   const hostEnv = selectProjectEnvValuesForExecutionTarget({
     resolved: modern,
     scopeName: "global",
@@ -2107,7 +2122,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
   });
   const serviceEnv = opts.remoteChoices?.length
     ? Object.fromEntries(
-        composeEnvOverrideServices(opts).map((service) => [
+        composeEnvOverrideServices(serviceScope).map((service) => [
           service,
           applyRemoteEnv(
             modern.serviceEnv[service] ?? modern.globalEnv,
@@ -2117,10 +2132,10 @@ export async function resolveModernComposeEnvOverrides(opts: {
       )
     : modern.serviceEnv;
   const preflightEnvByService = Object.fromEntries(
-    opts.targetServices.map((service) => [
-      service,
-      serviceEnv[service] ?? globalEnv,
-    ])
+    (opts.remoteChoices?.length
+      ? composeEnvOverrideServices(serviceScope)
+      : opts.targetServices
+    ).map((service) => [service, serviceEnv[service] ?? globalEnv])
   );
 
   for (const scope of modern.unknownScopes) {
@@ -2139,7 +2154,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
     labels: opts.remoteChoices?.length
       ? remoteSelectionLabels(opts.remoteChoices)
       : undefined,
-    targetServices: composeEnvOverrideServices(opts),
+    targetServices: composeEnvOverrideServices(serviceScope),
     globalEnv,
     serviceEnv,
     effectiveScopes: modern.effectiveMetadata,
@@ -2167,7 +2182,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
       projectDir: opts.project.projectDir,
       text: override.text,
       persist: opts.persist,
-      serviceNames: opts.allServiceNames,
+      serviceNames: allServiceNames,
     }),
     env: composeEnv,
     lifecycleEnv,
@@ -2305,8 +2320,13 @@ async function resolveComposeEnvOverrides(opts: {
   if (opts.remoteChoices?.length) {
     const managedEnv = selectHackEnvValues({ resolved });
     const globalEnv = applyRemoteEnv(managedEnv, opts.remoteChoices);
+    const allServiceNames = await readIncludedComposeServiceNames(
+      opts.project.composeFile,
+      { ...process.env, ...resolved.envForCompose, ...globalEnv }
+    );
+    const services = composeEnvOverrideServices({ ...opts, allServiceNames });
     const serviceEnv = Object.fromEntries(
-      composeEnvOverrideServices(opts).map((service) => [
+      services.map((service) => [
         service,
         applyRemoteEnv(
           selectHackEnvValues({ resolved, serviceName: service }),
@@ -2318,7 +2338,7 @@ async function resolveComposeEnvOverrides(opts: {
       labels: opts.remoteChoices?.length
         ? remoteSelectionLabels(opts.remoteChoices)
         : undefined,
-      targetServices: composeEnvOverrideServices(opts),
+      targetServices: services,
       globalEnv,
       serviceEnv,
     });
@@ -2334,7 +2354,7 @@ async function resolveComposeEnvOverrides(opts: {
             projectDir: opts.project.projectDir,
             text: override.text,
             persist: opts.persist,
-            serviceNames: opts.allServiceNames,
+            serviceNames: allServiceNames,
           })
         : [],
       env,
@@ -8203,11 +8223,12 @@ async function runUpCommand({
         composeFile: project.composeFile,
       })
     : null;
-  const initialServices = remoteServiceTargets(
-    remoteChoices,
-    serviceScoped ? requestedServices : allServiceNames,
-    serviceScoped ? "start" : "whole"
-  );
+  const initialServices = serviceScoped
+    ? remoteServiceTargets(remoteChoices, requestedServices, "start")
+    : allServiceNames;
+  const scopedBackingServices = serviceScoped
+    ? initialServices.filter((service) => !requestedServices.includes(service))
+    : [];
   const cacheBootstrapServices = scopedDependencyCache
     ? await resolveDependencyCacheBootstrapServices({
         composeFile: project.composeFile,
@@ -8227,6 +8248,7 @@ async function runUpCommand({
     envName,
   });
 
+  const defaultTargets = serviceScoped ? requestedServices : initialServices;
   const targetServices =
     !serviceScoped && remoteChoices.length
       ? await resolveRemoteStartupServices({
@@ -8236,7 +8258,7 @@ async function runUpCommand({
           env: envOverrides.env,
           choices: remoteChoices,
         })
-      : initialServices;
+      : defaultTargets;
   const preparedServices = serviceScoped
     ? initialPreparedServices
     : targetServices;
@@ -8508,6 +8530,36 @@ async function runUpCommand({
       return bootstrapCode;
     }
     const upPhase = trackComposeStartupPhase();
+    if (scopedBackingServices.length) {
+      const cwd = dirname(project.composeFile);
+      const result = await exec(
+        [
+          ...buildComposeArgs({
+            composeFiles: composeFilesWithEnv,
+            composeProject: composeProjectName,
+            profiles,
+            cwd,
+          }),
+          "up",
+          "--detach",
+          "--no-deps",
+          "--no-recreate",
+          ...scopedBackingServices,
+        ],
+        {
+          cwd,
+          env: envOverrides.env,
+          timeoutMs: startupTimeoutMs,
+          forwardSignals: true,
+        }
+      );
+      if (result.exitCode !== 0) {
+        throw new HackCliError({
+          code: "E_COMPOSE_FAILED",
+          message: "Could not start the selected backing services.",
+        });
+      }
+    }
     if (!serviceScoped) {
       await stopInactiveRemoteServices({
         choices: remoteChoices,

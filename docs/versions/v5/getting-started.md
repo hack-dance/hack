@@ -87,6 +87,11 @@ Interrupting `hack autostart run` cancels the pass and waits for startup cleanup
 After upgrades that change global templates, run `hack global install` manually
 before relying on login routing.
 
+If a default remote target declares a [sign-in prerequisite](https://github.com/hack-dance/hack/blob/next/docs/env.md#sign-in-prerequisites-for-compose-projects),
+Hack checks it before startup hooks. If the check fails, follow the displayed
+login command and try again. Use `hack config validate` to verify declarations
+without running the checks.
+
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
 have no URL. Sign in or load a page that reads data to check the app itself.

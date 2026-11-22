@@ -21,14 +21,15 @@ import {
   readNativeConfigInput,
 } from "../lib/native-config-compiler.ts";
 import { validateNativeProject } from "../lib/native-project-validation.ts";
+import { readProjectConfigInDirectory } from "../lib/project.ts";
+import { discoverProjectInputs } from "../lib/project-input-selection.ts";
 
 const spec = defineCommand({
   name: "validate",
-  summary:
-    "Validate native configuration and selected local overlays without starting workloads",
+  summary: "Validate project configuration without starting workloads",
   group: "Project",
   description:
-    "Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.",
+    "Uses the matching bundled Rust compiler. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.",
   options: [
     defineOption({
       name: "file",
@@ -91,6 +92,16 @@ export const configValidateCommand = withHandler(
     process.once("SIGINT", cancel);
     process.once("SIGTERM", cancel);
     try {
+      const startDir = resolve(ctx.cwd, args.options.path ?? ".");
+      if (
+        file === undefined &&
+        (await validateComposeConfiguration(
+          startDir,
+          args.options.json === true
+        ))
+      ) {
+        return 0;
+      }
       const result =
         file === undefined
           ? await validateNativeProject({
@@ -144,6 +155,35 @@ export const configValidateCommand = withHandler(
     }
   }
 );
+
+async function validateComposeConfiguration(
+  startDir: string,
+  json: boolean
+): Promise<boolean> {
+  const inputs = await discoverProjectInputs({ startDir });
+  const directory = inputs?.composeDirectories[0];
+  if (inputs?.kind !== "legacy" || !directory) {
+    return false;
+  }
+  const config = await readProjectConfigInDirectory(
+    resolve(inputs.projectRoot, directory)
+  );
+  if (config.prerequisites?.error) {
+    throw config.prerequisites.error;
+  }
+  if (config.parseError) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: config.parseError,
+    });
+  }
+  process.stdout.write(
+    json
+      ? `${JSON.stringify({ transport_version: 1, ok: true, kind: "compose" })}\n`
+      : "Compose project configuration is valid.\n"
+  );
+  return true;
+}
 
 function renderValidationResult(opts: {
   readonly result: NativeConfigCompileResult | NativeConfigResolveResult;

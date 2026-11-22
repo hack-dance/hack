@@ -31,6 +31,10 @@ import {
 } from "./project-input-selection.ts";
 import { normalizeProjectName } from "./project-name.ts";
 import {
+  type ProjectPrerequisiteValidation,
+  validateProjectPrerequisites,
+} from "./project-remotes-config.ts";
+import {
   type ProjectSharedHelperConfig,
   parseProjectSharedHelpers,
 } from "./project-shared-helpers.ts";
@@ -251,6 +255,7 @@ export async function readProjectDefaultEnvConfig(opts: {
 }
 
 export interface ProjectConfig {
+  readonly prerequisites?: ProjectPrerequisiteValidation;
   readonly name?: string;
   readonly devHost?: string;
   readonly defaultEnvConfig?: string;
@@ -699,6 +704,15 @@ export function parseProjectConfigRecord(
     };
   }
 
+  const hasPrerequisites = [
+    "requires",
+    "remotes",
+    "min_cli_version",
+    "tools",
+  ].some((key) => value[key] !== undefined);
+  const prerequisites = hasPrerequisites
+    ? validateProjectPrerequisites(value)
+    : undefined;
   const name = getString(value, "name");
   const devHost = getString(value, "dev_host");
   const envConfig = getRecord(value, "env");
@@ -752,6 +766,7 @@ export function parseProjectConfigRecord(
       ? normalizeEnvConfigName(envDefaultOverlayRaw)
       : null;
   const parseErrors = [
+    ...(prerequisites?.error ? [prerequisites.error.message] : []),
     ...(defaultEnvConfigRaw && defaultEnvConfig === null
       ? [
           "Project defaultEnvConfig/default_env_config must be a non-empty env name.",
@@ -772,6 +787,7 @@ export function parseProjectConfigRecord(
   ];
 
   return {
+    ...(prerequisites ? { prerequisites } : {}),
     ...(name ? { name } : {}),
     ...(devHost ? { devHost } : {}),
     ...(defaultEnvConfig ? { defaultEnvConfig } : {}),

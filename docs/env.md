@@ -1886,3 +1886,39 @@ with an in-memory backend. Tests that exercise keychain behavior can temporarily
 clear the flag; the preload still prevents native keychain access. Child CLI
 processes inherit the flag, so tests must pass it through when supplying a custom
 process environment. The in-memory backend is cleared after each test.
+
+## Sign-in prerequisites for Compose projects
+
+Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
+`requires` array names those requirements. Hack checks the default target's
+requirements before running Compose lifecycle hooks for `up`, `restart`, or
+`run`. When you select services explicitly, Hack checks the remotes whose
+mapped env names match an `environment` key or a Compose interpolation
+reference in a selected service or its dependencies. With no service selection, Hack checks every default
+remote. Hack also checks every default remote when it cannot determine the
+selected services' environment keys, including when a service uses `env_file`
+or the checkout has managed env layers.
+Doctor runs preset checks and shows each declared login command. It reports
+custom checks as `not checked` after looking up their executables.
+
+A prerequisite can use the `aws-sso` preset with a `profile`, or the
+`gcloud-adc` preset. For other providers, give `check` and `login` as argv
+arrays. Hack runs these directly. A prerequisite's optional `tools` array
+names entries in the same configuration's top-level `tools` block. Each
+entry supplies `bins` and can provide an `install` hint for a missing binary.
+Hack resolves executables through `PATH`. Doctor shows the path and source
+for each prerequisite executable. Doctor shows the full custom check and login
+commands, and marks executables found inside the project. Startup prints a
+notice the first time it uses such an executable.
+
+Checks run from the project root in their own process group, discard both output
+streams, and stop the group after ten seconds. Keep secrets
+out of command arguments. Hack can offer to run a login in an interactive
+terminal after a failed check. With `--no-interactive`, use the displayed
+command yourself and retry.
+
+A config with `requires`, `remotes`, or `tools` needs `min_cli_version`. Set it to the
+first Hack release that supports the declarations the project uses. Upgrade
+all earlier Hack installations before adopting this configuration. Versions
+released before `min_cli_version` enforcement can silently ignore these
+declarations.

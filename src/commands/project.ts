@@ -26,6 +26,7 @@ import {
   stopLifecycleProcessController,
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
+import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -7494,6 +7495,17 @@ async function runUpCommand({
     }
     throw error;
   }
+  const cfg = await readProjectConfig(project);
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      json,
+      project.projectRoot,
+      { composeFile: project.composeFile, services: args.positionals.services }
+    ))
+  ) {
+    return 1;
+  }
   budgets = await withProjectComposeBudgets({ budgets, detach, project });
   const { startupTimeoutMs } = budgets;
   const envName = resolveRequestedEnvName({
@@ -7544,7 +7556,6 @@ async function runUpCommand({
   // the committed .hack/.gitignore (HACK-1278).
   await ensureHackGitInfoExclude({ projectDir: project.projectDir });
 
-  const cfg = await readProjectConfig(project);
   // Refused before the parse warning, which carries the same message.
   const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
   if (localDirectoriesRefusal !== null) {
@@ -9919,6 +9930,17 @@ async function runRestartCommand({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
+  const cfg = await readProjectConfig(project);
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      json,
+      project.projectRoot,
+      { composeFile: project.composeFile, services: args.positionals.services }
+    ))
+  ) {
+    return 1;
+  }
   const budgets = await withProjectComposeBudgets({
     budgets: resolveDetachedComposeBudgets(true),
     detach: true,
@@ -9962,7 +9984,6 @@ async function runRestartCommand({
     }
     return remoteRestartCode;
   }
-  const cfg = await readProjectConfig(project);
   // Refused before the parse warning, which carries the same message.
   const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
   if (localDirectoriesRefusal !== null) {
@@ -10870,6 +10891,16 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      background?.json === true,
+      project.projectRoot,
+      { composeFile: project.composeFile, services: [service] }
+    ))
+  ) {
+    return 1;
+  }
   const configRefusal = reviewRunConfig({ cfg, project });
   if (configRefusal !== null) {
     return configRefusal;

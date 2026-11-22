@@ -45,14 +45,49 @@ impl ImageCache {
             let lease = lifecycle::startup_lease(root, lifecycle::STARTUP_LEASE_WAIT)?;
             let staging = root.with_file_name("image-staging");
             if staging.try_exists().map_err(state::io)? {
-                state::check_private_directory(&staging)?;
-                fs::remove_dir_all(&staging).map_err(state::io)?;
+                clean_staging(&staging, true)?;
             }
             cache.lease = Some(lease);
         }
         cache.lease.as_ref().unwrap().verify_path(root)?;
         Ok(cache)
     }
+}
+
+fn clean_staging(path: &Path, root: bool) -> Result<(), CandidateError> {
+    if !path.try_exists().map_err(state::io)? {
+        return Ok(());
+    }
+    state::check_private_directory(path)?;
+    for entry in fs::read_dir(path).map_err(state::io)? {
+        let entry = entry.map_err(state::io)?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let metadata = fs::symlink_metadata(entry.path()).map_err(state::io)?;
+        if root && hex(&name) && metadata.is_dir() && metadata.uid() == current_uid() {
+            clean_staging(&entry.path(), false)?;
+            continue;
+        }
+        let generated = matches!(&*name, "image.tar" | "receipt.json" | "receipt.pending")
+            || [".hack-image-", ".hack-layer-"].iter().any(|prefix| {
+                name.strip_prefix(prefix)
+                    .and_then(|tail| tail.strip_suffix(".tmp"))
+                    .and_then(|tail| tail.split_once('-'))
+                    .is_some_and(|(pid, sequence)| {
+                        pid.parse::<u32>().is_ok_and(|pid| pid > 0)
+                            && !sequence.is_empty()
+                            && sequence.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            });
+        if !root && generated && metadata.is_file() && metadata.uid() == current_uid() {
+            fs::remove_file(entry.path()).map_err(state::io)?;
+        } else {
+            return Err(refused(format!(
+                "Unexpected image staging entry {name:?} was left in place."
+            )));
+        }
+    }
+    fs::remove_dir(path).map_err(state::io)
 }
 
 struct Reservation<'a> {
@@ -63,7 +98,7 @@ struct Reservation<'a> {
 
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        let _ = clean_staging(&self.path, false);
         self.cache
             .state
             .lock()
@@ -383,6 +418,11 @@ pub fn ensure_batch(
                     let Some((reference, platform)) = jobs.get(index) else {
                         break;
                     };
+                    let report =
+                        std::env::var("HACK_INTERNAL_REPORT_IMAGE_WAIT").as_deref() == Ok("batch");
+                    if report {
+                        eprintln!("hack.image-wait:working {index}");
+                    }
                     let started = std::time::Instant::now();
                     let result = timed_acquire(
                         Step::ImageEnsure,
@@ -393,6 +433,9 @@ pub fn ensure_batch(
                         true,
                         (&cache, Some(index)),
                     );
+                    if report {
+                        eprintln!("hack.image-wait:finished {index}");
+                    }
                     finished.lock().unwrap().push((
                         index,
                         result,
@@ -973,12 +1016,25 @@ mod tests {
         })
     }
     #[test]
+    fn unrelated_staging_files_are_named_and_preserved() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        let staged = root.with_file_name("image-staging").join(key(&pin(1)));
+        state::private_directory(&staged).unwrap();
+        let unrelated = staged.join("unrelated");
+        fs::write(&unrelated, b"fixture").unwrap();
+        let error = ImageCache::default().enter(&root).err().unwrap();
+        assert!(error.message.contains("unrelated"));
+        assert_eq!(fs::read(unrelated).unwrap(), b"fixture");
+    }
+
+    #[test]
     fn next_cache_writer_recovers_staging_left_by_interrupt() {
         let f = Fixture::new();
         let root = f.1.state_root.join("artifacts/images");
         let staged = root.with_file_name("image-staging").join(key(&pin(1)));
         state::private_directory(&staged).unwrap();
-        fs::write(staged.join("partial"), b"fixture").unwrap();
+        fs::write(staged.join(".hack-image-1-0.tmp"), b"fixture").unwrap();
         let coordinator = ImageCache::default();
         let _cache = coordinator.enter(&root).unwrap();
         assert!(!staged.exists());

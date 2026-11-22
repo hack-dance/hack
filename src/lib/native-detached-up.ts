@@ -85,6 +85,10 @@ let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
 let publishProgress:
   | ((phase: Exclude<NativeDetachedStartPhase, "launching">) => void)
   | undefined;
+let workingImages: readonly string[] = [];
+export function reportNativeImageWork(images: readonly string[]): void {
+  workingImages = images;
+}
 let progressHeartbeat: ReturnType<typeof setInterval> | undefined;
 let heartbeatIntervalMs = NATIVE_DETACHED_HEARTBEAT_MS;
 
@@ -732,6 +736,7 @@ export async function runNativeDetachedOwner(opts: {
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
       | {
           readonly kind: "progress";
+          readonly images?: readonly string[];
           readonly phase: Exclude<NativeDetachedStartPhase, "launching">;
         }
   ): Promise<void> =>
@@ -831,12 +836,19 @@ export async function runNativeDetachedOwner(opts: {
       stopProgressHeartbeat();
       return;
     }
-    send({ kind: "progress", phase });
+    send({
+      kind: "progress",
+      phase,
+      ...(phase === "images" && workingImages.length
+        ? { images: workingImages }
+        : {}),
+    });
   };
   try {
     return await opts.run(opts.args);
   } finally {
     stopping = true;
+    workingImages = [];
     publishReady = undefined;
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
@@ -942,7 +954,8 @@ function watchStartDeadline(opts: {
     }
     if (
       isRecord(value) &&
-      Object.keys(value).length === 2 &&
+      (Object.keys(value).length === 2 ||
+        (value.phase === "images" && Array.isArray(value.images))) &&
       value.kind === "progress" &&
       isNativeDetachedStartPhase(value.phase)
     ) {

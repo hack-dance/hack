@@ -19,6 +19,7 @@ import {
   nativeShellForwardingNotice,
   reportNativeImageDownloadWait,
   reportNativeImageNotice,
+  reportNativeImageWork,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
@@ -871,6 +872,7 @@ async function pinNativeImageBatch(
   for (let offset = 0; offset < pending.length; offset += 3) {
     const wave = pending.slice(offset, offset + 3);
     const waiting = new Set<string>();
+    const working = new Set<string>();
     const reply = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
@@ -879,7 +881,19 @@ async function pinNativeImageBatch(
         JSON.stringify(wave.map((job) => [job.input, job.policy ?? "native"]))
       ),
       signal: opts.signal,
-      onImageWait: (active, reference) => {
+      onImageWait: (active, reference, work) => {
+        if (work) {
+          const image = wave[Number(reference)]?.reference;
+          if (image) {
+            if (active) {
+              working.add(image);
+            } else {
+              working.delete(image);
+            }
+            reportNativeImageWork([...working]);
+          }
+          return;
+        }
         if (!(reference && wave.some((job) => job.reference === reference))) {
           return;
         }
@@ -890,7 +904,10 @@ async function pinNativeImageBatch(
         }
         reportNativeImageDownloadWait(waiting.values().next().value ?? null);
       },
-      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+      timeoutMs: Math.min(
+        3_600_000,
+        wave.length * NATIVE_IMAGE_ENSURE_TIMEOUT_MS
+      ),
     });
     if (!Array.isArray(reply) || reply.length !== wave.length) {
       throw unconfirmed("the runtime image batch");

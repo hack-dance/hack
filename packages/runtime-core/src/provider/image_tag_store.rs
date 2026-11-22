@@ -424,15 +424,17 @@ fn resolve_pending(
     // resolution another process just published.
     let lock = match state::Lock::acquire(&root) {
         Err(error) if error.code == "provider_busy" => {
-            let report_wait = std::env::var_os("HACK_INTERNAL_REPORT_IMAGE_WAIT")
-                .is_some_and(|value| value == "1");
-            if report_wait {
-                eprintln!("hack.image-wait:begin {canonical}");
+            let report_wait = std::env::var("HACK_INTERNAL_REPORT_IMAGE_WAIT").unwrap_or_default();
+            match report_wait.as_str() {
+                "batch" => eprintln!("hack.image-wait:begin {canonical}"),
+                "1" => eprintln!("hack.image-wait:begin"),
+                _ => (),
             }
-            let lock =
-                state::Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(590));
-            if report_wait {
-                eprintln!("hack.image-wait:end {canonical}");
+            let lock = super::lifecycle::startup_lease(&root, std::time::Duration::from_secs(590));
+            match report_wait.as_str() {
+                "batch" => eprintln!("hack.image-wait:end {canonical}"),
+                "1" => eprintln!("hack.image-wait:end"),
+                _ => (),
             }
             lock.map_err(|error| {
                 if error.code == "provider_busy" {

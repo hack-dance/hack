@@ -778,7 +778,11 @@ export async function invokeNativeRuntime(opts: {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
-  readonly onImageWait?: (waiting: boolean, reference?: string) => void;
+  readonly onImageWait?: (
+    waiting: boolean,
+    reference?: string,
+    working?: boolean
+  ) => void;
   readonly privateInput?: Uint8Array;
   /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
@@ -834,10 +838,12 @@ export async function invokeNativeRuntime(opts: {
     // Internal invariant: callers build these argv shapes; no user input selects them.
     throw new Error(REQUEST_BUDGET_REFUSAL);
   }
+  const imageBatch =
+    opts.args[0] === "runtime" && opts.args[1] === "ensure-images";
   if (
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
-    timeoutMs > 600_000 ||
+    timeoutMs > (imageBatch ? 3_600_000 : 600_000) ||
     (opts.privateInput?.byteLength ?? 0) > MAX_PRIVATE_INPUT_BYTES
   ) {
     // A selected startup timeout or the managed environment size can exceed these bounds.
@@ -859,7 +865,7 @@ export async function invokeNativeRuntime(opts: {
   Object.assign(env, nativeHotReloadEnvironment(opts.args));
   Object.assign(env, nativeAdmissionReuseEnvironment(opts.args));
   if (opts.onImageWait) {
-    env.HACK_INTERNAL_REPORT_IMAGE_WAIT = "1";
+    env.HACK_INTERNAL_REPORT_IMAGE_WAIT = imageBatch ? "batch" : "1";
   }
   const child = Bun.spawn(
     [
@@ -1354,7 +1360,11 @@ async function readNativeFailure(
   signal?: AbortSignal,
   limit = MAX_NATIVE_FAILURE_BYTES,
   startupLogs = false,
-  onImageWait?: (waiting: boolean, reference?: string) => void
+  onImageWait?: (
+    waiting: boolean,
+    reference?: string,
+    working?: boolean
+  ) => void
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -1384,6 +1394,14 @@ async function readNativeFailure(
               break;
             }
             const [state, reference] = text.slice(0, newline).split(" ", 2);
+            if (
+              state === "hack.image-wait:working" ||
+              state === "hack.image-wait:finished"
+            ) {
+              onImageWait(state === "hack.image-wait:working", reference, true);
+              text = text.slice(newline + 1);
+              continue;
+            }
             if (
               state === "hack.image-wait:begin" ||
               state === "hack.image-wait:end"

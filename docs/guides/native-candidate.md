@@ -2306,6 +2306,12 @@ line naming the native backend as a beta for Apple Silicon macOS, delivered by t
 `hack-next` channel, with a link to
 [the install guide](candidate-install.md). The line is omitted with `--json`.
 
+When a native start needs a provider or image-cache lock already in use,
+it can wait up to five seconds for the other operation to finish. If the wait
+expires, startup reports the holder it observed and asks you to run
+`hack up` again. A running pool still needs to already share the project's
+root because its mounts stay fixed until it stops.
+
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps`, for
 `hack status`, `hack logs SERVICE --follow` (available under verification) and bounded `logs --no-follow`. `hack status`

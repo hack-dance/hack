@@ -1789,6 +1789,7 @@ async function selectNativeStartup(opts: {
     const observed =
       preflight.runtimePhase === "running"
         ? await inspectNativeProjectGraph({
+            startupWait: true,
             runtime: opts.runtime,
             projectRoot: opts.scope.projectRoot,
             run: retained.run,
@@ -2908,6 +2909,7 @@ async function startNativeProjectAttempt(
           }
           const invokeInspect = () =>
             inspectNativeProjectGraph({
+              startupWait: true,
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
               run,
@@ -3289,6 +3291,26 @@ function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   }
 }
 
+const START_LOCK_HOLDER =
+  /^Provider lease acquisition refused; recorded holder: ([a-z ]+); no operation was admitted\.$/;
+
+function withStartupLockBlocker(error: unknown): unknown {
+  if (
+    !(error instanceof NativeRuntimeRequestError) ||
+    error.nativeCode !== "provider_busy"
+  ) {
+    return error;
+  }
+  const holder =
+    START_LOCK_HOLDER.exec(error.nativeMessage ?? "")?.[1] ?? "unavailable";
+  error.message = [
+    "Native startup could not acquire a runtime lock (provider_busy).",
+    `Holder: ${holder}.`,
+    "Run hack up again after the holder finishes.",
+  ].join("\n");
+  return error;
+}
+
 /** Publish advisory startup evidence until this foreground invocation settles. */
 export async function startNativeProject(
   opts: NativeProjectStartOptions
@@ -3298,6 +3320,8 @@ export async function startNativeProject(
     return await startNativeProjectAttempt(opts, async () => {
       finish = await beginNativeProjectStartupObservation(opts.scope);
     });
+  } catch (error) {
+    throw withStartupLockBlocker(error);
   } finally {
     await finish?.();
   }

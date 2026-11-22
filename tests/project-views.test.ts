@@ -13,6 +13,7 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import { HACK_VERSION } from "../src/lib/hack-version.ts";
 import {
   buildProjectViews,
   serializeProjectSummary,
@@ -269,6 +270,48 @@ test("buildProjectViews includes defined services and runtime status", async () 
   expect(serialized?.service_hosts).toEqual({
     api: ["api.alpha.hack", "api.alpha.hack.gy"],
   });
+});
+
+test("detailed project output includes declared remotes without observing the runtime", async () => {
+  const registration = await createProject({
+    name: "remote-sample",
+    services: ["api"],
+    configJson: JSON.stringify({
+      min_cli_version: HACK_VERSION,
+      remotes: {
+        db: {
+          default: "qa",
+          targets: {
+            qa: { hostname: { env_ref: "REMOTE_DB_HOST" }, port: 5432 },
+          },
+        },
+      },
+    }),
+  });
+  const [view] = await buildProjectViews({
+    observeNative: false,
+    registryProjects: [registration],
+    runtime: [],
+    runtimeOk: false,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+  if (!view) {
+    throw new Error("Expected the registered project.");
+  }
+  expect(serializeProjectView(view).remotes).toEqual([
+    {
+      service: "db",
+      kind: "remote",
+      target: "qa",
+      address: { kind: "env_ref", name: "REMOTE_DB_HOST", port: 5432 },
+      via: null,
+      state: "declared",
+      probe: "not checked",
+    },
+  ]);
+  expect(serializeProjectSummary(view)).not.toHaveProperty("remotes");
 });
 
 test("buildProjectViews filters retired extensions from upgraded configs", async () => {

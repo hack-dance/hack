@@ -1,3 +1,5 @@
+import type { StartBlocker } from "../ui/start-refusal-output.ts";
+
 /**
  * Machine-readable CLI result envelope.
  *
@@ -48,6 +50,7 @@ export const HACK_ERROR_CODES = [
   "E_COMPOSE_OUTPUT_INVALID",
   "E_STARTUP_INCOMPLETE",
   "E_DOWN_INCOMPLETE",
+  "E_RECOVERY_REQUIRED",
   "E_PLAN_REFUSED",
   "E_PLAN_INCOMPLETE",
   "E_NATIVE_SETUP_REQUIRED",
@@ -160,16 +163,19 @@ export function exitCodeForResult(opts: {
 export class HackCliError extends Error {
   readonly code: HackErrorCode;
   readonly detail?: unknown;
+  readonly startBlocker?: StartBlocker;
 
   constructor(opts: {
     readonly code: HackErrorCode;
     readonly message: string;
     readonly detail?: unknown;
+    readonly startBlocker?: StartBlocker;
   }) {
     super(opts.message);
     this.name = "HackCliError";
     this.code = opts.code;
     this.detail = opts.detail;
+    this.startBlocker = opts.startBlocker;
   }
 }
 

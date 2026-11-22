@@ -114,6 +114,8 @@ async function fixture(
      * until the test writes "open" or "fail" to the startup-gate file.
      */
     readonly holdStartup?: boolean;
+    /** The owner checks its pool boot; the boot ends when the test writes "boot-ended". */
+    readonly poolBootEnds?: boolean;
   } = {}
 ) {
   const home = await mkdtemp(join(await realpath(tmpdir()), "hk-owner-test-"));
@@ -170,6 +172,12 @@ try {
       }
     },
     requestAwaitingStartup: async () => { await appendFile(home + "/startup-waiters", "request\\n"); },
+    ${
+      options.poolBootEnds
+        ? `poolBootCheckMs: 20,
+    poolBootEnded: async () => { try { await readFile(home + "/boot-ended", "utf8"); return true; } catch { return false; } },`
+        : ""
+    }
     verifyIdle: async () => {
       failRelease("idle-verification");
       ${
@@ -501,6 +509,42 @@ test("historical HTTPS release still refuses a dirty graph after a bundle genera
   ).rejects.toThrow("graph restarted");
   expect(verified).toBe(true);
   expect(await f.snapshot()).toEqual(before);
+});
+
+test("an owner whose pool boot ended retires and keeps its lease and configuration for the archive (HACK-2456)", async () => {
+  const f = await fixture({ poolBootEnds: true });
+  const { configuration, socket, endpoint } = await f.start();
+  const identity = await f.acquire(socket, configuration.ownerGeneration, "a");
+  const root = nativeHttpsOwnerRoot(f.home);
+  // A live boot keeps the owner running.
+  await Bun.sleep(100);
+  expect(
+    (await readFile(join(f.home, "events"), "utf8")).split("\n")
+  ).not.toContain("close");
+  await writeFile(join(f.home, "boot-ended"), "yes");
+  await f.helperExited();
+  // The child pair was closed, the socket and its directory retired ...
+  expect(
+    (await readFile(join(f.home, "events"), "utf8")).split("\n")
+  ).toContain("close");
+  await expect(lstat(endpoint.socket)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  await expect(lstat(resolve(endpoint.socket, ".."))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  // ... and the records the previous-boot archive selects are kept unchanged.
+  expect((await readdir(root)).sort()).toEqual([
+    "configuration.json",
+    "endpoint.json",
+    "leases",
+  ]);
+  expect(await readdir(join(root, "leases"))).toEqual([
+    `${identity.leaseId}.json`,
+  ]);
+  expect(await readNativeHttpsOwnerConfiguration(f.binding.runtime)).toEqual(
+    configuration
+  );
 });
 
 test("detached helper outlives its spawning CLI and first release preserves the second lease", async () => {

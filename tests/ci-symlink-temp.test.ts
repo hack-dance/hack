@@ -10,7 +10,42 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-test("the Linux variant runs one selected shard behind a real temp symlink and cleans up", async () => {
+const repository = resolve(import.meta.dir, "..");
+const listPath = "scripts/test-shard-symlink-temp-files.json";
+
+function isolatedShardEnv() {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => !name.startsWith("HACK_TEST_")
+    )
+  );
+}
+
+test("the fixed list names existing tracked tests and runs exactly those files", async () => {
+  const selection = await Bun.file(resolve(repository, listPath)).text();
+  const files: unknown = JSON.parse(selection);
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error("The symlinked TMPDIR test list must be a nonempty array");
+  }
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      "scripts/test-shard.ts",
+      "plan",
+      "--shard=1/1",
+      "--layout=full",
+    ],
+    {
+      cwd: repository,
+      env: { ...isolatedShardEnv(), HACK_TEST_SELECTION: selection },
+      timeout: 5000,
+    }
+  );
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  expect(result.stdout.toString().trim().split("\n").sort()).toEqual(files);
+});
+
+test("the Linux variant runs the fixed list behind a real temp symlink and cleans up", async () => {
   const workflow = Bun.YAML.parse(
     await Bun.file(
       resolve(import.meta.dir, "../.github/workflows/ci.yml")
@@ -28,15 +63,17 @@ test("the Linux variant runs one selected shard behind a real temp symlink and c
       }
     >;
   };
-  const step = workflow.jobs["test-shard"]?.steps.find(
-    (entry) => entry.name === "Tests (shard)"
-  );
-  expect(step?.env?.HACK_TEST_SYMLINK_TMP).toBe(
-    "${{ matrix.shard == 8 && runner.os == 'Linux' }}"
-  );
-  expect(step?.env?.HACK_TEST_SELECTION).toBe(
+  const steps = workflow.jobs["test-shard"]?.steps;
+  const normal = steps?.find((entry) => entry.name === "Tests (shard)");
+  expect(normal?.env?.HACK_TEST_SELECTION).toBe(
     "${{ needs.changes.outputs.test_files }}"
   );
+  expect(normal?.run).not.toContain("TMPDIR");
+  const step = steps?.find(
+    (entry) => entry.name === "Tests (symlinked TMPDIR)"
+  );
+  expect(step?.if).toBe("matrix.shard == 8 && runner.os == 'Linux'");
+  expect(step?.env).toBeUndefined();
   if (!step?.run) {
     throw new Error("Missing symlink temp variant");
   }
@@ -50,31 +87,23 @@ test("the Linux variant runs one selected shard behind a real temp symlink and c
       join(bin, "bun"),
       `#!${process.execPath}
 import { lstatSync, realpathSync } from "node:fs";
-if (lstatSync(process.env.TMPDIR).isSymbolicLink() !== (process.env.STUB_SYMLINK === "true")) process.exit(2);
-if (process.env.STUB_SYMLINK === "true" && realpathSync(process.env.TMPDIR) === process.env.TMPDIR) process.exit(3);
+if (!lstatSync(process.env.TMPDIR).isSymbolicLink()) process.exit(2);
+if (Object.keys(process.env).some(name => name.startsWith("HACK_TEST_") && name !== "HACK_TEST_SELECTION")) process.exit(4);
+if (realpathSync(process.env.TMPDIR) === process.env.TMPDIR) process.exit(3);
 console.log(JSON.stringify({ args: process.argv.slice(2), selection: process.env.HACK_TEST_SELECTION }));
 process.exit(Number(process.env.STUB_EXIT));
 `
     );
     await chmod(join(bin, "bun"), 0o700);
-    for (const [symlink, exit] of [
-      [true, 0],
-      [true, 7],
-      [false, 0],
-      [false, 7],
-    ] as const) {
+    for (const exit of [0, 7]) {
       const result = Bun.spawnSync(["bash", "-e", "-u", "-c", step.run], {
+        cwd: repository,
         env: {
-          ...process.env,
+          ...isolatedShardEnv(),
           PATH: `${bin}:${process.env.PATH}`,
           RUNNER_TEMP: runner,
           STUB_EXIT: String(exit),
-          HACK_TEST_LAYOUT: "pooled",
-          HACK_TEST_SHARD: symlink ? "8/8" : "7/8",
-          HACK_TEST_SYMLINK_TMP: String(symlink),
-          STUB_SYMLINK: String(symlink),
           TMPDIR: runner,
-          HACK_TEST_SELECTION: '["tests/example.test.ts"]',
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -82,14 +111,10 @@ process.exit(Number(process.env.STUB_EXIT));
       });
       expect(result.exitCode, result.stderr.toString()).toBe(exit);
       expect(JSON.parse(result.stdout.toString())).toEqual({
-        args: [
-          "scripts/test-shard.ts",
-          "run",
-          symlink ? "--shard=8/8" : "--shard=7/8",
-          "--layout=pooled",
-          `--durations-out=${runner}/test-shard-durations.json`,
-        ],
-        selection: '["tests/example.test.ts"]',
+        args: ["scripts/test-shard.ts", "run", "--shard=1/1", "--layout=full"],
+        selection: (
+          await Bun.file(resolve(repository, listPath)).text()
+        ).trimEnd(),
       });
       expect(await readdir(runner)).toEqual([]);
     }

@@ -19,6 +19,10 @@ import {
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
+import {
+  admitNativeProjectBuilds,
+  nativeBuildIdentity,
+} from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
 import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
@@ -3836,9 +3840,10 @@ test("retained startup refuses missing, unacknowledged or changed finalization b
       https: httpsSelection,
       adaptationFile: join(opts.scope.projectRoot, "unread-adaptation.json"),
     });
-    await expect(attempt).rejects.toThrow(
-      "frontend finalization is unconfirmed"
-    );
+    await expect(attempt).rejects.toMatchObject({
+      code: "E_RECOVERY_REQUIRED",
+      message: expect.stringContaining("Run hack down --recover"),
+    });
     try {
       await attempt;
     } catch (error) {
@@ -4061,9 +4066,7 @@ test("retained acknowledgement cannot authorize a newer or concurrently changed 
       };
     }
     await expect(startNativeProject(opts)).rejects.toThrow(
-      fault === "newer-run"
-        ? "frontend finalization is unconfirmed"
-        : "mapping changed"
+      fault === "newer-run" ? "has no confirmed shutdown" : "mapping changed"
     );
     expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
   }
@@ -5627,6 +5630,122 @@ test("retained startup asks the runtime to confirm the tag before review", async
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
 });
 
+test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {
+  const saved = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const retained = `sha256:${"e".repeat(64)}`;
+  const rebuilt = `sha256:${"7".repeat(64)}`;
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    for (const [restart, reused] of [
+      [false, false],
+      [false, true],
+      [true, false],
+    ] as const) {
+      const { opts } = await fixture(false);
+      const request = admitNativeProjectBuilds({
+        services: { web: { build: "." } },
+        projectRoot: opts.scope.projectRoot,
+        composeFile: opts.composeFile,
+        enabled: true,
+      }).get("web");
+      if (!request) {
+        throw new Error("the fixture's build service was not admitted");
+      }
+      const verified = restart
+        ? new Map([
+            [
+              "web",
+              { imageId: rebuilt, identity: nativeBuildIdentity(request) },
+            ],
+          ])
+        : undefined;
+      const stopped = stoppedGraph(saved);
+      const observed = {
+        ...stopped,
+        receipt: {
+          ...stopped.receipt,
+          normalized_input: {
+            namespace: saved.namespace,
+            original_compose_sha256: "d".repeat(64),
+            normalized_compose_sha256: "f".repeat(64),
+          },
+          resources: {
+            "container:web": {
+              ...stopped.receipt.resources["container:web"],
+              image: retained,
+            },
+          },
+        },
+      };
+      opts.dependencies.retainedImages = selectNativeRetainedImages;
+      const prepare = opts.dependencies.prepare!;
+      opts.dependencies.prepare = async (request) => ({
+        ...(await prepare(request)),
+        normalizedComposeJson: JSON.stringify({
+          services: { web: { build: "." } },
+        }),
+      });
+      let builds = 0;
+      opts.dependencies.build = async () => {
+        builds += 1;
+        return { imageId: rebuilt, buildKey: "c".repeat(64), reused };
+      };
+      const invoke = opts.dependencies.invoke!;
+      let beforeReview = true;
+      const reclaims: string[][] = [];
+      opts.dependencies.invoke = async (request) => {
+        if (request.args[1] === "reclaim-build-images") {
+          reclaims.push([...request.args]);
+          // A failed reclamation never fails or delays the start.
+          throw new Error("reclaim failed");
+        }
+        if (request.args[1] === "inspect" && beforeReview) {
+          return observed;
+        }
+        if (request.args[1] === "restore-selection") {
+          return { ...saved, plan: saved.planId, generation: "2".repeat(64) };
+        }
+        return await invoke(request);
+      };
+      const review = opts.dependencies.review!;
+      let reviewedImage: unknown;
+      opts.dependencies.review = async (request) => {
+        beforeReview = false;
+        reviewedImage = JSON.parse(request.input.normalizedComposeJson).services
+          .web.image;
+        return await review(request);
+      };
+      await startNativeProject({
+        ...opts,
+        restore: saved,
+        verifiedBuildImages: verified,
+      });
+      // The retained image never stands in for the build: a restore asks the
+      // runtime, and a restart's resolved image is pinned without asking again.
+      expect(reviewedImage).toBe(rebuilt);
+      expect(builds).toBe(verified ? 0 : 1);
+      // Only a start that actually built an image reclaims, once it is ready.
+      expect(reclaims).toEqual(
+        restart || reused
+          ? []
+          : [["runtime", "reclaim-build-images", "--best-effort", "--json"]]
+      );
+    }
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+  }
+});
+
 test("retained startup confirms the image under the currently selected emulation policy", async () => {
   const saved = {
     run: "1".repeat(32),
@@ -7002,6 +7121,87 @@ for (const [name, hotReload, expected] of [
     ).toEqual(expected ? [renderNativeHotReloadNotice(expected)] : []);
   });
 }
+
+// HACK-2456: the pool stopped under the run while its foreground owner died.
+function ownerExitedRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_exited",
+    message: "The run's foreground owner exited.",
+  });
+}
+async function stoppedPoolUnderRunFixture(poolPhase: "stopped" | "running") {
+  const { opts, events } = await retainedFinalizationFixture();
+  const saved = await opts.dependencies.load!(opts.scope);
+  await acknowledgeRetainedFrontend(opts.scope, saved!);
+  let recovered = false;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && !recovered) {
+      events.push("graph retained-preflight refused");
+      throw ownerExitedRefusal();
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "status") {
+      events.push("runtime status");
+      return poolPhase === "running"
+        ? { phase: "running", process_alive: true }
+        : { phase: "stopped", process_alive: false };
+    }
+    return await invoke(request);
+  };
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const start = {
+    ...opts,
+    recoverStoppedPool: async () => {
+      events.push("down --recover");
+      recovered = true;
+    },
+  };
+  return { start, events, notices };
+}
+
+test("up on a stopped pool whose run's owner died recovers the run with data retained, then starts it", async () => {
+  const { start, events, notices } =
+    await stoppedPoolUnderRunFixture("stopped");
+  expect(await startNativeProject(start)).toBe(0);
+  expect(events.slice(0, 5)).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+    "down --recover",
+    "graph retained-preflight",
+    "graph inspect",
+  ]);
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(events.indexOf("down --recover")).toBeLessThan(
+    events.indexOf("runtime up")
+  );
+  expect(events).toContain("save");
+  expect(notices.join("\n")).toContain("recovered with data retained");
+});
+
+test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {
+  const { start, events } = await stoppedPoolUnderRunFixture("running");
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_exited"
+  );
+  expect(events).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+  ]);
+});
+
+test("up without a recovery callback keeps the owner-exited refusal and reads no status", async () => {
+  const { start, events } = await stoppedPoolUnderRunFixture("stopped");
+  const { recoverStoppedPool: _omitted, ...plain } = start;
+  await expect(startNativeProject(plain)).rejects.toBeInstanceOf(
+    NativeRuntimeRequestError
+  );
+  expect(events).toEqual(["graph retained-preflight refused"]);
+});
 
 test.each([
   [

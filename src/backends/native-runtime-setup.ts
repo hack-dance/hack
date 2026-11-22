@@ -17,6 +17,7 @@ import {
   nativeBuilderChangedRemedy,
   nativeBuilderRemedy,
 } from "../lib/native-image-builder.ts";
+import { printedShellCommand } from "../lib/printed-shell-command.ts";
 import { subprocessSignalExitStatus } from "../lib/subprocess-signal.ts";
 import {
   invokeNativeRuntime,
@@ -287,6 +288,19 @@ function refuse(inspection: Pick<NativeSetupInspection, "state">): never {
       ? "E_NATIVE_SETUP_REQUIRED"
       : "E_STARTUP_INCOMPLETE",
     message: nativeSetupGuidance(inspection),
+    startBlocker: nativeSetupCanResume(inspection)
+      ? {
+          thing: "native runtime",
+          problem: "setup required",
+          needs: "this start needs the native runtime",
+          command: printedShellCommand([
+            currentCandidateLauncher().command,
+            "native",
+            "setup",
+            ...(canPrompt() ? [] : ["--accept-downloads"]),
+          ]),
+        }
+      : undefined,
     detail: {
       runtime_setup: inspection.state,
       native_code: CODES[inspection.state],

@@ -483,15 +483,47 @@ With it:
   `runtime build-image` (below), and its filtered output streams to your terminal.
   Every service with that build is then pinned to the built content ID, so review,
   readiness and restore treat it like an image service.
-- An existing image for the same build inputs is reused without building. Set
-  `HACK_NATIVE_REBUILD=1` to build again; base-image tags then resolve again too.
-  Edits to other files in the context do not trigger a rebuild, as with Compose.
-- Restoring an unchanged retained run uses the retained images and never builds; if
-  one is missing, `up` refuses and asks you to start fresh. `hack restart` also never
-  builds: it reuses the running or retained image, or refuses before stopping anything.
+- An existing image for the same build inputs is reused without building. The build
+  inputs include every file and directory in the build context that the effective
+  ignore file (`<Dockerfile>.dockerignore`, else the context's `.dockerignore`) lets
+  the build read: paths, file contents, permission bits and symlink targets. Editing a
+  copied file builds a new image; editing an ignored file does not. An ignore file with
+  syntax Hack does not reproduce exactly (character classes or `\` escapes) counts as
+  excluding nothing: that never misses a change, but it can cause extra rebuilds, and
+  it can refuse the build when an otherwise ignored entry is unreadable, special or
+  pushes the context over its bounds. A context with more than
+  200,000 included entries or 4 GiB of included file content, deeper than 256 path
+  components, or whose included paths total more than 32 MiB, or with an unreadable
+  entry or a socket, FIFO or device the ignore file does not exclude, refuses.
+- Hack remembers each context file's size, timestamps and inode in a private cache, so
+  an unchanged context is not read again. The cache misses only a change that keeps the
+  size, inode, modification time and change time identical, which needs a deliberate
+  clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
+- Only those inputs count. A changed network response (a download in a `RUN` step),
+  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
+  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
+  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
+  `hack restart` to build every image again; base-image tags then resolve again too.
+- When an image is actually built, BuildKit reads a private copy of the included
+  context, made and checked against the build key right before it runs, so edits during
+  a build never reach the image. The copy keeps hard links as links and gives every
+  entry one fixed modification time, so it holds nothing the key does not describe. A file that changed between computing the key and
+  making the copy refuses; run `up` again. The copy costs time and disk only when a
+  build runs (about 2.7 s for 20,000 files and 632 MiB on a loaded Linux host); reusing
+  an image makes no copy.
+- Every `up` asks the runtime for each build, including an `up` that restores a run
+  stopped with `hack down`. The retained image is reused only while its build inputs
+  are unchanged (Dockerfile, ignore file, target, args, build context); an edited
+  Dockerfile or copied file builds a new image and the run's containers are recreated
+  from it, keeping named volumes when the stopped run can be restored.
+- `hack restart` resolves every build before it stops anything: a failed build, or a
+  rebuilt image the retained run could not take, refuses while the current graph keeps
+  running. It then stops the graph and starts it again on exactly the images it
+  resolved, rebuilt ones included; nothing is built after the stop, and a build
+  service added or changed in the meantime refuses instead.
 - "Unchanged" means the same Compose bytes. A run that mounts no project source and
   uses no dependency cache still restores after its Compose file was edited and put
-  back, or after any project file was touched; build-context edits do not rebuild it.
+  back, or after any project file was touched that its builds do not read.
   Its review then differs only in the project source inventory (file sizes and
   modification times), which such a run never reads, and restore keeps the retained
   ownership plan, images and data.
@@ -876,6 +908,84 @@ then validates socket absence and flushes the disks before recording
 data, and requires inspection before retry. No guest is started by alias recovery.
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
+
+`runtime down` stops the pool even while projects run in it, because a crash or a
+host reboot ends the same way. Their containers stop with the guest and their data is
+kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live, including a failed start that kept its started services, in
+`interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
+and it writes one line on stderr saying how many it stopped. `hack up` in each of those
+projects starts the pool again and recovers its run.
+
+How a run moves across a pool stop. It is checked as the TLA+ model
+`tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
+one is recovered too: another project's `hack up` or a `runtime up` by hand booted
+the pool and it stopped again before this project recovered, or the pool stopped
+again between a recovery's `runtime up` and its recovery. Each boot records the boots
+it supersedes in a bounded history (`run/smolvm/boot-history.json`, the last 16,
+bound to the pool), and recovery selects the one earlier boot the run's receipt
+names, never the current one. A run whose boot has left that history, or whose
+evidence names more than one boot, is refused with its data kept. Two paths stay
+limited to the previous boot: a `graph recover-cleanup` selection made while the
+pool was stopped (another boot in between may have restarted the run's containers),
+and absent-publication cleanup after a host reboot.
+
+```mermaid
+---
+title: PoolStop · run and pool stop
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> none
+    none --> ready : hack up
+    retained --> ready : hack up
+    ready --> retained : hack down
+    ready --> orphaned : runtime down, owner dies
+    ready --> crashed : VM or provider dies
+    crashed --> orphaned : hack native recover
+    orphaned --> recover : hack up, down --recover
+    state recover <<choice>>
+    recover --> retained : [boot known, no HTTPS lease]
+    recover --> finalizing : [boot known, HTTPS lease]
+    recover --> stranded : [boot not known]
+    finalizing --> retained : lease released or archived
+
+    note left of orphaned
+        Receipt still ready-observed,
+        owner dead, publication left.
+        Pool stopped or in a new boot.
+    end note
+    note right of recover
+        runtime up first, then the
+        existing recovery as its own
+        request, data kept.
+    end note
+    note right of stranded
+        Refused, data kept: the run's
+        boot left the 16-boot history,
+        or its evidence is ambiguous.
+    end note
+    note right of finalizing
+        Graph stopped, HTTPS lease held.
+        The old owner retires when its
+        boot ends; up refuses until
+        down --recover finishes.
+    end note
+    note left of retained
+        INV NoDeadEnd: some named
+        command always acts.
+        PROP Recovers.
+    end note
+
+    class ready ok
+    class orphaned wait
+    class crashed wait
+    class finalizing wait
+    class stranded fail
+```
 
 `runtime down` first quiesces the guest engine, which leaves the pool in phase
 `quiescing` until the engine exits. A guest agent that answers no ping lets `down`
@@ -1396,8 +1506,11 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the client prints values, terminal control characters are removed, lines are cut at
   16 KiB and output stops after 4 MiB.
 - `missing` reuses a verified image for the same build key without running the client;
-  `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
-  target, arguments and versions, not the context's other files (as with Compose).
+  `rebuild` always builds. The key (version 2) covers the Dockerfile and
+  `.dockerignore` bytes, target, arguments and versions, and every context entry the
+  ignore file lets the build read: its path, kind, permission bits, contents, symlink
+  target and hard-link group, as described with `HACK_NATIVE_BUILDS` above. It does
+  not cover network responses, cache mounts or a moved base-image tag.
 - The runtime must have network egress and the isolated build network that a runtime
   started by this version sets up. An older runtime refuses with
   `native_build_runtime_restart`: stop it and start it again.
@@ -1411,11 +1524,15 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
   images, containers or volumes.
 
-`runtime reclaim-build-images --json` removes build images that a newer build of the
-same key replaced. It keeps every image a build receipt names as current, every image
-that any retained run's saved state mentions, every image a container still uses (the
-engine refuses those), and every image whose ownership labels are not exactly this
-runtime's. Each removal deletes that one image only, never its untagged parent
+`runtime reclaim-build-images --json` removes build images that newer builds
+replaced. For each build declaration (project root and branch, context, Dockerfile and
+target) it keeps the image of the most recently built or reused key (`current`) and of
+the one before it (`previous`, for a quick revert). It also keeps every image that any
+retained run's saved state mentions, every image a container still uses (the engine
+refuses those), every image of a receipt written before this rule, and every image
+whose ownership labels are not exactly this runtime's. An `up` that built an image runs
+it with `--best-effort` once the project is ready: that form never fails, reports a
+refusal as `skipped`, and never delays or fails the start. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 
@@ -2334,7 +2451,35 @@ present it exits 0 and reports `runtime_not_running` (no phase, no service rows)
 and text output prints "Native runtime is not running; no services are running."
 That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
 `recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
-failed there with `runtime_changed`.
+failed there with `runtime_changed`. When a command that needs the running pool finds it in any other phase (stopped,
+or still booting or quiescing), it refuses with `runtime_not_running` and says only
+that it did not connect: "The native runtime is not in its running state, so this
+command did not connect to it; nothing was changed." `hack down` adds the next
+commands: `hack ps --json` to see the phase, then `hack up` or `hack down --recover`
+once the pool is stopped.
+When the pool stopped or the VM died under a running project, the run's foreground
+owner exits and the run is left neither running nor stopped (after a VM crash, run
+`hack native recover` first so the pool is recorded as stopped). `hack up` then starts the
+pool, recovers the run with its data retained, and starts it again. `hack down --recover`
+(and plain `hack down`) start the pool to recover the run the same way, then leave the
+pool running and say so; run `runtime down` to stop it. A run whose owner is still alive,
+or that is already stopped with data retained, keeps the refusal above, and so does one
+whose only recovery needs the boot it ran in (a failed start, or an interrupted
+same-boot recovery): starting the pool begins a new boot, so it would not help.
+
+A project with HTTPS routes also holds a lease on the shared HTTPS owner, a host
+process bound to the pool boot it started in. `runtime down` does not stop it; the
+owner retires on its own within a few seconds once its boot has ended (the pool
+stopped, crashed or booted again), keeping its records. The recovery then archives
+those records and releases the run's lease, waiting up to 20 seconds for an owner
+that is still retiring. If a recovery stopped the run but could not finish that step,
+`hack up` refuses with `E_RECOVERY_REQUIRED` and names `hack down --recover`, which
+starts a stopped pool to finish it, with data kept.
+
+A detached start (`hack up -d`) whose pool stopped or booted again ends on its
+own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
+--recover` recovers its run. A command that finds an earlier start of the instance
+still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,
@@ -4587,15 +4732,15 @@ owned containers and networks, and retains named volumes and dependency caches.
 It neither marks incomplete package caches valid nor replays initializers.
 
 If a foreground owner died after its graph reached `ready-observed` and the pool
-has already restarted once, the same explicit command can select recovery on that
-immediate successor boot. It requires the retained dead-owner identity, exact receipt
-hash, and bridge assignments belonging to the recorded previous boot. The recovery
-intent pins those assignments before effects and refuses replacements on retry.
+has restarted since, the same explicit command can select recovery on any later
+boot. It requires the retained dead-owner identity, exact receipt hash, the one
+earlier boot of the pool that the receipt names, and bridge assignments belonging
+to that boot. The recovery intent pins those assignments before effects and refuses replacements on retry.
 A remaining legacy device-rebound dependency reservation also requires the
 original recovery boot and host-pin witness. A further boot change refuses its
 release; no automatic recovery command for that state is implemented.
-Do not restart again to attempt this path: another boot rollover invalidates the
-previous-boot evidence. Old guest helper absence follows the verified boot transition;
+Do not restart while a selected recovery is unfinished: its intent is bound to the
+boot it was selected on, and another boot refuses it. Old guest helper absence follows the verified boot transition;
 it is not recorded as a live helper acknowledgement.
 
 Recovery retains its own durable intent and completion evidence. A guest completion

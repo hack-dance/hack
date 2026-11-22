@@ -43,7 +43,7 @@ From your machine, `boat exec <sandbox> --cwd <repo> '<command>'` runs a command
 in the sandbox (the default timeout is 30 seconds):
 
 ```sh
-curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack.local --resolve hello.hack.local:443:127.0.0.1 -k https://hello.hack.local/
 ```
 
 A VM with systemd-resolved may also resolve Hack's names after

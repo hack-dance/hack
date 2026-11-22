@@ -16,7 +16,8 @@ project on another machine with Docker.
   settings and secrets, and serves the project at `https://myapp.hack.local`.
 - **A worktree on a branch gets its own running copy.** Its own containers,
   addresses and logs, so three branches, or three coding agents, can each run
-  and test the app at once. A detached worktree needs `--branch <name>`.
+  and test the app at once. A detached worktree needs `--branch <name>` unless
+  `worktree.auto_branch=false` selects the base instance.
 - **The parts around the containers are declared too.** A sign-in check or a
   migration can run as a lifecycle hook. A tunnel or a worker runs as a host
   process the project declares. `hack down` stops what this copy started and
@@ -112,7 +113,7 @@ label its logs, and keep its instances apart.
 - `hack up --branch review` starts a second instance of the same project with its
   own addresses. In a linked git worktree, `hack up` does this without the flag
   and names the instance after the branch. A detached worktree needs
-  `--branch <name>`.
+  `--branch <name>` unless `worktree.auto_branch=false` selects the base instance.
 - An instance has its own containers, so each one has its own database container.
   Instances still share anything outside them: an external database, a
   bind-mounted folder, the same credentials. Hack separates what runs; it is not a
@@ -267,7 +268,7 @@ default for stable v5.
   every service and `hack open`.
 - It supports part of what Compose supports. When a project needs something
   outside that part, Hack refuses and names the feature.
-- One VM can run several projects and worktrees at once. A running VM cannot
+- Projects and worktrees the pool was started with can run together. A running VM cannot
   add a project folder it was not started with. `hack up` there refuses and
   explains what to stop. The folder joins when the VM next starts. See
   [one VM, several project folders](docs/guides/native-candidate.md#explicit-writable-development-source).

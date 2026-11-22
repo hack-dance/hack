@@ -103,8 +103,10 @@ Details and the exact checks:
 
 ## Other limits
 
-- **Shared machine.** All native projects run in one virtual machine. They are
-  separated the way Compose projects are, not by a machine each.
+- **Shared machine.** Projects the pool was started with share its VM resources.
+  A pool accepts up to eight project shares. If a running pool does not share
+  a project root, `hack up` refuses it until the pool is stopped and the share
+  is added for the next boot.
 - **Images that declare a volume.** Some images, such as the stock Redis and
   database images, declare a data folder with `VOLUME`. On native the service must
   mount a named volume at that path, for example `redis-data:/data`. Without one

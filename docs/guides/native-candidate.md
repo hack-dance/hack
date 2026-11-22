@@ -128,8 +128,7 @@ worktree when its exact source root can be shared with a fresh or matching pool.
 The runtime checks source compatibility before startup hooks; `restart` repeats
 this check before stopping the existing graph. A root that a running pool does not
 already share is refused, because a running VM's mounts never change. Stop the pool
-and run `up` again: the root joins at the next boot. One pool can then serve several
-project roots and worktrees at once; see
+and run `up` again: the root joins at the next boot. Projects and worktrees the pool was started with can run together; see
 [one pool, several project roots](#explicit-writable-development-source).
 
 Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
@@ -1681,7 +1680,7 @@ the container's own namespaces or cgroup limits: `NET_ADMIN` and `NET_BROADCAST`
 often declared for database images), `IPC_LOCK` (memory locking, still charged to
 the memory limit) and `IPC_OWNER` (the container's own IPC namespace). Plan review
 refuses every other addition with `capability_refused`, including `cap_add: [ALL]`.
-One VM can host several projects and worktrees, and Hack runs its own helpers
+Projects and worktrees the pool was started with can run together. Hack runs its own helpers
 inside service containers. These refused capabilities would act on that shared
 kernel or on those helpers:
 
@@ -2028,8 +2027,8 @@ unfiltered mode for a checkout whose local files must remain hidden from its ser
 Only the exact canonical project root is accepted; home/credential directories,
 aliased roots, and changes to a running pool's mount intent are refused.
 
-One development pool can host several project roots and linked worktrees, so one
-installed native home serves every project on the machine. The first root is the
+Projects and linked worktrees the development pool was started with can run
+together in one native home. The first root is the
 pool's primary share. Native `up` in another root adds that root itself when the
 pool is **stopped**, before any lifecycle hook runs, with the same unfiltered-source
 consent the first root gave; the share is mounted at the next boot. The explicit

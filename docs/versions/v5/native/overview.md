@@ -46,7 +46,9 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 - **Not a sandbox.** It is a way to run a Compose file without a Docker app. It
   refuses some risky container settings (see below), but it is not a security
   boundary: do not rely on it to contain a project or a coding agent.
-- **Not a wall between projects.** Projects on native share the VM's resources.
+- **Shared resources.** Projects the pool was started with share its VM resources.
+  `hack up` refuses an unshared root while the pool is running. Stop the pool
+  and add the root before the next boot.
 
 ## Control and traffic
 

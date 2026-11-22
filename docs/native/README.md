@@ -15,7 +15,8 @@ on the Mac. The pool runs its pinned Docker Engine inside the VM; it does not us
 your host's Docker app. Preparing that provider pool is still a separate step.
 
 It is not a different container format. Your images and your Compose file are the
-same. Projects using the same native pool share that pool's VM resources.
+same. Projects the pool was started with share its VM resources. A running pool refuses
+a start from an unshared project root.
 
 Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 `hack down`, `hack logs`) and your env and secrets are the same on both backends.

@@ -25,7 +25,7 @@ C4Context
   Person(developer, "Developer")
   System_Ext(agent, "Agent harness", "Optional CLI client")
   System(hack, "Hack CLI", "Local project commands")
-  System_Ext(backend, "Backend", "Compose by default")
+  System_Ext(backend, "Backend", "Compose or native")
   Rel(developer, hack, "Runs commands")
   Rel(agent, hack, "Runs commands")
   Rel(hack, backend, "Runs services")
@@ -97,7 +97,7 @@ start with the project instead of relying on an extra terminal tab.
 
 In a linked git worktree, `hack up` defaults to a branch instance named after the
 git branch. The secret key is inherited from the primary checkout through the
-shared git directory. A detached worktree needs an explicit `--branch <name>`.
+shared git directory. A detached worktree needs an explicit `--branch <name>` unless you set `worktree.auto_branch=false` to select the base instance.
 The worktree also reads the primary checkout's local env overlays live, below its
 own local overrides; see [Environment and secrets](env.md#merge-rules).
 See [Worktrees and watchers](guides/development-runtime-safety.md) for shared files,

@@ -80,7 +80,7 @@ hack up --detach --no-interactive --json
 Ask the session to run (with your project's host):
 
 ```sh
-curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack.local --resolve hello.hack.local:443:127.0.0.1 -k https://hello.hack.local/
 ```
 
 ## Expected differences

@@ -20,7 +20,7 @@ In short:
   `exec` and `run` keep the overlay.
 - **New:** an upgrade assistant, single repairs in `hack doctor`, a history of
   starts and stops, and background commands.
-- **Opt-in:** the agent plugin and the native backend (beta).
+- **Optional:** the agent plugin. Native backend selection depends on the launcher and platform.
 - **Gone:** hosted accounts, the dashboard, Hack Tickets and zellij.
 
 ```mermaid

@@ -1760,12 +1760,20 @@ fn ten_edits_of_one_build_leave_its_current_and_previous_images() {
     keys.dedup();
     assert_eq!(keys.len(), 10, "every edit had its own key");
     assert_eq!(pool.images.borrow().len(), 10);
-    // A retained run still references the image of edit 3.
+    // A retained run still references the image of edit 3. Its restore history names
+    // the images of edits 2 to 8, as eight stopped generations would; history is
+    // diagnostic, so those are not references (HACK-2554).
     let graphs = fixture.candidate.state_root.join("run/graphs/0123");
     state::private_directory(&graphs).unwrap();
     fs::write(
         graphs.join("receipt.json"),
         format!("{{\"image\":\"{}\"}}", numbered(3)),
+    )
+    .unwrap();
+    let history: Vec<String> = (2..=8).map(numbered).collect();
+    fs::write(
+        graphs.join("restore-history.json"),
+        serde_json::to_vec(&history).unwrap(),
     )
     .unwrap();
     let report = reclaim::run(&fixture.candidate, &pool).unwrap();

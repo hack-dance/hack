@@ -47,6 +47,57 @@ export const NATIVE_BUILD_FIELDS = [
   "args",
 ] as const;
 const BUILD_KEYS: ReadonlySet<string> = new Set(NATIVE_BUILD_FIELDS);
+
+/**
+ * Compose build fields native builds do not implement, in the order a refusal
+ * names them: the three users meet most, with what to change, then the rest of
+ * the Compose specification's build fields. A refusal names a field only from
+ * this list; any other key is authored text and is never printed.
+ */
+export const UNSUPPORTED_NATIVE_BUILD_FIELDS: ReadonlyMap<
+  string,
+  string | undefined
+> = new Map([
+  ["additional_contexts", "native builds read one context directory"],
+  ["ssh", "SSH agent forwarding into a native build is not supported"],
+  [
+    "dockerfile_inline",
+    "put the Dockerfile in a file inside the context and set build.dockerfile",
+  ],
+  ...[
+    "cache_from",
+    "cache_to",
+    "entitlements",
+    "extra_hosts",
+    "isolation",
+    "labels",
+    "network",
+    "no_cache",
+    "platforms",
+    "privileged",
+    "pull",
+    "secrets",
+    "shm_size",
+    "tags",
+    "ulimits",
+  ].map((field) => [field, undefined] as const),
+]);
+
+/**
+ * The first field of a build mapping that native builds do not implement, as
+ * `build.<field>` from {@link UNSUPPORTED_NATIVE_BUILD_FIELDS}, with its reason;
+ * `undefined` when every key is implemented or only unknown keys remain.
+ */
+export function unsupportedNativeBuildField(
+  build: Readonly<Record<string, unknown>>
+): { readonly field: string; readonly reason?: string } | undefined {
+  for (const [field, reason] of UNSUPPORTED_NATIVE_BUILD_FIELDS) {
+    if (Object.hasOwn(build, field)) {
+      return { field: `build.${field}`, ...(reason ? { reason } : {}) };
+    }
+  }
+  return undefined;
+}
 const MAX_ARGS = 64;
 /** The runtime's own budget is 30 minutes; the client waits a little longer. */
 const BUILD_TIMEOUT_SECONDS = 30 * 60;
@@ -173,9 +224,12 @@ function buildFields(service: string, build: unknown): NativeBuildRequest {
     throw refused(service, "build must be a context path or a mapping.");
   }
   if (Object.keys(build).some((key) => !BUILD_KEYS.has(key))) {
+    const named = unsupportedNativeBuildField(build);
     throw refused(
       service,
-      "only build context, dockerfile, target and literal args are supported."
+      named
+        ? `${named.field} is not supported by native builds${named.reason ? ` (${named.reason})` : ""}; only build context, dockerfile, target and literal args are supported.`
+        : "only build context, dockerfile, target and literal args are supported."
     );
   }
   const target =

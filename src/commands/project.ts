@@ -11,6 +11,7 @@ import {
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
+import { printedShellCommand } from "../lib/printed-shell-command.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -531,7 +532,6 @@ import { displayNativePs } from "./native-ps-display.ts";
 import {
   answerNativeAlreadyRunning,
   explainUnconfirmedNativeDetachedStart,
-  quoteSingleLineShellWord,
 } from "./native-up-already-running.ts";
 import {
   assertAutostartEnvironment,
@@ -7639,10 +7639,7 @@ async function runUpCommand({
     });
   let failedHook: string | undefined;
   let failedHookReason: string | undefined;
-  const retryCommand = [
-    "hack",
-    ...args.raw.argv.map(quoteSingleLineShellWord),
-  ].join(" ");
+  const retryCommand = printedShellCommand(["hack", ...args.raw.argv]);
   const summarizeFailure = json
     ? undefined
     : (name: string, reason?: string) => {

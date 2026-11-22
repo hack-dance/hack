@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { handleRunCliError } from "../src/cli/run.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { printedShellCommand } from "../src/lib/printed-shell-command.ts";
 import { writeUpHookBlocker } from "../src/ui/start-refusal-output.ts";
 
 const cases = [
@@ -114,4 +115,21 @@ test("a persistent hook startup refusal keeps the reason in one blocker", () => 
   } finally {
     stderr.mockRestore();
   }
+});
+
+test.each([
+  "a'quote",
+  "a\\backslash",
+  "$(printf injected)",
+  "-leading",
+  "x".repeat(300),
+  "line\nbreak",
+  "trailing\n",
+  "a\r\t b",
+])("printed recovery values round-trip through POSIX sh: %j", (value) => {
+  const command = printedShellCommand(["printf", "%s", value]);
+  expect(command).toBe(command.split("\n")[0]);
+  const result = Bun.spawnSync(["/bin/sh", "-c", command], { stdout: "pipe" });
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toBe(value);
 });

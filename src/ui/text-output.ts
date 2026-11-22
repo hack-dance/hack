@@ -185,10 +185,16 @@ export function createTextOutput({
       writeRenderedLine(
         `${paint("!", "attention")} ${singleLine(input.thing)}  ${singleLine(input.problem)}${which}`
       );
-      if (input.command) {
-        requireCommand(input.command);
-        line(`  ${input.needs}. run:`);
-        line(`  ${input.command}`);
+      if (input.command !== undefined) {
+        if (
+          input.command.trim() &&
+          singleLine(input.command) === input.command
+        ) {
+          line(`  ${input.needs}. run:`);
+          line(`  ${input.command}`);
+        } else {
+          line("  recovery command could not be printed on one line", "faint");
+        }
       }
       if (tty && input.prompt) {
         line(`  ${input.prompt}`, "faint");

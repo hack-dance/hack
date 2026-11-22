@@ -18,6 +18,7 @@ import { getString, isRecord } from "../lib/guards.ts";
 import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { quoteShellWord } from "../lib/logs.ts";
 import { readNativeComposeDocument } from "../lib/native-compose-backend-features.ts";
+import { scopedHackCommand } from "../lib/printed-shell-command.ts";
 import { type ProjectContext, readProjectConfig } from "../lib/project.ts";
 
 /**
@@ -163,6 +164,13 @@ export function nativeScopedCommand(opts: {
   readonly singleLine?: boolean;
   readonly selection: NativeUpSelection;
 }): string {
+  if (opts.singleLine) {
+    return scopedHackCommand(opts.action, {
+      path: opts.selection.path,
+      project: opts.selection.project,
+      branch: opts.selection.branch,
+    });
+  }
   const words = ["hack", opts.action];
   for (const [key, value] of Object.entries({
     path: opts.selection.path,
@@ -170,30 +178,10 @@ export function nativeScopedCommand(opts: {
     branch: opts.selection.branch,
   })) {
     if (value !== undefined) {
-      words.push(
-        `--${key}`,
-        opts.singleLine
-          ? quoteSingleLineShellWord(value)
-          : quoteShellWord(value)
-      );
+      words.push(`--${key}`, quoteShellWord(value));
     }
   }
   return words.join(" ");
-}
-
-const SHELL_LINE_CONTROLS = /[\p{Cc}\u2028\u2029]/u;
-const SHELL_QUOTED_CONTROLS = /[\\'\p{Cc}\u2028\u2029]/gu;
-
-export function quoteSingleLineShellWord(value: string): string {
-  if (!SHELL_LINE_CONTROLS.test(value)) {
-    return quoteShellWord(value);
-  }
-  const escaped = value.replaceAll(SHELL_QUOTED_CONTROLS, (char) =>
-    char === "'" || char === "\\"
-      ? `\\${char}`
-      : `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`
-  );
-  return `$'${escaped}'`;
 }
 
 function selectionMatches(

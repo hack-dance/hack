@@ -1,3 +1,4 @@
+import { currentCandidateLauncher } from "./candidate-launcher.ts";
 import { quoteShellWord } from "./logs.ts";
 
 const SHELL_LINE_CONTROLS = /[\p{Cc}\u2028\u2029]/u;
@@ -26,7 +27,7 @@ export function scopedHackCommand(
   },
   rest: readonly string[] = []
 ): string {
-  const argv = ["hack", action];
+  const argv = [currentCandidateLauncher().command, action];
   for (const [name, value] of Object.entries(selection)) {
     if (value !== undefined) {
       argv.push(`--${name}`, value);

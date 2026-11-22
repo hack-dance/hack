@@ -65,7 +65,8 @@ impl ImagePlatform {
 }
 
 /// How a service's image platform is chosen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PlatformPolicy {
     /// Linux arm64 only (the default, and the only choice without an opt-in).
     #[default]

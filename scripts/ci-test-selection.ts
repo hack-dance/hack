@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import ts from "typescript";
 import { isRecord } from "../src/lib/guards.ts";
-import { discoverTestFiles, TEST_SUITES } from "./test-shard-plan.ts";
+import {
+  discoverTestFiles,
+  STATIC_GUARD_TESTS,
+  TEST_SUITES,
+} from "./test-shard-plan.ts";
 
 export type TestSelection = {
   readonly mode: "full" | "selected";
@@ -13,6 +17,7 @@ export type TestSelection = {
 
 /** Add exceptional tests here with a reason; contracts and source readers run automatically. */
 export const ALWAYS_RUN_TESTS: Readonly<Record<string, string>> = {
+  ...STATIC_GUARD_TESTS,
   "tests/ci-change-scope.test.ts": "CI policy and required-check wiring",
   "tests/ci-test-selection.test.ts": "Selection must verify itself on every PR",
 };

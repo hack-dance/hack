@@ -5157,6 +5157,52 @@ test("startup admits each reference once and reuses validated pins for shared se
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
 });
 
+test("a changed 11-service plan uses the loaded selections of two recorded references", async () => {
+  const { opts } = await fixture(false);
+  const image = `sha256:${"e".repeat(64)}`;
+  const reference = "docker.io/fixture/app:stable";
+  const alias = "docker.io/fixture/app:also-stable";
+  const names = [
+    "web",
+    ...Array.from({ length: 10 }, (_, index) => `worker${index + 1}`),
+  ];
+  withImages(
+    opts,
+    Object.fromEntries(
+      names.map((name, index) => [name, index < 8 ? reference : alias])
+    )
+  );
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    originalSha256: "1".repeat(64),
+  });
+  const ensureRequests: string[] = [];
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      ensureRequests.push(String(request.args[3]));
+      return {
+        image_id: image,
+        pinned_reference: `docker.io/fixture/app@${image}`,
+        tag_resolution: { source: "recorded" },
+      };
+    }
+    return await invoke(request);
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    const specs = JSON.parse(request.input.normalizedComposeJson).services;
+    expect(Object.keys(specs)).toEqual(names);
+    expect(
+      Object.values(specs).map((spec) => (spec as { image: string }).image)
+    ).toEqual(names.map(() => image));
+    return await review(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(ensureRequests).toEqual([reference, alias]);
+});
+
 test("a service outside the selected profiles is not pulled, and the start says it was left out (HACK-2338)", async () => {
   const id = `sha256:${"e".repeat(64)}`;
   for (const selected of [[], ["jobs"]] as const) {
@@ -5315,7 +5361,15 @@ test("opted-in amd64 services boot a translation pool and pin with their own pla
       "prefer-native",
       "--json",
     ],
-    ["runtime", "ensure-image", "--reference", immutable, "--json"],
+    [
+      "runtime",
+      "ensure-image",
+      "--reference",
+      sharedTag,
+      "--json",
+      "--command-image-pin",
+      immutable,
+    ],
   ]);
   // Only opted-in services carry the reviewed runtime opt-in.
   expect(reviewed.legacy?.["x-hack-amd64-emulation"]).toBe("amd64");
@@ -5345,7 +5399,50 @@ test("without an emulation selection the runtime pool and image pins stay arm64-
   expect(calls.flat()).not.toContain("--emulation");
 });
 
-test("retained startup reviews the saved content ID instead of a newly resolved mutable tag", async () => {
+test("a start reports the fallback reason once for each distinct image", async () => {
+  const { opts } = await fixture(false);
+  const notices: string[] = [];
+  opts.dependencies.warn = (notice) => notices.push(notice);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: { image: "alpine:latest" },
+        worker: { image: "redis:latest" },
+        another: { image: "alpine:latest" },
+      },
+    }),
+  });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      const rateLimited = request.args.includes("redis:latest");
+      return {
+        image_id: `sha256:${"a".repeat(64)}`,
+        pinned_reference: `docker.io/library/alpine@sha256:${"b".repeat(64)}`,
+        platform: "linux/arm64",
+        tag_resolution: {
+          source: "offline",
+          fallback_reason: rateLimited
+            ? "registry_http_429"
+            : "registry_http_404",
+          resolved_at_unix_seconds: 1,
+        },
+      };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(
+    notices.filter((line) => line.includes("using the loaded image"))
+  ).toEqual([
+    "tag no longer exists in the registry (404), using the loaded image resolved 1970-01-01T00:00:01.000Z",
+    "registry rate limit reached, using the loaded image resolved 1970-01-01T00:00:01.000Z",
+  ]);
+});
+
+test("retained startup asks the runtime to confirm the tag before review", async () => {
   const { opts, events } = await fixture(false);
   const saved = {
     run: "1".repeat(32),
@@ -5382,9 +5479,25 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   });
   const invoke = opts.dependencies.invoke!;
   let beforeReview = true;
+  let confirmed = false;
   opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "image-tag-status") {
+      return [
+        {
+          reference: "docker.io/library/redis:latest",
+          aliases: ["redis:latest"],
+          registry: "docker.io",
+          source_digest: image,
+          resolved_at_unix_seconds: Math.floor(Date.now() / 1000),
+          selections: [
+            { policy: "native", platform: "linux/arm64", image_id: image },
+          ],
+        },
+      ];
+    }
     if (request.args[1] === "ensure-image") {
-      throw new Error("mutable tag was unexpectedly resolved");
+      confirmed = true;
+      return { image_id: image, platform: "linux/arm64" };
     }
     if (request.args[1] === "inspect" && beforeReview) {
       expect(events).toContain("runtime up");
@@ -5398,6 +5511,7 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   const review = opts.dependencies.review!;
   opts.dependencies.review = async (request) => {
     beforeReview = false;
+    expect(confirmed).toBe(true);
     expect(
       JSON.parse(request.input.normalizedComposeJson).services.web.image
     ).toBe(image);
@@ -5406,7 +5520,7 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
 });
 
-test("retained startup selects an image again when the service's emulation policy changed", async () => {
+test("retained startup confirms the image under the currently selected emulation policy", async () => {
   const saved = {
     run: "1".repeat(32),
     owner: "c".repeat(32),
@@ -5452,9 +5566,26 @@ test("retained startup selects an image again when the service's emulation polic
     const ensured: string[][] = [];
     let beforeReview = true;
     opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "image-tag-status") {
+        return [
+          {
+            reference: "docker.io/library/redis:latest",
+            aliases: ["redis:latest"],
+            registry: "docker.io",
+            source_digest: retained,
+            resolved_at_unix_seconds: Math.floor(Date.now() / 1000),
+            selections: [
+              { policy: "amd64", platform: "linux/amd64", image_id: retained },
+            ],
+          },
+        ];
+      }
       if (request.args[1] === "ensure-image") {
         ensured.push([...request.args]);
-        return { image_id: selected, platform: "linux/amd64" };
+        return {
+          image_id: retainedPolicy === "amd64" ? retained : selected,
+          platform: "linux/amd64",
+        };
       }
       if (request.args[1] === "inspect" && beforeReview) {
         return observed;
@@ -5475,21 +5606,17 @@ test("retained startup selects an image again when the service's emulation polic
     expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
     const changed = retainedPolicy !== "amd64";
     expect(reviewedImage).toBe(changed ? selected : retained);
-    expect(ensured).toEqual(
-      changed
-        ? [
-            [
-              "runtime",
-              "ensure-image",
-              "--reference",
-              "redis:latest",
-              "--emulation",
-              "amd64",
-              "--json",
-            ],
-          ]
-        : []
-    );
+    expect(ensured).toEqual([
+      [
+        "runtime",
+        "ensure-image",
+        "--reference",
+        "redis:latest",
+        "--emulation",
+        "amd64",
+        "--json",
+      ],
+    ]);
   }
 });
 
@@ -6388,7 +6515,7 @@ test("invalid HTTP retries name the service and field before hooks or runtime ef
   expect(events).not.toContain("runtime ensure-image");
 });
 
-test("a missing shared tag names every affected active service without echoing image values", async () => {
+test("a missing shared tag names the requested image and every affected active service", async () => {
   const { opts } = await fixture(false);
   const prepare = opts.dependencies.prepare!;
   opts.dependencies.prepare = async (request) => {
@@ -6432,7 +6559,7 @@ test("a missing shared tag names every affected active service without echoing i
   );
   expect((error as Error).message).not.toContain("inactive");
   expect((error as Error).message).not.toContain("unrelated");
-  expect((error as Error).message).not.toContain("synthetic:missing");
+  expect((error as Error).message).toContain("synthetic:missing");
   expect((error as Error).message).not.toContain("private registry detail");
 });
 
@@ -6845,4 +6972,30 @@ test("up without a recovery callback keeps the owner-exited refusal and reads no
     NativeRuntimeRequestError
   );
   expect(events).toEqual(["graph retained-preflight refused"]);
+});
+
+test.each([
+  [
+    "Provider lease acquisition refused; recorded holder: retained startup check; no operation was admitted.",
+    "retained startup check",
+  ],
+  [undefined, "unavailable"],
+])("a bounded startup lock refusal reports holder %s and tells the user how to retry", async (nativeMessage, holder) => {
+  const { opts, events } = await fixture();
+  const blocker = new NativeRuntimeRequestError({
+    message: "Native runtime request failed (provider_busy).",
+    nativeCode: "provider_busy",
+    nativeMessage,
+  });
+  opts.dependencies.invoke = async () => {
+    throw blocker;
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    [
+      "Native startup could not acquire a runtime lock (provider_busy).",
+      `Holder: ${holder}.`,
+      "Run hack up again after the holder finishes.",
+    ].join("\n")
+  );
+  expect(events).toEqual([]);
 });

@@ -48,6 +48,10 @@ const STUB = [
   '      : > "$marker"',
   "      exit 0",
   "      ;;",
+  '    *" pull "*)',
+  '      printf "%s\\n" "$IMAGE_TAG" > "$STUB_CAPTURE/pull-tag"',
+  "      exit 0",
+  "      ;;",
   '    *" up "*)',
   '      rm -f "$marker"',
   '      prev=""',
@@ -421,3 +425,29 @@ test("doctor reports a literal override by counts only and leaves removal to --f
   expect(check?.detail).toContain("hack doctor --fix");
   expect(await readFile(overridePath, "utf8")).toContain(CANARY);
 }, 120_000);
+
+test("Compose pull uses the selected managed environment for image interpolation", async () => {
+  const projectDir = join(projectRoot, ".hack");
+  await writeFile(
+    join(projectDir, "docker-compose.yml"),
+    'services:\n  web:\n    image: "alpine:${IMAGE_TAG}"\n'
+  );
+  await setProjectEnvValue({
+    projectRoot,
+    projectDir,
+    envName: "staging",
+    scope: "global",
+    key: "IMAGE_TAG",
+    value: "fixture-staging",
+    secret: false,
+  });
+  const result = await runCli({ args: ["pull", "--env", "staging", "--json"] });
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    ok: true,
+    data: { backend: "compose" },
+  });
+  expect(await readFile(join(capture, "pull-tag"), "utf8")).toBe(
+    "fixture-staging\n"
+  );
+});

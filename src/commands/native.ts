@@ -11,6 +11,7 @@ import {
   previewNativeSetup,
   runNativeSetupChild,
 } from "../backends/native-runtime-setup.ts";
+import { inspectTempAliases } from "../backends/native-temp-aliases.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
@@ -276,6 +277,68 @@ function phaseOf(value: unknown): string | undefined {
     : undefined;
 }
 
+const tempAliasesSpec = defineCommand({
+  name: "temp-aliases",
+  summary: "List dangling native provider HOME aliases",
+  description:
+    "List old aliases whose native home is gone, or remove them with --fix.",
+  group: "Global",
+  options: [
+    optJson,
+    defineOption({
+      name: "fix",
+      type: "boolean",
+      long: "--fix",
+      description: "Remove verified dangling aliases",
+    } as const),
+    defineOption({
+      name: "includeUnverifiedVolumes",
+      type: "boolean",
+      long: "--include-unverified-volumes",
+      description: "With --fix, include aliases whose volume may be unmounted",
+    } as const),
+  ],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const tempAliases = withHandler(tempAliasesSpec, async ({ ctx, args }) => {
+  if (args.options.includeUnverifiedVolumes && !args.options.fix) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: "--include-unverified-volumes requires --fix.",
+    });
+  }
+  const report = await inspectTempAliases({
+    runtime: resolveNativeSetupSelection(),
+    cwd: ctx.cwd,
+    fix: args.options.fix === true,
+    includeUnverifiedVolumes: args.options.includeUnverifiedVolumes === true,
+  });
+  if (args.options.json) {
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    return 0;
+  }
+  for (const name of report.dangling) {
+    process.stdout.write(
+      `${report.removed.includes(name) ? "Removed" : "Dangling"} ${name}\n`
+    );
+  }
+  for (const name of report.uncertainVolume) {
+    process.stdout.write(
+      report.removed.includes(name)
+        ? `Removed ${name}\n`
+        : `Cannot tell for ${name} (volume not mounted, or home deleted).\n`
+    );
+  }
+  if (report.incomplete) {
+    process.stdout.write("Temporary alias scan was incomplete.\n");
+  } else if (report.dangling.length + report.uncertainVolume.length === 0) {
+    process.stdout.write("No old dangling provider HOME aliases found.\n");
+  }
+  return 0;
+});
+
 /** Explicit native operations never change the project's Compose backend. */
 export const nativeCommand = defineCommand({
   name: "native",
@@ -283,6 +346,6 @@ export const nativeCommand = defineCommand({
   group: "Global",
   options: [],
   positionals: [],
-  subcommands: [setup, recover],
+  subcommands: [setup, recover, tempAliases],
   expandInRootHelp: true,
 } as const);

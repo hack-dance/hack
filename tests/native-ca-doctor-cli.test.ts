@@ -77,6 +77,14 @@ test("native Doctor reports unknown owner without consulting Docker-era CA state
     scope: "machine",
     nativePool: { state: "unknown", graphRuns: null },
   });
+  if (process.platform === "darwin") {
+    checks.push({
+      id: "native temporary aliases",
+      status: "warn",
+      detail: "Temporary alias scan unavailable · hack native temp-aliases",
+      scope: "machine",
+    });
+  }
   expect(envelope).toMatchObject({ ok: true, data: { checks } });
   expect(result.stdout).not.toContain("caddy local ca");
   expect(result.stdout).not.toContain("docker daemon");

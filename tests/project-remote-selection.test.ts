@@ -7,7 +7,7 @@ import {
   parseRemoteChoices,
   readRemoteChoices,
   resolveRemoteChoices,
-  runningRemoteTarget,
+  runningRemoteIdentity,
   saveRemoteChoices,
 } from "../src/lib/project-remote-selection.ts";
 import { parseProjectPrerequisites } from "../src/lib/project-remotes-config.ts";
@@ -82,9 +82,15 @@ test("active remote labels outrank stopped backing containers", () => {
     State,
     Labels: "dev.hack.remote.db=local",
   }));
-  expect(runningRemoteTarget(stopped, "db")).toBe("local");
+  expect(runningRemoteIdentity(stopped, "db")).toBe("local");
   expect(
-    runningRemoteTarget(
+    runningRemoteIdentity(
+      [...stopped, { State: "created", Labels: "dev.hack.remote.db=qa" }],
+      "db"
+    )
+  ).toBeUndefined();
+  expect(
+    runningRemoteIdentity(
       [...stopped, { State: "running", Labels: "dev.hack.remote.db=qa" }],
       "db"
     )

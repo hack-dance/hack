@@ -7,7 +7,6 @@ import {
   composeRuntimeBackend,
 } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
-import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { resolveEffectiveBranch } from "./branches.ts";
 import { HackCliError } from "./cli-result.ts";
 import { renderComposeEnvReferenceOverride } from "./compose-managed-env.ts";
@@ -16,9 +15,7 @@ import { ensureDir, writeTextFileAtomicIfChanged } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import { resolveHackEnv } from "./hack-env.ts";
 import { resolveLifecycleComposeProjectName } from "./lifecycle-runtime.ts";
-import { MissingProjectContextError } from "./missing-project-error.ts";
 import {
-  findProjectContext,
   type ProjectConfig,
   type ProjectContext,
   resolveWorktreeAutoBranch,
@@ -33,32 +30,17 @@ import {
   type EffectiveRemote,
   remoteSelectionLabels,
   remoteServiceTargets,
-  runningRemoteTarget,
+  remoteTargetIdentity,
+  runningRemoteIdentity,
 } from "./project-remote-selection.ts";
+import type { SelectedProjectRemote } from "./project-remotes-config.ts";
 import {
   readProjectRuntimeStateEntry,
   upsertProjectRuntimeStateEntry,
 } from "./project-runtime-state.ts";
 import { selectEnvForRunningInstance } from "./running-env-selection.ts";
 import { exec } from "./shell.ts";
-
-export async function resolveUseProject(opts: {
-  readonly cwd: string;
-  readonly path?: string;
-  readonly project?: string;
-}): Promise<ProjectContext> {
-  if (opts.path && opts.project !== undefined) {
-    throw new CliUsageError("Use either --path or --project (not both).");
-  }
-  if (opts.project !== undefined) {
-    return await resolveRegisteredProjectOption({ projectOpt: opts.project });
-  }
-  const project = await findProjectContext(resolve(opts.cwd, opts.path ?? "."));
-  if (!project) {
-    throw new MissingProjectContextError();
-  }
-  return project;
-}
+import { isHostControlEnvKey } from "./vetted-env.ts";
 
 export async function resolveUseInstance(opts: {
   readonly project: ProjectContext;
@@ -208,7 +190,7 @@ export async function observedRemoteChoices(
   composeProject: string | null,
   rows: readonly Record<string, unknown>[],
   recorded?: Readonly<Record<string, string>>
-): Promise<EffectiveRemote[]> {
+): Promise<SelectedProjectRemote[]> {
   const defaults = cfg.prerequisites?.config?.selected ?? [];
   if (!defaults.length) {
     return [];
@@ -219,15 +201,17 @@ export async function observedRemoteChoices(
       typeof Labels === "string" && Labels.split(",").includes(label)
   );
   return defaults.flatMap((remote) => {
-    const observed = runningRemoteTarget(owned, remote.remote);
-    const name =
-      observed === undefined
-        ? recorded?.[remote.remote]?.split(":")[0]
-        : observed;
+    const observed = runningRemoteIdentity(owned, remote.remote);
+    const [name, digest] =
+      (observed === undefined ? recorded?.[remote.remote] : observed)?.split(
+        ":"
+      ) ?? [];
     const target = name ? remote.targets.get(name) : undefined;
-    return name && target
-      ? [{ ...remote, ...target, target: name, source: "default" as const }]
-      : [];
+    if (!(name && target && digest)) {
+      return [];
+    }
+    const choice = { ...remote, ...target, target: name };
+    return remoteTargetIdentity(choice) === `${name}:${digest}` ? [choice] : [];
   });
 }
 
@@ -309,7 +293,10 @@ export async function recordStartedRemotes(
     return;
   }
   const remoteTargets = Object.fromEntries(
-    choices.map(({ remote, target, source }) => [remote, `${target}:${source}`])
+    choices.map((choice) => [
+      choice.remote,
+      `${remoteTargetIdentity(choice)}:${choice.source}`,
+    ])
   );
   await upsertProjectRuntimeStateEntry({
     projectDir,
@@ -358,9 +345,16 @@ export async function prepareRemoteStartup(opts: {
     composeProject: "",
     requestedEnvName: opts.envName,
   });
-  const env = applyRemoteEnv(managed, opts.choices, {
+  const bindings = applyRemoteEnv(managed, opts.choices, {
+    bindingsOnly: true,
     missing: () => undefined,
   });
+  const env = {
+    ...managed,
+    ...Object.fromEntries(
+      Object.entries(bindings).filter(([key]) => !isHostControlEnvKey(key))
+    ),
+  };
   const command = (
     profiles: readonly string[],
     args: readonly string[],
@@ -380,7 +374,7 @@ export async function prepareRemoteStartup(opts: {
     );
   const withoutBindings = await command(
     ["*"],
-    ["config", "--format", "json"],
+    ["config", "--no-env-resolution", "--format", "json"],
     managed
   );
   if (withoutBindings.exitCode !== 0) {
@@ -394,11 +388,13 @@ export async function prepareRemoteStartup(opts: {
         message: `Compose requires remote binding ${name}. Give it a default (\${${name}:-}) because the binding is unavailable at hack down.`,
       });
     }
-    readComposeModel(withoutBindings);
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Compose could not resolve services without remote bindings. Check that the Compose file can load without them.",
+    });
   }
-  const model = readComposeModel(
-    await command(["*"], ["config", "--format", "json"])
-  );
+  const model = readComposeModel(withoutBindings);
   const active = await command(opts.profiles, ["config", "--services"]);
   if (active.exitCode !== 0) {
     readComposeModel(active);

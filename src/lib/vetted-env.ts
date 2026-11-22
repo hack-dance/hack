@@ -65,3 +65,9 @@ const HOST_CONTROL_ENV_KEY =
 export function isHostControlEnvKey(key: string): boolean {
   return HOST_CONTROL_ENV_KEY.test(key);
 }
+
+export const HOST_LOOPBACK = "127.0.0.1";
+export const CONTAINER_ONLY_HOSTS: ReadonlySet<string> = new Set([
+  "host.docker.internal",
+  "host-gateway",
+]);

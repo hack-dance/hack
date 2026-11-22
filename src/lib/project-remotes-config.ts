@@ -38,7 +38,6 @@ export interface ProjectRemoteTarget {
 export interface SelectedProjectRemote extends ProjectRemoteTarget {
   readonly remote: string;
   readonly target: string;
-  readonly envNames: readonly string[];
   readonly targets: ReadonlyMap<string, ProjectRemoteTarget>;
   readonly bindings: Readonly<Record<string, string>>;
 }
@@ -395,7 +394,6 @@ function selectedPrerequisites(
       ...selected,
       targets: references,
       bindings,
-      envNames: Object.keys(bindings),
     };
   });
 }

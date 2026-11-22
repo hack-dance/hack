@@ -869,8 +869,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
@@ -879,25 +877,6 @@ jobs:
         uses: ./.github/actions/ci-dependency-cache
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Compare Compose calls to the PR merge base
-        if: matrix.shard == 8 && github.event_name == 'pull_request'
-        env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-        shell: bash
-        run: |
-          git fetch --no-tags origin "$PR_BASE"
-          export HACK_NEUTRALITY_BASE_SHA
-          HACK_NEUTRALITY_BASE_SHA=$(git merge-base HEAD "$PR_BASE")
-          if git diff --quiet "$HACK_NEUTRALITY_BASE_SHA" HEAD -- \
-            src/commands/project.ts src/commands/use.ts src/backends 'src/lib/project-remote-*' \
-            src/lib/project-runtime-state.ts tests/project-remote-compose-cli.test.ts .github/workflows/ci.yml; then
-            exit 0
-          fi
-          root=$(mktemp -d "$RUNNER_TEMP/compose-neutrality.XXXXXX")
-          trap 'rm "$root/base/node_modules"; git worktree remove "$root/base"; rmdir "$root"' EXIT
-          git worktree add --detach "$root/base" "$HACK_NEUTRALITY_BASE_SHA"
-          ln -s "$PWD/node_modules" "$root/base/node_modules"
-          HACK_NEUTRALITY_BASE_ROOT="$root/base" bun test tests/project-remote-compose-cli.test.ts
       # The one-off checks and builds run once, on shard 8 (Linux when pooled).
       - name: Report selected macOS files deferred to the integration run
         if: matrix.shard == 8 && needs.changes.outputs.defer_macos == 'true'

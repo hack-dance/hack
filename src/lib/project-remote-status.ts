@@ -7,6 +7,7 @@ export interface ProjectRemoteStatus {
   readonly service: string;
   readonly kind: "remote";
   readonly target: string;
+  readonly defaultTarget?: string;
   readonly address: (ProjectRemoteAddress & { readonly port: number }) | null;
   readonly via: "aws-ssm" | null;
   readonly state: "unknown" | "declared" | "tunnel not started by this version";

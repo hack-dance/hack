@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -12,6 +13,8 @@ import { canPrompt } from "./interactivity.ts";
 import { formatProjectRemoteAddress } from "./project-remote-status.ts";
 import type { SelectedProjectRemote } from "./project-remotes-config.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
+
+import { CONTAINER_ONLY_HOSTS, HOST_LOOPBACK } from "./vetted-env.ts";
 
 const SELECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
@@ -124,7 +127,7 @@ export function refuseRemoteStart(
   if (declared?.length) {
     throw new HackCliError({
       code: "E_REMOTE_START_UNSUPPORTED",
-      message: `${command} cannot start a project that declares remotes. Run hack up --detach for the whole project.`,
+      message: `${command} cannot start a project that declares remotes. Run ${command === "hack restart" ? "hack down, then " : ""}hack up --detach for the whole project.`,
     });
   }
 }
@@ -258,15 +261,9 @@ export async function saveRemoteChoices(opts: {
   });
 }
 
-export const HOST_LOOPBACK = "127.0.0.1";
-export const CONTAINER_ONLY_HOSTS: ReadonlySet<string> = new Set([
-  "host.docker.internal",
-  "host-gateway",
-]);
-
 export function applyRemoteEnv(
   env: Readonly<Record<string, string>>,
-  choices: readonly EffectiveRemote[] = [],
+  choices: readonly SelectedProjectRemote[] = [],
   options?: {
     readonly bindingsOnly?: boolean;
     readonly host?: boolean;
@@ -353,16 +350,32 @@ export function remoteServiceTargets(
   return { targets, inactive };
 }
 
+/** Hash authored descriptors only. An env reference contributes its name, never its value. */
+export function remoteTargetIdentity({
+  target,
+  address,
+  port,
+  bindings,
+}: SelectedProjectRemote): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([address, port, Object.entries(bindings).sort()]))
+    .digest("hex");
+  return `${target}:${digest}`;
+}
+
 export function remoteSelectionLabels(
   choices: readonly EffectiveRemote[]
 ): Record<string, string> {
   return Object.fromEntries(
-    choices.map(({ remote, target }) => [`dev.hack.remote.${remote}`, target])
+    choices.map((choice) => [
+      `dev.hack.remote.${choice.remote}`,
+      remoteTargetIdentity(choice),
+    ])
   );
 }
 
 /** Undefined means no observed label; null means observations disagree. */
-export function runningRemoteTarget(
+export function runningRemoteIdentity(
   entries: readonly Record<string, unknown>[],
   remote: string
 ): string | null | undefined {
@@ -389,9 +402,12 @@ export function runningRemoteTarget(
       .find((label) => label.startsWith(prefix))
       ?.slice(prefix.length);
     if (target) {
-      (stopped ? inactive : observed).add(target.split(":")[0] ?? target);
+      (stopped ? inactive : observed).add(target);
     }
   }
   const targets = active ? observed : inactive;
-  return targets.size > 1 ? null : [...targets][0];
+  if (targets.size > 1) {
+    return active ? null : undefined;
+  }
+  return [...targets][0];
 }

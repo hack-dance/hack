@@ -305,6 +305,7 @@ test("detailed project output includes declared remotes without observing the ru
       service: "db",
       kind: "remote",
       target: "unknown",
+      defaultTarget: "qa",
       address: null,
       via: null,
       state: "unknown",

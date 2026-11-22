@@ -10,18 +10,19 @@ import { readProjectConfig } from "../lib/project.ts";
 import {
   resolveRemoteInspectionEnv,
   resolveUseInstance,
-  resolveUseProject,
 } from "../lib/project-remote-compose.ts";
 import {
   parseRemoteChoices,
   readRemoteChoices,
   resolveRemoteChoices,
-  runningRemoteTarget,
+  runningRemoteIdentity,
   saveRemoteChoices,
 } from "../lib/project-remote-selection.ts";
 import { formatProjectRemoteAddress } from "../lib/project-remote-status.ts";
 import { readProjectRuntimeStateEntry } from "../lib/project-runtime-state.ts";
 import { isHostControlEnvKey } from "../lib/vetted-env.ts";
+
+import { resolveProjectForArgs } from "./project.ts";
 
 const COMPOSE_INSPECTION_TRANSPORT =
   /^(?:DOCKER_HOST|DOCKER_CONTEXT|DOCKER_TLS_VERIFY|DOCKER_CERT_PATH|COMPOSE_PROJECT_NAME|COMPOSE_PROFILES)$/;
@@ -42,10 +43,11 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
       message: "Remote selection currently requires the Compose backend.",
     });
   }
-  const project = await resolveUseProject({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
+  const project = await resolveProjectForArgs({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
   });
   const cfg = await readProjectConfig(project);
   if (cfg.prerequisites?.error) {
@@ -114,12 +116,13 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
       composeProject: lifecycleComposeProject,
     });
     for (const choice of pending) {
-      const running = active && runningRemoteTarget(active, choice.remote);
-      const [target, source] =
+      const identity = active && runningRemoteIdentity(active, choice.remote);
+      const running = identity?.split(":")[0];
+      const [target, digest, source] =
         runtime?.remoteTargets?.[choice.remote]?.split(":") ?? [];
       const fallback = active?.length === 0 ? "stopped" : "unknown";
       const description = running
-        ? `${running} (${target === running && source ? source : "source unknown"})`
+        ? `${running} (${identity === `${target}:${digest}` && source ? source : "source unknown"})`
         : fallback;
       process.stdout.write(
         `${choice.remote} · running: ${description} · pending: ${choice.target} (${choice.source}) · ${formatProjectRemoteAddress({ ...choice.address, port: choice.port })}${choice.via ? " · tunnel not started by this version" : ""}\n`

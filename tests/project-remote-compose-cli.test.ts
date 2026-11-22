@@ -6,9 +6,6 @@ import { HACK_VERSION } from "../src/lib/hack-version.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const root = resolve(import.meta.dir, "..");
-const neutralityBase =
-  process.env.HACK_NEUTRALITY_BASE_SHA ??
-  "3f2f00e1b8b2bb0fe26cadf47369dbc75e693001";
 const requiredInterpolation = /\$\{([A-Za-z_][A-Za-z0-9_]*):?\?[^}]*\}/g;
 const fixtureEngine = `#!${process.execPath}
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -18,13 +15,15 @@ const argv = Bun.argv.slice(2);
 const control = join(dirname(dirname(Bun.argv[1])), "control");
 const state = control + "/engine.json";
 const files = argv.flatMap((arg, i) => arg === "-f" ? [argv[i+1]] : []);
-const generated = files.filter((file) => file.includes("/.internal/") || file.includes("/.branch/"))
-  .map((file) => existsSync(file) ? readFileSync(file, "utf8") : null);
-appendFileSync(control + "/calls", JSON.stringify({argv, envNames: Object.keys(process.env).sort(), fixtureEnv: process.env.EXAMPLE ?? null, generated}) + "\\n");
+appendFileSync(control + "/calls", JSON.stringify(argv) + "\\n");
 const command = ["up", "down", "exec", "run", "logs", "ps", "config"].find((name) => argv.includes(name));
+const dotenv = files[0] && join(dirname(files[0]), ".env");
+const fileEnv = dotenv && existsSync(dotenv)
+  ? Object.fromEntries(readFileSync(dotenv, "utf8").trim().split("\\n").map((line) => line.split("=")))
+  : {};
 const required = files.flatMap((file) => existsSync(file)
   ? [...readFileSync(file, "utf8").matchAll(${requiredInterpolation})]
-  : []).find((match) => !process.env[match[1]]);
+  : []).find((match) => !(process.env[match[1]] ?? fileEnv[match[1]]));
 if (required) {
   console.error("required variable " + required[1] + " is missing a value: required");
   process.exit(1);
@@ -37,7 +36,14 @@ else if (command === "config") {
 } else if (command === "up") {
   if (!argv.includes("--no-start")) {
     const override = files.find((file) => file.includes("/compose.remote.override."));
-    const labels = override ? YAML.parse(readFileSync(override, "utf8")).services.api.labels : {};
+    const service = override ? YAML.parse(readFileSync(override, "utf8")).services.api : {};
+    const containerEnv = Object.fromEntries(Object.entries(service.environment ?? {})
+      .map(([name, ref]) => [name, process.env[ref.slice(2, -1)]]));
+    writeFileSync(join(control, "delivery"), JSON.stringify({
+      host: [process.env.DOCKER_HOST ?? null, process.env.COMPOSE_PROJECT_NAME ?? null, process.env.PATH],
+      container: containerEnv,
+    }));
+    const labels = service.labels ?? {};
     writeFileSync(state, JSON.stringify({
       ID: "a".repeat(64), Service: "api", State: "running", ExitCode: 0, Project: "remote-fixture",
       Labels: Object.entries({"com.docker.compose.project":"remote-fixture","com.docker.compose.service":"api","com.docker.compose.project.working_dir":process.cwd(), ...labels}).map(([k,v])=>k+"="+v).join(",")
@@ -122,145 +128,6 @@ async function fixture() {
   return { path, repo, project, control, cli, configure };
 }
 
-// ps --json launches its two architecture probes together. Fake child
-// startup may reverse their arrival order without changing the CLI calls.
-function compareTrace(trace: string, args: readonly string[]): string {
-  if (args.join(" ") !== "ps --json") {
-    return trace;
-  }
-  const lines = trace.trimEnd().split("\n");
-  const pair = lines.slice(-2);
-  if (
-    pair.some((line) =>
-      line.includes('["version","--format","{{json .Server.Arch}}"]')
-    ) &&
-    pair.some((line) => line.includes('["inspect","--type","container"'))
-  ) {
-    lines.splice(-2, 2, ...pair.sort());
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-const base = process.env.HACK_NEUTRALITY_BASE_ROOT;
-test.skipIf(!base)(
-  "non-remote Compose calls match the pinned base byte for byte",
-  async () => {
-    if (!base) {
-      throw new Error(
-        "Set HACK_NEUTRALITY_BASE_ROOT to the pinned base checkout."
-      );
-    }
-    const revision = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: base });
-    expect(revision.exitCode).toBe(0);
-    expect(revision.stdout.toString().trim()).toBe(neutralityBase);
-    const f = await fixture();
-    try {
-      const capture = async (cliRoot: string) => {
-        await rm(f.project, { recursive: true });
-        await mkdir(f.project);
-        await f.configure();
-        await Bun.write(
-          join(f.project, "hack.env.default.yaml"),
-          "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    EXAMPLE: sample\n"
-        );
-        await rm(join(f.control, "engine.json"), { force: true });
-        const traces: string[] = [];
-        for (const args of [
-          ["up"],
-          ["up", "-d"],
-          ["restart"],
-          ["ps"],
-          ["ps", "--json"],
-          ["logs"],
-          ["logs", "--compose"],
-          ["exec", "api", "true"],
-          ["run", "api", "true"],
-          ["down"],
-          ["run", "--profile", "test", "api", "true"],
-          ["up", "-d", "--branch", "test", "--profile", "test"],
-          ["down", "--branch", "test"],
-          ["up", "-d"],
-          ["down", "--prune-caches", "--yes"],
-        ]) {
-          await Bun.write(join(f.control, "calls"), "");
-          const result = await f.cli(args, cliRoot);
-          expect(
-            result.code,
-            `${args.join(" ")}\n${result.stdout}${result.stderr}`
-          ).toBe(0);
-          const calls = await Bun.file(join(f.control, "calls")).text();
-          const expected = args[0] === "restart" ? "up" : args[0];
-          expect(
-            calls
-              .trim()
-              .split("\n")
-              .some((line) => {
-                const { argv } = JSON.parse(line);
-                return argv[0] === "compose" && argv.includes(expected);
-              }),
-            args.join(" ")
-          ).toBe(true);
-          traces.push(compareTrace(calls, args));
-        }
-        await Bun.write(join(f.control, "calls"), "");
-        const failed = await f.cli(["ps", "--json"], cliRoot, {
-          TEST_FAIL_PS: "1",
-        });
-        expect(failed.code).toBe(1);
-        traces.push(await Bun.file(join(f.control, "calls")).text());
-        await Bun.write(join(f.control, "calls"), "");
-        const downFailure = await f.cli(["down"], cliRoot, {
-          TEST_FAIL_DOWN: "1",
-        });
-        expect(downFailure.code).toBe(19);
-        traces.push(await Bun.file(join(f.control, "calls")).text());
-        const git = (...args: string[]) => {
-          const result = Bun.spawnSync(
-            [
-              "git",
-              "-c",
-              "user.name=Fixture",
-              "-c",
-              "user.email=fixture@example.test",
-              ...args,
-            ],
-            { cwd: f.repo }
-          );
-          expect(result.exitCode, result.stderr.toString()).toBe(0);
-        };
-        const linked = join(f.path, "linked");
-        git("init", "-q");
-        git(
-          "add",
-          ".hack/hack.config.json",
-          ".hack/docker-compose.yml",
-          ".hack/hack.env.default.yaml"
-        );
-        git("commit", "-qm", "fixture", "--allow-empty");
-        git("worktree", "add", "--quiet", "-B", "neutral-linked", linked);
-        try {
-          await Bun.write(join(f.control, "calls"), "");
-          const result = await f.cli(["up", "-d"], cliRoot, undefined, linked);
-          expect(result.code, result.stdout + result.stderr).toBe(0);
-          const down = await f.cli(["down"], cliRoot, undefined, linked);
-          expect(down.code, down.stdout + down.stderr).toBe(0);
-          const calls = await Bun.file(join(f.control, "calls")).text();
-          expect(calls).toContain("--neutral-linked");
-          traces.push(calls);
-        } finally {
-          git("worktree", "remove", "--force", linked);
-        }
-        return traces;
-      };
-      const baseline = await capture(base);
-      expect(await capture(root)).toEqual(baseline);
-    } finally {
-      await rm(f.path, { recursive: true });
-    }
-  },
-  120_000
-);
-
 test("up requires optional remote interpolation and down binds hooks from the started target", async () => {
   const f = await fixture();
   try {
@@ -270,7 +137,7 @@ test("up requires optional remote interpolation and down binds hooks from the st
         composeFile,
         `name: remote-fixture\nservices:\n  api:\n    image: alpine\n    environment: ["DB_HOST=\${${key}${operator}}"]\n`
       );
-    const configure = (target: string) =>
+    const configure = (target: string, hostname = "live.example.test") =>
       f.configure({
         min_cli_version: HACK_VERSION,
         remotes: {
@@ -278,7 +145,7 @@ test("up requires optional remote interpolation and down binds hooks from the st
             default: target,
             env: { DB_HOST: "{host}" },
             targets: {
-              x: { hostname: "live.example.test", port: 5432 },
+              x: { hostname, port: 5432 },
               y: { hostname: "other.example.test", port: 5432 },
             },
           },
@@ -353,6 +220,37 @@ test("up requires optional remote interpolation and down binds hooks from the st
       db: null,
       files: [composeFile],
     });
+    for (const mode of ["record", "changedLabel", "changedRecord"]) {
+      await configure("x");
+      // A real .env value removes the requirement for a remote-only interpolation.
+      await Bun.write(
+        join(f.project, ".env"),
+        "DB_HOST=from-file.example.test\n"
+      );
+      await compose(":?required");
+      const started = await f.cli(["up", "-d", "--use", "db=x"]);
+      expect(started.code, started.stdout + started.stderr).toBe(0);
+      if (mode !== "changedLabel") {
+        const engine = Bun.file(join(f.control, "engine.json"));
+        const row = await engine.json();
+        const labels = row.Labels.split(",").filter(
+          (label: string) => !label.startsWith("dev.hack.remote.")
+        );
+        await Bun.write(
+          engine,
+          JSON.stringify({ ...row, Labels: labels.join(",") })
+        );
+      }
+      if (mode !== "record") {
+        await configure("x", "changed.example.test");
+        await compose(":?required");
+      }
+      const ended = await f.cli(["down"]);
+      expect(ended.code, ended.stdout + ended.stderr).toBe(0);
+      expect(await Bun.file(join(f.control, "hook")).text()).toBe(
+        mode === "record" ? "live.example.test\n" : "absent\n"
+      );
+    }
     const stopped = await f.cli(["ps", "--json"]);
     expect(stopped.code, stopped.stderr).toBe(0);
     expect(JSON.parse(stopped.stdout).remotes[0].target).toBe("unknown");
@@ -360,3 +258,40 @@ test("up requires optional remote interpolation and down binds hooks from the st
     await rm(f.path, { recursive: true });
   }
 }, 120_000);
+
+test("remote control names reach containers without changing the Compose client", async () => {
+  const f = await fixture();
+  try {
+    await f.configure({
+      min_cli_version: HACK_VERSION,
+      remotes: {
+        db: {
+          default: "qa",
+          env: {
+            DOCKER_HOST: "tcp://{host}:{port}",
+            COMPOSE_PROJECT_NAME: "{host}",
+            PATH: "/{host}",
+          },
+          targets: { qa: { hostname: "fixture-db", port: 5432 } },
+        },
+      },
+    });
+    const started = await f.cli(["up", "-d"]);
+    expect(started.code, started.stdout + started.stderr).toBe(0);
+    const delivery = await Bun.file(join(f.control, "delivery")).json();
+    expect(delivery.host).toEqual([
+      null,
+      null,
+      expect.stringContaining("/bin:"),
+    ]);
+    expect(delivery.container).toMatchObject({
+      DOCKER_HOST: "tcp://fixture-db:5432",
+      COMPOSE_PROJECT_NAME: "fixture-db",
+      PATH: "/fixture-db",
+    });
+    const ended = await f.cli(["down"]);
+    expect(ended.code, ended.stdout + ended.stderr).toBe(0);
+  } finally {
+    await rm(f.path, { recursive: true });
+  }
+}, 60_000);

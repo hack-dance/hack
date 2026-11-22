@@ -12,7 +12,9 @@ The stale-label control violates `ActiveLabelWins` with `label = "qa"`,
 The CLI fixture changes the saved preference after startup and removes the
 runtime record. The target-selection test covers exited, dead and created
 containers alongside an active label. The model assumes the labels and record
-belong to the instance. Compose container and network shutdown use their normal
+belong to the instance and use the same authored binding descriptor. The CLI
+fixture also covers config digest drift with both label and record lookup.
+Compose container and network shutdown use their normal
 paths outside this model.
 
 [State chart](state.svg) · [Mermaid source](state.mmd)

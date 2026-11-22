@@ -355,11 +355,29 @@ fn run() -> Result<(), CandidateError> {
                     "Could not disable core dumps for the runtime service.",
                 ));
             }
-            hack_runtime_core::service::serve(
+            let served = hack_runtime_core::service::serve(
                 &candidate.state_root,
                 hack_runtime_core::service::Options { idle },
                 notify,
-            )?;
+            );
+            match served {
+                // A drain that ran out of time keeps both locks for a worker
+                // that may still run. Exit now, with nothing in between: the
+                // kernel then ends that worker and frees the locks, so the
+                // next client can start a service. Returning to a caller that
+                // stays alive would leave the home without a socket while
+                // every starter loses the lock.
+                Err(error) if error.code == "service_drain_timeout" => {
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string(&error).expect("error is serializable")
+                    );
+                    hack_runtime_core::timings::exit(2);
+                }
+                other => {
+                    other?;
+                }
+            }
         }
         ["service", action @ ("status" | "stop")] => {
             let candidate = discover_candidate(&requested)?;

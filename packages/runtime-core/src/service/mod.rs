@@ -106,9 +106,10 @@ pub struct Options {
     /// Tests only: replaces `RELEASE_WAIT`.
     #[cfg(test)]
     pub(crate) release_wait: Option<Duration>,
-    /// Tests only: told once when the first attempt lost and the retry window began.
+    /// Tests only: told `"window"` when the first attempt lost and the retry
+    /// window began, and `"retry"` before each later attempt.
     #[cfg(test)]
-    pub(crate) retrying: Option<std::sync::mpsc::Sender<()>>,
+    pub(crate) retrying: Option<std::sync::mpsc::Sender<&'static str>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,7 +215,7 @@ fn start_or_retry(paths: &Paths, options: &Options) -> Result<Option<Bound>, Can
     }
     #[cfg(test)]
     if let Some(retrying) = &options.retrying {
-        let _ = retrying.send(());
+        let _ = retrying.send("window");
     }
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -224,6 +225,10 @@ fn start_or_retry(paths: &Paths, options: &Options) -> Result<Option<Bound>, Can
         std::thread::sleep(left.min(RELEASE_POLL));
         if Instant::now() >= deadline {
             return Ok(None);
+        }
+        #[cfg(test)]
+        if let Some(retrying) = &options.retrying {
+            let _ = retrying.send("retry");
         }
         if let Some(bound) = start(paths)? {
             return Ok(Some(bound));

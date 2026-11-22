@@ -1063,28 +1063,22 @@ fn a_starter_that_loses_to_an_answering_owner_reports_lost_at_once() {
 #[test]
 fn no_attempt_begins_after_the_release_window() {
     within(move || {
-        // A zero window: the starter loses, finds no socket, and the owner
-        // lets go right after. The starter must still report "lost".
+        // A zero window: the starter loses, finds no socket and enters the
+        // window, which has already ended. It must report "lost" having made
+        // no second attempt; the attempts are counted, not raced.
         let root = Root::new();
         let paths = paths(&root.0);
         let (listener, ownership, id) = start(&paths).unwrap().unwrap();
         unlink_if(&paths.socket, id);
-        let (retrying, entered) = std::sync::mpsc::channel();
+        let (retrying, attempts) = std::sync::mpsc::channel();
         let options = Options {
             idle: Duration::from_secs(30),
             hold_idle: None,
             release_wait: Some(Duration::ZERO),
             retrying: Some(retrying),
         };
-        let starter_root = root.0.clone();
-        let handle = std::thread::spawn(move || serve(&starter_root, options, None));
-        let released = std::thread::spawn(move || {
-            // Whether or not the window was entered, release only after the
-            // first loss has been reported or the starter has returned.
-            let _ = entered.recv();
-            drop((listener, ownership));
-        });
-        assert_eq!(handle.join().unwrap().unwrap(), Outcome::Lost);
-        released.join().unwrap();
+        assert_eq!(serve(&root.0, options, None).unwrap(), Outcome::Lost);
+        assert_eq!(attempts.try_iter().collect::<Vec<_>>(), vec!["window"]);
+        drop((listener, ownership));
     });
 }

@@ -11,6 +11,7 @@ hosts. Changes to model inputs select state models independently of build smoke.
 | Ordinary unit test or docs-site-only input | No Docker, models or build smoke; docs site when relevant |
 | `scripts/lib/tla-runtime-models.ts` or `tests/models/**` | State models; no Docker or build smoke |
 | TLA helper skill, `tests/tla-result.test.ts`, or the four Python controls bundled with the model job | State models; no Docker or build smoke |
+| Reference documents and source read by the benchmark Python controls | State models, plus other jobs that consume those files |
 | Runtime-core or guest Rust source | Linux candidate/compiler checks and Docker tier because the runtime images copy `packages/`; models when a model input also changes |
 | Config compiler or lifecycle supervisor Rust source | Docker and release build smoke; Linux Rust checks where applicable |
 | Other CLI release build inputs, including the packaged root README | Build smoke, plus Docker where shared with the Docker tier |
@@ -26,7 +27,9 @@ Docker dependencies are derived from the `docker-e2e-shard`, `runtime-images` an
 transitive local imports, nested shell helpers and literal execution/data paths.
 Local Compose builds contribute their Dockerfiles, ignore files and local
 `COPY`/`ADD` sources. The runtime image builder uses the repository root as its
-context. Build smoke and state models follow their own workflow commands. Cargo
+context. Build smoke and state models follow their own workflow commands. The
+model tier follows Python unittest discovery and literal references in those
+controls, including reference documents and source they read. Cargo
 manifests select their compiled crate directories. The planner reads both the
 base and merge trees, so deleted inputs and both sides of a rename still count. Thus the shared-host
 fixture, real-Docker context test and configuration compiler remain Docker inputs

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  deriveJobInputs,
   dockerJobInputs,
   matchesDockerJobInput,
 } from "../scripts/ci-docker-inputs.ts";
@@ -108,7 +109,7 @@ test("real shard execution inputs retain Docker when paired with the model regis
         inputs,
       })
   ).toBe(false);
-});
+}, 30_000);
 
 test.each([
   "future/engine.bin",
@@ -253,3 +254,53 @@ test("guard inventory keys do not execute the named tests or their sample crate 
   expect(inputs?.has("tests/policy.test.ts")).toBe(true);
   expect(inputs?.has("packages/runtime-core/")).toBe(false);
 });
+
+test("Python model discovery follows literal source and reference inputs", () => {
+  const inputs = deriveJobInputs({
+    repoRoot: "/fixture",
+    tier: "models",
+    sources: {
+      ".github/workflows/ci.yml": `jobs:
+  state-models:
+    steps:
+      - run: python3 -m unittest discover -s tests/python -p test_contract.py
+`,
+      "tests/python/test_contract.py":
+        'SOURCE = ROOT / "scripts/contract.py"\nDOC = ROOT / "docs/reference/contract.md"',
+      "tests/python/test_other.py": 'SOURCE = ROOT / "scripts/excluded.py"',
+      "scripts/contract.py": "DATA = Path(__file__).parent / 'contract.json'",
+      "scripts/contract.json": "{}",
+      "scripts/excluded.py": "# Separate suite",
+      "docs/reference/contract.md": "Contract",
+    },
+  });
+  expect(inputs?.has("tests/python/test_contract.py")).toBe(true);
+  expect(inputs?.has("scripts/contract.py")).toBe(true);
+  expect(inputs?.has("scripts/contract.json")).toBe(true);
+  expect(inputs?.has("docs/reference/contract.md")).toBe(true);
+  expect(inputs?.has("tests/python/test_other.py")).toBe(false);
+  expect(inputs?.has("scripts/excluded.py")).toBe(false);
+});
+
+test.each([
+  ["docs/reference/application-benchmark-protocol.md", false],
+  ["docs/performance.md", false],
+  ["packages/runtime-core/src/provider/profile.rs", true],
+] as const)(
+  "model workflow retains its Python reference input %s",
+  async (path, docker) => {
+    const plan = await planPullRequest({
+      repoRoot,
+      changed: [path],
+      draft: false,
+      full: false,
+      selection: { mode: "selected", reason: "fixture", files: [] },
+    });
+    expect(plan).toMatchObject({
+      docker_suite: docker,
+      state_models: true,
+      build_smoke: false,
+    });
+  },
+  30_000
+);

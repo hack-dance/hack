@@ -30,6 +30,18 @@ function inputReader(opts: InputOptions) {
         return;
       }
     },
+    glob(pattern: string): string[] {
+      const glob = new Bun.Glob(pattern);
+      return opts.sources
+        ? Object.keys(opts.sources).filter((path) => glob.match(path))
+        : [
+            ...glob.scanSync({
+              cwd: opts.repoRoot,
+              dot: true,
+              onlyFiles: true,
+            }),
+          ];
+    },
     kind(file: string): "file" | "directory" | undefined {
       if (opts.sources) {
         if (Object.hasOwn(opts.sources, file)) {
@@ -170,6 +182,27 @@ function commandDirectory(command: { text: string; cwd: string }) {
   return { text, cwd };
 }
 
+function collectPythonUnittests(opts: {
+  readonly text: string;
+  readonly cwd: string;
+  readonly reader: ReturnType<typeof inputReader>;
+  readonly collector: ReturnType<typeof inputCollector>;
+}): void {
+  for (const [, directory, pattern] of opts.text.matchAll(
+    /\bpython3?\s+-m\s+unittest\s+discover\s+-s\s+([.\w/-]+)(?:[ \t]+-p[ \t]+['"]?([\w.*?-]+))?/g
+  )) {
+    if (!directory) {
+      continue;
+    }
+    const root = posix.join(opts.cwd, directory);
+    for (const test of opts.reader.glob(
+      posix.join(root, "**", pattern ?? "test*.py")
+    )) {
+      opts.collector.add(test);
+    }
+  }
+}
+
 function collectCommands(opts: {
   readonly commands: readonly string[];
   readonly cwd?: string;
@@ -184,6 +217,12 @@ function collectCommands(opts: {
       break;
     }
     const { text, cwd } = commandDirectory(command);
+    collectPythonUnittests({
+      text,
+      cwd,
+      reader: opts.reader,
+      collector: opts.collector,
+    });
     for (const match of text.matchAll(
       /(?:^|[\s"'=])([.\w/-]+\.(?:[cm]?[jt]sx?|sh|py|json|toml|lock|ya?ml))\b/g
     )) {
@@ -259,6 +298,37 @@ function collectLiteralPaths(opts: {
   visit(ast);
 }
 
+function collectTextReferences(opts: {
+  readonly file: string;
+  readonly source: string;
+  readonly collector: ReturnType<typeof inputCollector>;
+  readonly reader: ReturnType<typeof inputReader>;
+}): void {
+  const { file, source, reader, collector } = opts;
+  const cwd = posix.dirname(file);
+  switch (posix.extname(file)) {
+    case ".sh":
+      collectCommands({
+        commands: [source.replace(/\$\{(?:SCRIPT_DIR|script_dir)\}\//g, "./")],
+        cwd,
+        reader,
+        collector,
+      });
+      break;
+    case ".py":
+      // Benchmark controls load checkout modules and reference files via pathlib.
+      // Literal references can be resolved without importing untrusted Python.
+      for (const match of source.matchAll(/(['"])([.\w/-]+)\1/g)) {
+        if (match[2]) {
+          collector.literal(match[2], cwd);
+        }
+      }
+      break;
+    default:
+      break;
+  }
+}
+
 function collectFiles(opts: {
   readonly tier: Tier;
   readonly collector: ReturnType<typeof inputCollector>;
@@ -291,14 +361,7 @@ function collectFiles(opts: {
     if (!source) {
       continue;
     }
-    if (/\.sh$/.test(file)) {
-      collectCommands({
-        commands: [source.replace(/\$\{(?:SCRIPT_DIR|script_dir)\}\//g, "./")],
-        cwd: posix.dirname(file),
-        reader,
-        collector,
-      });
-    }
+    collectTextReferences({ file, source, reader, collector });
     const builds = tier === "docker" ? dockerBuilds(file, source) : [];
     for (const build of builds) {
       contexts.push(dockerContextInputs({ ...build, read: reader.read }));

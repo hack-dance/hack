@@ -5,6 +5,7 @@ import {
   canPrintStartSelection,
   printedShellCommand,
 } from "../src/lib/printed-shell-command.ts";
+import { logger } from "../src/ui/logger.ts";
 import { writeUpHookBlocker } from "../src/ui/start-refusal-output.ts";
 
 import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
@@ -12,36 +13,42 @@ import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 const cases = [
   [
     "E_LIFECYCLE_FAILED",
-    "! lifecycle  hook failed\n  fix the failing hook and retry this start. run:\n  hack up\n",
+    "Fixture before hook input was unavailable.",
+    "! lifecycle  E_LIFECYCLE_FAILED: Fixture before hook input was unavailable.\n  fix the failing hook and retry this start. run:\n  hack up\n",
   ],
   [
     "E_NATIVE_SETUP_REQUIRED",
-    "! native runtime  setup required\n  this start needs the native runtime. run:\n  hack native setup --accept-downloads\n",
+    "Fixture installation needs a specific component.",
+    "! native runtime  E_NATIVE_SETUP_REQUIRED: Fixture installation needs a specific component.\n  this start needs the native runtime. run:\n  hack native setup --accept-downloads\n",
   ],
   [
     "E_DOCKER_UNAVAILABLE",
-    "! docker  engine unavailable · start docker or select a running engine\n",
+    "Fixture engine socket could not be opened.",
+    "! docker  E_DOCKER_UNAVAILABLE: Fixture engine socket could not be opened.\n",
   ],
   [
     "E_PROJECT_NOT_FOUND",
-    "! project  not found\n  this start needs a configured project. run:\n  hack init --auto\n",
+    "Fixture checkout has no project configuration.",
+    "! project  E_PROJECT_NOT_FOUND: Fixture checkout has no project configuration.\n  this start needs a configured project. run:\n  hack init --auto\n",
   ],
   [
     "E_INTERACTIVE_REQUIRED",
-    "! terminal  interaction required\n  this start needs confirmation from an interactive terminal. run:\n  hack up\n",
+    "Fixture confirmation requires --yes.",
+    "! terminal  E_INTERACTIVE_REQUIRED: Fixture confirmation requires --yes.\n  this start needs confirmation from an interactive terminal. run:\n  hack up\n",
   ],
   [
     "E_STARTUP_INCOMPLETE",
+    "Original message.",
     "! project  already running with a different selection\n  this start needs the running instance stopped first. run:\n  hack down --branch demo\n",
   ],
 ] as const;
 
 test.each(
   cases
-)("%s preserves the JSON envelope and prints at most three human lines", async (code, expected) => {
+)("%s preserves the JSON envelope and prints at most three human lines", async (code, message, expected) => {
   const error = new HackCliError({
     code,
-    message: "Original message.",
+    message,
     detail: { sample: true },
     startBlocker:
       code === "E_STARTUP_INCOMPLETE"
@@ -85,7 +92,7 @@ test.each(
           ok: false,
           error: {
             code,
-            message: "Original message.",
+            message,
             detail: { sample: true },
           },
         },
@@ -156,4 +163,46 @@ test("retry text excludes pasted assignments and noncanonical project aliases", 
       path: "-fixture\n",
     })
   ).toBe(true);
+});
+
+test("generic start blockers retain multiline messages and the original detail summary", async () => {
+  const lines: string[] = [];
+  const stderr = spyOn(process.stderr, "write").mockImplementation((line) => {
+    lines.push(String(line));
+    return true;
+  });
+  const diagnostics = spyOn(logger, "error").mockImplementation(() => {});
+  try {
+    expect(
+      await handleRunCliError({
+        error: new HackCliError({
+          code: "E_DOCKER_UNAVAILABLE",
+          message: "Engine connection failed.\nSecond line of the diagnostic.",
+          detail: {
+            native_compose_effect_refusal: {
+              stage: "effect-entry",
+              reason: "private-state",
+            },
+          },
+        }),
+        jsonRequested: false,
+        handlerPath: ["up"],
+      })
+    ).toBe(1);
+    expect(lines.join("")).toBe(
+      "! docker  E_DOCKER_UNAVAILABLE: Engine connection failed.\n"
+    );
+    expect(diagnostics.mock.calls).toEqual([
+      [{ message: "Second line of the diagnostic." }],
+      [
+        {
+          message:
+            "Refusal boundary: effect-entry (private-state); values omitted.",
+        },
+      ],
+    ]);
+  } finally {
+    diagnostics.mockRestore();
+    stderr.mockRestore();
+  }
 });

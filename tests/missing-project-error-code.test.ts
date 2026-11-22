@@ -431,7 +431,7 @@ test(
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(
-      "! project  not found\n  this start needs a configured project. run:\n  hack init --auto\n"
+      "! project  E_PROJECT_NOT_FOUND: No .hack/ (or legacy .dev/) found. Run: hack init\n  this start needs a configured project. run:\n  hack init --auto\n"
     );
   },
   SPAWN_TIMEOUT_MS

@@ -9,6 +9,10 @@ import {
 import { setNoInteractiveFlag } from "../lib/interactivity.ts";
 import { closeLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { reserveStdoutForMachineOutput } from "../lib/machine-stdout.ts";
+import {
+  MissingProjectContextError,
+  UnregisteredProjectError,
+} from "../lib/missing-project-error.ts";
 import { nativeDetachedUpFailure } from "../lib/native-detached-up.ts";
 import { canPrintPathSelector } from "../lib/printed-shell-command.ts";
 import { logger } from "../ui/logger.ts";
@@ -33,6 +37,7 @@ import { printHelpForPath } from "./help.ts";
 import { optEnv, optProject } from "./options.ts";
 import {
   parseProjectSelectorOption,
+  UnknownProjectUsageError,
   unknownProjectMessage,
 } from "./project-selector.ts";
 import { CLI_SPEC } from "./spec.ts";
@@ -256,7 +261,7 @@ export async function handleRunCliError(opts: {
     }
     if (
       opts.startSelector?.project &&
-      error.message.startsWith("Unknown project")
+      error instanceof UnknownProjectUsageError
     ) {
       writeStartBlocker({
         thing: "project",
@@ -281,19 +286,11 @@ export async function handleRunCliError(opts: {
   }
 
   if (error instanceof HackCliError) {
-    const blocker =
-      opts.handlerPath?.[0] === "up"
-        ? (error.startBlocker ??
-          selectedProjectBlocker(error, opts.startSelector) ??
-          nativeHookFailureBlocker(error) ??
-          startRefusalBlocker(error.code))
-        : undefined;
-    if (blocker) {
-      writeStartBlocker(blocker);
-      logDebugStack(error);
-      return 1;
+    if (opts.handlerPath?.[0] === "up") {
+      writeUpRefusal(error, opts.startSelector);
+    } else {
+      logger.error({ message: `${error.code}: ${error.message}` });
     }
-    logger.error({ message: `${error.code}: ${error.message}` });
     if (error.detail !== undefined) {
       // Loaded only for a detailed error, off the ordinary CLI start path.
       const { nativeComposeEffectRefusalSummary } = await import(
@@ -325,14 +322,41 @@ export async function handleRunCliError(opts: {
   return 1;
 }
 
+const REFUSAL_LINE_BREAK = /\r\n|[\r\n]/;
+
+function writeUpRefusal(
+  error: HackCliError,
+  selection: Parameters<typeof selectedProjectBlocker>[1]
+): void {
+  const blocker =
+    error.startBlocker ?? selectedProjectBlocker(error, selection);
+  if (blocker) {
+    writeStartBlocker(blocker);
+    return;
+  }
+  const guidance = startRefusalBlocker(error.code);
+  if (!guidance) {
+    logger.error({ message: `${error.code}: ${error.message}` });
+    return;
+  }
+  const [firstLine, ...remaining] = error.message.split(REFUSAL_LINE_BREAK);
+  writeStartBlocker({
+    ...guidance,
+    problem: `${error.code}: ${firstLine ?? ""}`,
+  });
+  if (remaining.length > 0) {
+    logger.error({ message: remaining.join("\n") });
+  }
+}
+
 function selectedProjectBlocker(
   error: HackCliError,
   selection: { readonly path?: string; readonly project?: string } | undefined
 ) {
-  if (error.code !== "E_PROJECT_NOT_FOUND") {
-    return;
-  }
-  if (selection?.project !== undefined) {
+  if (
+    error instanceof UnregisteredProjectError &&
+    selection?.project !== undefined
+  ) {
     const selector = parseProjectSelectorOption({
       projectOpt: selection.project,
     });
@@ -346,7 +370,10 @@ function selectedProjectBlocker(
       which: JSON.stringify(selector.name),
     };
   }
-  if (selection?.path !== undefined) {
+  if (
+    error instanceof MissingProjectContextError &&
+    selection?.path !== undefined
+  ) {
     return {
       thing: "project",
       problem:
@@ -355,19 +382,6 @@ function selectedProjectBlocker(
         ? JSON.stringify(selection.path)
         : undefined,
     };
-  }
-}
-
-// The detached owner relays the same closed error as foreground startup.
-const NATIVE_BEFORE_HOOK_FAILURE =
-  /^Lifecycle \(native up before\) failed \(exit \d+\); values omitted\.$/;
-
-function nativeHookFailureBlocker(error: HackCliError) {
-  if (
-    error.code === "E_LIFECYCLE_FAILED" &&
-    NATIVE_BEFORE_HOOK_FAILURE.test(error.message)
-  ) {
-    return { thing: "lifecycle", problem: `${error.code}: ${error.message}` };
   }
 }
 

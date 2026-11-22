@@ -7900,9 +7900,7 @@ async function runUpCommand({
     ? undefined
     : (name: string, reason?: string) => {
         failedHook = name;
-        failedHookReason = reason
-          ? "persistent hook startup refused"
-          : undefined;
+        failedHookReason = reason;
       };
   try {
     const lifecycleUp: LifecycleUpResult = serviceScoped
@@ -7960,6 +7958,7 @@ async function runUpCommand({
     writeStartBlocker({
       thing: "lifecycle",
       problem: "setup failed",
+      which: message,
       needs: "resolve the setup failure and retry this start",
       command: retryCommand,
     });

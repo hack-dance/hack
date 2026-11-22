@@ -152,7 +152,7 @@ test("a project command 70 directories deep with no project gets the ordinary mi
       expect(actual.exit).toBe(1);
       if (args[0] === "up") {
         expect(actual.output).toBe(
-          "! project  not found\n  this start needs a configured project. run:\n  hack init --auto\n"
+          "! project  E_PROJECT_NOT_FOUND: No .hack/ (or legacy .dev/) found. Run: hack init\n  this start needs a configured project. run:\n  hack init --auto\n"
         );
       } else {
         expect(actual.output).toContain("No .hack/ (or legacy .dev/) found");

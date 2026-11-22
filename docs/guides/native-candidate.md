@@ -801,8 +801,8 @@ extends its retention.
 
 Doctor and `hack native temp-aliases` list ambiguous volume entries as
 “cannot tell (volume not mounted, or home deleted).” The automatic sweep and
-`doctor --fix` keep these entries. After checking the volume yourself, use
-`hack native temp-aliases --fix --include-unverified-volumes` to include them.
+`doctor --fix` keep these entries. After checking the volume yourself,
+add `--include-unverified-volumes` to either command with `--fix` to include them.
 The command still checks age, owner, identity and target absence.
 
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds

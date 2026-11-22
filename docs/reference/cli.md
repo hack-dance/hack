@@ -1900,6 +1900,7 @@ hack doctor [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
+| `--include-unverified-volumes` | With --fix, include native aliases whose volume may be unmounted |
 | `--machine` | Observe machine checks only, without discovering a project or repairing state |
 | `--only <id>` | With --fix, select exactly one allowlisted repair: 'hack gitignore' (needs --yes) or 'polling watchers' (shows the diff; --yes applies it) |
 | `--yes` | Consent to the one repair selected with --fix --only |

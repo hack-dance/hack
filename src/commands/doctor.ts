@@ -467,6 +467,13 @@ const doctorOptions = [
   optPath,
   optFix,
   defineOption({
+    name: "includeUnverifiedVolumes",
+    type: "boolean",
+    long: "--include-unverified-volumes",
+    description:
+      "With --fix, include native aliases whose volume may be unmounted",
+  } as const),
+  defineOption({
     name: "machine",
     type: "boolean",
     long: "--machine",
@@ -846,6 +853,11 @@ async function runDoctorAudit(
     migrateEnvConfig: args.options.migrateEnvConfig === true,
     acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
   });
+  const includeUnverifiedVolumes =
+    args.options.includeUnverifiedVolumes === true;
+  if (includeUnverifiedVolumes && args.options.fix !== true) {
+    throw new CliUsageError("--include-unverified-volumes requires --fix.");
+  }
   const native = resolveNativeRuntimeSelection();
   if (native) {
     noteNativeBackendBeta({ json });
@@ -856,6 +868,7 @@ async function runDoctorAudit(
       json,
       machine: args.options.machine === true,
       fix: args.options.fix === true,
+      includeUnverifiedVolumes,
       migrateEnvConfig: args.options.migrateEnvConfig === true,
       acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
     });
@@ -879,6 +892,7 @@ async function runDoctorAudit(
     ...(await checkTempAliasesOnMac({
       progress: s,
       fix: args.options.fix === true,
+      includeUnverifiedVolumes,
     }))
   );
 
@@ -1476,6 +1490,7 @@ async function handleNativeDoctor(opts: {
   readonly json: boolean;
   readonly machine: boolean;
   readonly fix: boolean;
+  readonly includeUnverifiedVolumes: boolean;
   /**
    * Runs the same project-file env migration as Compose doctor after the
    * checks. It changes project files only, so it needs no native runtime.
@@ -1601,6 +1616,7 @@ async function handleNativeDoctor(opts: {
     ...(await checkTempAliasesOnMac({
       progress,
       fix: opts.fix,
+      includeUnverifiedVolumes: opts.includeUnverifiedVolumes,
       runtime: opts.runtime,
     }))
   );
@@ -1751,6 +1767,7 @@ async function appendNativeMachineChecks(opts: {
 async function checkTempAliasesOnMac(opts: {
   readonly progress: Parameters<typeof runCheck>[0];
   readonly fix: boolean;
+  readonly includeUnverifiedVolumes: boolean;
   readonly runtime?: NativeRuntimeSelection;
 }): Promise<TimedCheckResult[]> {
   if (!isMac()) {
@@ -1766,7 +1783,12 @@ async function checkTempAliasesOnMac(opts: {
     await runCheck(
       opts.progress,
       "native temporary aliases",
-      () => checkNativeTempAliases({ runtime, fix: opts.fix }),
+      () =>
+        checkNativeTempAliases({
+          runtime,
+          fix: opts.fix,
+          includeUnverifiedVolumes: opts.includeUnverifiedVolumes,
+        }),
       { timeoutMs: 4000 }
     ),
   ];
@@ -1775,6 +1797,7 @@ async function checkTempAliasesOnMac(opts: {
 async function checkNativeTempAliases(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly fix: boolean;
+  readonly includeUnverifiedVolumes: boolean;
 }): Promise<CheckResult> {
   const name = "native temporary aliases";
   try {

@@ -4,9 +4,15 @@
 > 2026-11-18 ([snapshots](https://www.daytona.io/docs/en/snapshots/),
 > [process execution](https://www.daytona.io/docs/en/process-code-execution/),
 > [secrets](https://www.daytona.io/docs/en/secrets/),
-> [preview](https://www.daytona.io/docs/en/preview/)). v5 has no Linux release
-> yet, so the install line needs a `hack` binary you supply; see
-> [Any Linux machine with Docker](cloud-linux-docker.md#steps).
+> [preview](https://www.daytona.io/docs/en/preview/)). The recipe below was
+> written before v5 published a Linux archive, so its install line uses a
+> `hack` binary you supply. `5.0.0-next.24` publishes Linux x86_64 and arm64
+> archives with the Compose backend: you can install the prerelease as
+> described in [Install](../install.md) instead. Neither way has been run here.
+> The installer puts the launcher at `$HOME/.hack-next/bin/hack-next` and
+> does not change `PATH`, so a new shell has no `hack` command. If you install
+> the prerelease, call the launcher by that path wherever the recipe below writes `hack`.
+> See [Any Linux machine with Docker](cloud-linux-docker.md#steps).
 
 Daytona sandboxes are driven through its API, SDK or CLI. They have no
 repository hook. Docker-in-Docker is documented with a Docker-capable snapshot

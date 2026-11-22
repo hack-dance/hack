@@ -67,10 +67,11 @@ such service as a private read-only file. An empty `HACK_NATIVE_GCLOUD_ADC=`
 withholds the consent for one command.
 
 **Image builds.** Services with `build:` need `HACK_NATIVE_BUILDS=1` on the `up`
-command, and the native builder prepared once with the exact `buildx` release
-that the runtime pins (`runtime prepare-builder --archive`; see the
-[native guide](../../guides/native-candidate.md)). Each distinct build runs once and is shared by the services that use
-it.
+command, and the image builder, which `native setup` installs with the rest of
+the runtime. A home that an earlier build set up does not have it yet: `up` and
+`hack doctor` say so, and `native setup --accept-downloads` adds it
+([the image builder](setup.md#the-image-builder)). Each distinct build runs once
+and is shared by the services that use it.
 
 **Host aliases** (`extra_hosts` with `host-gateway`, or `internal.extra_hosts`).
 Native's VM has no route to your machine except through a binding to one host

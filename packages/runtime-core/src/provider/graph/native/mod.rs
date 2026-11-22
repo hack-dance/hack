@@ -306,4 +306,6 @@ fn configuration_with_source(
 }
 
 #[cfg(test)]
+pub(crate) mod publication_wait;
+#[cfg(test)]
 mod tests;

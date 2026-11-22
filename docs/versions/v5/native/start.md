@@ -50,7 +50,10 @@ its [older setup procedure](setup.md#older-setup-only-homes).
 ```
 
 Setup shows file sizes, download hosts, hashes and locations, then asks once for
-consent. Read the list. A matching install is checked and reused. Noninteractive
+consent. Read the list. It includes the image builder that `build:` services
+need; a home that an earlier build set up gains it with
+`native setup --accept-downloads` ([the image builder](setup.md#the-image-builder)).
+A matching install is checked and reused. Noninteractive
 `up` refuses until setup is complete; interactive `up` can offer setup with the
 same consent and continue after success. For offline inputs or an interrupted
 download, use [setup and recovery details](setup.md).
@@ -152,7 +155,7 @@ run is still live or its stop cannot be proven, stop it with the old version fir
 
 ## Back to Compose
 
-Once the native stop is confirmed, use the same candidate on Compose:
+Once the native stop is confirmed, use the same prerelease on Compose:
 
 ```sh
 HACK_RUNTIME_BACKEND=compose "$CANDIDATE" up --detach --path /absolute/project

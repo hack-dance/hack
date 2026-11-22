@@ -349,11 +349,20 @@ fn cleanup_flat_layout(base: &Path, owner: u32) {
     }
     let key_path = base.join("key");
     removed &= remove_file_if_present(&key_path).is_ok() && absent(&key_path);
-    // Keep both VERSION and the lock name if any prior entry remains, so the
-    // next opener can recognize what is left and take the same lock to retry.
+    // Keep VERSION and the lock if any prior entry remains, so the next opener
+    // recognizes what is left and takes the same lock to retry. Once everything
+    // else is gone, VERSION goes first, while the lock is still held: a P1
+    // process that opens the base after that finds no store to adopt, and the
+    // lock name is removed last so no such process can lock a fresh inode while
+    // VERSION still says the flat store is live.
     let lock_path = base.join("lock");
-    if removed && remove_file_if_present(&lock_path).is_ok() && absent(&lock_path) {
-        let _ = remove_file_if_present(&base.join("VERSION"));
+    let version_path = base.join("VERSION");
+    if removed && remove_file_if_present(&version_path).is_ok() && absent(&version_path) {
+        #[cfg(test)]
+        FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("VERSION"));
+        let _ = remove_file_if_present(&lock_path);
+        #[cfg(test)]
+        FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("lock"));
     }
 }
 
@@ -594,6 +603,8 @@ fn read_key(root: &Path, owner: u32, probed: &Metadata) -> Result<(File, Zeroizi
 thread_local! {
     pub(super) static CHECK_CLEANUP_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static LEGACY_VERSION_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The order in which the flat migration removed VERSION and lock.
+    pub(super) static FLAT_FINAL_REMOVALS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
     pub(super) static FAIL_CACHE_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_KEY_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_KEY_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

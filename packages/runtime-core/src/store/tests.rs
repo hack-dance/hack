@@ -1966,3 +1966,23 @@ fn the_current_build_uses_the_running_images_embedded_identity() {
         )
     );
 }
+
+/// The flat migration removes VERSION before the lock, while still holding it:
+/// a P1 process opening the base afterwards finds no flat store, and no P1 process
+/// can lock a fresh `lock` while VERSION still names the flat store as live.
+#[test]
+fn flat_migration_removes_version_before_the_lock() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    fs::write(base.join("key"), b"legacy").unwrap();
+    disk::FLAT_FINAL_REMOVALS.with_borrow_mut(Vec::clear);
+    drop(fixture.open());
+    assert_eq!(
+        disk::FLAT_FINAL_REMOVALS.with_borrow(Clone::clone),
+        ["VERSION", "lock"]
+    );
+    assert!(!base.join("VERSION").exists());
+    assert!(!base.join("lock").exists());
+}

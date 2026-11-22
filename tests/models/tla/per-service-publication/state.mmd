@@ -1,12 +1,12 @@
 ---
-title: PerServicePublication · child admission
+title: Per-service child admission
 ---
 stateDiagram-v2
     direction TB
     [*] --> absent
-    absent --> gated : Admit [ready and current]
-    gated --> committed : Commit [target current]
-    committed --> authorized : Authorize [target current]
+    absent --> gated : Admit [ready, current]
+    gated --> committed : Commit [current]
+    committed --> authorized : Authorize [current]
     authorized --> bound : Bind [starting]
     bound --> bound : Record [observed]
     gated --> absent : EOFExit [aborted]
@@ -14,7 +14,7 @@ stateDiagram-v2
     authorized --> absent : Retire [aborted]
     bound --> absent : Retire [aborted]
     note right of committed
-        INV Identity commits before bind.
+        INV identity before bind
     end note
     classDef live stroke-width:1.6px
     class gated,committed wait

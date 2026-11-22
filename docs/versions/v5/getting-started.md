@@ -69,6 +69,12 @@ hack ps
 hack open
 ```
 
+Detached Compose `hack up` reports completed hooks by name and lists services
+after confirming startup. A successful start ends with the primary address,
+startup time, and count of configured routes for running services whose HTTP
+readiness has yet to be checked. The command makes no HTTP request to warm the
+routes. A successful `hack down` ends with a stopped line and the elapsed time.
+
 If `hack up` stops before the project is ready, look for the `!` line. It
 names the blocker and shows the command to run next.
 
@@ -98,6 +104,10 @@ If a default remote target declares a [sign-in prerequisite](https://github.com/
 Hack checks it before startup hooks. If the check fails, follow the displayed
 login command and try again. Use `hack config validate` to verify declarations
 without running the checks.
+
+When the project declares remotes, `hack ps` shows each default target with
+its configured address. An environment-backed hostname displays the variable
+name. This view reports declarations and whether their connection was checked.
 
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may

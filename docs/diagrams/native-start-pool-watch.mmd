@@ -1,0 +1,34 @@
+---
+title: Detached start · pool watch
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> unobserved
+    unobserved --> watching : record running
+    unobserved --> unobserved : starting, stopped, unreadable
+    watching --> watching : same boot, slow, unreadable
+    watching --> grace : boot ended
+    grace --> done : start returns
+    grace --> exited : 10 s pass
+    watching --> done : start returns
+    done --> [*]
+    exited --> [*]
+
+    note right of watching
+        Pool identity: owner token
+        and guest boot id, checked
+        every 5 s.
+    end note
+    note right of exited
+        Marker released, process
+        exits as a crash would; the
+        next up recovers the run.
+    end note
+
+    class watching ok
+    class grace wait
+    class exited fail

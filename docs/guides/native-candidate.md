@@ -909,6 +909,84 @@ data, and requires inspection before retry. No guest is started by alias recover
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
 
+`runtime down` stops the pool even while projects run in it, because a crash or a
+host reboot ends the same way. Their containers stop with the guest and their data is
+kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live, including a failed start that kept its started services, in
+`interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
+and it writes one line on stderr saying how many it stopped. `hack up` in each of those
+projects starts the pool again and recovers its run.
+
+How a run moves across a pool stop. It is checked as the TLA+ model
+`tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
+one is recovered too: another project's `hack up` or a `runtime up` by hand booted
+the pool and it stopped again before this project recovered, or the pool stopped
+again between a recovery's `runtime up` and its recovery. Each boot records the boots
+it supersedes in a bounded history (`run/smolvm/boot-history.json`, the last 16,
+bound to the pool), and recovery selects the one earlier boot the run's receipt
+names, never the current one. A run whose boot has left that history, or whose
+evidence names more than one boot, is refused with its data kept. Two paths stay
+limited to the previous boot: a `graph recover-cleanup` selection made while the
+pool was stopped (another boot in between may have restarted the run's containers),
+and absent-publication cleanup after a host reboot.
+
+```mermaid
+---
+title: PoolStop · run and pool stop
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> none
+    none --> ready : hack up
+    retained --> ready : hack up
+    ready --> retained : hack down
+    ready --> orphaned : runtime down, owner dies
+    ready --> crashed : VM or provider dies
+    crashed --> orphaned : hack native recover
+    orphaned --> recover : hack up, down --recover
+    state recover <<choice>>
+    recover --> retained : [boot known, no HTTPS lease]
+    recover --> finalizing : [boot known, HTTPS lease]
+    recover --> stranded : [boot not known]
+    finalizing --> retained : lease released or archived
+
+    note left of orphaned
+        Receipt still ready-observed,
+        owner dead, publication left.
+        Pool stopped or in a new boot.
+    end note
+    note right of recover
+        runtime up first, then the
+        existing recovery as its own
+        request, data kept.
+    end note
+    note right of stranded
+        Refused, data kept: the run's
+        boot left the 16-boot history,
+        or its evidence is ambiguous.
+    end note
+    note right of finalizing
+        Graph stopped, HTTPS lease held.
+        The old owner retires when its
+        boot ends; up refuses until
+        down --recover finishes.
+    end note
+    note left of retained
+        INV NoDeadEnd: some named
+        command always acts.
+        PROP Recovers.
+    end note
+
+    class ready ok
+    class orphaned wait
+    class crashed wait
+    class finalizing wait
+    class stranded fail
+```
+
 `runtime down` first quiesces the guest engine, which leaves the pool in phase
 `quiescing` until the engine exits. A guest agent that answers no ping lets `down`
 or `recover` stop the provider. A guest that still answers pings but whose engine
@@ -2374,7 +2452,35 @@ present it exits 0 and reports `runtime_not_running` (no phase, no service rows)
 and text output prints "Native runtime is not running; no services are running."
 That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
 `recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
-failed there with `runtime_changed`.
+failed there with `runtime_changed`. When a command that needs the running pool finds it in any other phase (stopped,
+or still booting or quiescing), it refuses with `runtime_not_running` and says only
+that it did not connect: "The native runtime is not in its running state, so this
+command did not connect to it; nothing was changed." `hack down` adds the next
+commands: `hack ps --json` to see the phase, then `hack up` or `hack down --recover`
+once the pool is stopped.
+When the pool stopped or the VM died under a running project, the run's foreground
+owner exits and the run is left neither running nor stopped (after a VM crash, run
+`hack native recover` first so the pool is recorded as stopped). `hack up` then starts the
+pool, recovers the run with its data retained, and starts it again. `hack down --recover`
+(and plain `hack down`) start the pool to recover the run the same way, then leave the
+pool running and say so; run `runtime down` to stop it. A run whose owner is still alive,
+or that is already stopped with data retained, keeps the refusal above, and so does one
+whose only recovery needs the boot it ran in (a failed start, or an interrupted
+same-boot recovery): starting the pool begins a new boot, so it would not help.
+
+A project with HTTPS routes also holds a lease on the shared HTTPS owner, a host
+process bound to the pool boot it started in. `runtime down` does not stop it; the
+owner retires on its own within a few seconds once its boot has ended (the pool
+stopped, crashed or booted again), keeping its records. The recovery then archives
+those records and releases the run's lease, waiting up to 20 seconds for an owner
+that is still retiring. If a recovery stopped the run but could not finish that step,
+`hack up` refuses with `E_RECOVERY_REQUIRED` and names `hack down --recover`, which
+starts a stopped pool to finish it, with data kept.
+
+A detached start (`hack up -d`) whose pool stopped or booted again ends on its
+own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
+--recover` recovers its run. A command that finds an earlier start of the instance
+still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,
@@ -4627,15 +4733,15 @@ owned containers and networks, and retains named volumes and dependency caches.
 It neither marks incomplete package caches valid nor replays initializers.
 
 If a foreground owner died after its graph reached `ready-observed` and the pool
-has already restarted once, the same explicit command can select recovery on that
-immediate successor boot. It requires the retained dead-owner identity, exact receipt
-hash, and bridge assignments belonging to the recorded previous boot. The recovery
-intent pins those assignments before effects and refuses replacements on retry.
+has restarted since, the same explicit command can select recovery on any later
+boot. It requires the retained dead-owner identity, exact receipt hash, the one
+earlier boot of the pool that the receipt names, and bridge assignments belonging
+to that boot. The recovery intent pins those assignments before effects and refuses replacements on retry.
 A remaining legacy device-rebound dependency reservation also requires the
 original recovery boot and host-pin witness. A further boot change refuses its
 release; no automatic recovery command for that state is implemented.
-Do not restart again to attempt this path: another boot rollover invalidates the
-previous-boot evidence. Old guest helper absence follows the verified boot transition;
+Do not restart while a selected recovery is unfinished: its intent is bound to the
+boot it was selected on, and another boot refuses it. Old guest helper absence follows the verified boot transition;
 it is not recorded as a live helper acknowledgement.
 
 Recovery retains its own durable intent and completion evidence. A guest completion

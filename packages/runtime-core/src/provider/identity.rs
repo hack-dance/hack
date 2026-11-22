@@ -580,6 +580,151 @@ pub fn executable_running(_binary: &Path) -> Result<bool, CandidateError> {
     ))
 }
 
+/// Whether any other process of this user runs `binary` with exactly `arguments` after
+/// its program name. Unlike [`executable_running`], processes of the same executable
+/// with other arguments do not count: a shared frontend binary also runs the CLI that
+/// asks the question.
+///
+/// A process of `binary` whose arguments cannot be read is observed again for a short
+/// bounded interval, then refuses as uncertain; it never counts as absent.
+#[cfg(target_os = "macos")]
+pub fn invocation_running(
+    binary: &Path,
+    arguments: &[&std::ffi::OsStr],
+) -> Result<bool, CandidateError> {
+    use std::os::unix::ffi::OsStrExt;
+    const ATTEMPTS: u32 = 40;
+    let uncertain = || {
+        CandidateError::new(
+            "stop_uncertain",
+            "Cannot establish that a recorded helper process exited.",
+        )
+    };
+    let expected: Vec<&[u8]> = arguments.iter().map(|value| value.as_bytes()).collect();
+    let canonical = std::fs::canonicalize(binary).ok();
+    // SAFETY: a null buffer asks libproc only for the current process count.
+    let estimate = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let capacity = usize::try_from(estimate).map_err(|_| uncertain())? + 64;
+    let mut pids = vec![0_i32; capacity];
+    let bytes = i32::try_from(capacity * std::mem::size_of::<i32>()).map_err(|_| uncertain())?;
+    // SAFETY: the buffer is writable for `bytes` bytes of pid_t values.
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    let count = usize::try_from(count).map_err(|_| uncertain())?;
+    if count == 0 || count >= capacity {
+        return Err(uncertain());
+    }
+    let this = i32::try_from(std::process::id()).map_err(|_| uncertain())?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let user = unsafe { libc::geteuid() };
+    for &pid in &pids[..count] {
+        if pid <= 0 || pid == this {
+            continue;
+        }
+        let observe = || match classify(&observe_process(pid), binary, canonical.as_deref(), user) {
+            Executes::No => Executes::No,
+            executes => match process_arguments(pid) {
+                Some(found) => {
+                    if invocation_matches(&found, &expected) {
+                        Executes::Yes
+                    } else if executes == Executes::Yes {
+                        Executes::No
+                    } else {
+                        Executes::Unknown
+                    }
+                }
+                // Gone between the two reads: nothing to prove.
+                None if !alive(pid).unwrap_or(true) => Executes::No,
+                None => Executes::Unknown,
+            },
+        };
+        if settle(observe, ATTEMPTS, |_| std::time::Duration::from_millis(5)).map_err(|_| {
+            CandidateError::new(
+                "stop_uncertain",
+                format!(
+                    "Cannot establish that a recorded helper process exited. Process {pid}: arguments unreadable."
+                ),
+            )
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `pid`'s argument vector from the kernel (`KERN_PROCARGS2`), or `None` when it cannot
+/// be read (gone, another user's, or a malformed buffer).
+#[cfg(target_os = "macos")]
+fn process_arguments(pid: i32) -> Option<Vec<Vec<u8>>> {
+    let mut limit: libc::c_int = 0;
+    let mut length = std::mem::size_of::<libc::c_int>();
+    let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: `limit` is writable for `length` bytes; no new value is set.
+    if unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            2,
+            (&raw mut limit).cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let mut buffer = vec![0_u8; usize::try_from(limit).ok()?.min(4 * 1024 * 1024)];
+    let mut size = buffer.len();
+    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    // SAFETY: `buffer` is writable for `size` bytes; no new value is set.
+    if unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    buffer.truncate(size);
+    parse_procargs2(&buffer)
+}
+
+/// Parse a `KERN_PROCARGS2` buffer: a native-endian `argc`, the executable path, NUL
+/// padding, then `argc` NUL-terminated arguments (environment strings follow and are
+/// never read). `None` for any buffer that does not have that shape.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_procargs2(buffer: &[u8]) -> Option<Vec<Vec<u8>>> {
+    const MAX_ARGUMENTS: usize = 4096;
+    let argc = i32::from_ne_bytes(buffer.get(..4)?.try_into().ok()?);
+    let argc = usize::try_from(argc).ok().filter(|n| *n <= MAX_ARGUMENTS)?;
+    let mut rest = &buffer[4..];
+    let path_end = rest.iter().position(|byte| *byte == 0)?;
+    rest = &rest[path_end..];
+    let first = rest.iter().position(|byte| *byte != 0)?;
+    rest = &rest[first..];
+    let mut arguments = Vec::with_capacity(argc);
+    for _ in 0..argc {
+        let end = rest.iter().position(|byte| *byte == 0)?;
+        arguments.push(rest[..end].to_vec());
+        rest = &rest[end + 1..];
+    }
+    Some(arguments)
+}
+
+/// Whether an argument vector is exactly a program name followed by `expected`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn invocation_matches(found: &[Vec<u8>], expected: &[&[u8]]) -> bool {
+    found.len() == expected.len() + 1
+        && found[1..]
+            .iter()
+            .zip(expected)
+            .all(|(found, expected)| found.as_slice() == *expected)
+}
+
 #[derive(Debug, Serialize)]
 pub struct MemoryUsage {
     pub resident_bytes: u64,
@@ -679,6 +824,75 @@ pub fn terminate(recorded: &ProcessIdentity, binary: &Path) -> Result<(), Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn procargs(argc: i32, body: &[u8]) -> Vec<u8> {
+        let mut buffer = argc.to_ne_bytes().to_vec();
+        buffer.extend_from_slice(body);
+        buffer
+    }
+
+    #[test]
+    fn procargs2_yields_exactly_the_argument_vector() {
+        let buffer = procargs(
+            3,
+            b"/opt/hack/bin/hack\0\0\0\0hack\0--internal-native-https-owner\0/fixture/native-https/configuration.json\0HOME=/fixture\0",
+        );
+        let found = parse_procargs2(&buffer).unwrap();
+        assert_eq!(
+            found,
+            [
+                b"hack".to_vec(),
+                b"--internal-native-https-owner".to_vec(),
+                b"/fixture/native-https/configuration.json".to_vec()
+            ]
+        );
+        let expected: [&[u8]; 2] = [
+            b"--internal-native-https-owner",
+            b"/fixture/native-https/configuration.json",
+        ];
+        assert!(invocation_matches(&found, &expected));
+        // The same executable with other arguments (a CLI command) is not the helper.
+        let cli = parse_procargs2(&procargs(3, b"/opt/hack/bin/hack\0hack\0up\0-d\0")).unwrap();
+        assert!(!invocation_matches(&cli, &expected));
+        // A prefix or an extra argument is not the exact invocation.
+        let prefix: [&[u8]; 1] = [b"--internal-native-https-owner"];
+        assert!(!invocation_matches(&found, &prefix));
+    }
+
+    #[test]
+    fn malformed_procargs2_buffers_are_unreadable() {
+        assert!(parse_procargs2(b"").is_none());
+        assert!(parse_procargs2(&procargs(-1, b"/bin/x\0x\0")).is_none());
+        assert!(parse_procargs2(&procargs(5000, b"/bin/x\0x\0")).is_none());
+        // Fewer arguments than argc, or no terminator.
+        assert!(parse_procargs2(&procargs(2, b"/bin/x\0x\0")).is_none());
+        assert!(parse_procargs2(&procargs(1, b"/bin/x\0x")).is_none());
+        assert!(parse_procargs2(&procargs(1, b"/bin/x")).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_invocation_running_matches_only_the_exact_arguments() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("37.25")
+            .spawn()
+            .unwrap();
+        let mut seen = false;
+        for _ in 0..200 {
+            if invocation_running(Path::new("/bin/sleep"), &["37.25".as_ref()]).unwrap() {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let other = invocation_running(Path::new("/bin/sleep"), &["37.5".as_ref()]).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(seen, "the exact invocation was not observed");
+        assert!(!other, "another invocation of the same executable matched");
+        assert!(!invocation_running(Path::new("/bin/sleep"), &["37.25".as_ref()]).unwrap());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn native_parent_rejects_a_reused_child_identity() {

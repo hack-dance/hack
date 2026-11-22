@@ -22,15 +22,28 @@ export interface ProjectHostTool {
   readonly install?: string;
 }
 
+export type ProjectRemoteAddress =
+  | { readonly kind: "service"; readonly service: string }
+  | { readonly kind: "hostname"; readonly hostname: string }
+  | { readonly kind: "env_ref"; readonly name: string };
+
+interface ProjectRemoteTarget {
+  readonly address: ProjectRemoteAddress;
+  readonly port: number;
+  readonly via?: "aws-ssm";
+  readonly requires: readonly string[];
+}
+
+export interface SelectedProjectRemote extends ProjectRemoteTarget {
+  readonly remote: string;
+  readonly target: string;
+  readonly envNames: readonly string[];
+}
+
 export interface ProjectPrerequisiteConfig {
   readonly tools: ReadonlyMap<string, ProjectHostTool>;
   readonly requires: ReadonlyMap<string, ProjectPrerequisite>;
-  readonly selected: readonly {
-    readonly remote: string;
-    readonly target: string;
-    readonly envNames: readonly string[];
-    readonly requires: readonly string[];
-  }[];
+  readonly selected: readonly SelectedProjectRemote[];
 }
 
 function fail(code: HackErrorCode, message: string): never {
@@ -103,7 +116,7 @@ function optionalFlag(value: unknown): boolean {
   return value === undefined || typeof value === "boolean";
 }
 
-function isPort(value: unknown): boolean {
+function isPort(value: unknown): value is number {
   return (
     typeof value === "number" &&
     Number.isInteger(value) &&
@@ -223,24 +236,37 @@ function parsePrerequisite(
   return { tools, check: value.check, login: value.login };
 }
 
-function validHostname(value: unknown): boolean {
-  if (typeof value === "string") {
-    return HOSTNAME.test(value);
+function parseTargetAddress(
+  entry: Record<string, unknown>
+): ProjectRemoteAddress | null {
+  if (entry.service !== undefined) {
+    return isName(entry.service) &&
+      entry.hostname === undefined &&
+      entry.via === undefined
+      ? { kind: "service", service: entry.service }
+      : null;
   }
-  return (
-    isRecord(value) &&
-    onlyKeys(value, ["env_ref"]) &&
-    typeof value.env_ref === "string" &&
-    ENV_NAME.test(value.env_ref)
-  );
+  const hostname = entry.hostname;
+  if (typeof hostname === "string" && HOSTNAME.test(hostname)) {
+    return { kind: "hostname", hostname };
+  }
+  if (
+    isRecord(hostname) &&
+    onlyKeys(hostname, ["env_ref"]) &&
+    typeof hostname.env_ref === "string" &&
+    ENV_NAME.test(hostname.env_ref)
+  ) {
+    return { kind: "env_ref", name: hostname.env_ref };
+  }
+  return null;
 }
 
 function validateVia(
   value: unknown,
   tools: ProjectPrerequisiteConfig["tools"]
-): void {
+): ProjectRemoteTarget["via"] {
   if (value === undefined) {
-    return;
+    return undefined;
   }
   if (
     !(
@@ -255,15 +281,16 @@ function validateVia(
     fail("E_INVALID_REMOTE", "Invalid remote tunnel declaration.");
   }
   toolReferences(value.tools, tools);
+  return value.kind;
 }
 
-function targetRequirements(opts: {
+function parseRemoteTarget(opts: {
   readonly remote: string;
   readonly target: string;
   readonly entry: unknown;
   readonly requires: ProjectPrerequisiteConfig["requires"];
   readonly tools: ProjectPrerequisiteConfig["tools"];
-}): readonly string[] {
+}): ProjectRemoteTarget {
   const { remote, target, entry, requires, tools } = opts;
   if (
     !(
@@ -285,13 +312,8 @@ function targetRequirements(opts: {
   ) {
     fail("E_INVALID_REMOTE", `Invalid target ${remote} (${target}).`);
   }
-  const addressValid =
-    entry.service !== undefined
-      ? isName(entry.service) &&
-        entry.hostname === undefined &&
-        entry.via === undefined
-      : validHostname(entry.hostname);
-  if (!addressValid) {
+  const address = parseTargetAddress(entry);
+  if (!address) {
     fail("E_INVALID_REMOTE", `Invalid address for ${remote} (${target}).`);
   }
   const names = entry.requires ?? [];
@@ -303,8 +325,8 @@ function targetRequirements(opts: {
       );
     }
   }
-  validateVia(entry.via, tools);
-  return names;
+  const via = validateVia(entry.via, tools);
+  return { address, port: entry.port, requires: names, via };
 }
 
 function remoteEnvNames(value: unknown): readonly string[] {
@@ -340,11 +362,11 @@ function selectedPrerequisites(
     const references = new Map(
       entries(config.targets, "E_INVALID_REMOTE").map(([target, entry]) => [
         target,
-        targetRequirements({ remote, target, entry, requires, tools }),
+        parseRemoteTarget({ remote, target, entry, requires, tools }),
       ])
     );
-    const names = references.get(config.default);
-    if (!names) {
+    const selected = references.get(config.default);
+    if (!selected) {
       fail(
         "E_UNKNOWN_REMOTE_TARGET",
         `Remote ${remote} has no target named ${config.default}.`
@@ -353,7 +375,7 @@ function selectedPrerequisites(
     return {
       remote,
       target: config.default,
-      requires: names,
+      ...selected,
       envNames: remoteEnvNames(config.env),
     };
   });

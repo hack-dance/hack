@@ -551,8 +551,91 @@ export function renderProjectConfigSchemaJson(): string {
     title: "hack.config.json",
     type: "object",
     additionalProperties: true,
+    dependentRequired: {
+      remotes: ["min_cli_version"],
+      requires: ["min_cli_version"],
+    },
+    $defs: {
+      nameList: { type: "array", items: { type: "string", minLength: 1 } },
+      argv: { type: "array", minItems: 1, items: { type: "string" } },
+      toolOverride: {
+        type: "object",
+        properties: {
+          bins: { $ref: "#/$defs/nameList", minItems: 1 },
+          version: { type: "string", minLength: 1 },
+          install: { type: "string", minLength: 1 },
+        },
+      },
+    },
     properties: {
       $schema: { type: "string" },
+      min_cli_version: {
+        type: "string",
+        description: "Minimum Hack CLI SemVer for this project.",
+      },
+      tools: {
+        type: "object",
+        additionalProperties: {
+          $ref: "#/$defs/toolOverride",
+          required: ["bins"],
+          properties: {
+            optional: { type: "boolean" },
+            lose: { type: "string" },
+            always: { type: "boolean" },
+            os: {
+              type: "object",
+              additionalProperties: { $ref: "#/$defs/toolOverride" },
+            },
+          },
+        },
+      },
+      requires: {
+        type: "object",
+        additionalProperties: {
+          type: "object",
+          properties: {
+            kind: { enum: ["aws-sso", "gcloud-adc"] },
+            profile: { type: "string", minLength: 1 },
+            tools: { $ref: "#/$defs/nameList" },
+            check: { $ref: "#/$defs/argv" },
+            login: { $ref: "#/$defs/argv" },
+          },
+          anyOf: [
+            {
+              required: ["kind", "profile"],
+              properties: { kind: { const: "aws-sso" } },
+            },
+            {
+              required: ["kind"],
+              properties: { kind: { const: "gcloud-adc" } },
+            },
+            { required: ["check", "login"], not: { required: ["kind"] } },
+          ],
+        },
+      },
+      remotes: {
+        type: "object",
+        additionalProperties: {
+          type: "object",
+          required: ["default", "targets"],
+          properties: {
+            default: { type: "string", minLength: 1 },
+            targets: {
+              type: "object",
+              additionalProperties: {
+                type: "object",
+                properties: {
+                  requires: { $ref: "#/$defs/nameList" },
+                  via: {
+                    type: "object",
+                    properties: { tools: { $ref: "#/$defs/nameList" } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
       name: { type: "string" },
       dev_host: { type: "string" },
       defaultEnvConfig: { type: "string" },

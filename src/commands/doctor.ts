@@ -292,6 +292,7 @@ import {
   inspectProjectLifecycleHygiene,
   repairProjectLifecycleSessions,
 } from "../lib/project-lifecycle-hygiene.ts";
+import { inspectProjectPrerequisites } from "../lib/project-prerequisites.ts";
 import {
   findIncompleteRuntimeProjects,
   findMissingRegistryEntries,
@@ -1269,7 +1270,52 @@ async function collectDoctorProjectChecks(opts: {
     }))
   );
 
+  if (!adopted && projectCtx.status === "ok") {
+    results.push(...(await collectPrerequisiteChecks(startDir, s)));
+  }
+
   return results;
+}
+
+async function collectPrerequisiteChecks(
+  startDir: string,
+  progress: DoctorProgress
+): Promise<TimedCheckResult[]> {
+  const project = await findProjectContext(startDir);
+  if (!project) {
+    return [];
+  }
+  const { prerequisites } = await readProjectConfig(project);
+  if (prerequisites?.error) {
+    const { code, message } = prerequisites.error;
+    return [
+      await runCheck(progress, "prerequisites", () =>
+        Promise.resolve({
+          name: "prerequisites",
+          status: "error",
+          message: `${code}: ${message}`,
+        })
+      ),
+    ];
+  }
+  if (!prerequisites?.config) {
+    return [];
+  }
+  const observed = await inspectProjectPrerequisites(prerequisites.config);
+  return await Promise.all(
+    observed.map(({ name, state, login }) => {
+      const checkName = `prerequisite ${name}`;
+      const label =
+        state.state === "missing" ? `${state.bin} not found` : state.state;
+      return runCheck(progress, checkName, () =>
+        Promise.resolve({
+          name: checkName,
+          status: state.state === "ok" ? "ok" : "warn",
+          message: `${label} · login: ${login}`,
+        })
+      );
+    })
+  );
 }
 
 function assertMachineDoctorOptions(

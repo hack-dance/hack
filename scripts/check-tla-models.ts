@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import {
   verifyAdmissionModelResult,
   verifyBalloonReuseModelResult,
+  verifyFiniteModelResult,
   verifyRestoreHistoryModelResult,
 } from "./lib/tla-result.ts";
 
@@ -31,6 +32,18 @@ if (
 }
 const models = [
   ...runtimeModels,
+  {
+    name: "project-prerequisites",
+    module: "ProjectPrerequisites",
+    verify: (opts: Parameters<typeof verifyAdmissionModelResult>[0]) =>
+      verifyFiniteModelResult({
+        ...opts,
+        states: 9,
+        invariant: "CheckedBeforeHooks",
+        action: "Login",
+        fields: ['phase = "allowed"', "checked = FALSE", "loggedIn = TRUE"],
+      }),
+  },
   {
     name: "restore-history",
     module: "RestoreHistory",

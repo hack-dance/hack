@@ -1,0 +1,21 @@
+---
+title: ProjectPrerequisites · Compose start
+---
+stateDiagram-v2
+  [*] --> check
+  check --> allowed: CheckPass
+  check --> offer: CheckFails [interactive]
+  check --> blocked: CheckFails [no offer]
+  offer --> login: Decide [yes]
+  offer --> blocked: Decide [no]
+  login --> recheck: Login [pass]
+  login --> blocked: Login [fail]
+  recheck --> allowed: CheckPass
+  recheck --> blocked: CheckFails
+  class check,recheck,login live
+  class offer wait
+  class allowed ok
+  class blocked fail
+  note right of allowed
+    INV Passing check before hooks
+  end note

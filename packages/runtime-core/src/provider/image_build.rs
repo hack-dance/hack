@@ -897,10 +897,6 @@ fn run_with_bases<P: BuildPool>(
         Err(error) => return Err(state::io(error)),
     }
     let alias_path = directory.join(format!("{}.client/base-aliases.json", inputs.key));
-    if selected.is_some() {
-        aliases::sweep_stranded(&root, pool, &lease, &identity, &alias_path);
-        aliases::sweep(pool, &lease, &identity, &alias_path)?;
-    }
     let expected = labels(inputs, &identity);
     let previous = read_receipt(&receipt_path)?;
     if let Some(previous) = &previous {
@@ -936,6 +932,10 @@ fn run_with_bases<P: BuildPool>(
             dead.phase = Phase::Indeterminate;
             state::write(&receipt_path, &dead)?;
         }
+    }
+    if selected.is_some() {
+        aliases::sweep_stranded(&root, pool, &lease, &identity, &alias_path);
+        aliases::sweep(pool, &lease, &identity, &alias_path)?;
     }
     let previous_bytes = previous.as_ref().and_then(|receipt| receipt.image_bytes);
     drop(lease);

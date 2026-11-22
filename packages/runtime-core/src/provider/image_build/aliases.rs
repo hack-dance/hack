@@ -47,10 +47,15 @@ fn tag<P: BuildPool>(
         if image["Id"] == id {
             return Ok(());
         }
-        return Err(refusal(
-            "native_build_base_image",
-            "A private base alias differs from the verified image.",
-        ));
+        let keeper = format!("{DOMAIN}/{CACHE}:{}", id.trim_start_matches("sha256:"));
+        if reference != keeper {
+            return Err(refusal(
+                "native_build_base_image",
+                "A private base alias differs from the verified image.",
+            ));
+        }
+        // The keeper name is derived from this exact image ID. Repoint the
+        // private tag without deleting the image it currently names.
     }
     pool.tag_base(lease, id, reference)?;
     if pool
@@ -163,32 +168,48 @@ pub(super) fn sweep<P: BuildPool>(
     if !path.try_exists().map_err(state::io)? {
         return Ok(());
     }
-    let journal: Journal = state::read_bounded(path, MAX_RECEIPT_BYTES)?;
+    let journal: Journal = match state::read_bounded(path, MAX_RECEIPT_BYTES) {
+        Ok(journal) => journal,
+        Err(error) if error.code == "invalid_receipt" => return quarantine(path),
+        Err(error) => return Err(error),
+    };
     if journal.incarnation == identity.incarnation && journal.engine_id == identity.engine_id {
+        if journal
+            .aliases
+            .iter()
+            .any(|(alias, id)| parse(alias) != scope(path) || !image_id(id))
+        {
+            return quarantine(path);
+        }
         for (alias, id) in journal.aliases {
-            if parse(&alias) != scope(path) || !image_id(&id) {
-                return Err(refusal(
-                    "native_build_receipt",
-                    "The recorded build alias is invalid.",
-                ));
-            }
             if let Some(image) = pool.inspect(lease, &alias)? {
-                let keeper = format!("{DOMAIN}/{CACHE}:{}", id.trim_start_matches("sha256:"));
-                if image["Id"] != id
-                    || pool
-                        .inspect(lease, &keeper)?
-                        .is_none_or(|image| image["Id"] != id)
-                {
+                if image["Id"] != id {
                     return Err(refusal(
-                        "native_build_receipt",
-                        "The recorded build alias or its cache tag differs.",
+                        "native_build_base_image",
+                        "The recorded build alias differs from its image ID.",
                     ));
                 }
+                let keeper = format!("{DOMAIN}/{CACHE}:{}", id.trim_start_matches("sha256:"));
+                tag(pool, lease, &id, &keeper)?;
                 pool.untag_base(lease, &alias)?;
             }
         }
     }
     fs::remove_file(path).map_err(state::io)
+}
+
+fn quarantine(path: &Path) -> Result<(), CandidateError> {
+    let mut nonce = [0u8; 16];
+    File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut nonce))
+        .map_err(state::io)?;
+    let saved = path.with_extension(format!("invalid-{:x}.json", crate::Hex(nonce)));
+    fs::rename(path, &saved).map_err(state::io)?;
+    eprintln!(
+        "Set aside a malformed build alias journal at {}",
+        saved.display()
+    );
+    Ok(())
 }
 
 /// Sweep only attempt journals whose key lock is free, including other projects.

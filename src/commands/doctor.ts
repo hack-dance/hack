@@ -146,6 +146,11 @@ import {
   doctorMetadata,
 } from "../lib/doctor-metadata.ts";
 import {
+  checkNativeImageBuilder,
+  NATIVE_BUILDER_CHECK,
+  type NativeBuilderReport,
+} from "../lib/doctor-native-builder.ts";
+import {
   AMD64_EMULATION_CHECK,
   type Amd64EmulationReport,
   amd64EmulationCheckResult,
@@ -386,6 +391,8 @@ interface CheckResult {
   readonly devPerformance?: DevPerformanceReport;
   /** Native pool idleness: state, graph count and memory; no paths. */
   readonly nativePool?: NativePoolReport;
+  /** A count of build services and the image builder's closed state. */
+  readonly nativeBuilder?: NativeBuilderReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -1729,6 +1736,20 @@ async function handleNativeDoctor(opts: {
         { timeoutMs: 25_000 }
       )
     );
+    // Read-only, with --fix too: adding the builder needs download consent.
+    results.push(
+      await runCheck(
+        progress,
+        NATIVE_BUILDER_CHECK,
+        async () =>
+          await checkNativeImageBuilder({
+            runtime: opts.runtime,
+            cwd: nativeProject.projectRoot,
+            compose: await readNativeComposeDocument(nativeProject.composeFile),
+          }),
+        { timeoutMs: 35_000 }
+      )
+    );
   }
   await appendNativeMachineChecks({ ...opts, progress, results });
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
@@ -1988,6 +2009,8 @@ export type DoctorJsonCheck = DoctorMetadata & {
   readonly devPerformance?: DevPerformanceReport;
   /** Present only on the native pool idle machine check. */
   readonly nativePool?: NativePoolReport;
+  /** Present only on the native image builder check: a count and a closed state. */
+  readonly nativeBuilder?: NativeBuilderReport;
 };
 
 export type DoctorJsonData = {
@@ -2019,6 +2042,7 @@ const DOCTOR_REPORT_FIELDS = [
   "nativeSource",
   "devPerformance",
   "nativePool",
+  "nativeBuilder",
 ] as const satisfies readonly (keyof CheckResult)[];
 
 type DoctorReportFields = Pick<

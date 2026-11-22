@@ -266,7 +266,15 @@ export interface NativeBuiltImage {
   readonly imageId: string;
   readonly buildKey: string;
   readonly reused: boolean;
+  /**
+   * Canonical base reference -> pinned reference with digest, for every base image
+   * the build used. A command passes them to its later builds as `pins`, so each
+   * base tag resolves once per command.
+   */
+  readonly basePins?: Readonly<Record<string, string>>;
 }
+const MAX_BASE_PINS = 64;
+const MAX_REFERENCE = 512;
 
 function parseBuilt(value: unknown): NativeBuiltImage {
   if (
@@ -287,7 +295,36 @@ function parseBuilt(value: unknown): NativeBuiltImage {
     imageId: value.image_id,
     buildKey: value.build_key,
     reused: value.reused,
+    basePins: parseBasePins(value.base_pins),
   };
+}
+
+/** Bounded string-to-string map of base pins; an older runtime omits it. */
+function parseBasePins(value: unknown): Readonly<Record<string, string>> {
+  if (value === undefined) {
+    return {};
+  }
+  const invalid = () =>
+    new ClosedCliError(
+      "Native runtime returned an invalid image build result; values omitted."
+    );
+  if (!isRecord(value) || Object.keys(value).length > MAX_BASE_PINS) {
+    throw invalid();
+  }
+  const pins: Record<string, string> = {};
+  for (const [reference, pin] of Object.entries(value)) {
+    if (
+      reference.length === 0 ||
+      reference.length > MAX_REFERENCE ||
+      typeof pin !== "string" ||
+      pin.length === 0 ||
+      pin.length > MAX_REFERENCE
+    ) {
+      throw invalid();
+    }
+    pins[reference] = pin;
+  }
+  return pins;
 }
 
 /**
@@ -699,6 +736,9 @@ async function runPendingBuilds(opts: {
   // The runtime requires the exact canonical root; it also derives the namespace.
   const projectRoot = await realpath(opts.projectRoot);
   const directory = await mkdtemp(join(tmpdir(), "hack-native-build-"));
+  // One pin per base reference for the whole command: each build receives the
+  // pins earlier builds used, so a shared tag resolves once (HACK-2533).
+  const pins: Record<string, string> = {};
   try {
     let index = 0;
     for (const { request, services } of opts.pending.values()) {
@@ -720,6 +760,7 @@ async function runPendingBuilds(opts: {
           target: request.target,
           args: request.args,
           policy: opts.rebuild ? "rebuild" : "missing",
+          pins,
           timeout_seconds: BUILD_TIMEOUT_SECONDS,
         }),
         { mode: 0o600, flag: "wx" }
@@ -734,6 +775,7 @@ async function runPendingBuilds(opts: {
       });
       // The request carries argument values; remove it as soon as it is consumed.
       await rm(requestFile, { force: true });
+      Object.assign(pins, built.basePins ?? {});
       for (const service of services) {
         const spec = opts.specs[service];
         if (spec) {

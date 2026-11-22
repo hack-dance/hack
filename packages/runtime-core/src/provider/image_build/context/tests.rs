@@ -522,3 +522,90 @@ fn corrupt_foreign_and_other_version_caches_are_ignored_and_rewritten() {
     fs::write(&cache, serde_json::to_vec(&value).unwrap()).unwrap();
     assert_eq!(tree.settled().files_read, 3, "an invalid hash was trusted");
 }
+
+#[test]
+fn a_snapshot_holds_exactly_the_keyed_entries_and_is_removed() {
+    let tree = Tree::new();
+    let context = tree.context();
+    fs::set_permissions(context.join("main.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("sub/a.txt", context.join("link")).unwrap();
+    fs::create_dir(context.join("empty")).unwrap();
+    fs::create_dir(context.join("locked")).unwrap();
+    fs::write(context.join("locked/inner"), "x").unwrap();
+    fs::set_permissions(context.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+    let keyed = tree.walk("*.log\n", None, SystemTime::now());
+    let holder = tree.root.join("snapshot");
+    let snapshot = snapshot::Snapshot::create(&context, &holder, &keyed.recorded, &|| None)
+        .unwrap()
+        .unwrap();
+    let mode = fs::metadata(&holder).unwrap().mode();
+    assert_eq!(mode & 0o777, 0o700);
+    // Re-walking the copy with no rules gives the keyed digest: same entries (the
+    // ignored file was never copied), kinds, modes, contents and targets.
+    let copied = digest(
+        &snapshot.context(),
+        b"",
+        None,
+        SystemTime::now(),
+        Bounds::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(copied.digest, keyed.digest);
+    assert!(!snapshot.context().join("notes.log").exists());
+    let source = fs::metadata(context.join("main.txt")).unwrap();
+    let copy = fs::metadata(snapshot.context().join("main.txt")).unwrap();
+    assert_eq!(
+        (copy.mtime(), copy.mtime_nsec()),
+        (source.mtime(), source.mtime_nsec())
+    );
+    drop(snapshot);
+    assert!(!holder.exists(), "the snapshot outlived its guard");
+    fs::set_permissions(context.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_snapshot_refuses_any_difference_from_the_record() {
+    let tree = Tree::new();
+    let context = tree.context();
+    std::os::unix::fs::symlink("main.txt", context.join("link")).unwrap();
+    let holder = tree.root.join("snapshot");
+    let attempt = |change: &dyn Fn()| {
+        let keyed = tree.walk("", None, SystemTime::now());
+        change();
+        let error =
+            snapshot::Snapshot::create(&context, &holder, &keyed.recorded, &|| None).unwrap_err();
+        assert!(!holder.exists(), "a refused snapshot was left behind");
+        error.code
+    };
+    let same_size = || fs::write(context.join("main.txt"), "two").unwrap();
+    assert_eq!(attempt(&same_size), "native_build_context_changed");
+    let grown = || fs::write(context.join("main.txt"), "a longer body").unwrap();
+    assert_eq!(attempt(&grown), "native_build_context_changed");
+    let mode = || {
+        fs::set_permissions(context.join("main.txt"), fs::Permissions::from_mode(0o700)).unwrap()
+    };
+    assert_eq!(attempt(&mode), "native_build_context_changed");
+    let retarget = || {
+        fs::remove_file(context.join("link")).unwrap();
+        std::os::unix::fs::symlink("sub/a.txt", context.join("link")).unwrap();
+    };
+    assert_eq!(attempt(&retarget), "native_build_context_changed");
+    let gone = || fs::remove_file(context.join("sub/a.txt")).unwrap();
+    assert_eq!(attempt(&gone), "native_build_context_changed");
+    let swapped = || {
+        fs::remove_file(context.join("main.txt")).unwrap();
+        std::os::unix::fs::symlink("notes.log", context.join("main.txt")).unwrap();
+    };
+    assert_eq!(attempt(&swapped), "native_build_context_changed");
+    // A stop request ends the copy cleanly, with nothing left.
+    let keyed = tree.walk("", None, SystemTime::now());
+    let calls = std::cell::Cell::new(0);
+    let stopped = snapshot::Snapshot::create(&context, &holder, &keyed.recorded, &|| {
+        calls.set(calls.get() + 1);
+        (calls.get() > 2).then_some(snapshot::Stopped::Canceled)
+    })
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(stopped, snapshot::Stopped::Canceled);
+    assert!(!holder.exists());
+}

@@ -30,9 +30,9 @@
 //! What the cache can miss: a content change that leaves device, inode, size, mtime and
 //! ctime all identical. That needs a deliberate timestamp manipulation: mtime can be set
 //! back by the file's owner, but ctime changes on every write and cannot be set by an
-//! unprivileged user without changing the system clock. Racing a directory swap during
-//! the walk is not defended either: the digest detects edits, it is not a security
-//! boundary (BuildKit reads the context itself).
+//! unprivileged user without changing the system clock. Such a miss can make a
+//! reuse decision stale, never a build wrong: a build copies and re-hashes every file
+//! ([`snapshot`]), refuses on a mismatch and then drops the cache.
 use super::{Flock, refusal, state};
 use crate::CandidateError;
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,7 @@ use std::{
 };
 
 pub(super) mod ignore;
+pub(super) mod snapshot;
 #[cfg(test)]
 mod tests;
 
@@ -88,6 +89,8 @@ impl Bounds {
 )]
 pub(super) struct ContextDigest {
     pub digest: String,
+    /// Every included entry in sorted path order: what a build snapshot must copy.
+    pub recorded: Vec<Entry>,
     /// Included entries, the root included.
     pub entries: usize,
     /// Regular files whose contents were read (the rest reused a cached hash).
@@ -183,24 +186,35 @@ fn store_cache(path: &Path, cache: &CacheFile) {
     }
 }
 
-enum Kind {
+/// What one included entry is, as hashed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum Kind {
     Directory,
-    File([u8; 32]),
+    /// Content SHA-256 and the size it was hashed at.
+    File([u8; 32], u64),
+    /// The link target bytes.
     Symlink(Vec<u8>),
 }
-struct Entry {
-    path: Vec<u8>,
-    mode: u32,
-    kind: Kind,
+/// One included entry, as the key walk recorded it.
+#[derive(Clone, Debug)]
+pub(super) struct Entry {
+    /// Relative to the context root; empty for the root itself.
+    pub path: Vec<u8>,
+    /// Permission bits (`mode & 0o7777`).
+    pub mode: u32,
+    pub kind: Kind,
+    /// Modification time `(seconds, nanoseconds)`; carried into the snapshot so image
+    /// layers keep the project's times. Not hashed.
+    pub mtime: (i64, i64),
 }
 
-fn unreadable() -> CandidateError {
+pub(super) fn unreadable() -> CandidateError {
     refusal(
         "native_build_context_unreadable",
         "An entry of the build context cannot be read; fix its permissions or exclude it in the ignore file.",
     )
 }
-fn changed() -> CandidateError {
+pub(super) fn changed() -> CandidateError {
     refusal(
         "native_build_context_changed",
         "A build context file changed while it was hashed; run the build again.",
@@ -404,6 +418,7 @@ pub(super) fn digest(
         path: Vec::new(),
         mode: root.mode() & 0o7777,
         kind: Kind::Directory,
+        mtime: (root.mtime(), root.mtime_nsec()),
     })?;
     // Excluded directories walked because a `!` pattern may re-include beneath them.
     let mut excluded_directories: BTreeMap<Vec<u8>, Entry> = BTreeMap::new();
@@ -432,12 +447,14 @@ pub(super) fn digest(
                 _ => (false, None),
             };
             let mode = metadata.mode() & 0o7777;
+            let mtime = (metadata.mtime(), metadata.mtime_nsec());
             let kind = metadata.file_type();
             if kind.is_dir() {
                 let entry = Entry {
                     path: child.clone(),
                     mode,
                     kind: Kind::Directory,
+                    mtime,
                 };
                 if excluded {
                     if text.is_some_and(|text| walk.rules.may_include_below(text)) {
@@ -455,7 +472,8 @@ pub(super) fn digest(
                 walk.include(Entry {
                     path: child,
                     mode,
-                    kind: Kind::File(hash),
+                    kind: Kind::File(hash, metadata.size()),
+                    mtime,
                 })?;
             } else if kind.is_symlink() {
                 let target = fs::read_link(&path).map_err(|_| unreadable())?;
@@ -463,6 +481,7 @@ pub(super) fn digest(
                     path: child,
                     mode,
                     kind: Kind::Symlink(target.as_os_str().as_bytes().to_vec()),
+                    mtime,
                 })?;
             } else {
                 return Err(refusal(
@@ -498,7 +517,7 @@ pub(super) fn digest(
         digest.update(entry.mode.to_le_bytes());
         match &entry.kind {
             Kind::Directory => digest.update(b"d"),
-            Kind::File(hash) => {
+            Kind::File(hash, _) => {
                 digest.update(b"f");
                 digest.update(hash);
             }
@@ -530,6 +549,7 @@ pub(super) fn digest(
     Ok(ContextDigest {
         digest: format!("{:x}", crate::Hex(digest.finalize())),
         entries: included.len(),
+        recorded: included,
         files_read: walk.files_read,
         fallback: rules.fallback,
     })

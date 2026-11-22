@@ -287,6 +287,35 @@ test("every up asks the runtime for each build, a restore too (HACK-2533)", asyn
   expect(keys).toEqual(["same", "changed"]);
 });
 
+test("one command pins each base tag once: later builds receive earlier pins", async () => {
+  const project = await root();
+  const pin = `docker.io/library/node:22@sha256:${"e".repeat(64)}`;
+  const sent: unknown[] = [];
+  await buildNativeProjectImages({
+    runtime,
+    projectRoot: project,
+    branch: null,
+    profiles: [],
+    builds: new Map([
+      ["web", request()],
+      ["worker", { ...request(), target: "worker" }],
+    ]),
+    specs: { web: { build: "app" }, worker: { build: "app" } },
+    rebuild: true,
+    signal: new AbortController().signal,
+    invoke: async ({ requestFile }) => {
+      sent.push(JSON.parse(await readFile(requestFile, "utf8")).pins);
+      return {
+        imageId: IMAGE,
+        buildKey: KEY,
+        reused: false,
+        basePins: { "docker.io/library/node:22": pin },
+      };
+    },
+  });
+  expect(sent).toEqual([{}, { "docker.io/library/node:22": pin }]);
+});
+
 test("restart resolves its builds before stopping: a rebuilt image is what it runs", async () => {
   const project = await root();
   let calls = 0;
@@ -598,7 +627,12 @@ test("build output streams through while the runtime's closed error is returned"
     requestFile: join(ok.home, "request.json"),
     write: () => undefined,
   });
-  expect(built).toEqual({ imageId: IMAGE, buildKey: KEY, reused: false });
+  expect(built).toEqual({
+    imageId: IMAGE,
+    buildKey: KEY,
+    reused: false,
+    basePins: {},
+  });
 });
 
 test("cancellation sends SIGTERM so the runtime can stop its build client", async () => {

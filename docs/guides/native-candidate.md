@@ -504,8 +504,12 @@ With it:
   digests for at most 24 hours; after that the next `up` resolves the tags again (this
   needs registry access): unchanged digests keep the image, a moved tag builds a new one. Set `HACK_NATIVE_REBUILD=1` to build
   again now; base-image tags then resolve again too.
-- If a copied file changes while its image is being built, the build is not recorded
-  for those inputs and `up` refuses; run it again.
+- When an image is actually built, BuildKit reads a private copy of the included
+  context, made and checked against the build key right before it runs, so edits during
+  a build never reach the image. A file that changed between computing the key and
+  making the copy refuses; run `up` again. The copy costs time and disk only when a
+  build runs (about 2.7 s for 20,000 files and 632 MiB on a loaded Linux host); reusing
+  an image makes no copy.
 - Every `up` asks the runtime for each build, including an `up` that restores a run
   stopped with `hack down`. The retained image is reused only while its build inputs
   are unchanged (Dockerfile, ignore file, target, args, build context); an edited

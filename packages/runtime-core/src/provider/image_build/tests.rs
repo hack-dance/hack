@@ -61,6 +61,7 @@ impl Fixture {
             args: BTreeMap::from([("GREETING".to_owned(), SECRET.to_owned())]),
             policy,
             timeout_seconds: Some(30),
+            pins: BTreeMap::new(),
         }
     }
     fn inputs(&self, policy: Policy) -> Inputs {
@@ -103,10 +104,15 @@ done
 cat "$file" > seen-bake.json
 cat dockerfile/Dockerfile > seen-dockerfile
 cat dockerfile/Dockerfile.dockerignore > seen-dockerignore
+ls -A snapshot/context > seen-entries
 case {mode} in
   ok) printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
   edit)
-    printf 'edited during the build' > "$(cat edit-target)"
+    target=$(cat edit-target)
+    original=$(cat "$target")
+    printf 'edited during the build' > "$target"
+    cat snapshot/context/main.txt > seen-during
+    printf '%s' "$original" > "$target"
     printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
   leak)
     printf '#5 0.1 value=%s\n\033[31mred\033[0m\033]0;title\007\n' '{SECRET}' >&2
@@ -253,6 +259,15 @@ impl Write for Captured {
     }
 }
 
+fn target_context(scratch: &Path) -> String {
+    let bake: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
+    bake["target"]["build"]["context"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
 fn never() -> bool {
     false
 }
@@ -270,7 +285,7 @@ fn cold_build_passes_values_only_through_the_private_definition_and_records_the_
     assert_eq!(
         outcome.base_pins,
         BTreeMap::from([(
-            "alpine:3.20".to_owned(),
+            "docker.io/library/alpine:3.20".to_owned(),
             format!("docker.io/library/alpine@{PIN}")
         )])
     );
@@ -282,7 +297,20 @@ fn cold_build_passes_values_only_through_the_private_definition_and_records_the_
     assert_eq!(lines.last(), Some(&"build"));
     assert!(lines.contains(&"--provenance=false") && lines.contains(&"--sbom=false"));
     assert!(lines.windows(2).any(|w| w[0] == "--allow"
-        && w[1] == format!("fs.read={}", fixture.project.join("app").display())));
+        && w[1] == format!("fs.read={}", scratch.join("snapshot/context").display())));
+    // BuildKit was pointed at the private snapshot, which is gone after the run.
+    assert_eq!(
+        Path::new(target_context(&scratch).as_str()),
+        scratch.join("snapshot/context")
+    );
+    assert!(
+        !scratch.join("snapshot").exists(),
+        "the snapshot outlived the run"
+    );
+    assert_eq!(
+        fs::read_to_string(scratch.join("seen-entries")).unwrap(),
+        "Dockerfile\nmain.txt\n"
+    );
     assert!(
         !argv.contains("pool-1"),
         "the pool incarnation reached argv"
@@ -660,6 +688,7 @@ fn bake_definitions_never_evaluate_project_text() {
     let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     let definition = bake_definition(
         &inputs,
+        Path::new("/s/context"),
         Path::new("/s/Dockerfile"),
         &BTreeMap::new(),
         &BTreeMap::new(),
@@ -688,26 +717,28 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     let fixture = Fixture::new();
     let app = fixture.project.join("app");
     let scanned = fs::read(app.join("Dockerfile")).unwrap();
-    fs::write(app.join(".dockerignore"), "*.txt\n").unwrap();
+    // The build files themselves are excluded, so editing them later leaves the
+    // keyed context set unchanged.
+    let rules = "*.txt\nDockerfile*\n.dockerignore\n";
+    fs::write(app.join(".dockerignore"), rules).unwrap();
     let inputs = fixture.inputs(Policy::Missing);
     // Edits after the scan (while bases resolve) must not reach the client.
     fs::write(app.join("Dockerfile"), "FROM unpinned:latest\nRUN id\n").unwrap();
     fs::write(app.join(".dockerignore"), "!*\n").unwrap();
-    fs::write(app.join("Dockerfile.dockerignore"), "main.txt\n").unwrap();
+    fs::write(
+        app.join("Dockerfile.dockerignore"),
+        "main.txt\nDockerfile*\n",
+    )
+    .unwrap();
     let pool = FakePool::new("pool-1");
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    // Those files are context entries too, so the post-build check refuses to adopt;
-    // the client still ran with the scanned bytes.
-    assert_eq!(
-        changed_during_build(&fixture, &pool, &inputs),
-        "native_build_context_changed"
-    );
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
     let scratch = fixture.scratch(&inputs);
     assert_eq!(fs::read(scratch.join("seen-dockerfile")).unwrap(), scanned);
     assert_eq!(
         fs::read_to_string(scratch.join("seen-dockerignore")).unwrap(),
-        "*.txt\n"
+        rules
     );
     let bake: Value =
         serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
@@ -720,33 +751,26 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     fs::remove_file(app.join("Dockerfile.dockerignore")).unwrap();
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    assert_eq!(
-        changed_during_build(&fixture, &pool, &inputs),
-        "native_build_context_changed"
-    );
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
     assert_eq!(
         fs::read_to_string(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
-        "main.txt\n"
+        "main.txt\nDockerfile*\n"
     );
     fs::remove_file(app.join(".dockerignore")).unwrap();
     let inputs = fixture.inputs(Policy::Rebuild);
     fs::write(app.join(".dockerignore"), "*\n").unwrap();
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    assert_eq!(
-        changed_during_build(&fixture, &pool, &inputs),
-        "native_build_context_changed"
-    );
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
     assert_eq!(
         fs::read(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
         b""
     );
-}
-
-fn changed_during_build(fixture: &Fixture, pool: &FakePool, inputs: &Inputs) -> &'static str {
-    run(&fixture.candidate, pool, inputs, &never)
-        .unwrap_err()
-        .code
+    // The snapshot holds only entries recorded before the late ignore file appeared.
+    assert_eq!(
+        fs::read_to_string(fixture.scratch(&inputs).join("seen-entries")).unwrap(),
+        "Dockerfile\nmain.txt\n"
+    );
 }
 
 #[test]
@@ -1550,7 +1574,7 @@ fn base_resolutions_are_trusted_for_a_day_then_checked_once() {
     assert_eq!(resolves(), 3);
     assert_eq!(fixture.calls(&inputs), 2);
     assert_eq!(
-        rebuilt.base_pins["alpine:3.20"],
+        rebuilt.base_pins["docker.io/library/alpine:3.20"],
         format!("docker.io/library/alpine@{MOVED}")
     );
     assert_eq!(
@@ -1623,34 +1647,174 @@ fn context_edits_rebuild_and_ignored_edits_reuse() {
 }
 
 #[test]
-fn a_context_edited_during_the_build_is_not_adopted() {
+fn edits_during_the_build_never_reach_it_even_when_undone() {
     let fixture = Fixture::new();
     let inputs = fixture.inputs(Policy::Missing);
     let pool = FakePool::new("pool-1");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
     fixture.client(&inputs, "edit");
-    // The seam: the fake client edits a copied file after BuildKit "read" it.
+    // The seam: the fake client changes a copied file and changes it back while it
+    // "builds" (A -> B -> A), which no walk before or after could see.
     let main = fixture.project.join("app/main.txt");
     fs::write(
         fixture.scratch(&inputs).join("edit-target"),
         main.as_os_str().as_bytes(),
     )
     .unwrap();
+    let outcome = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert!(!outcome.reused);
+    assert_eq!(fs::read_to_string(&main).unwrap(), "one");
+    // BuildKit's context held the keyed bytes the whole time.
+    assert_eq!(
+        fs::read_to_string(fixture.scratch(&inputs).join("seen-during")).unwrap(),
+        "one"
+    );
+    assert_eq!(fixture.receipt(&inputs).phase, Phase::ContentIdVerified);
+}
+
+#[test]
+fn a_context_edited_after_its_key_refuses_before_the_client_runs() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let cache = builds_root(&fixture.candidate)
+        .join(&inputs.namespace)
+        .join(context::cache_name(&fixture.project.join("app")));
+    assert!(cache.exists());
+    fs::write(fixture.project.join("app/main.txt"), "two").unwrap();
     let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
     assert_eq!(error.code, "native_build_context_changed");
     assert!(!error.message.contains("main"));
-    assert_eq!(fixture.calls(&inputs), 1);
-    let receipt = fixture.receipt(&inputs);
-    assert_eq!(receipt.phase, Phase::Indeterminate);
-    assert!(receipt.image_id.is_none());
-    // The old key is never reused for that image; the new contents get their own key.
-    let again = fixture.inputs(Policy::Missing);
-    assert_ne!(again.key, inputs.key);
-    fixture.client(&again, "ok");
-    pool.built(&again, "pool-1", serde_json::json!({}));
-    let outcome = run(&fixture.candidate, &pool, &again, &never).unwrap();
-    assert!(!outcome.reused);
-    assert_eq!(fixture.receipt(&again).phase, Phase::ContentIdVerified);
+    assert_eq!(fixture.calls(&inputs), 0, "the client ran on unkeyed bytes");
+    assert!(!fixture.scratch(&inputs).join("snapshot").exists());
+    // No attempt was recorded, and the possibly stale stat cache is gone.
+    assert!(
+        !builds_root(&fixture.candidate)
+            .join(&inputs.namespace)
+            .join(format!("{}.json", inputs.key))
+            .exists()
+    );
+    assert!(!cache.exists());
+}
+
+#[test]
+fn cancellation_during_the_snapshot_adopts_nothing_and_leaves_no_copy() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let snapshot = fixture.scratch(&inputs).join("snapshot");
+    // Requested once the copy has begun (its root exists).
+    let marker = snapshot.join("context");
+    let cancel = move || marker.exists();
+    let error = run(&fixture.candidate, &pool, &inputs, &cancel).unwrap_err();
+    assert_eq!(error.code, "native_build_canceled");
+    assert_eq!(fixture.calls(&inputs), 0);
+    assert!(!snapshot.exists(), "the snapshot outlived a canceled copy");
+    assert!(
+        !builds_root(&fixture.candidate)
+            .join(&inputs.namespace)
+            .join(format!("{}.json", inputs.key))
+            .exists()
+    );
+}
+
+/// A second project directory whose Dockerfile shares the first one's base tag.
+fn second_build(fixture: &Fixture, policy: Policy, pins: BTreeMap<String, String>) -> Inputs {
+    let other = fixture.project.join("other");
+    let _ = fs::create_dir(&other);
+    fs::write(other.join("Dockerfile"), "FROM alpine:3.20\nRUN echo two\n").unwrap();
+    let mut request = fixture.request(policy);
+    request.context = "other".into();
+    request.pins = pins;
+    prepare(request, &builds_root(&fixture.candidate)).unwrap()
+}
+
+#[test]
+fn passed_pins_give_every_build_of_a_command_the_same_base() {
+    const MOVED: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let fixture = Fixture::new();
+    let first = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&first, "pool-1", serde_json::json!({}));
+    fixture.client(&first, "ok");
+    let outcome = run(&fixture.candidate, &pool, &first, &never).unwrap();
+    assert_eq!(pool.resolve_deadlines.borrow().len(), 1);
+    let passed = outcome.base_pins.clone();
+    // The tag moves and no shared record exists: only the passed pin can agree.
+    *pool.pin.borrow_mut() = MOVED.into();
+    fs::remove_dir_all(
+        builds_root(&fixture.candidate)
+            .join(&first.namespace)
+            .join("bases"),
+    )
+    .unwrap();
+    for policy in [Policy::Missing, Policy::Rebuild] {
+        let second = second_build(&fixture, policy, passed.clone());
+        assert_ne!(second.key, first.key);
+        pool.built(&second, "pool-1", serde_json::json!({}));
+        fixture.client(&second, "ok");
+        let built = run(&fixture.candidate, &pool, &second, &never).unwrap();
+        assert_eq!(built.base_pins, passed, "{policy:?}");
+        assert_eq!(
+            pool.resolve_deadlines.borrow().len(),
+            1,
+            "{policy:?} resolved"
+        );
+        let bake: Value = serde_json::from_slice(
+            &fs::read(fixture.scratch(&second).join("seen-bake.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            bake["target"]["build"]["contexts"]["alpine:3.20"],
+            format!("docker-image://docker.io/library/alpine@{PIN}")
+        );
+    }
+
+    // A fresh receipt whose pin differs from the passed one builds instead of reusing.
+    let moved = BTreeMap::from([(
+        "docker.io/library/alpine:3.20".to_owned(),
+        format!("docker.io/library/alpine@{MOVED}"),
+    )]);
+    let mut request = fixture.request(Policy::Missing);
+    request.pins = moved.clone();
+    let repinned = prepare(request, &builds_root(&fixture.candidate)).unwrap();
+    assert_eq!(repinned.key, first.key);
+    pool.built(&repinned, "pool-1", serde_json::json!({}));
+    let rebuilt = run(&fixture.candidate, &pool, &repinned, &never).unwrap();
+    assert!(!rebuilt.reused);
+    assert_eq!(rebuilt.base_pins, moved);
+    assert_eq!(fixture.calls(&first), 2);
+    assert_eq!(pool.resolve_deadlines.borrow().len(), 1);
+    // Passing the pin it now records reuses it.
+    let mut request = fixture.request(Policy::Missing);
+    request.pins = moved;
+    let same = prepare(request, &builds_root(&fixture.candidate)).unwrap();
+    assert!(
+        run(&fixture.candidate, &pool, &same, &never)
+            .unwrap()
+            .reused
+    );
+
+    // A passed pin must pin its own base image's repository by digest.
+    let mut request = fixture.request(Policy::Missing);
+    request.pins = BTreeMap::from([(
+        "docker.io/library/alpine:3.20".to_owned(),
+        format!("docker.io/library/busybox@{MOVED}"),
+    )]);
+    let foreign = prepare(request, &builds_root(&fixture.candidate)).unwrap();
+    assert_eq!(
+        run(&fixture.candidate, &pool, &foreign, &never)
+            .unwrap_err()
+            .code,
+        "native_build_request"
+    );
+    let mut request = fixture.request(Policy::Missing);
+    request.pins = BTreeMap::from([("docker.io/library/alpine:3.20".to_owned(), "alpine".into())]);
+    assert_eq!(code(&fixture, request), "native_build_request");
 }
 
 #[test]
@@ -1683,7 +1847,7 @@ fn base_resolutions_are_shared_across_builds_of_a_namespace_for_a_day() {
     let outcome = build(&second);
     assert_eq!(resolves(), 1, "a fresh shared resolution was repeated");
     assert_eq!(
-        outcome.base_pins["alpine:3.20"],
+        outcome.base_pins["docker.io/library/alpine:3.20"],
         format!("docker.io/library/alpine@{PIN}")
     );
     // Its receipt carries the record's time, not this build's.
@@ -1707,7 +1871,7 @@ fn base_resolutions_are_shared_across_builds_of_a_namespace_for_a_day() {
     assert!(!rebuilt.reused);
     assert_eq!(resolves(), 2);
     assert_eq!(
-        rebuilt.base_pins["alpine:3.20"],
+        rebuilt.base_pins["docker.io/library/alpine:3.20"],
         format!("docker.io/library/alpine@{MOVED}")
     );
 

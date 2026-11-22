@@ -47,8 +47,9 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
   refuses some risky container settings (see below), but it is not a security
   boundary: do not rely on it to contain a project or a coding agent.
 - **Shared resources.** Projects the pool was started with share its VM resources.
-  `hack up` refuses an unshared root while the pool is running. Stop the pool
-  and add the root before the next boot.
+  A running pool's folders are fixed. When nothing uses the pool, `hack up` in
+  another project restarts it once to add that folder (about 30 s). When another
+  project is running, it refuses: run `hack down` there first.
 
 ## Control and traffic
 

@@ -6,8 +6,10 @@ unavailable on native. `hack config adopt` requires Compose even with
 `--dry-run`. On native it refuses with `E_NATIVE_PROJECT_UNSUPPORTED`.
 
 Projects the pool was started with can run together. If a running pool does
-not share a project root, `hack up` refuses the start. Stop the pool and add
-the root before the next boot. A pool accepts up to eight project shares.
+not share a project root, `hack up` restarts the pool to add it when nothing uses
+the pool (about 30 s, one line says so). When another project is running there, or
+the pool is starting or stopping, `hack up` refuses the start: run `hack down` in the
+other projects first. A pool accepts up to eight project shares.
 
 ## Native startup limits
 

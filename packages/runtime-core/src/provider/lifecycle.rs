@@ -2667,11 +2667,29 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
 
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
-        down_observed(candidate)
+        down_observed(candidate, &|| Ok(()))
     })
 }
 
-fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+/// Stop a running pool that nothing uses, so a stopped-pool share update can follow
+/// (HACK-2535). The pool is checked idle (`pool_users::require_idle`) under the provider
+/// lease, and again right before the guest stops. Every graph start needs that lease
+/// before it creates a container, so no container starts between the second check and
+/// the stop; a start whose receipt turned live meanwhile makes the second check refuse.
+pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        down_observed(candidate, &|| {
+            pool_users::require_idle(&candidate.state_root)
+        })
+    })
+}
+
+/// `runtime down`, with `idle` checked under the lease and again right before the guest
+/// stops; plain `down` passes a check that always holds.
+fn down_observed(
+    candidate: &Candidate,
+    idle: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
@@ -2680,6 +2698,7 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     let lock = state::Lock::acquire(&root(candidate))?;
     // Builds take their shared fence only under this lease, so none can start after this.
     super::image_build::require_no_active_build(candidate)?;
+    idle()?;
     let mut owner = Owner::load(candidate)?;
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
     // When there is a pool to stop, one host sample is taken beside the stop, on its own
@@ -2721,6 +2740,8 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
             deadline,
         )
     });
+    // The second idle check, right before the guest stops (HACK-2535).
+    idle()?;
     let mut result = match guest_stop(candidate, &mut owner) {
         Ok(()) => status(candidate),
         Err(error)

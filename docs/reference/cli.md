@@ -463,6 +463,33 @@ hack ps [options]
 | `--version, -v` | Show version |
 
 
+## `hack use [selection]`
+
+List remote selections or save a target for the next Compose start
+
+### Usage
+
+```bash
+hack use [selection] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `selection` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack pull`
 
 Refresh and download project images without starting services

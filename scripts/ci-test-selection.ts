@@ -14,6 +14,8 @@ export type TestSelection = {
 
 /** Add exceptional tests here with a reason; contracts and source readers run automatically. */
 export const ALWAYS_RUN_TESTS: Readonly<Record<string, string>> = {
+  "tests/ci-docker-inputs.test.ts":
+    "Real-engine dependency closure and unknown-input qualification",
   "tests/ci-change-scope.test.ts": "CI policy and required-check wiring",
   "tests/ci-test-selection.test.ts": "Selection must verify itself on every PR",
 };
@@ -490,6 +492,21 @@ function graphInternals(graph: SelectionGraph): GraphState {
     throw new Error("selection graph was not created by buildSelectionGraph");
   }
   return state;
+}
+
+/** Reuse the selector's static import resolution without executing repository code. */
+export function selectionModuleInputs(opts: {
+  readonly graph: SelectionGraph;
+  readonly file: string;
+}): {
+  readonly source: string | undefined;
+  readonly dependencies: readonly string[];
+} {
+  const state = graphInternals(opts.graph);
+  return {
+    source: state.read(opts.file),
+    dependencies: state.module(opts.file).dependencies,
+  };
 }
 
 /**

@@ -139,8 +139,21 @@ export function touchesStateModels(path: string): boolean {
  * source conservative; native-only source is not excluded without a consumer audit.
  */
 export function touchesDockerSuite(path: string): boolean {
-  return /^(?:src\/|index\.ts$|packages\/(?:cli|lifecycle-supervisor)\/|templates\/|docker\/|examples\/|assets\/|docs\/recipes\/|\.dockerignore$|tests\/e2e\/|tests\/helpers\/|\.hack\/|Dockerfile(?:\.|$)|docker-compose(?:\.|$))/.test(
+  return /^(?:src\/|index\.ts$|packages\/(?:cli|lifecycle-supervisor)\/|templates\/|docker\/|examples\/|assets\/|docs\/recipes\/|\.dockerignore$|tests\/(?:e2e|fixtures|helpers)\/|\.hack\/|Dockerfile(?:\.|$)|docker-compose(?:\.|$))/.test(
     path
+  );
+}
+
+/** Unknown input families require every job, independently of unit graph fallback. */
+export function isKnownCiInput(path: string): boolean {
+  return (
+    DOCS_FILES.has(path) ||
+    DOCS_PATHS.some((pattern) => pattern.test(path)) ||
+    touchesStateModels(path) ||
+    touchesDockerSuite(path) ||
+    /^(?:tests\/|packages\/(?:runtime-core|relay-guest|config-compiler|db)\/|hack-local$)/.test(
+      path
+    )
   );
 }
 

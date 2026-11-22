@@ -7,6 +7,7 @@ import {
   touchesRelocatedCli,
   touchesStateModels,
 } from "./ci-change-scope.ts";
+import { dockerJobInputs, matchesDockerJobInput } from "./ci-docker-inputs.ts";
 import { selectTests, type TestSelection } from "./ci-test-selection.ts";
 import { requiresWorkflowFull } from "./ci-workflow-guard.ts";
 import { classifyTestPools } from "./test-shard-plan.ts";
@@ -123,6 +124,28 @@ function shouldRunModels(opts: {
   );
 }
 
+function shouldRunDocker(opts: {
+  readonly draft: boolean;
+  readonly integration: boolean;
+  readonly full: boolean;
+  readonly e2e: boolean;
+  readonly changed: readonly string[] | null;
+  readonly inputs: ReadonlySet<string> | null;
+}): boolean {
+  return (
+    !opts.draft &&
+    (opts.integration ||
+      opts.full ||
+      opts.e2e ||
+      opts.changed?.some(
+        (path) =>
+          touchesDockerSuite(path) ||
+          (opts.inputs !== null &&
+            matchesDockerJobInput({ path, inputs: opts.inputs }))
+      ) === true)
+  );
+}
+
 export async function planPullRequest(opts: {
   readonly repoRoot: string;
   readonly changed: readonly string[] | null;
@@ -140,7 +163,12 @@ export async function planPullRequest(opts: {
   readonly selection?: TestSelection;
 }): Promise<PullRequestPlan> {
   const stablePr = opts.pullRequest !== false && opts.baseRef === "main";
-  const full = opts.full || stablePr || requiresWorkflowFull(opts.changed);
+  const forcedFull =
+    opts.full || stablePr || requiresWorkflowFull(opts.changed);
+  const dockerInputs = forcedFull
+    ? new Set<string>()
+    : dockerJobInputs({ repoRoot: opts.repoRoot });
+  const full = forcedFull || dockerInputs === null;
   const selection =
     opts.selection ??
     selectTests({
@@ -158,12 +186,14 @@ export async function planPullRequest(opts: {
     !opts.draft && (full || opts.changed?.some(touchesRustInput) === true);
   const mac =
     !opts.draft && (integration || stablePr || opts.full || opts.mac === true);
-  const e2e =
-    !opts.draft &&
-    (integration ||
-      full ||
-      opts.e2e === true ||
-      opts.changed?.some(touchesDockerSuite) === true);
+  const e2e = shouldRunDocker({
+    draft: opts.draft,
+    integration,
+    full,
+    e2e: opts.e2e === true,
+    changed: opts.changed,
+    inputs: dockerInputs,
+  });
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
   const allJobs = full;

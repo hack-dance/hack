@@ -451,7 +451,7 @@ describe("PR matrix policy", () => {
     }
     const input = {
       repoRoot,
-      changed: ["packages/config-compiler/src/lib.rs"],
+      changed: ["packages/runtime-core/src/lib.rs"],
       draft: false,
       full: false,
       selection,
@@ -505,7 +505,7 @@ describe("PR matrix policy", () => {
         COMPILER_HOSTS.filter((host) => host.platform === "linux")
       ),
       defer_macos: true,
-      docker_suite: false,
+      docker_suite: path.startsWith("packages/config-compiler/"),
       build_smoke: false,
       test_shards: "[4,5,6,7,8]",
     });

@@ -12,12 +12,23 @@ hosts. Model changes now enable the state-model job independently of build smoke
 | `scripts/lib/tla-runtime-models.ts` or `tests/models/**` | State models; no Docker or build smoke |
 | TLA helper skill or the four Python controls bundled with the model job | State models; no Docker or build smoke |
 | Runtime Rust source, including a model registry edit | Linux candidate/compiler checks; models when changed; no Docker |
-| Compose backend, templates, E2E harness (`tests/e2e/**`) | Docker E2E, runtime images and Linux process lifetime |
+| Compose backend, templates, E2E harness and their derived imported/executed inputs | Docker E2E, runtime images and Linux process lifetime |
 | Shared CLI source (`src/**`, `index.ts`, `packages/cli/**`), `.hack/**`, Docker definitions, lifecycle supervisor, examples/assets and recipe snippets | Docker tier conservatively; CLI source also retains relocated acceptance |
-| Shared test helpers/preloads, other scripts, manifests, lockfiles, toolchain/config pins, workflows or selectors | Full Linux, Docker, state-model and build tiers |
+| Unknown input families, shared test helpers/preloads, other scripts, manifests, lockfiles, toolchain/config pins, workflows or selectors | Full Linux, Docker, state-model and build tiers |
 | `ci:e2e` label | Docker tier, independently of model/build tiers |
 | `ci:full` label | Full ordinary tiers and selected macOS/native hosts |
 | `next` integration push | Docker, models and build smoke, selected Linux/macOS pools and native checks |
+
+Docker dependencies are derived from the `docker-e2e-shard`, `runtime-images` and
+`linux-process-lifetime` workflow commands, including package/workspace scripts,
+transitive local imports, literal file paths and joined execution/data paths.
+Cargo manifests select their compiled crate directories. Thus the shared-host
+fixture, real-Docker context test and configuration compiler remain Docker inputs
+without relying on a filename-prefix guess. A new registered scenario importing a
+new helper automatically brings that helper into Docker qualification. Fixture
+regressions exercise that edge; unavailable dependency evidence selects full.
+Unknown path families select every job even if the unit graph already fell back
+to every test file. Unit inventory expansion and job-tier expansion are separate.
 
 Unknown scripts and shared helpers remain full-tier inputs until their consumers
 are audited. In particular, this change exempts only the known model registry from
@@ -274,3 +285,10 @@ Use `bun scripts/ci-change-scope.ts --event=pull_request --dry-run
 This reads the current tree as data, prints job switches and selected tests, and
 does not write GitHub output/summary files. The policy tests cover every row of
 the tier table and exercise the independent workflow shell against fixture diffs.
+
+
+The required fan-ins keep their existing dependency sets in this scope change:
+`test` does not aggregate state models, and `docker-e2e` does not aggregate runtime
+images. Those jobs retain their visible results; a successful whole CI run is
+required for the ready note. This PR does not change branch-protection settings
+or claim either fan-in alone proves the model/image jobs succeeded.

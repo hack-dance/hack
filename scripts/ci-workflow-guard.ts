@@ -1,5 +1,5 @@
 /** Replay/policy mirror of the independent shell guard in ci.yml; parity is tested against the shell. */
-import { touchesStateModels } from "./ci-change-scope.ts";
+import { isKnownCiInput, touchesStateModels } from "./ci-change-scope.ts";
 
 /** Unknown scripts and shared setup stay full until their consumers are bounded. */
 export function requiresWorkflowFull(paths: readonly string[] | null): boolean {
@@ -7,6 +7,7 @@ export function requiresWorkflowFull(paths: readonly string[] | null): boolean {
     !paths?.length ||
     paths.some(
       (path) =>
+        !isKnownCiInput(path) ||
         (!touchesStateModels(path) && /^scripts\//.test(path)) ||
         /^(?:\.github\/|tests\/helpers\/)/.test(path) ||
         [

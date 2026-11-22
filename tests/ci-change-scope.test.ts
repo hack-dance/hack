@@ -252,6 +252,11 @@ describe("pull request diff", () => {
     expect(changeScope(pullRequestPaths(root) ?? [])).toBe("docs");
     await mkdir(join(root, "tests"), { recursive: true });
     await mkdir(join(root, "packages/db"), { recursive: true });
+    await mkdir(join(root, ".github/workflows"), { recursive: true });
+    await writeFile(
+      join(root, ".github/workflows/ci.yml"),
+      "jobs:\n  docker-e2e-shard:\n    steps:\n      - run: echo fixture\n"
+    );
     const result = Bun.spawnSync(
       [
         process.execPath,

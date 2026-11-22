@@ -130,7 +130,7 @@ jobs:
                     linux_rust=true ;;
                 esac
                 case "$path" in
-                  src/*|index.ts|packages/cli/*|packages/lifecycle-supervisor/*|templates/*|docker/*|examples/*|assets/*|docs/recipes/*|.dockerignore|tests/e2e/*|tests/helpers/*|.hack/*|Dockerfile|Dockerfile.*|docker-compose|docker-compose.*)
+                  src/*|index.ts|packages/cli/*|packages/lifecycle-supervisor/*|templates/*|docker/*|examples/*|assets/*|docs/recipes/*|.dockerignore|tests/e2e/*|tests/fixtures/*|tests/helpers/*|.hack/*|Dockerfile|Dockerfile.*|docker-compose|docker-compose.*)
                     docker_inputs=true ;;
                 esac
                 case "$path" in
@@ -143,6 +143,16 @@ jobs:
                   rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml|\
                   bunfig.toml|*/bunfig.toml|tsconfig*.json|*/tsconfig*.json|mise.toml)
                     full=true ;;
+                esac
+                # A unit-graph fallback is not a job-tier fallback. Unknown
+                # input families must retain every job independently.
+                case "$path" in
+                  README.md|CHANGELOG.md|SECURITY.md|PACKAGING.md|LICENSE|docs/*|site/*|scripts/*|.github/*|\
+                  src/*|index.ts|tests/*|packages/cli/*|packages/lifecycle-supervisor/*|\
+                  packages/runtime-core/*|packages/relay-guest/*|packages/config-compiler/*|packages/db/*|hack-local|\
+                  templates/*|docker/*|examples/*|assets/*|.hack/*|.dockerignore|Dockerfile|Dockerfile.*|docker-compose|docker-compose.*|\
+                  .ai/skills/hack-repo-tla/*) ;;
+                  *) full=true ;;
                 esac
               done < "$RUNNER_TEMP/ci-paths"
             fi
@@ -235,6 +245,9 @@ jobs:
                 printf 'compiler_hosts=%s\n' "$compiler" >> "$GITHUB_OUTPUT"
               fi
             fi
+            # Trusted base policy derives extra inputs from the Docker jobs'
+            # import and execution graph; this boundary may widen, never erase it.
+            if [ "$PR_DRAFT" != "true" ] && [ "$(sed -n 's/^docker_suite=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "true" ]; then e2e=true; fi
             printf 'docker_suite=%s\n' "$e2e" >> "$GITHUB_OUTPUT"
             models=false
             if [ "$PR_DRAFT" != "true" ] && { [ "$full" = "true" ] || [ "$model_inputs" = "true" ]; }; then models=true; fi

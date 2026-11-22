@@ -43,6 +43,7 @@ async function scope(opts: {
   ref?: string;
   baseRef?: string;
   tierPlan?: boolean;
+  tierDocker?: boolean;
   before?: string;
   predecessor?: string;
   dispatchFull?: boolean;
@@ -90,7 +91,7 @@ async function scope(opts: {
       await writeFile(join(root, path), source);
     };
     const tierPlan = opts.tierPlan
-      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=true\n`)});`
+      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=${String(opts.tierDocker === true)}\n`)});`
       : "";
     const policy = opts.legacy
       ? 'throw Error("legacy policy must not execute");'
@@ -193,6 +194,7 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
   });
 });
 for (const path of [
+  "future/engine.bin",
   "scripts/lib/native-plan-home.ts",
   "scripts/ci-test-selection.ts",
   "scripts/ci-change-scope.ts",
@@ -567,4 +569,13 @@ test.each([
   expect(outputs.selection_mode).not.toBe("full");
   expect(outputs.docker_suite).toBe(docker);
   expect(outputs.state_models).toBe(models);
+});
+
+test("the independent boundary preserves Docker inputs derived by trusted base policy", async () => {
+  const output = await scope({
+    path: "tests/docker-context.test.ts",
+    tierPlan: true,
+    tierDocker: true,
+  });
+  expect(output.docker_suite).toBe("true");
 });

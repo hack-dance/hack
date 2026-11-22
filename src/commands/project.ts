@@ -48,6 +48,7 @@ import {
   runningRemoteChoice,
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
+import { isHostControlEnvKey } from "../lib/vetted-env.ts";
 import {
   selectLifecycleAddress,
   writeLifecycleStopped,
@@ -11199,6 +11200,36 @@ async function runRestartCommand({
   });
 }
 
+/** Compose reads application interpolation without adopting checkout client settings. */
+export async function resolveRemoteInspectionEnv(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly baseProjectName: string;
+  readonly envName: string | null | undefined;
+  readonly choices: readonly EffectiveRemote[];
+}): Promise<Record<string, string>> {
+  const { project, envName } = opts;
+  const modern = await resolveProjectEnvConfig({
+    projectDir: project.projectDir,
+    projectRoot: project.projectRoot,
+    envName,
+    serviceNames: await readIncludedComposeServiceNames(project.composeFile),
+  });
+  const managed =
+    modern?.globalEnv ??
+    (
+      await resolveHackEnv({
+        projectDir: project.projectDir,
+        projectName: sanitizeProjectSlug(opts.baseProjectName),
+        envName,
+      })
+    ).envForCompose;
+  return Object.fromEntries(
+    Object.entries(applyRemoteEnv(managed, opts.choices)).filter(
+      ([key]) => !isHostControlEnvKey(key)
+    )
+  );
+}
+
 /** Restore target names for commands against existing containers without prompting. */
 async function resolveRuntimeRemoteChoices(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -11738,7 +11769,27 @@ async function handlePs({
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
-  const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
+  const { composeProjectName, lifecycleComposeProject } = resolveRestartTarget({
+    baseProjectName,
+    branch,
+  });
+  const choices = await resolveRuntimeRemoteChoices({
+    project,
+    cfg,
+    composeProject: lifecycleComposeProject,
+  });
+  const env = choices.length
+    ? await resolveRemoteInspectionEnv({
+        project,
+        baseProjectName,
+        choices,
+        envName: await resolveStoredRuntimeEnvName({
+          requestedEnvName: undefined,
+          projectDir: project.projectDir,
+          composeProject: lifecycleComposeProject,
+        }),
+      })
+    : undefined;
 
   const cwd = dirname(project.composeFile);
 
@@ -11747,10 +11798,12 @@ async function handlePs({
   // A failed or unparsable read throws a coded error with the engine's cause
   // (envelope under --json, one line otherwise); see compose-ps-result.ts.
   const read = await readComposePs({
+    redactValues: Object.values(env ?? {}),
     run: () =>
       composeRuntimeBackend.psJson({
         composeFiles: [project.composeFile],
         composeProject: composeProjectName,
+        env,
         profiles,
         cwd,
         all: true,
@@ -11780,7 +11833,7 @@ async function handlePs({
   // when it completes and a Compose client waits for it (HACK-2310).
   const psInterpolationEnv = await readComposeInterpolationEnv({
     composeFiles: [project.composeFile],
-    env: process.env,
+    env: { ...process.env, ...env },
   });
   const waiting = waitingDependents({
     graph: await readComposeOneShotGraph([project.composeFile], {

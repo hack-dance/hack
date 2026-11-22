@@ -80,7 +80,7 @@ test("the six --use entry points deliver the invocation target without saving it
         '  *" exec "*) test -n "${DB_HOST:-}" || exit 1; printf "%s\\n" "$DB_HOST" ;;',
         '  *" down "*) test -n "${DB_HOST:-}" || exit 1; printf "down=%s\\n" "$DB_HOST" >> "$TEST_DELIVERY"; rm -f "$TEST_STACK_STATE" ;;',
         '  *" --profile * "*" ps "*) test -n "${DB_HOST:-}" && test "${DOCKER_CONFIG:-}" != /project-config && test "${LD_LIBRARY_PATH:-}" != /project-loader || exit 1; if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
-        '  *" ps "*) if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
+        '  *" ps "*) if [ "${TEST_INSPECTION_REQUIRED:-}" = 1 ]; then test "${DB_HOST:-}" = live.example.test:5432 || exit 1; fi; if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" up "*|*" run "*)',
         '    printf "%s\\n" "$*" >> "$TEST_DELIVERY"',
         '    printf "%s\\n" "${DB_HOST:-}" >> "$TEST_DELIVERY"',
@@ -251,6 +251,13 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(await Bun.file(log).text()).toContain(
       "DB_HOST=host.example.test:5432"
     );
+    const status = hack(["ps", "--json"], stack, {
+      TEST_INSPECTION_REQUIRED: "1",
+    });
+    expect(status.code, status.stdout + status.stderr).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      remotes: [{ target: "live" }],
+    });
     expect(ok(["exec", "api", "true"]).stdout).toContain(
       "live.example.test:5432"
     );
@@ -291,6 +298,7 @@ test("the six --use entry points deliver the invocation target without saving it
       "links: [postgres:db]",
       "volumes_from: [postgres:ro]",
       "network_mode: service:postgres",
+      'network_mode: "service:${DB_SERVICE:-postgres}"',
     ]) {
       await Bun.write(
         join(stack, ".hack", "docker-compose.yml"),

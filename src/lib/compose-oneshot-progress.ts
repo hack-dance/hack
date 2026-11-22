@@ -384,7 +384,7 @@ function implicitServiceDependencies(
   }
   const interpolate = (value: unknown) =>
     typeof value === "string"
-      ? (interpolateComposeValue(value, env ?? {}) ?? value)
+      ? (interpolateComposeValue(value, env ?? {}, true) ?? value)
       : "";
   const links = Array.isArray(service.links) ? service.links : [];
   const volumes = Array.isArray(service.volumes_from)

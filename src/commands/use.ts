@@ -4,14 +4,10 @@ import { defineCommand, withHandler } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optPath, optProject } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
-import { readIncludedComposeServiceNames } from "../lib/compose-oneshot-progress.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { readComposePs } from "../lib/compose-ps-result.ts";
-import { resolveHackEnv } from "../lib/hack-env.ts";
-import { readProjectConfig, sanitizeProjectSlug } from "../lib/project.ts";
-import { resolveProjectEnvConfig } from "../lib/project-env-config.ts";
+import { readProjectConfig } from "../lib/project.ts";
 import {
-  applyRemoteEnv,
   parseRemoteChoices,
   readRemoteChoices,
   resolveRemoteChoices,
@@ -19,10 +15,10 @@ import {
   saveRemoteChoices,
 } from "../lib/project-remote-selection.ts";
 import { formatProjectRemoteAddress } from "../lib/project-remote-status.ts";
-import { isHostControlEnvKey } from "../lib/vetted-env.ts";
 import {
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
+  resolveRemoteInspectionEnv,
   resolveRestartTarget,
   resolveStoredRuntimeEnvName,
 } from "./project.ts";
@@ -78,28 +74,12 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
     });
-    const modern = await resolveProjectEnvConfig({
-      projectDir: project.projectDir,
-      projectRoot: project.projectRoot,
+    const env = await resolveRemoteInspectionEnv({
+      project,
+      baseProjectName: base,
       envName,
-      serviceNames: await readIncludedComposeServiceNames(project.composeFile),
+      choices: pending,
     });
-    const managed =
-      modern?.globalEnv ??
-      (
-        await resolveHackEnv({
-          projectDir: project.projectDir,
-          projectName: sanitizeProjectSlug(base),
-          envName,
-        })
-      ).envForCompose;
-    // Interpolation supplies application values. Docker and its plugin keep
-    // the process environment's executable, loader, and client settings.
-    const env = Object.fromEntries(
-      Object.entries(applyRemoteEnv(managed, pending)).filter(
-        ([key]) => !isHostControlEnvKey(key)
-      )
-    );
     const result = await readComposePs({
       redactValues: Object.values(env),
       run: () =>

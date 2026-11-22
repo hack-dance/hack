@@ -49,14 +49,15 @@ import {
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import {
+  selectLifecycleAddress,
+  writeLifecycleStopped,
+} from "../ui/lifecycle-closing.ts";
+import {
   writeStartBlocker,
   writeUpHookBlocker,
 } from "../ui/start-refusal-output.ts";
 import { createTextOutput } from "../ui/text-output.ts";
-import {
-  writeComposeStarted,
-  writeComposeStopped,
-} from "./compose-lifecycle-closing.ts";
+import { writeComposeStarted } from "./compose-lifecycle-closing.ts";
 import {
   createComposeUpProgress,
   type HookCompletion,
@@ -158,6 +159,7 @@ import {
 } from "../backends/native-project-settings.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
+  NativeStartupCanceledError,
   type NativeStartupProgress,
   startNativeProject,
 } from "../backends/native-project-start.ts";
@@ -2621,6 +2623,8 @@ export async function runLifecycleCommands(opts: {
    * result is then 130.
    */
   readonly signal?: AbortSignal;
+  /** Report a stop during native startup after the attached hook settles. */
+  readonly startupSignal?: AbortSignal;
 }): Promise<number> {
   const commands = opts.commands ?? [];
   assertAutostartHostCommandsAllowed({ hasCommands: commands.length > 0 });
@@ -2645,6 +2649,9 @@ export async function runLifecycleCommands(opts: {
           })
           .finally(clear);
       } catch (error: unknown) {
+        if (opts.startupSignal?.aborted) {
+          return 130;
+        }
         const message =
           error instanceof Error
             ? error.message
@@ -2722,6 +2729,9 @@ export async function runLifecycleCommands(opts: {
       message: `[end] ${opts.title}: exit ${exitCode}`,
     });
 
+    if (opts.startupSignal?.aborted) {
+      return 130;
+    }
     if (exitCode !== 0) {
       const failure = `${opts.title} failed (exit ${exitCode}): ${label}`;
       if (opts.summarizeFailure) {
@@ -2848,6 +2858,7 @@ function hasPersistentLifecycleCommands(
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly title: string;
+  readonly startupSignal?: AbortSignal;
   readonly onHookStart?: HookStart;
   readonly onHookComplete?: HookCompletion;
   readonly summarizeFailure?: (name: string, reason?: string) => void;
@@ -2921,6 +2932,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
       onHookStart: opts.onHookStart,
       onHookComplete: opts.onHookComplete,
       commands: beforeCommands,
+      startupSignal: opts.startupSignal,
       projectRoot: opts.project.projectRoot,
       env: opts.env,
       projectDir: opts.project.projectDir,
@@ -2983,6 +2995,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     onHookStart: opts.onHookStart,
     onHookComplete: opts.onHookComplete,
     commands: beforeCommands,
+    startupSignal: opts.startupSignal,
     projectRoot: opts.project.projectRoot,
     env: opts.env,
     projectDir: opts.project.projectDir,
@@ -7056,6 +7069,7 @@ async function handleNativeUp({
     createNativeEnvFingerprintSession(envFingerprintScope);
   const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
     await resolveNativeInternalExtraHostSelection({ project, cfg });
+  let ready = false;
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -7109,11 +7123,22 @@ async function handleNativeUp({
       await envFingerprints.record(
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
-    onReady: (services) => {
+    onReady: (services, addresses) => {
+      const primaryHost = branch
+        ? applyBranchToHost({
+            branch,
+            host: devHost,
+            baseHosts: resolveProjectRouteBaseHosts({
+              devHost,
+              aliasHost: resolveBranchAliasHost({ devHost, cfg }),
+            }),
+          })
+        : devHost;
       nativeDetachedUpReady({
         project: projectName,
         branch,
         composeProject,
+        address: selectLifecycleAddress(addresses, primaryHost),
         ...services,
       });
     },
@@ -7153,11 +7178,17 @@ async function handleNativeUp({
       }
       // A detached launcher's clocks follow these phases (HACK-2351).
       nativeDetachedUpProgress(event.phase);
-      reportNativeStartupProgress(event);
+      if (event.phase === "ready") {
+        ready = true;
+      }
+      if (restart || ready || event.phase !== "stopped") {
+        reportNativeStartupProgress(event);
+      }
     },
-    before: async (input) => {
+    before: async (input, signal) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
+        startupSignal: signal,
         project,
         cfg,
         projectName,
@@ -7204,7 +7235,7 @@ async function handleNativeUp({
         ...(down?.before?.length || down?.after?.length
           ? { stop: { before: stopPhase("before"), after: stopPhase("after") } }
           : {}),
-        ready: async () => {
+        ready: async (readySignal: AbortSignal) => {
           await assertNativeSharedHelpersCurrent({
             lifecycle,
             cleanup,
@@ -7212,12 +7243,16 @@ async function handleNativeUp({
           });
           const code = await runLifecycleCommands({
             title: "Lifecycle (native up after)",
+            startupSignal: readySignal,
             commands: cfg.lifecycle?.up?.after,
             projectRoot: project.projectRoot,
             env: input.lifecycleHostEnvironment,
             projectDir: project.projectDir,
             composeProject,
           });
+          if (readySignal.aborted) {
+            return;
+          }
           if (code !== 0) {
             throw new HackCliError({
               code: "E_LIFECYCLE_FAILED",
@@ -7245,7 +7280,16 @@ async function handleNativeUp({
   };
   if (!restart) {
     try {
-      return await startNativeProject(startup);
+      const code = await startNativeProject(startup).catch((error: unknown) => {
+        if (error instanceof NativeStartupCanceledError) {
+          return error.interruptedExit;
+        }
+        throw error;
+      });
+      if (code === 130 && !ready) {
+        process.stderr.write("Native project startup interrupted.\n");
+      }
+      return code;
     } finally {
       await envFingerprints.release();
     }
@@ -7435,9 +7479,9 @@ async function restartNativeImageProject({
         verifiedBuildImages,
         // The restart's own bookkeeping first, then the startup's ready
         // report: a detached owner (`restart --json`) tells its launcher here.
-        onReady: async (services) => {
+        onReady: async (services, addresses) => {
           await onReady();
-          await startup.onReady?.(services);
+          await startup.onReady?.(services, addresses);
         },
         signal,
         onStopSignals,
@@ -9045,6 +9089,7 @@ async function handleDownUnlocked({
   readonly invoke?: typeof invokeNativeRuntime;
   readonly flagTimeoutSeconds?: number;
 }): Promise<number> {
+  const startedAt = performance.now();
   prepareLifecycleProgress({
     action: "down",
     progress: args.options.progress,
@@ -9125,11 +9170,9 @@ async function handleDownUnlocked({
     if (args.options.json) {
       process.stdout.write(`${JSON.stringify(result)}\n`);
     } else {
-      logger.info({
-        message:
-          result.status === "stopped"
-            ? "Native project stopped; data retained."
-            : "Native project is not started.",
+      writeLifecycleStopped(performance.now() - startedAt, {
+        retained: result.status === "stopped",
+        unchanged: result.status === "not_started",
       });
       if (result.runtimeStarted) {
         logger.info({ message: NATIVE_RECOVERY_RUNTIME_STARTED_NOTE });
@@ -9598,7 +9641,7 @@ async function runDownCommand({
       return 1;
     }
     if (afterCode === 0) {
-      writeComposeStopped(performance.now() - startedAt);
+      writeLifecycleStopped(performance.now() - startedAt);
     }
     return afterCode;
   }

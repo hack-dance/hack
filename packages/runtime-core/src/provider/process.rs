@@ -641,10 +641,31 @@ mod tests {
             String::from_utf8(listed.stdout).unwrap()
         }
         let alone = open_descriptors();
-        assert!(
-            alone.starts_with("/dev/fd/0 /dev/fd/1 /dev/fd/2"),
-            "{alone}"
-        );
+        assert!(has_standard_descriptors(&alone), "{alone}");
+        // Runner-inherited descriptors are part of the baseline too. The glob sorts
+        // lexicographically (131 precedes 2); compare every race child to this real
+        // lone child, rather than assuming only stdin/stdout/stderr were inherited.
+        // Prove that an additional inherited descriptor changes that comparison.
+        {
+            use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+            let source = std::fs::File::open("/dev/null").unwrap();
+            // SAFETY: source is live. F_DUPFD returns a new owned descriptor without
+            // CLOEXEC, deliberately modeling a leak; OwnedFd closes it before the race.
+            let extra = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 128) };
+            assert!(extra >= 0, "{}", std::io::Error::last_os_error());
+            let _extra = unsafe { OwnedFd::from_raw_fd(extra) };
+            let control = open_descriptors();
+            assert!(
+                control
+                    .split_whitespace()
+                    .any(|fd| fd == format!("/dev/fd/{extra}")),
+                "deliberately inherited descriptor {extra} missing: {control:?}"
+            );
+            assert_ne!(
+                control, alone,
+                "probe missed a deliberately inherited descriptor"
+            );
+        }
         let together = std::sync::Barrier::new(THREADS);
         let inherited: Vec<String> = std::thread::scope(|scope| {
             let spawners: Vec<_> = (0..THREADS)
@@ -672,6 +693,20 @@ mod tests {
             inherited[0],
         );
         println!("no-descriptor-leaked");
+    }
+
+    fn has_standard_descriptors(listed: &str) -> bool {
+        ["/dev/fd/0", "/dev/fd/1", "/dev/fd/2"]
+            .iter()
+            .all(|required| listed.split_whitespace().any(|fd| fd == *required))
+    }
+
+    #[test]
+    fn spawn_probe_baseline_accepts_inherited_descriptors_in_glob_order() {
+        let baseline = "/dev/fd/0 /dev/fd/1 /dev/fd/131 /dev/fd/140 /dev/fd/143 /dev/fd/146 /dev/fd/2 /dev/fd/3\n";
+        assert!(has_standard_descriptors(baseline));
+        assert!(!has_standard_descriptors("/dev/fd/0 /dev/fd/1 /dev/fd/20"));
+        assert!(!has_standard_descriptors(""));
     }
 
     /// A thread that panicked while it held the spawn lock does not stop later spawns.

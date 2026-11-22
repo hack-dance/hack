@@ -711,15 +711,16 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 
 | Control | Switches | Result |
 | --- | --- | --- |
-| `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 113 states; `NoDeadEnd`, `BootBoundUnreached` and `Recovers` hold |
+| `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 210 states; `NoDeadEnd`, `BootBoundUnreached` and `Recovers` hold |
 | `negative` | `next` before HACK-2456 | `NoDeadEnd` fails in an `OwnerCrash` or `OwnerNotices` state: stopped pool, ready run, dead owner, publication left |
 | `by-hand` | `next`, counting an unnamed `runtime up` | fails in a `RuntimeUp` state with `boot = 3`, `runBoot = 1` |
 | `strict` | stopped-pool recovery with the old predecessor-only rule, while something else boots the pool | fails in `RecoverStopped` (or `RuntimeUp`) with `boot = 3`, `runBoot = 1` |
 | `crash-in-recovery` | the old predecessor-only rule; the pool stops between the recovery's boot and its graph recovery | fails in `RecoverStopped` with `boot = 3`, `runBoot = 1`, `recovering = TRUE` |
-| `https` | recovery from any earlier boot with every fault, for a project with HTTPS routes (`Https`) | 284 states; all hold |
+| `https` | recovery from any earlier boot with every fault, for a project with HTTPS routes (`Https`) | 292 states; all hold |
 | `https-no-retire` | `https` controls: the shared HTTPS owner keeps running after its boot ended | fails in `RecoverRunning` (or `RecoverStopped`): pool running, `https = "live"` bound to the old boot, `fin = TRUE` |
 | `https-archive` | the previous-boot archive cannot prove the owner quiescent | fails with `https = "records"`, `fin = TRUE`, pool running |
 | `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | fails with the pool stopped, `run = "retained"`, `fin = TRUE` |
+| `https-finish-bound` | `https`, but a completed recovery's archive may run only in the boot the recovery ran in (`FinishAnyBoot = FALSE`) | fails once that boot ends with the archive still owed: `https = "records"`, `fin = TRUE`, pool running |
 
 `Recovers` also fails on `next` (TLC exit 13: the behavior stutters in the dead end).
 That is checked by hand, because the runner's controls are invariant violations only.
@@ -745,6 +746,7 @@ and absent-publication cleanup after a host reboot.
 | `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |
 | `PoolRecover` | `hack native recover` (`lifecycle::recover`) |
 | `OwnerRetire` | `native-https-owner-server.ts` pool-boot check (`native-https-pool-boot.ts`), which retires through `failOwner` and keeps the configuration and lease |
+| `FinishCompleted` | the same archive after the recovery's boot ended (HACK-2550, z338, z282): `HttpsArchiveGuard` admits the completed intent from any boot, and `host_relay::inspect_cleanup_completed` with `bridges::cleanup::read_completed_recovery` admit its bridge selection by the run's own evidence; everything else is observed in the current boot |
 | `Finalize` | the frontend finalization's `recoverNativeHttpsLease`: release through a live owner of this boot, or `runtime archive-previous-boot-shared-https` (`provider/shared_https_recovery.rs`), whose quiescence proof is `prove_quiescence` plus `await_owner_exit` |
 | `RecoverStopped` (finalization) | `deadOwnerOfLiveRun` in `native-project-down.ts`: a retained stop with no owner and an interrupted frontend lifetime |
 

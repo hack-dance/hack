@@ -126,7 +126,10 @@ for (const mode of [
     const launcher = Bun.spawn(
       [process.execPath, fixture, "launcher", root, mode],
       {
-        env: fixtureEnv(root),
+        env: {
+          ...fixtureEnv(root),
+          FIXTURE_READY_ADDRESS: "https://sample.hack.local",
+        },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -533,6 +536,39 @@ test("HACK-2339: a refusal before VM work reaches the launcher as the foreground
     }
   }
 }, 30_000);
+
+test("detached native up closes with its served address or no address", async () => {
+  for (const address of ["https://sample.hack.local:8443", ""]) {
+    const root = await fixtureRoot(join(tmpdir(), "native-detached-closing-"));
+    const launcher = Bun.spawn(
+      [process.execPath, fixture, "launcher", root, "ready"],
+      {
+        env: {
+          ...fixtureEnv(root),
+          FIXTURE_TEXT_OUTPUT: "1",
+          FIXTURE_READY_ADDRESS: address,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 8000,
+      }
+    );
+    try {
+      const [code, stdout, stderr] = await Promise.all([
+        launcher.exited,
+        new Response(launcher.stdout).text(),
+        new Response(launcher.stderr).text(),
+      ]);
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).toStartWith(`${address || "no address"}  up in `);
+      expect(stdout).toMatch(/\d+\.\ds · native\n$/);
+      await stop(root);
+    } finally {
+      await removeFixture(root);
+    }
+  }
+}, 20_000);
 
 test("a detached fixture owner exits when its root disappears", async () => {
   const root = await fixtureRoot(join(tmpdir(), "native-detached-root-"));

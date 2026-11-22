@@ -760,3 +760,13 @@ alone never authorizes a signal. Changed metadata, foreign tokens or an interrup
 launch without a complete ready/state pair retain evidence and cannot replay the
 process or hooks. Portable real-child controls do not qualify the retained Event
 Agent's tunnels, guest access or routing; live corpus acceptance remains open.
+
+## Compose-compatible native startup preflight
+
+The CLI uses the internal `hack-native up preflight --json` stream for its
+pre-hook Compose checks. Each message runs one existing runtime operation with
+the same checks and locks as its standalone command. The CLI validates each
+reply before requesting the next operation. The stream retains no provider
+state or authority between requests and closes before hooks or pool startup.
+Pool startup and graph restore still revalidate their inputs under their own
+leases.

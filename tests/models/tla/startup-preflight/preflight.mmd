@@ -1,0 +1,17 @@
+---
+title: Preflight · frontend disconnect
+---
+stateDiagram-v2
+  direction TB
+  state "idle" as idle
+  state "in-flight" as active
+  state "closed" as closed
+  [*] --> idle
+  idle --> active : Send [alive, done < 2]
+  active --> idle : Reply
+  idle --> closed : EOFObserved [frontend dead]
+  active --> closed : EOFObserved [frontend dead]
+  closed --> [*]
+  class idle wait
+  class active live
+  class closed ok

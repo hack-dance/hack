@@ -17,6 +17,7 @@ import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import { packageNativeStorageTool } from "../scripts/package-native-storage-tool.ts";
 import {
   CONFIG_COMPILER_PAYLOAD,
+  createAndVerifyPrerelease,
   createPrereleasePlan,
   PAYLOAD_MODES,
   PRERELEASE_BASE,
@@ -26,6 +27,7 @@ import {
   packagePrerelease as packagePrereleaseActual,
   prereleaseMetadata,
   prereleaseNotes,
+  releaseAssets,
   renderChecksums,
   requireExactHeadCi,
   requireHumanApproval,
@@ -1670,6 +1672,116 @@ globalThis.fetch = async (input, options) => {
     expect(exit).toBe(1);
     expect(stderr).toContain(
       "Expected exactly the candidate and standalone installer release assets"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publication reads back assets and refuses a partial fake gh upload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-release-readback-"));
+  try {
+    const assets = await Promise.all(
+      releaseAssets(plan).map(async (name) => {
+        const path = join(root, name);
+        const size = await Bun.write(path, `fixture for ${name}\n`);
+        return {
+          name,
+          size,
+          digest: `sha256:${digest(path)}`,
+          state: "uploaded",
+        };
+      })
+    );
+    const listing = join(root, "listing.json");
+    const release = join(root, "release.json");
+    await Bun.write(release, JSON.stringify({ id: 321, tag_name: plan.tag }));
+    await writeFile(
+      join(root, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "api --method") printf '%s\\n' tag >> "$EFFECTS" ;;
+  "release create") printf '%s\\n' create >> "$EFFECTS" ;;
+  "api repos/hack-dance/hack/releases/tags/${plan.tag}")
+    /bin/cat "$RELEASE_FIXTURE" ;;
+  "api --paginate")
+    [ "$3" = "--slurp" ] || exit 96
+    [ "$4" = "repos/hack-dance/hack/releases/321/assets?per_page=100" ] || exit 97
+    printf '%s\\n' list >> "$EFFECTS"
+    /bin/cat "$ASSET_FIXTURE" ;;
+  *) exit 98 ;;
+esac
+`,
+      { mode: 0o700 }
+    );
+    const effects = join(root, "effects");
+    const options = {
+      plan,
+      output: root,
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: root,
+          EFFECTS: effects,
+          ASSET_FIXTURE: listing,
+          RELEASE_FIXTURE: release,
+        },
+      }),
+    };
+    const last = assets.at(-1);
+    const other = assets.slice(0, -1);
+    const elapsed: number[] = [];
+    const writeListing = (entries: unknown[]) =>
+      Bun.write(listing, JSON.stringify([entries]));
+    const clock =
+      (next?: (retry: number) => Promise<unknown>) =>
+      async (milliseconds: number) => {
+        elapsed.push(milliseconds);
+        await next?.(elapsed.length);
+      };
+
+    await writeListing(other);
+    await createAndVerifyPrerelease({
+      ...options,
+      sleep: clock((retry) =>
+        writeListing([
+          ...other,
+          ...[
+            { ...last, state: "starter" },
+            { ...last, digest: null },
+            last,
+          ].slice(retry - 1, retry),
+        ])
+      ),
+    });
+    expect(elapsed.splice(0)).toEqual([5000, 5000, 5000]);
+
+    await writeListing(other);
+    await expect(
+      createAndVerifyPrerelease({ ...options, sleep: clock() })
+    ).rejects.toThrow(
+      `The release exists at ${plan.tag}. Inspect it and do not re-dispatch the same version.`
+    );
+    expect(elapsed.splice(0)).toEqual([5000, 5000, 5000, 5000, 5000]);
+
+    for (const mismatch of [
+      { size: 0, state: "starter" },
+      { digest: "sha256:wrong", state: "starter" },
+    ]) {
+      await writeListing([...other, { ...last, ...mismatch }]);
+      await expect(
+        createAndVerifyPrerelease({ ...options, sleep: clock() })
+      ).rejects.toThrow(
+        `Published prerelease asset does not match the local set: ${last?.name}`
+      );
+      expect(elapsed).toEqual([]);
+    }
+    expect(await Bun.file(effects).text()).toBe(
+      "tag\ncreate\n" +
+        "list\n".repeat(4) +
+        "tag\ncreate\n" +
+        "list\n".repeat(6) +
+        "tag\ncreate\nlist\n".repeat(2)
     );
   } finally {
     await rm(root, { recursive: true, force: true });

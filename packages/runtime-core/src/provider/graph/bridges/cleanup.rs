@@ -913,6 +913,73 @@ pub(crate) fn read_recovery(
     validate_selection_recovery(engine, receipt, &selection, host_pin)?;
     Ok(selection)
 }
+/// The bridge selection of a completed dead-owner recovery whose boot has since ended
+/// (HACK-2550, seen on a real VM: its archive failed, then the pool booted again).
+/// Such a selection was captured by that recovery (`capture_previous_boot`): it names
+/// the boot it ran in and the boot it selected from, and no helper. It is admitted
+/// in a later boot by the run's own evidence alone: this pool's incarnation, the
+/// run, its plan and capacity, bindings that match the receipt, and neither boot
+/// being the live one. The caller holds the completed intent that recorded it.
+pub(crate) fn read_completed_recovery(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    root: &std::path::Path,
+) -> Result<Selection, CandidateError> {
+    let selection: Selection = state::read_bounded(&selection_path(root)?, 65536)?;
+    admit_completed_selection(
+        &selection,
+        receipt,
+        engine.guest().incarnation(),
+        engine.guest().boot_id(),
+        engine.guest().bridge_intent().map_or(0, |v| v.slots),
+    )?;
+    Ok(selection)
+}
+
+/// The checks of [`read_completed_recovery`] on plain values: the pool incarnation,
+/// the live boot and the bridge capacity.
+fn admit_completed_selection(
+    selection: &Selection,
+    receipt: &Receipt,
+    incarnation: &str,
+    current: &str,
+    capacity: u8,
+) -> Result<(), CandidateError> {
+    let previous = selection.previous_boot.as_deref().ok_or_else(invalid)?;
+    if selection.version != 1
+        || selection.owner != incarnation
+        || selection.boot.is_empty()
+        || selection.boot == current
+        || previous == current
+        || selection.run != receipt.run
+        || selection.plan != receipt.plan_id
+        || selection.capacity != capacity
+        || selection.predecessor_owner.is_some()
+        || selection.predecessor_absence.is_some()
+        || selection
+            .selected
+            .values()
+            .any(|selected| selected.helper.is_some())
+    {
+        return Err(invalid());
+    }
+    validate_bindings(receipt, selection, Some(previous))
+}
+
+/// A completed recovery's bridges are retired in the current registry: no slot names
+/// the run. Its helpers belonged to a boot that has ended.
+pub(crate) fn verify_completed_recovery(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    let store = strict_store(candidate, engine)?;
+    if store.slots.values().any(|a| a.run == receipt.run) {
+        return Err(invalid());
+    }
+    engine.guest().verify()
+}
+
 pub(crate) fn read_recovery_absence(
     engine: &Engine<'_>,
     receipt: &Receipt,
@@ -1581,6 +1648,94 @@ mod tests {
     /// pool stopped under it. Recovery in boot C finds A's sidecar, two boots back. It is
     /// accepted once the restore history proves that generation stopped, and refused when
     /// it names the live boot.
+    /// HACK-2550, the shape of z338-N and z282-N: a completed recovery in boot B of the
+    /// run of boot A left this selection; the pool is now in boot C. It is admitted by
+    /// the run's own evidence, and refused for any other pool, boot, helper or binding.
+    #[test]
+    fn a_completed_recovery_selection_is_admitted_in_a_later_boot() {
+        let (a, b, c) = (
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333",
+        );
+        let mut completed = selection(2);
+        completed.boot = b.into();
+        completed.previous_boot = Some(a.into());
+        completed.capacity = 1;
+        let assignment = Assignment {
+            loopback_port: None,
+            reservation: "d".repeat(32),
+            run: completed.run.clone(),
+            service: "web".into(),
+            generation: "e".repeat(64),
+            container_id: "f".repeat(64),
+            network_id: "1".repeat(64),
+            boot_id: a.into(),
+            phase: "running".into(),
+            relay: Some(relay::Relay {
+                transport: relay::Transport::ReservationV1,
+                launch_serial: 1,
+                binary_sha256: "2".repeat(64),
+                target_pid: 10,
+                target_start: 10,
+                port: 8080,
+            }),
+        };
+        completed.selected.insert(
+            0,
+            Selected {
+                assignment: assignment.clone(),
+                helper: None,
+            },
+        );
+        let receipt: Receipt = serde_json::from_value(json!({
+            "version":1,"run":completed.run,"owner":completed.owner,
+            "namespace":"3".repeat(64),"plan_id":completed.plan,
+            "phase":"stopped-data-retained","readiness":{},"resources":{
+                "container:web":{"kind":"container","key":"web","name":"owned-web",
+                    "id":assignment.container_id,"image":null,"phase":"absent"},
+                "network:default":{"kind":"network","key":"default","name":"owned-network",
+                    "id":assignment.network_id,"image":null,"phase":"absent"}
+            }
+        }))
+        .unwrap();
+        let admit = |selection: &Selection, incarnation: &str, current: &str| {
+            admit_completed_selection(selection, &receipt, incarnation, current, 1)
+        };
+        admit(&completed, &completed.owner, c).unwrap();
+        // Neither recorded boot may be the live one.
+        assert!(admit(&completed, &completed.owner, b).is_err());
+        assert!(admit(&completed, &completed.owner, a).is_err());
+        // Another pool's selection, or one without the boot it selected from.
+        assert!(admit(&completed, &"9".repeat(32), c).is_err());
+        let mut without_previous = completed.clone();
+        without_previous.previous_boot = None;
+        assert!(admit(&without_previous, &completed.owner, c).is_err());
+        // A live helper or predecessor evidence is not a completed recovery's selection.
+        let mut with_helper = completed.clone();
+        with_helper.selected.get_mut(&0).unwrap().helper = Some(
+            serde_json::from_value(json!({
+                "pid":10,"start":10,"executable_device":1,"executable_inode":1,
+                "socket_device":1,"socket_inode":1,"kernel_socket_inode":1
+            }))
+            .unwrap(),
+        );
+        assert!(admit(&with_helper, &completed.owner, c).is_err());
+        let mut with_predecessor = completed.clone();
+        with_predecessor.predecessor_owner = Some("4".repeat(64));
+        assert!(admit(&with_predecessor, &completed.owner, c).is_err());
+        // Bindings must still match the receipt.
+        let mut foreign_binding = completed.clone();
+        foreign_binding
+            .selected
+            .get_mut(&0)
+            .unwrap()
+            .assignment
+            .container_id = "5".repeat(64);
+        assert!(admit(&foreign_binding, &completed.owner, c).is_err());
+        assert!(admit_completed_selection(&completed, &receipt, &completed.owner, c, 2).is_err());
+    }
+
     #[test]
     fn prior_generation_from_a_boot_before_the_runs_own_is_accepted() {
         let fixture = Fixture::new();

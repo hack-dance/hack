@@ -203,23 +203,18 @@ fn candidate_boots(
     Ok(boots)
 }
 
-/// Whether a completed dead-owner recovery still admits the previous-boot HTTPS
-/// archive in the `current` boot. The recovery ran in `new_boot`. That is the current
-/// boot, or, when its HTTPS step failed and the pool booted again before a later
-/// `hack down --recover`, any recorded earlier boot (HACK-2550, seen on a real VM: the
-/// archive then had no way to run). It is never the run's own boot. The guard
-/// re-inspects every resource as absent in the current boot before any archive effect.
-fn archive_after_completed_recovery(
-    new_boot: Option<&str>,
-    old_boot: &str,
-    current: &str,
-    earlier: &[String],
-) -> bool {
-    new_boot.is_some_and(|boot| {
-        !boot.is_empty()
-            && boot != old_boot
-            && (boot == current || earlier.iter().any(|known| known == boot))
-    })
+/// Whether a completed dead-owner recovery admits the previous-boot HTTPS archive in
+/// the `current` boot. The recovery ran in `new_boot` and recovered the run of
+/// `old_boot`. After its HTTPS step failed, the pool may have booted any number of
+/// times, and the run may predate the boot history (HACK-2550, seen on a real VM:
+/// z338, z282). What is left is host-side, and the guard proves it from current
+/// observations: the receipt matches the intent's completion, every resource is
+/// absent in this boot, the publisher is retired, no bridge slot or claim remains.
+/// The recorded boots must only be distinct, and the run's own boot never the live one.
+fn archive_after_completed_recovery(new_boot: Option<&str>, old_boot: &str, current: &str) -> bool {
+    new_boot.is_some_and(|boot| !boot.is_empty() && boot != old_boot)
+        && !old_boot.is_empty()
+        && old_boot != current
 }
 
 fn no_pending(root: &std::path::Path) -> Result<(), CandidateError> {
@@ -516,16 +511,14 @@ impl<'a> HttpsArchiveGuard<'a> {
             &intent.owner_sha256,
         )?;
         let pool = Owner::load(candidate)?;
-        let earlier = crate::provider::boot_history::earlier_boots(candidate, &pool)?;
+        let current = self.engine.guest().boot_id();
         if intent.complete_sha256.as_deref() != Some(complete.as_str())
             || intent.old_boot != self.old_boot
             || !archive_after_completed_recovery(
                 intent.new_boot.as_deref(),
                 &self.old_boot,
-                self.engine.guest().boot_id(),
-                &earlier,
+                current,
             )
-            || !earlier.contains(&self.old_boot)
             || pool.guest_boot_id.as_deref() != Some(self.engine.guest().boot_id())
             || pool.token != receipt.owner
             || intent.one_off_sha256.is_some()
@@ -568,15 +561,27 @@ impl<'a> HttpsArchiveGuard<'a> {
         {
             return Err(refused());
         }
-        host_relay::inspect_cleanup_recovery(
-            candidate,
-            &self.engine,
-            &receipt,
-            false,
-            &environment,
-            bridges,
-            witness.as_ref(),
-        )?;
+        if intent.new_boot.as_deref() == Some(current) {
+            host_relay::inspect_cleanup_recovery(
+                candidate,
+                &self.engine,
+                &receipt,
+                false,
+                &environment,
+                bridges,
+                witness.as_ref(),
+            )?;
+        } else {
+            // The recovery's boot has ended: its bridge selection is admitted by the
+            // run's own evidence, everything else is re-observed now (HACK-2550).
+            host_relay::inspect_cleanup_completed(
+                candidate,
+                &self.engine,
+                &receipt,
+                &environment,
+                bridges,
+            )?;
+        }
         super::super::publication::require_no_claims_locked(candidate, &receipt.owner)?;
         let authority = super::super::hostname_authority::managed::inspect(candidate)?;
         if authority["authority"]["present"] != false {
@@ -1848,41 +1853,20 @@ mod tests {
     }
     /// HACK-2550, seen on a real VM: `hack up`'s recovery completed in boot B, its
     /// HTTPS archive then refused, and the pool booted again (C). The archive must
-    /// still be admissible in C, but never for the run's own boot A or an unknown boot.
+    /// still be admissible in C, but never for the run's own boot A.
     #[test]
     fn the_https_archive_follows_a_completed_recovery_into_later_boots() {
-        let earlier = ["b".to_owned(), "a".to_owned()];
-        assert!(archive_after_completed_recovery(
-            Some("c"),
-            "a",
-            "c",
-            &earlier
-        ));
-        assert!(archive_after_completed_recovery(
-            Some("b"),
-            "a",
-            "c",
-            &earlier
-        ));
-        assert!(!archive_after_completed_recovery(
-            Some("a"),
-            "a",
-            "c",
-            &earlier
-        ));
-        assert!(!archive_after_completed_recovery(
-            Some("x"),
-            "a",
-            "c",
-            &earlier
-        ));
-        assert!(!archive_after_completed_recovery(
-            Some(""),
-            "a",
-            "c",
-            &earlier
-        ));
-        assert!(!archive_after_completed_recovery(None, "a", "c", &earlier));
+        // The recovery ran in this boot, or in any earlier one, recorded or not (z282
+        // predates the boot history).
+        assert!(archive_after_completed_recovery(Some("c"), "a", "c"));
+        assert!(archive_after_completed_recovery(Some("b"), "a", "c"));
+        assert!(archive_after_completed_recovery(Some("x"), "a", "c"));
+        // Never the run's own boot for the recovery, nor the live boot for the run.
+        assert!(!archive_after_completed_recovery(Some("a"), "a", "c"));
+        assert!(!archive_after_completed_recovery(Some("c"), "c", "c"));
+        assert!(!archive_after_completed_recovery(Some(""), "a", "c"));
+        assert!(!archive_after_completed_recovery(Some("b"), "", "c"));
+        assert!(!archive_after_completed_recovery(None, "a", "c"));
     }
     #[test]
     fn normalized_completion_preserves_original_proof_and_rejects_altered_job() {

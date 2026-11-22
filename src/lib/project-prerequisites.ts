@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
 import { YAML } from "bun";
+import { childEnvironment } from "./child-environment.ts";
 import { HackCliError, type HackErrorCode } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { canPrompt } from "./interactivity.ts";
@@ -76,7 +77,7 @@ async function checkPrerequisite(
     stdout: "ignore",
     stderr: "ignore",
     detached: true,
-    env: { ...process.env, AWS_CLI_AUTO_PROMPT: "off" },
+    env: childEnvironment(process.env, { AWS_CLI_AUTO_PROMPT: "off" }),
   });
   let timedOut = false;
   let stopRequested = false;
@@ -176,6 +177,7 @@ async function login(
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
+    env: childEnvironment(),
   });
   const interrupt = () => child.kill("SIGINT");
   const terminate = () => child.kill("SIGTERM");

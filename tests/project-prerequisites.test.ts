@@ -490,7 +490,7 @@ test("Doctor reports a custom prerequisite without executing it", async () => {
   }
 });
 
-test("a project dotenv file cannot override the AWS preset executable", async () => {
+test("the AWS check ignores project dotenv overrides and receives no Hack keys", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-dotenv-"));
   try {
     const checkout = join(root, "project");
@@ -500,7 +500,10 @@ test("a project dotenv file cannot override the AWS preset executable", async ()
     await mkdir(configDir, { recursive: true });
     await mkdir(binDir);
     const aws = join(binDir, "aws");
-    await writeFile(aws, "#!/bin/sh\nexit 42\n");
+    await writeFile(
+      aws,
+      '#!/bin/sh\nif [ "${HACK_ENV_SECRET_KEY+x}" = x ]; then exit 24; fi\nexit 42\n'
+    );
     await chmod(aws, 0o700);
     await writeFile(override, "#!/bin/sh\nexit 23\n");
     await chmod(override, 0o700);
@@ -535,6 +538,7 @@ test("a project dotenv file cannot override the AWS preset executable", async ()
       root,
       env: {
         HACK_NO_INTERACTIVE: "1",
+        HACK_ENV_SECRET_KEY: "synthetic-placeholder",
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
       },
     });

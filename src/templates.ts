@@ -548,6 +548,48 @@ export function renderProjectEnvContractJson(): string {
 export function renderProjectConfigSchemaJson(): string {
   const names = { type: "array", items: { type: "string" } };
   const argv = { ...names, minItems: 1 };
+  const port = { type: "integer", minimum: 1 };
+  const flag = { type: "boolean" };
+  const text = { type: "string" };
+  const target = {
+    type: "object",
+    required: ["port"],
+    additionalProperties: false,
+    properties: {
+      service: text,
+      hostname: {
+        anyOf: [
+          text,
+          {
+            type: "object",
+            required: ["env_ref"],
+            properties: { env_ref: text },
+            additionalProperties: false,
+          },
+        ],
+      },
+      port,
+      requires: names,
+      confirm: flag,
+      intercept: flag,
+      via: {
+        type: "object",
+        required: ["kind", "instance", "region", "listen"],
+        additionalProperties: false,
+        properties: {
+          kind: { enum: ["aws-ssm"] },
+          instance: text,
+          region: text,
+          listen: port,
+          tools: names,
+        },
+      },
+    },
+    anyOf: [
+      { required: ["service"], properties: { hostname: false, via: false } },
+      { required: ["hostname"], properties: { service: false } },
+    ],
+  };
   const toolProperties = {
     bins: argv,
     version: { type: "string" },
@@ -561,6 +603,7 @@ export function renderProjectConfigSchemaJson(): string {
     dependentRequired: {
       remotes: ["min_cli_version"],
       requires: ["min_cli_version"],
+      tools: ["min_cli_version"],
     },
     properties: {
       $schema: { type: "string" },
@@ -573,6 +616,7 @@ export function renderProjectConfigSchemaJson(): string {
         additionalProperties: {
           type: "object",
           required: ["bins"],
+          additionalProperties: false,
           properties: {
             ...toolProperties,
             optional: { type: "boolean" },
@@ -582,6 +626,7 @@ export function renderProjectConfigSchemaJson(): string {
               type: "object",
               additionalProperties: {
                 type: "object",
+                additionalProperties: false,
                 properties: toolProperties,
               },
             },
@@ -592,6 +637,7 @@ export function renderProjectConfigSchemaJson(): string {
         type: "object",
         additionalProperties: {
           type: "object",
+          additionalProperties: false,
           properties: {
             kind: { enum: ["aws-sso", "gcloud-adc"] },
             profile: { type: "string" },
@@ -602,13 +648,25 @@ export function renderProjectConfigSchemaJson(): string {
           anyOf: [
             {
               required: ["kind", "profile"],
-              properties: { kind: { enum: ["aws-sso"] } },
+              properties: {
+                kind: { enum: ["aws-sso"] },
+                check: false,
+                login: false,
+              },
             },
             {
               required: ["kind"],
-              properties: { kind: { enum: ["gcloud-adc"] } },
+              properties: {
+                kind: { enum: ["gcloud-adc"] },
+                profile: false,
+                check: false,
+                login: false,
+              },
             },
-            { required: ["check", "login"], properties: { kind: false } },
+            {
+              required: ["check", "login"],
+              properties: { kind: false, profile: false },
+            },
           ],
         },
       },
@@ -617,21 +675,11 @@ export function renderProjectConfigSchemaJson(): string {
         additionalProperties: {
           type: "object",
           required: ["default", "targets"],
+          additionalProperties: false,
           properties: {
-            default: { type: "string" },
-            targets: {
-              type: "object",
-              additionalProperties: {
-                type: "object",
-                properties: {
-                  requires: names,
-                  via: {
-                    type: "object",
-                    properties: { tools: names },
-                  },
-                },
-              },
-            },
+            default: text,
+            env: { type: "object", additionalProperties: text },
+            targets: { type: "object", additionalProperties: target },
           },
         },
       },

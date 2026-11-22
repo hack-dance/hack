@@ -12,10 +12,13 @@ stateDiagram-v2
   login --> blocked: Login [fail]
   recheck --> allowed: CheckPass
   recheck --> blocked: CheckFails
-  class check,recheck,login live
+  check --> stopping: Timeout
+  recheck --> stopping: Timeout
+  stopping --> timeoutBlocked: StopGroup
+  class check,recheck,login,stopping live
   class offer wait
   class allowed ok
-  class blocked fail
+  class blocked,timeoutBlocked fail
   note right of allowed
     INV Passing check before hooks
   end note

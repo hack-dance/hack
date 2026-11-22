@@ -5,6 +5,9 @@ import { HACK_VERSION } from "./hack-version.ts";
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 const VERSION =
   /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_TEMPLATE = /^(?:[^{}]|\{host\}|\{port\})+$/;
+const HOSTNAME = /^[A-Za-z0-9][A-Za-z0-9.:-]*$/;
 const ARGUMENT = /^[^\x00-\x1f\x7f]*$/;
 
 export interface ProjectPrerequisite {
@@ -25,6 +28,7 @@ export interface ProjectPrerequisiteConfig {
   readonly selected: readonly {
     readonly remote: string;
     readonly target: string;
+    readonly envNames: readonly string[];
     readonly requires: readonly string[];
   }[];
 }
@@ -62,10 +66,14 @@ function entries(value: unknown, code: HackErrorCode): [string, unknown][] {
 function validateMinimumVersion(config: Record<string, unknown>): void {
   const version = config.min_cli_version;
   if (version === undefined) {
-    if (config.requires !== undefined || config.remotes !== undefined) {
+    if (
+      config.requires !== undefined ||
+      config.remotes !== undefined ||
+      config.tools !== undefined
+    ) {
       fail(
         "E_MIN_CLI_VERSION_REQUIRED",
-        "requires and remotes need min_cli_version."
+        "requires, remotes and tools need min_cli_version."
       );
     }
     return;
@@ -84,6 +92,26 @@ function validateMinimumVersion(config: Record<string, unknown>): void {
   }
 }
 
+function onlyKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[]
+): boolean {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+
+function optionalFlag(value: unknown): boolean {
+  return value === undefined || typeof value === "boolean";
+}
+
+function isPort(value: unknown): boolean {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 65_535
+  );
+}
+
 function optionalText(value: unknown): value is string | undefined {
   return (
     value === undefined ||
@@ -95,11 +123,20 @@ function parseTool(value: unknown): ProjectHostTool {
   if (
     !(isRecord(value) && isNameList(value.bins)) ||
     value.bins.length === 0 ||
+    !onlyKeys(value, [
+      "bins",
+      "version",
+      "optional",
+      "lose",
+      "os",
+      "install",
+      "always",
+    ]) ||
     !optionalText(value.version) ||
     !optionalText(value.install) ||
     !optionalText(value.lose) ||
-    (value.optional !== undefined && typeof value.optional !== "boolean") ||
-    (value.always !== undefined && typeof value.always !== "boolean")
+    !optionalFlag(value.optional) ||
+    !optionalFlag(value.always)
   ) {
     fail("E_INVALID_HOST_TOOL", "Invalid host tool declaration.");
   }
@@ -107,7 +144,9 @@ function parseTool(value: unknown): ProjectHostTool {
   let install = value.install;
   for (const [platform, override] of entries(value.os, "E_INVALID_HOST_TOOL")) {
     if (
-      !isRecord(override) ||
+      !(
+        isRecord(override) && onlyKeys(override, ["bins", "version", "install"])
+      ) ||
       (override.bins !== undefined &&
         (!isNameList(override.bins) || override.bins.length === 0)) ||
       !optionalText(override.version) ||
@@ -149,7 +188,11 @@ function parsePrerequisite(
     fail("E_INVALID_PREREQUISITE", "Expected a prerequisite object.");
   }
   const tools = toolReferences(value.tools, declared);
-  if (value.kind === "aws-sso" && isName(value.profile)) {
+  if (
+    value.kind === "aws-sso" &&
+    isName(value.profile) &&
+    onlyKeys(value, ["kind", "profile", "tools"])
+  ) {
     return {
       tools,
       check: ["aws", "sts", "get-caller-identity", "--profile", value.profile],
@@ -157,7 +200,7 @@ function parsePrerequisite(
       preset: `aws-sso, ${value.profile}`,
     };
   }
-  if (value.kind === "gcloud-adc") {
+  if (value.kind === "gcloud-adc" && onlyKeys(value, ["kind", "tools"])) {
     return {
       tools,
       check: ["gcloud", "auth", "application-default", "print-access-token"],
@@ -166,9 +209,11 @@ function parsePrerequisite(
     };
   }
   if (
-    value.kind !== undefined ||
-    !isArgv(value.check) ||
-    !isArgv(value.login)
+    !(
+      onlyKeys(value, ["check", "login", "tools"]) &&
+      isArgv(value.check) &&
+      isArgv(value.login)
+    )
   ) {
     fail(
       "E_INVALID_PREREQUISITE",
@@ -178,38 +223,126 @@ function parsePrerequisite(
   return { tools, check: value.check, login: value.login };
 }
 
+function validHostname(value: unknown): boolean {
+  if (typeof value === "string") {
+    return HOSTNAME.test(value);
+  }
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["env_ref"]) &&
+    typeof value.env_ref === "string" &&
+    ENV_NAME.test(value.env_ref)
+  );
+}
+
+function validateVia(
+  value: unknown,
+  tools: ProjectPrerequisiteConfig["tools"]
+): void {
+  if (value === undefined) {
+    return;
+  }
+  if (
+    !(
+      isRecord(value) &&
+      onlyKeys(value, ["kind", "instance", "region", "listen", "tools"])
+    ) ||
+    value.kind !== "aws-ssm" ||
+    !isName(value.instance) ||
+    !isName(value.region) ||
+    !isPort(value.listen)
+  ) {
+    fail("E_INVALID_REMOTE", "Invalid remote tunnel declaration.");
+  }
+  toolReferences(value.tools, tools);
+}
+
+function targetRequirements(opts: {
+  readonly remote: string;
+  readonly target: string;
+  readonly entry: unknown;
+  readonly requires: ProjectPrerequisiteConfig["requires"];
+  readonly tools: ProjectPrerequisiteConfig["tools"];
+}): readonly string[] {
+  const { remote, target, entry, requires, tools } = opts;
+  if (
+    !(
+      isRecord(entry) &&
+      onlyKeys(entry, [
+        "service",
+        "hostname",
+        "port",
+        "requires",
+        "confirm",
+        "via",
+        "intercept",
+      ]) &&
+      isPort(entry.port) &&
+      optionalFlag(entry.confirm) &&
+      optionalFlag(entry.intercept)
+    ) ||
+    (entry.requires !== undefined && !isNameList(entry.requires))
+  ) {
+    fail("E_INVALID_REMOTE", `Invalid target ${remote} (${target}).`);
+  }
+  const addressValid =
+    entry.service !== undefined
+      ? isName(entry.service) &&
+        entry.hostname === undefined &&
+        entry.via === undefined
+      : validHostname(entry.hostname);
+  if (!addressValid) {
+    fail("E_INVALID_REMOTE", `Invalid address for ${remote} (${target}).`);
+  }
+  const names = entry.requires ?? [];
+  for (const name of names) {
+    if (!requires.has(name)) {
+      fail(
+        "E_UNKNOWN_PREREQUISITE",
+        `${remote} (${target}) refers to undeclared prerequisite ${name}.`
+      );
+    }
+  }
+  validateVia(entry.via, tools);
+  return names;
+}
+
+function remoteEnvNames(value: unknown): readonly string[] {
+  const bindings = entries(value, "E_INVALID_REMOTE");
+  for (const [name, template] of bindings) {
+    if (
+      !ENV_NAME.test(name) ||
+      typeof template !== "string" ||
+      !ARGUMENT.test(template) ||
+      !ENV_TEMPLATE.test(template)
+    ) {
+      fail("E_INVALID_REMOTE", "Invalid remote environment mapping.");
+    }
+  }
+  return bindings.map(([name]) => name);
+}
+
 function selectedPrerequisites(
   value: unknown,
-  requires: ReadonlyMap<string, ProjectPrerequisite>,
-  tools: ReadonlyMap<string, ProjectHostTool>
+  requires: ProjectPrerequisiteConfig["requires"],
+  tools: ProjectPrerequisiteConfig["tools"]
 ): ProjectPrerequisiteConfig["selected"] {
   return entries(value, "E_INVALID_REMOTE").map(([remote, config]) => {
-    if (!(isRecord(config) && isName(config.default))) {
-      fail("E_INVALID_REMOTE", `Remote ${remote} needs a default target name.`);
+    if (
+      !(
+        isRecord(config) &&
+        onlyKeys(config, ["default", "targets", "env"]) &&
+        isName(config.default)
+      )
+    ) {
+      fail("E_INVALID_REMOTE", `Invalid remote ${remote}.`);
     }
-    const targets = entries(config.targets, "E_INVALID_REMOTE");
-    const references = new Map<string, readonly string[]>();
-    for (const [target, entry] of targets) {
-      if (
-        !isRecord(entry) ||
-        (entry.requires !== undefined && !isNameList(entry.requires))
-      ) {
-        fail("E_INVALID_REMOTE", `Invalid target ${remote} (${target}).`);
-      }
-      const names = entry.requires ?? [];
-      for (const name of names) {
-        if (!requires.has(name)) {
-          fail(
-            "E_UNKNOWN_PREREQUISITE",
-            `${remote} (${target}) refers to undeclared prerequisite ${name}.`
-          );
-        }
-      }
-      if (isRecord(entry.via)) {
-        toolReferences(entry.via.tools, tools);
-      }
-      references.set(target, names);
-    }
+    const references = new Map(
+      entries(config.targets, "E_INVALID_REMOTE").map(([target, entry]) => [
+        target,
+        targetRequirements({ remote, target, entry, requires, tools }),
+      ])
+    );
     const names = references.get(config.default);
     if (!names) {
       fail(
@@ -217,7 +350,12 @@ function selectedPrerequisites(
         `Remote ${remote} has no target named ${config.default}.`
       );
     }
-    return { remote, target: config.default, requires: names };
+    return {
+      remote,
+      target: config.default,
+      requires: names,
+      envNames: remoteEnvNames(config.env),
+    };
   });
 }
 

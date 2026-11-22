@@ -1891,7 +1891,11 @@ process environment. The in-memory backend is cleared after each test.
 Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
 `requires` array names those requirements. Hack checks the default target's
 requirements before running Compose lifecycle hooks for `up`, `restart`, or
-`run`. Doctor checks each declared prerequisite and shows the login command.
+`run`. When you select services explicitly, Hack checks the remotes whose
+mapped env names match an `environment` entry on a selected service. With
+no service selection, Hack checks every default remote. When Hack cannot
+read the selected service declarations, it checks every default remote.
+Doctor checks each declared prerequisite and shows the login command.
 
 A prerequisite can use the `aws-sso` preset with a `profile`, or the
 `gcloud-adc` preset. For other providers, give `check` and `login` as argv
@@ -1901,12 +1905,13 @@ entry supplies `bins` and can provide an `install` hint for a missing binary.
 Hack looks for an absolute override like `HACK_TOOL_AWS_PATH` before searching
 `PATH`. Use the uppercase binary name, with punctuation replaced by underscores.
 
-Checks have a ten-second timeout and discard both output streams. Keep secrets
+Checks run from the project root in their own process group, discard both output
+streams, and stop the group after ten seconds. Keep secrets
 out of command arguments. Hack can offer to run a login in an interactive
 terminal after a failed check. With `--no-interactive`, use the displayed
 command yourself and retry.
 
-A config with `requires` or `remotes` needs `min_cli_version`. Set it to the
+A config with `requires`, `remotes`, or `tools` needs `min_cli_version`. Set it to the
 first Hack release that supports the declarations the project uses. Upgrade
 all earlier Hack installations before adopting this configuration. Versions
 released before `min_cli_version` enforcement can silently ignore these

@@ -7463,7 +7463,8 @@ async function runUpCommand({
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
       json,
-      project.projectRoot
+      project.projectRoot,
+      { composeFile: project.composeFile, services: args.positionals.services }
     ))
   ) {
     return 1;
@@ -9850,7 +9851,8 @@ async function runRestartCommand({
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
       json,
-      project.projectRoot
+      project.projectRoot,
+      { composeFile: project.composeFile, services: args.positionals.services }
     ))
   ) {
     return 1;
@@ -10794,8 +10796,9 @@ async function handleRun({
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
-      false,
-      project.projectRoot
+      background?.json === true,
+      project.projectRoot,
+      { composeFile: project.composeFile, services: [service] }
     ))
   ) {
     return 1;

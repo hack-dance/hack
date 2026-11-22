@@ -10,7 +10,10 @@ import { HackCliError } from "../src/lib/cli-result.ts";
 import { HACK_VERSION } from "../src/lib/hack-version.ts";
 import { parseProjectConfigRecord } from "../src/lib/project.ts";
 import { enforceProjectPrerequisites } from "../src/lib/project-prerequisites.ts";
+import { renderProjectConfigSchemaJson } from "../src/templates.ts";
+import { validateJsonSchemaSubset } from "./helpers/json-schema-subset.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { runPrivateTtyCli } from "./helpers/private-cli-tty.ts";
 
 test("Compose projects declare a supported minimum CLI version", () => {
   expect(
@@ -60,7 +63,16 @@ test("a failed check reports its exit code without its process output", async ()
         },
       },
       remotes: {
-        db: { default: "qa", targets: { qa: { requires: ["cloud"] } } },
+        db: {
+          default: "qa",
+          targets: {
+            qa: {
+              hostname: "db.example.test",
+              port: 5432,
+              requires: ["cloud"],
+            },
+          },
+        },
       },
     },
     "fixture.json"
@@ -90,7 +102,7 @@ test("Compose lifecycle refuses before running hooks with a missing prerequisite
     await mkdir(configDir);
     await writeFile(
       join(configDir, PROJECT_COMPOSE_FILENAME),
-      "services: {}\n"
+      "services:\n  api:\n    environment: [DB_HOST]\n"
     );
     await writeFile(
       join(configDir, PROJECT_CONFIG_FILENAME),
@@ -106,7 +118,17 @@ test("Compose lifecycle refuses before running hooks with a missing prerequisite
           cloud: { check: ["true"], login: ["true"], tools: ["cloud-cli"] },
         },
         remotes: {
-          db: { default: "qa", targets: { qa: { requires: ["cloud"] } } },
+          db: {
+            env: { DB_HOST: "{host}" },
+            default: "qa",
+            targets: {
+              qa: {
+                hostname: "db.example.test",
+                port: 5432,
+                requires: ["cloud"],
+              },
+            },
+          },
         },
         startup: [{ name: "marker", run: "touch hook-ran", cwd: root }],
       })
@@ -117,6 +139,7 @@ test("Compose lifecycle refuses before running hooks with a missing prerequisite
       ["up", "--json"],
       ["restart", "--json"],
       ["run", "api"],
+      ["run", "--detach", "--json", "api"],
     ]) {
       const result = Bun.spawnSync([process.execPath, cli, ...argv], {
         cwd: root,
@@ -146,6 +169,7 @@ test("Compose lifecycle refuses before running hooks with a missing prerequisite
 test("host tool OS overrides supply the current platform bins and hint", () => {
   const config = parseProjectConfigRecord(
     {
+      min_cli_version: HACK_VERSION,
       tools: {
         "cloud-cli": {
           bins: ["aws"],
@@ -176,7 +200,17 @@ test("prerequisite check resolves an argument relative to the selected project",
         min_cli_version: HACK_VERSION,
         requires: { cloud: { check: ["sh", "check.sh"], login: ["true"] } },
         remotes: {
-          db: { default: "qa", targets: { qa: { requires: ["cloud"] } } },
+          db: {
+            env: { DB_HOST: "{host}" },
+            default: "qa",
+            targets: {
+              qa: {
+                hostname: "db.example.test",
+                port: 5432,
+                requires: ["cloud"],
+              },
+            },
+          },
         },
       },
       "fixture.json"
@@ -184,6 +218,200 @@ test("prerequisite check resolves an argument relative to the selected project",
     expect(
       await enforceProjectPrerequisites(cfg.prerequisites, true, root)
     ).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("schema and parser both refuse malformed new config blocks", () => {
+  const base = { name: "fixture", dev_host: "fixture.hack.local" };
+  const target = { hostname: "db.example.test", port: 5432 };
+  const remoteConfig = (qa: unknown) => ({
+    ...base,
+    min_cli_version: HACK_VERSION,
+    remotes: { db: { default: "qa", targets: { qa } } },
+  });
+  const valid = remoteConfig(target);
+  expect(
+    validateJsonSchemaSubset({
+      schema: JSON.parse(renderProjectConfigSchemaJson()),
+      value: valid,
+    })
+  ).toEqual([]);
+  expect(
+    parseProjectConfigRecord(valid, "fixture.json").parseError
+  ).toBeUndefined();
+  for (const value of [
+    remoteConfig({ ...target, require: ["cloud"] }),
+    remoteConfig({ ...target, via: 1 }),
+    remoteConfig({ ...target, confirm: [] }),
+    { ...base, tools: { cloud: { bins: ["aws"] } } },
+  ]) {
+    expect(
+      validateJsonSchemaSubset({
+        schema: JSON.parse(renderProjectConfigSchemaJson()),
+        value,
+      })
+    ).not.toEqual([]);
+    expect(
+      parseProjectConfigRecord(value, "fixture.json").prerequisites?.error
+    ).toBeDefined();
+  }
+});
+
+test("explicit service selection checks only remotes with matching environment keys", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-services-"));
+  try {
+    const composeFile = join(root, "compose.yaml");
+    await writeFile(
+      composeFile,
+      "services:\n  api:\n    environment: [DB_HOST]\n  worker:\n    environment: [OTHER_HOST]\n"
+    );
+    const cfg = parseProjectConfigRecord(
+      {
+        min_cli_version: HACK_VERSION,
+        requires: { cloud: { check: ["false"], login: ["true"] } },
+        remotes: {
+          db: {
+            env: { DB_HOST: "{host}" },
+            default: "qa",
+            targets: {
+              qa: {
+                hostname: "db.example.test",
+                port: 5432,
+                requires: ["cloud"],
+              },
+            },
+          },
+        },
+      },
+      "fixture.json"
+    );
+    expect(
+      await enforceProjectPrerequisites(cfg.prerequisites, true, root, {
+        composeFile,
+        services: ["worker"],
+      })
+    ).toBe(true);
+    await expect(
+      enforceProjectPrerequisites(cfg.prerequisites, true, root, {
+        composeFile,
+        services: ["api"],
+      })
+    ).rejects.toMatchObject({ code: "E_PREREQUISITE_CHECK_FAILED" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a signal exit differs from timeout and timeout stops the check group", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-timeout-"));
+  try {
+    const check = async (command: string) => {
+      const cfg = parseProjectConfigRecord(
+        {
+          min_cli_version: HACK_VERSION,
+          requires: {
+            cloud: { check: ["sh", "-c", command], login: ["true"] },
+          },
+          remotes: {
+            db: {
+              default: "qa",
+              targets: {
+                qa: {
+                  hostname: "db.example.test",
+                  port: 5432,
+                  requires: ["cloud"],
+                },
+              },
+            },
+          },
+        },
+        "fixture.json"
+      );
+      return await enforceProjectPrerequisites(cfg.prerequisites, true, root);
+    };
+    await expect(check("kill -KILL $$")).rejects.toMatchObject({
+      code: "E_PREREQUISITE_CHECK_FAILED",
+      detail: { signal: "SIGKILL" },
+    });
+    await expect(
+      check("(sleep 11; touch child-survived) & wait")
+    ).rejects.toMatchObject({
+      code: "E_PREREQUISITE_CHECK_TIMEOUT",
+    });
+    await Bun.sleep(1250);
+    expect(await Bun.file(join(root, "child-survived")).exists()).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 16_000);
+
+test("failed check output stays private and noninteractive TTY does not start login", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-tty-"));
+  try {
+    const configDir = join(root, ".hack");
+    await mkdir(configDir);
+    await writeFile(
+      join(configDir, PROJECT_COMPOSE_FILENAME),
+      "services: {}\n"
+    );
+    const outputMarker = "SYNTHETIC_CHECK_STDOUT_AND_STDERR";
+    await writeFile(
+      join(configDir, PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        min_cli_version: HACK_VERSION,
+        requires: {
+          cloud: {
+            check: [
+              "sh",
+              "-c",
+              `echo ${outputMarker}; echo ${outputMarker} >&2; exit 1`,
+            ],
+            login: ["touch", "login-started"],
+          },
+        },
+        remotes: {
+          db: {
+            default: "qa",
+            targets: {
+              qa: {
+                hostname: "db.example.test",
+                port: 5432,
+                requires: ["cloud"],
+              },
+            },
+          },
+        },
+      })
+    );
+    const env = privateCliEnv({ root, env: { HACK_NO_INTERACTIVE: "1" } });
+    const piped = Bun.spawnSync(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "../index.ts"),
+        "up",
+        "--json",
+      ],
+      { cwd: root, env }
+    );
+    expect(piped.exitCode).toBe(1);
+    expect(JSON.parse(piped.stdout.toString()).error.code).toBe(
+      "E_PREREQUISITE_CHECK_FAILED"
+    );
+    expect(piped.stdout.toString() + piped.stderr.toString()).not.toContain(
+      outputMarker
+    );
+    const tty = await runPrivateTtyCli({
+      cwd: root,
+      env,
+      args: ["up", "--no-interactive"],
+    });
+    expect(tty.exitCode).toBe(1);
+    expect(tty.stderr).toContain("! cloud  sign-in expired");
+    expect(tty.stderr).not.toContain(outputMarker);
+    expect(tty.stderr).not.toContain("run it now?");
+    expect(await Bun.file(join(root, "login-started")).exists()).toBe(false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

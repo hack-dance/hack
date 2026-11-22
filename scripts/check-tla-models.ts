@@ -38,7 +38,7 @@ const models = [
     verify: (opts: Parameters<typeof verifyAdmissionModelResult>[0]) =>
       verifyFiniteModelResult({
         ...opts,
-        states: 9,
+        states: 13,
         invariant: "CheckedBeforeHooks",
         action: "Login",
         fields: ['phase = "allowed"', "checked = FALSE", "loggedIn = TRUE"],

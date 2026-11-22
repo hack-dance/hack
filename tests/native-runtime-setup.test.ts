@@ -269,7 +269,9 @@ test("noninteractive setup requires consent; accepted JSON passes through and up
   expect(up.exitCode).toBe(1);
   expect(up.stdout + up.stderr).not.toContain("E_NATIVE_SETUP_REQUIRED");
   // No project exists: reaching project resolution proves the install gate passed.
-  expect(up.stderr).toContain("! project  not found");
+  expect(up.stderr).toContain(
+    "! project  E_PROJECT_NOT_FOUND: No .hack/ (or legacy .dev/) found."
+  );
 }, 90_000);
 
 test("preflight JSON reports missing runtime as its own blocker", async () => {

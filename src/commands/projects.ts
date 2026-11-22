@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { nativeImageTagStatuses } from "../backends/native-image-tags.ts";
 import { nativeProjectPs } from "../backends/native-project-observe.ts";
 import {
   type NativeRuntimeSelection,
@@ -610,6 +611,13 @@ async function runNativeStatus(opts: {
       branch,
     },
   });
+  const imageTags = opts.ps
+    ? []
+    : await nativeImageTagStatuses({
+        runtime: opts.native,
+        projectRoot: project.projectRoot,
+        composeFile: project.composeFile,
+      });
   const registry = await (opts.readRegistry ?? readProjectsRegistry)();
   const registration = registry.projects.find(
     (entry) =>
@@ -627,11 +635,11 @@ async function runNativeStatus(opts: {
   if (opts.json) {
     emitCliResult({
       result: okResult({
-        data: { ...result, autostart, autostart_global: global },
+        data: { ...result, imageTags, autostart, autostart_global: global },
       }),
     });
   } else {
-    await displayNativePs(result, false);
+    await displayNativePs({ ...result, imageTags }, false);
     if (registration?.autostart) {
       const policy = registration.autostart;
       await display.kv({

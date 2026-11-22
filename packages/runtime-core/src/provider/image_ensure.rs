@@ -2,9 +2,11 @@
 use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::{
     engine, image_load,
-    image_policy::{ARCHIVE_CEILING, CACHE_CEILING, ImagePolicy},
+    image_policy::{ARCHIVE_CEILING, CACHE_CEILING, ImagePolicy, ImageTagMode},
+    image_tag_store::{self, TagSource},
     registry_image, state,
 };
+use crate::timings::{Step, measure_attributed};
 use crate::{Candidate, CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -195,16 +197,27 @@ fn usage(candidate: &Candidate, root: &Path) -> Result<(usize, u64), CandidateEr
     Ok((count, bytes))
 }
 #[derive(Debug, Serialize)]
+pub struct EnsuredTag {
+    pub reference: String,
+    pub registry: String,
+    pub source_digest: String,
+    pub resolved_at_unix_seconds: u64,
+    pub source: TagSource,
+}
+
+#[derive(Debug, Serialize)]
 pub struct EnsuredImage {
     pub pinned_reference: String,
     pub image_id: String,
     pub archive_sha256: String,
     pub archive_reused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_resolution: Option<EnsuredTag>,
     pub phase: &'static str,
     /// The platform loaded; `linux/amd64` runs only under the pool's x86_64 translation.
     pub platform: ImagePlatform,
 }
-/// Resolve tags on every call, reuse their exact immutable archive when available,
+/// Select a tag resolution, reuse its exact immutable archive when available,
 /// and validate/import via the owned guest's existing loader. The engine must already
 /// be running before acquisition. A cache miss acquires at most the policy's per-image
 /// budget and the cache's remaining budget (at most 64 archives); an image whose
@@ -228,6 +241,59 @@ pub fn ensure_with(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
 ) -> Result<EnsuredImage, CandidateError> {
+    timed_acquire(
+        Step::ImageEnsure,
+        candidate,
+        reference,
+        policy,
+        platform,
+        true,
+    )
+}
+
+pub use super::image_tag_store::status as tag_status;
+
+/// Resolve and verify an archive for `hack pull` without requiring a running guest.
+pub fn cache(
+    candidate: &Candidate,
+    reference: &str,
+    policy: &ImagePolicy,
+    platform: PlatformPolicy,
+) -> Result<EnsuredImage, CandidateError> {
+    timed_acquire(
+        Step::ImageCache,
+        candidate,
+        reference,
+        policy,
+        platform,
+        false,
+    )
+}
+
+fn timed_acquire(
+    step: Step,
+    candidate: &Candidate,
+    reference: &str,
+    policy: &ImagePolicy,
+    platform: PlatformPolicy,
+    import: bool,
+) -> Result<EnsuredImage, CandidateError> {
+    measure_attributed(step, None, |_, attrs| {
+        let (result, count) = registry_image::count_requests(|| {
+            acquire_for_use(candidate, reference, policy, platform, import)
+        });
+        attrs.registry_requests = Some(count);
+        result
+    })
+}
+
+fn acquire_for_use(
+    candidate: &Candidate,
+    reference: &str,
+    policy: &ImagePolicy,
+    platform: PlatformPolicy,
+    import: bool,
+) -> Result<EnsuredImage, CandidateError> {
     // Validate input, including registry admission, before touching runtime state; tags
     // are resolved after the engine preflight, and pinned references never make a
     // mutable resolution call.
@@ -236,34 +302,78 @@ pub fn ensure_with(
     } else {
         registry_image::tagged(reference, policy)?;
     }
-    engine::info(candidate)?;
-    let (pinned, platform) = if reference.contains('@') {
-        (
+    if import {
+        engine::info(candidate)?;
+    }
+    let tag = if reference.contains('@') {
+        None
+    } else {
+        Some(image_tag_store::resolve(
+            candidate, reference, policy, platform,
+        )?)
+    };
+    let (pinned, platform) = match &tag {
+        Some(tag) => (
+            tag.pinned_reference.clone(),
+            PlatformPolicy::exact(tag.platform),
+        ),
+        None => (
             registry_image::pinned(reference, policy)?.canonical(),
             platform,
-        )
-    } else {
-        // A tag resolves to one platform; the pinned entry is then that exact platform.
-        let resolved = registry_image::resolve_with(reference, policy, platform)?;
-        let exact = match resolved.platform {
-            "linux/amd64" => PlatformPolicy::Amd64,
-            _ => PlatformPolicy::Native,
-        };
-        (resolved.pinned_reference, exact)
+        ),
     };
-    ensure_pinned_resolving(
+    let offline = policy.tag_mode == ImageTagMode::Offline
+        || tag
+            .as_ref()
+            .is_some_and(|tag| tag.source == TagSource::Offline);
+    let no_archive = || {
+        CandidateError::new(
+            "image_archive_offline_missing",
+            "Registry unavailable and the selected immutable image archive is unavailable locally.",
+        )
+    };
+    let mut ensured = ensure_pinned_resolving(
         candidate,
         &pinned,
         policy,
         platform,
-        |reference, platform| registry_image::pinned_platform(reference, policy, platform),
+        |reference, platform| {
+            if offline {
+                return Err(no_archive());
+            }
+            registry_image::pinned_platform(reference, policy, platform)
+        },
         |reference, path, platform, limit| {
+            if offline {
+                return Err(no_archive());
+            }
             registry_image::acquire_with(reference, path, policy, limit, platform)
         },
         |candidate, path, sha, image, platform| {
-            image_load::load_for(candidate, path, sha, image, policy, platform).map(|_| ())
+            if tag.as_ref().is_some_and(|tag| tag.image_id != image) {
+                return Err(CandidateError::new(
+                    "image_tag_record",
+                    "Selected image configuration differs from the recorded tag resolution.",
+                ));
+            }
+            if import {
+                image_load::load_for(candidate, path, sha, image, policy, platform).map(|_| ())
+            } else {
+                image_load::validate_file_for(path, sha, image, policy, platform).map(|_| ())
+            }
         },
-    )
+    )?;
+    if !import {
+        ensured.phase = "archive-verified";
+    }
+    ensured.tag_resolution = tag.map(|tag| EnsuredTag {
+        reference: tag.record.reference,
+        registry: tag.record.registry,
+        source_digest: tag.record.source_digest,
+        resolved_at_unix_seconds: tag.record.resolved_at_unix_seconds,
+        source: tag.source,
+    });
+    Ok(ensured)
 }
 /// [`ensure_pinned_resolving`] for a cache that must never need to resolve the published
 /// platform: every case it covers has its preferred entry cached, or none.
@@ -415,6 +525,7 @@ fn ensure_pinned_resolving(
         image_id: receipt.image_id,
         archive_sha256: receipt.archive_sha256,
         archive_reused: reused,
+        tag_resolution: None,
         phase: "content-id-verified",
         platform: receipt.platform,
     })

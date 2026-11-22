@@ -84,6 +84,34 @@ const CONFIG_TYPES: [&str; 2] = [
     "application/vnd.docker.container.image.v1+json",
 ];
 
+thread_local! {
+    static REQUESTS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// One command's actual HTTP send attempts, including auth, redirects and
+/// retries. The scope restores any outer count even if dispatch unwinds.
+pub(super) fn count_requests<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REQUESTS.with(|count| count.set(self.0));
+        }
+    }
+    let previous = REQUESTS.with(|count| count.replace(Some(0)));
+    let restore = Restore(previous);
+    let result = operation();
+    let requests = REQUESTS.with(|count| count.get().unwrap_or_default());
+    drop(restore);
+    (result, requests)
+}
+
+pub(super) fn permits_recorded_fallback(failure: &CandidateError) -> bool {
+    matches!(
+        failure.cause_code.as_deref(),
+        Some("registry_unreachable" | "registry_http_refused")
+    )
+}
+
 fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("registry_image", message)
 }
@@ -264,6 +292,31 @@ fn transport_error(failure: &reqwest::Error, message: &'static str) -> Candidate
         source = cause.source();
     }
     error(message)
+}
+
+/// Failure to establish a route to the registry is distinct from authentication,
+/// TLS verification and an authoritative rejection by the registry.
+fn registry_unreachable(failure: &reqwest::Error) -> bool {
+    if !failure.is_connect() {
+        return false;
+    }
+    let mut source = std::error::Error::source(failure);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+            )
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    failure.is_timeout()
 }
 
 /// The reference grammar's `host[:port]` syntax, for local registry opt-ins.
@@ -865,6 +918,11 @@ impl<'a> Fetch<'a> {
             let request = request
                 .try_clone()
                 .ok_or_else(|| error("Cannot replay registry request."))?;
+            REQUESTS.with(|count| {
+                if let Some(requests) = count.get() {
+                    count.set(Some(requests.saturating_add(1)));
+                }
+            });
             match request.timeout(remaining.min(timeout)).send() {
                 Ok(response) => return Ok(response),
                 Err(failure) => {
@@ -876,15 +934,23 @@ impl<'a> Fetch<'a> {
                         || attempt == ATTEMPTS
                         || self.remaining().unwrap_or_default() <= delay
                     {
-                        return Err(CandidateError::new(
+                        let error = CandidateError::new(
                             classified.code,
                             format!(
                                 "{} Host {} after {attempt} attempt(s).",
                                 classified.message,
-                                url.host_str().unwrap_or("unknown")
+                                url.host_str().unwrap_or("unknown"),
                             ),
                         )
-                        .with_network_request(url.host_str().unwrap_or("unknown"), attempt));
+                        .with_network_request(url.host_str().unwrap_or("unknown"), attempt);
+                        return Err(
+                            if classified.code == "registry_image" && registry_unreachable(&failure)
+                            {
+                                error.with_cause_code("registry_unreachable".into())
+                            } else {
+                                error
+                            },
+                        );
                     }
                     std::thread::sleep(delay);
                 }
@@ -1436,20 +1502,23 @@ impl Drop for LayerFile {
 
 /// A successful response, or the refusal its status means.
 fn refusal(response: Response) -> Result<Response, CandidateError> {
-    match response.status() {
-        s if s.is_success() => Ok(response),
-        StatusCode::NOT_FOUND => Err(CandidateError::new(
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let failure = match response.status() {
+        StatusCode::NOT_FOUND => CandidateError::new(
             "registry_image_not_found",
             "The registry image or requested tag was not found.",
-        )),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(error(
-            "The registry refused access with the Docker credentials configured for it.",
-        )),
-        StatusCode::TOO_MANY_REQUESTS => Err(error(
-            "The registry rate-limited this request; retry later or configure credentials.",
-        )),
-        _ => Err(error("The registry request was refused.")),
-    }
+        ),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            error("The registry refused access with the Docker credentials configured for it.")
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            error("The registry rate-limited this request; retry later or configure credentials.")
+        }
+        _ => error("The registry request was refused."),
+    };
+    Err(failure.with_cause_code("registry_http_refused".into()))
 }
 
 fn verify_object(descriptor: &Descriptor, bytes: &[u8]) -> Result<(), CandidateError> {
@@ -1637,8 +1706,43 @@ pub fn resolve_with(
     let mut fetch = Fetch::new(&registry, &path, policy)?;
     let initial = fetch.manifest(&tag)?;
     let source_digest = digest(&initial);
-    let (manifest, manifest_digest, indexed) =
-        select(&mut fetch, &initial, &source_digest, platform)?;
+    resolve_metadata(
+        &mut fetch,
+        &registry,
+        &path,
+        initial,
+        source_digest,
+        platform,
+    )
+}
+
+pub(super) fn resolve_pinned(
+    reference_text: &str,
+    policy: &ImagePolicy,
+    platform: PlatformPolicy,
+) -> Result<ResolvedImage, CandidateError> {
+    let pin = pinned(reference_text, policy)?;
+    let mut fetch = Fetch::new(&pin.registry, &pin.path, policy)?;
+    let initial = fetch.manifest(&pin.digest)?;
+    resolve_metadata(
+        &mut fetch,
+        &pin.registry,
+        &pin.path,
+        initial,
+        pin.digest,
+        platform,
+    )
+}
+
+fn resolve_metadata(
+    fetch: &mut Fetch<'_>,
+    registry: &Registry,
+    path: &str,
+    initial: Vec<u8>,
+    source_digest: String,
+    platform: PlatformPolicy,
+) -> Result<ResolvedImage, CandidateError> {
+    let (manifest, manifest_digest, indexed) = select(fetch, &initial, &source_digest, platform)?;
     let config = manifest
         .config
         .ok_or_else(|| error("Image config descriptor is missing."))?;

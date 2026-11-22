@@ -8,8 +8,30 @@ const MAX_CACHE_MIB = 262_144;
 const MAX_LOCAL_REGISTRIES = 16;
 const DEFAULT_BUDGET_MIB = 2048;
 const DEFAULT_CACHE_MIB = 16_384;
+const SECONDS = /^[0-9]+$/;
 const MEBIBYTES = /^[0-9]{1,8}$/;
 const LOCAL_REGISTRY = /^(?:http:\/\/)?[a-z0-9.-]+(?::[0-9]{1,5})?$/;
+
+export const NATIVE_IMAGE_OFFLINE_NOTICE =
+  "Registry unavailable or offline mode selected. Using recorded image tag resolutions.";
+
+export const DEFAULT_NATIVE_IMAGE_TAG_TTL_SECONDS = 86_400;
+
+export function nativeImageTagTtlSeconds(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): number {
+  const raw = env.HACK_NATIVE_IMAGE_TAG_TTL_SECONDS?.trim();
+  if (!raw) {
+    return DEFAULT_NATIVE_IMAGE_TAG_TTL_SECONDS;
+  }
+  const ttl = Number(raw);
+  if (!(SECONDS.test(raw) && Number.isSafeInteger(ttl))) {
+    throw invalid(
+      "HACK_NATIVE_IMAGE_TAG_TTL_SECONDS must be a whole number of seconds."
+    );
+  }
+  return ttl;
+}
 
 /**
  * Image acquisition time for one `runtime ensure-image` request: registry transfer plus
@@ -41,6 +63,7 @@ function mebibytes(opts: {
  * fixed system environment, so these settings travel as explicit flags:
  *
  * - `HACK_NATIVE_IMAGE_BUDGET_MIB`: per-image compressed archive budget (default 2048).
+ * - `HACK_NATIVE_IMAGE_TAG_TTL_SECONDS`: tag resolution lifetime (default 86400).
  * - `HACK_NATIVE_IMAGE_CACHE_MIB`: total image cache budget (default 16384).
  * - `HACK_NATIVE_LOCAL_REGISTRIES`: comma-separated `[http://]host[:port]` registries that
  *   are otherwise refused as local; `http://` selects plain HTTP.
@@ -82,6 +105,9 @@ export function nativeImagePolicyArgs(
     throw invalid(
       "HACK_NATIVE_IMAGE_CACHE_MIB must be at least HACK_NATIVE_IMAGE_BUDGET_MIB."
     );
+  }
+  if (env.HACK_NATIVE_IMAGE_TAG_TTL_SECONDS?.trim()) {
+    args.push("--image-tag-ttl-seconds", String(nativeImageTagTtlSeconds(env)));
   }
   const registries = (env.HACK_NATIVE_LOCAL_REGISTRIES ?? "")
     .split(",")

@@ -17,6 +17,7 @@ import {
   nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
+  reportNativeImageTagOffline,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
@@ -58,8 +59,10 @@ import {
 import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-notices.ts";
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  NATIVE_IMAGE_OFFLINE_NOTICE,
   nativeImagePolicyArgs,
 } from "./native-image-policy.ts";
+import { retainCurrentImageTags, usedOfflineTag } from "./native-image-tags.ts";
 import {
   type NativePreparedBase,
   preparedBaseArguments,
@@ -760,8 +763,11 @@ async function pinNativeProjectImages(opts: {
   /** Opted-in services' platform policies; every other service resolves Linux arm64. */
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly signal: AbortSignal;
+  readonly imageTagMode?: "refresh" | "offline";
+  readonly warn: (line: string) => void;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
+  let reportedOffline = false;
   for (const [name, spec] of Object.entries(opts.specs)) {
     if (opts.signal.aborted) {
       throw canceled();
@@ -793,6 +799,7 @@ async function pinNativeProjectImages(opts: {
         args: [
           ...nativeEnsureImageArgs(image, policy),
           ...nativeImagePolicyArgs(),
+          ...(opts.imageTagMode ? ["--image-tag-mode", opts.imageTagMode] : []),
         ],
         timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
       })
@@ -817,6 +824,12 @@ async function pinNativeProjectImages(opts: {
       !ensuredPlatformAccepted(ensured.platform, policy)
     ) {
       throw unconfirmed("the runtime image selection");
+    }
+    if (usedOfflineTag(ensured) && !reportedOffline) {
+      if (!reportNativeImageTagOffline()) {
+        opts.warn(NATIVE_IMAGE_OFFLINE_NOTICE);
+      }
+      reportedOffline = true;
     }
     spec.image = ensured.image_id;
   }
@@ -1966,6 +1979,7 @@ type NativeProjectStartOptions = {
     envName: string | null | undefined
   ) => Promise<NativeProfileSelection>;
   readonly sharedSource: boolean;
+  readonly imageTagMode?: "refresh" | "offline";
   readonly restore?: NativeProjectRun;
   readonly onReady?: (services: {
     readonly started: readonly string[];
@@ -2644,10 +2658,20 @@ async function startNativeProjectAttempt(
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       specs,
-      retainedImages,
+      retainedImages: await retainCurrentImageTags({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        specs,
+        retained: retainedImages,
+        policies: input.amd64Emulation,
+        mode: opts.imageTagMode,
+        invoke: deps.invoke,
+      }),
       profiles,
       amd64Emulation: input.amd64Emulation,
       signal: controller.signal,
+      imageTagMode: opts.imageTagMode,
+      warn: deps.warn,
       invoke: deps.invoke,
     });
     // Image work is done: what follows counts against a detached start's

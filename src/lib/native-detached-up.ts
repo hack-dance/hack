@@ -5,6 +5,7 @@ import {
   parseNativeHotReloadNotice,
   renderNativeHotReloadNotice,
 } from "../backends/native-hot-reload-notice.ts";
+import { NATIVE_IMAGE_OFFLINE_NOTICE } from "../backends/native-image-policy.ts";
 import {
   type NativeProfileNotice,
   parseNativeProfileNotice,
@@ -57,6 +58,7 @@ type Ready = {
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
+let publishImageTagOffline: (() => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
 let publishHotReload: ((notice: NativeHotReloadNotice) => void) | undefined;
@@ -567,9 +569,26 @@ function writeHotReload(value: unknown): boolean {
   return true;
 }
 
+export function reportNativeImageTagOffline(): boolean {
+  if (!publishImageTagOffline) {
+    return false;
+  }
+  publishImageTagOffline();
+  return true;
+}
+
+function writeImageTagOffline(value: unknown): boolean {
+  if (value !== "image-tag-offline") {
+    return false;
+  }
+  process.stderr.write(`${NATIVE_IMAGE_OFFLINE_NOTICE}\n`);
+  return true;
+}
+
 /** Prints any validated owner notice; true when `value` was one. */
 function writeOwnerNotice(value: unknown): boolean {
   return (
+    writeImageTagOffline(value) ||
     writeProfileNotice(value) ||
     writeBranchDropped(value) ||
     writeHotReload(value)
@@ -727,6 +746,11 @@ export async function runNativeDetachedOwner(opts: {
       });
     }
   };
+  publishImageTagOffline = () => {
+    if (!stopping) {
+      send("image-tag-offline");
+    }
+  };
   publishProfileNotice = (notice) => {
     if (!stopping) {
       send({ kind: "profile-notice", notice });
@@ -770,6 +794,7 @@ export async function runNativeDetachedOwner(opts: {
     publishReady = undefined;
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
+    publishImageTagOffline = undefined;
     publishBranchDropped = undefined;
     publishHotReload = undefined;
     publishFailure = undefined;
@@ -816,6 +841,8 @@ export function nativeDetachedOwnerArgs(opts: {
     readonly branch?: string;
     readonly env?: string;
     readonly profile?: string;
+    readonly refreshImages?: boolean;
+    readonly offline?: boolean;
   };
 }): string[] {
   const args: string[] = [opts.action];
@@ -824,6 +851,12 @@ export function nativeDetachedOwnerArgs(opts: {
     if (value !== undefined) {
       args.push(`--${name}=${value}`);
     }
+  }
+  if (opts.options.refreshImages) {
+    args.push("--refresh-images");
+  }
+  if (opts.options.offline) {
+    args.push("--offline");
   }
   return args;
 }

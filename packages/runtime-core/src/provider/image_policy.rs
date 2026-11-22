@@ -26,6 +26,17 @@ const MIN_ARCHIVE_LIMIT: u64 = 16 * MIB;
 /// Local registry opt-ins a single request may name.
 const MAX_LOCAL_REGISTRIES: usize = 16;
 
+/// Mutable tags retain a verified resolution for one day by default.
+pub const DEFAULT_TAG_TTL_SECONDS: u64 = 24 * 60 * 60;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ImageTagMode {
+    #[default]
+    Normal,
+    Refresh,
+    Offline,
+}
+
 fn invalid(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("image_policy", message)
 }
@@ -47,6 +58,10 @@ pub struct ImagePolicy {
     pub expanded_limit: u64,
     /// Total archive bytes the candidate's image cache may retain.
     pub cache_limit: u64,
+    /// Maximum age at which an ordinary start can use a tag resolution without the registry.
+    pub tag_ttl_seconds: u64,
+    /// Override the ordinary tag lookup for an explicit refresh or an offline command.
+    pub tag_mode: ImageTagMode,
     /// Registries that are refused as local unless named here.
     pub local_registries: Vec<LocalRegistry>,
     /// Docker configuration directory for read-only credential lookup. `None` means
@@ -65,6 +80,8 @@ impl Default for ImagePolicy {
             archive_limit: DEFAULT_ARCHIVE_LIMIT,
             expanded_limit: DEFAULT_ARCHIVE_LIMIT * EXPANSION_FACTOR,
             cache_limit: DEFAULT_CACHE_LIMIT,
+            tag_ttl_seconds: DEFAULT_TAG_TTL_SECONDS,
+            tag_mode: ImageTagMode::Normal,
             local_registries: Vec::new(),
             docker_config: None,
             helper_path: None,
@@ -103,6 +120,7 @@ impl ImagePolicy {
     pub fn from_flags(flags: &[&str]) -> Result<Self, CandidateError> {
         let mut policy = Self::default();
         let (mut budget, mut cache, mut config) = (false, false, false);
+        let (mut ttl, mut tag_mode) = (false, false);
         let mut rest = flags;
         while let [flag, value, tail @ ..] = rest {
             match *flag {
@@ -133,6 +151,25 @@ impl ImagePolicy {
                         domain: domain.to_owned(),
                         plain_http,
                     });
+                }
+                "--image-tag-ttl-seconds" if !ttl => {
+                    ttl = true;
+                    policy.tag_ttl_seconds = value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|_| value.bytes().all(|byte| byte.is_ascii_digit()))
+                        .ok_or_else(|| {
+                            invalid("Image tag lifetime must be a whole number of seconds.")
+                        })?;
+                }
+                "--image-tag-mode" if !tag_mode => {
+                    tag_mode = true;
+                    policy.tag_mode = match *value {
+                        "normal" => ImageTagMode::Normal,
+                        "refresh" => ImageTagMode::Refresh,
+                        "offline" => ImageTagMode::Offline,
+                        _ => return Err(invalid("Use image tag mode normal, refresh or offline.")),
+                    };
                 }
                 "--docker-config" if !config => {
                     config = true;

@@ -1,3 +1,4 @@
+import type { NativeImageTagStatus } from "../backends/native-image-tags.ts";
 import type { NativeProjectPsResult } from "../backends/native-project-observe.ts";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
@@ -18,7 +19,9 @@ export function nativePsState(
  * ps result, matching authored native ps.
  */
 export async function displayNativePs(
-  result: NativeProjectPsResult,
+  result: NativeProjectPsResult & {
+    imageTags?: readonly NativeImageTagStatus[];
+  },
   json: boolean
 ): Promise<void> {
   if (json) {
@@ -65,6 +68,26 @@ export async function displayNativePs(
       item.health ?? "",
     ]),
   });
+  if (result.imageTags?.length) {
+    await display.table({
+      columns: [
+        "IMAGE TAG",
+        "RESOLVED DIGEST",
+        "IMAGE ID",
+        "PLATFORM",
+        "RESOLVED AT",
+      ],
+      rows: result.imageTags.flatMap((tag) =>
+        tag.selections.map((selection) => [
+          tag.reference,
+          tag.source_digest,
+          selection.image_id,
+          selection.platform,
+          new Date(tag.resolved_at_unix_seconds * 1000).toISOString(),
+        ])
+      ),
+    });
+  }
   if (result.ports?.length) {
     await display.table({
       columns: ["NATIVE SERVICE", "PUBLISHED PORT", "STATE"],

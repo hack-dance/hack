@@ -2079,7 +2079,7 @@ a private certificate authority is not reachable yet. Host names are classified
 before connecting, and resolved addresses are checked again before each
 connection (see [Local registries](#local-registries)).
 
-No implicit image refresh occurs. Keep the archive only as long as needed for owned
+Explicit fetch uses the requested digest. Keep the archive only as long as needed for owned
 imports; fetch does not install a background cache or cleanup daemon. The complete
 archive is synced, validated and published without replacing an existing path.
 A failed write or verification leaves no final archive; process interruption may
@@ -2095,6 +2095,26 @@ index publishes it and otherwise the exact `linux/amd64` image; `amd64` selects 
 configuration must confirm. An amd64 archive is cached under its own address, never
 reused for arm64, and imports only into a pool booted with translation; see
 [amd64 emulation with Rosetta 2](#amd64-emulation-with-rosetta-2).
+
+### Mutable image tags
+
+An ordinary native start uses a verified tag resolution for up to 24 hours.
+Set `HACK_NATIVE_IMAGE_TAG_TTL_SECONDS` to change that interval. A value of
+`0` refreshes on every command. `hack pull` refreshes tags and verifies their
+archives without starting services. `hack up --refresh-images` refreshes the
+tags when starting services.
+
+Use `hack up --offline` to use recorded tag resolutions and local archives
+without contacting a registry. The runtime can also use a recorded resolution
+of any age when it cannot reach the registry. The command reports that fallback
+once. A tag without a usable recorded resolution refuses with
+`image_tag_offline_missing`. If its immutable archive is unavailable locally,
+the refusal is `image_archive_offline_missing`. An authoritative registry
+rejection remains a refusal.
+
+`hack ps` and `hack status` show the recorded registry, source digest, selected
+image configuration IDs and last resolution time for the project's mutable
+tags. A running container keeps the image ID it was created with.
 
 ### Explicit writable development source
 

@@ -2697,6 +2697,7 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     super::hostname_authority::managed::stop(candidate, &owner)?;
     super::publication::release(candidate, &owner.token, None)?;
     if stopped {
+        owner.release_stopped_short_home(candidate)?;
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
@@ -2998,10 +2999,10 @@ sync"#,
         finish_stopped(candidate, owner, "stopped-after-engine-failure")?;
     } else {
         finish_quiesced_stop(candidate, owner)?;
-        // The stopped receipt is written. The `/private/tmp` HOME alias stays reserved for
-        // this pool, so no other user can take its name; only the provider sockets the
-        // stop proved closed are removed.
+        // Commit the clean stop before dropping any temporary paths. A retry can
+        // release the alias using the same durable pool receipt.
         remove_closed_sockets(candidate, owner)?;
+        owner.release_stopped_short_home(candidate)?;
     }
     Ok(())
 }

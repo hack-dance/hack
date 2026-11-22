@@ -785,9 +785,10 @@ complete bundle to change the candidate.
 
 The provider runs with a short temporary HOME alias, `/private/tmp/hkl-<owner>`, a
 symlink to `<home>/.hack-local/run/smolvm/home` that keeps its Unix socket paths
-within the macOS length limit. A clean `runtime down` keeps this alias, so no other
-local user can take its name while the pool is stopped. It removes only the provider
-socket files the stop proved closed, through the real data directory.
+within the macOS length limit. A clean `runtime down` removes provider sockets it
+proved closed, then releases the alias. Pools with pinned dependency socket paths
+keep the alias because those paths cannot move to a different name. The next start
+restores a released alias under the pool lock.
 
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared

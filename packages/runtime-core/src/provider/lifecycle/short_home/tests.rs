@@ -414,10 +414,8 @@ fn vm_lock_release_child() {
     }
 }
 
-/// HACK-1916: a clean `down` keeps its temporary HOME alias reserved, so no other user can
-/// take the name while the pool is stopped. Host cleanup can still remove it; then the next
-/// mutating operation restores it, and a path another entry took meanwhile is never used:
-/// the receipt moves to a fresh alias instead.
+/// A clean stop can release the alias. The next start restores it or records a fresh
+/// alias if another entry took the name and no dependency sockets pin the original.
 impl Pool {
     /// The receipt `down` writes after a quiesced stop: `stopped` plus the clean-stop marker.
     fn cleanly_stopped(mut self) -> Self {
@@ -479,6 +477,42 @@ impl Squatter {
             fs::remove_file(path).unwrap();
         }
     }
+}
+
+#[test]
+fn a_clean_stop_releases_its_alias_and_restart_restores_it() {
+    let pool = Pool::new().cleanly_stopped();
+    let before = pool.receipt();
+    for _ in 0..2 {
+        assert_eq!(
+            super::super::down(&pool.candidate).unwrap().phase,
+            "stopped"
+        );
+        assert!(pool.alias_absent());
+    }
+    assert_eq!(status(&pool.candidate).unwrap().phase, "stopped");
+    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+    super::super::restore_released_short_home(&pool.candidate).unwrap();
+    drop(lock);
+    assert_eq!(
+        fs::read_link(&pool.owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
+    assert_eq!(pool.receipt(), before);
+}
+
+#[test]
+fn stopped_pool_with_pinned_dependency_paths_keeps_its_alias() {
+    let mut pool = Pool::new();
+    pool.owner.dependency_sockets = Some(crate::provider::DependencySocketIntent::new(1).unwrap());
+    let pool = pool.cleanly_stopped();
+    let inode = pool.alias_inode();
+    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+    pool.owner
+        .release_stopped_short_home(&pool.candidate)
+        .unwrap();
+    drop(lock);
+    assert_eq!(pool.alias_inode(), inode);
 }
 
 #[test]

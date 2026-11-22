@@ -127,7 +127,11 @@ fn record_at(state_root: &Path, owner: &Owner) -> Result<(), CandidateError> {
 /// a stopped pool, and stopping it takes that lease, so no `record` runs meanwhile.
 /// The current boot is never added; an invalid history refuses (recovery fails closed).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn adopt(candidate: &Candidate, owner: &Owner, boot: &str) -> Result<(), CandidateError> {
+pub(crate) fn adopt(
+    candidate: &Candidate,
+    owner: &Owner,
+    boot: &str,
+) -> Result<(), CandidateError> {
     adopt_at(&candidate.state_root, owner, boot)
 }
 
@@ -285,7 +289,11 @@ mod tests {
         assert_eq!(std::fs::read(path(&root.0)).unwrap(), once);
         // The next boot keeps it.
         boot(&root.0, &mut pool, "b4");
-        assert!(earlier_boots_at(&root.0, &pool).unwrap().contains(&"b0".to_owned()));
+        assert!(
+            earlier_boots_at(&root.0, &pool)
+                .unwrap()
+                .contains(&"b0".to_owned())
+        );
     }
 
     #[test]

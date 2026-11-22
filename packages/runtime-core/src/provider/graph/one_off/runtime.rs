@@ -99,6 +99,7 @@ pub fn begin(
         root: root.clone(),
         receipt,
         configs,
+        default_health_cadence: BTreeMap::new(),
         expected_environment,
         restarting: false,
         fresh_cache_completion: false,

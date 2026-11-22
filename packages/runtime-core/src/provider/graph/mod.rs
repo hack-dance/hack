@@ -768,6 +768,7 @@ struct Session<'a, 's> {
     root: PathBuf,
     receipt: Receipt,
     configs: BTreeMap<String, Value>,
+    default_health_cadence: BTreeMap<String, bool>,
     expected_environment: BTreeMap<String, image_environment::Expected>,
     restarting: bool,
     fresh_cache_completion: bool,
@@ -922,6 +923,7 @@ impl Session<'_, '_> {
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
         // Restore reattaches every settled volume. A volume still `reserved` never
         // received a create intent; it is created exclusively, never adopted.
+        let mut created_volumes = BTreeSet::new();
         let keys: Vec<_> = self
             .receipt
             .resources
@@ -1008,6 +1010,18 @@ impl Session<'_, '_> {
             volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, true)?;
             self.capture_cache_provenance(&key, true)?;
             self.reserve(&key, "created")?;
+            if resource.kind == Kind::Volume {
+                created_volumes.insert(resource.name);
+            }
+        }
+        if !created_volumes.is_empty() {
+            for (service, default_period) in &self.default_health_cadence {
+                config::use_authored_health_cadence(
+                    self.configs.get_mut(service).expect("compiled service"),
+                    *default_period,
+                    &created_volumes,
+                );
+            }
         }
         Ok(())
     }
@@ -1709,6 +1723,7 @@ fn run_inputs(
         root,
         receipt,
         configs: prepared.configs,
+        default_health_cadence: prepared.default_health_cadence,
         expected_environment,
         probe_findings: BTreeMap::new(),
         restarting: false,
@@ -2521,6 +2536,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         root,
         receipt,
         configs: prepared.configs,
+        default_health_cadence: BTreeMap::new(),
         expected_environment,
         probe_findings: BTreeMap::new(),
         restarting: true,

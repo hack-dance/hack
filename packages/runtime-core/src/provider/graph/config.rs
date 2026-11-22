@@ -23,6 +23,8 @@ pub(super) struct Prepared {
     /// logical volume. Only [`retain_recorded_legacy_caches`] may select one.
     pub legacy_caches: BTreeMap<String, dependency_cache::CacheBinding>,
     pub configs: BTreeMap<String, Value>,
+    /// Services with an injected start interval, and whether the period was also injected.
+    pub default_health_cadence: BTreeMap<String, bool>,
     pub probes: BTreeMap<String, super::super::http_probe::HttpProbe>,
     pub resources: BTreeMap<String, Resource>,
     pub namespace: String,
@@ -796,6 +798,7 @@ pub(super) fn prepare_delivery(
         }
     }
     let mut configs = BTreeMap::new();
+    let mut default_health_cadence = BTreeMap::new();
     let mut probes = BTreeMap::new();
     for (index, (name, service)) in plan.services.iter().filter(|(_, s)| s.active).enumerate() {
         let values = &inputs.services[name];
@@ -996,6 +999,9 @@ pub(super) fn prepare_delivery(
             config["Healthcheck"] = json!({"Test":["NONE"]});
         } else if let Some(health) = &service.healthcheck {
             let mut value = json!({});
+            if !health.disabled && health.start_interval_nanos.is_none() {
+                default_health_cadence.insert(name.clone(), health.start_period_nanos.is_none());
+            }
             if let Some(test) = &values.health_test {
                 value["Test"] = json!(test);
             }
@@ -1050,11 +1056,37 @@ pub(super) fn prepare_delivery(
         legacy_caches,
         graph,
         configs,
+        default_health_cadence,
         probes,
         resources,
         namespace: plan.namespace.clone(),
         plan_id: inputs.review.plan_id.clone(),
     })
+}
+
+/// Drop only Hack's startup defaults for a service mounting a volume created
+/// in this attempt. Compose anonymous mounts have generated owned names.
+pub(super) fn use_authored_health_cadence(
+    config: &mut Value,
+    default_period: bool,
+    created_volumes: &BTreeSet<String>,
+) {
+    let has_new_volume = config["HostConfig"]["Mounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|mount| {
+            mount["Type"] == "volume"
+                && mount["Source"]
+                    .as_str()
+                    .is_some_and(|name| created_volumes.contains(name))
+        });
+    if has_new_volume && let Some(health) = config["Healthcheck"].as_object_mut() {
+        health.remove("StartInterval");
+        if default_period {
+            health.remove("StartPeriod");
+        }
+    }
 }
 
 /// Primary network preserves declaration order; every declared network receives

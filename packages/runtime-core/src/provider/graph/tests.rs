@@ -78,8 +78,16 @@ fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
     let image = format!("sha256:{}", "a".repeat(64));
     let disabled_check =
         |document: &Value| document["services"]["web"]["healthcheck"]["disable"] == true;
-    let compiled = |healthcheck: Value| {
+    let compiled = |healthcheck: Value, mount: Option<&str>, created: Option<&str>| {
         let mut document = compose(&image, "marker", false);
+        if let Some(mount) = mount {
+            document["services"]["web"]["volumes"] = json!([mount]);
+        } else {
+            document["services"]["web"]
+                .as_object_mut()
+                .unwrap()
+                .remove("volumes");
+        }
         document["services"]["web"]["expose"] = json!(["3000"]);
         document["services"]["web"]["healthcheck"] = healthcheck;
         // A disabled check cannot satisfy `service_healthy`; this test is about the check.
@@ -98,13 +106,26 @@ fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
         if disabled_check(&document) {
             goals.insert("web".into(), Condition::Started);
         }
-        config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None)
-            .unwrap()
-            .configs["web"]["Healthcheck"]
-            .clone()
+        let mut prepared =
+            config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None).unwrap();
+        let created = match created {
+            Some("anonymous") => BTreeSet::from([prepared.configs["web"]["HostConfig"]["Mounts"]
+                [0]["Source"]
+                .as_str()
+                .unwrap()
+                .to_owned()]),
+            Some(key) => BTreeSet::from([prepared.resources[key].name.clone()]),
+            None => BTreeSet::new(),
+        };
+        let config = prepared.configs.get_mut("web").unwrap();
+        if let Some(default_period) = prepared.default_health_cadence.get("web") {
+            config::use_authored_health_cadence(config, *default_period, &created);
+        }
+        config["Healthcheck"].clone()
     };
     let test = json!(["CMD", "/usr/local/bin/bun", "-e", "process.exit(0)"]);
-    let undeclared = compiled(json!({"test": test, "interval": "30s"}));
+    let health = json!({"test": test, "interval": "30s"});
+    let undeclared = compiled(health.clone(), Some("data:/data"), None);
     assert_eq!(
         undeclared["StartInterval"],
         crate::project::DEFAULT_START_INTERVAL_NANOS
@@ -114,10 +135,38 @@ fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
         crate::project::DEFAULT_START_PERIOD_NANOS
     );
     assert_eq!(undeclared["Interval"], 30_000_000_000u64);
-    let declared = compiled(json!({"test": test, "start_interval": "1s", "start_period": "5s"}));
-    assert_eq!(declared["StartInterval"], 1_000_000_000u64);
+    assert_eq!(
+        compiled(health.clone(), None, Some("volume:data")),
+        undeclared
+    );
+    for (mount, created) in [("data:/data", "volume:data"), ("/data", "anonymous")] {
+        assert_eq!(
+            compiled(health.clone(), Some(mount), Some(created)),
+            json!({"Test": test, "Interval":30_000_000_000u64})
+        );
+        assert_eq!(compiled(health.clone(), Some(mount), None), undeclared);
+    }
+    let period = compiled(
+        json!({"test": test, "start_period": "5s"}),
+        Some("data:/data"),
+        Some("volume:data"),
+    );
+    assert_eq!(
+        period,
+        json!({"Test": test, "StartPeriod":5_000_000_000u64})
+    );
+    let declared = compiled(
+        json!({"test": test, "start_interval": "250ms", "start_period": "5s"}),
+        Some("data:/data"),
+        Some("volume:data"),
+    );
+    assert_eq!(declared["StartInterval"], 250_000_000u64);
     assert_eq!(declared["StartPeriod"], 5_000_000_000u64);
-    let disabled = compiled(json!({"disable": true}));
+    let disabled = compiled(
+        json!({"disable": true}),
+        Some("data:/data"),
+        Some("volume:data"),
+    );
     assert!(disabled.get("StartInterval").is_none(), "{disabled}");
     assert!(disabled.get("StartPeriod").is_none(), "{disabled}");
 }
@@ -1558,6 +1607,18 @@ fn owned_driver_live() -> Result<(), CandidateError> {
         }
         let before_vm_token = {
             let engine = Engine::connect(&candidate)?;
+            let web = engine.request(
+                Method::GET,
+                &format!(
+                    "/v1.53/containers/{}/json",
+                    first["resources"]["container:web"]["id"]
+                        .as_str()
+                        .expect("web ID")
+                ),
+                None,
+            )?;
+            let interval = &web["Config"]["Healthcheck"]["StartInterval"];
+            assert!(interval.is_null() || interval == 0, "{interval}");
             let (output, _, _) = engine.logs(
                 first["resources"]["container:init"]["id"]
                     .as_str()
@@ -1613,6 +1674,20 @@ fn owned_driver_live() -> Result<(), CandidateError> {
         let restored = launch(&candidate, &fixture, &run, "restore")?;
         {
             let engine = Engine::connect(&candidate)?;
+            let web = engine.request(
+                Method::GET,
+                &format!(
+                    "/v1.53/containers/{}/json",
+                    restored["resources"]["container:web"]["id"]
+                        .as_str()
+                        .expect("web ID")
+                ),
+                None,
+            )?;
+            assert_eq!(
+                web["Config"]["Healthcheck"]["StartInterval"],
+                crate::project::DEFAULT_START_INTERVAL_NANOS
+            );
             let (output, _, _) = engine.logs(
                 restored["resources"]["container:init"]["id"]
                     .as_str()

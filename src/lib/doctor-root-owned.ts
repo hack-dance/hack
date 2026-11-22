@@ -9,7 +9,7 @@ import { quoteShellWord } from "./logs.ts";
 export const ROOT_OWNED_CHECK = "root-owned checkout files";
 const ENTRY_LIMIT = 4096;
 const REPORT_LIMIT = 12;
-const LINE_BREAK = /[\n\r]/;
+const UNSAFE_TERMINAL_TEXT = /[\p{Cc}\p{Bidi_Control}]/gu;
 const WALK_MS = 500;
 const DIRECTORY_FLAGS =
   constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -81,13 +81,13 @@ export async function findCheckoutFilesOwnedBy(opts: {
   return { paths, incomplete };
 }
 
-export async function checkRootOwnedCheckout(opts: {
-  readonly projectRoot: string;
-  readonly composeFile: string;
-}) {
+export async function checkRootOwnedCheckout(
+  opts: { readonly projectRoot: string; readonly composeFile: string },
+  ownerUid = 0
+) {
   const observed = await findCheckoutFilesOwnedBy({
     root: opts.projectRoot,
-    uid: 0,
+    uid: ownerUid,
   });
   if (observed.paths.length === 0) {
     return {
@@ -121,15 +121,19 @@ export async function checkRootOwnedCheckout(opts: {
           )
       )
       .map(([name]) => name);
-    return `${JSON.stringify(relative(opts.projectRoot, path))}${owners.length ? ` (possible services: ${owners.join(", ")})` : ""}`;
+    return `${JSON.stringify(relative(opts.projectRoot, path)).replace(UNSAFE_TERMINAL_TEXT, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}${owners.length ? ` (possible services: ${owners.join(", ")})` : ""}`;
   });
-  const safePaths = observed.paths.filter((path) => !LINE_BREAK.test(path));
+  const safePaths = observed.paths.filter(
+    (path) => path.search(UNSAFE_TERMINAL_TEXT) === -1
+  );
   return {
     name: ROOT_OWNED_CHECK,
     status: "warn" as const,
     message: [
       `Root-owned checkout paths: ${paths.join(", ")}.`,
-      observed.incomplete ? "The scan did not cover the entire checkout." : "",
+      observed.incomplete
+        ? "This list may be partial. The command only changes the listed paths. Rerun Doctor to find more."
+        : "",
       `Set user: "${process.getuid?.()}:${process.getgid?.()}" in the Compose service definition.`,
       safePaths.length
         ? `To return these paths to your user: sudo chown -h -- "$(id -u):$(id -g)" ${safePaths.map(quoteShellWord).join(" ")}`

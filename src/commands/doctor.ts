@@ -4161,15 +4161,9 @@ async function runProjectChecks(opts: {
   if (isLinux() && process.getuid?.() !== 0) {
     const project = await findProjectContext(startDir);
     if (project) {
+      const observe = () => checkRootOwnedCheckout(project);
       results.push(
-        await runCheck(
-          s,
-          ROOT_OWNED_CHECK,
-          () => checkRootOwnedCheckout(project),
-          {
-            timeoutMs: 700,
-          }
-        )
+        await runCheck(s, ROOT_OWNED_CHECK, observe, { timeoutMs: 700 })
       );
     }
   }

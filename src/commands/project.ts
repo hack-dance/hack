@@ -3875,16 +3875,18 @@ async function describeDirectIngressAccess(
   const runtime = await readRuntimeProjects({ includeGlobal: false });
   const project = runtime.runtime.find((item) => item.project === name);
   return (
-    (project &&
-      runningComposeDirectAccess(
-        [...project.services.values()].flatMap((service) =>
-          service.containers.filter(
-            (container) => container.workingDir === opts.project.projectDir
+    runningComposeDirectAccess(
+      project
+        ? [...project.services.values()].flatMap(
+            (service) => service.containers
           )
-        ),
-        process.platform === "linux"
-      )) ||
-    fallback
+        : [],
+      {
+        project: name,
+        checkout: opts.project.projectDir,
+        linux: process.platform === "linux",
+      }
+    ) ?? fallback
   );
 }
 

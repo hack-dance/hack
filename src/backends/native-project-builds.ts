@@ -10,6 +10,7 @@ import {
   type NativeBuilderCommandOptions,
   nativeBuilderRemedy,
 } from "../lib/native-image-builder.ts";
+import { nativeImageRegistryReason } from "./native-image-policy.ts";
 import {
   type invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -394,31 +395,55 @@ async function forwardBuildOutput(
   return held;
 }
 
-function failureCode(line: string | undefined): string | undefined {
-  if (line === undefined) {
-    return;
-  }
-  try {
-    const value: unknown = JSON.parse(line);
-    return isRecord(value) &&
-      typeof value.code === "string" &&
-      ERROR_CODE.test(value.code)
-      ? value.code
-      : undefined;
-  } catch {
-    return;
+const BUILD_BASE_REFERENCE = /^[A-Za-z0-9._:/@-]{1,512}$/;
+
+export class NativeBuildRegistryError extends NativeRuntimeRequestError {
+  readonly reference: string;
+
+  constructor(reference: string, causeCode: string, code = "registry_image") {
+    super({
+      message: `Build base ${reference} is unavailable (${nativeImageRegistryReason(causeCode)}). Retry hack up when the registry is reachable.`,
+      nativeCode: code,
+      nativeCauseCode: causeCode,
+    });
+    this.reference = reference;
   }
 }
 
-function failureMessage(line: string | undefined): string | undefined {
-  try {
-    const value: unknown = line === undefined ? undefined : JSON.parse(line);
-    return isRecord(value) && typeof value.message === "string"
-      ? value.message.slice(0, 512)
-      : undefined;
-  } catch {
-    return;
+function buildFailure(line: string | undefined): NativeRuntimeRequestError {
+  let value: unknown;
+  if (line !== undefined) {
+    try {
+      value = JSON.parse(line);
+    } catch {
+      value = undefined;
+    }
   }
+  const detail = isRecord(value) ? value : {};
+  const code =
+    typeof detail.code === "string" && ERROR_CODE.test(detail.code)
+      ? detail.code
+      : undefined;
+  if (
+    code?.startsWith("registry_") &&
+    typeof detail.cause_code === "string" &&
+    nativeImageRegistryReason(detail.cause_code) &&
+    typeof detail.build_base_reference === "string" &&
+    BUILD_BASE_REFERENCE.test(detail.build_base_reference)
+  ) {
+    return new NativeBuildRegistryError(
+      detail.build_base_reference,
+      detail.cause_code,
+      code
+    );
+  }
+  return new NativeRuntimeRequestError({
+    message:
+      typeof detail.message === "string"
+        ? detail.message.slice(0, 512)
+        : "Native image build failed; its output is shown above.",
+    nativeCode: code,
+  });
 }
 
 /**
@@ -482,13 +507,7 @@ export async function invokeNativeBuild(opts: {
       );
     }
     if (code !== 0) {
-      const nativeCode = failureCode(held);
-      throw new NativeRuntimeRequestError({
-        message:
-          failureMessage(held) ??
-          "Native image build failed; its output is shown above.",
-        nativeCode,
-      });
+      throw buildFailure(held);
     }
     if (stdout.byteLength > MAX_STDOUT) {
       throw new ClosedCliError(
@@ -951,6 +970,9 @@ function nameBuildFailure(
   error: unknown,
   parallel: boolean
 ): unknown {
+  if (error instanceof NativeBuildRegistryError) {
+    return error;
+  }
   const which = serviceList(services);
   if (!(error instanceof NativeRuntimeRequestError)) {
     return parallel

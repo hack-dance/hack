@@ -1447,7 +1447,7 @@ If the prepared tree changes, `runtime probe` and every build
 refuse with `artifact_digest_mismatch`. `runtime probe` reports `builder_prepared`:
 `true` when the client is present and unchanged, `false` for a home without it.
 
-A project's first native start can build distinct images together. The
+A native start can build distinct images together, including a retained start after edits. The
 four-CPU development pool runs at most three builds at once. Identical build
 requests still share one build. A failure or Ctrl-C requests cancellation of
 the other builds, and the CLI waits for all started builds to settle before

@@ -12,4 +12,4 @@ existing single-build contract and are outside this batch model.
 
 TLC 1.7.4 explored 296 states. The early-return control violated
 `NoLiveReturn` and the cancellation-error control violated `FirstOutcome`.
-See the [state chart](build-batch.svg).
+See the [state chart](build-batch.svg) and [Mermaid source](build-batch.mmd).

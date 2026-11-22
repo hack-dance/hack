@@ -656,6 +656,26 @@ test("build output streams through while the runtime's closed error is returned"
   });
 });
 
+test("a build base registry refusal keeps the normalized reference and closed cause", async () => {
+  const reference = "docker.io/library/python:3.12-alpine";
+  const fake = await fakeRuntime(
+    `printf '{"code":"registry_image","message":"discarded private detail","build_base_reference":"${reference}","cause_code":"registry_http_429"}\\n' >&2\nexit 1`
+  );
+  const error = await invokeNativeBuild({
+    runtime: fake as never,
+    cwd: fake.home,
+    requestFile: join(fake.home, "request.json"),
+    write: () => undefined,
+  }).catch((caught: unknown) => caught);
+  expect(error).toMatchObject({
+    reference,
+    nativeCode: "registry_image",
+    nativeCauseCode: "registry_http_429",
+    message: expect.stringContaining("registry rate limit reached"),
+  });
+  expect(String(error)).not.toContain("discarded private detail");
+});
+
 test("cancellation sends SIGTERM so the runtime can stop its build client", async () => {
   const fake = await fakeRuntime(
     `trap 'printf terminated > "$0.signal"; exit 143' TERM\nprintf 'started\\n' >&2\nwhile :; do sleep 0.05; done`

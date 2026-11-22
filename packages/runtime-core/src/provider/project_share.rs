@@ -141,7 +141,7 @@ impl ProjectShareIntent {
 /// Each share is one provider filesystem device for the life of the machine.
 pub const MAX_PROJECT_SHARES: usize = 8;
 
-fn extension_required() -> CandidateError {
+pub(super) fn extension_required() -> CandidateError {
     CandidateError::new(
         "project_share_extension_required",
         "This pool does not share this project root. Add it to the stopped pool with `runtime project-share add`; a running pool's mounts are never changed.",

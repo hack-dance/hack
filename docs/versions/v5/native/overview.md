@@ -86,6 +86,12 @@ The compiler does not carry application traffic. This picture covers published
 TCP ports, not every routing mode or the authored frontend's separate capability
 limits; see the [reference](reference.md) before selecting a workload.
 
+A native home can also run one small control process, the runtime service
+(`hack-native service serve|status|stop`). It only answers who it is and whether
+it is running: no `hack` command uses it yet, it never starts by itself, and
+stopping it does not stop your services or the VM. The native backend reference
+describes its commands under "The runtime service".
+
 ## Why try it
 
 What you get today:

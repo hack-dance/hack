@@ -362,6 +362,8 @@ hack up [services...] [options]
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
+| `--refresh-images` | Native backend: refresh the project's mutable image tags from the registry. |
+| `--offline` | Native backend: use recorded image resolutions and local archives without contacting a registry. |
 | `--always` | Mark this project for machine-local autostart and start it |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -453,6 +455,30 @@ hack ps [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack pull`
+
+Refresh and download project images without starting services
+
+### Usage
+
+```bash
+hack pull [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -1761,6 +1787,7 @@ hack native <subcommand> [options]
 | --- | --- |
 | `hack native setup` | Download and prepare the pinned native runtime for this home |
 | `hack native recover` | Recover this home's native runtime after an interrupted or failed start |
+| `hack native temp-aliases` | List dangling native provider HOME aliases |
 
 ### Options
 
@@ -1813,6 +1840,29 @@ Runs the runtime's own recovery for this native home: it proves what a failed or
 | Option | Description |
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack native temp-aliases`
+
+List dangling native provider HOME aliases
+
+### Usage
+
+```bash
+hack native temp-aliases [options]
+```
+
+List old aliases whose native home is gone, or remove them with --fix.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--fix` | Remove verified dangling aliases |
+| `--include-unverified-volumes` | With --fix, include aliases whose volume may be unmounted |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1878,6 +1928,7 @@ hack doctor [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
+| `--include-unverified-volumes` | With --fix, include native aliases whose volume may be unmounted |
 | `--machine` | Observe machine checks only, without discovering a project or repairing state |
 | `--only <id>` | With --fix, select exactly one allowlisted repair: 'hack gitignore' (needs --yes) or 'polling watchers' (shows the diff; --yes applies it) |
 | `--yes` | Consent to the one repair selected with --fix --only |

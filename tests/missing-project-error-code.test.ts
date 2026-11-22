@@ -55,6 +55,7 @@ const UNSUPPORTED = "unsupported or internal command";
 
 const COMMANDS: Readonly<Record<string, Expectation>> = {
   up: { kind: "envelope", argv: ["up", "-p", "DIR", "--json"] },
+  pull: { kind: "line", argv: ["pull", "-p", "DIR"] },
   down: { kind: "envelope", argv: ["down", "-p", "DIR", "--json"] },
   restart: { kind: "envelope", argv: ["restart", "-p", "DIR", "--json"] },
   ps: { kind: "envelope", argv: ["ps", "-p", "DIR", "--json"] },

@@ -24,6 +24,7 @@ import { resolvePrimaryLocalProjectDir } from "./worktree-local-config.ts";
 const UNQUOTED_ARG = /^[a-zA-Z0-9_.:/@%+=,-]+$/;
 const COMPOSE_VARIABLE = /\$\$|\$\{?([a-zA-Z_][a-zA-Z0-9_]*)/g;
 const CHECK_TIMEOUT_MS = 10_000;
+const CHECK_SETTLEMENT_TIMEOUT_MS = 5000;
 
 type CheckState =
   | { readonly state: "ok" }
@@ -39,7 +40,11 @@ type CheckState =
       readonly signal?: NodeJS.Signals | number;
     }
   | { readonly state: "timeout" }
-  | { readonly state: "cancelled"; readonly signal: "SIGINT" | "SIGTERM" }
+  | {
+      readonly state: "cancelled";
+      readonly signal: "SIGINT" | "SIGTERM";
+      readonly stopUnconfirmed?: boolean;
+    }
   | { readonly state: "cleanup pending" };
 
 function resolveExecutable(bin: string): string | null {
@@ -150,13 +155,19 @@ async function checkPrerequisite(
     }, CHECK_TIMEOUT_MS);
     const exitCode = await child.exited;
     endGroup();
-    if (
-      !(await waitForOwnedProcessGroupSettlement({ processGroupId: child.pid }))
-    ) {
-      return { state: "cleanup pending" };
-    }
+    const settled = await waitForOwnedProcessGroupSettlement({
+      processGroupId: child.pid,
+      timeoutMs: CHECK_SETTLEMENT_TIMEOUT_MS,
+    });
     if (cancelledBy) {
-      return { state: "cancelled", signal: cancelledBy };
+      return {
+        state: "cancelled",
+        signal: cancelledBy,
+        stopUnconfirmed: !settled,
+      };
+    }
+    if (!settled) {
+      return { state: "cleanup pending" };
     }
     if (timedOut) {
       return { state: "timeout" };
@@ -195,7 +206,7 @@ function blocker(
   if (result.state === "cancelled") {
     return {
       code: "E_CANCELLED",
-      message: `! ${name}  sign-in check cancelled by ${result.signal}`,
+      message: `! ${name}  sign-in check cancelled by ${result.signal}${result.stopUnconfirmed ? "\n  Could not confirm that the check process group stopped." : ""}`,
     };
   }
   if (result.state === "cleanup pending") {

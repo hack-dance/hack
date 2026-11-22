@@ -127,7 +127,9 @@ test("copies attributes an instance to its worktree using one Compose inventory"
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("BRANCH");
     expect(result.stdout).toContain("CHECKOUT");
-    expect(result.stdout).toContain("2 copies · 1 stopped · 1 unhealthy");
+    expect(result.stdout).toContain(
+      "2 copies on compose · 1 unknown · 1 unhealthy"
+    );
     expect(result.stdout).toContain("https://feature-1.sample.hack.local");
     expect(result.stdout).not.toContain(f.root);
     expect((await readFile(f.calls, "utf8")).trim().split("\n")).toEqual([
@@ -145,7 +147,7 @@ test("copies attributes an instance to its worktree using one Compose inventory"
             branch: null,
             checkout: { kind: "primary", name: "primary" },
             instance: null,
-            state: "stopped",
+            state: "unknown",
             address: null,
           },
           {
@@ -168,22 +170,24 @@ test("one copy has a normal table and singular count", async () => {
   try {
     const result = await f.run([]);
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("1 copy · 1 stopped");
+    expect(result.stdout).toContain("1 copy on compose · 1 unknown");
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
 });
 
-test("twenty stopped copies need one docker call or no native processes", async () => {
+test("twenty idle copies need one docker call or no native processes", async () => {
   const f = await fixture(20);
   try {
     for (const native of [false, true]) {
       const result = await f.run([], native);
       expect(result.code).toBe(0);
       expect(result.stderr).toBe("");
-      expect(result.stdout).toContain("20 copies · 20 stopped");
+      expect(result.stdout).toContain(
+        `20 copies on ${native ? "native" : "compose"} · 20 unknown`
+      );
       console.info(
-        `copies-20 ${native ? "native" : "compose"}: ${Math.round(result.elapsed)} ms (source CLI, Linux fixture)`
+        `copies-20 ${native ? "native" : "compose"}: ${Math.round(result.elapsed)} ms (source CLI, ${process.platform} fixture)`
       );
     }
     expect((await readFile(f.calls, "utf8")).trim().split("\n")).toHaveLength(
@@ -215,7 +219,7 @@ test("a foreign native home leaves an unknown row and a scoped recovery hint", a
     const result = await f.run([], true);
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("2 copies · 1 stopped · 1 unknown");
+    expect(result.stdout).toContain("2 copies on native · 2 unknown");
     expect(result.stdout).not.toContain(f.root);
     expect(result.stdout).toContain("from feature-1, run:");
     expect(result.stdout).toContain("--native-run-mapping");
@@ -263,7 +267,7 @@ process.exit(1);
     const result = await f.run([], true);
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("7 copies · 1 stopped · 6 unknown");
+    expect(result.stdout).toContain("7 copies on native · 7 unknown");
     const events = await readFile(trace, "utf8");
     let inFlight = 0;
     let peak = 0;
@@ -325,8 +329,11 @@ test("authored Compose copies match the generated base and branch inventory", as
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("feature/example");
-    expect(result.stdout).toContain("2 copies · 1 healthy · 1 starting");
+    expect(result.stdout).toContain(
+      "2 copies on compose · 1 healthy · 1 starting"
+    );
     expect(result.stdout).not.toContain("hack-nc-");
+    expect(result.stdout).not.toContain("no address");
     expect((await readFile(f.calls, "utf8")).trim().split("\n")).toHaveLength(
       1
     );
@@ -362,6 +369,58 @@ WORKTREES
         instance: "changed-branch",
       },
     ]);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("unobserved backends, bad config and duplicate branch names remain distinct", async () => {
+  const f = await fixture(3);
+  try {
+    await writeFile(
+      join(f.root, "git"),
+      `#!/bin/sh
+cat <<'WORKTREES'
+worktree ${f.checkout(0)}
+branch refs/heads/main
+
+WORKTREES
+`,
+      { mode: 0o700 }
+    );
+    await writeFile(join(f.checkout(1), ".hack", "hack.config.json"), "{");
+    const entries = [
+      ["sample", "web", "running", "Up 7 seconds", 0],
+      ["sample", "jobs", "exited", "Exited (1) 2 seconds ago", 0],
+      ["sample--main", "web", "running", "Up 7 seconds", 0],
+      ["sample--feature-1", "web", "running", "Up 7 seconds", 1],
+    ] as const;
+    await writeFile(
+      f.reply,
+      entries
+        .map(([name, service, state, status, index]) =>
+          JSON.stringify({
+            ID: `${name}-${service}`,
+            State: state,
+            Status: status,
+            Labels: `com.docker.compose.project=${name},com.docker.compose.service=${service},com.docker.compose.project.working_dir=${join(f.checkout(index), ".hack")}`,
+          })
+        )
+        .join("\n")
+    );
+    const result = await f.run([]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("primary (base)");
+    expect(result.stdout).toContain("primary (main)");
+    expect(result.stdout).toContain(
+      "4 copies on compose · 1 exited (1) · 1 running · 2 unknown"
+    );
+    const native = await f.run([], true);
+    expect(native.code).toBe(0);
+    expect(native.stdout).toContain("3 copies on native · 3 unknown");
+    expect((await readFile(f.calls, "utf8")).trim().split("\n")).toHaveLength(
+      1
+    );
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

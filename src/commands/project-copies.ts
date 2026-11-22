@@ -43,6 +43,7 @@ type Copy = {
   readonly backend: "compose" | "native";
   readonly state: string;
   readonly address: string | null;
+  readonly authored: boolean;
 };
 
 type Observation = {
@@ -52,13 +53,19 @@ type Observation = {
 };
 
 function copyState(values: readonly string[]): string {
+  const failed = values.find(
+    (state) => state.startsWith("exited (") && state !== "exited (0)"
+  );
+  if (failed) {
+    return failed;
+  }
   for (const state of [
     "port-down",
     "unhealthy",
+    "restarting",
     "starting",
     "running",
     "healthy",
-    "restarting",
   ]) {
     if (values.includes(state)) {
       return state;
@@ -102,18 +109,15 @@ async function readNativeCopy(
     if (result.status === "pending") {
       return { ...unknownCopy, state: "starting" };
     }
-    if (
-      result.status === "not_started" ||
-      result.status === "runtime_not_running"
-    ) {
-      return { ...unknownCopy, state: "stopped" };
-    }
     if (result.status !== "observed") {
       return unknownCopy;
     }
-    const states = new Map(
-      result.items.map((item) => [item.service, psServiceState(item)])
-    );
+    const states = new Map<string, string>();
+    for (const item of result.items) {
+      const previous = states.get(item.service);
+      const state = psServiceState(item);
+      states.set(item.service, previous ? copyState([previous, state]) : state);
+    }
     if ("ports" in result) {
       for (const port of result.ports ?? []) {
         if (port.state === "down") {
@@ -128,25 +132,25 @@ async function readNativeCopy(
 }
 
 // Docker's inventory appends the health status to the uptime display.
+const INVENTORY_EXIT = /^Exited \((\d+)\)/;
 const INVENTORY_HEALTH = /\((?:health: )?(healthy|unhealthy|starting)\)$/;
 
-function readComposeCopy(
-  runtime: RuntimeProject | undefined,
-  available: boolean
-): Observation {
+function readComposeCopy(runtime: RuntimeProject | undefined): Observation {
   if (!runtime) {
-    return { ...unknownCopy, state: available ? "stopped" : "unknown" };
+    return unknownCopy;
   }
   const states = new Map(
     [...runtime.services.values()].map(({ service, containers }) => [
       service,
       copyState(
-        containers.map(({ state, status }) =>
-          psServiceState({
+        containers.map(({ state, status }) => {
+          const exit = INVENTORY_EXIT.exec(status)?.[1];
+          return psServiceState({
             state,
             health: INVENTORY_HEALTH.exec(status.trim())?.[1],
-          })
-        )
+            exitCode: exit === undefined ? undefined : Number(exit),
+          });
+        })
       ),
     ])
   );
@@ -163,25 +167,34 @@ const LIVE_STATES = new Set([
 
 function renderCopies(
   rows: readonly Copy[],
-  recoveries: readonly string[]
+  recoveries: readonly string[],
+  backend: "native" | "compose"
 ): void {
   const output = createTextOutput();
   const counts = new Map<string, number>();
   for (const row of rows) {
     counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
   }
+  const keys = rows.map(({ branch, checkout }) =>
+    JSON.stringify([branch, checkout.name])
+  );
+  const duplicates = new Set(
+    keys.filter((key, index) => keys.indexOf(key) !== index)
+  );
   output.table({
     columns: ["branch", "checkout", "state", "address"],
-    rows: rows.map((row) => [
+    rows: rows.map((row, index) => [
       row.branch ? { text: row.branch, role: "identity" } : null,
-      row.checkout.name,
+      duplicates.has(keys[index] ?? "")
+        ? `${row.checkout.name} (${row.instance ?? "base"})`
+        : row.checkout.name,
       row.state,
       row.address
         ? { text: row.address, role: "identity" }
-        : { text: "no address", role: "faint" },
+        : { text: row.authored ? "" : "no address", role: "faint" },
     ]),
     count: [
-      `${rows.length} ${rows.length === 1 ? "copy" : "copies"}`,
+      `${rows.length} ${rows.length === 1 ? "copy" : "copies"} on ${backend}`,
       ...[...counts].map(([state, count]) => `${count} ${state}`),
     ].join(" · "),
   });
@@ -252,8 +265,14 @@ async function composeIndex(inventory: readonly RuntimeProject[]) {
   return byDir;
 }
 
-function composeInstances(base: string, entries: readonly RuntimeProject[]) {
+function composeInstances(
+  base: string | null,
+  entries: readonly RuntimeProject[]
+) {
   const instances = new Map<string | null, RuntimeProject>();
+  if (base === null) {
+    return instances;
+  }
   for (const entry of entries) {
     if (entry.project === base) {
       instances.set(null, entry);
@@ -387,11 +406,13 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
         : null;
     const usage = await readBranchUsage({
       projectDir: checkout.projectDir,
-    }).catch(() => new Map());
+    }).catch(() => null);
     const dir = await canonical(checkout.projectDir);
     const base = native
       ? ""
-      : await resolveComposeProjectName({ project: context, cfg });
+      : await resolveComposeProjectName({ project: context, cfg }).catch(
+          () => null
+        );
     const containers =
       authored && inventory
         ? await authoredComposeInstances(
@@ -411,11 +432,17 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
       : [];
     const instances = [...new Set([automatic, ...containers.keys(), ...saved])];
     const observe = async (branch: string | null) => {
-      if (!family || family.kind === "none" || family.kind === "conflict") {
+      if (
+        !family ||
+        family.kind === "none" ||
+        family.kind === "conflict" ||
+        !usage ||
+        (!authored && (!cfg || cfg.parseError))
+      ) {
         return unknownCopy;
       }
       if (!native) {
-        return readComposeCopy(containers.get(branch), inventory?.ok === true);
+        return readComposeCopy(containers.get(branch));
       }
       return runtime
         ? await readNativeCopy(
@@ -441,7 +468,7 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
           const branch =
             instance === null
               ? gitBranch
-              : (usage.get(instance)?.name ??
+              : (usage?.get(instance)?.name ??
                 (instance === automatic ? gitBranch : null) ??
                 instance);
           const row: Copy = {
@@ -451,6 +478,7 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
             backend: native ? "native" : "compose",
             state: observed.state,
             address,
+            authored,
           };
           return { row, recovery: observed.recovery };
         })
@@ -465,9 +493,16 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
   }
 
   if (opts.json) {
-    emitCliResult({ result: okResult({ data: { project, copies: rows } }) });
+    emitCliResult({
+      result: okResult({
+        data: {
+          project,
+          copies: rows.map(({ authored: _authored, ...row }) => row),
+        },
+      }),
+    });
   } else {
-    renderCopies(rows, recoveries);
+    renderCopies(rows, recoveries, native ? "native" : "compose");
   }
   return 0;
 }

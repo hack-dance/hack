@@ -85,7 +85,8 @@ names the blocker and shows the command to run next.
 address followed by `+1` has one more configured address. Use `hack ps --wide`
 for all addresses, container names, exit codes and port details.
 Use `hack ps --copies` to list the project's checkouts and branch instances
-together. A copy whose runtime state cannot be confirmed shows `unknown`.
+together. The count names the backend that was observed. A copy whose runtime
+state cannot be confirmed on that backend shows `unknown`.
 Use `hack ps --copies --json` for the same inventory in structured form.
 
 To start this project at future logins, use `hack up -d --always` and install

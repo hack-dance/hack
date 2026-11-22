@@ -54,12 +54,11 @@ a key already removed by an older cleanup.
 
 Try v5 on a project whose application data you can restore and whose important
 workflows you can exercise. Wait if you need a stable-only release, depend on a
-retired integration, or cannot qualify recovery. Compose remains the ordinary
-CLI's default backend. Native is an opt-in beta for Apple Silicon macOS through
-`hack-next`, with a bounded command and configuration surface.
+retired integration, or cannot qualify recovery. Stable `hack` uses Compose.
 
-There is an important launcher exception: **`hack-next` defaults to native**.
-Use `HACK_RUNTIME_BACKEND=compose` explicitly for the first Compose trial. Keep
+Native is the planned default for stable v5. Today `hack-next` defaults to
+native on Apple Silicon macOS and uses Compose on supported Linux. On macOS,
+set `HACK_RUNTIME_BACKEND=compose` for the first Compose trial. Keep
 stable `hack` installed. See [Install](../install.md) and
 [native limits](../native/limits.md).
 
@@ -894,7 +893,7 @@ and follow its runtime-stop/quiescence procedure. Select Compose explicitly:
 HACK_RUNTIME_BACKEND=compose "$V5" up --path /absolute/project
 ```
 
-Do not just unset the selector on `hack-next`: that returns to its native default.
+On Apple Silicon macOS, unsetting the selector on `hack-next` returns to native.
 Native and Compose data are not automatically transferred. Native setup, retained
 data and the switch-back on the real machine are **to be confirmed in the dogfood run**.
 

@@ -25,7 +25,7 @@ C4Context
   Person(developer, "Developer")
   System_Ext(agent, "Agent harness", "Optional CLI client")
   System(hack, "Hack CLI", "Local project commands")
-  System_Ext(backend, "Backend", "Compose by default")
+  System_Ext(backend, "Backend", "Compose or native")
   Rel(developer, hack, "Runs commands")
   Rel(agent, hack, "Runs commands")
   Rel(hack, backend, "Runs services")
@@ -38,9 +38,10 @@ A **service** is one part of a project, such as a web app, API or database. Each
 instance runs its own copy of every service. Branch instances let you run
 different versions of one project side by side.
 
-A **backend** is what actually runs the containers. Compose is the default; it
-runs services with Docker Compose behind shared local routing for HTTPS. Native
-is an opt-in beta on Apple Silicon macOS. New projects use `.hack.local` names. Existing `.hack` names and custom
+A **backend** runs the containers. Stable `hack` uses Compose behind shared
+local routing for HTTPS. Native is a beta on Apple Silicon macOS. On either
+backend, a fresh `hack init` uses `.hack.local` unless you set a global
+`default_domain` or supply `--dev-host`. Existing `.hack` names and custom
 domains keep working. Use `hack open` to find the URL for your instance rather than
 guessing a port or hostname.
 
@@ -96,7 +97,7 @@ start with the project instead of relying on an extra terminal tab.
 
 In a linked git worktree, `hack up` defaults to a branch instance named after the
 git branch. The secret key is inherited from the primary checkout through the
-shared git directory. A detached worktree needs an explicit `--branch <name>`.
+shared git directory. A detached worktree needs an explicit `--branch <name>` unless you set `worktree.auto_branch=false` to select the base instance.
 The worktree also reads the primary checkout's local env overlays live, below its
 own local overrides; see [Environment and secrets](env.md#merge-rules).
 See [Worktrees and watchers](guides/development-runtime-safety.md) for shared files,
@@ -115,8 +116,8 @@ Use the [CLI overview](cli.md) to choose a command and the
 
 ## Backends
 
-Docker Compose is the default backend and the one every example on this page uses.
-v5 adds a native backend (beta) for Apple Silicon macOS, available through the
-`hack-next` channel, whose launcher selects native unless you set `HACK_RUNTIME_BACKEND=compose`, that runs explicitly prepared projects without Docker Desktop or OrbStack
-and supports a bounded command subset. See [Upgrade to v5](guides/upgrade-to-v5.md)
+The examples on this page use Compose. The current v5 prerelease launcher
+`hack-next` selects native on Apple Silicon macOS unless you set
+`HACK_RUNTIME_BACKEND=compose`. On supported Linux it selects Compose and
+refuses native. Native is the planned default for stable v5. Native runs prepared projects without Docker Desktop or OrbStack. See [Upgrade to v5](guides/upgrade-to-v5.md)
 and [the native backend overview](native/README.md).

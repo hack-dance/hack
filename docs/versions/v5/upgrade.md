@@ -80,7 +80,7 @@ offered as Run. Host changes and decisions still need review.
 5. **Review env migration before accepting it.** `up` can offer migration;
    sessions and some env commands can migrate without a prompt. Keep backups
    before any of them. If explicit migration is needed, use
-   `hack doctor --migrate-env-config` only after reading the
+   `hack env migrate --json` to preview, then `hack env migrate --apply` after reading the
    [migration and consent details](guides/upgrade-from-v4.md#4-what-changes-for-a-project).
    On next.16 or earlier, cleanup can remove a project key a legacy store names:
    never run that repair there without the private readable key copy. The fix in
@@ -90,7 +90,9 @@ offered as Run. Host changes and decisions still need review.
    hooks and a restart. Keep the backup until rollback and data recovery have
    been checked. See [known problems](guides/upgrade-from-v4.md#known-problems-and-the-dogfood-record).
 
-v5 keeps Compose as the default for the ordinary CLI. Retired features include the hosted
+Stable `hack` uses Compose. Native is the planned default for stable v5. The current
+`hack-next` defaults to native on Apple Silicon macOS and uses Compose on supported
+Linux. Retired features include the hosted
 account/team flows, dashboard and Hack Tickets; [Breaking changes from v4](guides/breaking-changes.md) lists every breaking
 change in one table, with the reason for each. The
 [release summary](../guides/v5-release-notes.md) has the detail. An older installed prerelease keeps its original behavior;

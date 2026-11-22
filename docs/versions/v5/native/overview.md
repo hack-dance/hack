@@ -1,8 +1,8 @@
 # Native backend (beta)
 
 The native backend is a second way for Hack to run your project. It is a beta for
-Apple Silicon Macs. Docker Compose is still the default, and nothing changes for a
-project unless you choose native for it.
+Apple Silicon Macs. Stable `hack` uses Compose. The current `hack-next`
+prerelease selects native on Apple Silicon macOS and Compose on Linux.
 
 Native setup and live log following are **under verification**. Real-VM
 acceptance remains pending; start with disposable projects and synthetic data.
@@ -30,7 +30,9 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 
 ## What it is not
 
-- **Not the default.** Compose runs your project unless you select native.
+- **Backend selection.** Set `HACK_RUNTIME_BACKEND=compose` to run project
+  commands through the macOS candidate on Compose. Native is the planned default
+  for stable v5.
 - **Not in stable Hack.** It ships only through the separate `hack-next` channel.
   The stable release archives and the Homebrew formula do not contain it.
 - **Not for every platform.** It runs on Apple Silicon macOS only. Intel Macs,
@@ -44,7 +46,9 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 - **Not a sandbox.** It is a way to run a Compose file without a Docker app. It
   refuses some risky container settings (see below), but it is not a security
   boundary: do not rely on it to contain a project or a coding agent.
-- **Not a wall between projects.** Projects on native share the VM's resources.
+- **Shared resources.** Projects the pool was started with share its VM resources.
+  `hack up` refuses an unshared root while the pool is running. Stop the pool
+  and add the root before the next boot.
 
 ## Control and traffic
 
@@ -124,8 +128,8 @@ and synthetic data.
 Stay on Compose if you need every Compose feature, you work on Linux or an Intel
 Mac, or the project holds data you cannot lose.
 
-Compose remains the default; a native trial requires a supported Mac, explicit
-beta opt-in, supported workload features and a separately prepared runtime.
+A native trial requires a supported Mac, supported workload features and a
+separately prepared runtime.
 
 ```mermaid
 ---

@@ -69,6 +69,11 @@ hack ps
 hack open
 ```
 
+On Compose, a successful detached `hack up` ends with the primary address,
+startup time, and count of configured routes for running services whose HTTP
+readiness has yet to be checked. The command makes no HTTP request to warm the
+routes. A successful `hack down` ends with a stopped line and the elapsed time.
+
 If `hack up` stops before the project is ready, look for the `!` line. It
 names the blocker and shows the command to run next.
 

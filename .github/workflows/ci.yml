@@ -909,7 +909,13 @@ jobs:
           HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
           HACK_TEST_DRAFT: ${{ needs.changes.outputs.draft }}
           HACK_TEST_DEFER_MACOS: ${{ needs.changes.outputs.defer_macos }}
-        run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+        # Only a scheduled Linux shard 8 can take over this fixed list. Its
+        # result is required by the test fan-in as part of the shard matrix.
+        run: >-
+          bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD"
+          --layout="$HACK_TEST_LAYOUT"
+          --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+          ${{ runner.os == 'Linux' && contains(fromJSON(needs.changes.outputs.test_shards), 8) && '--route-symlink-temp=true' || '' }}
       - name: Tests (symlinked TMPDIR)
         if: matrix.shard == 8 && runner.os == 'Linux'
         shell: bash

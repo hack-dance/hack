@@ -45,6 +45,38 @@ test("the fixed list names existing tracked tests and runs exactly those files",
   expect(result.stdout.toString().trim().split("\n").sort()).toEqual(files);
 });
 
+test("Linux routing leaves the other files in place and keeps a normal fallback", () => {
+  const selection = JSON.stringify([
+    "tests/ci-symlink-temp.test.ts",
+    "tests/daemon-systemd.test.ts",
+  ]);
+  const plan = (route: boolean) => {
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "scripts/test-shard.ts",
+        "plan",
+        "--shard=1/1",
+        "--layout=full",
+        ...(route ? ["--route-symlink-temp=true"] : []),
+      ],
+      {
+        cwd: repository,
+        env: { ...isolatedShardEnv(), HACK_TEST_SELECTION: selection },
+        timeout: 5000,
+      }
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    return result.stdout.toString().trim().split("\n");
+  };
+
+  const fallback = JSON.parse(selection);
+  expect(plan(false)).toEqual(fallback);
+  expect(plan(true)).toEqual(
+    process.platform === "linux" ? ["tests/ci-symlink-temp.test.ts"] : fallback
+  );
+});
+
 test("the Linux variant runs the fixed list behind a real temp symlink and cleans up", async () => {
   const workflow = Bun.YAML.parse(
     await Bun.file(
@@ -69,6 +101,9 @@ test("the Linux variant runs the fixed list behind a real temp symlink and clean
     "${{ needs.changes.outputs.test_files }}"
   );
   expect(normal?.run).not.toContain("TMPDIR");
+  expect(normal?.run).toContain(
+    "runner.os == 'Linux' && contains(fromJSON(needs.changes.outputs.test_shards), 8) && '--route-symlink-temp=true'"
+  );
   const step = steps?.find(
     (entry) => entry.name === "Tests (symlinked TMPDIR)"
   );

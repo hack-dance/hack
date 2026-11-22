@@ -528,3 +528,20 @@ test("a mapping that differs in more than its native home keeps the generic refu
     "Native project run mapping is unsafe, changed, or owned by another run; inspect native state before recovery."
   );
 });
+
+test("releasing with no mapping for the instance is a closed refusal, not a filesystem error", async () => {
+  const f = await fixture();
+  // No mapping storage at all yet.
+  await expectClosedRefusal(
+    release({ scope: f.b, expectSelection: "e".repeat(64) }),
+    "No native run mapping to release for this instance"
+  );
+  // Storage present, the mapping released or never written.
+  await startInHomeA(f, true);
+  const selection = (await f.inspect()).selectionSha256 ?? "";
+  await release({ scope: f.b, expectSelection: selection });
+  await expectClosedRefusal(
+    release({ scope: f.b, expectSelection: selection }),
+    "No native run mapping to release for this instance"
+  );
+});

@@ -1721,6 +1721,23 @@ async function downHooksSettled(path: string, run: string): Promise<void> {
 }
 
 /**
+ * The selection a release acts on. No mapping (or no mapping storage) for this
+ * instance is a closed refusal, never a raw filesystem error.
+ */
+async function selectForRelease(scope: NativeProjectRunScope) {
+  try {
+    return await foreignHomeSelection({ scope });
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      throw new ClosedCliError(
+        "No native run mapping to release for this instance; nothing was changed. Run hack doctor --native-run-mapping inspect to see this instance's mapping."
+      );
+    }
+    throw error;
+  }
+}
+
+/**
  * Release a mapping that another native home left after a clean stop, so this home
  * can start the instance afresh. Ownership is proved, never assumed: the stored scope
  * differs only in its native home, that home is still the recorded directory, and
@@ -1739,7 +1756,7 @@ export async function releaseNativeProjectRunForeignHome(opts: {
   if (!HEX64.test(opts.expectSelection)) {
     throw refused();
   }
-  const initial = await foreignHomeSelection({ scope: opts.scope });
+  const initial = await selectForRelease(opts.scope);
   if (initial === undefined) {
     throw refused();
   }
@@ -1772,7 +1789,7 @@ export async function releaseNativeProjectRunForeignHome(opts: {
         run: initial.inspection.run,
         attempt,
         action: async () => {
-          const selected = await foreignHomeSelection({ scope: opts.scope });
+          const selected = await selectForRelease(opts.scope);
           if (
             selected === undefined ||
             selected.inspection.selectionSha256 !== opts.expectSelection ||
@@ -1870,7 +1887,7 @@ async function releaseGoneHome(opts: {
     await mkdir(initial.p.lock, { mode: 0o700 });
     const mappingHeld = await heldDirectory(initial.p.lock);
     try {
-      const selected = await foreignHomeSelection({ scope: opts.scope });
+      const selected = await selectForRelease(opts.scope);
       if (
         selected === undefined ||
         selected.inspection.owner !== "gone" ||

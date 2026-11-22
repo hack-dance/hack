@@ -1,5 +1,5 @@
-import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readdir, realpath } from "node:fs/promises";
+import { relative, resolve } from "node:path";
 import { nativeAuthoredProjectPs } from "../backends/native-authored-project-observe.ts";
 import { nativeProjectPs } from "../backends/native-project-observe.ts";
 import { isNativeForeignHomeRefusal } from "../backends/native-project-run.ts";
@@ -16,6 +16,8 @@ import { emitCliResult, HackCliError, okResult } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGitCurrentBranch } from "../lib/git-worktree.ts";
 import { isRecord } from "../lib/guards.ts";
+import { expectedNativeComposeProject } from "../lib/native-compose-generation.ts";
+import { jsonPrivate } from "../lib/native-compose-private-state.ts";
 import { selectNativeComposeProject } from "../lib/native-compose-selection.ts";
 import { scopedHackCommand } from "../lib/printed-shell-command.ts";
 import {
@@ -255,6 +257,58 @@ function composeInstances(base: string, entries: readonly RuntimeProject[]) {
   return instances;
 }
 
+const INSTANCE_DIGEST = /^[a-f0-9]{64}$/;
+const GENERATION_DIR = /^generations\/[a-f0-9]+$/;
+
+async function authoredComposeInstances(
+  checkout: BranchInstanceCheckout,
+  inventory: readonly RuntimeProject[]
+): Promise<Map<string | null, RuntimeProject>> {
+  const store = resolve(checkout.projectDir, ".internal/native-compose");
+  const directories = await readdir(store, { withFileTypes: true }).catch(
+    () => []
+  );
+  const instances = new Map<string | null, RuntimeProject>();
+  for (const directory of directories) {
+    if (!(directory.isDirectory() && INSTANCE_DIGEST.test(directory.name))) {
+      continue;
+    }
+    const root = resolve(store, directory.name);
+    const receipt = await jsonPrivate(resolve(root, "receipt.json")).catch(
+      () => null
+    );
+    const identity = isRecord(receipt) ? receipt.identity : null;
+    if (!isRecord(identity)) {
+      continue;
+    }
+    const instance = identity.instance;
+    if (instance !== null && typeof instance !== "string") {
+      continue;
+    }
+    const expected = await expectedNativeComposeProject({
+      projectRoot: checkout.root,
+      instance,
+    }).catch(() => null);
+    if (
+      expected !== `hack-nc-${directory.name.slice(0, 32)}` ||
+      expected !== identity.composeProject ||
+      identity.checkoutRoot !== checkout.root
+    ) {
+      continue;
+    }
+    const entry = inventory.find(
+      (item) =>
+        item.project === expected &&
+        item.workingDir !== null &&
+        GENERATION_DIR.test(relative(root, item.workingDir))
+    );
+    if (entry) {
+      instances.set(instance, entry);
+    }
+  }
+  return instances;
+}
+
 async function addressFor(
   opts: CopiesOptions,
   context: ProjectContext,
@@ -321,10 +375,16 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
     const base = native
       ? ""
       : await resolveComposeProjectName({ project: context, cfg });
-    const containers = composeInstances(base, [
-      ...(byDir.get(root) ?? []),
-      ...(byDir.get(dir) ?? []),
-    ]);
+    const containers =
+      authored && inventory
+        ? await authoredComposeInstances(
+            { ...checkout, root, projectDir: dir },
+            inventory.runtime
+          )
+        : composeInstances(base, [
+            ...(byDir.get(root) ?? []),
+            ...(byDir.get(dir) ?? []),
+          ]);
     const saved = native
       ? await listNativeCopyInstances({
           checkout,

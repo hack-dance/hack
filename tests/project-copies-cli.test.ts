@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -272,6 +274,58 @@ process.exit(1);
     expect(inFlight).toBe(0);
     expect(peak).toBeLessThanOrEqual(4);
     expect(peak).toBeGreaterThan(1);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("authored Compose copies match the generated base and branch inventory", async () => {
+  const f = await fixture(1);
+  try {
+    const root = f.checkout(0);
+    const dir = join(root, ".hack");
+    await rm(join(dir, "hack.config.json"));
+    await rm(join(dir, "docker-compose.yml"));
+    await writeFile(join(dir, "hack.project.json"), "{}");
+    const { dev, ino } = await stat(root);
+    const inventory: string[] = [];
+    for (const instance of [null, "feature/example"]) {
+      const instanceId = createHash("sha256")
+        .update(JSON.stringify([root, dev, ino, instance]))
+        .digest("hex");
+      const composeProject = `hack-nc-${instanceId.slice(0, 32)}`;
+      const store = join(dir, ".internal", "native-compose", instanceId);
+      const generation = join(store, "generations", "a".repeat(32));
+      await mkdir(generation, { recursive: true });
+      await writeFile(
+        join(store, "receipt.json"),
+        JSON.stringify({
+          identity: { checkoutRoot: root, instance, composeProject },
+        }),
+        { mode: 0o600 }
+      );
+      inventory.push(
+        JSON.stringify({
+          ID: instance ?? "base",
+          State: "running",
+          Labels: [
+            `com.docker.compose.project=${composeProject}`,
+            "com.docker.compose.service=web",
+            `com.docker.compose.project.working_dir=${generation}`,
+          ].join(","),
+        })
+      );
+    }
+    await writeFile(f.reply, inventory.join("\n"));
+    const result = await f.run([]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("feature/example");
+    expect(result.stdout).toContain("2 copies · 2 running");
+    expect(result.stdout).not.toContain("hack-nc-");
+    expect((await readFile(f.calls, "utf8")).trim().split("\n")).toHaveLength(
+      1
+    );
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

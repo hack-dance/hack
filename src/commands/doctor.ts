@@ -891,6 +891,7 @@ async function runDoctorAudit(
   results.push(
     ...(await checkTempAliasesOnMac({
       progress: s,
+      machine: args.options.machine === true,
       fix: args.options.fix === true,
       includeUnverifiedVolumes,
     }))
@@ -1615,6 +1616,7 @@ async function handleNativeDoctor(opts: {
   results.push(
     ...(await checkTempAliasesOnMac({
       progress,
+      machine: opts.machine,
       fix: opts.fix,
       includeUnverifiedVolumes: opts.includeUnverifiedVolumes,
       runtime: opts.runtime,
@@ -1766,11 +1768,12 @@ async function appendNativeMachineChecks(opts: {
  */
 async function checkTempAliasesOnMac(opts: {
   readonly progress: Parameters<typeof runCheck>[0];
+  readonly machine: boolean;
   readonly fix: boolean;
   readonly includeUnverifiedVolumes: boolean;
   readonly runtime?: NativeRuntimeSelection;
 }): Promise<TimedCheckResult[]> {
-  if (!isMac()) {
+  if (opts.machine || !isMac()) {
     return [];
   }
   let runtime: NativeRuntimeSelection;

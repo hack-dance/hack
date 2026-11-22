@@ -68,6 +68,12 @@ test("native Doctor reports unknown owner without consulting Docker-era CA state
       status: "warn",
       hackLocalRoute: { status: "refused", reason: "relay-not-verified" },
     });
+    checks.push({
+      id: "native temporary aliases",
+      status: "warn",
+      detail: "Temporary alias scan unavailable.",
+      scope: "machine",
+    });
   }
   checks.push({
     id: "native pool idle",

@@ -89,11 +89,7 @@ test.skipIf(process.platform !== "linux")(
     const root = await mkdtemp(join(tmpdir(), "checkout-owner-text-"));
     try {
       const compose = join(root, "compose.yml");
-      const files = [
-        "a'file",
-        "bad\u001bfile",
-        ...Array.from({ length: 16 }, (_, i) => `file-${i}`),
-      ];
+      const files = Array.from({ length: 16 }, (_, i) => `file-${i}`);
       for (const file of files) {
         await writeFile(join(root, file), "");
       }
@@ -115,9 +111,39 @@ test.skipIf(process.platform !== "linux")(
       expect(result.message).toContain("(possible services: writer)");
       expect(result.message).not.toContain("(possible services: reader");
       expect(result.message).not.toContain("services: override");
-      expect(result.message).toContain("only changes the listed paths");
+      expect(result.message).toContain("only changes the paths it names");
       expect(result.message).toContain('sudo chown -h -- "$(id -u):$(id -g)"');
-      expect(result.message).not.toContain("\u001b");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+);
+
+test.skipIf(process.platform !== "linux")(
+  "control characters are displayed safely and omitted from the quoted repair",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "checkout-owner-quote-"));
+    try {
+      const composeFile = join(root, "compose.yml");
+      for (const path of [
+        composeFile,
+        join(root, "a'file"),
+        join(root, "bad\u001bfile"),
+      ]) {
+        await writeFile(path, "");
+      }
+      const { message } = await checkRootOwnedCheckout(
+        { projectRoot: root, composeFile },
+        process.getuid?.() ?? -1
+      );
+      expect(message).toContain("bad\\u001bfile");
+      expect(message).toContain("omits paths with terminal control characters");
+      const repair = message
+        .split("\n")
+        .find((line) => line.includes("sudo chown"));
+      expect(repair).toContain("a'\\''file");
+      expect(repair).not.toContain("bad");
+      expect(message).not.toContain("\u001b");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

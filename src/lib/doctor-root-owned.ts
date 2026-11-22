@@ -132,9 +132,12 @@ export async function checkRootOwnedCheckout(
     message: [
       `Root-owned checkout paths: ${paths.join(", ")}.`,
       observed.incomplete
-        ? "This list may be partial. The command only changes the listed paths. Rerun Doctor to find more."
+        ? "This list may be partial. The command only changes the paths it names. Rerun Doctor to find more."
         : "",
       `Set user: "${process.getuid?.()}:${process.getgid?.()}" in the Compose service definition.`,
+      safePaths.length < paths.length
+        ? "The repair command omits paths with terminal control characters. Review those paths separately."
+        : "",
       safePaths.length
         ? `To return these paths to your user: sudo chown -h -- "$(id -u):$(id -g)" ${safePaths.map(quoteShellWord).join(" ")}`
         : "",

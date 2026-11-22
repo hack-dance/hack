@@ -77,6 +77,7 @@ test("the six --use entry points deliver the invocation target without saving it
         '    printf "%s\\n" api postgres worker',
         '    case " $* " in *" --profile maintenance "*) printf "%s\\n" migrate ;; esac ;;',
         '  *" stop "*) printf "%s\\n" "$*" >> "$TEST_DELIVERY" ;;',
+        '  *" exec "*) test -n "${DB_HOST:-}" || exit 1; printf "%s\\n" "$DB_HOST" ;;',
         '  *" down "*) test -n "${DB_HOST:-}" || exit 1; printf "down=%s\\n" "$DB_HOST" >> "$TEST_DELIVERY"; rm -f "$TEST_STACK_STATE" ;;',
         '  *" --profile * "*" ps "*) test -n "${DB_HOST:-}" && test "${DOCKER_CONFIG:-}" != /project-config && test "${LD_LIBRARY_PATH:-}" != /project-loader || exit 1; if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" ps "*) if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
@@ -249,6 +250,9 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(withUp.stderr.match(/db → live/g)).toHaveLength(1);
     expect(await Bun.file(log).text()).toContain(
       "DB_HOST=host.example.test:5432"
+    );
+    expect(ok(["exec", "api", "true"]).stdout).toContain(
+      "live.example.test:5432"
     );
     expect(
       await Bun.file(join(stack, ".hack", ".internal", "use.json")).json()

@@ -9418,28 +9418,15 @@ async function runDownCommand({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
-  const defaults = cfg.prerequisites?.config?.selected ?? [];
+  const remoteChoices = await resolveRuntimeRemoteChoices({
+    project,
+    cfg,
+    composeProject: lifecycleComposeProject,
+  });
   let remoteEnv:
     | Awaited<ReturnType<typeof resolveComposeEnvOverrides>>
     | undefined;
-  if (defaults.length) {
-    const runtime = await readProjectRuntimeStateEntry({
-      projectDir: project.projectDir,
-      composeProject: lifecycleComposeProject,
-    });
-    const recorded = runtime?.remoteTargets
-      ? Object.fromEntries(
-          defaults.flatMap(({ remote, targets }) => {
-            const name = runtime.remoteTargets?.[remote];
-            return name && targets.has(name) ? [[remote, name]] : [];
-          })
-        )
-      : undefined;
-    const remoteChoices = resolveRemoteChoices(
-      defaults,
-      recorded ?? (await readRemoteChoices(project.projectDir)),
-      {}
-    );
+  if (remoteChoices.length) {
     const services = await readIncludedComposeServiceNames(project.composeFile);
     remoteEnv = await resolveComposeEnvOverrides({
       project,
@@ -11212,6 +11199,31 @@ async function runRestartCommand({
   });
 }
 
+/** Restore target names for commands against existing containers without prompting. */
+async function resolveRuntimeRemoteChoices(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly composeProject: string;
+}): Promise<readonly EffectiveRemote[]> {
+  const defaults = opts.cfg.prerequisites?.config?.selected ?? [];
+  if (!defaults.length) {
+    return [];
+  }
+  const runtime = await readProjectRuntimeStateEntry({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProject,
+  });
+  const recorded = runtime?.remoteTargets
+    ? Object.fromEntries(
+        defaults.flatMap(({ remote, targets }) => {
+          const name = runtime.remoteTargets?.[remote];
+          return name && targets.has(name) ? [[remote, name]] : [];
+        })
+      )
+    : await readRemoteChoices(opts.project.projectDir);
+  return resolveRemoteChoices(defaults, recorded, {});
+}
+
 /**
  * The overlay a command against a running instance uses: an explicit
  * `--env`, else the instance's recorded running selection (base included),
@@ -12353,7 +12365,13 @@ async function handleExec({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
+  const remoteChoices = await resolveRuntimeRemoteChoices({
+    project,
+    cfg,
+    composeProject: lifecycleComposeProject,
+  });
   const envOverrides = await resolveComposeEnvOverrides({
+    remoteChoices,
     project,
     projectName,
     targetServices: [service],

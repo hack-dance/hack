@@ -36,14 +36,15 @@ import {
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import {
+  selectLifecycleAddress,
+  writeLifecycleStopped,
+} from "../ui/lifecycle-closing.ts";
+import {
   writeStartBlocker,
   writeUpHookBlocker,
 } from "../ui/start-refusal-output.ts";
 import { createTextOutput } from "../ui/text-output.ts";
-import {
-  writeComposeStarted,
-  writeComposeStopped,
-} from "./compose-lifecycle-closing.ts";
+import { writeComposeStarted } from "./compose-lifecycle-closing.ts";
 import {
   createComposeUpProgress,
   type HookCompletion,
@@ -6910,11 +6911,22 @@ async function handleNativeUp({
       await envFingerprints.record(
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
-    onReady: (services) => {
+    onReady: (services, addresses) => {
+      const primaryHost = branch
+        ? applyBranchToHost({
+            branch,
+            host: devHost,
+            baseHosts: resolveProjectRouteBaseHosts({
+              devHost,
+              aliasHost: resolveBranchAliasHost({ devHost, cfg }),
+            }),
+          })
+        : devHost;
       nativeDetachedUpReady({
         project: projectName,
         branch,
         composeProject,
+        address: selectLifecycleAddress(addresses, primaryHost),
         ...services,
       });
     },
@@ -7236,9 +7248,9 @@ async function restartNativeImageProject({
         verifiedBuildImages,
         // The restart's own bookkeeping first, then the startup's ready
         // report: a detached owner (`restart --json`) tells its launcher here.
-        onReady: async (services) => {
+        onReady: async (services, addresses) => {
           await onReady();
-          await startup.onReady?.(services);
+          await startup.onReady?.(services, addresses);
         },
         signal,
         onStopSignals,
@@ -8760,6 +8772,7 @@ async function handleDownUnlocked({
   readonly invoke?: typeof invokeNativeRuntime;
   readonly flagTimeoutSeconds?: number;
 }): Promise<number> {
+  const startedAt = performance.now();
   prepareLifecycleProgress({
     action: "down",
     progress: args.options.progress,
@@ -8840,11 +8853,9 @@ async function handleDownUnlocked({
     if (args.options.json) {
       process.stdout.write(`${JSON.stringify(result)}\n`);
     } else {
-      logger.info({
-        message:
-          result.status === "stopped"
-            ? "Native project stopped; data retained."
-            : "Native project is not started.",
+      writeLifecycleStopped(performance.now() - startedAt, {
+        retained: result.status === "stopped",
+        unchanged: result.status === "not_started",
       });
       if (result.runtimeStarted) {
         logger.info({ message: NATIVE_RECOVERY_RUNTIME_STARTED_NOTE });
@@ -9276,7 +9287,7 @@ async function runDownCommand({
       return 1;
     }
     if (afterCode === 0) {
-      writeComposeStopped(performance.now() - startedAt);
+      writeLifecycleStopped(performance.now() - startedAt);
     }
     return afterCode;
   }

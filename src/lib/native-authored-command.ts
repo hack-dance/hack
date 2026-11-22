@@ -47,6 +47,7 @@ import {
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { display } from "../ui/display.ts";
+import { writeLifecycleStopped } from "../ui/lifecycle-closing.ts";
 import { logger } from "../ui/logger.ts";
 import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
@@ -632,6 +633,7 @@ async function runRecovery(input: LifecycleInput): Promise<number> {
 }
 
 async function runStop(input: LifecycleInput): Promise<number> {
+  const startedAt = performance.now();
   try {
     await (input.seams.stop ?? stopNativeAuthoredProject)({
       scope: input.scope,
@@ -647,9 +649,7 @@ async function runStop(input: LifecycleInput): Promise<number> {
     }
     return await runRecovery(input);
   }
-  logger.info({
-    message: "Selected native project stopped; persistent data is retained.",
-  });
+  writeLifecycleStopped(performance.now() - startedAt, { retained: true });
   return 0;
 }
 

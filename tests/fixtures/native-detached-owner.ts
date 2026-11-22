@@ -392,7 +392,7 @@ if (role === "channel-holder") {
     process.exitCode = await startNativeDetachedUp({
       cwd: root,
       args: [],
-      json: true,
+      json: !process.env.FIXTURE_TEXT_OUTPUT,
       ...(mode === "restart-action" ? { action: "restart" as const } : {}),
       invocation: [
         process.execPath,
@@ -618,6 +618,7 @@ if (role === "channel-holder") {
           project: "fixture",
           branch: null,
           composeProject: "fixture",
+          address: process.env.FIXTURE_READY_ADDRESS,
           started: ["web"],
           completed: ["seed"],
         });

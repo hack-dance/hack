@@ -9,8 +9,17 @@ import {
 import { setNoInteractiveFlag } from "../lib/interactivity.ts";
 import { closeLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { reserveStdoutForMachineOutput } from "../lib/machine-stdout.ts";
+import {
+  MissingProjectContextError,
+  UnregisteredProjectError,
+} from "../lib/missing-project-error.ts";
 import { nativeDetachedUpFailure } from "../lib/native-detached-up.ts";
+import { canPrintPathSelector } from "../lib/printed-shell-command.ts";
 import { logger } from "../ui/logger.ts";
+import {
+  startRefusalBlocker,
+  writeStartBlocker,
+} from "../ui/start-refusal-output.ts";
 import {
   type AnyCommandSpec,
   CliUsageError,
@@ -26,7 +35,11 @@ import {
 import { resolveRequestedEnvName } from "./env-selection.ts";
 import { printHelpForPath } from "./help.ts";
 import { optEnv, optProject } from "./options.ts";
-import { parseProjectSelectorOption } from "./project-selector.ts";
+import {
+  parseProjectSelectorOption,
+  UnknownProjectUsageError,
+  unknownProjectMessage,
+} from "./project-selector.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -45,6 +58,9 @@ export async function runCli(argv: readonly string[]): Promise<number> {
   }
   // Set once argument parsing succeeded and the handler owns the request.
   let handlerPath: readonly string[] | undefined;
+  let startSelector:
+    | { readonly path?: string; readonly project?: string }
+    | undefined;
   try {
     const cli = CLI_SPEC;
     const allowUnknownOptions = shouldAllowUnknownOptions({
@@ -116,6 +132,12 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     });
 
     handlerPath = resolved.path.map((command) => command.name);
+    if (handlerPath[0] === "up") {
+      startSelector = {
+        path: typeof opts.path === "string" ? opts.path : undefined,
+        project: typeof opts.project === "string" ? opts.project : undefined,
+      };
+    }
     return await resolved.command.handler({
       ctx: { cwd: process.cwd(), cli },
       args: {
@@ -136,6 +158,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       error,
       jsonRequested,
       handlerPath,
+      startSelector,
       logFollowJson:
         jsonRequested &&
         process.env.HACK_RUNTIME_BACKEND === "native" &&
@@ -208,6 +231,10 @@ export async function handleRunCliError(opts: {
   readonly jsonRequested: boolean;
   readonly handlerPath?: readonly string[];
   readonly logFollowJson?: boolean;
+  readonly startSelector?: {
+    readonly path?: string;
+    readonly project?: string;
+  };
 }): Promise<number> {
   const { error, jsonRequested } = opts;
   if (opts.logFollowJson) {
@@ -232,6 +259,17 @@ export async function handleRunCliError(opts: {
       });
       return 1;
     }
+    if (
+      opts.startSelector?.project &&
+      error instanceof UnknownProjectUsageError
+    ) {
+      writeStartBlocker({
+        thing: "project",
+        problem: "selected project not registered",
+        which: error.message,
+      });
+      return 1;
+    }
     // Do not use the UI logger here: clack writes errors to stdout.
     process.stderr.write(`ERROR: ${error.message}\n`);
     if (opts.handlerPath === undefined) {
@@ -248,7 +286,11 @@ export async function handleRunCliError(opts: {
   }
 
   if (error instanceof HackCliError) {
-    logger.error({ message: `${error.code}: ${error.message}` });
+    if (opts.handlerPath?.[0] === "up") {
+      writeUpRefusal(error, opts.startSelector);
+    } else {
+      logger.error({ message: `${error.code}: ${error.message}` });
+    }
     if (error.detail !== undefined) {
       // Loaded only for a detailed error, off the ordinary CLI start path.
       const { nativeComposeEffectRefusalSummary } = await import(
@@ -278,6 +320,69 @@ export async function handleRunCliError(opts: {
     logger.error({ message: error.stack });
   }
   return 1;
+}
+
+const REFUSAL_LINE_BREAK = /\r\n|[\r\n]/;
+
+function writeUpRefusal(
+  error: HackCliError,
+  selection: Parameters<typeof selectedProjectBlocker>[1]
+): void {
+  const blocker =
+    error.startBlocker ?? selectedProjectBlocker(error, selection);
+  if (blocker) {
+    writeStartBlocker(blocker);
+    return;
+  }
+  const guidance = startRefusalBlocker(error.code);
+  if (!guidance) {
+    logger.error({ message: `${error.code}: ${error.message}` });
+    return;
+  }
+  const [firstLine, ...remaining] = error.message.split(REFUSAL_LINE_BREAK);
+  writeStartBlocker({
+    ...guidance,
+    problem: `${error.code}: ${firstLine ?? ""}`,
+  });
+  if (remaining.length > 0) {
+    logger.error({ message: remaining.join("\n") });
+  }
+}
+
+function selectedProjectBlocker(
+  error: HackCliError,
+  selection: { readonly path?: string; readonly project?: string } | undefined
+) {
+  if (
+    error instanceof UnregisteredProjectError &&
+    selection?.project !== undefined
+  ) {
+    const selector = parseProjectSelectorOption({
+      projectOpt: selection.project,
+    });
+    if (!selector.canonical) {
+      return { thing: "project", problem: unknownProjectMessage(selector) };
+    }
+    return {
+      thing: "project",
+      problem:
+        "selected project not registered · use a registered project name",
+      which: JSON.stringify(selector.name),
+    };
+  }
+  if (
+    error instanceof MissingProjectContextError &&
+    selection?.path !== undefined
+  ) {
+    return {
+      thing: "project",
+      problem:
+        "no project found at the selected path · use a configured project path",
+      which: canPrintPathSelector(selection.path)
+        ? JSON.stringify(selection.path)
+        : undefined,
+    };
+  }
 }
 
 /** One-line pointer to a command's help, printed after a handler refusal. */

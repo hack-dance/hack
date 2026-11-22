@@ -1584,7 +1584,9 @@ test(
     });
     const result = await cli({ fixture: f, args: ["down", "--recover"] });
     expect(result.code).toBe(0);
-    expect(result.output).toContain("Native project stopped; data retained.");
+    expect(result.output).toMatch(
+      /✓ services {2}stopped · data retained · \d+\.\ds/
+    );
     expect(result.output).toContain(
       "The native runtime was started to recover this run and is still running; run `runtime down` to stop it."
     );

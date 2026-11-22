@@ -133,6 +133,8 @@ import {
 } from "../lib/project-env-key-override.ts";
 import {
   applyRemoteEnv,
+  CONTAINER_ONLY_HOSTS,
+  HOST_LOOPBACK,
   prepareProjectRemoteChoices,
 } from "../lib/project-remote-selection.ts";
 import {
@@ -222,8 +224,6 @@ const DEFAULT_ENCRYPTED_FILE_KEY_PATH = "~/.hack/secrets-file.key";
 const LEGACY_RELATIVE_ENCRYPTED_FILE_STORE_PATH = ".hack-secrets.enc.json";
 const LEGACY_RELATIVE_ENCRYPTED_FILE_KEY_PATH = ".hack-secrets-file.key";
 const HOST_ENV_TARGET_VALUES = ["host", "compose"] as const;
-const HOST_LOOPBACK = "127.0.0.1";
-const CONTAINER_ONLY_HOSTS = new Set(["host.docker.internal", "host-gateway"]);
 const HOST_KEY_PATTERN = /(?:^|_)?(HOST|HOSTNAME)$/;
 const URL_LIKE_KEY_PATTERN = /(?:^DATABASE_URL$|(?:^|_)(URL|URI|DSN)$)/;
 const URL_LIKE_VALUE_PATTERN =

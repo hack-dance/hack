@@ -4174,6 +4174,33 @@ async function refuseNativeRemoteCommand(
   });
 }
 
+async function stopInactiveRemoteServices(
+  opts: Parameters<typeof buildComposeArgs>[0] & {
+    readonly choices?: readonly EffectiveRemote[];
+    readonly timeoutMs: number;
+  }
+): Promise<void> {
+  const inactive = inactiveRemoteServices(opts.choices);
+  if (!inactive.length) {
+    return;
+  }
+  const stopped = await exec(
+    [...buildComposeArgs({ ...opts, profiles: ["*"] }), "stop", ...inactive],
+    {
+      cwd: opts.cwd,
+      env: opts.env,
+      timeoutMs: opts.timeoutMs,
+      forwardSignals: true,
+    }
+  );
+  if (stopped.exitCode !== 0) {
+    throw new HackCliError({
+      code: "E_COMPOSE_FAILED",
+      message: "Could not stop services for unselected remote targets.",
+    });
+  }
+}
+
 async function resolveRemoteStartupServices(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly composeProjectName: string | null;
@@ -8433,33 +8460,14 @@ async function runUpCommand({
       return bootstrapCode;
     }
     const upPhase = trackComposeStartupPhase();
-    const inactive = inactiveRemoteServices(remoteChoices);
-    if (inactive.length) {
-      const stopped = await exec(
-        [
-          ...buildComposeArgs({
-            composeFiles: composeFilesWithEnv,
-            composeProject: composeProjectName,
-            profiles: ["*"],
-            cwd: dirname(project.composeFile),
-          }),
-          "stop",
-          ...inactive,
-        ],
-        {
-          cwd: dirname(project.composeFile),
-          env: envOverrides.env,
-          timeoutMs: startupTimeoutMs,
-          forwardSignals: true,
-        }
-      );
-      if (stopped.exitCode !== 0) {
-        throw new HackCliError({
-          code: "E_COMPOSE_FAILED",
-          message: "Could not stop services for unselected remote targets.",
-        });
-      }
-    }
+    await stopInactiveRemoteServices({
+      choices: remoteChoices,
+      composeFiles: composeFilesWithEnv,
+      composeProject: composeProjectName,
+      cwd: dirname(project.composeFile),
+      env: envOverrides.env,
+      timeoutMs: startupTimeoutMs,
+    });
     containerStartBegun = true;
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,
@@ -10120,6 +10128,14 @@ async function runRestartUpPhase(opts: {
       detach: opts.detach === true,
     });
     const upPhase = trackComposeStartupPhase();
+    await stopInactiveRemoteServices({
+      choices: opts.remoteChoices,
+      composeFiles: composeFilesWithEnv,
+      composeProject: opts.composeProjectName,
+      cwd: dirname(opts.project.composeFile),
+      env: envOverrides.env,
+      timeoutMs: opts.budgets.startupTimeoutMs,
+    });
     containerStartBegun = true;
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,

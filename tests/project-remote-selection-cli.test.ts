@@ -51,6 +51,7 @@ test("the six --use entry points deliver the invocation target without saving it
               targets: {
                 local: { service: "postgres", port: 5432 },
                 qa: { hostname: "qa.example.test", port: 5432 },
+                gateway: { hostname: "host.docker.internal", port: 5432 },
                 live: {
                   hostname: { env_ref: "LIVE_HOST" },
                   port: 5432,
@@ -75,6 +76,7 @@ test("the six --use entry points deliver the invocation target without saving it
         '  *" config --services "*)',
         '    printf "%s\\n" api postgres worker',
         '    case " $* " in *" --profile maintenance "*) printf "%s\\n" migrate ;; esac ;;',
+        '  *" stop "*) printf "%s\\n" "$*" >> "$TEST_DELIVERY" ;;',
         '  *" down "*) rm -f "$TEST_STACK_STATE" ;;',
         '  *" ps "*) if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" up "*|*" run "*)',
@@ -154,6 +156,12 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(ok(["host", "shell", ...choice]).stdout).toBe(
       "host.example.test:5432\n"
     );
+    expect(ok(["host", "shell", "--use", "db=gateway"]).stdout).toBe(
+      "127.0.0.1:5432\n"
+    );
+    expect(
+      ok(["host", "shell", "--target", "compose", "--use", "db=gateway"]).stdout
+    ).toBe("host.docker.internal:5432\n");
     expect(ok(["host", "shell", "--use", "db=local"]).stdout).toBe(
       "127.0.0.1:5432\n"
     );
@@ -189,7 +197,8 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(defaultStartup).not.toMatch(/ up .* migrate/);
     await Bun.write(log, "");
     ok(["restart", "--profile", "maintenance", ...choice]);
-    expect(await Bun.file(log).text()).toMatch(/ up .* worker migrate/);
+    const fullRestart = await Bun.file(log).text();
+    expect(fullRestart).toMatch(/ stop postgres[\s\S]* up .* worker migrate/);
     expect(ok(["use"]).stdout).toContain(
       "running: live (--use) · pending: qa (checkout)"
     );

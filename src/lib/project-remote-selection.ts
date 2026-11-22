@@ -269,6 +269,12 @@ export async function prepareProjectRemoteChoices(
   });
 }
 
+export const HOST_LOOPBACK = "127.0.0.1";
+export const CONTAINER_ONLY_HOSTS: ReadonlySet<string> = new Set([
+  "host.docker.internal",
+  "host-gateway",
+]);
+
 export function applyRemoteEnv(
   env: Readonly<Record<string, string>>,
   choices: readonly EffectiveRemote[] = [],
@@ -289,9 +295,15 @@ export function applyRemoteEnv(
       }
       host = value;
     } else if (address.kind === "service") {
-      host = options?.host ? "127.0.0.1" : address.service;
+      host = address.service;
     } else {
       host = address.hostname;
+    }
+    if (
+      options?.host &&
+      (address.kind === "service" || CONTAINER_ONLY_HOSTS.has(host))
+    ) {
+      host = HOST_LOOPBACK;
     }
     for (const [name, template] of Object.entries(bindings)) {
       Object.defineProperty(result, name, {

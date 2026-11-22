@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -6,6 +6,8 @@ import {
   buildComposeDownCommand,
   composeRuntimeBackend,
 } from "../src/backends/runtime-backend.ts";
+import { CLI_SPEC } from "../src/cli/spec.ts";
+import { downCommand } from "../src/commands/project.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
   buildComposeDownFailure,
@@ -593,5 +595,255 @@ describe("compose down stop timeout validation, argv, and cap", () => {
     });
     expect(textRun.exitCode).toBe(124);
     expect(`${textRun.stdout}\n${textRun.stderr}`).not.toContain("reached its");
+  }, 60_000);
+
+  async function runDownThroughCommandPath(opts: {
+    readonly fixture: Awaited<ReturnType<typeof createComposeFixture>>;
+    readonly timeout?: string;
+    readonly json?: boolean;
+  }): Promise<{
+    readonly exitCode: number;
+    readonly stdout: string;
+    readonly downCalls: readonly {
+      readonly timeoutSeconds: number | undefined;
+      readonly capMs: number | undefined;
+    }[];
+  }> {
+    const envOverrides: Record<string, string> = {
+      HOME: opts.fixture.homeDir,
+      HACK_HOME: join(opts.fixture.homeDir, ".hack"),
+      XDG_CONFIG_HOME: join(opts.fixture.homeDir, ".config"),
+      HACK_GLOBAL_CONFIG_PATH: join(
+        opts.fixture.homeDir,
+        ".hack",
+        "hack.config.json"
+      ),
+      HACK_NO_INTERACTIVE: "1",
+      HACK_RUNTIME_BACKEND: "compose",
+      HACK_LOGGER: "console",
+      PATH: `${opts.fixture.binDir}:${process.env.PATH ?? ""}`,
+    };
+    const previousEnv = new Map<string, string | undefined>();
+    for (const [key, value] of Object.entries(envOverrides)) {
+      previousEnv.set(key, process.env[key]);
+      process.env[key] = value;
+    }
+
+    const downCalls: Array<{
+      readonly timeoutSeconds: number | undefined;
+      readonly capMs: number | undefined;
+    }> = [];
+    const downSpy = spyOn(composeRuntimeBackend, "down").mockImplementation(
+      async (downOpts) => {
+        downCalls.push({
+          timeoutSeconds: downOpts.timeoutSeconds,
+          capMs: downOpts.capMs,
+        });
+        await opts.fixture.setDockerConfig({ psJson: "[]\n" });
+        downOpts.onOutcome?.({ exitCode: 0, timedOut: false });
+        return 0;
+      }
+    );
+
+    let stdout = "";
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      stdout +=
+        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      return true;
+    }) as typeof process.stdout.write;
+
+    try {
+      const input = {
+        ctx: { cwd: opts.fixture.root, cli: CLI_SPEC },
+        args: {
+          options: {
+            path: opts.fixture.root,
+            project: undefined,
+            env: undefined,
+            branch: undefined,
+            profile: undefined,
+            target: undefined,
+            timeout: opts.timeout,
+            pruneCaches: undefined,
+            removeData: undefined,
+            yes: undefined,
+            progress: undefined,
+            recoverNativeCompose: undefined,
+            json: opts.json === true,
+          },
+          positionals: {},
+          raw: {
+            argv: [
+              "--path",
+              opts.fixture.root,
+              ...(opts.timeout !== undefined
+                ? ["--timeout", opts.timeout]
+                : []),
+              ...(opts.json ? ["--json"] : []),
+            ],
+            positionals: [],
+          },
+        },
+      } as unknown as Parameters<typeof downCommand.handler>[0];
+      const exitCode = await downCommand.handler(input);
+      return { exitCode, stdout, downCalls };
+    } finally {
+      process.stdout.write = originalWrite;
+      downSpy.mockRestore();
+      for (const [key, previous] of previousEnv.entries()) {
+        restoreEnv(key, previous);
+      }
+    }
+  }
+
+  test("CLI down arms 90s cap for three replicas of one service and 210s for three distinct services at --timeout 60", async () => {
+    const fixture = await createComposeFixture({ name: "replica-cap" });
+
+    // Three running replicas of a single service (`api`) -> 1 distinct service -> 90 s floor.
+    await fixture.setDockerConfig({
+      psJson: [
+        JSON.stringify({ ID: "c1", Service: "api", State: "running" }),
+        JSON.stringify({ ID: "c2", Service: "api", State: "running" }),
+        JSON.stringify({ ID: "c3", Service: "api", State: "running" }),
+      ].join("\n"),
+    });
+    const replicaRun = await runDownThroughCommandPath({
+      fixture,
+      timeout: "60",
+      json: true,
+    });
+    expect(replicaRun.exitCode).toBe(0);
+    expect(replicaRun.downCalls).toEqual([
+      { timeoutSeconds: 60, capMs: 90_000 },
+    ]);
+
+    // Three distinct running services -> 3 * 60 s + 30 s = 210 s cap.
+    await fixture.setDockerConfig({
+      psJson: [
+        JSON.stringify({ ID: "c1", Service: "api", State: "running" }),
+        JSON.stringify({ ID: "c2", Service: "web", State: "running" }),
+        JSON.stringify({ ID: "c3", Service: "worker", State: "running" }),
+      ].join("\n"),
+    });
+    const distinctRun = await runDownThroughCommandPath({
+      fixture,
+      timeout: "60",
+      json: true,
+    });
+    expect(distinctRun.exitCode).toBe(0);
+    expect(distinctRun.downCalls).toEqual([
+      { timeoutSeconds: 60, capMs: 210_000 },
+    ]);
+  }, 30_000);
+
+  test("CLI down produces the same cap and stopped list whether compose ps prints JSON lines or a JSON array", async () => {
+    const fixture = await createComposeFixture({ name: "ps-encoding" });
+    const rows = [
+      { ID: "c1", Service: "api", State: "running" },
+      { ID: "c2", Service: "web", State: "running" },
+      { ID: "c3", Service: "worker", State: "running" },
+    ];
+
+    const encodings = [
+      rows.map((row) => JSON.stringify(row)).join("\n"),
+      JSON.stringify(rows),
+      JSON.stringify(rows, null, 2),
+    ];
+
+    const results: Array<{
+      readonly capMs: number | undefined;
+      readonly stopped: readonly string[];
+    }> = [];
+    for (const psJson of encodings) {
+      await fixture.setDockerConfig({ psJson });
+      const run = await runDownThroughCommandPath({
+        fixture,
+        timeout: "60",
+        json: true,
+      });
+      expect(run.exitCode).toBe(0);
+      expect(run.downCalls).toEqual([{ timeoutSeconds: 60, capMs: 210_000 }]);
+      const parsed = JSON.parse(run.stdout) as {
+        readonly ok: boolean;
+        readonly data: {
+          readonly services: { readonly stopped: readonly string[] };
+        };
+      };
+      expect(parsed.ok).toBe(true);
+      results.push({
+        capMs: run.downCalls[0]?.capMs,
+        stopped: parsed.data.services.stopped,
+      });
+    }
+
+    expect(results[0]).toEqual({
+      capMs: 210_000,
+      stopped: ["api", "web", "worker"],
+    });
+    expect(results[1]).toEqual(results[0]);
+    expect(results[2]).toEqual(results[0]);
+  }, 30_000);
+
+  test("HACK_RUNTIME_BACKEND selection agrees with --timeout refusal for both 'native' and 'NATIVE'", async () => {
+    const fixture = await createComposeFixture({ name: "backend-case" });
+
+    // Lowercase 'native' selects native backend both with and without --timeout.
+    const nativeWithFlag = await runCli({
+      args: ["down", "--timeout", "2", "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+      extraEnv: { HACK_RUNTIME_BACKEND: "native" },
+    });
+    expect(nativeWithFlag.exitCode).toBe(1);
+    const nativeWithFlagParsed = JSON.parse(nativeWithFlag.stdout) as {
+      readonly ok: boolean;
+      readonly error: { readonly code: string; readonly message: string };
+    };
+    expect(nativeWithFlagParsed.ok).toBe(false);
+    expect(nativeWithFlagParsed.error.code).toBe("E_USAGE");
+    expect(nativeWithFlagParsed.error.message).toContain("--timeout");
+    expect(await readDockerCalls(fixture.dockerLogPath)).toHaveLength(0);
+
+    const nativeWithoutFlag = await runCli({
+      args: ["down", "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+      extraEnv: { HACK_RUNTIME_BACKEND: "native" },
+    });
+    expect(nativeWithoutFlag.exitCode).toBe(1);
+    expect(await readDockerCalls(fixture.dockerLogPath)).toHaveLength(0);
+
+    // Uppercase 'NATIVE' does not select native; runs Compose both with and without --timeout.
+    await writeFile(fixture.dockerLogPath, "");
+    const upperWithoutFlag = await runCli({
+      args: ["down", "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+      extraEnv: { HACK_RUNTIME_BACKEND: "NATIVE" },
+    });
+    expect(upperWithoutFlag.exitCode).toBe(0);
+    const upperWithoutDown = (
+      await readDockerCalls(fixture.dockerLogPath)
+    ).find((argv) => argv[0] === "compose" && argv.includes("down"));
+    expect(upperWithoutDown).toBeDefined();
+    expect(upperWithoutDown).not.toContain("--timeout");
+
+    await writeFile(fixture.dockerLogPath, "");
+    const upperWithFlag = await runCli({
+      args: ["down", "--timeout", "2", "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+      extraEnv: { HACK_RUNTIME_BACKEND: "NATIVE" },
+    });
+    expect(upperWithFlag.exitCode).toBe(0);
+    const upperWithDown = (await readDockerCalls(fixture.dockerLogPath)).find(
+      (argv) => argv[0] === "compose" && argv.includes("down")
+    );
+    expect(upperWithDown?.slice(-3)).toEqual(["down", "--timeout", "2"]);
   }, 60_000);
 });

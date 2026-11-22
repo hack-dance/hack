@@ -1,5 +1,4 @@
 import { HackCliError } from "./cli-result.ts";
-import { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "./compose-startup-budget.ts";
 
 /** Minimum allowed stop timeout in seconds for `hack down` on the Compose backend. */
 export const MIN_COMPOSE_DOWN_TIMEOUT_SECONDS = 0;
@@ -11,7 +10,7 @@ export const MAX_COMPOSE_DOWN_TIMEOUT_SECONDS = 600;
 export const COMPOSE_DOWN_TIMEOUT_CONFIG = "compose.downTimeoutSeconds";
 
 /** Overall `docker compose down` subprocess cap (ms) when neither flag nor config key is set. */
-export const DEFAULT_COMPOSE_DOWN_CAP_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+export const DEFAULT_COMPOSE_DOWN_CAP_MS = 90_000;
 
 /** Fixed overhead (ms) added above `timeout * runningServices` when scaling the down cap. */
 export const COMPOSE_DOWN_OVERHEAD_MS = 30_000;

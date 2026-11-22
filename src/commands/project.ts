@@ -1341,7 +1341,7 @@ async function readComposeServiceStates(opts: {
     if (res.exitCode !== 0) {
       return [];
     }
-    entries = parseJsonLines(res.stdout);
+    entries = parseBestEffortComposePsJson(res.stdout);
   }
   const serviceFilter = opts.services ? new Set(opts.services) : null;
   return entries
@@ -1356,6 +1356,27 @@ async function readComposeServiceStates(opts: {
         entry.service.length > 0 &&
         (serviceFilter === null || serviceFilter.has(entry.service))
     );
+}
+
+function parseBestEffortComposePsJson(
+  stdout: string
+): Record<string, unknown>[] {
+  const parsed = parseComposePsJson(stdout);
+  if (parsed !== null) {
+    return parsed;
+  }
+  const trimmed = stdout.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const value: unknown = JSON.parse(trimmed);
+      if (Array.isArray(value)) {
+        return value.filter(isRecord);
+      }
+    } catch {
+      // Fall through to best-effort JSON lines parsing.
+    }
+  }
+  return parseJsonLines(stdout);
 }
 
 function parseComposeExitCode(value: unknown): number | null {
@@ -8176,8 +8197,7 @@ async function handleDown(
   input: Parameters<typeof handleDownUnlocked>[0]
 ): Promise<number> {
   parseRequestedTarget({ raw: input.args.options.target });
-  const isNativeBackend =
-    process.env.HACK_RUNTIME_BACKEND?.trim().toLowerCase() === "native";
+  const isNativeBackend = resolveInitComposeBackend(process.env) === "native";
   if (isNativeBackend && input.args.options.timeout !== undefined) {
     refuseNativeDownOptions(input.args.options);
   }

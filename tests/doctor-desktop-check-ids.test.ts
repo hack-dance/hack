@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
-import { DOCTOR_CHECK_IDS } from "../src/lib/doctor-metadata.ts";
+import {
+  DOCTOR_CHECK_IDS,
+  doctorMetadata,
+} from "../src/lib/doctor-metadata.ts";
 
+const ROUTING = "apps/desktop/ui/src/window.rs";
 const CLASSIFIER = "apps/desktop/core/src/doctor.rs";
 const EXACT_ID = /"([^"]+)"\s*(?=\||=>)/g;
 const RUST_COMMENT = /\/\/[^\n]*|\/\*[\s\S]*?\*\//g;
@@ -44,4 +48,37 @@ test("a commented-out classification does not satisfy the Desktop contract", asy
   );
   expect(commented).not.toBe(source);
   expect(unclassifiedIds(commented)).toEqual(["native pool idle"]);
+});
+
+test("Desktop routing status covers the CLI's machine routing and certificate checks", async () => {
+  const source = (
+    await Bun.file(new URL(`../${ROUTING}`, import.meta.url)).text()
+  ).replace(RUST_COMMENT, "");
+  const routingIds = DOCTOR_CHECK_IDS.filter((id) => {
+    const { area, scope } = doctorMetadata({ id });
+    return (
+      scope === "machine" &&
+      (area === "routing_dns" || area === "certificates") &&
+      !id.endsWith("(optional)")
+    );
+  });
+
+  for (const [name, expected] of [
+    ["ROUTING_CHECKS", routingIds.filter((id) => !id.endsWith("*"))],
+    [
+      "ROUTING_PREFIXES",
+      routingIds.filter((id) => id.endsWith("*")).map((id) => id.slice(0, -1)),
+    ],
+  ] as const) {
+    const block = source
+      .split(`const ${name}:`)[1]
+      ?.split("= [")[1]
+      ?.split("];")[0];
+    const actual = [...(block ?? "").matchAll(/"([^"]+)"/g)].map(
+      (match) => match[1]
+    );
+    expect(actual.sort(), `Update ${name} in ${ROUTING}.`).toEqual(
+      expected.sort()
+    );
+  }
 });

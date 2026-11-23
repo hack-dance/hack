@@ -60,10 +60,10 @@ hack files ls --json api .
 hack files cat --json --branch feature-search api /app/search.config.ts
 ```
 
-`files` reads the lowest-numbered running Compose replica. Relative paths
-start in the container's working directory. A linked worktree selects its
-branch instance the same way as `hack exec`. To choose another checkout,
-pass `--path <checkout>`.
+`files` reads the lowest-numbered running Compose replica owned by the
+selected checkout. Relative paths start in the container's working
+directory. A linked worktree selects its branch instance the same way as
+`hack exec`. To choose another checkout, pass `--path <checkout>`.
 
 Both commands return a `hack.files.v1` success envelope. The `entry` describes
 the resolved target. For directory listings, `entries` includes direct

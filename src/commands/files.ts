@@ -1,3 +1,4 @@
+import { buildComposeArgs } from "../backends/runtime-backend.ts";
 import type {
   CliContext,
   CommandArgs,
@@ -10,13 +11,17 @@ import {
   branchComposeProjectName,
   resolveComposeProjectName,
 } from "../lib/compose-project-name.ts";
+import { resolveHackEnv } from "../lib/hack-env.ts";
+import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
-import { readProjectConfig } from "../lib/project.ts";
+import { readProjectConfig, sanitizeProjectSlug } from "../lib/project.ts";
+import { resolveProjectEnvConfig } from "../lib/project-env-config.ts";
 import { readServiceFiles } from "../lib/service-files.ts";
 import { TARGET_SERVICE_PATTERN } from "../lib/target-inspect.ts";
 import {
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
+  resolveStoredRuntimeEnvName,
 } from "./project.ts";
 
 const options = [optBranch, optPath, optProject, optJson] as const;
@@ -72,13 +77,44 @@ async function runFiles(
   });
   const cfg = await readProjectConfig(project);
   const base = await resolveComposeProjectName({ project, cfg });
+  const projectName = sanitizeProjectSlug(base);
   const composeProject = branch
     ? branchComposeProjectName({ base, branch })
-    : base;
+    : null;
+  const envName = await resolveStoredRuntimeEnvName({
+    requestedEnvName: undefined,
+    projectDir: project.projectDir,
+    composeProject: resolveLifecycleComposeProjectName({ projectName, branch }),
+  });
+  // Compose's project selection can come from either the invoked environment
+  // or its own .env. Use the environment sources used by exec without its
+  // migration prompts or generated-file writes.
+  const modern = await resolveProjectEnvConfig({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName,
+    serviceNames: [service],
+  });
+  const env =
+    modern?.globalEnv ??
+    (
+      await resolveHackEnv({
+        projectDir: project.projectDir,
+        projectName,
+        envName,
+        allowKeyProvisioning: false,
+      })
+    ).envForCompose;
   const result = await readServiceFiles({
     operation,
-    root: project.projectRoot,
-    composeProject,
+    project,
+    composeArgs: buildComposeArgs({
+      composeFiles: [project.composeFile],
+      composeProject,
+      cwd: project.projectDir,
+      profiles: ["*"],
+    }),
+    env,
     service,
     path,
   });

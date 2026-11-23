@@ -1,17 +1,22 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { HackCliError, type HackErrorCode } from "./cli-result.ts";
+import { containerOwnership } from "./compose-instance-stop.ts";
 import { getString, isRecord } from "./guards.ts";
+import type { ProjectContext } from "./project.ts";
 import { EXEC_STDOUT_OVERFLOW_EXIT, exec } from "./shell.ts";
 
 const PREVIEW_BYTES = 64 * 1024;
 const DIRECTORY_ENTRIES = 2000;
 const OUTPUT_BYTES = 2 * 1024 * 1024;
-const REPLICA = /^([a-f0-9]{64}) (\d+)$/;
+const CONTAINER_ID = /^[a-f0-9]{64}$/;
+const ANONYMOUS_VOLUME_NAME = /^[a-f0-9]{64}$/;
 const COMPOSE_LABEL = "com.docker.compose";
-// Read only the mount and replica data. A full inspect includes container env values.
-const INSPECT =
-  '{"mounts":{{json .Mounts}},"binds":{{json .HostConfig.Binds}},"configured":{{json .HostConfig.Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}';
+// A full inspect includes container env values. Select only fields for this read.
+const INSPECT = `{"id":{{json .Id}},"state":{{json .State.Status}},"service":{{json (index .Config.Labels "${COMPOSE_LABEL}.service")}},"number":{{json (index .Config.Labels "${COMPOSE_LABEL}.container-number")}},"oneOff":{{json (index .Config.Labels "${COMPOSE_LABEL}.oneoff")}},"workingDir":{{json (index .Config.Labels "${COMPOSE_LABEL}.project.working_dir")}},"mounts":{{json .Mounts}},"binds":{{json .HostConfig.Binds}},"configured":{{json .HostConfig.Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}`;
+// Modern engines label anonymous volumes, including ones inherited via volumes_from.
+const VOLUME =
+  '{"name":{{json .Name}},"anonymous":"{{range $key, $_ := .Labels}}{{if eq $key "com.docker.volume.anonymous"}}yes{{end}}{{end}}"}';
 const CONTAINER_TIMEOUT_SECONDS = 4;
 
 // Paths are passed as argv, and NUL framing preserves spaces, tabs and newlines.
@@ -87,65 +92,131 @@ function invalid(): never {
   );
 }
 
-async function docker(argv: readonly string[], maxStdoutBytes = OUTPUT_BYTES) {
-  try {
-    return await exec(["docker", ...argv], {
-      timeoutMs: 6000,
-      maxStdoutBytes,
-      maxStderrBytes: 16 * 1024,
-      forwardSignals: true,
-    });
-  } catch {
-    return fail("E_DOCKER_UNAVAILABLE", "Could not connect to Docker.");
-  }
+type DockerRead = (argv: readonly string[]) => ReturnType<typeof exec>;
+
+function dockerReader(opts: {
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+}): DockerRead {
+  return async (argv) => {
+    try {
+      return await exec(["docker", ...argv], {
+        cwd: opts.cwd,
+        env: { ...opts.env },
+        timeoutMs: 6000,
+        maxStdoutBytes: OUTPUT_BYTES,
+        maxStderrBytes: 16 * 1024,
+        forwardSignals: true,
+      });
+    } catch {
+      return fail("E_DOCKER_UNAVAILABLE", "Could not connect to Docker.");
+    }
+  };
 }
 
-async function runningReplica(
-  composeProject: string,
-  service: string
-): Promise<string> {
-  const result = await docker([
+function lines(output: string): string[] {
+  return output.trim().split("\n").filter(Boolean);
+}
+
+function parseRecord(line: string): Record<string, unknown> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line);
+  } catch {
+    return invalid();
+  }
+  return isRecord(raw) ? raw : invalid();
+}
+
+function ownedReplica(opts: {
+  readonly raw: Record<string, unknown>;
+  readonly ids: ReadonlySet<string>;
+  readonly projectDir: string;
+  readonly service: string;
+}) {
+  const { raw, ids, projectDir, service } = opts;
+  const id = getString(raw, "id");
+  if (!(id && ids.has(id))) {
+    return invalid();
+  }
+  const workingDir = getString(raw, "workingDir");
+  const replica = Number(raw.number);
+  if (
+    raw.service !== service ||
+    raw.state !== "running" ||
+    raw.oneOff !== "False" ||
+    !(workingDir && isAbsolute(workingDir)) ||
+    !Number.isSafeInteger(replica) ||
+    replica < 1 ||
+    containerOwnership({
+      container: { id, service, state: "running", workingDir },
+      projectDir,
+    }) !== "owned"
+  ) {
+    return null;
+  }
+  return { id, replica, raw };
+}
+
+async function runningReplica(opts: {
+  readonly compose: DockerRead;
+  readonly docker: DockerRead;
+  readonly composeArgs: readonly string[];
+  readonly service: string;
+  readonly projectDir: string;
+}) {
+  // Compose resolves the base name, including COMPOSE_PROJECT_NAME in its env
+  // or .env, with the same project directory and branch -p as up/exec.
+  const listed = await opts.compose([
+    ...opts.composeArgs,
     "ps",
+    "--quiet",
     "--no-trunc",
-    "--filter",
-    "status=running",
-    "--filter",
-    `label=${COMPOSE_LABEL}.project=${composeProject}`,
-    "--filter",
-    `label=${COMPOSE_LABEL}.service=${service}`,
-    "--filter",
-    `label=${COMPOSE_LABEL}.oneoff=False`,
-    "--format",
-    `{{.ID}} {{.Label "${COMPOSE_LABEL}.container-number"}}`,
+    "--status",
+    "running",
+    "--orphans=false",
+    opts.service,
   ]);
-  if (result.exitCode !== 0) {
+  if (listed.exitCode !== 0) {
     return fail(
-      "E_DOCKER_UNAVAILABLE",
-      "Could not read running Compose services from Docker."
+      "E_COMPOSE_FAILED",
+      "Could not read running Compose services. Check the Compose configuration and Docker connection."
     );
   }
-  let selected: { id: string; replica: number } | undefined;
-  for (const line of result.stdout.trim().split("\n").filter(Boolean)) {
-    const match = REPLICA.exec(line.trim());
-    const id = match?.[1];
-    const replica = Number(match?.[2]);
-    if (!(id && Number.isSafeInteger(replica) && replica > 0)) {
-      return invalid();
-    }
-    if (
-      !selected ||
-      replica < selected.replica ||
-      (replica === selected.replica && id < selected.id)
-    ) {
-      selected = { id, replica };
-    }
+  const ids = new Set(lines(listed.stdout));
+  if (ids.size === 0) {
+    return noOwnedReplica();
   }
-  return (
-    selected?.id ??
-    fail(
-      "E_SERVICE_NOT_FOUND",
-      "No running container for this Compose service."
-    )
+  if (![...ids].every((id) => CONTAINER_ID.test(id))) {
+    return invalid();
+  }
+  const inspected = await opts.docker([
+    "inspect",
+    "--type",
+    "container",
+    "--format",
+    INSPECT,
+    ...ids,
+  ]);
+  if (inspected.exitCode !== 0) {
+    return fail(
+      "E_COMPOSE_FAILED",
+      "Could not inspect the running service. Refresh and try again."
+    );
+  }
+  const replicas = lines(decode(Buffer.from(inspected.stdout, "latin1")))
+    .map((line) => ownedReplica({ ...opts, ids, raw: parseRecord(line) }))
+    .filter((replica) => replica !== null);
+  // Multiple checkouts can use the same Compose name on the same engine.
+  // Apply the checkout ownership check before choosing the lowest replica.
+  replicas.sort((a, b) => a.replica - b.replica || a.id.localeCompare(b.id));
+  return replicas[0] ?? noOwnedReplica();
+}
+
+function noOwnedReplica(): never {
+  return fail(
+    "E_SERVICE_NOT_FOUND",
+    "No running container for this Compose service in the selected checkout."
   );
 }
 
@@ -166,7 +237,10 @@ function hostBindPath(source: string): string {
   return source;
 }
 
-function namedVolume(raw: Record<string, unknown>, name: string): boolean {
+function explicitlyNamedVolume(
+  raw: Record<string, unknown>,
+  name: string
+): boolean {
   const configured = Array.isArray(raw.configured) ? raw.configured : [];
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   return (
@@ -180,11 +254,62 @@ function namedVolume(raw: Record<string, unknown>, name: string): boolean {
   );
 }
 
-async function classifyMount(
-  raw: Record<string, unknown>,
-  mount: unknown,
-  root: string
-): Promise<Mount> {
+async function inspectVolumes(
+  docker: DockerRead,
+  mounts: readonly unknown[]
+): Promise<Map<string, boolean>> {
+  const names = new Set<string>();
+  for (const mount of mounts) {
+    if (isRecord(mount) && mount.Type === "volume") {
+      const name = getString(mount, "Name");
+      if (name) {
+        names.add(name);
+      }
+    }
+  }
+  if (names.size === 0) {
+    return new Map();
+  }
+  const result = await docker([
+    "volume",
+    "inspect",
+    "--format",
+    VOLUME,
+    "--",
+    ...names,
+  ]);
+  if (result.exitCode !== 0) {
+    return fail(
+      "E_COMPOSE_FAILED",
+      "Could not determine the service's volume sources. Refresh and try again."
+    );
+  }
+  const volumes = new Map<string, boolean>();
+  for (const line of lines(decode(Buffer.from(result.stdout, "latin1")))) {
+    const row = parseRecord(line);
+    const name = getString(row, "name");
+    if (
+      !(
+        name &&
+        names.has(name) &&
+        !volumes.has(name) &&
+        (row.anonymous === "" || row.anonymous === "yes")
+      )
+    ) {
+      return invalid();
+    }
+    volumes.set(name, row.anonymous === "yes");
+  }
+  return volumes.size === names.size ? volumes : invalid();
+}
+
+async function classifyMount(opts: {
+  readonly raw: Record<string, unknown>;
+  readonly mount: unknown;
+  readonly root: string;
+  readonly volumes: ReadonlyMap<string, boolean>;
+}): Promise<Mount> {
+  const { raw, mount, root, volumes } = opts;
   if (!isRecord(mount)) {
     return invalid();
   }
@@ -193,7 +318,14 @@ async function classifyMount(
     return invalid();
   }
   const name = getString(mount, "Name");
-  if (mount.Type === "volume" && name && namedVolume(raw, name)) {
+  // Older Docker can omit the anonymous label. Its default IDs are 64 hex
+  // characters; explicitly named mounts still disambiguate such names.
+  if (
+    mount.Type === "volume" &&
+    name &&
+    volumes.get(name) === false &&
+    (!ANONYMOUS_VOLUME_NAME.test(name) || explicitlyNamedVolume(raw, name))
+  ) {
     return { destination, source: "volume", hostRoot: null };
   }
   const source = getString(mount, "Source");
@@ -206,33 +338,22 @@ async function classifyMount(
   return { destination, source: "container", hostRoot: null };
 }
 
-async function readMounts(id: string, projectRoot: string): Promise<Mount[]> {
-  const out = await docker([
-    "inspect",
-    "--type",
-    "container",
-    "--format",
-    INSPECT,
-    id,
+async function readMounts(opts: {
+  readonly raw: Record<string, unknown>;
+  readonly projectRoot: string;
+  readonly docker: DockerRead;
+}): Promise<Mount[]> {
+  const { raw, projectRoot, docker } = opts;
+  if (!(raw.mounts === null || Array.isArray(raw.mounts))) {
+    return invalid();
+  }
+  const mounts: readonly unknown[] = raw.mounts ?? [];
+  const [root, volumes] = await Promise.all([
+    realpath(projectRoot),
+    inspectVolumes(docker, mounts),
   ]);
-  if (out.exitCode !== 0) {
-    return fail(
-      "E_COMPOSE_FAILED",
-      "Could not inspect the service's mounts. Refresh the service and try again."
-    );
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(decode(Buffer.from(out.stdout, "latin1")));
-  } catch {
-    return invalid();
-  }
-  if (!(isRecord(raw) && (raw.mounts === null || Array.isArray(raw.mounts)))) {
-    return invalid();
-  }
-  const root = await realpath(projectRoot);
   const actual = await Promise.all(
-    (raw.mounts ?? []).map((mount: unknown) => classifyMount(raw, mount, root))
+    mounts.map((mount) => classifyMount({ raw, mount, root, volumes }))
   );
   for (const destination of Object.keys(isRecord(raw.tmpfs) ? raw.tmpfs : {})) {
     actual.push({ destination, source: "container", hostRoot: null });
@@ -381,13 +502,34 @@ function requireReadSuccess(code: number): undefined {
 /** Read the selected running replica by ID so the mount inventory and read use the same container. */
 export async function readServiceFiles(opts: {
   readonly operation: "ls" | "cat";
-  readonly root: string;
-  readonly composeProject: string;
+  readonly project: Pick<ProjectContext, "projectRoot" | "projectDir">;
+  readonly composeArgs: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
   readonly service: string;
   readonly path: string;
 }): Promise<FilesResult> {
-  const id = await runningReplica(opts.composeProject, opts.service);
-  const mounts = await readMounts(id, opts.root);
+  const cwd = opts.project.projectDir;
+  const compose = dockerReader({ cwd, env: opts.env });
+  // Direct Docker reads need the same client/engine, without forwarding
+  // application interpolation values outside Compose.
+  const clientEnv = Object.fromEntries(
+    Object.entries(opts.env).filter(
+      ([key]) => key.startsWith("DOCKER_") || key === "PATH" || key === "HOME"
+    )
+  );
+  const docker = dockerReader({ cwd, env: clientEnv });
+  const { id, raw } = await runningReplica({
+    compose,
+    docker,
+    composeArgs: opts.composeArgs.slice(1),
+    service: opts.service,
+    projectDir: cwd,
+  });
+  const mounts = await readMounts({
+    raw,
+    projectRoot: opts.project.projectRoot,
+    docker,
+  });
   const result = await docker([
     "exec",
     id,

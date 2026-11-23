@@ -15,6 +15,7 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 const cli = resolve(import.meta.dir, "..", "index.ts");
 const firstReplica = "b".repeat(64);
 const secondReplica = "a".repeat(64);
+const foreignReplica = "0".repeat(64);
 const directory = "/app\x0041ed:10:32\0";
 
 let root: string;
@@ -26,32 +27,41 @@ beforeEach(async () => {
   project = join(root, "checkout");
   docker = join(root, "docker");
   await mkdir(join(project, ".hack"), { recursive: true });
-  await mkdir(join(root, "checkout-elsewhere"));
+  await mkdir(join(root, "checkout-elsewhere", ".hack"), { recursive: true });
   await writeFile(
     join(project, ".hack", "docker-compose.yml"),
+    "name: files-test\nservices:\n  api:\n    image: alpine\n"
+  );
+  await writeFile(
+    join(root, "checkout-elsewhere", ".hack", "docker-compose.yml"),
     "name: files-test\nservices:\n  api:\n    image: alpine\n"
   );
   await writeFile(
     docker,
     `#!/bin/sh
 set -eu
+[ "\${DOCKER_CONTEXT:-}" = "\${FILES_CONTEXT:-}" ] || exit 9
 case "$1" in
-  ps)
+  compose)
     case "$*" in
-      *"label=com.docker.compose.project=files-test--branch "*"label=com.docker.compose.service=api "*"label=com.docker.compose.oneoff=False "*) ;;
-      *) exit 0 ;;
+      *"-p files-test--branch "*) [ -z "\${COMPOSE_PROJECT_NAME:-}" ] || exit 1 ;;
+      *) [ "\${COMPOSE_PROJECT_NAME:-}" = alternate-project ] || exit 0 ;;
     esac
-    printf '%s 2\\n%s 1\\n' '${secondReplica}' '${firstReplica}'
+    [ "\${FILES_CONTEXT:-}" = "" ] || [ "$APP_VALUE" = "fixture-only" ] || exit 9
+    printf '%s\\n' '${foreignReplica}' '${secondReplica}' '${firstReplica}'
     ;;
   inspect)
-    shift 5
-    [ "$1" = '${firstReplica}' ] || exit 1
-    cat "$FILES_FIXTURE/mounts"
+    [ "\${APP_VALUE:-}" = "" ] || exit 9
+    cat "$FILES_FIXTURE/replicas"
+    ;;
+  volume)
+    cat "$FILES_FIXTURE/volumes"
     ;;
   exec)
     [ "$2" = '${firstReplica}' ] || exit 1
     shift 10
     [ "$1" = "$FILES_PATH" ] || exit 1
+    printf 'exec\\n' >> "$FILES_FIXTURE/calls"
     cat "$FILES_FIXTURE/output"
     exit "$FILES_EXIT"
     ;;
@@ -60,28 +70,66 @@ esac
 `
   );
   await chmod(docker, 0o755);
+  const replica = {
+    workingDir: join(project, ".hack"),
+    state: "running",
+    service: "api",
+    oneOff: "False",
+  };
   await writeFile(
-    join(root, "mounts"),
-    JSON.stringify({
-      mounts: [
-        { Type: "bind", Destination: "/app", Source: project },
-        { Type: "volume", Destination: "/app/cache", Name: "files-test_cache" },
-        {
-          Type: "volume",
-          Destination: "/app/anonymous",
-          Name: "anonymous-volume-id",
-        },
-        {
-          Type: "bind",
-          Destination: "/app/outside",
-          Source: join(root, "checkout-elsewhere"),
-        },
-        { Type: "volume", Destination: "/app/cargo", Name: "cargo-data" },
-      ],
-      configured: [{ Type: "volume", Source: "cargo-data" }],
-      binds: ["files-test_cache:/app/cache:rw"],
-      tmpfs: { "/app/tmp": "rw" },
-    })
+    join(root, "replicas"),
+    [
+      {
+        ...replica,
+        id: foreignReplica,
+        number: "1",
+        workingDir: join(root, "foreign", ".hack"),
+      },
+      { ...replica, id: secondReplica, number: "2" },
+      {
+        ...replica,
+        id: firstReplica,
+        number: "1",
+        mounts: [
+          { Type: "bind", Destination: "/app", Source: project },
+          {
+            Type: "volume",
+            Destination: "/app/cache",
+            Name: "files-test_cache",
+          },
+          {
+            Type: "volume",
+            Destination: "/app/anonymous",
+            Name: "inherited-anonymous",
+          },
+          {
+            Type: "bind",
+            Destination: "/app/outside",
+            Source: join(root, "checkout-elsewhere"),
+          },
+          {
+            Type: "volume",
+            Destination: "/app/cargo",
+            Name: "inherited-named-data",
+          },
+        ],
+        configured: [],
+        binds: ["files-test_cache:/app/cache:rw"],
+        tmpfs: { "/app/tmp": "rw" },
+      },
+    ]
+      .map((row) => JSON.stringify(row))
+      .join("\n")
+  );
+  await writeFile(
+    join(root, "volumes"),
+    [
+      { name: "files-test_cache", anonymous: "" },
+      { name: "inherited-named-data", anonymous: "" },
+      { name: "inherited-anonymous", anonymous: "yes" },
+    ]
+      .map((row) => JSON.stringify(row))
+      .join("\n")
   );
 });
 
@@ -93,6 +141,8 @@ async function run(opts: {
   readonly output: string | Buffer;
   readonly status?: number;
   readonly branch?: boolean;
+  readonly checkout?: string;
+  readonly context?: string;
 }) {
   await writeFile(join(root, "output"), opts.output);
   const child = Bun.spawn(
@@ -103,7 +153,7 @@ async function run(opts: {
       opts.operation,
       "--json",
       "--path",
-      project,
+      opts.checkout ?? project,
       ...(opts.branch === false ? [] : ["--branch", "branch"]),
       "--",
       "api",
@@ -118,6 +168,7 @@ async function run(opts: {
           FILES_FIXTURE: root,
           FILES_PATH: opts.path,
           FILES_EXIT: String(opts.status ?? 0),
+          FILES_CONTEXT: opts.context,
         },
       }),
       stdin: "ignore",
@@ -152,7 +203,7 @@ test("files ls scopes the branch and replica, and classifies the deepest actual 
       )
       .join("");
   const result = await run({ operation: "ls", path: ".", output });
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.stdout).toBe(0);
   expect(result.stderr).toBe("");
   const data = machineData(result.stdout, "hack.files.v1");
   expect(data.service).toBe("api");
@@ -212,7 +263,7 @@ test("files cat preserves binary bytes and tags the resolved symlink target", as
       Buffer.from([0, 1, 255]),
     ]),
   });
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.stdout).toBe(0);
   expect(machineData(result.stdout, "hack.files.v1")).toMatchObject({
     operation: "cat",
     encoding: "base64",
@@ -233,7 +284,7 @@ test("files cat returns a bounded UTF-8 prefix without a partial codepoint", asy
       Buffer.from([226, 130]),
     ]),
   });
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.stdout).toBe(0);
   expect(machineData(result.stdout, "hack.files.v1")).toMatchObject({
     encoding: "utf8",
     content: prefix,
@@ -270,4 +321,49 @@ test("files never falls back to a different Compose instance", async () => {
   });
   expect(result.exitCode).not.toBe(0);
   machineError(result.stdout, "E_SERVICE_NOT_FOUND");
+}, 60_000);
+
+test("files refuses a checkout when every matching service replica belongs elsewhere", async () => {
+  const result = await run({
+    operation: "cat",
+    path: "/app/example.txt",
+    output: "foreign-content-must-not-be-read",
+    checkout: join(root, "checkout-elsewhere"),
+  });
+  expect(result.exitCode).not.toBe(0);
+  machineError(result.stdout, "E_SERVICE_NOT_FOUND");
+  expect(await Bun.file(join(root, "calls")).exists()).toBe(false);
+}, 60_000);
+
+test("files uses the managed overlay's Docker engine and base Compose project", async () => {
+  await writeFile(
+    join(project, ".hack", "hack.config.json"),
+    JSON.stringify({ env: { defaultOverlay: "qa" } })
+  );
+  await writeFile(
+    join(project, ".hack", "hack.env.qa.yaml"),
+    [
+      "version: 1",
+      "environment: qa",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    DOCKER_CONTEXT: files-context",
+      "    COMPOSE_PROJECT_NAME: alternate-project",
+      "    APP_VALUE: fixture-only",
+      "",
+    ].join("\n")
+  );
+  const result = await run({
+    operation: "ls",
+    path: ".",
+    output: directory,
+    context: "files-context",
+    branch: false,
+  });
+  expect(result.exitCode, result.stdout).toBe(0);
+  expect(machineData(result.stdout, "hack.files.v1").entry).toMatchObject({
+    path: "/app",
+    source: "worktree",
+  });
 }, 60_000);

@@ -170,6 +170,7 @@ pub(crate) struct FilesPane {
     input: Entity<InputState>,
     directory: Option<Directory>,
     selected: Option<Entry>,
+    selection_epoch: u64,
     preview: Option<Preview>,
     show_hidden: bool,
     notice: Option<String>,
@@ -213,6 +214,7 @@ impl FilesPane {
             input,
             directory: None,
             selected: None,
+            selection_epoch: 0,
             preview: None,
             show_hidden: false,
             notice: None,
@@ -232,6 +234,9 @@ impl FilesPane {
     }
 
     fn load(&mut self, op: Read, path: String, cx: &mut Context<Self>) {
+        if op == Read::List {
+            self.selection_epoch += 1;
+        }
         self.reading = Some(op);
         self.notice = None;
         let target = self.target.clone();
@@ -284,6 +289,7 @@ impl FilesPane {
         match entry.kind {
             Kind::Directory | Kind::Symlink => self.load(Read::List, entry.path, cx),
             Kind::File | Kind::Other => {
+                self.selection_epoch += 1;
                 self.pending = None;
                 self.reading = None;
                 self.notice = None;
@@ -299,6 +305,8 @@ impl FilesPane {
 
     fn open_editor(&mut self, entry: Entry, cx: &mut Context<Self>) {
         let root = self.target.root.clone();
+        let selection_epoch = self.selection_epoch;
+        let selected_path = entry.path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -309,8 +317,15 @@ impl FilesPane {
                 .await;
             if let Err(error) = result {
                 let _ = this.update(cx, |this, cx| {
-                    this.notice = Some(error.into());
-                    cx.notify();
+                    if this.selection_epoch == selection_epoch
+                        && this
+                            .selected
+                            .as_ref()
+                            .is_some_and(|entry| entry.path == selected_path)
+                    {
+                        this.notice = Some(error.into());
+                        cx.notify();
+                    }
                 });
             }
         })
@@ -612,6 +627,7 @@ fn parent_path(path: &str) -> &str {
 }
 
 fn open_text_file(path: &Path) -> Result<(), &'static str> {
+    const FAILED: &str = "Could not open the worktree file in your editor.";
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = std::process::Command::new("/usr/bin/open");
@@ -619,7 +635,26 @@ fn open_text_file(path: &Path) -> Result<(), &'static str> {
         command
     };
     #[cfg(not(target_os = "macos"))]
-    let mut command = std::process::Command::new("xdg-open");
+    let mut command = {
+        // Choose the text handler even for worktree files with another MIME type.
+        let output = std::process::Command::new("xdg-mime")
+            .args(["query", "default", "text/plain"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map_err(|_| FAILED)?;
+        let desktop_id = std::str::from_utf8(&output.stdout)
+            .map(str::trim)
+            .map_err(|_| FAILED)?;
+        if !output.status.success()
+            || !desktop_id.ends_with(".desktop")
+            || desktop_id.starts_with('-')
+        {
+            return Err(FAILED);
+        }
+        let mut command = std::process::Command::new("gtk-launch");
+        command.arg(desktop_id);
+        command
+    };
     command
         .arg(path)
         .stdin(std::process::Stdio::null())
@@ -629,7 +664,7 @@ fn open_text_file(path: &Path) -> Result<(), &'static str> {
         .ok()
         .filter(|status| status.success())
         .map(|_| ())
-        .ok_or("Could not open the worktree file in your editor.")
+        .ok_or(FAILED)
 }
 
 fn file_icon(kind: Kind) -> Glyph {

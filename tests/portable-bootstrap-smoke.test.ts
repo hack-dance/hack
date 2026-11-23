@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   entrypoint,
@@ -21,6 +22,9 @@ test("portable runner qualifies real CLI env, HTTP, dev write, restart, and clea
   expect(summary).toMatchObject({
     ok: true,
     cleanup: true,
+    selectedExecutableSha256: createHash("sha256")
+      .update(await readFile(f.binary))
+      .digest("hex"),
     checks: [
       "selected executable",
       "missing and wrong keys refuse child launch",

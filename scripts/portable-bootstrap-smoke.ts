@@ -1,5 +1,5 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, createReadStream } from "node:fs";
 import {
   access,
   lstat,
@@ -104,7 +104,12 @@ type Fixture = {
  */
 export async function runPortableBootstrap(opts: {
   readonly hackBin: string;
-}): Promise<{ version: string; checks: readonly string[]; cleanup: true }> {
+}): Promise<{
+  version: string;
+  selectedExecutableSha256: string;
+  checks: readonly string[];
+  cleanup: true;
+}> {
   const context: BootstrapContext = { step: "setup" };
   try {
     return await runWorkflow(opts, context);
@@ -122,7 +127,12 @@ export async function runPortableBootstrap(opts: {
 async function runWorkflow(
   opts: { readonly hackBin: string },
   context: BootstrapContext
-): Promise<{ version: string; checks: readonly string[]; cleanup: true }> {
+): Promise<{
+  version: string;
+  selectedExecutableSha256: string;
+  checks: readonly string[];
+  cleanup: true;
+}> {
   if (!isAbsolute(opts.hackBin)) {
     throw new BootstrapFailure("invalid_executable");
   }
@@ -134,10 +144,16 @@ async function runWorkflow(
   const fixture = await createFixture();
   const checks: string[] = [];
   let version = "";
+  let selectedExecutableSha256 = "";
   let completed = false;
   let failure: BootstrapFailure | undefined;
   try {
     context.step = "identity";
+    const digest = createHash("sha256");
+    for await (const chunk of createReadStream(hackBin)) {
+      digest.update(chunk);
+    }
+    selectedExecutableSha256 = digest.digest("hex");
     const identity = await command({ fixture, hackBin, args: ["--version"] });
     requireThat(
       identity.code === 0 && identity.stdout.trim().length > 0,
@@ -273,7 +289,7 @@ async function runWorkflow(
     throw failure;
   }
   requireThat(completed, "workflow_completion");
-  return { version, checks, cleanup: true };
+  return { version, selectedExecutableSha256, checks, cleanup: true };
 }
 
 /** Only closed labels may cross the runner's stderr boundary; never retain a raw cause. */

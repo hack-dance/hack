@@ -56,7 +56,13 @@ export interface AutostartDownTarget {
   readonly compose?: {
     readonly base: string;
     readonly projectDir: string;
+    readonly lifecycle: {
+      readonly projectName: string;
+      readonly lifecycleComposeProject: string;
+    };
     readonly env: Readonly<Record<string, string>>;
+    readonly lifecycleEnv: Readonly<Record<string, string>>;
+    readonly pin: boolean;
   };
 }
 interface AutostartCommandSelection {

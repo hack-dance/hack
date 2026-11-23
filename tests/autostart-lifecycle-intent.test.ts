@@ -145,6 +145,7 @@ async function installComposeNameFixture(opts?: {
   readonly failFirstProbe?: boolean;
   readonly holdStart?: boolean;
   readonly foreignCheckout?: string;
+  readonly foreignStack?: string;
   readonly startContainers?: boolean;
 }) {
   await writeFile(
@@ -163,10 +164,14 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
     await Bun.write(fixture + "/name-probed", "probed");
     process.exit(1);
   }
-  const match = /:-([a-z]+)}/.exec(model.name);
-  if (!match) process.exit(1);
+  const resolveName = (expression) => {
+    const match = /^\\$\\{([A-Z_]+):-([a-z]+)\\}$/.exec(expression);
+    return match ? process.env[match[1]] || match[2] : expression;
+  };
+  const name = process.env.COMPOSE_PROJECT_NAME || resolveName(model.name);
+  const labels = Object.fromEntries(Object.entries(model.services.probe.labels ?? {}).map(([key, value]) => [key, resolveName(value)]));
   if (args.includes("/dev/null")) await Bun.write(fixture + "/unattended-probe", "seen");
-  process.stdout.write(JSON.stringify({name: match[1]}));
+  process.stdout.write(JSON.stringify({name, services: {probe: {labels}}}));
 } else if (mode === "config") {
   process.stdout.write(JSON.stringify({name: "sample", services: {app: {image: "example.invalid/app"}}}));
 } else if (mode === "inspect" && args[0] === "image") {
@@ -184,7 +189,9 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   if (args[1] !== containerId || process.env.DOCKER_CONTEXT !== "saved-files-context") process.exit(9);
   process.stdout.write("/app\\x0041ed:10:32\\0");
 } else if (mode === "ps" || mode === "inspect") {
-  const directory = options.foreignCheckout ?? (await Bun.file(running).exists() ? process.cwd() : null);
+  const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || "sample";
+  const foreign = !options.foreignStack || options.foreignStack === stack;
+  const directory = (foreign ? options.foreignCheckout : undefined) ?? (await Bun.file(running).exists() ? process.cwd() : null);
   process.stdout.write(JSON.stringify(directory ? [{
     ID: "fixture-container", Service: "app", State: "running",
     Labels: "com.docker.compose.project.working_dir=" + directory
@@ -202,6 +209,7 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   if (args.includes("-d")) await Bun.write(running, "running");
 } else if (mode === "down") {
   await Bun.write(fixture + "/compose-down", JSON.stringify(args));
+  await Bun.write(fixture + "/down-overlay", process.env.COMPOSE_PROJECT_NAME || "none");
   await rm(running, { force: true });
 }
 `,
@@ -302,14 +310,38 @@ test("a failed Always on identity lookup stops the command before it can retry",
   expect((await marker()).paused).toBe(true);
 });
 
-for (const login of [false, true]) {
-  test(`ordinary Down shares the Compose lock with ${login ? "login startup" : "desktop Start"} on an interpolated stack`, async () => {
+for (const { label, login, overlay } of [
+  {
+    label: "desktop Start on an interpolated stack",
+    login: false,
+    overlay: false,
+  },
+  {
+    label: "login startup on an interpolated stack",
+    login: true,
+    overlay: false,
+  },
+  {
+    label: "login startup with a managed name interpolation",
+    login: true,
+    overlay: true,
+  },
+]) {
+  test(`ordinary Down shares the Compose lock with ${label}`, async () => {
     const projectRoot = join(root, "project");
-    await writeOwnedFixture(
-      join(projectRoot, ".hack", "hack.config.json"),
-      '{"name":"sample","dev_host":"sample.hack"}'
-    );
-    await writeInterpolatedStack(projectRoot, "STACK_A");
+    if (overlay) {
+      await configureManagedNameOverlay({
+        defaultOverlay: true,
+        interpolate: true,
+      });
+    } else {
+      await writeOwnedFixture(
+        join(projectRoot, ".hack", "hack.config.json"),
+        '{"name":"sample","dev_host":"sample.hack"}'
+      );
+      await writeInterpolatedStack(projectRoot, "STACK_A");
+    }
+    const stack = overlay ? "alternate" : "sample";
     await installComposeNameFixture({ holdStart: true });
     await writeRegistry(false);
     const start = run(
@@ -327,12 +359,19 @@ for (const login of [false, true]) {
     const downInvocation = join(root, "compose-down");
     let down: ReturnType<typeof run> | undefined;
     try {
-      await waitForCondition(
-        () => Bun.file(join(root, "compose-start")).exists(),
-        "Start did not reach the held Compose phase"
-      );
+      await Promise.race([
+        waitForCondition(
+          () => Bun.file(join(root, "compose-start")).exists(),
+          "Start did not reach the held Compose phase"
+        ),
+        start.then((result) => {
+          throw new Error(
+            `Start exited before the held Compose phase: ${result.stderr || result.stdout}`
+          );
+        }),
+      ]);
       const upArgs = await Bun.file(join(root, "compose-start")).json();
-      expect(upArgs.slice(0, 3)).toEqual(["compose", "-p", "sample"]);
+      expect(upArgs.slice(0, 3)).toEqual(["compose", "-p", stack]);
       if (login) {
         expect(upArgs).toContain("/dev/null");
         expect(await Bun.file(join(root, "unattended-probe")).exists()).toBe(
@@ -353,7 +392,7 @@ for (const login of [false, true]) {
       expect((await Bun.file(downInvocation).json()).slice(0, 3)).toEqual([
         "compose",
         "-p",
-        "sample",
+        stack,
       ]);
       expect((await marker()).paused).toBe(true);
     } finally {
@@ -362,6 +401,91 @@ for (const login of [false, true]) {
     }
   }, 25_000);
 }
+
+async function configureManagedNameOverlay(opts: {
+  readonly defaultOverlay: boolean;
+  readonly interpolate?: boolean;
+}) {
+  const projectDir = join(root, "project", ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      dev_host: "sample.hack",
+      ...(opts.defaultOverlay ? { env: { defaultOverlay: "qa" } } : {}),
+    })
+  );
+  if (opts.interpolate) {
+    await writeInterpolatedStack(join(root, "project"), "STACK_NAME");
+  } else {
+    await writeOwnedFixture(
+      join(projectDir, "docker-compose.yml"),
+      "name: sample\nservices:\n  app:\n    image: example.invalid/app\n"
+    );
+  }
+  const key = opts.interpolate ? "STACK_NAME" : "COMPOSE_PROJECT_NAME";
+  await writeOwnedFixture(
+    join(projectDir, "hack.env.qa.yaml"),
+    `version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    ${key}: alternate\n`
+  );
+}
+
+test("login startup leaves managed COMPOSE_PROJECT_NAME under the existing manual-start policy", async () => {
+  await configureManagedNameOverlay({ defaultOverlay: true });
+  await installComposeNameFixture({ holdStart: true });
+  await writeRegistry(false);
+  const started = await run(["up", "-d", "--json"], true);
+  expect(started.exitCode).toBe(1);
+  expect(JSON.parse(started.stdout)).toMatchObject({
+    ok: false,
+    error: { detail: { reason: "compose_inputs_require_manual_start" } },
+  });
+  expect(await Bun.file(join(root, "compose-start")).exists()).toBe(false);
+});
+
+test("ordinary Down reuses desktop Start's pinned name and saved managed overlay", async () => {
+  await configureManagedNameOverlay({ defaultOverlay: false });
+  await installComposeNameFixture({
+    startContainers: true,
+    foreignCheckout: join(root, "foreign", ".hack"),
+    foreignStack: "alternate",
+  });
+  const started = await run([
+    "up",
+    "-d",
+    "--env",
+    "qa",
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "sample",
+    "--json",
+  ]);
+  expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+  const stopped = await run(["down", "--json"]);
+  expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+  expect(
+    (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+  ).toEqual(["compose", "-p", "sample"]);
+  expect(await Bun.file(join(root, "down-overlay")).text()).toBe("alternate");
+}, 40_000);
+
+test("ordinary Down checks ownership of a stack named by a managed override", async () => {
+  await configureManagedNameOverlay({ defaultOverlay: true });
+  await installComposeNameFixture({
+    foreignCheckout: join(root, "foreign", ".hack"),
+    foreignStack: "alternate",
+  });
+  const stopped = await run(["down", "--json"]);
+  expect(stopped.exitCode).toBe(1);
+  expect(JSON.parse(stopped.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      message: expect.stringContaining("do not all belong to this checkout"),
+    },
+  });
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+}, 40_000);
 
 test("ordinary Down refuses an interpolated branch stack owned by another checkout", async () => {
   await writeInterpolatedStack(join(root, "project"), "STACK_A");

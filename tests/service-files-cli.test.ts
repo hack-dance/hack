@@ -47,7 +47,7 @@ IFS= read -r context < "$fixture/context"
 case "$1" in
   compose)
     case "$*" in
-      *"-f - config --format json") cat >/dev/null; echo '{"name":"files-test"}'; exit ;;
+      *"-f - config --format json") cat >/dev/null; echo '{"name":"alternate-project","services":{"probe":{"labels":{"hack.compose.configured-name":"files-test"}}}}'; exit ;;
       *"-p files-test--branch "*) [ -z "\${COMPOSE_PROJECT_NAME:-}" ] || exit 1 ;;
       *) [ "\${COMPOSE_PROJECT_NAME:-}" = alternate-project ] || exit 0 ;;
     esac

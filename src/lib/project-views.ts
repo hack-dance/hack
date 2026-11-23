@@ -465,10 +465,10 @@ async function buildRegisteredProjectView(opts: {
     cfg: config ?? undefined,
     composeName: composeDefinition?.name ?? null,
   };
-  const baseName = await resolveComposeName(composeNameInput);
-  const branchBaseName = composeNameInput.composeName?.includes("$")
-    ? baseName
-    : await resolveComposeName({ ...composeNameInput, forBranch: true });
+  const [baseName, branchBaseName] = await Promise.all([
+    resolveComposeName(composeNameInput),
+    resolveComposeName({ ...composeNameInput, forBranch: true }),
+  ]);
   const runtime = resolveRegisteredRuntime({ ...opts, registration, baseName });
   const definedServices = composeDefinition?.names ?? null;
   const serviceHosts = composeExists

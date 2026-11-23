@@ -148,7 +148,9 @@ Compose project. Each entry has `branch`, `branch_name`, `checkout`, `url`,
 `defined_services` and `recorded`. The URL uses the checkout's configuration
 and the same open preference as `hack open`. When Compose can target a
 copy, `compose_project` names that stack. Base copies honor
-`COMPOSE_PROJECT_NAME` from the shell or checkout dotenv. Full rows and
+`COMPOSE_PROJECT_NAME` from the shell or checkout dotenv. Branch copies
+interpolate their checkout's Compose `name` for the branch prefix independently
+of that base override. Full rows and
 branch entries set `compose_project_unresolved: true` when the effective
 name lookup fails.
 A worktree configured with

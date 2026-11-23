@@ -744,7 +744,7 @@ async function createWorktreeFixture(): Promise<{
       `  cat "${dockerRowsPath}"`,
       "  exit 0",
       "fi",
-      'if [ "$1" = compose ]; then case " $* " in *" -f - config --format json "*) grep -q HACK_TEST_STACK_NAME || exit 1; echo \'{"name":"demo"}\'; exit 0;; esac; fi',
+      'if [ "$1" = compose ]; then case " $* " in *" -f - config --format json "*) grep -q HACK_TEST_STACK_NAME || exit 1; echo \'{"name":"demo","services":{"probe":{"labels":{"hack.compose.configured-name":"demo"}}}}\'; exit 0;; esac; fi',
       `if [ "$1" = compose ]; then case " $* " in *" -p demo--feature-current "*" up -d "*) printf '[{"ID":"api-created","Service":"api","State":"running","Labels":"com.docker.compose.project.working_dir=%s"}]\\n' "$PWD" > "${dockerComposeRowsPath}";; esac; fi`,
       `if [ "$1" = compose ] && [ -s "${dockerComposeRowsPath}" ]; then case " $* " in *" ps "*) cat "${dockerComposeRowsPath}"; exit 0;; esac; fi`,
       'if [ "$1" = "inspect" ]; then',

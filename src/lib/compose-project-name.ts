@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { YAML } from "bun";
 import { childEnvironment } from "./child-environment.ts";
@@ -55,6 +56,10 @@ type ComposeNameEnvironment = {
 const DOTENV_PROJECT_NAME =
   /^(?:[ \t]*export[ \t]+)?[ \t]*COMPOSE_PROJECT_NAME[ \t]*(?:=|:|\r?$)/m;
 const DISABLE_DEFAULT_DOTENV = /^(?:1|t|T|true|TRUE|True)$/;
+const PROJECT_NAME_LABEL = "hack.compose.configured-name";
+const PROJECT_NAME_REFERENCE = /\$(?:\{)?COMPOSE_PROJECT_NAME\b/;
+const INVALID_COMPOSE_NAME_CHARS = /[^a-z0-9_-]/g;
+const COMPOSE_NAME_LEADING_SEPARATORS = /^[-_]+/;
 
 export async function shouldResolveComposeProjectName(
   opts: ComposeNameEnvironment & {
@@ -120,9 +125,23 @@ export async function resolveDesktopComposeProjectName(
     return configuredName;
   }
   const cwd = dirname(opts.project.composeFile);
+  const sentinel =
+    opts.forBranch && PROJECT_NAME_REFERENCE.test(configuredName)
+      ? `hack-name-${randomUUID()}`
+      : undefined;
   const config = JSON.stringify({
-    name: configuredName,
-    services: { probe: { image: "scratch" } },
+    name: sentinel ?? configuredName,
+    services: {
+      probe: {
+        image: "scratch",
+        // Compose interpolates labels even when COMPOSE_PROJECT_NAME takes
+        // precedence over the YAML name. Explicit branch names use that YAML
+        // expression as their base.
+        ...(opts.forBranch
+          ? { labels: { [PROJECT_NAME_LABEL]: configuredName } }
+          : {}),
+      },
+    },
   });
   try {
     const result = await exec(
@@ -149,11 +168,44 @@ export async function resolveDesktopComposeProjectName(
     );
     const rendered: unknown =
       result.exitCode === 0 ? JSON.parse(result.stdout) : null;
-    const name = isRecord(rendered) ? getString(rendered, "name") : null;
+    if (!isRecord(rendered)) {
+      return null;
+    }
+    const effectiveName = getString(rendered, "name");
+    if (sentinel && effectiveName === sentinel) {
+      // Compose injected the probe name into its model because there was
+      // no external override. Read the actual top-level expression instead.
+      return await resolveDesktopComposeProjectName({
+        ...opts,
+        composeName,
+        forBranch: false,
+      });
+    }
+    const name = opts.forBranch
+      ? configuredBranchBase(rendered)
+      : effectiveName;
     return name && isComposeProjectName(name) ? name : null;
   } catch {
     return null;
   }
+}
+
+function configuredBranchBase(
+  rendered: Record<string, unknown>
+): string | null {
+  const services = isRecord(rendered.services) ? rendered.services : null;
+  const probe = services && isRecord(services.probe) ? services.probe : null;
+  const value =
+    probe && isRecord(probe.labels)
+      ? getString(probe.labels, PROJECT_NAME_LABEL)
+      : null;
+  // Compose normalizes an interpolated YAML name before assigning it.
+  return (
+    value
+      ?.toLowerCase()
+      .replace(INVALID_COMPOSE_NAME_CHARS, "")
+      .replace(COMPOSE_NAME_LEADING_SEPARATORS, "") ?? null
+  );
 }
 
 /** Compose project name of a branch instance: `<base>--<branch slug>`. */

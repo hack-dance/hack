@@ -39,6 +39,12 @@ effect-capable child settles. Pause writes are abstract committed atomic updates
 The model does not prove filesystem durability, registry trust, alias/key mapping,
 PID identity or lock reclamation, real engine requests, descendant-process cleanup,
 or any late runtime effect surviving termination of the lock-owning CLI child.
+The source regression in `autostart-lifecycle-intent.test.ts` holds login startup
+at Compose's prepare phase with a name interpolated from a managed overlay. It
+checks that Down publishes pause and waits for the lock on that effective stack
+before sending teardown to the same name. This exercises the name mapping that
+the model assumes. A separate source regression checks that Down keeps the name
+pinned by Desktop Start while delivering its saved overlay.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

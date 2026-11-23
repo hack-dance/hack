@@ -14,6 +14,8 @@ export type ProjectRuntimeStateEntry = {
   readonly composeProject: string;
   readonly envName: string | null;
   readonly updatedAt: string;
+  /** Base name explicitly passed to Compose at startup, before any branch suffix. */
+  readonly pinnedComposeBase?: string;
   /**
    * Value-free digests of the env set each service was last created with.
    * Absent for state written before fingerprints existed; exec then skips the
@@ -216,6 +218,7 @@ function parseProjectRuntimeStateEntry(
     typeof envNameRaw === "string" ? envNameRaw.trim() || null : null;
 
   const envFingerprint = parseComposeEnvFingerprintRecord(value.envFingerprint);
+  const pinnedComposeBase = getString(value, "pinnedComposeBase");
   const composeProfiles = Array.isArray(value.composeProfiles)
     ? value.composeProfiles.filter(
         (profile): profile is string =>
@@ -227,6 +230,7 @@ function parseProjectRuntimeStateEntry(
     composeProject,
     envName,
     updatedAt,
+    ...(pinnedComposeBase ? { pinnedComposeBase } : {}),
     ...(envFingerprint ? { envFingerprint } : {}),
     ...(composeProfiles ? { composeProfiles } : {}),
   };

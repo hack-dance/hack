@@ -686,6 +686,32 @@ composeTest(
       expect(branchEntries(overridden, "branch_runtime")).toMatchObject([
         { branch: "preview", compose_project: "demo--preview" },
       ]);
+
+      await writeFile(
+        compose,
+        'name: "${HACK_TEST_STACK_NAME:-demo}"\nservices: {}\n'
+      );
+      Reflect.deleteProperty(process.env, "HACK_TEST_STACK_NAME");
+      const interpolatedBranch = await serializedProject({
+        registration,
+        runtime: ["alternate", "demo--preview"].map((name) => ({
+          ...branchRuntime({
+            slug: "preview",
+            workingDir: registration.projectDir,
+          }),
+          project: name,
+        })),
+      });
+      expect(interpolatedBranch).toMatchObject({
+        compose_project: "alternate",
+        runtime: { project: "alternate" },
+        branch_copies: [
+          { branch: "preview", compose_project: "demo--preview" },
+        ],
+      });
+      expect(branchEntries(interpolatedBranch, "branch_runtime")).toMatchObject(
+        [{ branch: "preview", compose_project: "demo--preview" }]
+      );
     } finally {
       restoreEnv("HACK_TEST_STACK_NAME", previousName);
       restoreEnv("COMPOSE_PROJECT_NAME", previousComposeName);

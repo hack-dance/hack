@@ -3269,6 +3269,7 @@ name = "hack-desktop-core"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

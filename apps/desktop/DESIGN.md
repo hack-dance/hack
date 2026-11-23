@@ -16,7 +16,7 @@ second implementation of them.
 | The CLI is the only writer | Every action is one `hack <cmd> --no-interactive` run as the user with `--path <repo_root>`. Commands without `--json` are judged by exit code, then a fresh read. |
 | Reads observe only | A poll never starts Docker, hackd, a VM or anything else. A command that can start something (today: `hack global status`) is not polled until it has an observe-only mode (R13). |
 | No app state beyond window layout | Selected project, window size, sidebar width, theme override. Nothing else is stored. |
-| No credentials, no passwords | No password field, no `sudo` from the app. Admin steps go to the user's terminal ([Onboarding](#2-first-run-onboarding)). |
+| No credentials, no passwords | With **Run** in the Ghostty drawer, the CLI invokes `sudo` and the user responds to its prompt in the drawer. The app has no password field, does not collect the password, and never invokes `sudo` directly. See [Onboarding](#2-first-run-onboarding). |
 | Env values only through the CLI, one at a time | Owner decision (Nov 17): Env shows plaintext values and reveals a secret's value on request. Every read goes through the CLI on a pipe (`hack env get KEY` per name); the app never parses env files, decrypts or holds the key. A revealed value hides after 60 s and on any move; nothing bulk-reveals ([Env tab](#env-tab)). Logs are unredacted service output (which can include values Hack injected), shown as the CLI emits them, with a warning, never written to disk and with no copy-all (owner decision: the Logs tab is in scope). |
 | Unknown is not absent | A failed or timed-out read shows "could not read" with the error, never "stopped" or "0 projects". |
 | Small | Target under 4,000 lines of Rust for v0.1. The old `apps/macos` grew to 13,800 lines through an embedded terminal, command palette, editor and agent integrations, tickets and remote features. None of those come back. |
@@ -177,17 +177,18 @@ snapshot, only counts and nothing else.
 Shown on first launch when a check needs attention and the user has not yet
 selected an instance, opened Doctor or opened a terminal tab (a lost CLI shows
 it regardless), and from the Doctor row ("Run setup again"). One card per
-check, in order. Every check is read-only; every card offers **Check again**.
+check, in order. The pane offers **Check again** for its read-only checks.
+When the CLI check fails, the later steps show **Blocked** and offer no actions.
 
 ![Onboarding](diagrams/onboarding.svg) ([source](diagrams/onboarding.mmd))
 
 | Step | Read-only check | Fix | Admin | Skipped / unknown shows |
 |---|---|---|---|---|
-| CLI | `hack --version` (text; R1 for JSON) | `brew install hack-dance/tap/hack` (copy) | no | Cannot skip |
-| Docker (Compose projects) | `runtime_ok` from `/v1/projects` or `hack projects --json` (Docker only) | open Docker Desktop / Docker docs | no | "Docker not reachable" on Compose projects only |
+| CLI | `hack version --json`, with a plain-text fallback for older releases | Open the Hack 5 install guide | no | Cannot skip |
+| hackd | `hack daemon status --json` and the version from `/v1/status` | `hack daemon start` if confirmed off. Check again if unreadable. | no | Slower refresh when disconnected |
+| Docker (Compose projects) | The machine Doctor's `docker daemon` check | Docker docs | no | "Docker not reachable" on Compose projects only |
 | Native runtime (native projects) | native `ps` `data.status` per native project (`runtime_not_running` etc.) | native setup doc (HACK-2193) | no | that native project shows Unknown; Compose projects unaffected |
-| hackd | `hack daemon status --json` | `hack daemon start` | no | Status bar "hackd off"; slower refresh |
-| Routing and DNS (Compose) | macOS: doctor `resolver:<tld>`, `dnsmasq.conf:<tld>`, `dnsmasq:53` and `coredns forwarding` (all must pass). Linux: doctor `linux dns route`. Never `hack global status` (can start Docker) | `hack global install` | **yes** | URLs greyed "DNS not set up"; "unknown" when a check is missing |
+| Routing and DNS (Compose) | macOS: doctor `resolver:<tld>`, `dnsmasq.conf:<tld>`, `dnsmasq:53` and `coredns forwarding` (all must pass). Linux: doctor `linux dns route`. Never `hack global status` (can start Docker) | `hack global install` | **yes** | Count and individual results for all expected DNS pieces |
 | Routing and DNS (native) | `hack doctor --browser-url <project URL>` → `native host dns` (absent without `--browser-url`) | none from the app: `hack global install` refuses native; link to the native setup doc (HACK-2193) | — | "unknown" |
 | Certificate trust (Compose) | **Unknown** today: doctor `caddy local ca` checks the exported CA, not system or browser trust (R16) | `hack global trust` | **yes** | Lock icon on URLs: "browser may warn" |
 | Certificate trust (native) | doctor `native root trust` | none from the app: `hack global trust` refuses native; doc link | — | "unknown" |

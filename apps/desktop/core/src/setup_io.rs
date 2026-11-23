@@ -54,24 +54,32 @@ impl LiveSource {
         } else {
             runner.version(Duration::from_secs(5).min(left()))
         };
-        // Missing CLI is decisive; no reason to attempt other subprocesses.
-        if cli.is_err() {
-            let reason = cli
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            let mut report = setup::derive(
-                Err(&reason),
-                None,
-                None,
-                None,
-                &[],
-                setup::Platform::current(),
-            );
-            report.force_cli_gate = matches!(cli, Err(crate::runner::RunError::NotFound));
-            return report;
-        }
+        // Only a confirmed compatible CLI may read any subsequent checks.
+        let cli = match cli {
+            Ok(version) if setup::supported_cli(&version) => version,
+            Ok(version) => {
+                return setup::derive(
+                    Ok(&version),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    setup::Platform::current(),
+                );
+            }
+            Err(error) => {
+                let mut report = setup::derive(
+                    Err(&error.to_string()),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    setup::Platform::current(),
+                );
+                report.force_cli_gate = matches!(error, crate::runner::RunError::NotFound);
+                return report;
+            }
+        };
         let daemon = if left().is_zero() {
             None
         } else {
@@ -85,7 +93,7 @@ impl LiveSource {
             .as_ref()
             .filter(|s| {
                 // Equal versions, or ones the CLI reports as compatible.
-                cli.as_ref().is_ok_and(|v| v == &s.version)
+                cli == s.version
                     || daemon
                         .as_ref()
                         .and_then(|d| d.get("api_compatible"))
@@ -128,7 +136,7 @@ impl LiveSource {
             Duration::from_secs(60),
         );
         let mut report = setup::derive(
-            cli.as_deref().map_err(|_| "CLI unavailable"),
+            Ok(&cli),
             projects.as_ref(),
             socket.as_ref().map(|d| d.version.as_str()),
             daemon.as_ref(),
@@ -141,11 +149,11 @@ impl LiveSource {
         // A hackd at another version that another install's CLI also uses
         // (they share this home): never offer to restart it, which would
         // replace that install's daemon. Same rule as the project list.
-        if let (Ok(cli_version), Some(running), Some(client)) = (&cli, &socket, &client)
-            && running.version != *cli_version
+        if let (Some(running), Some(client)) = (&socket, &client)
+            && running.version != cli
             && let Some(other) = self.install_sharing(&runner, client.socket())
         {
-            setup::mark_shared_home(&mut report, &running.version, cli_version, &other);
+            setup::mark_shared_home(&mut report, &running.version, &cli, &other);
         }
         // Copy commands run the checked CLI with its checked context, never
         // whichever `hack` the user's terminal finds first.

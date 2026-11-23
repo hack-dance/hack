@@ -283,7 +283,10 @@ impl MainWindow {
                     projects,
                 );
             }
-            Phase::Empty | Phase::CliMissing | Phase::Error { .. } => {}
+            Phase::Empty
+            | Phase::CliMissing
+            | Phase::CliUnsupported { .. }
+            | Phase::Error { .. } => {}
         }
         let doctor_trailing: AnyElement = match (list.doctor_known, list.doctor_count) {
             (true, n) if n > 0 => count_pill(n, ui).into_any_element(),
@@ -641,6 +644,14 @@ impl Render for MainWindow {
                 "Hack CLI not found",
                 "The app runs the hack command for everything. Install it, then reopen the app.",
                 Some("brew install hack-dance/tap/hack"),
+                &ui,
+            )
+            .into_any_element(),
+            Phase::CliUnsupported { version } => empty_pane(
+                Glyph::CircleAlert,
+                "Hack 5 required",
+                hack_desktop_core::setup::unsupported_cli_detail(version),
+                None,
                 &ui,
             )
             .into_any_element(),

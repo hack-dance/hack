@@ -99,6 +99,31 @@ fn all_mac_dns_checks_required_including_custom_pairs() {
         .status
     };
     assert_eq!(state(&ids), Status::Passed);
+    let mut partial = ids;
+    for (_, status) in &mut partial[5..] {
+        *status = "error";
+    }
+    let report = derive(
+        &[machine(&partial)],
+        Platform::Mac,
+        serde_json::json!({"running":true}),
+        Some("5.0.0"),
+    );
+    let routing = report.cards.iter().find(|c| c.id == "routing").unwrap();
+    assert_eq!(routing.status, Status::NeedsAttention);
+    assert_eq!(routing.detail, "5 of 8 DNS pieces are set up");
+    assert_eq!(routing.checks.len(), 8);
+    for (id, status) in partial {
+        let check = routing.checks.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            check.status,
+            if status == "ok" {
+                Status::Passed
+            } else {
+                Status::NeedsAttention
+            }
+        );
+    }
     for i in 0..ids.len() {
         let mut missing = ids.to_vec();
         missing.remove(i);
@@ -138,6 +163,26 @@ fn daemon_requires_running_and_socket_version_not_exit_zero() {
             want
         );
         assert_eq!(r.cards.last().unwrap().status, Status::NeedsAttention);
+    }
+}
+
+#[test]
+fn unreadable_hackd_has_no_remedy_and_precedes_docker() {
+    for daemon in [
+        None,
+        Some(serde_json::json!({"running":true,"status":"starting"})),
+    ] {
+        let report = setup::derive(Ok("5.0.0"), None, None, daemon.as_ref(), &[], Platform::Mac);
+        let [cli, daemon, docker, ..] = report.cards.as_slice() else {
+            panic!("missing setup cards");
+        };
+        assert_eq!(cli.id, "cli");
+        assert_eq!(daemon.id, "daemon");
+        assert_eq!(daemon.status, Status::Unknown);
+        assert_eq!(daemon.remedy, Remedy::None);
+        assert!(daemon.detail.contains("Check again"));
+        assert_eq!(docker.id, "docker");
+        assert!(!docker.detail.contains("hackd"));
     }
 }
 #[test]

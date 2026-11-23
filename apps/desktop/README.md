@@ -33,10 +33,10 @@ cargo run -p hack-desktop -- --list-fixtures
 cargo run -p hack-desktop -- --fixtures failed-start --theme dark
 ```
 
-The core reads version identity through `hack version --json` and validates its
-`hack.version.v1` schema inside the success envelope. New schema-tagged commands
-use the strict parser; daemon and published legacy payloads keep their existing
-parsers. Shared boundary fixtures are checked against the CLI producers.
+The core reads the CLI version through `hack version --json`. The
+`hack.version.v1` envelope allows additive fields. For older installs the
+app also reads plain version output, including when the CLI rejects the JSON
+flag. Shared boundary fixtures are checked against the CLI producers.
 
 Dropping a log stream retries killing its owned process group for up to two
 seconds before detaching a reader still waiting for EOF. A descendant that
@@ -115,7 +115,9 @@ action started since.
 
 The app finds stable `hack` on PATH and a prerelease `hack-next` (on PATH or
 `~/.hack-next/bin/hack-next`), offering only installs no other user can change.
-It uses the one chosen before, else stable, else the prerelease. The status bar
+It prefers a compatible Hack 5 CLI in this order: saved choice, stable, then
+prerelease. When every readable CLI is incompatible, Setup names the installed
+version and blocks the remaining checks. The status bar
 names it (`hack-next 5.0.0-next.19 · prerelease`) and offers the other with one
 click (**Use hack (stable)**); the choice is saved in the app's settings
 (`~/Library/Application Support/dance.hack.desktop/settings.json` on macOS,

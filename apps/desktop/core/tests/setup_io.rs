@@ -420,8 +420,81 @@ fn version_timeout_is_unknown_without_forcing_a_missing_cli_gate() {
     assert!(!report.cli_ready());
     assert!(!report.force_cli_gate);
     assert!(report.cards[0].detail.contains("did not answer"));
+    assert!(
+        report.cards[1..]
+            .iter()
+            .all(|card| card.status == Status::Blocked)
+    );
     assert_eq!(
         std::fs::read_to_string(t.0.join("calls")).unwrap(),
         "version --json"
     );
+}
+
+#[test]
+fn legacy_cli_version_blocks_following_checks_before_any_daemon_reads() {
+    for rejects_json in [false, true] {
+        let t = Tree::new();
+        let program = t.0.join("hack");
+        let version_json = if rejects_json {
+            r#"printf '%s\n' '{"ok":false,"error":{"code":"E_USAGE","message":"Option(s) not valid for \"version\": --json"}}'; exit 1"#
+        } else {
+            "printf 'hack v4.3.1\n'"
+        };
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/calls"
+case "$*" in
+'version --json') {version_json};;
+version) printf 'hack v4.3.1\n';;
+*) exit 98;;
+esac
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        warm_version(&program, &t.0);
+        std::fs::remove_file(t.0.join("calls")).unwrap();
+        let source = LiveSource::new(
+            CliRunner::new(program)
+                .with_env("HOME", t.0.to_str().unwrap())
+                .with_env("HACK_HOME", t.0.join(".hack").to_str().unwrap()),
+            None,
+        );
+        let report = source.setup();
+        assert!(report.force_cli_gate);
+        assert!(!report.cli_ready());
+        assert_eq!(report.cards[0].status, Status::NeedsAttention);
+        assert_eq!(
+            report.cards[0].detail,
+            "Hack 4.3.1 is installed, this app needs 5"
+        );
+        assert_eq!(
+            report.cards[1..]
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["daemon", "docker", "routing", "trust", "login"]
+        );
+        assert!(report.cards[1..].iter().all(|card| {
+            card.status == Status::Blocked
+                && card.remedy == hack_desktop_core::setup::Remedy::None
+                && card.checks.is_empty()
+        }));
+        assert!(
+            matches!(source.listing(), Err(hack_desktop_core::source::SourceError::CliUnsupported { version }) if version == "4.3.1")
+        );
+        let expected = if rejects_json {
+            "version --json\nversion\nversion --json\nversion\n"
+        } else {
+            "version --json\nversion --json\n"
+        };
+        assert_eq!(
+            std::fs::read_to_string(t.0.join("calls")).unwrap(),
+            expected
+        );
+    }
 }

@@ -114,6 +114,7 @@ impl Banner {
 pub enum Phase {
     Loading,
     CliMissing,
+    CliUnsupported { version: String },
     Error { code: String, message: String },
     Empty,
     Ready,
@@ -714,6 +715,9 @@ impl AppModel {
         let mut banners = Vec::new();
         let phase = match (&self.snapshot, &self.last_error) {
             (_, Some(SourceError::CliMissing)) => Phase::CliMissing,
+            (_, Some(SourceError::CliUnsupported { version })) => Phase::CliUnsupported {
+                version: version.clone(),
+            },
             (None, Some(SourceError::Cli { code, message, .. })) => Phase::Error {
                 code: code.clone(),
                 message: message.clone(),
@@ -795,6 +799,10 @@ impl AppModel {
             stopped: stopped.len() - unknown,
             unknown,
         };
+        let cli_version = match &phase {
+            Phase::CliMissing | Phase::CliUnsupported { .. } => None,
+            _ => self.snapshot.as_ref().map(|s| s.cli_version.clone()),
+        };
         ListView {
             phase,
             banners,
@@ -806,7 +814,7 @@ impl AppModel {
                 .as_ref()
                 .and_then(|s| s.doctor.as_ref())
                 .map_or(0, crate::models::DoctorReport::attention_count),
-            cli_version: self.snapshot.as_ref().map(|s| s.cli_version.clone()),
+            cli_version,
             counts,
         }
     }
@@ -939,6 +947,7 @@ fn describe(e: &SourceError) -> String {
     match e {
         SourceError::Pending => "still loading".into(),
         SourceError::CliMissing => "hack was not found on PATH".into(),
+        SourceError::CliUnsupported { version } => crate::setup::unsupported_cli_detail(version),
         SourceError::DaemonUnavailable { message, .. } => message.clone(),
         SourceError::Cli { code, message, .. } => format!("{code}: {message}"),
     }

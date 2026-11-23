@@ -952,17 +952,32 @@ impl HackApp {
         let version = self.cli_label_for(list);
         let other = choice.as_ref().and_then(|c| c.others().next().cloned());
         let p = ui.p;
-        status_bar(self.status_items(list), version, ui).children(other.map(|o| {
-            let label = format!("Use {} ({})", o.name, o.channel.label());
+        let disconnected = disconnected_status(list, &self.setup.report);
+        let setup = (self.pane != Pane::Setup && disconnected.is_some()).then(|| {
             div()
-                .id("use-other-cli")
+                .id("status-setup")
                 .ml(space::S5)
                 .cursor_pointer()
                 .text_color(p.accent)
                 .hover(|d| d.underline())
-                .child(label)
-                .on_click(cx.listener(move |this, _, window, cx| this.use_cli(&o.path, window, cx)))
-        }))
+                .child("Set up")
+                .on_click(cx.listener(|this, _, _, cx| this.open_setup(cx)))
+        });
+        status_bar(self.status_items(list, disconnected), version, ui)
+            .children(setup)
+            .children(other.map(|o| {
+                let label = format!("Use {} ({})", o.name, o.channel.label());
+                div()
+                    .id("use-other-cli")
+                    .ml(space::S5)
+                    .cursor_pointer()
+                    .text_color(p.accent)
+                    .hover(|d| d.underline())
+                    .child(label)
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.use_cli(&o.path, window, cx)),
+                    )
+            }))
     }
 
     /// The status bar's CLI label: `hack-next 5.0.0-next.19 · prerelease`.
@@ -1169,7 +1184,10 @@ impl HackApp {
                     );
                 }
             }
-            Phase::Empty | Phase::CliMissing | Phase::Error { .. } => {}
+            Phase::Empty
+            | Phase::CliMissing
+            | Phase::CliUnsupported { .. }
+            | Phase::Error { .. } => {}
         }
         let machine = div()
             .flex_none()
@@ -1707,9 +1725,16 @@ impl HackApp {
         })
     }
 
-    fn status_items(&self, list: &ListView) -> Vec<(Option<Status>, String)> {
-        if list.cli_version.is_none() {
-            return vec![(None, "not connected".into())];
+    fn status_items(
+        &self,
+        list: &ListView,
+        disconnected: Option<(Status, String)>,
+    ) -> Vec<(Option<Status>, String)> {
+        if let Some((status, detail)) = disconnected {
+            return vec![(Some(status), detail)];
+        }
+        if matches!(list.phase, Phase::Loading) {
+            return vec![(None, "Checking Hack…".into())];
         }
         let c = list.counts;
         let always_on = list
@@ -1737,16 +1762,55 @@ impl HackApp {
             (Status::Running, "engine ok")
         };
         items.push((Some(engine.0), engine.1.into()));
-        if banners.iter().any(|b| matches!(b, Banner::DaemonOff)) {
-            items.push((Some(Status::Stopped), "hackd off".into()));
-        } else if banners
-            .iter()
-            .any(|b| matches!(b, Banner::DaemonMismatch { .. }))
-        {
-            items.push((Some(Status::Degraded), "hackd mismatch".into()));
-        }
         items
     }
+}
+
+fn disconnected_status(
+    list: &ListView,
+    setup: &hack_desktop_core::setup::Report,
+) -> Option<(Status, String)> {
+    use hack_desktop_core::setup::{Remedy, SafeAction};
+
+    let cause = match &list.phase {
+        Phase::CliMissing => (Status::Unknown, "Hack CLI not found".into()),
+        Phase::CliUnsupported { version } => {
+            (Status::Degraded, format!("Hack {version} · needs Hack 5"))
+        }
+        _ => {
+            if let Some(cause) = list.banners.iter().find_map(|banner| match banner {
+                Banner::DaemonOff => {
+                    let off = setup.cards.iter().any(|card| {
+                        card.id == "daemon" && card.remedy == Remedy::Run(SafeAction::StartDaemon)
+                    });
+                    Some(if off {
+                        (Status::Stopped, "hackd not running")
+                    } else {
+                        (Status::Unknown, "Couldn't check hackd")
+                    })
+                }
+                Banner::DaemonMismatch { .. } => Some((Status::Degraded, "hackd version mismatch")),
+                Banner::DaemonReadFailed { .. } => {
+                    Some((Status::Unknown, "Couldn't read projects from hackd"))
+                }
+                Banner::SharedHome { .. } => {
+                    Some((Status::Degraded, "hackd belongs to another Hack install"))
+                }
+                _ => None,
+            }) {
+                return Some((cause.0, cause.1.into()));
+            }
+            match &list.phase {
+                Phase::Error { code, .. } if code == "E_APP_CONTEXT" => (
+                    Status::Unknown,
+                    "Couldn't check the Hack CLI environment".into(),
+                ),
+                Phase::Error { .. } => (Status::Unknown, "Couldn't check the Hack CLI".into()),
+                _ => return None,
+            }
+        }
+    };
+    Some(cause)
 }
 
 impl HackApp {
@@ -1818,8 +1882,16 @@ impl Render for HackApp {
             Phase::CliMissing => empty_pane(
                 Glyph::CircleAlert,
                 "Hack CLI not found",
-                "The app runs the hack command for everything. Install it, then reopen the app.",
-                Some("brew install hack-dance/tap/hack"),
+                "The app needs a Hack 5 CLI. Open Set up to check your install.",
+                None,
+                &ui,
+            )
+            .into_any_element(),
+            Phase::CliUnsupported { version } => empty_pane(
+                Glyph::CircleAlert,
+                "Hack 5 required",
+                hack_desktop_core::setup::unsupported_cli_detail(version),
+                None,
                 &ui,
             )
             .into_any_element(),
@@ -1976,6 +2048,36 @@ mod tests {
         let mut m = AppModel::new();
         m.apply(Event::Refreshed(FixtureSource(f).snapshot()));
         m.list()
+    }
+
+    #[test]
+    fn footer_distinguishes_missing_unsupported_and_unreachable() {
+        use hack_desktop_core::setup::{Platform, Report, derive};
+
+        let empty = Report::default();
+        let label = |list, report| disconnected_status(list, report).unwrap().1;
+        assert_eq!(
+            label(&list(Fixture::CliMissing), &empty),
+            "Hack CLI not found"
+        );
+
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Err(SourceError::CliUnsupported {
+            version: "4.3.1".into(),
+        })));
+        assert_eq!(label(&model.list(), &empty), "Hack 4.3.1 · needs Hack 5");
+
+        let down = list(Fixture::DaemonDown);
+        assert_eq!(label(&down, &empty), "Couldn't check hackd");
+        let off = derive(
+            Ok("5.0.0"),
+            None,
+            None,
+            Some(&serde_json::json!({"running":false})),
+            &[],
+            Platform::Mac,
+        );
+        assert_eq!(label(&down, &off), "hackd not running");
     }
 
     #[test]

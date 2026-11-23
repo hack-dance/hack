@@ -393,7 +393,7 @@ fn card(
         (_, true) => ("Skipped for now", p.states.unknown),
         (Status::Passed, false) => ("Passed", p.states.running),
         (Status::NeedsAttention, false) => ("Needs attention", p.states.degraded),
-        (Status::Unknown, false) => ("Unknown", p.states.unknown),
+        (Status::Unknown, false) => ("Couldn't check", p.states.unknown),
         (Status::Blocked, false) => ("Blocked", p.states.unknown),
     };
     let cli = pane.report.cli_ready();
@@ -481,7 +481,7 @@ fn card(
             }
         }
         // The CLI cannot be skipped: everything else needs it.
-        if c.id != "cli" && !skipped {
+        if c.id != "cli" && !skipped && c.remedy != Remedy::None {
             let id = c.id.clone();
             let enabled = !busy;
             actions = actions.child(

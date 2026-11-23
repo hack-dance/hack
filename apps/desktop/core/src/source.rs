@@ -211,6 +211,9 @@ pub enum SourceError {
     /// No answer yet (fixtures use it for the loading state).
     Pending,
     CliMissing,
+    CliUnsupported {
+        version: String,
+    },
     /// Project reads require a matching daemon until observe-only CLI listing exists.
     DaemonUnavailable {
         cli: String,
@@ -1451,6 +1454,11 @@ impl LiveSource {
         let cli_version = self.cli_version(&runner);
         timed("hack version --json (cached 30 s per CLI)", t);
         let cli_version = cli_version?;
+        if !crate::setup::supported_cli(&cli_version) {
+            return Err(SourceError::CliUnsupported {
+                version: cli_version,
+            });
+        }
         // hackd is found and checked with the CLI in its checked context; a
         // context that cannot be checked is that error, never "hackd off"
         // (which would offer Start).
@@ -2180,6 +2188,7 @@ fn describe_error(e: &SourceError) -> String {
             message.clone()
         }
         SourceError::CliMissing => "hack was not found on PATH".into(),
+        SourceError::CliUnsupported { version } => crate::setup::unsupported_cli_detail(version),
         SourceError::Pending => "still loading".into(),
     }
 }

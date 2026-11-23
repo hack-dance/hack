@@ -13,6 +13,11 @@ CANDIDATE="$HOME/.hack-next/bin/hack-next"
 Native is beta. Keep a copy of any data you care about; native does not move
 Compose volumes.
 
+For Postgres, use a TCP health check such as `pg_isready -h 127.0.0.1`. A
+Unix-socket check can pass against the temporary server that initializes a fresh
+volume. If the service omits `start_interval`, native uses the authored timing
+on a start that creates its data volume and uses the fast defaults with retained data.
+
 ## 1. List the blockers
 
 ```sh
@@ -78,7 +83,10 @@ the service and the field, and prints the command that runs it there.
 
 An image is reused while its build inputs are unchanged: the Dockerfile, the ignore
 file, the target, the args, and every file in the build context the ignore file lets
-the build read. Change any of them and the next `up` builds again, also after
+the build read. Native always leaves Hack's machine-local files out of its build
+context, including `.hack/.internal/`, `.hack/.branch/`, `.hack/.env` and the
+checkout's `.hack.secret.key`. Explicitly copying one of these paths in the
+Dockerfile fails. Change any included input and the next `up` builds again, also after
 `hack down`; the run's containers are then recreated from the new image and named
 volumes are kept. `hack restart` checks the same inputs before it stops anything: a
 build that fails leaves the current project running, and a rebuilt image is what the

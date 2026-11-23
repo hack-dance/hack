@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { nativeComposeStorageDockerFixtureScript } from "./native-compose-storage-docker.ts";
+import { mkdirOwnedFixture, writeOwnedFixture } from "./owned-fixture.ts";
 import { privateCliEnv } from "./private-cli-env.ts";
 
 const roots: string[] = [];
@@ -72,10 +73,10 @@ export async function fixture(
   if (opts.cleanupAllowed) {
     cleanupGuards.set(root, opts.cleanupAllowed);
   }
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   // Private HOME for child CLIs; the contributor's home is never selected.
   await mkdir(join(root, "user-home"), { mode: 0o700 });
-  await Bun.write(
+  await writeOwnedFixture(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({
       schema_version: 1,
@@ -129,7 +130,7 @@ export async function fixture(
           }),
     })
   );
-  await Bun.write(
+  await writeOwnedFixture(
     join(root, ".hack/hack.env.default.yaml"),
     JSON.stringify({
       version: 1,

@@ -457,7 +457,7 @@ impl HackApp {
                 self.project_text(
                     report,
                     "logs.snapshot_backend",
-                    "compose",
+                    "loki",
                     enabled,
                     ui,
                     window,
@@ -1396,4 +1396,76 @@ fn field_row(label: &str, detail: &str, element: impl IntoElement, ui: &Ui) -> D
                 .children((!detail.is_empty()).then(|| muted(detail.to_owned(), ui))),
         )
         .child(div().flex_1().min_w_0().child(element))
+}
+
+#[cfg(all(test, feature = "screenshots"))]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui_kit::{HeadlessAppContext, NoopTextSystem, WindowOptions};
+    use hack_desktop_core::{config::ConfigState, fixtures::Fixture};
+
+    use super::*;
+
+    #[test]
+    fn the_snapshot_backend_defaults_to_loki_and_can_be_changed_to_compose() {
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(hack_desktop_ui::tokens::init);
+        let (window, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                    cx.new(|cx| {
+                        HackApp::new(crate::source_for(Some(Fixture::Running)), false, window, cx)
+                    })
+                })
+            })
+            .expect("open a headless window");
+        let report = ConfigReport {
+            state: ConfigState::Ready,
+            project: serde_json::json!({ "logs": {} }),
+            layers: vec![ConfigLayer {
+                id: "1".into(),
+                file: ".hack/hack.config.json".into(),
+                kind: "project".into(),
+                ownership: "shared".into(),
+                active: true,
+                writable: true,
+                revision: "fixture".into(),
+                exists: true,
+                source: None,
+                hidden: false,
+                source_writable: true,
+                inherited: None,
+                overlay: None,
+            }],
+            writable: true,
+            ..Default::default()
+        };
+        let field_id = "project/logs.snapshot_backend";
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.config_project_form(&report, &app.ui(cx), window, cx);
+                let original = app.config.inputs[field_id].0.read(cx).value();
+                assert_eq!(original.as_ref(), "loki");
+                Field::Project("logs.snapshot_backend".into()).stage(
+                    app,
+                    "compose".into(),
+                    &original,
+                    cx,
+                );
+            });
+        })
+        .expect("edit the snapshot backend");
+        cx.update(|cx| {
+            assert!(matches!(
+                app.read(cx).config.draft.changes.get(field_id),
+                Some(ConfigChange::Project { layer, path, value })
+                    if layer == "1" && path == "logs.snapshot_backend" && value == "compose"
+            ));
+        });
+    }
 }

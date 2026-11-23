@@ -169,8 +169,7 @@ Run `hack up --detach --timings` to see the native startup timeline on stderr.
 It shows when every container started and when all services met their readiness
 conditions. A service with a health check must pass it. A completed one-shot
 service must exit successfully. A milestone appears only when this invocation
-observed it. A project that is still warming may have a start time without a
-readiness time.
+observed it. Detached native startup waits for readiness before returning.
 
 Native `hack up --json` includes the same [timing records](../../../reference/timings.md)
 in `data.timings`. Add `--timings-file <file>` to save those records as JSONL

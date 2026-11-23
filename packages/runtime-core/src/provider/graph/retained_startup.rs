@@ -744,9 +744,7 @@ pub(in crate::provider::graph) mod tests {
         // moment) has its own code, which a caller may wait on.
         let fixture = Fixture::new();
         foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
-        let owner = foreground::transport::root(&fixture.candidate, &fixture.run)
-            .unwrap()
-            .join("owner.json");
+        let owner = fixture._publication.join("owner.json");
         fs::write(&owner, b"{").unwrap();
         let before = state(&fixture);
         assert_eq!(refusal(&fixture), "graph_foreground_owner_uncertain");

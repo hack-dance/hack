@@ -82,6 +82,8 @@ when a completed load receipt and live readback satisfy `ensure-image`.
 of attempted HTTP sends in that runtime command, including registry
 authentication, retries and redirects. A fresh loaded selection reports zero.
 `image.tag.record` covers the local receipt read without network transfer.
+A batch ensure also includes `attrs.image_index`, the zero-based position in
+the batch request, so overlapping spans can be attributed to each image.
 
 ## Growing the vocabulary
 

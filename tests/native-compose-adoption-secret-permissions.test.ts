@@ -34,7 +34,7 @@ beforeEach(async () => {
   root = await realpath(
     await mkdtemp(join(tmpdir(), "retained-permission-proof-"))
   );
-  await mkdir(join(root, "material"));
+  await mkdir(join(root, "material"), { mode: 0o755 });
   await writeFile(join(root, "material/config"), "public-fixture", {
     mode: 0o444,
   });

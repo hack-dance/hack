@@ -297,6 +297,186 @@ test("cache pruning is confirmation-gated and never selects application data mou
   expect(log).not.toContain("volume rm database-data");
 });
 
+async function detachedCacheFixture() {
+  const fixture = await createWorktreeFixture();
+  const project = "downsafe--feature-current";
+  const down = [
+    "down",
+    "--path",
+    fixture.worktreeRoot,
+    "--branch",
+    "feature-current",
+    "--json",
+  ];
+  const runtime = (
+    destination: string,
+    root = fixture.worktreeRoot,
+    composeProject = project
+  ): RuntimeFixture => ({
+    composeProject,
+    id: "fixture-runtime",
+    state: "running",
+    workingDir: join(root, ".hack"),
+    mounts: [{ type: "volume", source: "owned-next", destination }],
+  });
+  const set = (...rows: RuntimeFixture[]) =>
+    writeRuntimeFixtures({ fixture, runtime: rows });
+  const prune = () =>
+    runCliWithCapturedOutput([...down, "--prune-caches", "--yes"]);
+  await writeFile(join(fixture.primaryRoot, "inventory"), "owned-next\n");
+  return { fixture, project, down, runtime, set, prune };
+}
+
+test("only the volume's own disposable label qualifies after plain down", async () => {
+  const { fixture, down, runtime, set, prune } = await detachedCacheFixture();
+  await writeFile(
+    join(fixture.primaryRoot, "inventory"),
+    "owned-next\nowned-turbo\nowned-next-foreign\n"
+  );
+  await set(runtime("/app/.next"));
+  expect((await runCliWithCapturedOutput(down)).exitCode).toBe(0);
+  expect(await readFile(fixture.dockerLogPath, "utf8")).not.toMatch(
+    /^(volume |info )/m
+  );
+  await set(runtime("/app/.next", fixture.worktreeRoot, "downsafe--other"));
+  const first = await prune();
+  expect(first.exitCode).toBe(0);
+  expect(JSON.parse(first.stdout).data).toMatchObject({
+    cacheVolumesRemoved: ["owned-turbo"],
+    cacheVolumesKept: [
+      { name: "owned-next", reason: "mounted-elsewhere" },
+      { name: "owned-next-foreign", reason: "ownership-unverified" },
+    ],
+  });
+  await set();
+  const again = await prune();
+  expect(again.exitCode).toBe(0);
+  expect(again.stderr).toContain(
+    "Kept volumes without current mounts: owned-next."
+  );
+  expect(again.stderr).toContain("down --prune-caches before stopping");
+  expect(again.stderr).toContain("add hack.cache.disposable=true");
+  expect(JSON.parse(again.stdout).data).toMatchObject({
+    cacheVolumesRemoved: [],
+    cacheVolumesKept: [
+      { name: "owned-next", reason: "no-live-mount" },
+      { name: "owned-next-foreign", reason: "ownership-unverified" },
+    ],
+  });
+  expect(
+    (await readFile(fixture.dockerLogPath, "utf8")).match(/^volume rm .*$/gm)
+  ).toEqual(["volume rm owned-turbo"]);
+});
+
+test.each([
+  "remounted as data",
+  "Docker info failure",
+  "volume inspect failure",
+  "another checkout",
+  "failed restart up",
+  "untrusted old receipt",
+])("past cache mount gives no removal authority after %s", async (scenario) => {
+  const { fixture, project, down, runtime, set, prune } =
+    await detachedCacheFixture();
+  await set(runtime("/app/.next"));
+  expect((await runCliWithCapturedOutput(down)).exitCode).toBe(0);
+  const alternateRoot =
+    scenario === "another checkout"
+      ? fixture.primaryRoot
+      : fixture.worktreeRoot;
+  await set(runtime("/data", alternateRoot));
+  if (scenario === "remounted as data" || scenario === "another checkout") {
+    const live = await prune();
+    expect(live.exitCode).toBe(0);
+    expect(JSON.parse(live.stdout).data.cacheVolumesKept).toEqual([
+      {
+        name: "owned-next",
+        reason:
+          scenario === "another checkout"
+            ? "mounted-elsewhere"
+            : "not-disposable",
+      },
+    ]);
+  } else if (scenario === "failed restart up") {
+    await writeFile(join(fixture.primaryRoot, "fail-up"), "");
+    const restart = await runCliWithCapturedOutput([
+      "restart",
+      ...down.slice(1),
+    ]);
+    expect(restart.exitCode).not.toBe(0);
+    expect(await readFile(fixture.dockerLogPath, "utf8")).toMatch(
+      /^compose .* up /m
+    );
+  } else if (scenario === "untrusted old receipt") {
+    const directory = join(
+      process.env.HOME ?? "",
+      ".hack",
+      "compose-cache-receipts"
+    );
+    await mkdir(directory, { recursive: true });
+    const key = new Bun.CryptoHasher("sha256")
+      .update(JSON.stringify(["fixture-engine", project]))
+      .digest("hex");
+    await writeFile(
+      join(directory, `${key}.json`),
+      JSON.stringify({
+        checkout: join(fixture.worktreeRoot, ".hack"),
+        mounts: [
+          {
+            name: "owned-next",
+            destinations: ["/app/.next"],
+            services: ["api"],
+            fingerprint: "",
+          },
+        ],
+      }),
+      { mode: 0o666 }
+    );
+    await chmod(join(directory, `${key}.json`), 0o666);
+  } else {
+    const failure = join(
+      fixture.primaryRoot,
+      scenario === "Docker info failure" ? "fail-info" : "fail-inspect"
+    );
+    await writeFile(failure, "");
+    expect((await runCliWithCapturedOutput(down)).exitCode).toBe(0);
+    await rm(failure);
+  }
+  await set();
+  const detached = await prune();
+  expect(detached.exitCode).toBe(0);
+  expect(JSON.parse(detached.stdout).data).toMatchObject({
+    cacheVolumesRemoved: [],
+    cacheVolumesKept: [{ name: "owned-next", reason: "no-live-mount" }],
+  });
+  expect(await readFile(fixture.dockerLogPath, "utf8")).not.toMatch(
+    /^volume rm /m
+  );
+});
+
+test("prune keeps a volume recreated during stop", async () => {
+  const { fixture, set, prune, runtime } = await detachedCacheFixture();
+  await set({
+    ...runtime("/app/.next"),
+    mounts: [
+      { type: "volume", source: "owned-replaced", destination: "/app/.next" },
+    ],
+  });
+  await writeFile(join(fixture.primaryRoot, "replace-on-down"), "");
+  const result = await prune();
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout).data).toMatchObject({
+    cacheVolumesRemoved: [],
+    cacheVolumesKept: [
+      { name: "owned-next", reason: "no-live-mount" },
+      { name: "owned-replaced", reason: "identity-changed" },
+    ],
+  });
+  const log = await readFile(fixture.dockerLogPath, "utf8");
+  expect(log.match(/^volume inspect owned-replaced$/gm)).toHaveLength(2);
+  expect(log).not.toMatch(/^volume rm /m);
+});
+
 async function createWorktreeFixture(): Promise<{
   readonly dockerInspectPath: string;
   readonly dockerLogPath: string;
@@ -361,18 +541,28 @@ async function createWorktreeFixture(): Promise<{
       `  cat "${dockerInspectPath}"`,
       "  exit 0",
       "fi",
-      'if [ "$1 $2 $3" = "volume inspect owned-next" ]; then',
-      '  printf \'[{"Name":"owned-next","Labels":{"com.docker.compose.project":"downsafe--feature-current","com.docker.compose.volume":"next"}}]\\n\'',
+      `if [ "$1" = info ]; then [ ! -e "${primaryRoot}/fail-info" ] || exit 1; echo fixture-engine; exit 0; fi`,
+      'if [ "$1 $2" = "volume ls" ]; then',
+      `  if [ -e "${primaryRoot}/inventory" ]; then while read -r name; do [ -e "${tempDir}/removed-$name" ] || printf '%s\\n' "$name"; done < "${primaryRoot}/inventory"; fi`,
       "  exit 0",
       "fi",
-      'if [ "$1 $2 $3" = "volume inspect owned-turbo" ]; then',
-      '  printf \'[{"Name":"owned-turbo","Labels":{"com.docker.compose.project":"downsafe--feature-current","com.docker.compose.volume":"turbo","hack.cache.disposable":"true"}}]\\n\'',
+      `if [ "$1" = compose ]; then case " $* " in *" down "*) [ ! -e "${primaryRoot}/replace-on-down" ] || touch "${primaryRoot}/changed-volume";; *" up "*) [ ! -e "${primaryRoot}/fail-up" ] || exit 1;; esac; fi`,
+      'if [ "$1 $2" = "volume inspect" ]; then',
+      `  [ ! -e "${primaryRoot}/fail-inspect" ] || exit 1`,
+      `  [ ! -e "${tempDir}/removed-$3" ] || { echo "get $3: no such volume" >&2; exit 1; }`,
+      `  created=2026-01-01T00:00:00Z; [ "$3" != owned-replaced ] || [ ! -e "${primaryRoot}/changed-volume" ] || created=2026-01-01T00:00:01Z`,
+      '  case "$3" in',
+      '    owned-next|owned-replaced|owned-claimed) key=next; project=downsafe--feature-current; extra="" ;;',
+      `    owned-turbo) key=turbo; project=downsafe--feature-current; extra=',"hack.cache.disposable":"true"' ;;`,
+      '    owned-next-foreign) key=next; project=downsafe--foreign; extra=\',"hack.cache.disposable":"true"\' ;;',
+      '    database-data) key=data; project=downsafe--feature-current; extra="" ;;',
+      "    *) exit 1 ;;",
+      "  esac",
+      `  printf '[{"Name":"%s","CreatedAt":"%s","Labels":{"com.docker.compose.project":"%s","com.docker.compose.volume":"%s"%s}}]\\n' "$3" "$created" "$project" "$key" "$extra"`,
       "  exit 0",
       "fi",
-      'if [ "$1 $2 $3" = "volume rm owned-next" ]; then',
-      "  exit 0",
-      "fi",
-      'if [ "$1 $2 $3" = "volume rm owned-turbo" ]; then',
+      'if [ "$1 $2" = "volume rm" ]; then',
+      `  touch "${tempDir}/removed-$3"`,
       "  exit 0",
       "fi",
       "exit 0",

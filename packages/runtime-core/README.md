@@ -563,7 +563,7 @@ BuildKit `RUN` steps use; `guest-build-network.sh` isolates it from the guest, t
 gateway and link-local metadata, and the engine client refuses any container create
 that does not name an owned network or `none`. Cold builds need free guest storage
 (at least 6 GiB, or twice the key's last image), successful builds prune BuildKit
-cache to 8 GiB, and `runtime reclaim-build-images` removes only owned, superseded,
+cache to 4 GiB, and `runtime reclaim-build-images` removes only owned, superseded,
 unreferenced images (`provider/image_build/reclaim.rs`; model
 `tests/models/tla/native-build-retention`). Native `up` calls the build operation
 for Compose `build:` services only when `HACK_NATIVE_BUILDS=1` is set. The client reaches
@@ -594,6 +594,10 @@ another test's spawned child to inherit a socket and delay EOF. Retries are zero
 The admission-pool test group retains the old mutex's serialization of whole-host
 disk-handle scans. Ignored helpers remain ignored and their owning tests still invoke
 them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+Candidate core runs the rest of each scheduled test suite and its doctests after
+a test failure. A failed qualification pass still stops subsequent repetitions.
+The job runs independent later checks and summarizes failed step IDs. Setup
+dependencies and the kill-harness check still require their input artifacts.
 Focused target selections such as `bun run test:local --lib` or `--test <name>`
 skip doctests, matching Cargo; explicit `--doc` selection runs through Cargo alone.
 The wrapper accepts Cargo build, feature and target options; nextest-specific

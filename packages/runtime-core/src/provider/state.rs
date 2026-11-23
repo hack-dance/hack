@@ -994,6 +994,39 @@ mod tests {
     }
 
     #[test]
+    fn a_start_waiter_cancels_after_confirmed_contention() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        let holder = super::Lock::acquire(&root).unwrap();
+        let contended = Cell::new(false);
+        let refused = super::wait_for_acquisition(
+            Instant::now() + Duration::from_secs(2),
+            || {
+                if contended.get() {
+                    return Err(crate::CandidateError::new(
+                        "provider_acquisition_cancelled",
+                        "cancelled",
+                    ));
+                }
+                Ok(())
+            },
+            || {
+                let result = super::Lock::acquire(&root);
+                assert!(matches!(&result, Err(error) if error.code == "provider_busy"));
+                contended.set(true);
+                result
+            },
+            super::acquisition_expired,
+        );
+        assert!(contended.get());
+        assert!(matches!(refused, Err(error) if error.code == "provider_acquisition_cancelled"));
+        drop(holder);
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
     fn acquisition_after_the_deadline_releases_the_lock() {
         use std::time::{Duration, Instant};
         let fixture = fixture();

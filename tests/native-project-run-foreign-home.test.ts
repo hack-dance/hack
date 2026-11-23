@@ -18,6 +18,7 @@ import {
   recoverNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import {
+  describeNativeForeignHomeMapping,
   inspectNativeProjectRunMapping,
   loadNativeProjectRun as load,
   type NativeProjectRun,
@@ -30,6 +31,7 @@ import {
   expectClosedRefusal,
   expectCodedRefusal,
 } from "./helpers/closed-refusal.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 /**
  * HACK-1952: each launcher version has its own native home, and the project's run
@@ -66,7 +68,7 @@ async function fixture(branch: string | null = null) {
   const projectDir = join(projectRoot, ".hack");
   const homeA = join(root, "versions", "one", "native-home");
   const homeB = join(root, "versions", "two", "native-home");
-  await mkdir(projectDir, { recursive: true });
+  await mkdirOwnedFixture(projectDir, true);
   await mkdir(homeA, { recursive: true, mode: 0o700 });
   await mkdir(homeB, { recursive: true, mode: 0o700 });
   const a = { projectRoot, projectDir, nativeHome: homeA, branch };
@@ -287,19 +289,111 @@ test("a selection goes stale when the owning home starts the run again", async (
   expect(await load(f.a)).toEqual(run);
 });
 
-test("a replaced owning home is unproven even with completed records copied in", async () => {
+test("a replaced owning home is gone: copied records grant no clean-stop release", async () => {
   const f = await fixture();
   await startInHomeA(f, true);
+  const clean = (await f.inspect()).selectionSha256;
   await rename(f.homeA, `${f.homeA}-moved`);
   await mkdir(f.homeA, { mode: 0o700 });
   await rename(
     join(`${f.homeA}-moved`, ".hack-local"),
     join(f.homeA, ".hack-local")
   );
-  expect(await f.inspect()).toMatchObject({
-    owner: "unproven",
-    selectionSha256: null,
+  // Another directory at the path is the home gone (HACK-2524): only the gone-home
+  // release, with its process scan, applies; the copied records are not read.
+  const inspection = await f.inspect();
+  expect(inspection).toMatchObject({ owner: "gone", ownerPid: null });
+  expect(inspection.selectionSha256).toMatch(/^[a-f0-9]{64}$/);
+  expect(inspection.selectionSha256).not.toBe(clean);
+});
+
+// HACK-2524: the owning home was deleted; its records went with it.
+test("a deleted owning home is named with the release and the moved-home residual, and releases once nothing of it runs", async () => {
+  const f = await fixture();
+  await startInHomeA(f, false);
+  await rm(join(f.root, "versions", "one"), { recursive: true, force: true });
+  const inspection = await f.inspect();
+  expect(inspection).toMatchObject({ owner: "gone", ownerHome: f.homeA });
+  const selection = inspection.selectionSha256 ?? "";
+  const coded = await expectCodedRefusal(
+    load(f.b),
+    "E_NATIVE_RUN_MAPPING_FOREIGN_HOME",
+    "moved rather than deleted"
+  );
+  // An absent home may be a disk that is not mounted: never claim its data is gone.
+  expect(coded.message).toContain(
+    "If that home is on a disk that is not mounted, mount it and stop the run there instead."
+  );
+  expect(coded.message).not.toContain("went with");
+  expect(inspection.missingVolume).toBeUndefined();
+  expect(
+    describeNativeForeignHomeMapping({
+      inspection: { ...inspection, missingVolume: "/Volumes/External" },
+      branch: null,
+    })
+  ).toContain(
+    "It was under /Volumes/External, which looks like a disk that is not mounted: mount it and stop the run there instead."
+  );
+  expect(coded.detail).toMatchObject({
+    owner: "gone",
+    releaseCommand: `hack doctor --native-run-mapping release --expect-selection ${selection}`,
   });
+  // An owed down hook beside the mapping is audited and skipped, not run.
+  const mapping = (await readdir(f.runs)).find((name) =>
+    /^[a-f0-9]{64}\.json$/.test(name)
+  );
+  const base = join(f.runs, (mapping ?? "absent").slice(0, -5));
+  await writeFile(`${base}.down-hooks.json`, '{"owed":true}', { mode: 0o600 });
+  const scanned: string[] = [];
+  const released = await release({
+    scope: f.b,
+    expectSelection: selection,
+    scanHome: (home) => {
+      scanned.push(home);
+      return Promise.resolve([]);
+    },
+  });
+  expect(scanned).toEqual([f.homeA]);
+  expect(released).toMatchObject({ released: true, owner: "gone" });
+  const audit = JSON.parse(await readFile(released.auditPath, "utf8"));
+  expect(audit).toMatchObject({
+    kind: "gone-home",
+    ownerHome: f.homeA,
+    gone: "absent",
+    downHooks: '{"owed":true}',
+  });
+  expect(JSON.parse(audit.mapping)).toMatchObject({ run });
+  expect(await readdir(f.runs)).not.toContain(
+    `${mapping?.slice(0, -5)}.down-hooks.json`
+  );
+  expect(await load(f.b)).toBeNull();
+});
+
+test("a live process of a deleted home's path refuses the release and keeps the mapping", async () => {
+  const f = await fixture();
+  await startInHomeA(f, false);
+  await rm(join(f.root, "versions", "one"), { recursive: true, force: true });
+  const selection = (await f.inspect()).selectionSha256 ?? "";
+  await expectClosedRefusal(
+    release({
+      scope: f.b,
+      expectSelection: selection,
+      scanHome: () => Promise.resolve([{ pid: 4242, why: "command" as const }]),
+    }),
+    "pid 4242 (names it)"
+  );
+  expect((await f.inspect()).owner).toBe("gone");
+  // A stale selection is refused before any scan.
+  await expectClosedRefusal(
+    release({
+      scope: f.b,
+      expectSelection: "e".repeat(64),
+      scanHome: () => {
+        throw new Error("a stale selection must not scan");
+      },
+    }),
+    ""
+  );
 });
 
 test("pending down hooks, held locks and the owning home's lock refuse release", async () => {
@@ -433,5 +527,22 @@ test("a mapping that differs in more than its native home keeps the generic refu
   await expectClosedRefusal(
     load(f.b),
     "Native project run mapping is unsafe, changed, or owned by another run; inspect native state before recovery."
+  );
+});
+
+test("releasing with no mapping for the instance is a closed refusal, not a filesystem error", async () => {
+  const f = await fixture();
+  // No mapping storage at all yet.
+  await expectClosedRefusal(
+    release({ scope: f.b, expectSelection: "e".repeat(64) }),
+    "No native run mapping to release for this instance"
+  );
+  // Storage present, the mapping released or never written.
+  await startInHomeA(f, true);
+  const selection = (await f.inspect()).selectionSha256 ?? "";
+  await release({ scope: f.b, expectSelection: selection });
+  await expectClosedRefusal(
+    release({ scope: f.b, expectSelection: selection }),
+    "No native run mapping to release for this instance"
   );
 });

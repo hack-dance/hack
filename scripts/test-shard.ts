@@ -8,7 +8,7 @@
  *   bun scripts/test-shard.ts plan --focus=docs[,runtime-core]
  *   bun scripts/test-shard.ts run --shard=2/4 [--layout=full|pooled]
  *       [--durations-out=FILE] [--file-timeout-seconds=720]
- *       [--deadline-seconds=1800]
+ *       [--deadline-seconds=1800] [--route-symlink-temp=true]
  *   bun scripts/test-shard.ts run --focus=docs[,runtime-core] [...]
  *   bun scripts/test-shard.ts update-durations --source=TEXT FILE...
  *
@@ -735,9 +735,37 @@ async function commandReportDeferred(): Promise<number> {
   return 0;
 }
 
+async function routedFiles(
+  target: ShardTarget,
+  args: readonly string[]
+): Promise<readonly string[]> {
+  if (
+    process.platform !== "linux" ||
+    optionValue(args, "route-symlink-temp") !== "true"
+  ) {
+    return target.files;
+  }
+  const list: unknown = await Bun.file(
+    resolve(REPO_ROOT, "scripts/test-shard-symlink-temp-files.json")
+  ).json();
+  const tracked = new Set(target.plan.files);
+  if (
+    !Array.isArray(list) ||
+    list.length === 0 ||
+    new Set(list).size !== list.length ||
+    list.some((file) => typeof file !== "string" || !tracked.has(file))
+  ) {
+    throw new ClosedCliError(
+      "test shard: invalid fixed symlink temp file list."
+    );
+  }
+  const routed = new Set(list);
+  return target.files.filter((file) => !routed.has(file));
+}
+
 async function commandPlan(args: readonly string[]): Promise<number> {
   const target = await resolveTarget({ args, requireHost: false });
-  for (const file of target.files) {
+  for (const file of await routedFiles(target, args)) {
     console.log(file);
   }
   return 0;
@@ -756,15 +784,15 @@ async function commandRun(args: readonly string[]): Promise<number> {
   const startedAt = Date.now();
   runPackageScript("check:bun-version");
   runPackageScript("test:preflight");
-  const {
-    label,
-    plan,
-    files: plannedFiles,
-  } = await resolveTarget({
-    args,
-    requireHost: true,
-  });
-  const files = prioritizeSlowFiles(plannedFiles);
+  const target = await resolveTarget({ args, requireHost: true });
+  const { label, plan } = target;
+  const files = prioritizeSlowFiles(await routedFiles(target, args));
+  const transferred = target.files.length - files.length;
+  if (transferred > 0) {
+    console.log(
+      `${label} ${transferred} files run in shard 8's fixed symlinked TMPDIR step.`
+    );
+  }
   const state: ShardState = {
     label,
     files,

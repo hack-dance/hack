@@ -3,15 +3,27 @@ use super::{BTreeMap, Candidate, CandidateError, graph};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
+/// The boolean `serve` / `serve-restore` options.
+pub(super) struct ServeFlags {
+    pub environment_stdin: bool,
+    pub automatic_dependency_slots: bool,
+    /// `--report-started`: the owner prints `graph_foreground_started` first.
+    pub report_started: bool,
+}
+
 pub(super) fn command(
     candidate: &Candidate,
     action: &str,
     options: graph::NormalizedRunOptions<'_>,
     singles: &BTreeMap<&str, &str>,
     route_slots: &BTreeMap<String, graph::RouteSlot>,
-    environment_stdin: bool,
-    automatic_dependency_slots: bool,
+    flags: ServeFlags,
 ) -> Result<Value, CandidateError> {
+    let ServeFlags {
+        environment_stdin,
+        automatic_dependency_slots,
+        report_started,
+    } = flags;
     #[cfg(target_os = "macos")]
     let configure = if matches!(action, "serve" | "serve-restore") {
         use hack_runtime_core::timings::{self, Step};
@@ -137,7 +149,7 @@ pub(super) fn command(
         if let Some(managed) = &managed {
             managed.remaining()?;
         }
-        let runtime = super::relay::runtime(
+        let mut runtime = super::relay::runtime(
             candidate,
             Path::new(singles.get("--dependencies").copied().ok_or_else(invalid)?),
             options.run.expected_plan,
@@ -149,6 +161,7 @@ pub(super) fn command(
             options.run.run_id,
             automatic_dependency_slots,
         )?;
+        runtime.report_started(report_started);
         let deadline = managed.as_ref().map_or_else(
             || Instant::now() + Duration::from_secs(120),
             |managed| managed.deadline(),
@@ -182,6 +195,7 @@ pub(super) fn command(
             route_slots,
             environment_stdin,
             automatic_dependency_slots,
+            report_started,
         );
         Err(CandidateError::new(
             "unsupported_host",

@@ -70,6 +70,8 @@ the resolved target. For directory listings, `entries` includes direct
 children, including dotfiles. Each entry has a `source` of `worktree`,
 `volume` or `container`. The deepest actual mount determines the source.
 Worktree entries also carry `hostPath` for the corresponding checkout path.
+Files read through an SSH or TCP Docker endpoint stay in the container or
+its named volumes.
 `cat` returns the first 64 KiB with an `encoding` of `utf8` or `base64` and sets
 `truncated` if there are more bytes. These commands use `sh`, `readlink`,
 `stat`, `timeout` and `head` in the container.

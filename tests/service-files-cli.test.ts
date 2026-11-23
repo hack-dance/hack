@@ -40,30 +40,38 @@ beforeEach(async () => {
     docker,
     `#!/bin/sh
 set -eu
-[ "\${DOCKER_CONTEXT:-}" = "\${FILES_CONTEXT:-}" ] || exit 9
+fixture=\${0%/*}
+IFS= read -r context < "$fixture/context"
+[ "\${DOCKER_CONTEXT:-}" = "$context" ] || exit 9
+[ -z "$context" ] || [ "$SSH_AUTH_SOCK" = "/tmp/hack-fixture-agent.sock" ] || exit 9
 case "$1" in
   compose)
     case "$*" in
       *"-p files-test--branch "*) [ -z "\${COMPOSE_PROJECT_NAME:-}" ] || exit 1 ;;
       *) [ "\${COMPOSE_PROJECT_NAME:-}" = alternate-project ] || exit 0 ;;
     esac
-    [ "\${FILES_CONTEXT:-}" = "" ] || [ "$APP_VALUE" = "fixture-only" ] || exit 9
+    [ "$context" = "" ] || [ "$APP_VALUE" = "fixture-only" ] || exit 9
     printf '%s\\n' '${foreignReplica}' '${secondReplica}' '${firstReplica}'
     ;;
   inspect)
     [ "\${APP_VALUE:-}" = "" ] || exit 9
-    cat "$FILES_FIXTURE/replicas"
+    cat "$fixture/replicas"
+    ;;
+  context)
+    cat "$fixture/endpoint"
     ;;
   volume)
-    cat "$FILES_FIXTURE/volumes"
+    cat "$fixture/volumes"
     ;;
   exec)
     [ "$2" = '${firstReplica}' ] || exit 1
     shift 10
-    [ "$1" = "$FILES_PATH" ] || exit 1
-    printf 'exec\\n' >> "$FILES_FIXTURE/calls"
-    cat "$FILES_FIXTURE/output"
-    exit "$FILES_EXIT"
+    IFS= read -r expected_path < "$fixture/path"
+    [ "$1" = "$expected_path" ] || exit 1
+    printf 'exec\\n' >> "$fixture/calls"
+    cat "$fixture/output"
+    IFS= read -r status < "$fixture/status"
+    exit "$status"
     ;;
   *) exit 1 ;;
 esac
@@ -143,8 +151,18 @@ async function run(opts: {
   readonly branch?: boolean;
   readonly checkout?: string;
   readonly context?: string;
+  readonly endpoint?: string;
 }) {
-  await writeFile(join(root, "output"), opts.output);
+  await Promise.all([
+    writeFile(join(root, "output"), opts.output),
+    writeFile(join(root, "context"), `${opts.context ?? ""}\n`),
+    writeFile(
+      join(root, "endpoint"),
+      opts.endpoint ?? "unix:///tmp/files-engine.sock"
+    ),
+    writeFile(join(root, "path"), `${opts.path}\n`),
+    writeFile(join(root, "status"), `${opts.status ?? 0}\n`),
+  ]);
   const child = Bun.spawn(
     [
       process.execPath,
@@ -165,10 +183,6 @@ async function run(opts: {
         root,
         env: {
           PATH: `${root}:/usr/bin:/bin`,
-          FILES_FIXTURE: root,
-          FILES_PATH: opts.path,
-          FILES_EXIT: String(opts.status ?? 0),
-          FILES_CONTEXT: opts.context,
         },
       }),
       stdin: "ignore",
@@ -349,6 +363,7 @@ test("files uses the managed overlay's Docker engine and base Compose project", 
       "values:",
       "  global:",
       "    DOCKER_CONTEXT: files-context",
+      "    SSH_AUTH_SOCK: /tmp/hack-fixture-agent.sock",
       "    COMPOSE_PROJECT_NAME: alternate-project",
       "    APP_VALUE: fixture-only",
       "",
@@ -365,5 +380,24 @@ test("files uses the managed overlay's Docker engine and base Compose project", 
   expect(machineData(result.stdout, "hack.files.v1").entry).toMatchObject({
     path: "/app",
     source: "worktree",
+  });
+}, 60_000);
+
+test.each([
+  "ssh://fixture.invalid",
+  "tcp://fixture.invalid:2376",
+])("files keeps a bind source on remote endpoint %s out of the host editor", async (endpoint) => {
+  const result = await run({
+    operation: "ls",
+    path: ".",
+    output: `${directory}/app/local-name.txt\x0081a4:8:32\0`,
+    endpoint,
+  });
+  expect(result.exitCode, result.stdout).toBe(0);
+  expect(machineData(result.stdout, "hack.files.v1")).toMatchObject({
+    entry: { path: "/app", source: "container", hostPath: null },
+    entries: [
+      { path: "/app/local-name.txt", source: "container", hostPath: null },
+    ],
   });
 }, 60_000);

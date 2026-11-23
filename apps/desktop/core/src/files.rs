@@ -73,22 +73,24 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Recheck the path from the CLI before handing it to a host editor.
-    /// Retargeted links or paths outside this checkout cannot be opened here.
+    /// Compare the selected entry with a fresh CLI read before opening it.
+    /// Retargeted mounts, links or paths outside this checkout cannot be opened.
     ///
     /// # Errors
-    /// The file no longer exists in the selected checkout.
-    pub fn editor_path(&self, root: &Path) -> Result<PathBuf, &'static str> {
+    /// The mapping changed or the mapped file is unavailable.
+    pub fn editor_path(&self, current: &Self, root: &Path) -> Result<PathBuf, &'static str> {
+        if self.path != current.path
+            || self.host_path != current.host_path
+            || current.source != FileSource::Worktree
+            || current.kind != Kind::File
+        {
+            return Err("The service's worktree mount changed. Refresh Files and try again.");
+        }
         const MISSING: &str = "This file is no longer available in the worktree.";
         let path = self.host_path.as_ref().ok_or(MISSING)?;
         let root = root.canonicalize().map_err(|_| MISSING)?;
         let actual = path.canonicalize().map_err(|_| MISSING)?;
-        if self.source == FileSource::Worktree
-            && self.kind == Kind::File
-            && actual == *path
-            && actual.starts_with(root)
-            && actual.is_file()
-        {
+        if actual == *path && actual.starts_with(root) && actual.is_file() {
             Ok(actual)
         } else {
             Err(MISSING)

@@ -71,6 +71,14 @@ fn files_preview_preserves_text_and_the_worktree_mapping() {
     );
     assert_eq!(content, "example\n");
     assert!(!truncated);
+
+    // A service recreated with a different bind must not open the old path.
+    let mut current = entry.clone();
+    current.host_path = Some("/example/checkout/other/example.txt".into());
+    assert_eq!(
+        entry.editor_path(&current, std::path::Path::new("/example/checkout")),
+        Err("The service's worktree mount changed. Refresh Files and try again.")
+    );
 }
 
 #[test]

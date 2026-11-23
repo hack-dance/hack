@@ -2,6 +2,8 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { HackCliError, type HackErrorCode } from "./cli-result.ts";
 import { containerOwnership } from "./compose-instance-stop.ts";
+import { dockerUnixHostPath } from "./docker-context.ts";
+import { dockerHelperRunEnvironment } from "./docker-helper-environment.ts";
 import { getString, isRecord } from "./guards.ts";
 import type { ProjectContext } from "./project.ts";
 import { EXEC_STDOUT_OVERFLOW_EXIT, exec } from "./shell.ts";
@@ -97,12 +99,14 @@ type DockerRead = (argv: readonly string[]) => ReturnType<typeof exec>;
 function dockerReader(opts: {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
+  readonly unsetEnvKeys?: readonly string[];
 }): DockerRead {
   return async (argv) => {
     try {
       return await exec(["docker", ...argv], {
         cwd: opts.cwd,
         env: { ...opts.env },
+        unsetEnvKeys: opts.unsetEnvKeys,
         timeoutMs: 6000,
         maxStdoutBytes: OUTPUT_BYTES,
         maxStderrBytes: 16 * 1024,
@@ -306,7 +310,7 @@ async function inspectVolumes(
 async function classifyMount(opts: {
   readonly raw: Record<string, unknown>;
   readonly mount: unknown;
-  readonly root: string;
+  readonly root: string | null;
   readonly volumes: ReadonlyMap<string, boolean>;
 }): Promise<Mount> {
   const { raw, mount, root, volumes } = opts;
@@ -329,13 +333,35 @@ async function classifyMount(opts: {
     return { destination, source: "volume", hostRoot: null };
   }
   const source = getString(mount, "Source");
-  if (mount.Type === "bind" && source) {
+  if (root !== null && mount.Type === "bind" && source) {
     const hostRoot = await realpath(hostBindPath(source)).catch(() => null);
     if (hostRoot && within(root, hostRoot)) {
       return { destination, source: "worktree", hostRoot };
     }
   }
   return { destination, source: "container", hostRoot: null };
+}
+
+async function localMountRoot(opts: {
+  readonly docker: DockerRead;
+  readonly mounts: readonly unknown[];
+  readonly projectRoot: string;
+}): Promise<string | null> {
+  if (!opts.mounts.some((mount) => isRecord(mount) && mount.Type === "bind")) {
+    return null;
+  }
+  // A daemon reached over SSH or TCP can expose a bind with exactly the
+  // same path as a local file. Its pathname is evidence only on that daemon.
+  const endpoint = await opts.docker([
+    "context",
+    "inspect",
+    "--format",
+    '{{(index .Endpoints "docker").Host}}',
+  ]);
+  const host = decode(Buffer.from(endpoint.stdout, "latin1")).trim();
+  return endpoint.exitCode === 0 && dockerUnixHostPath(host) !== null
+    ? await realpath(opts.projectRoot)
+    : null;
 }
 
 async function readMounts(opts: {
@@ -349,7 +375,7 @@ async function readMounts(opts: {
   }
   const mounts: readonly unknown[] = raw.mounts ?? [];
   const [root, volumes] = await Promise.all([
-    realpath(projectRoot),
+    localMountRoot({ docker, mounts, projectRoot }),
     inspectVolumes(docker, mounts),
   ]);
   const actual = await Promise.all(
@@ -512,12 +538,7 @@ export async function readServiceFiles(opts: {
   const compose = dockerReader({ cwd, env: opts.env });
   // Direct Docker reads need the same client/engine, without forwarding
   // application interpolation values outside Compose.
-  const clientEnv = Object.fromEntries(
-    Object.entries(opts.env).filter(
-      ([key]) => key.startsWith("DOCKER_") || key === "PATH" || key === "HOME"
-    )
-  );
-  const docker = dockerReader({ cwd, env: clientEnv });
+  const docker = dockerReader({ cwd, ...dockerHelperRunEnvironment(opts.env) });
   const { id, raw } = await runningReplica({
     compose,
     docker,

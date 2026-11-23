@@ -712,6 +712,9 @@ files have read-only previews. **Copy path** copies the path inside the
 container. The app calls `hack files ls|cat --json` for the selected service
 and branch instance and reads the `hack.files.v1` response.
 
+On Linux, **Open in editor** uses the default `text/plain` handler through
+`xdg-mime` and `gtk-launch`. Both tools are needed for this action.
+
 Use `--fixtures files --screenshots <dir>` with the screenshots build to
 render the Files tab in both themes.
 

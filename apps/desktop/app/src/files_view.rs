@@ -304,15 +304,21 @@ impl FilesPane {
     }
 
     fn open_editor(&mut self, entry: Entry, cx: &mut Context<Self>) {
-        let root = self.target.root.clone();
+        let target = self.target.clone();
+        let source = self.source.clone();
         let selection_epoch = self.selection_epoch;
         let selected_path = entry.path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let path = entry.editor_path(&root)?;
-                    open_text_file(&path)
+                    let Report::List { entry: current, .. } =
+                        source.service_files(&target, Read::List, &entry.path)?
+                    else {
+                        return Err("The Files report did not contain the current entry.".into());
+                    };
+                    let path = entry.editor_path(&current, &target.root)?;
+                    open_text_file(&path).map_err(str::to_owned)
                 })
                 .await;
             if let Err(error) = result {
@@ -323,7 +329,7 @@ impl FilesPane {
                             .as_ref()
                             .is_some_and(|entry| entry.path == selected_path)
                     {
-                        this.notice = Some(error.into());
+                        this.notice = Some(error);
                         cx.notify();
                     }
                 });
@@ -641,7 +647,12 @@ fn open_text_file(path: &Path) -> Result<(), &'static str> {
             .args(["query", "default", "text/plain"])
             .stderr(std::process::Stdio::null())
             .output()
-            .map_err(|_| FAILED)?;
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    "Opening worktree files on Linux requires xdg-mime."
+                }
+                _ => FAILED,
+            })?;
         let desktop_id = std::str::from_utf8(&output.stdout)
             .map(str::trim)
             .map_err(|_| FAILED)?;
@@ -649,22 +660,26 @@ fn open_text_file(path: &Path) -> Result<(), &'static str> {
             || !desktop_id.ends_with(".desktop")
             || desktop_id.starts_with('-')
         {
-            return Err(FAILED);
+            return Err("Choose a default application for text/plain to open worktree files.");
         }
         let mut command = std::process::Command::new("gtk-launch");
         command.arg(desktop_id);
         command
     };
-    command
+    let result = command
         .arg(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .ok()
-        .filter(|status| status.success())
-        .map(|_| ())
-        .ok_or(FAILED)
+        .status();
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        #[cfg(not(target_os = "macos"))]
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("Opening worktree files on Linux requires gtk-launch.")
+        }
+        _ => Err(FAILED),
+    }
 }
 
 fn file_icon(kind: Kind) -> Glyph {

@@ -129,6 +129,8 @@ launchers if requested. After an uncertain outcome, inspect
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
 Native `up --detach` and `up --json` wait for the background owner to report ready.
+Text output reports each build as it finishes, including its service names,
+outcome and elapsed time. Build output stays with foreground `hack up`.
 See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
 separate detached and graph readiness limits. If detached startup times out,
 run `down` next. It waits up to two minutes for a pending owner and stops what

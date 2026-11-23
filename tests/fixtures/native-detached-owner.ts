@@ -2,10 +2,10 @@ import { ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { NativeImageBlocker } from "../../src/backends/native-image-policy.ts";
 import {
   batchImageFailure,
   NativeImageBatchError,
+  NativeImageBlocker,
 } from "../../src/backends/native-image-policy.ts";
 import {
   NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
@@ -19,6 +19,7 @@ import { handleRunCliError } from "../../src/cli/run.ts";
 import { ClosedCliError, HackCliError } from "../../src/lib/cli-result.ts";
 import {
   nativeDetachedUpBranchDropped,
+  nativeDetachedUpBuildProgress,
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
   nativeDetachedUpHookFailed,
@@ -468,6 +469,7 @@ if (role === "channel-holder") {
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
+      "build-progress",
       "image-batch-errors",
       "prestart-refusal",
       "prestart-after-runtime",
@@ -479,7 +481,10 @@ if (role === "channel-holder") {
       "images-ceiling",
       "images-wait-ceiling",
     ].includes(mode)
-      ? await handleRunCliError({ error, jsonRequested: true })
+      ? await handleRunCliError({
+          error,
+          jsonRequested: !process.env.FIXTURE_TEXT_OUTPUT,
+        })
       : 1;
   } finally {
     restore?.();
@@ -709,6 +714,34 @@ if (role === "channel-holder") {
         // Force cancellation just before the existing owner accepts the IPC
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
+      }
+      if (mode === "build-progress") {
+        process.send?.({
+          kind: "build-settled",
+          outcome: "failed",
+          durationMs: 500,
+          services: ["private-build-line"],
+          extra: "this field is forbidden",
+        });
+        nativeDetachedUpBuildProgress({
+          services: ["worker"],
+          outcome: "failed",
+          durationMs: 1500,
+        });
+        nativeDetachedUpBuildProgress({
+          services: ["web"],
+          outcome: "cancelled",
+          durationMs: 2000,
+        });
+        await nativeDetachedUpFailure(
+          new NativeRuntimeRequestError({
+            message: "fixture failure",
+            nativeCode: "native_build_failed",
+          })
+        );
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
       }
       await reportFixturePhases(mode);
       publishFixtureProfileNotice(mode);

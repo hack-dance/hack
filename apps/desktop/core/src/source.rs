@@ -341,10 +341,55 @@ pub struct CopiesObservation {
     pub code: Option<String>,
 }
 
+/// A short reason and next step for a failed copies observation.
+#[derive(Debug)]
+pub struct CopiesError {
+    pub reason: String,
+    pub hint: String,
+}
+
+impl From<RunError> for CopiesError {
+    fn from(error: RunError) -> Self {
+        let (reason, hint): (String, String) = match error {
+            RunError::Cli(error) => {
+                let fallback = match error.code.as_str() {
+                    "E_USAGE" => "Select a Hack CLI that supports ps --copies.",
+                    "E_PROJECT_NOT_FOUND" => "Check the project checkout and try again.",
+                    "E_DOCKER_UNAVAILABLE" => "Start the container engine and check again.",
+                    _ => "Run hack ps --copies from the checkout for more detail.",
+                };
+                let hint = error
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.get("hint"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(fallback)
+                    .to_owned();
+                (format!("{}: {}", error.code, error.message), hint)
+            }
+            RunError::NotFound => (
+                "Hack CLI unavailable.".into(),
+                "Select an installed Hack CLI.".into(),
+            ),
+            RunError::Timeout { after } => (
+                format!("E_TIMEOUT: Hack did not answer within {after:?}."),
+                "Check again.".into(),
+            ),
+            // Don't display unsolicited subprocess output, including stdout from
+            // a CLI that doesn't implement the JSON contract.
+            _ => (
+                "Hack did not return a project copies report.".into(),
+                "Run hack ps --copies from the checkout for more detail.".into(),
+            ),
+        };
+        Self { reason, hint }
+    }
+}
+
 pub trait Source: Send + Sync {
     /// Observe the project family in the selected checkout.
-    fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, SourceError> {
-        Err(SourceError::Pending)
+    fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, CopiesError> {
+        Err(RunError::NotFound.into())
     }
 
     /// Read names-only env metadata; diagnostics must never contain CLI output.
@@ -2058,8 +2103,11 @@ impl Source for LiveSource {
         Self::read_native_ps(&Self::native_runner(&self.runner.fixed()), repo_root)
     }
 
-    fn copies(&self, root: &Path, native: bool) -> Result<CopiesReport, SourceError> {
-        let root = trusted_root(root)?;
+    fn copies(&self, root: &Path, native: bool) -> Result<CopiesReport, CopiesError> {
+        let root = trusted_root(root).map_err(|error| CopiesError {
+            reason: describe_error(&error),
+            hint: "Check the project checkout and try again.".into(),
+        })?;
         // The CLI gives its parallel observation jobs 45 s. Leave time for
         // project discovery and address resolution before the runner retires it.
         Ok(self.runner_for(native).run_json(
@@ -4671,6 +4719,26 @@ esac
 
     fn untrusted(r: Result<PathBuf, SourceError>) -> bool {
         matches!(r, Err(SourceError::Cli { ref code, .. }) if code == "E_APP_UNTRUSTED_ROOT")
+    }
+
+    #[test]
+    fn copies_error_keeps_the_cli_hint_and_ignores_unstructured_output() {
+        let error = CopiesError::from(RunError::Cli(crate::models::CliError {
+            code: "E_NATIVE_SETUP_REQUIRED".into(),
+            message: "Native runtime unavailable.".into(),
+            detail: Some(serde_json::json!({"hint": "Run hack native setup."})),
+        }));
+        assert_eq!(
+            error.reason,
+            "E_NATIVE_SETUP_REQUIRED: Native runtime unavailable."
+        );
+        assert_eq!(error.hint, "Run hack native setup.");
+
+        let error = CopiesError::from(RunError::Exit {
+            code: Some(1),
+            stderr: "fixture output".into(),
+        });
+        assert!(!error.reason.contains("fixture output"));
     }
 
     #[test]

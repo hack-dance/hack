@@ -1,9 +1,10 @@
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, Div, InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, Task, div,
 };
 use hack_desktop_core::source::{
-    CopiesObservation, CopiesReport, CopyCheckout, ProjectCopy, SourceError,
+    CopiesError, CopiesObservation, CopiesReport, CopyCheckout, ProjectCopy,
 };
 use hack_desktop_ui::{
     components::{StyledExt as _, Ui, action_button, neutral_pill},
@@ -15,7 +16,7 @@ use crate::view::HackApp;
 
 #[derive(Default)]
 pub(crate) struct CopiesPane {
-    result: Option<Result<CopiesReport, SourceError>>,
+    result: Option<Result<CopiesReport, CopiesError>>,
     pending: Option<Task<()>>,
 }
 
@@ -69,60 +70,60 @@ impl HackApp {
             .gap(space::S4)
             .type_step(text::BODY)
             .text_color(ui.p.text_secondary);
-        let body = match &self.copies.result {
+        let summary = match &self.copies.result {
             None if self.copies.pending.is_some() || !self.live => {
-                body.child("Reading project copies…")
+                Some("Reading project copies…".into())
             }
-            None => body.child("Select a project with a known checkout to read copies."),
-            Some(Err(error)) => body.child(match error {
-                SourceError::Cli { code, .. } => format!("Could not read project copies ({code})."),
-                _ => "Could not read project copies.".into(),
-            }),
-            Some(Ok(report)) => body
-                .children((!report.observation.ok).then(|| {
-                    let reason = report
-                        .observation
-                        .code
-                        .as_deref()
-                        .unwrap_or("status unavailable");
-                    format!("Runtime observation incomplete ({reason}).")
-                }))
-                .children(
-                    (report.copies.is_empty() && report.observation.ok)
-                        .then_some("No project copies reported."),
-                )
-                .children(report.copies.iter().map(|copy| {
-                    let instance = copy.instance.as_deref().unwrap_or("Base instance");
-                    let branch = copy.branch.as_deref().unwrap_or("Branch unknown");
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space::S2)
-                        .py(space::S4)
-                        .hairline_b(ui.p.border)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(space::S4)
-                                .child(
-                                    div()
-                                        .type_step(text::BODY_STRONG)
-                                        .text_color(ui.p.text_primary)
-                                        .child(format!("{} · {instance}", copy.checkout.name)),
-                                )
-                                .child(neutral_pill(copy.backend.clone(), ui))
-                                .child(neutral_pill(copy.state.clone(), ui)),
-                        )
-                        .child(format!("{branch} · {}", copy.checkout.kind))
-                        .child(
-                            div()
-                                .type_step(text::MONO)
-                                .font_family(ui.mono.clone())
-                                .child(copy.checkout.root.clone()),
-                        )
-                        .children(copy.address.clone())
-                })),
+            None => Some("Select a project with a known checkout to read copies.".into()),
+            Some(Err(error)) => Some(format!("{} {}", error.reason, error.hint)),
+            Some(Ok(report)) if !report.observation.ok => {
+                let reason = report
+                    .observation
+                    .code
+                    .as_deref()
+                    .unwrap_or("status unavailable");
+                Some(format!("Runtime observation incomplete ({reason})."))
+            }
+            Some(Ok(report)) if report.copies.is_empty() => {
+                Some("No project copies reported.".into())
+            }
+            Some(Ok(_)) => None,
+        };
+        let has_summary = summary.is_some();
+        let rows = match &self.copies.result {
+            Some(Ok(report)) => body.children(report.copies.iter().map(|copy| {
+                let instance = copy.instance.as_deref().unwrap_or("Base instance");
+                let branch = copy.branch.as_deref().unwrap_or("Branch unknown");
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::S2)
+                    .py(space::S4)
+                    .hairline_b(ui.p.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::S4)
+                            .child(
+                                div()
+                                    .type_step(text::BODY_STRONG)
+                                    .text_color(ui.p.text_primary)
+                                    .child(format!("{} · {instance}", copy.checkout.name)),
+                            )
+                            .child(neutral_pill(copy.backend.clone(), ui))
+                            .child(neutral_pill(copy.state.clone(), ui)),
+                    )
+                    .child(format!("{branch} · {}", copy.checkout.kind))
+                    .child(
+                        div()
+                            .type_step(text::MONO)
+                            .font_family(ui.mono.clone())
+                            .child(copy.checkout.root.clone()),
+                    )
+                    .children(copy.address.clone())
+            })),
+            _ => body,
         };
         div()
             .flex()
@@ -132,13 +133,27 @@ impl HackApp {
             .px(space::S8)
             .pb(space::S5)
             .gap(space::S4)
-            .child(div().flex().justify_end().child(refresh))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::S4)
+                    .when(!has_summary, |row| row.justify_end())
+                    .children(summary.map(|message| {
+                        div()
+                            .min_w_0()
+                            .type_step(text::BODY)
+                            .text_color(ui.p.text_secondary)
+                            .child(message)
+                    }))
+                    .child(refresh),
+            )
             .child(
                 div()
                     .id("copies-list")
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(body),
+                    .child(rows),
             )
     }
 
@@ -177,7 +192,10 @@ impl HackApp {
         };
         self.copies.result = match name {
             "copies-loading" => None,
-            "copies-error" => Some(Err(SourceError::CliMissing)),
+            "copies-error" => Some(Err(CopiesError {
+                reason: "E_USAGE: This Hack CLI does not support ps --copies.".into(),
+                hint: "Select a newer Hack CLI.".into(),
+            })),
             _ => Some(Ok(CopiesReport {
                 copies,
                 observation: CopiesObservation {

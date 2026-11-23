@@ -48,6 +48,8 @@ in `.hack/docker-compose.yml`. Adjust relative build and mount paths for that
 file's location; keep the original Compose file until the app checks pass.
 This is the Compose setup path; `hack config adopt` is a separate native configuration path.
 If `.hack/` already exists, review that setup instead of replacing it.
+New scaffold files and directories created by Hack exclude group and other write
+permissions, even with a shell umask of `002`.
 
 Check `.hack/docker-compose.yml`: its images, commands, ports and mounts should
 match your app. Check the local URL in the service's routing labels. Commit shared

@@ -373,7 +373,8 @@ mod tests {
                 remedy: Remedy::Doc(String::new()),
             }],
             cli_program: Some("/usr/bin/hack".into()),
-            context: ExecutionContext::from_values(&[("HOME".into(), "/home/alex".into())]).ok(),
+            context: ExecutionContext::from_values(&[("HOME".into(), "/home/test-user".into())])
+                .ok(),
             force_cli_gate: false,
         }
     }

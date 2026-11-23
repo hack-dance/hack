@@ -198,6 +198,30 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "guest-execution",
+    module: "GuestAgent",
+    states: 3900,
+    invariant: "ResultBeforeRelease",
+    action: "Release",
+    fields: ['job = "released"', 'saved = "none"'],
+    additionalControls: [
+      {
+        name: "duplicate",
+        negative: true,
+        invariant: "StartedOnce",
+        action: "Next",
+        fields: ["starts = <<2, 0>>", "id = 1"],
+      },
+      {
+        name: "record-running",
+        negative: true,
+        invariant: "SavedOutcome",
+        action: "Record",
+        fields: ['belief = "running"', 'saved = "running"'],
+      },
+    ],
+  },
+  {
     name: "project-prerequisites",
     module: "ProjectPrerequisites",
     states: 13,
@@ -2443,6 +2467,46 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "per-service-publication",
+    module: "PerServicePublication",
+    states: 622,
+    invariant: "Safe",
+    action: "Record",
+    fields: [
+      'recorded = {"first"}',
+      'child = [first |-> "gated", second |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "Record",
+        fields: [
+          'recorded = {"second"}',
+          'child = [first |-> "absent", second |-> "gated"]',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "bind-before-commit",
+        negative: true,
+        action: "Bind",
+        fields: [
+          'child = [first |-> "uncommitted-bind", second |-> "absent"]',
+          "recorded = {}",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Bind",
+            fields: [
+              'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+              "recorded = {}",
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
     // Loopback TCP publication of Compose `ports`: one listener per host
     // port, no forwarding to a replaced container, no recovery of a live
     // owner, no listener after acknowledged stop; see tests/models/tla/README.md.
@@ -2827,6 +2891,23 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-build-batch",
+    module: "BuildBatch",
+    states: 296,
+    invariant: "NoLiveReturn",
+    action: "Return",
+    fields: ["result = -2"],
+    additionalControls: [
+      {
+        name: "cancel-wins",
+        negative: true,
+        invariant: "FirstOutcome",
+        action: "Return",
+        fields: ["active = {}"],
+      },
+    ],
+  },
+  {
     name: "native-build-retention",
     module: "BuildRetention",
     states: 6181,
@@ -2973,7 +3054,7 @@ const contracts: readonly ModelContract[] = [
       // the owner never retires when its boot ends, the previous-boot archive
       // cannot prove quiescence, or down --recover does not start a stopped pool
       // for a pending finalization. Each strands the recovered run's lease.
-      { name: "https", negative: false, states: 292 },
+      { name: "https", negative: false, states: 608 },
       {
         name: "https-no-retire",
         negative: true,
@@ -3018,6 +3099,10 @@ const contracts: readonly ModelContract[] = [
             fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
           },
           {
+            action: "TimeWaitEnds",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+          {
             action: "OwnerRetire",
             fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
           },
@@ -3034,10 +3119,75 @@ const contracts: readonly ModelContract[] = [
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
           {
+            action: "TimeWaitEnds",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+          {
             action: "PoolRecover",
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
         ],
+      },
+      {
+        // HACK-2550: the archive's port claim binds with address reuse so the
+        // retired Caddy's TIME_WAIT does not block it; binding the wildcard alone,
+        // without the exact claim of every local address, it would archive over
+        // a live specific-address listener.
+        name: "reuse-no-check",
+        negative: true,
+        invariant: "NoArchiveOverListener",
+        action: "Finalize",
+        fields: ['port = "listener"', "overListener = TRUE", 'https = "none"'],
+        alternativeWitnesses: [
+          {
+            action: "FinishCompleted",
+            fields: [
+              'port = "listener"',
+              "overListener = TRUE",
+              'https = "none"',
+            ],
+          },
+        ],
+      },
+      // HACK-2535: another project's `up` stops an idle running pool to add its
+      // share. A run that became live before that stop is never stopped by it;
+      // without the second idle check right before the guest stops, a start
+      // between the two checks is.
+      { name: "idle-restart", negative: false, states: 302 },
+      {
+        name: "idle-restart-one-check",
+        negative: true,
+        invariant: "NoRestartOverLiveRun",
+        action: "RestartStop",
+        fields: ["stoppedLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
+      },
+    ],
+  },
+  {
+    // HACK-2524: release a checkout's run mapping whose native home is gone. The
+    // positive control releases when the path no longer holds the home and no
+    // process names it; `negative` is today (the clean-stop release from the
+    // home's own records), which strands a deleted home; `path-only` ignores the
+    // process scan and releases while the home's run is still alive.
+    name: "native-run-mapping-release",
+    module: "MappingRelease",
+    states: 21,
+    invariant: "NoStrandedMapping",
+    action: "Delete",
+    fields: ['home = "deleted"', 'mapping = "held"', "procs = FALSE"],
+    alternativeWitnesses: [
+      {
+        action: "Move",
+        fields: ['home = "moved"', 'mapping = "held"', "procs = FALSE"],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "path-only",
+        negative: true,
+        invariant: "NeverReleaseLive",
+        action: "GoneHomeRelease",
+        fields: ['mapping = "released"', "procs = TRUE", "unsafe = TRUE"],
       },
     ],
   },
@@ -3330,6 +3480,17 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverHits",
         ...statKeyedHits({ withCtime: true, stale: false }),
       },
+    ],
+  },
+  {
+    name: "native-image-batch",
+    module: "ImageBatch",
+    states: 3233,
+    invariant: "Safe",
+    action: "Import",
+    fields: [
+      'phase = <<"import", "import", "queued", "queued">>',
+      "verified = {1, 2}",
     ],
   },
   {

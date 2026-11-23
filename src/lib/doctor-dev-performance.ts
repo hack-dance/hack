@@ -151,7 +151,7 @@ export type DevPerformanceReport =
     };
 
 export type DevPerformanceCheck = {
-  readonly name: string;
+  readonly name: (typeof DEV_PERFORMANCE_CHECKS)[number];
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly devPerformance?: DevPerformanceReport;
@@ -760,7 +760,9 @@ export function devImageTagsCheck(opts: {
 }
 
 /** True when the note above names at least one service. */
-export function hasDevPerformanceDetail(check: DevPerformanceCheck): boolean {
+export function hasDevPerformanceDetail(
+  check: Omit<DevPerformanceCheck, "name">
+): boolean {
   if (check.status !== "ok") {
     return true;
   }

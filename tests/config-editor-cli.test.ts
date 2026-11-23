@@ -247,6 +247,7 @@ test("validate is nonmutating and apply publishes one revision per file, retaini
         value: "products_new",
       },
       { layer: "5", kind: "env", scope: "api", key: "PAGE_SIZE", value: "50" },
+      { layer: "5", kind: "env", scope: "global", key: "LOG_LEVEL", value: "" },
     ],
   };
   const validated = await cli({ ...args, args: ["validate"], patch });
@@ -273,6 +274,13 @@ test("validate is nonmutating and apply publishes one revision per file, retaini
   expect(next.env.find((row) => row.key === "PAGE_SIZE")?.values).toEqual([
     { layer: "5", secret: false, value: "50" },
   ]);
+  const logLevel = next.env.find((row) => row.key === "LOG_LEVEL");
+  expect(logLevel?.winning).toBe("5");
+  expect(logLevel?.values.at(-1)).toEqual({
+    layer: "5",
+    secret: false,
+    value: "",
+  });
   expect(next.project.internal).toEqual({ dns: true, tls: true });
   expect(
     (await cli({ ...args, args: ["apply"], patch })).payload.error.code

@@ -65,10 +65,17 @@ impl Field {
         }
     }
 
-    fn stage(&self, app: &mut HackApp, value: String, original: &str, cx: &mut Context<HackApp>) {
+    fn stage(
+        &self,
+        app: &mut HackApp,
+        value: String,
+        original: Option<&str>,
+        cx: &mut Context<HackApp>,
+    ) {
         let id = self.item();
+        let text_changed = Some(value.as_str()) != original;
         let changed = match self {
-            Self::Project(path) => (value != original).then(|| ConfigChange::Project {
+            Self::Project(path) => text_changed.then(|| ConfigChange::Project {
                 layer: "1".into(),
                 path: path.clone(),
                 value: Value::String(value),
@@ -95,28 +102,26 @@ impl Field {
                     port: number,
                 })
             }
-            Self::ServiceImage(service) => (value != original).then(|| ConfigChange::Service {
+            Self::ServiceImage(service) => text_changed.then(|| ConfigChange::Service {
                 layer: "2".into(),
                 service: service.clone(),
                 field: "image".into(),
                 value: Value::String(value),
             }),
-            Self::ServiceList { service, field } => {
-                (value != original).then(|| ConfigChange::Service {
-                    layer: "2".into(),
-                    service: service.clone(),
-                    field: field.clone(),
-                    value: Value::Array(
-                        value
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|part| !part.is_empty())
-                            .map(|part| Value::String(part.into()))
-                            .collect(),
-                    ),
-                })
-            }
-            Self::Env { layer, scope, key } => (value != original).then(|| ConfigChange::Env {
+            Self::ServiceList { service, field } => text_changed.then(|| ConfigChange::Service {
+                layer: "2".into(),
+                service: service.clone(),
+                field: field.clone(),
+                value: Value::Array(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .map(|part| Value::String(part.into()))
+                        .collect(),
+                ),
+            }),
+            Self::Env { layer, scope, key } => text_changed.then(|| ConfigChange::Env {
                 layer: layer.clone(),
                 scope: scope.clone(),
                 key: key.clone(),
@@ -160,7 +165,7 @@ impl HackApp {
     fn field_input(
         &mut self,
         field: Field,
-        original: String,
+        original: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
@@ -168,15 +173,22 @@ impl HackApp {
         if let Some((input, _)) = self.config.inputs.get(&id) {
             return input.clone();
         }
-        let value = field.value(self, &original);
+        let value = field.value(self, original.as_deref().unwrap_or_default());
         let state = cx.new(|cx| {
             let mut input = InputState::new(window, cx);
             input.set_value(value, window, cx);
             input
         });
         let subscription = cx.subscribe(&state, move |app, state, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                field.stage(app, state.read(cx).value().to_string(), &original, cx);
+            if matches!(event, InputEvent::Change)
+                || (original.is_none() && matches!(event, InputEvent::PressEnter { .. }))
+            {
+                field.stage(
+                    app,
+                    state.read(cx).value().to_string(),
+                    original.as_deref(),
+                    cx,
+                );
             }
         });
         self.config.inputs.insert(id, (state.clone(), subscription));
@@ -186,7 +198,7 @@ impl HackApp {
     fn field_control(
         &mut self,
         field: Field,
-        original: String,
+        original: Option<String>,
         enabled: bool,
         ui: &Ui,
         window: &mut Window,
@@ -296,7 +308,7 @@ impl HackApp {
                     .unwrap_or_else(|| legacy_default_overlay(&report.project));
                 let field = self.field_control(
                     Field::Project(path.into()),
-                    original,
+                    Some(original),
                     enabled,
                     ui,
                     window,
@@ -407,7 +419,7 @@ impl HackApp {
             .to_owned();
         self.field_control(
             Field::Project(name.into()),
-            initial,
+            Some(initial),
             enabled,
             ui,
             window,
@@ -589,9 +601,15 @@ impl HackApp {
                 sites: route.sites.clone(),
                 upstream: port.clone(),
             };
-            let hosts =
-                self.field_control(field(false), route.sites.clone(), enabled, ui, window, cx);
-            let input = self.field_control(field(true), port, enabled, ui, window, cx);
+            let hosts = self.field_control(
+                field(false),
+                Some(route.sites.clone()),
+                enabled,
+                ui,
+                window,
+                cx,
+            );
+            let input = self.field_control(field(true), Some(port), enabled, ui, window, cx);
             row = row.child(hosts.flex_1()).child(input.w(px(82.))).child(
                 muted(
                     if route.sites.is_empty() {
@@ -690,7 +708,7 @@ impl HackApp {
                                 .on_click(cx.listener(|app, _, _, cx| app.go_to_source("2", cx))),
                             )
                         } else {
-                            self.field_control(field, initial, enabled, ui, window, cx)
+                            self.field_control(field, Some(initial), enabled, ui, window, cx)
                         };
                         field_row(title, hint, control, ui)
                     }))
@@ -950,7 +968,8 @@ impl HackApp {
                 if self.config.active_cell.as_deref() == Some(&id) && editable {
                     let initial = original
                         .filter(|cell| !cell.unset)
-                        .map_or_else(String::new, EnvCell::label);
+                        .and_then(|cell| cell.value.as_ref())
+                        .map(scalar_label);
                     entry =
                         entry.child(self.field_control(field, initial, editable, ui, window, cx));
                 } else {
@@ -1468,7 +1487,7 @@ fn field_row(label: &str, detail: &str, element: impl IntoElement, ui: &Ui) -> D
 mod tests {
     use std::sync::Arc;
 
-    use gpui_kit::{HeadlessAppContext, NoopTextSystem, WindowOptions};
+    use gpui_kit::{AnyWindowHandle, HeadlessAppContext, NoopTextSystem, WindowOptions};
     use hack_desktop_core::{config::ConfigState, fixtures::Fixture};
 
     use super::*;
@@ -1533,13 +1552,108 @@ mod tests {
         );
     }
 
-    fn assert_project_field_can_stage(
-        mut report: ConfigReport,
-        section: EditSection,
-        path: &str,
-        initial: &str,
-        edited: &str,
-    ) {
+    #[test]
+    fn env_cells_keep_an_explicit_empty_override() {
+        let (mut cx, window, app) = headless_config_app();
+        let report = ConfigReport {
+            state: ConfigState::Ready,
+            writable: true,
+            layers: vec![ConfigLayer {
+                id: "5".into(),
+                file: ".hack/hack.env.local.yaml".into(),
+                kind: "env".into(),
+                ownership: "local".into(),
+                active: true,
+                writable: true,
+                revision: "fixture".into(),
+                exists: true,
+                source: None,
+                hidden: false,
+                source_writable: false,
+                inherited: None,
+                overlay: None,
+            }],
+            ..Default::default()
+        };
+        for (key, cell) in [
+            ("ABSENT", None),
+            ("UNSET", Some((true, None))),
+            ("EMPTY", Some((false, Some(Value::String(String::new()))))),
+        ] {
+            let id = format!("env/5/global/{key}");
+            let mut values = vec![EnvCell {
+                layer: "3".into(),
+                scope: "global".into(),
+                unset: false,
+                secret: false,
+                value: Some(Value::String("inherited".into())),
+            }];
+            if let Some((unset, value)) = cell {
+                values.push(EnvCell {
+                    layer: "5".into(),
+                    scope: "global".into(),
+                    unset,
+                    secret: false,
+                    value,
+                });
+            }
+            let row = EnvRow {
+                key: key.into(),
+                scope: "global".into(),
+                values,
+                winning: None,
+            };
+            cx.update_window(window, |_, window, cx| {
+                app.update(cx, |app, cx| {
+                    app.config.scope = "global".into();
+                    app.config.active_cell = Some(id.clone());
+                    app.env_grid_row(&row, &[&report.layers[0]], &report, &app.ui(cx), window, cx);
+                    assert!(app.config.inputs[&id].0.read(cx).value().is_empty());
+                    assert!(!app.config.draft.changes.contains_key(&id));
+                });
+            })
+            .expect("render the Env cell");
+            for value in ["temporary", ""] {
+                cx.update_window(window, |_, window, cx| {
+                    let input = app.read(cx).config.inputs[&id].0.clone();
+                    input.update(cx, |input, cx| input.replace_all(value, window, cx));
+                })
+                .expect("edit the Env cell");
+                cx.update(|cx| {
+                    let changes = &app.read(cx).config.draft.changes;
+                    if key == "EMPTY" && value.is_empty() {
+                        assert!(!changes.contains_key(&id));
+                    } else {
+                        assert!(matches!(
+                            changes.get(&id),
+                            Some(ConfigChange::Env { layer, scope, value: Some(staged), .. })
+                                if layer == "5" && scope == "global" && staged == value
+                        ));
+                    }
+                });
+            }
+            if key == "ABSENT" {
+                cx.update(|cx| {
+                    let input = app.read(cx).config.inputs[&id].0.clone();
+                    app.update(cx, |app, cx| app.stage_config(id.clone(), None, cx));
+                    input.update(cx, |_, cx| {
+                        cx.emit(InputEvent::PressEnter {
+                            secondary: false,
+                            shift: false,
+                        });
+                    });
+                });
+                cx.update(|cx| {
+                    assert!(matches!(
+                        app.read(cx).config.draft.changes.get(&id),
+                        Some(ConfigChange::Env { value: Some(value), .. }) if value.is_empty()
+                    ));
+                });
+            }
+        }
+    }
+
+    fn headless_config_app() -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(NoopTextSystem::new()),
             Arc::new(hack_desktop_ui::icons::Assets),
@@ -1555,6 +1669,17 @@ mod tests {
                 })
             })
             .expect("open a headless window");
+        (cx, window, app)
+    }
+
+    fn assert_project_field_can_stage(
+        mut report: ConfigReport,
+        section: EditSection,
+        path: &str,
+        initial: &str,
+        edited: &str,
+    ) {
+        let (mut cx, window, app) = headless_config_app();
         report.state = ConfigState::Ready;
         report.writable = true;
         report.layers.push(ConfigLayer {
@@ -1579,7 +1704,7 @@ mod tests {
                 app.config_form(&report, &app.ui(cx), window, cx);
                 let original = app.config.inputs[&field_id].0.read(cx).value();
                 assert_eq!(original.as_ref(), initial);
-                Field::Project(path.into()).stage(app, edited.into(), &original, cx);
+                Field::Project(path.into()).stage(app, edited.into(), Some(&original), cx);
             });
         })
         .expect("edit the project field");

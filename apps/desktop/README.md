@@ -818,6 +818,8 @@ the selected files. A file changed by another editor shows Reload in the
 save dock. Route changes offer a restart and env-only changes apply at the
 next start. The Worktrees toggles show the effective branch and inheritance
 settings, including camelCase keys in existing project files.
+To override an inherited Env layers value with an empty string, open the
+target cell, clear the input, and press Enter.
 
 The native screenshot harness uses synthetic projects and values. Build with
 `bash scripts/build.sh --features screenshots`, then run

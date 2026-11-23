@@ -31,7 +31,7 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 ## What it is not
 
 - **Backend selection.** Set `HACK_RUNTIME_BACKEND=compose` to run project
-  commands through the macOS candidate on Compose. Native is the planned default
+  commands through the macOS prerelease on Compose. Native is the planned default
   for stable v5.
 - **Not in stable Hack.** It ships only through the separate `hack-next` channel.
   The stable release archives and the Homebrew formula do not contain it.

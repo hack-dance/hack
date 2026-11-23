@@ -24,6 +24,10 @@ type Reason =
   | { readonly kind: "owned-elsewhere"; readonly what: string };
 
 const CLASSIFIED: Readonly<Record<string, Reason>> = {
+  "src/lib/command-timings.ts": {
+    kind: "held",
+    what: "child timing drains; callers await trace finalization",
+  },
   "src/mcp/server.ts": {
     kind: "held",
     what: "stdio MCP session and each tool call",

@@ -19,7 +19,7 @@ fn published_owner_refused(candidate: &Candidate, run: &str) -> CandidateError {
     match published_owner(candidate, run) {
         Ok(PublishedOwner::Running) => error(
             "graph_foreground_owner_running",
-            "Another foreground hack up or hack restart still owns this run. Stop it with Ctrl-C in its terminal, or run hack down, then start the project again.",
+            "Another hack up or hack restart of this run is still running, in a terminal or detached (-d). Run hack down to stop it (or press Ctrl-C if it runs in your terminal), then start the project again.",
         ),
         Ok(PublishedOwner::Exited) if exited_ready(candidate, run) => error(
             "graph_foreground_owner_exited",

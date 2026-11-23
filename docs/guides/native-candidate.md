@@ -2485,6 +2485,13 @@ A detached start (`hack up -d`) whose pool stopped or booted again ends on its
 own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
 --recover` recovers its run. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
+A provider that dies while the pool record still says `running` (killed, crashed, or
+lost across a sleep) leaves the pool `process-exited` in `runtime status`, and
+`runtime down` refuses it (`process_identity_unavailable`). The run's detached start
+notices that its provider's process is gone and ends as for an ended boot, and
+`hack up` and `hack down` run `runtime recover` first (under the provider lease,
+with the recorded provider proven gone by its identity), say so in one line, and
+continue as after any pool stop (HACK-2579).
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

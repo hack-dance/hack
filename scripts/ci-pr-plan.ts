@@ -72,7 +72,7 @@ export function fullPushPlan(
 
 /** Inputs copied/compiled by the candidate job, including its qualification scripts. */
 export function touchesCandidate(path: string): boolean {
-  return /^(?:packages\/(?:runtime-core|config-compiler|relay-guest)\/|hack-local$|scripts\/(?:build-hack-local|native-|.*candidate|.*provider)|mise\.toml$|\.github\/|(?:.*\/)?(?:Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?)$)/.test(
+  return /^(?:tests\/models\/tla\/guest-execution\/|packages\/(?:runtime-core|hack-vm-(?:agent|protocol)|config-compiler|relay-guest)\/|hack-local$|scripts\/(?:build-hack-local|native-|.*candidate|.*provider)|mise\.toml$|\.github\/|(?:.*\/)?(?:Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?)$)/.test(
     path
   );
 }
@@ -87,8 +87,11 @@ export function touchesCompilerHost(path: string): boolean {
 /** Rust crate inputs retain Linux checks even when the PR defers macOS. */
 export function touchesRustInput(path: string): boolean {
   return (
+    /^tests\/models\/tla\/guest-execution\//.test(path) ||
     /^packages\/relay-guest\//.test(path) ||
-    (/^packages\/(?:runtime-core|config-compiler)\//.test(path) &&
+    (/^packages\/(?:runtime-core|config-compiler|hack-vm-(?:agent|protocol))\//.test(
+      path
+    ) &&
       !path.endsWith(".md"))
   );
 }

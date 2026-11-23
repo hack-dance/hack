@@ -126,6 +126,10 @@ esac
         r.cards.iter().find(|c| c.id == "daemon").unwrap().status,
         Status::NeedsAttention
     );
+    assert!(matches!(
+        source.listing(),
+        Err(hack_desktop_core::source::SourceError::DaemonUnavailable { daemon: None, .. })
+    ));
     source.setup_action(SafeAction::InstallDaemon, &r);
     let calls = std::fs::read_to_string(calls).unwrap();
     assert!(!calls.contains("daemon install --no-interactive"));
@@ -497,4 +501,18 @@ esac
             expected
         );
     }
+}
+
+#[test]
+fn unreadable_daemon_status_is_not_a_confirmed_stop() {
+    let t = Tree::new();
+    let source = service_source(&t, serde_json::Value::Null, false, false);
+    let report = source.setup();
+    let daemon = report.cards.iter().find(|c| c.id == "daemon").unwrap();
+    assert_eq!(daemon.status, Status::Unknown);
+    assert_eq!(daemon.remedy, hack_desktop_core::setup::Remedy::None);
+    assert!(matches!(
+        source.listing(),
+        Err(hack_desktop_core::source::SourceError::DaemonUnreadable)
+    ));
 }

@@ -3174,7 +3174,10 @@ esac
         let r = src.snapshot();
         server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(matches!(&r, Err(SourceError::DaemonUnreadable)), "{r:?}");
+        assert!(
+            matches!(&r, Err(SourceError::DaemonUnavailable { .. })),
+            "{r:?}"
+        );
     }
 
     #[test]

@@ -56,6 +56,12 @@ flowchart LR
 Follow [Upgrade from v4](upgrade.md). It is a backup-first procedure, and it
 says how to go back.
 
+### Native build contexts
+
+Native builds exclude machine-local `.hack/` state, including generated Compose
+env overrides, and the checkout's `.hack.secret.key`. Changes to that state no
+longer trigger rebuilds.
+
 ### Native build receipts and downgrades
 
 New native build receipts record verified base image IDs for reclamation. After

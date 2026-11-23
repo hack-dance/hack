@@ -60,7 +60,11 @@ that fails later still carries it. It is absent when no such sample was accepted
 a pool that was already running, a Research pool, or a start refused before or at
 that sample.
 
-TypeScript libraries share this contract; public CLI integration and performance qualification follow.
+Native `hack up` joins startup records from its runtime children under
+`command.total`. `containers.started` ends when the final container start
+is recorded. `services.ready` ends when all observed readiness conditions
+hold. A milestone without a successful record has no observed time for
+this invocation.
 
 For image acquisition, `image.engine.preflight` measures the initial guest
 check and `image.tag.resolve` measures mutable tag resolution.

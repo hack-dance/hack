@@ -94,6 +94,7 @@ async function fixture(compose = COMPOSE) {
   await writeFile(
     binary,
     `#!/bin/sh
+case "$1" in --internal-timings=*) shift;; esac
 ${nativeSetupShellReply()}
 if [ -f '${stub}/'"$3-$4"'.hold' ]; then
   printf '%s' ready > './interrupt-ready'

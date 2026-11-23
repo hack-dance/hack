@@ -56,7 +56,6 @@ import { formatNativeStartupLogReport } from "../src/backends/native-startup-log
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
 const repository = resolve(import.meta.dir, "..");
-
 const digest = `sha256:${"a".repeat(64)}`;
 const required = [
   "--hack",

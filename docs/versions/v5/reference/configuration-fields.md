@@ -14,6 +14,11 @@ This reference describes v5 (next.5). Use [Environment and secrets](../../env.md
 
 The published native launcher accepts a narrower authored project model. This legacy JSON/Compose reference does not establish native feature support. Start with [Native configuration import](../../reference/native-config-import.md) and the authored schemas linked from [Reference](overview.md).
 
+The desktop preview's **Configuration** view edits selected project and global
+settings through `hack config get` and `hack config set`. It previews the
+command, validates supported inputs before saving, and checks the saved value
+through the CLI. The project overlay field suggests names from `hack env list`.
+
 ## Project JSON
 
 A project groups service definitions and env overlay files, while a routed service

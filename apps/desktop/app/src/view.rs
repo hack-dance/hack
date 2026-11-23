@@ -125,6 +125,7 @@ pub struct HackApp {
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
     pub(crate) changes: crate::changes_view::ChangesPane,
+    pub(crate) configuration: crate::config_view::Configuration,
     pub(crate) catalog: crate::service_catalog::ServiceCatalog,
     pub(crate) env: hack_desktop_core::env::EnvModel,
     /// The Env tab's open edit, if any (`env_view`).
@@ -201,12 +202,24 @@ impl HackApp {
             }
         })
         .detach();
+        let config_input = cx.new(|cx| InputState::new(window, cx).placeholder("Setting value"));
+        cx.subscribe(
+            &config_input,
+            |this: &mut HackApp, _, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.configuration.clear_feedback();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let mut this = Self {
             model: AppModel::new(),
             source,
             logs,
             tab: 0,
             changes: Default::default(),
+            configuration: crate::config_view::Configuration::new(config_input),
             catalog: crate::service_catalog::ServiceCatalog {
                 input: catalog_input,
                 selected: 0,
@@ -483,6 +496,7 @@ impl HackApp {
         let after = self.model.selected_key();
         let selection_changed = before != after || previous_root != self.selected_root();
         if selection_changed {
+            self.configuration.invalidate_project();
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
             self.logs.model.set_service(None);
@@ -1038,6 +1052,7 @@ impl HackApp {
         }
         if before != after {
             self.model.source_changed();
+            self.configuration.invalidate();
             self.changes = Default::default();
             // A Start or Restart hackd still running belongs to the
             // previous installation: it must not block this one.
@@ -1256,6 +1271,13 @@ impl HackApp {
                 machine_row("resources", Glyph::Container, "Resources", div(), ui)
                     .when(self.pane == Pane::Resources, |d| d.bg(p.surface_1))
                     .on_click(cx.listener(|this, _, _, cx| this.show_resources(cx))),
+            )
+            .child(
+                machine_row("configuration", Glyph::Pencil, "Configuration", div(), ui)
+                    .when(self.pane == Pane::Configuration, |d| d.bg(p.surface_1))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_configuration(window, cx)),
+                    ),
             )
             .child(
                 machine_row(
@@ -1882,6 +1904,7 @@ impl Render for HackApp {
         let ui = self.ui(cx);
         let p = ui.p;
         let main: AnyElement = match &list.phase {
+            _ if self.pane == Pane::Configuration => self.render_configuration(&ui, cx),
             // Setup applies whatever the project list shows, a missing CLI
             // included.
             _ if self.pane == Pane::Resources => crate::resources_view::render(self, &ui, cx),

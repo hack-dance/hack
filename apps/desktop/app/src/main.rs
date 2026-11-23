@@ -19,6 +19,7 @@
 
 mod changes_view;
 mod clipboard;
+mod config_view;
 mod doctor_view;
 #[cfg(hack_terminal)]
 mod drive;
@@ -254,6 +255,9 @@ fn main() {
                             if !fixtures::opens_doctor(f) {
                                 app.show_project();
                             }
+                        }
+                        if f.name().starts_with("config-") {
+                            app.show_configuration_fixture(f.name(), window, cx);
                         }
                         if f.name().starts_with("resources-") {
                             if f.name() == "resources-unavailable" {

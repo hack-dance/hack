@@ -479,6 +479,55 @@ mod tests {
     }
 
     #[test]
+    fn a_registry_timeout_keeps_a_known_native_https_failure_unresolved_through_login() {
+        let mut flow = Flow::default();
+        let mut pane = ready();
+        let native = hack_desktop_core::setup_fixtures::load("native-unknown").unwrap();
+        let mut trust = native
+            .cards
+            .into_iter()
+            .find(|card| card.id.starts_with("trust:"))
+            .unwrap();
+        trust.status = Status::NeedsAttention;
+        let trust_id = trust.id.clone();
+        pane.report.cards.push(trust);
+
+        let scope = Step::Https.check_scope();
+        let mut timed_out = ready().report;
+        timed_out.cards.retain(|card| scope.includes(&card.id));
+        timed_out.project_registry_read = false;
+        pane.report = timed_out.clone().with_prior(&pane.report, scope);
+        flow.enter(Screen::Step(Step::Https));
+        assert_eq!(flow.state(Step::Https, &pane), StepState::Unchecked);
+        assert_eq!(
+            pane.report
+                .cards
+                .iter()
+                .find(|card| card.id == trust_id)
+                .unwrap()
+                .status,
+            Status::Unknown
+        );
+
+        let scope = Step::Login.check_scope();
+        let mut login = ready().report;
+        login.cards.retain(|card| scope.includes(&card.id));
+        pane.report = login.with_prior(&pane.report, scope);
+        flow.enter(Screen::Step(Step::Login));
+        assert!(flow.can_advance(&pane));
+        assert_eq!(
+            flow.next_screen(Step::Login, &pane),
+            Screen::Step(Step::Https)
+        );
+
+        // The same empty registry result can retire the card only once the
+        // registry has answered successfully.
+        timed_out.project_registry_read = true;
+        pane.report = timed_out.with_prior(&pane.report, Step::Https.check_scope());
+        assert_eq!(flow.next_screen(Step::Login, &pane), Screen::Done);
+    }
+
+    #[test]
     fn a_skip_that_includes_native_runtime_does_not_say_docker_only() {
         let mut flow = Flow::default();
         let mut pane = ready();

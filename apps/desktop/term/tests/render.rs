@@ -378,31 +378,31 @@ fn capture_with_view(
 
 fn selection_background_covers_find_highlights() {
     let Some(shot) = capture_with_view(
-        "MMMM  MMMM\n",
+        " MMMM  MMMM\n",
         None,
         "selection-and-find.png",
         (560., 120.),
         |view, cx| {
             Theme::change(ThemeMode::Dark, None, cx);
             assert_eq!(view.search("MMMM", cx).total, 2);
-            view.emulator().select_start(0, 0);
-            view.emulator().select_to(3, 0);
+            view.emulator().select_start(1, 0);
+            view.emulator().select_to(4, 0);
             cx.notify();
         },
     ) else {
         return;
     };
     assert_eq!(shot.frame.matches.len(), 2, "both matches are visible");
-    assert_eq!(shot.frame.selection[0], Some((0, 3)));
+    assert_eq!(shot.frame.selection[0], Some((1, 4)));
     let color = TermTheme::DARK.selection_bg;
     let selected = [color.r, color.g, color.b];
-    let overlap = shot.cells(0, 0, 4).all_ink(selected);
+    let overlap = shot.cells(1, 0, 4).all_ink(selected);
     assert!(
         (0.01..0.5).contains(&overlap),
         "selected text should have visible ink on the selection background ({overlap})"
     );
     assert!(
-        shot.cells(6, 0, 4).all_ink(shot.background()) > 0.8,
+        shot.cells(7, 0, 4).all_ink(shot.background()) > 0.8,
         "the unselected match should retain its Find highlight"
     );
 }

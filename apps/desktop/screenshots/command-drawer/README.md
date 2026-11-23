@@ -1,7 +1,7 @@
 # Command drawer captures
 
 The current frames were captured from the native macOS app built at
-`56ab91f85a1daf9d230e9a5f8ef34ca68cceff7e`. The fixture runner uses synthetic
+`67bf7327a9cf211d4767b17384ec8b275a86a285`. The fixture runner uses synthetic
 Setup reports and real embedded terminal sessions. It uses the built-in
 terminal palette for capture.
 

@@ -2000,6 +2000,74 @@ test("down --recover waits for the owner of an ended pool boot to go, then recov
   expect(calls).toContain("recover-cleanup");
 });
 
+// HACK-2572: the owner's end seen by the selection, point by point.
+for (const recover of [true, false]) {
+  test(`${recover ? "down --recover" : "plain down"} through the owner's end (running, uncertain, exited) recovers once`, async () => {
+    const opts = await fixture();
+    const calls: string[] = [];
+    const points = ["running", "uncertain", "uncertain"] as const;
+    let pool = false;
+    let cleaned = false;
+    let owners = 0;
+    const result = await nativeProjectDown({
+      ...opts,
+      ...(recover ? { recover: true } : {}),
+      poolBootEnded: async () => !pool,
+      endedBootOwnerWaitMs: 5000,
+      invoke: async (request) => {
+        const command = request.args[1]!;
+        calls.push(command);
+        if (command === "up") {
+          pool = true;
+          return { phase: "running" };
+        }
+        if (command === "foreground-owner") {
+          owners += 1;
+          const point = points[owners - 1];
+          return point
+            ? ownerSelection(point)
+            : {
+                ...ownerSelection("exited"),
+                dead_owner_recovery: pool ? "7".repeat(64) : null,
+              };
+        }
+        if (!pool) {
+          throw poolStoppedError();
+        }
+        if (!recover) {
+          // The retried plain down then takes its ordinary path on the running pool.
+          return snapshot(true);
+        }
+        if (command === "recover-cleanup") {
+          cleaned = true;
+          return { run: run.run, recovered: true, data_retained: true };
+        }
+        if (command === "retire-recovered-publisher") {
+          return { run: run.run, publisher_retired: true, data_retained: true };
+        }
+        return snapshot(cleaned);
+      },
+    });
+    expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+    // Three selections see the owner alive or ending; the pool is started once only
+    // after one sees it exited.
+    expect(calls.slice(0, 6)).toEqual([
+      "inspect",
+      "foreground-owner",
+      "foreground-owner",
+      "foreground-owner",
+      "foreground-owner",
+      "foreground-owner",
+    ]);
+    expect(calls.filter((call) => call === "up")).toHaveLength(1);
+    if (recover) {
+      expect(calls.filter((call) => call === "recover-cleanup")).toHaveLength(
+        1
+      );
+    }
+  });
+}
+
 test("down keeps its refusal at once when the stopped pool's owner is running but the boot is not proven ended", async () => {
   const opts = await fixture();
   const calls: string[] = [];

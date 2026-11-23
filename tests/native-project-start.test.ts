@@ -7146,6 +7146,76 @@ test("up waits, with one line, for the owner of an ended pool boot to go, then r
   ).toHaveLength(1);
 });
 
+// HACK-2572: the owner's end seen by the preflight, point by point: alive, then
+// ending (exited but not yet reaped, or its publication read mid-change), then
+// exited. Every sequence must reach the same recovery, never a refusal to retry.
+function endingOwnerRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_uncertain",
+    message: "The previous foreground owner of this run is ending.",
+  });
+}
+async function endingOwnerFixture(
+  sequence: readonly ("running" | "uncertain")[],
+  recover = true
+) {
+  const fixture = await stoppedPoolUnderRunFixture("stopped");
+  const { start, events } = fixture;
+  let index = 0;
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && index < sequence.length) {
+      const point = sequence[index]!;
+      index += 1;
+      events.push(`graph retained-preflight owner ${point}`);
+      throw point === "running" ? ownerRunningRefusal() : endingOwnerRefusal();
+    }
+    return await invoke(request);
+  };
+  start.dependencies.poolBootEnded = async () => true;
+  start.dependencies.endedBootOwnerWaitMs = 5000;
+  if (!recover) {
+    const { recoverStoppedPool: _omitted, ...plain } = start;
+    return { ...fixture, start: plain };
+  }
+  return fixture;
+}
+
+for (const sequence of [
+  ["running", "uncertain", "uncertain"],
+  ["uncertain"],
+  ["running", "uncertain", "running", "uncertain"],
+] as const) {
+  test(`up through the owner's end (${sequence.join(", ")}, exited) waits with one line, then recovers once`, async () => {
+    const { start, events, notices } = await endingOwnerFixture(sequence);
+    expect(await startNativeProject(start)).toBe(0);
+    expect(events.filter((event) => event === "down --recover")).toHaveLength(
+      1
+    );
+    // One line when it actually waited: an owner already exited at the first
+    // re-read is not waited for.
+    expect(
+      notices.filter((line) => line === NATIVE_ENDED_BOOT_OWNER_NOTICE)
+    ).toHaveLength(sequence.length > 1 ? 1 : 0);
+  });
+}
+
+test("restart through the owner's end waits with one line, then keeps its own exited refusal as before", async () => {
+  // Restart passes no stopped-pool recovery: after the wait it decides as today.
+  const { start, events, notices } = await endingOwnerFixture(
+    ["running", "uncertain"],
+    false
+  );
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_exited"
+  );
+  expect(events).not.toContain("down --recover");
+  expect(notices).toEqual([NATIVE_ENDED_BOOT_OWNER_NOTICE]);
+});
+
 test("a live foreground owner on a running pool keeps its refusal at once, with no wait or line", async () => {
   const { start, events, notices } = await exitingOwnerFixture({
     runningRefusals: Number.POSITIVE_INFINITY,

@@ -237,6 +237,6 @@ async function writeProjectRuntimeStateFile(opts: {
   readonly state: ProjectRuntimeStateFile;
 }): Promise<void> {
   const path = resolveProjectRuntimeStatePath({ projectDir: opts.projectDir });
-  await ensureDir(resolve(opts.projectDir, ".internal"));
-  await writeTextFile(path, `${JSON.stringify(opts.state, null, 2)}\n`);
+  await ensureDir(resolve(opts.projectDir, ".internal"), 0o700);
+  await writeTextFile(path, `${JSON.stringify(opts.state, null, 2)}\n`, 0o600);
 }

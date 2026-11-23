@@ -111,6 +111,11 @@ pub struct RuntimeStatus {
     pub interrupted_runs: Option<Vec<String>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interrupted_runs_unknown: bool,
+    /// Graph runs whose receipt is live (`pool_users::live_graph_runs`), sorted, so the
+    /// CLI can name the projects that keep a running pool in use (HACK-2535). Absent
+    /// for an uninitialized pool or when the receipts cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_runs: Option<Vec<String>>,
     /// Whether this process hashes SHA-256 with the CPU's instructions (`sha256_backend`).
     pub hashing: crate::sha256_backend::Report,
 }
@@ -997,6 +1002,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             repaired_sockets: None,
             interrupted_runs: None,
             interrupted_runs_unknown: false,
+            live_runs: None,
             hashing: crate::sha256_backend::report(),
         });
     }
@@ -1071,6 +1077,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
         interrupted_runs: None,
         interrupted_runs_unknown: false,
+        live_runs: pool_users::live_graph_runs(&candidate.state_root),
         hashing: crate::sha256_backend::report(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
@@ -2667,11 +2674,35 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
 
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
-        down_observed(candidate)
+        down_observed(candidate, None)
     })
 }
 
-fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+/// Stop a running pool that nothing uses, so a stopped-pool share update can follow
+/// (HACK-2535). The pool is checked idle (`pool_users::require_idle`) under the provider
+/// lease, and again right before the guest stops. The lease is held from the first
+/// check to the stop, and graph starts and interactive sessions are admitted only under
+/// it, so a start that begins meanwhile waits for the lease and then finds the pool
+/// stopped. The second check is a second guard, should a receipt ever turn live
+/// without the lease; it costs one read of the receipts.
+pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        down_observed(
+            candidate,
+            Some(&|| pool_users::require_idle(&candidate.state_root)),
+        )
+    })
+}
+
+/// `runtime down`. With `idle` (HACK-2535) the check runs under the lease before any
+/// effect, and again right before the guest stops; the host-side releases (the managed
+/// hostname authority and every publisher) then follow that second check, so a refusal
+/// at either check has changed nothing. Plain `down` releases them before it verifies
+/// the live guest, as before.
+fn down_observed(
+    candidate: &Candidate,
+    idle: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
@@ -2680,6 +2711,9 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     let lock = state::Lock::acquire(&root(candidate))?;
     // Builds take their shared fence only under this lease, so none can start after this.
     super::image_build::require_no_active_build(candidate)?;
+    if let Some(idle) = idle {
+        idle()?;
+    }
     let mut owner = Owner::load(candidate)?;
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
     // When there is a pool to stop, one host sample is taken beside the stop, on its own
@@ -2703,10 +2737,16 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     if !stopped {
         artifact::verify(candidate)?;
     }
-    super::hostname_authority::managed::stop(candidate, &owner)?;
-    super::publication::release(candidate, &owner.token, None)?;
+    let release = |owner: &Owner| -> Result<(), CandidateError> {
+        super::hostname_authority::managed::stop(candidate, owner)?;
+        super::publication::release(candidate, &owner.token, None)
+    };
     if stopped {
+        release(&owner)?;
         return status(candidate);
+    }
+    if idle.is_none() {
+        release(&owner)?;
     }
     verify_live(candidate, &owner)?;
     // Stopping a running pool stops every graph's containers with the guest. This is
@@ -2721,6 +2761,12 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
             deadline,
         )
     });
+    // The second idle check, right before the guest stops (HACK-2535); nothing was
+    // released before it.
+    if let Some(idle) = idle {
+        idle()?;
+        release(&owner)?;
+    }
     let mut result = match guest_stop(candidate, &mut owner) {
         Ok(()) => status(candidate),
         Err(error)
@@ -2865,11 +2911,15 @@ fn agent_silent(candidate: &Candidate, owner: &Owner) -> Result<bool, CandidateE
 /// Any reply, even an unexpected one, means the guest is alive and keeps the normal stop
 /// path.
 fn agent_silent_at(path: &Path) -> bool {
+    agent_silent_with(|| agent::answers_ping(path, SILENT_PING_TIMEOUT))
+}
+
+fn agent_silent_with(mut answers: impl FnMut() -> bool) -> bool {
     for attempt in 0..SILENT_PINGS {
         if attempt > 0 {
             std::thread::sleep(SILENT_PING_INTERVAL);
         }
-        if agent::answers_ping(path, SILENT_PING_TIMEOUT) {
+        if answers() {
             return false;
         }
     }
@@ -4438,60 +4488,67 @@ printf 'status=%s%s\n' "$status" "$left"
 
     #[test]
     fn only_a_guest_agent_that_never_starts_a_reply_counts_as_silent() {
-        use std::os::unix::net::UnixListener;
+        use std::net::Shutdown;
+        use std::os::unix::net::{UnixListener, UnixStream};
+
         let directory = ShortDirectory::new();
         let path = directory.0.join("agent.sock");
         // No listener: refused connections are silence.
         assert!(agent_silent_at(&path));
         let listener = UnixListener::bind(&path).unwrap();
-        // Accepted but never answered, as when the guest's vsock path is saturated.
-        let held = std::thread::spawn(move || {
-            // Keep every connection open and unanswered until the probe is over.
-            let kept: Vec<_> = listener
-                .incoming()
-                .take(SILENT_PINGS as usize)
-                .map(Result::unwrap)
-                .collect();
-            kept.len()
-        });
-        let started = Instant::now();
-        assert!(agent_silent_at(&path));
-        // Each probe waits out its deadline (the last sees the fake end the connection).
-        assert!(started.elapsed() >= SILENT_PING_TIMEOUT * (SILENT_PINGS - 1));
-        assert_eq!(held.join().unwrap(), SILENT_PINGS as usize);
-        fs::remove_file(&path).unwrap();
-        // Any reply byte, even of an unexpected response, is an answer.
-        let listener = UnixListener::bind(&path).unwrap();
-        // Answer every probe connection: on a loaded host the first ping can time out
-        // before this thread runs, and the next ping must still reach a listener.
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let answering = {
-            let done = std::sync::Arc::clone(&done);
-            std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    if done.load(std::sync::atomic::Ordering::SeqCst) {
-                        break;
-                    }
-                    // The probe may already have given up on this connection.
-                    let _ = stream.unwrap().write_all(b"?");
-                }
-            })
+        let connect = || -> std::io::Result<_> {
+            let client = UnixStream::connect(&path)?;
+            let (peer, _) = listener.accept()?;
+            Ok((client, peer))
         };
-        assert!(!agent_silent_at(&path));
-        done.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Wake the accept loop so it observes `done` and exits.
-        drop(std::os::unix::net::UnixStream::connect(&path));
-        answering.join().unwrap();
-        fs::remove_file(&path).unwrap();
-        // A connection the guest side ends before replying is silence.
-        let listener = UnixListener::bind(&path).unwrap();
-        let closing = std::thread::spawn(move || {
-            for stream in listener.incoming().take(SILENT_PINGS as usize) {
-                drop(stream.unwrap());
-            }
-        });
-        assert!(agent_silent_at(&path));
-        closing.join().unwrap();
+
+        // Keep every accepted connection open and unanswered through its deadline.
+        let mut kept = Vec::new();
+        let started = Instant::now();
+        assert!(agent_silent_with(|| agent::answers_ping_with(
+            || {
+                let (client, peer) = connect()?;
+                kept.push(peer);
+                Ok(client)
+            },
+            SILENT_PING_TIMEOUT,
+            Instant::now,
+        )));
+        assert!(started.elapsed() >= SILENT_PING_TIMEOUT * SILENT_PINGS);
+        assert_eq!(kept.len(), SILENT_PINGS as usize);
+
+        // Queue one byte before polling, with no responder thread to schedule.
+        // The agent never sends a complete reply. A fixed clock makes this check
+        // independent of how long the test process is descheduled.
+        let now = Instant::now();
+        let mut attempts = 0;
+        assert!(!agent_silent_with(|| {
+            attempts += 1;
+            agent::answers_ping_with(
+                || {
+                    let (client, mut peer) = connect()?;
+                    peer.write_all(b"?")?;
+                    peer.shutdown(Shutdown::Write)?;
+                    kept.push(peer);
+                    Ok(client)
+                },
+                SILENT_PING_TIMEOUT,
+                || now,
+            )
+        }));
+        assert_eq!(attempts, 1);
+
+        // EOF before the first reply byte is silence.
+        assert!(agent_silent_with(|| agent::answers_ping_with(
+            || {
+                let (client, peer) = connect()?;
+                peer.shutdown(Shutdown::Write)?;
+                kept.push(peer);
+                Ok(client)
+            },
+            SILENT_PING_TIMEOUT,
+            || now,
+        )));
     }
 
     /// A stand-in for the provider's forwarded engine socket. It holds its first `hold`

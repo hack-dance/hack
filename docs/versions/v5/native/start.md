@@ -171,7 +171,7 @@ conditions. A service with a health check must pass it. A completed one-shot
 service must exit successfully. A milestone appears only when this invocation
 observed it. Detached native startup waits for readiness before returning.
 
-Native `hack up --json` includes the same [timing records](../../../reference/timings.md)
+Native `hack up --json` includes the same `hack.timings/1` records
 in `data.timings`. Add `--timings-file <file>` to save those records as JSONL
 in a new file. Times overlap when steps run together, so use `command.total`
 for elapsed startup time.

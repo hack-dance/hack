@@ -37,6 +37,7 @@ const OTHER_MODULES: Readonly<Record<string, string>> = {
   environment:
     "Private wrapper publication and delivery are runtime operations.",
   iter: "Standard iterator helper.",
+  timings: "Optional observations do not produce startup refusals.",
   serde_json: "JSON encoding of already-admitted values.",
   fs: "Filesystem acquisition for verified cache bindings.",
   libc: "Host identity for verified cache bindings.",

@@ -441,8 +441,10 @@ fn storage_attempt_preflight(
     candidate: &Candidate,
     owner: &str,
     boot: &str,
-) -> Result<(), CandidateError> {
-    for run in storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))? {
+) -> Result<Option<PathBuf>, CandidateError> {
+    let runs = storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?;
+    let archive = archive_at_limit(candidate, owner, &runs)?;
+    for run in runs {
         let (receipt, root) = journal::load_admission(candidate, &run, owner, boot)?;
         persistent_data::tool::require_idle(&root)?;
         if !matches!(receipt.phase, Phase::ReadyObserved | Phase::Removed) {
@@ -452,7 +454,7 @@ fn storage_attempt_preflight(
             require_data_tool(&receipt)?;
         }
     }
-    Ok(())
+    Ok(archive)
 }
 
 pub(super) fn ownership(
@@ -1032,13 +1034,15 @@ pub(super) fn run_guarded(
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
-    if !input.inputs().storage.is_empty() {
+    let storage_archive = if input.inputs().storage.is_empty() {
+        None
+    } else {
         storage_attempt_preflight(
             candidate,
             engine.guest().incarnation(),
             engine.guest().boot_id(),
-        )?;
-    }
+        )?
+    };
     let source = selected
         .project_source
         .as_ref()
@@ -1123,11 +1127,8 @@ pub(super) fn run_guarded(
         engine.guest().incarnation(),
         engine.guest().boot_id(),
     )?;
-    if !config.data.is_empty() {
-        let runs = storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?;
-        if runs.len() == storage_inventory::RUN_LIMIT {
-            super::archive::make_room(candidate, engine.guest().incarnation(), &runs)?;
-        }
+    if let Some(source) = storage_archive {
+        super::archive::make_room(candidate, source)?;
     }
     let root = journal::reserve(candidate, &receipt)?;
     if let Some(admitted) = admitted {
@@ -1958,6 +1959,16 @@ fn reservations_using(
 ) -> Result<(), CandidateError> {
     reservations_using_except(candidate, owner, boot, new_attempt, None, inspect, add)
 }
+fn archive_at_limit(
+    candidate: &Candidate,
+    owner: &str,
+    runs: &[String],
+) -> Result<Option<PathBuf>, CandidateError> {
+    (runs.len() == storage_inventory::RUN_LIMIT)
+        .then(|| super::archive::select(candidate, owner, runs))
+        .transpose()
+}
+
 fn reservations_using_except(
     candidate: &Candidate,
     owner: &str,
@@ -1968,6 +1979,11 @@ fn reservations_using_except(
     mut add: impl FnMut(&Value) -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     let runs = storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?;
+    let archive = if new_attempt {
+        archive_at_limit(candidate, owner, &runs)?
+    } else {
+        None
+    };
     for run in &runs {
         if except == Some(run.as_str()) {
             continue;
@@ -2002,8 +2018,8 @@ fn reservations_using_except(
             add(&value)?;
         }
     }
-    if new_attempt && runs.len() == storage_inventory::RUN_LIMIT {
-        super::archive::make_room(candidate, owner, &runs)?;
+    if let Some(source) = archive {
+        super::archive::make_room(candidate, source)?;
     }
     Ok(())
 }

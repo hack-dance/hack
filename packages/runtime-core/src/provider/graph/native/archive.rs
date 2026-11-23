@@ -77,16 +77,16 @@ fn sync(path: &Path) -> Result<(), CandidateError> {
         .map_err(state::io)
 }
 
-/// Called under the provider mutation lease. Renames publish whole directories.
-/// An interrupted eviction can be finished without touching another receipt.
-pub(super) fn make_room(
+/// Select before evaluating guest capacity so the full inventory gets its own
+/// diagnostic. The caller retains the provider mutation lease through the move.
+pub(super) fn select(
     candidate: &Candidate,
     owner: &str,
     runs: &[String],
-) -> Result<(), CandidateError> {
+) -> Result<PathBuf, CandidateError> {
     let active = candidate.state_root.join("run/native-graphs");
     let environment_runs = native_environment::retained_runs(candidate)?;
-    let source = oldest(runs.iter().map(|run| active.join(run)), |path| {
+    oldest(runs.iter().map(|run| active.join(run)), |path| {
         let run = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -101,7 +101,17 @@ pub(super) fn make_room(
         }
         Ok(eligible(&receipt) && !environment_runs.contains(run))
     })?
-    .ok_or_else(refused)?;
+    .ok_or_else(|| error(
+        "native_graph_attempt_limit",
+        "The native authored graph limit is 64 attempts. Active workloads, persistent storage, private environment records, or unfinished cleanup and recovery can keep attempts in the active inventory. Run hack doctor --native-cleanup inspect for cleanup guidance.",
+    ))
+}
+
+/// Renames publish whole directories. An interrupted eviction can be finished
+/// without touching another receipt.
+pub(super) fn make_room(candidate: &Candidate, source: PathBuf) -> Result<(), CandidateError> {
+    let active = candidate.state_root.join("run/native-graphs");
+
     let run = source
         .file_name()
         .and_then(|name| name.to_str())

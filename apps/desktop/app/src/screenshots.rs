@@ -21,7 +21,11 @@ fn fixture_context() -> HeadlessAppContext {
         Arc::new(hack_desktop_ui::icons::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
-    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        crate::theme::init(cx);
+        #[cfg(target_os = "linux")]
+        crate::theme::capture_fonts(cx);
+    });
     cx
 }
 

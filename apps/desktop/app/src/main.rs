@@ -38,6 +38,7 @@ mod screenshots;
 mod setup_view;
 #[cfg(hack_terminal)]
 mod terminal;
+mod theme;
 mod upgrade_view;
 mod usage_view;
 mod view;
@@ -242,7 +243,11 @@ fn main() {
     gpui_kit::application()
         .with_assets(hack_desktop_ui::icons::Assets)
         .run(move |cx| {
-            gpui_kit::init(cx);
+            theme::init(cx);
+            #[cfg(all(feature = "screenshots", target_os = "linux"))]
+            if args.fixture.is_some() || args.logs_fixture.is_some() {
+                theme::capture_fonts(cx);
+            }
             view::bind_keys(cx);
             let fixture = args.fixture.or(args.logs_fixture.map(|l| {
                 if l == hack_desktop_core::logs::fixtures::LogsFixture::Stopped {

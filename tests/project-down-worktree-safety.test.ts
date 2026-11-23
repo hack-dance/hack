@@ -455,6 +455,9 @@ test("service Stop reports confirmed replicas on failure and uses the Compose wo
       message: "Could not stop api (Docker exit 1).",
       detail: {
         stoppedContainerIds: ["api-one"],
+        stoppedContainers: [
+          { id: "api-one", startedAt: "2026-11-23T00:00:00.000000111Z" },
+        ],
         stoppedAt: expect.any(String),
       },
     },
@@ -798,6 +801,10 @@ async function createWorktreeFixture(): Promise<{
       `echo "$@" >> "${dockerLogPath}"`,
       'if [ "${DOCKER_CONFIG:-}" = "relative-docker-config" ]; then',
       '  [ -f "$DOCKER_CONFIG/fixture-context" ] || exit 29',
+      '  if [ "$1" = "inspect" ]; then',
+      '    printf \'%s\\n\' \'{"Id":"api-one","State":{"Status":"running","StartedAt":"2026-11-23T00:00:00.000000111Z"}}\' \'{"Id":"api-two","State":{"Status":"running","StartedAt":"2026-11-23T00:00:00.000000222Z"}}\'',
+      "    exit 0",
+      "  fi",
       '  if [ "$1" = "stop" ]; then',
       '    printf "%s\\n" "api-one" "unrelated"',
       '    printf "%s\\n" "fixture could not stop api-two" >&2',

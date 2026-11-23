@@ -158,8 +158,8 @@ A worktree configured with
 when it owns the base stack. An unaddressable worktree has a null branch and
 URL. Match branch observations by branch and owning checkout, then use
 `runtime_ok` to distinguish a missing runtime from an unavailable observation.
-Container IDs are full Docker IDs. When available, `started_at` identifies
-the observed container execution.
+Container IDs are full Docker IDs. When available, the container's `started_at`
+identifies the observed execution and retains Docker's timestamp precision.
 
 The row also has `open_url` and `open_url_host`, the same for the base
 instance (`hack open` with no branch).

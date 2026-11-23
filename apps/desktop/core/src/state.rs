@@ -150,8 +150,14 @@ pub struct LocalContext {
     pub in_flight: Option<Action>,
     /// Failed services from the last `up`/`restart` this app ran.
     pub last_failed: Vec<String>,
-    /// Container IDs confirmed stopped by a service action in this session.
-    pub service_stops: std::collections::BTreeMap<String, String>,
+    /// Container executions confirmed stopped by a service action in this session.
+    pub(crate) service_stops: std::collections::BTreeMap<String, ServiceStopEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceStopEvidence {
+    pub started_at: String,
+    pub stopped_at: String,
 }
 
 /// One service row for the Services table.
@@ -302,7 +308,7 @@ fn explicitly_stopped(container: &crate::models::Container, local: &LocalContext
             .as_ref()
             .and_then(|id| local.service_stops.get(id))
             .zip(container.started_at.as_ref())
-            .is_some_and(|(stopped_at, started_at)| started_at < stopped_at)
+            .is_some_and(|(receipt, started_at)| started_at == &receipt.started_at)
 }
 
 fn stop_evidence_pending(container: &crate::models::Container, local: &LocalContext) -> bool {

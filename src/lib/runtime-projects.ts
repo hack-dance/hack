@@ -713,9 +713,7 @@ export function serializeRuntimeProject(
         name: container.name,
         ports: container.ports,
         working_dir: container.workingDir ?? null,
-        started_at: container.observation?.startedAt
-          ? new Date(container.observation.startedAt).toISOString()
-          : null,
+        started_at: container.observation?.startedAt ?? null,
         image: container.image,
         labels: container.labels,
         mounts: container.mounts.map((mount) => ({

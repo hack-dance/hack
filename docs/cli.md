@@ -451,7 +451,8 @@ invocation wins over the project setting:
 
 For Compose `hack down`, `compose.downTimeoutSeconds` (or
 `hack down --timeout <seconds>`, which wins over the project setting) sets the
-per-container stop grace period passed to `docker compose down --timeout`. The
+per-container stop grace period passed to `docker compose down --timeout`.
+
 Use `hack down --service <name>` to stop one local Compose service in the
 selected instance. Use `--branch <name>` to select an explicit branch copy.
 The command keeps the containers, networks, volumes and Always on setting.

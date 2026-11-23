@@ -10,6 +10,7 @@ use crate::doctor::DoctorRun;
 use crate::fixtures::{self, Fixture};
 use crate::models::{
     DaemonApiStatus, DoctorReport, LifecycleResult, LogEntry, OpenResult, ProjectsPayload,
+    StoppedContainerExecution,
 };
 use crate::runner::{CliRunner, RunError};
 use crate::state::Action;
@@ -269,7 +270,7 @@ pub struct ServiceActionError {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ServiceStopReceipt {
-    pub stopped_container_ids: Vec<String>,
+    pub stopped_containers: Vec<StoppedContainerExecution>,
     pub stopped_at: String,
 }
 

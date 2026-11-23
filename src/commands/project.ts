@@ -294,6 +294,7 @@ import {
   type InstanceContainerListing,
   type InstanceNetworkListing,
   parseComposePsInstanceContainers,
+  readServiceStopExecutions,
   resolveInstanceStopProfiles,
   selectOwnedInstanceContainers,
   unionProfiles,
@@ -1312,6 +1313,10 @@ export type LifecycleJsonData = {
   readonly interrupted?: readonly string[];
   readonly warnings?: readonly string[];
   readonly stoppedContainerIds?: readonly string[];
+  readonly stoppedContainers?: readonly {
+    readonly id: string;
+    readonly startedAt: string;
+  }[];
   readonly stoppedAt?: string;
   readonly durationMs: number;
 };
@@ -8924,17 +8929,16 @@ async function handleDown(
   validateComposeExpectation(input.args.options);
   parseRequestedTarget({ raw: input.args.options.target });
   if (input.args.options.service !== undefined) {
-    const selection = {
+    return await withComposeCheckoutLock({
       cwd: input.ctx.cwd,
       path: input.args.options.path,
       project: input.args.options.project,
       branch: input.args.options.branch,
-      run: () => handleServiceDown(input),
-    };
-    const expected = input.args.options.expectComposeProject;
-    return expected === undefined
-      ? await withComposeCheckoutLock(selection)
-      : await withComposeNameLock(expected, selection.run);
+      run: () =>
+        withComposeNameLock(input.args.options.expectComposeProject, () =>
+          handleServiceDown(input)
+        ),
+    });
   }
   const isNativeBackend = resolveInitComposeBackend(process.env) === "native";
   if (isNativeBackend && input.args.options.timeout !== undefined) {
@@ -8947,7 +8951,7 @@ async function handleDown(
     !isNativeBackend && input.args.options.expectComposeProject === undefined;
   const run = () =>
     runWholeDown({ input, flagTimeoutSeconds, discoverComposeTarget });
-  if (!discoverComposeTarget) {
+  if (isNativeBackend) {
     return await run();
   }
   return await withComposeCheckoutLock({
@@ -9143,6 +9147,25 @@ async function runServiceStop(
   const active = owned.filter(
     (container) => !["created", "exited", "dead"].includes(container.state)
   );
+  const stoppedContainerIds = active.map((container) => container.id);
+  const cwd = dirname(opts.project.composeFile);
+  const executions =
+    !opts.json || stoppedContainerIds.length === 0
+      ? new Map<string, string>()
+      : await readServiceStopExecutions({
+          ids: stoppedContainerIds,
+          cwd,
+          env: opts.env,
+          timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
+        });
+  const receipt = (ids: readonly string[]) => ({
+    stoppedContainerIds: ids,
+    stoppedContainers: ids.flatMap((id) => {
+      const startedAt = executions.get(id);
+      return startedAt ? [{ id, startedAt }] : [];
+    }),
+    stoppedAt: new Date().toISOString(),
+  });
   if (active.length) {
     const result = await exec(
       [
@@ -9152,10 +9175,10 @@ async function runServiceStop(
           ? []
           : ["--timeout", String(opts.timeoutSeconds)]),
         "--",
-        ...active.map((container) => container.id),
+        ...stoppedContainerIds,
       ],
       {
-        cwd: dirname(opts.project.composeFile),
+        cwd,
         stdin: "ignore",
         env: { ...opts.env },
         timeoutMs: INSTANCE_STOP_GRACE_CAP_MS,
@@ -9167,15 +9190,13 @@ async function runServiceStop(
       const confirmed = new Set(
         result.stdout.split("\n").map((id) => id.trim())
       );
-      const stoppedContainerIds = active
-        .filter((container) => confirmed.has(container.id))
-        .map((container) => container.id);
+      const confirmedIds = stoppedContainerIds.filter((id) =>
+        confirmed.has(id)
+      );
       throw new HackCliError({
         code: "E_COMPOSE_FAILED",
         message: `Could not stop ${opts.service} (Docker exit ${result.exitCode}).`,
-        detail: stoppedContainerIds.length
-          ? { stoppedContainerIds, stoppedAt: new Date().toISOString() }
-          : undefined,
+        detail: confirmedIds.length ? receipt(confirmedIds) : undefined,
       });
     }
   }
@@ -9194,8 +9215,7 @@ async function runServiceStop(
           stopped: active.length > 0 ? [opts.service] : [],
           durationMs: Date.now() - startedAt,
         }),
-        stoppedContainerIds: active.map((container) => container.id),
-        stoppedAt: new Date().toISOString(),
+        ...receipt(stoppedContainerIds),
       },
     }),
     exitCode: 0,

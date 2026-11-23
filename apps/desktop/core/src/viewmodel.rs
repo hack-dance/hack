@@ -14,10 +14,10 @@
 
 use std::collections::HashMap;
 
-use crate::models::{LifecycleResult, ProjectRow, Worktree};
+use crate::models::{LifecycleResult, ProjectRow, StoppedContainerExecution, Worktree};
 pub use crate::source::UpdateSide;
 use crate::source::{ActionOutcome, DaemonRecovery, ServiceActionError, Snapshot, SourceError};
-use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
+use crate::state::{self, Action, LocalContext, ProjectState, ServiceStopEvidence, ServiceView};
 
 /// One runnable instance: a project's base instance (`branch: None`) or one
 /// of its branch instances.
@@ -475,11 +475,11 @@ impl AppModel {
                 })
                 .collect();
             let checked = snapshot.projects.runtime_checked_at.as_deref();
-            local.service_stops.retain(|id, stopped_at| {
-                checked.is_none_or(|time| time <= stopped_at.as_str())
-                    || exited
-                        .get(id)
-                        .is_some_and(|started_at| started_at.is_none_or(|start| start < stopped_at))
+            local.service_stops.retain(|id, receipt| {
+                checked.is_none_or(|time| time <= receipt.stopped_at.as_str())
+                    || exited.get(id).is_some_and(|started_at| {
+                        started_at.is_none_or(|start| start == &receipt.started_at)
+                    })
             });
         }
     }
@@ -842,27 +842,23 @@ impl AppModel {
         match result {
             Ok(receipt) => {
                 if let Some(stopped_at) = receipt.stopped_at {
-                    self.record_service_stop(&key, receipt.stopped_container_ids, &stopped_at);
+                    self.record_service_stop(&key, receipt.stopped_containers, &stopped_at);
                 }
             }
             Err(error) => {
                 if let Some(receipt) = error.stopped {
-                    self.record_service_stop(
-                        &key,
-                        receipt.stopped_container_ids,
-                        &receipt.stopped_at,
-                    );
+                    self.record_service_stop(&key, receipt.stopped_containers, &receipt.stopped_at);
                 }
                 self.action_errors.insert(key, describe(&error.source));
             }
         }
     }
 
-    /// Remember only containers whose stop was confirmed by the CLI.
+    /// Remember only executions whose stop was confirmed by the CLI.
     fn record_service_stop(
         &mut self,
         key: &InstanceKey,
-        containers: Vec<String>,
+        containers: Vec<StoppedContainerExecution>,
         stopped_at: &str,
     ) {
         if containers.is_empty() {
@@ -872,7 +868,15 @@ impl AppModel {
             .entry(key.clone())
             .or_default()
             .service_stops
-            .extend(containers.into_iter().map(|id| (id, stopped_at.to_owned())));
+            .extend(containers.into_iter().map(|container| {
+                (
+                    container.id,
+                    ServiceStopEvidence {
+                        started_at: container.started_at,
+                        stopped_at: stopped_at.to_owned(),
+                    },
+                )
+            }));
     }
 
     /// The last good snapshot, if any.
@@ -2664,7 +2668,7 @@ mod tests {
                 code: "E_COMPOSE_FAILED".into(),
                 message: "Could not stop api (Docker exit 1).".into(),
                 detail: Some(serde_json::json!({
-                    "stoppedContainerIds": ["confirmed"],
+                    "stoppedContainers": [{ "id": "confirmed", "startedAt": "2026-11-23T00:00:00.000Z" }],
                     "stoppedAt": "2026-11-23T00:00:30.000Z"
                 })),
             })
@@ -2709,7 +2713,7 @@ mod tests {
         runtime.services.retain(|service| service.service == "api");
         let container = &mut runtime.services[0].containers[0];
         container.id = Some("stopped-api".into());
-        container.started_at = Some("2026-11-23T00:00:00.000Z".into());
+        container.started_at = Some("2026-11-23T00:00:00.000000111Z".into());
         container.state = "exited".into();
         container.status = "Exited (137) 2 seconds ago".into();
         let mut completed_replica = container.clone();
@@ -2728,7 +2732,14 @@ mod tests {
             model.detail().unwrap().state,
             ProjectState::FailedStart { .. }
         ));
-        model.record_service_stop(&key, vec!["stopped-api".into()], "2026-11-23T00:00:30.000Z");
+        model.record_service_stop(
+            &key,
+            vec![StoppedContainerExecution {
+                id: "stopped-api".into(),
+                started_at: "2026-11-23T00:00:00.000000111Z".into(),
+            }],
+            "2026-11-23T00:00:30.000Z",
+        );
         let mut cached = snapshot.clone();
         cached.projects.runtime_checked_at = Some("2026-11-23T00:00:29.999Z".into());
         let project = cached
@@ -2773,7 +2784,9 @@ mod tests {
             .find(|p| p.name == "storefront")
             .unwrap();
         let container = &mut project.branch_runtime[0].runtime.services[0].containers[0];
-        container.started_at = Some("2026-11-23T00:00:45.000Z".into());
+        // The same ID restarted and crashed during the batch. Its newer
+        // execution began before the batch finished, even in the same ms.
+        container.started_at = Some("2026-11-23T00:00:00.000000222Z".into());
         model.apply(Event::Refreshed(Ok(restarted)));
         let detail = model.detail().unwrap();
         assert!(matches!(detail.state, ProjectState::FailedStart { .. }));

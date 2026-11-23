@@ -1,7 +1,53 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { COMPOSE_DOWN_TIMEOUT_CONFIG } from "./compose-down-budget.ts";
-import { isRecord } from "./guards.ts";
+import { getString, isRecord } from "./guards.ts";
+import { parseJsonLines } from "./json-lines.ts";
+import { readContainerState } from "./runtime-service-state.ts";
+import { exec } from "./shell.ts";
+
+const STOP_EXECUTION_INSPECT_FORMAT =
+  '{"Id":{{json .Id}},"State":{"Status":{{json .State.Status}},"StartedAt":{{json .State.StartedAt}}}}';
+
+/** Read only execution identity. Missing inspect evidence does not prevent Stop. */
+export async function readServiceStopExecutions(opts: {
+  readonly ids: readonly string[];
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly timeoutMs: number;
+}): Promise<ReadonlyMap<string, string>> {
+  const result = await exec(
+    [
+      "docker",
+      "inspect",
+      "--type",
+      "container",
+      "--format",
+      STOP_EXECUTION_INSPECT_FORMAT,
+      "--",
+      ...opts.ids,
+    ],
+    {
+      cwd: opts.cwd,
+      env: { ...opts.env },
+      stdin: "ignore",
+      timeoutMs: opts.timeoutMs,
+      maxStdoutBytes: opts.ids.length * 256,
+      maxStderrBytes: 4096,
+    }
+  ).catch(() => null);
+  const executions = new Map<string, string>();
+  if (result) {
+    for (const row of parseJsonLines(result.stdout)) {
+      const id = getString(row, "Id");
+      const startedAt = readContainerState(row.State)?.startedAt;
+      if (id && startedAt) {
+        executions.set(id, startedAt);
+      }
+    }
+  }
+  return executions;
+}
 
 /**
  * Rules for stopping a whole Compose instance (HACK-2340).

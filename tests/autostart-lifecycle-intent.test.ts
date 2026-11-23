@@ -145,6 +145,7 @@ async function writeInterpolatedStack(projectRoot: string, variable: string) {
 async function installComposeNameFixture(opts?: {
   readonly failFirstProbe?: boolean;
   readonly holdStart?: boolean;
+  readonly holdRestart?: boolean;
   readonly holdBeforePin?: boolean;
   readonly foreignCheckout?: string;
   readonly foreignStack?: string;
@@ -160,6 +161,7 @@ const options = ${JSON.stringify(opts ?? {})};
 const args = process.argv.slice(2);
 const mode = args.find((arg) => ["config", "ps", "inspect", "up", "down", "exec", "stop", "logs"].includes(arg));
 const running = fixture + "/compose-running";
+const created = fixture + "/compose-created";
 const containerId = "f".repeat(64);
 const context = process.env.DOCKER_CONTEXT || "none";
 const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || "sample";
@@ -213,9 +215,10 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   const foreign = !options.foreignStack || options.foreignStack === stack;
   const inSavedContext = !options.savedContextOnly || context === "saved-files-context";
   const isRunning = await Bun.file(running).exists() && (await Bun.file(running).text()) === stack;
-  const directory = (foreign ? options.foreignCheckout : undefined) ?? (inSavedContext && isRunning ? process.cwd() : null);
+  const isCreated = await Bun.file(created).exists();
+  const directory = (foreign ? options.foreignCheckout : undefined) ?? (inSavedContext && (isRunning || isCreated) ? process.cwd() : null);
   process.stdout.write(JSON.stringify(directory ? [{
-    ID: "fixture-container", Service: "app", State: "running",
+    ID: "fixture-container", Service: "app", State: isCreated ? "created" : "running",
     Labels: "com.docker.compose.project.working_dir=" + directory
   }] : []));
 } else if (mode === "up") {
@@ -223,7 +226,12 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
     await Bun.write(fixture + "/restart-context", context);
     await Bun.write(fixture + "/restart-stack", stack);
   }
-  if (options.holdStart && args.includes("--no-start")) {
+  const holdRestart = options.holdRestart && args.includes("--force-recreate");
+  if (args.includes("--no-start") && (options.holdStart || holdRestart)) {
+    if (holdRestart) {
+      await rm(running, { force: true });
+      await Bun.write(created, stack);
+    }
     await Bun.write(fixture + "/compose-start", JSON.stringify(args));
     const deadline = Date.now() + 12000;
     while (!(await Bun.file(fixture + "/release-start").exists())) {
@@ -232,7 +240,10 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
     }
   }
   if (!options.startContainers) process.exit(1);
-  if (args.includes("-d")) await Bun.write(running, stack);
+  if (args.includes("-d")) {
+    await rm(created, { force: true });
+    await Bun.write(running, stack);
+  }
 } else if (mode === "down") {
   await Bun.write(fixture + "/compose-down", JSON.stringify(args));
   await Bun.write(fixture + "/down-overlay", process.env.COMPOSE_PROJECT_NAME || "none");
@@ -571,6 +582,58 @@ test("unbound service Stop finds the desktop-pinned stack even with a managed na
   });
   expect(await Bun.file(join(root, "stop-context")).exists()).toBe(true);
   expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+}, 40_000);
+
+test("bound service Stop waits for ordinary Restart after it creates the containers", async () => {
+  const projectDir = join(root, "project", ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    '{"name":"sample","dev_host":"sample.hack"}'
+  );
+  await writeOwnedFixture(
+    join(projectDir, "docker-compose.yml"),
+    "name: sample\nservices:\n  app:\n    image: example.invalid/app\n"
+  );
+  await installComposeNameFixture({ holdRestart: true, startContainers: true });
+  const started = await run(["up", "-d", "--json"]);
+  expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+  const restart = run(["restart", "--json"]);
+  const release = Bun.file(join(root, "release-start"));
+  let stop: ReturnType<typeof run> | undefined;
+  try {
+    await waitForCondition(
+      () => Bun.file(join(root, "compose-created")).exists(),
+      "Restart did not reach the create phase"
+    );
+    stop = run([
+      "down",
+      "--service",
+      "app",
+      "--target",
+      "local",
+      "--expect-compose-project",
+      "sample",
+      "--json",
+    ]);
+    const premature = await Promise.race([
+      Bun.sleep(1800).then(() => false),
+      stop.then(() => true),
+    ]);
+    expect(premature).toBe(false);
+    await Bun.write(release, "release");
+    const restarted = await restart;
+    expect(restarted.exitCode, restarted.stderr || restarted.stdout).toBe(0);
+    const stopped = await stop;
+    expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+    expect(JSON.parse(stopped.stdout)).toMatchObject({
+      ok: true,
+      data: { services: { stopped: ["app"] } },
+    });
+    expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
+  } finally {
+    await Bun.write(release, "release");
+    await Promise.allSettled([restart, stop]);
+  }
 }, 40_000);
 
 test("ordinary Down waits for desktop Start to publish its pin before selecting the stack", async () => {

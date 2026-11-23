@@ -778,8 +778,18 @@ pub struct LifecycleResult {
     pub duration_ms: Option<u64>,
     #[serde(rename = "stoppedContainerIds")]
     pub stopped_container_ids: Vec<String>,
+    #[serde(rename = "stoppedContainers")]
+    pub stopped_containers: Vec<StoppedContainerExecution>,
     #[serde(rename = "stoppedAt")]
     pub stopped_at: Option<String>,
+}
+
+/// One successful Docker stop and the execution observed before shutdown.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoppedContainerExecution {
+    pub id: String,
+    pub started_at: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

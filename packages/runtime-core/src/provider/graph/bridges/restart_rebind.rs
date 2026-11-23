@@ -288,18 +288,21 @@ pub(in crate::provider::graph) fn supervise_probes(
     candidate: &Candidate,
     run: &str,
     generations: &mut BTreeMap<String, String>,
-    initialize: bool,
+    startup_deadline: Option<std::time::Instant>,
     excluded: &BTreeSet<String>,
     check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     check()?;
     probe_tick(
-        initialize,
+        startup_deadline.is_some(),
         generations,
         excluded,
         |mode| {
             check()?;
-            Engine::connect_in_mode(candidate, mode)
+            match startup_deadline {
+                Some(deadline) => Engine::connect_for_start(candidate, mode, deadline, check),
+                None => Engine::connect_in_mode(candidate, mode),
+            }
         },
         |engine| {
             let (receipt, _) = load(candidate, engine, run)?;

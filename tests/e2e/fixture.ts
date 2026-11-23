@@ -1,13 +1,13 @@
 import type { Stats } from "node:fs";
 import { lstat, mkdir, readdir, readlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-
 import {
   HACK_DIR_GITIGNORE_BEGIN_MARKER,
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../../src/templates.ts";
 import { fixtureGitEnv } from "../helpers/fixture-git.ts";
+import { ownedFixtureCommand } from "../helpers/owned-fixture.ts";
 import { recordOwnedFixture } from "./docker-ownership.ts";
 import { runCommand } from "./harness.ts";
 
@@ -183,7 +183,7 @@ async function writeRootFiles(opts: {
   readonly root: string;
   readonly name: string;
 }): Promise<void> {
-  await mkdir(opts.root, { recursive: true });
+  await mkdir(opts.root, { recursive: true, mode: 0o755 });
 
   const packageJson = {
     name: opts.name,
@@ -523,7 +523,7 @@ async function git(opts: {
 }): Promise<void> {
   const result = await runCommand({
     exactEnv: fixtureGitEnv(),
-    argv: [
+    argv: ownedFixtureCommand([
       "git",
       "-C",
       opts.root,
@@ -534,7 +534,7 @@ async function git(opts: {
       "-c",
       "commit.gpgsign=false",
       ...opts.args,
-    ],
+    ]),
     cwd: opts.root,
   });
   if (result.exitCode !== 0) {

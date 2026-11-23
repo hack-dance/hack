@@ -1,5 +1,5 @@
 ---
-title: Detached start · pool watch
+title: Detached start · pool boot ended
 ---
 stateDiagram-v2
     direction TB
@@ -7,28 +7,35 @@ stateDiagram-v2
     classDef wait stroke-width:1.6px
     classDef fail stroke-width:1.6px
 
-    [*] --> unobserved
-    unobserved --> watching : record running
-    unobserved --> unobserved : starting, stopped, unreadable
-    watching --> watching : same boot, slow, unreadable
-    watching --> grace : boot ended
-    grace --> done : start returns
-    grace --> exited : 10 s pass
-    watching --> done : start returns
+    [*] --> watching : boot recorded
+    watching --> watching : every 1 s, boot alive
+    watching --> ended : [boot ended]
+    state ended <<choice>>
+    ended --> exit : [ready, not stopping]
+    ended --> grace : [starting or stopping]
+    grace --> exit : 10 s passed
+    grace --> done : [start finished]
+    exit --> gone
+    gone --> recovered : next up proves it gone
+    grace --> waited : a new up arrives
+    waited --> gone : owner exited, ≤15 s
     done --> [*]
-    exited --> [*]
+    recovered --> [*]
 
-    note right of watching
-        Pool identity: owner token
-        and guest boot id, checked
-        every 5 s.
+    note right of exit
+        Same as a crash: marker
+        released, process exits.
     end note
-    note right of exited
-        Marker released, process
-        exits as a crash would; the
-        next up recovers the run.
+    note left of gone
+        The next up waits for this,
+        then recovers the run.
+    end note
+    note right of waited
+        Only while the pool record
+        shows the pool stopped.
+        One line says so.
     end note
 
-    class watching ok
+    class recovered ok
     class grace wait
-    class exited fail
+    class exit fail

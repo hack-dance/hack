@@ -35,6 +35,10 @@ import {
   openNativeComposeRouteClaims,
 } from "../src/lib/native-compose-route-claims.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+import {
+  mkdirOwnedFixture,
+  ownedFixtureCommand,
+} from "./helpers/owned-fixture.ts";
 
 const REVISION = createHash("sha256").update("synthetic input").digest("hex");
 const fixtures: string[] = [];
@@ -60,7 +64,7 @@ async function fixture(): Promise<string> {
   );
   fixtures.push(parent);
   const root = join(parent, "checkout");
-  await mkdir(join(root, ".hack"), { recursive: true });
+  await mkdirOwnedFixture(join(root, ".hack"), true);
   await writeFile(
     join(root, ".hack", "hack.project.json"),
     JSON.stringify({ schema_version: 1, name: "fixture" })
@@ -2410,12 +2414,15 @@ test(
   async () => {
     const root = await fixture();
     const git = async (args: readonly string[]) => {
-      const child = Bun.spawn(["git", "-C", root, ...args], {
-        env: fixtureGitEnv(),
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "pipe",
-      });
+      const child = Bun.spawn(
+        ownedFixtureCommand(["git", "-C", root, ...args]),
+        {
+          env: fixtureGitEnv(),
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "pipe",
+        }
+      );
       expect(await child.exited).toBe(0);
     };
     await git(["init", "-q"]);
@@ -2473,7 +2480,7 @@ test("checkout configuration directory replacement refuses saved rebinding", asy
   await activate(owner);
   const old = join(root, ".hack.old");
   await rename(join(root, ".hack"), old);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await rename(join(old, ".internal"), join(root, ".hack", ".internal"));
   await writeFile(join(root, ".hack", "hack.project.json"), "{}");
   await rejected(

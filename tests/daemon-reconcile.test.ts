@@ -14,7 +14,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import {
   checkRunningLaunchdDaemon,
   refuseLaunchdBeforeReplacing,
@@ -80,6 +79,7 @@ import {
   renderSystemdUnit,
   type SystemdDeps,
 } from "../src/daemon/systemd.ts";
+import { writeOwnedFixture } from "./helpers/owned-fixture.ts";
 
 /** HACK-2216: the reconcile decision and its `--json` contract, no I/O. */
 
@@ -2016,8 +2016,8 @@ test("an incompatible launchd daemon with a missing plist program is only replac
   try {
     const target = join(dir, "hack");
     const other = join(dir, "hack-other");
-    await writeFile(target, "#!/bin/sh\n");
-    await writeFile(other, "#!/bin/sh\n");
+    await writeOwnedFixture(target, "#!/bin/sh\n");
+    await writeOwnedFixture(other, "#!/bin/sh\n");
     const run = async (opts: {
       readonly executing: string | null;
       readonly unfit?: boolean;

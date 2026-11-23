@@ -104,7 +104,7 @@ export function nativePoolIdleCheck(opts: {
   readonly status: unknown;
   readonly runtime: { readonly binary: string; readonly home: string };
 }): {
-  readonly name: string;
+  readonly name: typeof NATIVE_POOL_IDLE_CHECK;
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly nativePool: NativePoolReport;

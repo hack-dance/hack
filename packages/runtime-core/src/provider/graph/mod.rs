@@ -23,6 +23,7 @@ mod admission;
 #[cfg(any(target_os = "macos", test))]
 mod boot_match;
 mod cache_provenance;
+mod cache_retention;
 mod dependency_hosts;
 #[cfg(target_os = "macos")]
 mod dependency_slots;
@@ -844,6 +845,7 @@ struct Session<'a, 's> {
     root: PathBuf,
     receipt: Receipt,
     configs: BTreeMap<String, Value>,
+    default_health_cadence: BTreeMap<String, config::DefaultHealthCadence>,
     expected_environment: BTreeMap<String, image_environment::Expected>,
     restarting: bool,
     fresh_cache_completion: bool,
@@ -998,6 +1000,7 @@ impl Session<'_, '_> {
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
         // Restore reattaches every settled volume. A volume still `reserved` never
         // received a create intent; it is created exclusively, never adopted.
+        let mut created_volumes = BTreeSet::new();
         let keys: Vec<_> = self
             .receipt
             .resources
@@ -1044,7 +1047,8 @@ impl Session<'_, '_> {
                 ));
             }
             if resource.cache.is_some() {
-                check_cache_capacity(&self.engine, &self.receipt.owner)?;
+                let run_dir = self.engine.guest().candidate().state_root.join("run");
+                check_cache_capacity(&self.engine, &self.receipt.owner, &run_dir)?;
             }
             self.check_cancelled()?;
             self.reserve(&key, "create-intent")?;
@@ -1084,10 +1088,39 @@ impl Session<'_, '_> {
             volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, true)?;
             self.capture_cache_provenance(&key, true)?;
             self.reserve(&key, "created")?;
+            if resource.kind == Kind::Volume {
+                created_volumes.insert(resource.name);
+            }
+        }
+        if !created_volumes.is_empty() {
+            for (service, cadence) in &self.default_health_cadence {
+                cadence.apply(
+                    self.configs.get_mut(service).expect("compiled service"),
+                    &created_volumes,
+                );
+            }
         }
         Ok(())
     }
 }
+
+fn restart_health_cadence(
+    context: &spec::Context<'_>,
+    config: &mut Value,
+    default_period: bool,
+    inspected: &Value,
+) -> Result<(), CandidateError> {
+    let mut authored = config.clone();
+    config::use_authored_health_cadence(&mut authored, default_period);
+    let authored_spec = spec::of(&authored, context)?;
+    // Only the exact create spec can select omitted timing fields; an
+    // inherited image value alone cannot distinguish a cold create.
+    if spec::verify_label(inspected, &authored_spec).is_ok() {
+        *config = authored;
+    }
+    Ok(())
+}
+
 impl Driver for Session<'_, '_> {
     fn service_failure(&self, name: &str, observation: Observation) -> CandidateError {
         probes::service_failure_finding(
@@ -1745,6 +1778,7 @@ fn run_inputs(
         &mut prepared.configs,
         &wrapped,
         &file_owners,
+        Some(&mut prepared.default_health_cadence),
     )?;
     validate_private_delivery(&prepared.configs, &environments)?;
     validate_dependency_processes(&prepared.configs, &dependency_processes)?;
@@ -1794,6 +1828,7 @@ fn run_inputs(
         root,
         receipt,
         configs: prepared.configs,
+        default_health_cadence: prepared.default_health_cadence,
         expected_environment,
         probe_findings: BTreeMap::new(),
         restarting: false,
@@ -2034,6 +2069,22 @@ fn observed_service_state(resource: &Resource, value: &Value) -> Result<Value, C
     }
 }
 
+/// Where inspection reads a run: its active directory, or, once a fresh start
+/// archived it as removed (HACK-2576), the archive. The project's CLI may still map
+/// such a run until it confirms the removal, so the archived receipt must stay
+/// readable there; the caller accepts it only in the `removed` phase.
+fn inspection_root(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
+    let active = directory(candidate, run)?;
+    if active.exists() || active.is_symlink() {
+        return Ok(active);
+    }
+    let archived = archive::path(candidate, run)?;
+    if archived.exists() || archived.is_symlink() {
+        return Ok(archived);
+    }
+    Ok(active)
+}
+
 /// A foreground start binds its publication before it creates the journal, so
 /// the journal is checked on both sides of the publication check.
 #[cfg(target_os = "macos")]
@@ -2172,7 +2223,15 @@ fn inspect_using(
     engine: &impl Inspection,
     run: &str,
 ) -> Result<Snapshot, CandidateError> {
-    let (receipt, root) = load_at(directory(candidate, run)?, run, engine.incarnation())?;
+    let (receipt, root) = load_at(inspection_root(candidate, run)?, run, engine.incarnation())?;
+    if root.starts_with(candidate.state_root.join("run/graph-archive"))
+        && receipt.phase != "removed"
+    {
+        return Err(error(
+            "graph_confirmation_location",
+            "An archived graph attempt is inspected only once it is removed.",
+        ));
+    }
     let mut observations = BTreeMap::new();
     let journal_incomplete = root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
@@ -2303,6 +2362,24 @@ pub fn cleanup(
 /// receipt resumes.
 pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
+    // HACK-2576: a fresh start may already have archived this removed run (see
+    // `archive::make_room`); removing its data again is then complete as it is.
+    let active = directory(candidate, run)?;
+    if !active.exists() && !active.is_symlink() {
+        let (receipt, root) = load_at(
+            archive::path(candidate, run)?,
+            run,
+            engine.guest().incarnation(),
+        )?;
+        if receipt.phase == "removed"
+            && !root.join("state.pending").exists()
+            && !root.join("state.pending").is_symlink()
+        {
+            archive::verify_removed(&engine, &receipt)?;
+            return Ok(receipt);
+        }
+        return Err(not_retained());
+    }
     let (receipt, root) = load(candidate, &engine, run)?;
     if receipt.relay_startup.is_some()
         || !["stopped-data-retained", "cleanup-intent", "removed"].contains(&receipt.phase.as_str())
@@ -2615,6 +2692,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         &mut prepared.configs,
         &BTreeSet::new(),
         &BTreeSet::new(),
+        Some(&mut prepared.default_health_cadence),
     )?;
     probes::unchanged(&prepared.configs, &prepared.probes, &receipt)?;
     for resource in receipt.resources.values() {
@@ -2627,6 +2705,30 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         cache_provenance::verify(&engine, &receipt, resource)?;
         if resource.kind == Kind::Container {
             admission::unchanged(&value, &prepared.configs[&resource.key])?;
+            if let Some(cadence) = prepared.default_health_cadence.get(&resource.key)
+                && !cadence.data_volumes.is_empty()
+            {
+                restart_health_cadence(
+                    &spec::Context {
+                        resources: &receipt.resources,
+                        probe: receipt.probes.get(&resource.key),
+                        managed: false,
+                        relay: receipt
+                            .relay_startup
+                            .as_ref()
+                            .and_then(|startup| startup.services.get(&resource.key))
+                            .map(|selected| selected.bindings.keys().cloned().collect())
+                            .unwrap_or_default(),
+                        amd64_emulation: resource.amd64_emulation,
+                    },
+                    prepared
+                        .configs
+                        .get_mut(&resource.key)
+                        .expect("compiled service"),
+                    cadence.period,
+                    &value,
+                )?;
+            }
         }
         if resource.kind == Kind::Container
             && (resource.phase != "started"
@@ -2656,6 +2758,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         root,
         receipt,
         configs: prepared.configs,
+        default_health_cadence: BTreeMap::new(),
         expected_environment,
         probe_findings: BTreeMap::new(),
         restarting: true,
@@ -2815,6 +2918,9 @@ pub(super) fn check_reservations(
     engine: &Engine<'_>,
     except: Option<&str>,
 ) -> Result<(), CandidateError> {
+    if except.is_none() {
+        archive::make_room(candidate, engine)?;
+    }
     let parent = candidate.state_root.join("run/graphs");
     if parent.exists() || parent.is_symlink() {
         state::check_private_directory(&parent)?;
@@ -2826,7 +2932,7 @@ pub(super) fn check_reservations(
         if entries.len() > 64 || (entries.len() == 64 && except.is_none()) {
             return Err(error(
                 "graph_retention_budget",
-                "Graph receipt retention exceeds 64 attempts; explicit archival is required.",
+                "64 graph attempts that keep data are retained, so no fresh run fits; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
             ));
         }
         for entry in entries {
@@ -2852,7 +2958,11 @@ pub(super) fn check_reservations(
     Ok(())
 }
 
-fn check_cache_capacity(engine: &Engine<'_>, owner: &str) -> Result<(), CandidateError> {
+fn check_cache_capacity(
+    engine: &Engine<'_>,
+    owner: &str,
+    run_dir: &std::path::Path,
+) -> Result<(), CandidateError> {
     let listing = engine.request(Method::GET, "/v1.53/volumes", None)?;
     let volumes = match listing.get("Volumes") {
         Some(Value::Array(volumes)) => volumes.as_slice(),
@@ -2864,18 +2974,36 @@ fn check_cache_capacity(engine: &Engine<'_>, owner: &str) -> Result<(), Candidat
             ));
         }
     };
-    if volumes
+    let mut count = volumes
         .iter()
         .filter(|v| {
             v["Labels"]["io.hack-local.owner"] == owner
                 && v["Labels"]["io.hack-local.kind"] == "dependency-cache"
         })
-        .count()
-        >= 64
-    {
+        .count();
+    if count < cache_retention::LIMIT {
+        return Ok(());
+    }
+    // HACK-2576: the oldest caches nothing refers to make room (see `cache_retention`).
+    let references = cache_retention::references(run_dir)?;
+    let (_, offered) = cache_retention::evictable(volumes, owner, &references);
+    for name in offered {
+        if count < cache_retention::LIMIT {
+            break;
+        }
+        // Without force: the engine refuses (keeps) a volume a container still uses.
+        // A volume already gone frees its place too; any other failure is reported.
+        match engine.request(Method::DELETE, &format!("/v1.53/volumes/{name}"), None) {
+            Ok(_) => count -= 1,
+            Err(error) if error.code == "engine_not_found" => count -= 1,
+            Err(error) if error.code == "engine_rejected" => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if count >= cache_retention::LIMIT {
         return Err(error(
             "graph_cache_capacity",
-            "Runtime cache limit of 64 volumes reached; explicit cache retention is required.",
+            "64 dependency cache volumes are kept and each is still referred to by a retained run or in use by a container; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
         ));
     }
     Ok(())
@@ -2990,6 +3118,7 @@ fn verify_images(
     configs: &mut BTreeMap<String, Value>,
     private_services: &BTreeSet<String>,
     file_owners: &BTreeSet<String>,
+    mut cadence: Option<&mut BTreeMap<String, config::DefaultHealthCadence>>,
 ) -> Result<BTreeMap<String, image_environment::Expected>, CandidateError> {
     let mut expected = BTreeMap::new();
     let mut refusals = process_refusals::Collector::default();
@@ -3026,6 +3155,16 @@ fn verify_images(
             &configs[&resource.key],
             resources,
         )?;
+        if let Some(cadence) = cadence
+            .as_deref_mut()
+            .and_then(|map| map.get_mut(&resource.key))
+        {
+            cadence.data_volumes = config::data_health_volumes(
+                &configs[&resource.key],
+                resources,
+                &image["Config"]["Volumes"],
+            );
+        }
         if private_services.contains(&resource.key) || file_owners.contains(&resource.key) {
             resolve_named_user(engine, &image, configs, &resource.key)?;
         }

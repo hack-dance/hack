@@ -57,6 +57,12 @@ flowchart LR
 Follow [Upgrade from v4](upgrade.md). It is a backup-first procedure, and it
 says how to go back.
 
+### Native build contexts
+
+Native builds exclude machine-local `.hack/` state, including generated Compose
+env overrides, and the checkout's `.hack.secret.key`. Changes to that state no
+longer trigger rebuilds.
+
 ## 2. What you will notice every day
 
 **`hack env list` hides every value.** It shows names, scopes and source files.

@@ -47,6 +47,7 @@ type Item = {
   readiness?: "started" | "healthy" | "completed";
 };
 type Options = {
+  readonly signal?: AbortSignal;
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly invoke?: typeof invokeNativeRuntime;
@@ -251,6 +252,7 @@ async function inspect(
           cwd: opts.scope.projectRoot,
           args: ["graph", "status", "--run-id", run.run, "--json"],
           timeoutMs: 30_000,
+          signal: opts.signal,
         })
       : await inspectNativeProjectGraph({
           runtime: opts.runtime,
@@ -390,6 +392,7 @@ export async function nativeProjectPs(
         cwd: opts.scope.projectRoot,
         args: ["graph", "owner-status", "--run-id", run.run, "--json"],
         timeoutMs: 15_000,
+        signal: opts.signal,
       });
       if (ownerJournalChanged(owner)) {
         return {

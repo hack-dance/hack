@@ -106,7 +106,7 @@ export function envOverrideCoverageCheck(opts: {
   /** True when the expected services are running containers, false the Compose file's. */
   readonly running: boolean;
 }): {
-  readonly name: string;
+  readonly name: typeof ENV_OVERRIDE_COVERAGE_CHECK;
   readonly status: "ok" | "warn";
   readonly message: string;
 } {

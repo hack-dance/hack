@@ -5,7 +5,12 @@ import { join } from "node:path";
 import {
   batchImageFailure,
   NativeImageBatchError,
+  NativeImageBlocker,
 } from "../../src/backends/native-image-policy.ts";
+import {
+  NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
+  preflightNativeProjectSource,
+} from "../../src/backends/native-project-source-preflight.ts";
 import {
   NativeRuntimeRequestError,
   retainNativeRuntimeFailure,
@@ -60,6 +65,49 @@ function publishFixtureBranchDropped(fixtureMode: string): void {
       count: 2,
     });
   }
+}
+
+/**
+ * HACK-2535: the detached owner runs the source preflight; restarting an idle pool
+ * for a new root reaches the launcher as one validated notice line.
+ */
+async function publishFixturePoolRestart(fixtureMode: string): Promise<void> {
+  if (fixtureMode !== "pool-restart-notice") {
+    return;
+  }
+  let shared = false;
+  await preflightNativeProjectSource({
+    runtime: { binary: "/fixture/hack-native", home: "/fixture/home" },
+    projectRoot: "/fixture/second-app",
+    invoke: (request) => {
+      if (request.args[1] === "check-project-share") {
+        if (!shared) {
+          return Promise.reject(
+            new NativeRuntimeRequestError({
+              message:
+                "Native runtime request failed (project_share_extension_required).",
+              nativeCode: NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
+            })
+          );
+        }
+        return Promise.resolve({
+          source_admitted: true,
+          pool_initialized: true,
+        });
+      }
+      if (request.args[1] === "status") {
+        return Promise.resolve({ phase: "running", process_alive: true });
+      }
+      shared = true;
+      return Promise.resolve({
+        kind: "project_share_added",
+        project: "/fixture/second-app",
+        restarted: false,
+        disks_preserved: true,
+        stopped_idle_pool: true,
+      });
+    },
+  });
 }
 
 /** HACK-2409: a detached owner hands the pool's hot-reload notice to the launcher. */
@@ -414,6 +462,7 @@ if (role === "channel-holder") {
       "wrapped-failure",
       "wrapped-static-failure",
       "builder-missing",
+      "build-registry-limit",
       "provider-pin",
       "wrapped-provider-pin",
       "immediate-failure",
@@ -485,6 +534,16 @@ if (role === "channel-holder") {
         nativeDetachedUpShellVariables([], true);
         nativeDetachedUpShellVariables([], true);
       }
+      if (mode === "build-registry-limit") {
+        await nativeDetachedUpFailure(
+          new NativeImageBlocker({
+            missing: "docker.io/library/python:3.12-alpine",
+            buildBase: true,
+            reason: "registry_http_429",
+            present: ["docker.io/library/alpine:3.22"],
+          })
+        );
+      }
       if (mode === "builder-missing") {
         await nativeDetachedUpFailure(
           new NativeRuntimeRequestError({
@@ -514,6 +573,7 @@ if (role === "channel-holder") {
           ...PRESTART_MODES,
           "fail",
           "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -654,11 +714,13 @@ if (role === "channel-holder") {
       publishFixtureProfileNotice(mode);
       publishFixtureBranchDropped(mode);
       publishFixtureHotReload(mode);
+      await publishFixturePoolRestart(mode);
       sendUnsafePrestartRefusals(mode);
       if (
         [
           "ready",
           "profile-notice",
+          "pool-restart-notice",
           "branch-dropped",
           "hot-reload-off",
           "hot-reload-unsafe",

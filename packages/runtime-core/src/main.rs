@@ -715,6 +715,23 @@ fn run() -> Result<(), CandidateError> {
         [
             "runtime",
             "project-share",
+            "add",
+            "--project-share",
+            project,
+            "--unfiltered-source",
+            "--stop-idle-pool",
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::add_project_share_stopping_idle_pool(
+                    &discover_candidate(&requested)?,
+                    Path::new(project),
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "project-share",
             "remove",
             "--project-share",
             project,

@@ -1103,6 +1103,7 @@ pub(super) fn run_guarded(
             &mut config.configs,
             &private,
             &BTreeSet::new(),
+            None,
         )?
     } else {
         for service in config.data_mounts.keys() {

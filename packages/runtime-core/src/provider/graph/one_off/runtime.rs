@@ -62,6 +62,7 @@ pub fn begin(
         &mut configs,
         &private,
         &BTreeSet::new(),
+        None,
     )?;
     let mut environments = BTreeMap::new();
     if let Some(values) = values.filter(|v| !v.is_empty()) {
@@ -99,6 +100,7 @@ pub fn begin(
         root: root.clone(),
         receipt,
         configs,
+        default_health_cadence: BTreeMap::new(),
         expected_environment,
         restarting: false,
         fresh_cache_completion: false,

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
+import { NATIVE_IDLE_POOL_RESTART_NOTICE } from "../src/backends/native-project-source-preflight.ts";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
 import {
   NATIVE_HOOK_OUTPUT_TERMINAL_ONLY,
@@ -101,6 +102,7 @@ async function stop(root: string): Promise<void> {
 for (const mode of [
   "ready",
   "profile-notice",
+  "pool-restart-notice",
   "branch-dropped",
   "hot-reload-off",
   "hot-reload-unsafe",
@@ -112,6 +114,7 @@ for (const mode of [
   "unsafe-prestart-refusal",
   "fail",
   "builder-missing",
+  "build-registry-limit",
   "provider-pin",
   "wrapped-provider-pin",
   "timeout",
@@ -151,22 +154,25 @@ for (const mode of [
       expect(stderr).toBe(
         mode === "profile-notice"
           ? "Not starting 1 service whose Compose profiles are not selected: jobs. Selected profiles: none (from no --profile or COMPOSE_PROFILES). Select others with --profile or COMPOSE_PROFILES.\n"
-          : mode === "branch-dropped"
-            ? "Branch feature-a: service web label caddy drops 2 sites outside this project's route namespaces; they stay with the base instance.\n"
-            : mode === "hot-reload-off"
-              ? `${renderNativeHotReloadNotice({ state: "off", reason: "large_share", limit: 100_000 })}\n`
-              : mode === "shell-names"
-                ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
-                : mode === "shell-names-empty"
-                  ? "Forwarding shell variables: (none).\n"
-                  : mode === "shell-names-root-dotenv"
-                    ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
-                    : ""
+          : mode === "pool-restart-notice"
+            ? `${NATIVE_IDLE_POOL_RESTART_NOTICE}\n`
+            : mode === "branch-dropped"
+              ? "Branch feature-a: service web label caddy drops 2 sites outside this project's route namespaces; they stay with the base instance.\n"
+              : mode === "hot-reload-off"
+                ? `${renderNativeHotReloadNotice({ state: "off", reason: "large_share", limit: 100_000 })}\n`
+                : mode === "shell-names"
+                  ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
+                  : mode === "shell-names-empty"
+                    ? "Forwarding shell variables: (none).\n"
+                    : mode === "shell-names-root-dotenv"
+                      ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
+                      : ""
       );
       if (
         [
           "ready",
           "profile-notice",
+          "pool-restart-notice",
           "branch-dropped",
           "hot-reload-off",
           "hot-reload-unsafe",
@@ -213,6 +219,11 @@ for (const mode of [
           ok: false,
           error: { code: "E_CANCELLED" },
         });
+      } else if (mode === "build-registry-limit") {
+        expect(code).toBe(1);
+        expect(JSON.parse(stdout).error.message).toBe(
+          "Image unavailable: could not resolve build base docker.io/library/python:3.12-alpine (registry rate limit reached).\nAlready present: docker.io/library/alpine:3.22.\nRetry hack up when the registry is reachable."
+        );
       } else if (mode === "builder-missing") {
         // A detached owner reports the code only; the launcher must still tell the
         // user what is wrong and the one command that fixes it.
@@ -250,6 +261,7 @@ for (const mode of [
         ![
           "fail",
           "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -261,6 +273,7 @@ for (const mode of [
           [
             "ready",
             "profile-notice",
+            "pool-restart-notice",
             "branch-dropped",
             "hot-reload-off",
             "hot-reload-unsafe",

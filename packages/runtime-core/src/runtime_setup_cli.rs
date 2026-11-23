@@ -51,6 +51,7 @@ fn execute(
     reuse: impl FnOnce(
         &Candidate,
         setup::BuilderSource<'_>,
+        bool,
     ) -> Result<Option<serde_json::Value>, CandidateError>,
     install: impl FnOnce(
         &Candidate,
@@ -66,6 +67,7 @@ fn execute(
     if let Some(result) = reuse(
         candidate,
         setup::BuilderSource::select(offline, options.accept),
+        offline.is_some(),
     )? {
         writeln!(
             output,
@@ -257,7 +259,7 @@ mod tests {
         execute(
             &candidate,
             &["--no-interactive"],
-            |_, builder| {
+            |_, builder, _| {
                 // No consent and no offline file: the builder is only observed.
                 assert!(matches!(builder, setup::BuilderSource::Absent));
                 verified = true;
@@ -388,7 +390,7 @@ mod tests {
         execute(
             &candidate,
             &["--no-interactive", "--accept-downloads", "--json"],
-            |_, builder| {
+            |_, builder, _| {
                 assert!(matches!(builder, setup::BuilderSource::Download));
                 Ok(Some(reused.clone()))
             },
@@ -404,7 +406,7 @@ mod tests {
         execute(
             &candidate,
             &with_builder,
-            |_, builder| {
+            |_, builder, _| {
                 assert!(matches!(
                     builder,
                     setup::BuilderSource::File(file) if file == Path::new("/input/builder")
@@ -444,7 +446,7 @@ mod output_tests {
                 "--network-tools-directory",
                 "/input/packages",
             ],
-            |_, _| Ok(None),
+            |_, _, _| Ok(None),
             |_, inputs, accepted| {
                 assert!(!accepted);
                 let inputs = inputs.unwrap();
@@ -466,7 +468,7 @@ mod output_tests {
         execute(
             &candidate,
             &["--json", "--no-interactive"],
-            |_, _| Ok(Some(reused.clone())),
+            |_, _, _| Ok(Some(reused.clone())),
             |_, _, _| panic!("reuse prepared"),
             &mut output,
         )

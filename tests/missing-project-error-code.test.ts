@@ -233,6 +233,10 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
   init: { kind: "not-a-project-command", reason: NOT_REQUIRED },
   doctor: { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "crash-capture": { kind: "not-a-project-command", reason: NOT_REQUIRED },
+  "data export": {
+    kind: "envelope",
+    argv: ["data", "export", "-p", "DIR", "--json"],
+  },
   "mcp install": { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "mcp print": { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "setup cursor": { kind: "not-a-project-command", reason: NOT_REQUIRED },

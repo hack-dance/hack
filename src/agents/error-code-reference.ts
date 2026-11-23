@@ -160,6 +160,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "After start or restart, a service is neither running nor a successful one-shot.",
     readFirst: "`hack ps --json`",
   },
+  E_PROJECT_RUNNING: {
+    meaning:
+      "The command needs the project stopped, and some of its containers (or containers using its volumes) are running; nothing was changed. `error.detail.running` names them. Hack never stops them for you.",
+    readFirst: "`hack ps --json`",
+  },
   E_RECOVERY_REQUIRED: {
     meaning:
       "The last native run of this instance has no confirmed shutdown (its owner exited before finishing it, or another start replaced it), so `up` started nothing. `hack down --recover` finishes that cleanup with data kept, starting the native runtime if it needs to.",

@@ -75,6 +75,7 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "mcp-logs-compose": 24,
   "lifecycle-session-recovery": 21,
   "cache-prune": 18,
+  "data-export": 4,
   "up-down": 16,
   "down-profiles": 40,
   "dependency-cache-protocol": 14,

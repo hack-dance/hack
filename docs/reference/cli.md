@@ -1112,6 +1112,56 @@ Qualifies a strict static legacy subset with exact existing data volumes. --dry-
 | `--version, -v` | Show version |
 
 
+## `hack data`
+
+Back up project volume data
+
+### Usage
+
+```bash
+hack data <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack data export` | Back up the project's Compose named volumes to verified tar files |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack data export`
+
+Back up the project's Compose named volumes to verified tar files
+
+### Usage
+
+```bash
+hack data export [options]
+```
+
+Copies each declared, non-external named volume that Docker labels as this project's into <backup>/<key>.tar, with a manifest of sizes and digests. The project must be stopped; Hack never stops it for you. External and foreign volumes are skipped and reported. Compose backend only. Restore is not available yet.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--out <dir>` | Parent directory for the backup (default: $HACK_HOME/data-backups/<compose project>) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack session`
 
 Manage persistent project workspaces with tmux-first onboarding

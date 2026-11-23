@@ -30,6 +30,7 @@ import { composeConfigHashDriftScenario } from "./scenarios/compose-config-hash-
 import { composeForegroundSignalScenario } from "./scenarios/compose-foreground-signal.ts";
 import { composeLongOneshotScenario } from "./scenarios/compose-long-oneshot.ts";
 import { composeShortOneshotScenario } from "./scenarios/compose-short-oneshot.ts";
+import { dataExportScenario } from "./scenarios/data-export.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
 import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
 import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
@@ -120,6 +121,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   lifecycleSessionRecoveryScenario,
   sharedHostHelpersScenario,
   cachePruneScenario,
+  dataExportScenario,
   dependencyCacheScenario,
   dependencyCacheBootstrapScenario,
   dependencyCacheProtocolScenario,

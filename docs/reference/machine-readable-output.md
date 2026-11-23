@@ -82,7 +82,7 @@ success behavior stays covered by command-specific suites.
 | `hack config import --json` | Legacy bare object (no `data` envelope) |
 | `hack config plan --json` | Native compiler protocol object (`transport_version`, `ok`, result / diagnostics) |
 | `hack config show --json` | Envelope; versioned `data.schema`: `hack.config.v1` |
-| `hack config validate --json` | Envelope with `data.schema: hack.config.v1` for a Compose patch on stdin. Native compiler protocol object without a patch |
+| `hack config validate --json` | Envelope with `data.schema: hack.config.v1` for a Compose patch on stdin when `--file`, `--profile` and `--domain` are omitted. Otherwise a file validation object with `transport_version` |
 | `hack daemon install --json` | Envelope; versioned `data.schema`: `hack.daemon-install.v1` |
 | `hack daemon restart --json` | Envelope; versioned `data.schema`: `hack.daemon-restart.v1` |
 | `hack daemon start --json` | Envelope; versioned `data.schema`: `hack.daemon-start.v1` |
@@ -206,9 +206,10 @@ checks the complete migration and records the patch's file revisions in the
 migration journal so rollback can restore the original files and remove newly
 created layers.
 
-Pass the same checkout and overlay flags to `config validate` and
-`config apply`. Read revisions from a fresh `show` and send the patch on
-stdin. Each revision identifies the resolved checkout, layer file and its
+Pass the same checkout and overlay flags to `config validate --json` and
+`config apply --json`. Omit `--file`, `--profile` and `--domain` when validating
+a patch. Read revisions from a fresh `show` and send the patch on stdin.
+Each revision identifies the resolved checkout, layer file and its
 contents or absence. The minimum base includes every edited layer. Additional
 revisions can protect inputs the client used to prepare the patch.
 

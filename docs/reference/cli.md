@@ -1128,7 +1128,7 @@ Validate project configuration without starting workloads
 hack config validate [options]
 ```
 
-Reads a Compose config patch when --json receives a patch on stdin. Otherwise uses the matching bundled Rust compiler. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode decrypts env secrets, writes state, or starts workloads.
+Reads a Compose config patch on stdin with --json when --file, --profile and --domain are omitted. Otherwise checks the on-disk configuration, using the matching bundled Rust compiler for native projects. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode decrypts env secrets, writes state, or starts workloads.
 
 ### Options
 

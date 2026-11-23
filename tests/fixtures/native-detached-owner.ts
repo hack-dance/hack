@@ -3,6 +3,10 @@ import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  batchImageFailure,
+  NativeImageBatchError,
+} from "../../src/backends/native-image-policy.ts";
+import {
   NativeRuntimeRequestError,
   retainNativeRuntimeFailure,
 } from "../../src/backends/native-runtime-client.ts";
@@ -415,6 +419,7 @@ if (role === "channel-holder") {
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
+      "image-batch-errors",
       "prestart-refusal",
       "prestart-after-runtime",
       "prestart-plain-error",
@@ -546,6 +551,19 @@ if (role === "channel-holder") {
         if (["immediate-failure", "exit-first-failure"].includes(mode)) {
           process.exit(1);
         }
+        return 1;
+      }
+      if (mode === "image-batch-errors") {
+        await nativeDetachedUpFailure(
+          new NativeImageBatchError([
+            batchImageFailure("fixture/image:a", { code: "provider_busy" }, [
+              "web",
+            ]),
+            batchImageFailure("fixture/image:b", { code: "image_disk_space" }, [
+              "db",
+            ]),
+          ])
+        );
         return 1;
       }
       if (mode === "failed-services") {

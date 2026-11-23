@@ -2676,6 +2676,9 @@ pub(super) fn check_reservations(
     engine: &Engine<'_>,
     except: Option<&str>,
 ) -> Result<(), CandidateError> {
+    if except.is_none() {
+        archive::make_room(candidate, engine)?;
+    }
     let parent = candidate.state_root.join("run/graphs");
     if parent.exists() || parent.is_symlink() {
         state::check_private_directory(&parent)?;
@@ -2687,7 +2690,7 @@ pub(super) fn check_reservations(
         if entries.len() > 64 || (entries.len() == 64 && except.is_none()) {
             return Err(error(
                 "graph_retention_budget",
-                "Graph receipt retention exceeds 64 attempts; explicit archival is required.",
+                "64 graph attempts that keep data are retained, so no fresh run fits; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
             ));
         }
         for entry in entries {

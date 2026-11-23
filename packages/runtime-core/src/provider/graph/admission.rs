@@ -72,11 +72,14 @@ fn check_using(
     for config in requested.values() {
         budget.add(config)?;
     }
+    if except.is_none() {
+        super::archive::make_room(candidate, engine)?;
+    }
     let runs = storage_inventory::runs(&candidate.state_root.join("run/graphs"))?;
     if runs.len() == 64 && except.is_none() {
         return Err(error(
             "graph_retention_budget",
-            "64 graph attempts are retained; explicit archival is required.",
+            "64 graph attempts that keep data are retained, so no fresh run fits; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
         ));
     }
     for run in runs {

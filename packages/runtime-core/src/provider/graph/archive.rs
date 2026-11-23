@@ -111,7 +111,16 @@ fn read_confirmation(
 /// reserved permanently; this operation neither deletes evidence nor permits execution replay.
 pub fn archive(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
-    let (receipt, root) = load(candidate, &engine, run)?;
+    archive_with(candidate, &engine, run)
+}
+
+/// [`archive`] under a provider lease the caller already holds.
+fn archive_with(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    run: &str,
+) -> Result<Receipt, CandidateError> {
+    let (receipt, root) = load(candidate, engine, run)?;
     initializer_cache::require_resolved(&receipt)?;
     if receipt.phase != "removed"
         || root.join("state.pending").exists()
@@ -122,8 +131,8 @@ pub fn archive(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateErr
             "Archive requires completed explicit data removal and no pending journal.",
         ));
     }
-    verify_removed(&engine, &receipt)?;
-    environment::archive_slots(candidate, &engine, &receipt, &root)?;
+    verify_removed(engine, &receipt)?;
+    environment::archive_slots(candidate, engine, &receipt, &root)?;
     let target = path(candidate, run)?;
     let parent = target.parent().expect("archive parent");
     state::private_directory(parent)?;
@@ -147,6 +156,74 @@ pub fn archive(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateErr
             .map_err(state::io)?;
     }
     Ok(receipt)
+}
+
+/// Graph attempts the active inventory holds (`run/graphs`); a fresh run needs fewer.
+const ACTIVE_LIMIT: usize = 64;
+
+/// Room for a fresh run (HACK-2576). Every fully removed attempt stays in the active
+/// inventory until something archives it, and nothing in the CLI did, so 64 of them
+/// (each `down --remove-data` followed by `up`, each failed fresh start) refused
+/// every later start for ever. At the bound, removed attempts are archived oldest
+/// first, each proven removed exactly as `graph archive` proves it, until there is
+/// room. An attempt that keeps data, has a pending journal or fails that proof is
+/// never touched. The caller holds the provider lease.
+pub(super) fn make_room(candidate: &Candidate, engine: &Engine<'_>) -> Result<(), CandidateError> {
+    let (mut count, removed) = archivable(&candidate.state_root.join("run/graphs"))?;
+    for run in removed {
+        if count < ACTIVE_LIMIT {
+            break;
+        }
+        match archive_with(candidate, engine, &run) {
+            Ok(_) => count -= 1,
+            // The archive's own bound is reported as it is; a run that fails the
+            // removal proof is left where it is.
+            Err(error) if error.code == "graph_archive_budget" => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// The active inventory's size and, when it is at the bound, its removed attempts,
+/// oldest receipt first. A run with a pending journal, an unreadable or foreign
+/// receipt, or any phase but `removed` is never selected.
+fn archivable(parent: &std::path::Path) -> Result<(usize, Vec<String>), CandidateError> {
+    if !parent.exists() && !parent.is_symlink() {
+        return Ok((0, Vec::new()));
+    }
+    state::check_private_directory(parent)?;
+    let mut count = 0;
+    let mut removed = Vec::new();
+    for entry in fs::read_dir(parent)
+        .map_err(state::io)?
+        .take(ACTIVE_LIMIT + 1)
+    {
+        let entry = entry.map_err(state::io)?;
+        count += 1;
+        let Some(run) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let state = entry.path().join("state.json");
+        let pending = entry.path().join("state.pending");
+        if !hex(&run, 32) || pending.exists() || pending.is_symlink() {
+            continue;
+        }
+        let Ok(receipt) = state::read::<Receipt>(&state) else {
+            continue;
+        };
+        if receipt.phase == "removed" && receipt.run == run {
+            let modified = fs::symlink_metadata(&state)
+                .and_then(|metadata| metadata.modified())
+                .map_err(state::io)?;
+            removed.push((modified, run));
+        }
+    }
+    if count < ACTIVE_LIMIT {
+        return Ok((count, Vec::new()));
+    }
+    removed.sort();
+    Ok((count, removed.into_iter().map(|(_, run)| run).collect()))
 }
 
 pub(super) fn verify_removed(engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {

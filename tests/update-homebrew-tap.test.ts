@@ -141,7 +141,8 @@ test("renders a temporary formula from local archives and fails on a missing arc
       await Bun.write(join(directory, `hack-5.0.0-${target}.tar.gz`), target);
     }
 
-    const run = () => Bun.spawnSync(args, { env: { PATH: "" } });
+    const run = () =>
+      Bun.spawnSync(args, { env: { PATH: "" }, timeout: 10_000 });
     const missing = run();
     expect(missing.exitCode).toBe(1);
     expect(missing.stderr.toString()).toContain(

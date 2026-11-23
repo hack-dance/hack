@@ -102,6 +102,8 @@ type Journal = {
     | "rolled_back"
     | "rolling_back";
   readonly sources: readonly EnvMigrationFileState[];
+  /** Authored files committed by the same save after migration. */
+  readonly configEdits?: readonly EnvMigrationFileState[];
   readonly writes: readonly Publication[];
   readonly removable: readonly string[];
   readonly overlayNames: readonly string[];
@@ -224,6 +226,16 @@ function validState(
   );
 }
 
+function isAuthoredMigrationConfigPath(
+  project: EnvMigrationProject,
+  path: string
+): boolean {
+  return (
+    path === join(project.projectDir, "hack.config.json") ||
+    path === join(project.projectDir, "docker-compose.yml")
+  );
+}
+
 function validPublication(entry: unknown, path: string): entry is Publication {
   return (
     validState(entry) &&
@@ -282,6 +294,7 @@ async function readJournal(
       isRecord(raw.project) &&
       raw.project.projectRoot === project.projectRoot &&
       raw.project.projectDir === project.projectDir &&
+      typeof raw.project.projectName === "string" &&
       typeof raw.manifestPath === "string" &&
       isAbsolute(raw.manifestPath) &&
       [
@@ -294,6 +307,14 @@ async function readJournal(
       ].includes(String(raw.state)) &&
       Array.isArray(raw.sources) &&
       raw.sources.every(validState) &&
+      (raw.configEdits === undefined ||
+        (Array.isArray(raw.configEdits) &&
+          raw.configEdits.length <= 2 &&
+          raw.configEdits.every(
+            (file) =>
+              validState(file) &&
+              isAuthoredMigrationConfigPath(project, file.path)
+          ))) &&
       (raw.composeRepair === undefined ||
         ["deferred", "applying", "complete"].includes(
           String(raw.composeRepair)
@@ -593,8 +614,13 @@ async function assertSources(
     const publication = journal.writes.find(
       (entry) => entry.path === source.path
     );
+    const edited = revised
+      ? undefined
+      : journal.configEdits?.find((entry) => entry.path === source.path);
     const write =
-      revised && publication?.kind !== "compose" ? undefined : publication;
+      edited || (revised && publication?.kind !== "compose")
+        ? undefined
+        : publication;
     if (
       allowLayerChanges &&
       (publication?.kind === "layer" || publication?.kind === "local_layer")
@@ -602,7 +628,12 @@ async function assertSources(
       continue;
     }
     if (
-      !matchesMigrationSource({ current, source, write, allowTighterModes })
+      !matchesMigrationSource({
+        current,
+        source: edited ?? source,
+        write,
+        allowTighterModes,
+      })
     ) {
       throw new ClosedCliError(
         `Env migration input changed: ${JSON.stringify(source.path)}. Keep the legacy files and snapshot. To restore originals while retaining later edits privately, use hack env migrate --rollback-manifest ${JSON.stringify(journal.manifestPath)} --preserve-changes (values omitted).`
@@ -723,6 +754,7 @@ async function prepareDeferredComposeRepair(
   project: EnvMigrationProject,
   journal: Journal
 ): Promise<Preparation | null> {
+  const legacy = { ...project, projectName: journal.project.projectName };
   const composeFile = join(project.projectDir, "docker-compose.yml");
   const before = (await readState(composeFile)).state;
   const references = await inspectLegacyComposeEnvFileReferences({
@@ -740,7 +772,7 @@ async function prepareDeferredComposeRepair(
     allowLayerChanges: true,
     allowTighterModes: true,
   });
-  const preparation = await prepareConsistent(project);
+  const preparation = await prepareConsistent(legacy);
   if (
     preparation.prepared.files.some(
       (file) =>
@@ -755,7 +787,7 @@ async function prepareDeferredComposeRepair(
     throw refuse();
   }
   await assertLegacyEnvMigrationDelivery({
-    ...project,
+    ...legacy,
     overlayNames: preparation.prepared.overlayNames,
   });
   return preparation;
@@ -1093,6 +1125,7 @@ export async function applyEnvMigration(input: {
           run: () =>
             assertLegacyEnvMigrationDelivery({
               ...project,
+              projectName: journal.project.projectName,
               overlayNames: journal.overlayNames,
             }),
         });
@@ -1375,6 +1408,7 @@ async function cleanupLocked(
   });
   const context = await acquireLegacyEnvCleanupContext({
     ...project,
+    projectName: journal.project.projectName,
     overlayNames: journal.overlayNames,
     paths: journal.sources
       .filter(
@@ -1484,6 +1518,68 @@ async function cleanupLocked(
   };
 }
 
+/** Record only the exact authored revision committed by the save that ran this migration. */
+export async function recordEnvMigrationConfigEdit(input: {
+  readonly project: EnvMigrationProject;
+  readonly manifestPath: string;
+  readonly path: string;
+  readonly before: string | null;
+  readonly after: string;
+}): Promise<void> {
+  const { project } = input;
+  const path = envMigrationJournalPath(project.projectRoot);
+  if (!isAuthoredMigrationConfigPath(project, input.path)) {
+    throw new AtomicWriteConflictError();
+  }
+  await withProjectsRegistryLock({
+    lockPath: `${path}.lock`,
+    label: "env migration",
+    run: async () => {
+      const journal = await readJournal(path, project);
+      if (
+        !journal ||
+        journal.state !== "complete" ||
+        journal.manifestPath !== input.manifestPath ||
+        journal.composeRepairSources !== undefined
+      ) {
+        throw new AtomicWriteConflictError();
+      }
+      const original = journal.sources.find(
+        (entry) => entry.path === input.path
+      );
+      if (!original) {
+        throw new AtomicWriteConflictError();
+      }
+      const expected =
+        journal.writes.find((entry) => entry.path === input.path) ?? original;
+      const before =
+        input.before === null ? null : digest(Buffer.from(input.before));
+      const current = (await readState(input.path)).state;
+      if (
+        expected.sha256 !== before ||
+        current.sha256 !== digest(Buffer.from(input.after)) ||
+        (expected.mode !== null && current.mode !== expected.mode)
+      ) {
+        throw new AtomicWriteConflictError();
+      }
+      await envMigrationSnapshots().recordAfter({
+        manifestPath: journal.manifestPath,
+        files: [current],
+      });
+      await writeMetadata(path, {
+        ...journal,
+        validated: undefined,
+        configEdits: [
+          ...(journal.configEdits ?? []).filter(
+            (entry) => entry.path !== current.path
+          ),
+          current,
+        ],
+      });
+    },
+  });
+}
+
 /** Called only by successful full-project startup paths, never by preview or env resolution. */
 export async function recordEnvMigrationProjectRun(
   input: EnvMigrationProject
@@ -1578,8 +1674,16 @@ async function rollbackLocked(
       (journal.state === "cleaning" &&
         journal.removable.includes(source.path) &&
         current.sha256 === null);
+    const publication = journal.writes.find(
+      (write) => write.path === source.path
+    );
+    const edited = journal.configEdits?.find(
+      (entry) => entry.path === source.path
+    );
     let expected =
-      journal.writes.find((write) => write.path === source.path) ??
+      (publication?.kind === "compose"
+        ? publication
+        : (edited ?? publication)) ??
       journal.composeRepairSources?.find(
         (entry) => entry.path === source.path
       ) ??

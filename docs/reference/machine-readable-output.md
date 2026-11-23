@@ -197,7 +197,9 @@ The default overlay uses the same names as `--env`. Use `default` to select
 base layers. Config honors the env migration journal for the selected
 checkout and any inherited layers. On the first env write to a project
 with a legacy contract, apply migrates that contract through the same
-path as `hack env add`.
+path as `hack env add`. Validation checks the legacy contract and declared
+dotenv inputs without decrypting the legacy store. Apply prepares and checks
+the complete migration before publishing the patch.
 
 Pass the same checkout and overlay flags to `config validate` and
 `config apply`. Read revisions from a fresh `show` and send the patch on

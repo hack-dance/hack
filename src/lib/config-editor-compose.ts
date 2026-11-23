@@ -22,11 +22,17 @@ const UPSTREAM = /^\{\{upstreams ([0-9]+)\}\}$/;
 const HOST_LABEL = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i;
 const SERVICE_NAME = /^[\w.-]+$/;
 const ROUTE_LABEL = /^caddy(?:[._]|$)/;
-const SHORT_PORT =
-  /^(?:(\[[^\]]+\]|[^:]+):(?=[^:]*:))?(?:([^:]*):)?(\d+(?:-\d+)?)(?:\/(?:tcp|udp|sctp))?$/iu;
-const PORT_RANGE = /^(\d+)(?:-(\d+))?$/;
-const PORT_NUMBER = /^\d+$/;
-const VARIABLE_REFERENCE = /\$\{?[A-Za-z_]/;
+const PORT_RANGE = /^([\d*]+)(?:-([\d*]+))?$/;
+const PORT_NUMBER = /^[\d*]+$/;
+const VARIABLE_REFERENCE =
+  /\$(?:\$|\{[A-Za-z_]\w*(?:\}|(:?[-+?]))|[A-Za-z_]\w*)/y;
+const PORT_PROTOCOLS = new Set(["tcp", "udp", "sctp", "*"]);
+const DEPENDENCY_CONDITIONS = new Set([
+  "service_started",
+  "service_healthy",
+  "service_completed_successfully",
+  "*",
+]);
 
 export const validHost = (host: string): boolean =>
   host.length <= 253 && host.split(".").every((part) => HOST_LABEL.test(part));
@@ -41,23 +47,38 @@ export function validComposePort(value: unknown): boolean {
   if (typeof value !== "string") {
     return validPort(value);
   }
-  if (hasInterpolation(value)) {
-    return true;
-  }
-  const match = SHORT_PORT.exec(value);
-  if (!match) {
+  const template = portTemplate(value);
+  if (template === null) {
     return false;
   }
-  const [, host, published, target] = match;
+  const [mapping, protocol, extra] = template.split("/");
+  if (
+    mapping === undefined ||
+    extra !== undefined ||
+    (protocol !== undefined && !PORT_PROTOCOLS.has(protocol))
+  ) {
+    return false;
+  }
+  // Split from the target end because a host can be an unbracketed IPv6 address.
+  const [target, published, ...address] = mapping.split(":").toReversed();
+  const host = address.toReversed().join(":");
   return (
-    (host === undefined || isIP(host.replace(/^\[|\]$/g, "")) !== 0) &&
+    (address.length === 0 || validPortHost(host)) &&
     (!published || validPortRange(published, true)) &&
     target !== undefined &&
     validPortRange(target) &&
     (!published ||
+      published.includes("*") ||
+      target.includes("*") ||
       portRangeSpan(target) === 0 ||
       portRangeSpan(target) === portRangeSpan(published))
   );
+}
+
+function validPortHost(value: string): boolean {
+  const host =
+    value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+  return host === "*" || isIP(host) !== 0;
 }
 
 function portRangeSpan(value: string): number {
@@ -65,21 +86,62 @@ function portRangeSpan(value: string): number {
   return Number(last) - Number(first);
 }
 
-function validPortRange(value: string, dynamic = false): boolean {
+function validPortRange(value: string, allowZero = false): boolean {
   const match = PORT_RANGE.exec(value);
-  if (dynamic && value === "0") {
-    return true;
+  const first = match?.[1];
+  const last = match?.[2];
+  if (!first) {
+    return false;
   }
   return (
-    match !== null &&
-    validPort(Number(match[1])) &&
-    (match[2] === undefined ||
-      (validPort(Number(match[2])) && Number(match[1]) <= Number(match[2])))
+    validPortNumber(first, allowZero && last === undefined) &&
+    (last === undefined ||
+      (validPortNumber(last) &&
+        (first.includes("*") ||
+          last.includes("*") ||
+          Number(first) <= Number(last))))
   );
 }
 
-function hasInterpolation(value: unknown): boolean {
-  return typeof value === "string" && VARIABLE_REFERENCE.test(value);
+function validPortNumber(value: string, allowZero = false): boolean {
+  return (
+    PORT_NUMBER.test(value) &&
+    (value.includes("*") ||
+      (allowZero && value === "0") ||
+      validPort(Number(value)))
+  );
+}
+
+/** Replace well-formed references with an unknown component without reading any env. */
+function portTemplate(value: unknown): string | null {
+  if (typeof value !== "string" || value.includes("*")) {
+    return null;
+  }
+  let template = "";
+  let depth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== "$") {
+      if (depth === 0) {
+        template += character;
+      } else if (character === "}") {
+        depth -= 1;
+      }
+      continue;
+    }
+    VARIABLE_REFERENCE.lastIndex = index;
+    const match = VARIABLE_REFERENCE.exec(value);
+    if (!match) {
+      return null;
+    }
+    const [reference, operator] = match;
+    if (depth === 0) {
+      template += reference === "$$" ? "$" : "*";
+    }
+    depth += operator === undefined ? 0 : 1;
+    index += reference.length - 1;
+  }
+  return depth === 0 ? template : null;
 }
 
 function validSourcePort(port: unknown): boolean {
@@ -87,18 +149,19 @@ function validSourcePort(port: unknown): boolean {
     return validComposePort(port);
   }
   const { target, published, host_ip } = port;
+  const targetTemplate = portTemplate(target);
+  const publishedTemplate = portTemplate(
+    typeof published === "number" ? String(published) : published
+  );
+  const hostTemplate = portTemplate(host_ip);
   return (
     (validPort(target) ||
-      (typeof target === "string" &&
-        (hasInterpolation(target) ||
-          (PORT_NUMBER.test(target) && validPort(Number(target)))))) &&
+      (targetTemplate !== null && validPortNumber(targetTemplate))) &&
     (published === undefined ||
-      hasInterpolation(published) ||
-      ((typeof published === "string" || typeof published === "number") &&
-        validPortRange(String(published), true))) &&
+      (publishedTemplate !== null &&
+        validPortRange(publishedTemplate, true))) &&
     (host_ip === undefined ||
-      hasInterpolation(host_ip) ||
-      (typeof host_ip === "string" && isIP(host_ip) !== 0))
+      (hostTemplate !== null && validPortHost(hostTemplate)))
   );
 }
 
@@ -329,7 +392,7 @@ function serviceNames(value: unknown): string[] {
   return isRecord(value) ? Object.keys(value) : [];
 }
 
-function validDependencies(value: unknown): boolean {
+function validDependencies(value: unknown, complete: boolean): boolean {
   return (
     value === undefined ||
     (Array.isArray(value) &&
@@ -338,8 +401,19 @@ function validDependencies(value: unknown): boolean {
       )) ||
     (isRecord(value) &&
       Object.entries(value).every(
-        ([name, options]) => SERVICE_NAME.test(name) && isRecord(options)
+        ([name, options]) =>
+          SERVICE_NAME.test(name) &&
+          isRecord(options) &&
+          validDependencyCondition(options.condition, complete)
       ))
+  );
+}
+
+function validDependencyCondition(value: unknown, complete: boolean): boolean {
+  const condition = portTemplate(value);
+  return (
+    (condition !== null && DEPENDENCY_CONDITIONS.has(condition)) ||
+    (value === undefined && !complete)
   );
 }
 
@@ -529,12 +603,15 @@ function composeServiceIssues(
       )
     );
   }
-  const dependencyIssue = validDependencies(service.depends_on)
+  const dependencyIssue = validDependencies(
+    service.depends_on,
+    source.checksDependencies
+  )
     ? composeDependencyIssue(source, name, dependencies)
     : composeFieldIssue(
         source,
         ["services", name, "depends_on"],
-        "Use a list or map of service dependencies."
+        "Use a list of services or give each mapped dependency a valid condition."
       );
   if (dependencyIssue) {
     issues.push(dependencyIssue);

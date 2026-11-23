@@ -12,7 +12,7 @@ import {
 const SECRET_KEY =
   /(?:access[_-]?key|auth(?:orization)?|credential|pass(?:word|phrase|wd)?\b|secret|secure|token|private[_-]?key|api[_-]?key)/i;
 const SECRET_TEXT =
-  /(?:[a-z][a-z\d+.-]*:\/\/[^\s/@]*:[^\s/@]+@|[?&](?:token|key|secret|password|signature)=|-----BEGIN [^-]+PRIVATE KEY-----|\bauthorization\s*:?\s+(?:bearer|basic)\s+\S)/i;
+  /(?:[a-z][a-z\d+.-]*:\/\/[^\s/?#@]+@|[?&](?:token|key|secret|password|signature)=|-----BEGIN [^-]+PRIVATE KEY-----|\bauthorization\s*:?\s+(?:bearer|basic)\s+\S)/i;
 const PRIVATE_COMPOSE_FIELDS = /^(?:command|entrypoint|args|secrets|test)$/;
 const CADDY_HEADER =
   /^caddy(?:[._].*)?[._](?:header_up|header_down|header|request_header)(?:[._]|$)/i;
@@ -43,13 +43,54 @@ export function configLine(text: string, offset: number): number {
 export function jsonConfigTree(text: string) {
   const errors: ParseError[] = [];
   const root = parseTree(text, errors, { disallowComments: true });
+  const duplicate =
+    root && errors.length === 0 ? duplicateJsonProperty(root) : undefined;
   return {
     root,
     error: errors[0],
-    ok: root?.type === "object" && errors.length === 0,
+    duplicate,
+    ok:
+      root?.type === "object" && errors.length === 0 && duplicate === undefined,
   };
 }
 
+export function jsonConfigDiagnostic(text: string) {
+  const tree = jsonConfigTree(text);
+  return tree.ok
+    ? null
+    : {
+        line: configLine(
+          text,
+          tree.duplicate?.offset ?? tree.error?.offset ?? 0
+        ),
+        message: tree.duplicate
+          ? "Each JSON field must appear once."
+          : "Expected a valid JSON object.",
+      };
+}
+
+function duplicateJsonProperty(root: Node): Node | undefined {
+  const stack = [root];
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    const children = node.children ?? [];
+    if (node.type === "object") {
+      const keys = new Set<string>();
+      for (const child of children) {
+        const key = child.children?.[0];
+        if (key && typeof key.value === "string") {
+          if (keys.has(key.value)) {
+            return key;
+          }
+          keys.add(key.value);
+        }
+      }
+    }
+    for (const child of children) {
+      stack.push(child);
+    }
+  }
+  return undefined;
+}
 type SourcePath = readonly (string | number)[];
 type Range = {
   readonly start: number;

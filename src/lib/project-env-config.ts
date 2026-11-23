@@ -7149,6 +7149,63 @@ export type PreparedLegacyEnvMigration = {
   readonly payload: (path: string) => string;
 };
 
+/** Check declared dotenv inputs without reading a legacy secret-store key or value. */
+export async function preflightLegacyEnvContract(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly contract: HackEnvContract;
+  readonly maxLayerBytes: number;
+}): Promise<void> {
+  const overlayNames = await discoverLegacyOverlayNames({
+    ...opts,
+    includeSymlinks: false,
+  });
+  await assertNoLegacyDotenvLinks({ ...opts, overlayNames });
+  await preflightLegacyEnvMigrationPaths({ ...opts, overlayNames });
+  const base = parseDotEnv(
+    (await readLegacyDotenvText({
+      path: resolveEnvFilePath({ ...opts, envName: null }),
+    })) ?? ""
+  );
+  const plain = opts.contract.vars.filter(
+    (entry) => entry.source === "plain_env"
+  );
+  const { storePlaintextInBackend } = await readHackEnvRuntimeConfig(opts);
+  for (const envName of [null, ...overlayNames]) {
+    const own =
+      envName === null
+        ? base
+        : parseDotEnv(
+            (await readLegacyDotenvText({
+              path: resolveEnvFilePath({ ...opts, envName }),
+            })) ?? ""
+          );
+    if (storePlaintextInBackend) {
+      continue;
+    }
+    const values = buildMigratedValues({
+      resolvedValues: plain.map((entry) => ({
+        ...entry,
+        source: "plain_env",
+        value: own[entry.key] ?? null,
+      })),
+      baseValues: envName === null ? null : new Map(Object.entries(base)),
+      keyText: null,
+    });
+    const config = buildMigratedProjectEnvConfig({
+      environment: envName ?? "default",
+      values,
+    });
+    if (
+      Buffer.byteLength(serializeProjectEnvConfig(config)) > opts.maxLayerBytes
+    ) {
+      throw new ClosedCliError(
+        `A migrated config file exceeds the ${opts.maxLayerBytes / 1024} KiB limit.`
+      );
+    }
+  }
+}
+
 /**
  * Prepares the explicit, journalled migration without any filesystem mutation.
  * Legacy sources stay in place throughout publication. The journal owner stages

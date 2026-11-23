@@ -23,6 +23,7 @@ import {
   prepareImplicitEnvMigration,
   previewEnvCleanup,
   previewEnvMigration,
+  recordEnvMigrationConfigEdit,
   recordEnvMigrationProjectRun,
   rollbackEnvMigration,
 } from "../src/lib/env-migration.ts";
@@ -765,6 +766,40 @@ test("a prepared implicit migration reports committed bytes and keeps an interru
   expect(resumed.status).toBe("applied");
   await expect(assertEnvMigrationReadable(project)).resolves.toBeUndefined();
 });
+
+test("cleanup and rollback honor a Config save receipt while refusing subsequent authored edits", async () => {
+  const snapshots = envMigrationSnapshots();
+  const migration = await apply({
+    project,
+    snapshots,
+    acceptTrackedChanges: false,
+    repairCompose: false,
+  });
+  const path = join(project.projectDir, "hack.config.json");
+  const before = await readFile(path, "utf8");
+  const after = '{"name":"renamed"}\n';
+  await writeFile(path, after);
+  await recordEnvMigrationConfigEdit({
+    project,
+    manifestPath: migration.manifestPath,
+    path,
+    before,
+    after,
+  });
+  const renamed = { ...project, projectName: "renamed" };
+  await recordEnvMigrationProjectRun(renamed);
+  const cleanup = { project: renamed, snapshots, acceptTrackedChanges: false };
+  await writeFile(path, '{"name":"edited-later"}\n');
+  await expect(cleanupEnvMigration(cleanup)).rejects.toThrow("input changed");
+  await writeFile(path, after);
+  expect((await cleanupEnvMigration(cleanup)).status).toBe("cleaned");
+  await rollbackEnvMigration({
+    project: renamed,
+    snapshots,
+    manifestPath: migration.manifestPath,
+  });
+  expect(await readFile(path, "utf8")).toBe(before);
+}, 30_000);
 
 test("later Compose repair refuses damaged originals before changing the completed journal", async () => {
   const composePath = join(project.projectDir, "docker-compose.yml");

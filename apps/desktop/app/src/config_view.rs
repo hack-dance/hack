@@ -14,7 +14,6 @@ use hack_desktop_core::{
         ConfigChange, ConfigError, ConfigIssue, ConfigPatch, ConfigReport, ConfigSaved,
         ConfigState, ConfigTarget, ConfigValidation,
     },
-    state::Action,
     viewmodel::InstanceKey,
 };
 use hack_desktop_ui::{
@@ -615,7 +614,10 @@ impl HackApp {
         if !self.live || self.config.restarting {
             return;
         }
-        let branch = report.branch.clone();
+        let target = ConfigTarget {
+            branch: report.branch.clone(),
+            overlay: self.config.selection.target.overlay.clone(),
+        };
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let selection = self.config.selection.clone();
         let epoch = self.model.source_epoch();
@@ -623,7 +625,7 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async move { source.act(&root, false, branch.as_deref(), Action::Restart) })
+                .spawn(async move { source.config_restart(&root, &target) })
                 .await;
             let _ = this.update(cx, |app, cx| {
                 if app.model.source_epoch() != epoch || app.config.selection != selection {

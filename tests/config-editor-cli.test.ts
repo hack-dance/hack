@@ -363,6 +363,31 @@ test("show reports missing, unreadable JSON and read-only layers distinctly", as
   expect((await show(f.root, f.main)).layers[0]?.writable).toBe(false);
 });
 
+test("duplicate project JSON properties are reported on the duplicate line before any form write", async () => {
+  const f = await fixture();
+  const path = join(f.project, "hack.config.json");
+  const source = '{\n "name": "first",\n "name": "second"\n}\n';
+  await writeFile(path, source);
+  const report = await show(f.root, f.main);
+  expect(report.state).toBe("invalid");
+  expect(report.issues[0]).toMatchObject({
+    layer: "1",
+    line: 3,
+    message: "Each JSON field must appear once.",
+  });
+  const result = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["apply"],
+    patch: {
+      base: bases(report),
+      changes: [{ layer: "1", kind: "project", path: "name", value: "new" }],
+    },
+  });
+  expect(result.payload.ok).toBe(false);
+  expect(await readFile(path, "utf8")).toBe(source);
+});
+
 test("a revision conflict preflights all layers without applying earlier changes", async () => {
   const f = await fixture();
   const report = await show(f.root, f.main);
@@ -481,7 +506,7 @@ test("show and validation previews omit authorization headers and commands", asy
     writeFile(
       join(f.project, "hack.env.default.yaml"),
       env(
-        "  global:\n    REDIS_URL: redis://:fixture-ciphertext-marker@redis.example.test:6379"
+        "  global:\n    REDIS_URL: redis://:fixture-ciphertext-marker@redis.example.test:6379\n    REGISTRY_URL: https://fixture-ciphertext-marker@registry.example.test"
       )
     ),
   ]);
@@ -489,8 +514,10 @@ test("show and validation previews omit authorization headers and commands", asy
   expect(report.layers[0]?.hidden).toBe(true);
   expect(report.layers[1]?.hidden).toBe(true);
   expect(
-    report.env.find((row) => row.key === "REDIS_URL")?.values[0]?.secret
-  ).toBe(true);
+    report.env
+      .filter((row) => ["REDIS_URL", "REGISTRY_URL"].includes(row.key))
+      .map((row) => row.values[0]?.secret)
+  ).toEqual([true, true]);
   const result = await cli({
     root: f.root,
     cwd: f.main,
@@ -514,7 +541,7 @@ test("show and validation previews omit authorization headers and commands", asy
   expect(result.payload.data.previews["2"]).toContain('"[redacted:');
   await writeFile(
     composePath,
-    `${compose}# Connection example redis://:fixture-ciphertext-marker@redis.example.test\n`
+    `${compose}# Registry example https://fixture-ciphertext-marker@registry.example.test\n`
   );
   const privateComment = await show(f.root, f.main);
   expect(privateComment.layers[1]?.source).toBeNull();
@@ -821,16 +848,18 @@ test("the first Config env write migrates an existing legacy contract before pub
   const project = join(cwd, ".hack");
   await mkdir(project, { recursive: true });
   const storePath = join(cwd, "legacy-secrets.enc.json");
+  const keyPath = join(cwd, "legacy-store.key");
   await Promise.all([
     writeFile(
       join(project, "hack.config.json"),
       JSON.stringify({
         name: "legacy",
         dev_host: "legacy.hack",
+        defaultEnvConfig: "qa",
         controlPlane: {
           secrets: {
             backend: "encrypted_file",
-            encryptedFile: { path: storePath },
+            encryptedFile: { path: storePath, keyPath },
           },
         },
       })
@@ -851,6 +880,7 @@ test("the first Config env write migrates an existing legacy contract before pub
       })
     ),
     writeFile(join(project, ".env"), "EXISTING=kept\nANOTHER=also-kept\n"),
+    writeFile(join(project, ".env.qa"), "ANOTHER=qa-override\n"),
   ]);
   const storeModule = resolve(import.meta.dir, "../src/lib/secret-store.ts");
   const store = Bun.spawn([process.execPath, "--no-env-file", "-"], {
@@ -866,23 +896,46 @@ test("the first Config env write migrates an existing legacy contract before pub
     stderr: "ignore",
   });
   expect(await store.exited).toBe(0);
-  const before = await show(root, cwd);
+  const selection = ["--env", "default"];
+  const before = await show(root, cwd, ...selection);
+  const source = before.layers.find((layer) => layer.id === "1")?.source ?? "";
+  const patch = {
+    base: bases(before),
+    changes: [
+      {
+        layer: "1",
+        kind: "source",
+        text: source.replace('"legacy"', '"renamed"'),
+      },
+      { layer: "5", kind: "env", scope: "api", key: "NEW", value: "added" },
+    ],
+  };
+  const heldKey = join(cwd, "held-test-key");
+  await rename(keyPath, heldKey);
+  const validation = await cli({
+    root,
+    cwd,
+    args: ["validate", ...selection],
+    patch,
+  });
+  expect(validation.payload.data.valid).toBe(true);
+  expect(await Bun.file(keyPath).exists()).toBe(false);
+  await rename(heldKey, keyPath);
   const applied = await cli({
     root,
     cwd,
-    args: ["apply"],
-    patch: {
-      base: bases(before),
-      changes: [
-        { layer: "1", kind: "project", path: "name", value: "renamed" },
-        { layer: "5", kind: "env", scope: "api", key: "NEW", value: "added" },
-      ],
-    },
+    args: ["apply", ...selection],
+    patch,
   });
   expect(applied.payload.ok).toBe(true);
   expect(applied.payload.data.restart_offered).toBe(true);
+  expect(applied.payload.data.changed).toEqual(
+    expect.arrayContaining(["3:qa", "5:qa"])
+  );
   const after = await show(root, cwd);
   expect(after.project.name).toBe("renamed");
+  expect(after.project.defaultEnvConfig).toBeUndefined();
+  expect(after.project.env).toMatchObject({ defaultOverlay: "qa" });
   expect(after.env.find((row) => row.key === "SECRET_TOKEN")).toMatchObject({
     scope: "api",
     values: [expect.objectContaining({ secret: true })],
@@ -1062,7 +1115,14 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
       kind: "service",
       service: "web",
       field: "ports",
-      value: ["443", "80", "${PORT:-8080}:80", "127.0.0.1::80", "8082:81"],
+      value: [
+        "443",
+        "80",
+        "${PORT:-8080}:80",
+        "::1:8080:80",
+        "127.0.0.1::80",
+        "8082:81",
+      ],
     },
     {
       layer: "2",
@@ -1086,17 +1146,27 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     "'8082-8081:81'",
     "'127.0.0.999:8081:81'",
     "{published: 8081}",
+    "'${PORT:-8080}:70000'",
+    "'${PORT'",
   ];
-  for (const mapping of invalidMappings) {
-    const invalid = await check([
-      {
-        layer: "2",
-        kind: "source",
-        text: `services:\n  web:\n    ports: [${mapping}]\n`,
-      },
-    ]);
-    expect(invalid.payload.data.valid).toBe(false);
-  }
+  const invalid = await check([
+    {
+      layer: "2",
+      kind: "source",
+      text: [
+        "services:",
+        ...invalidMappings.map(
+          (mapping, index) => `  port-${index}:\n    ports: [${mapping}]`
+        ),
+        "  scalar:\n    depends_on: web",
+        "  missing:\n    depends_on:\n      web: {}",
+        "  typo:\n    depends_on:\n      web: {condition: typo}",
+        "  web: {}",
+      ].join("\n"),
+    },
+  ]);
+  expect(invalid.payload.data.valid).toBe(false);
+  expect(invalid.payload.data.issues).toHaveLength(invalidMappings.length + 3);
   const self = await check([
     {
       layer: "2",
@@ -1117,14 +1187,6 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     },
   ]);
   expect(cycles.payload.data.issues[0]?.message).toContain("dependency cycle");
-  const scalar = await check([
-    {
-      layer: "2",
-      kind: "source",
-      text: "services:\n  api:\n    depends_on: web\n  web: {}\n",
-    },
-  ]);
-  expect(scalar.payload.data.valid).toBe(false);
   const unequal = await check([
     {
       layer: "2",

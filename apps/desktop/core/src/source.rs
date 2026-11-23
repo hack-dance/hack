@@ -417,6 +417,14 @@ pub trait Source: Send + Sync {
         Err(ConfigError::unavailable())
     }
 
+    fn config_restart(
+        &self,
+        root: &Path,
+        target: &ConfigTarget,
+    ) -> Result<ActionOutcome, SourceError> {
+        self.act(root, false, target.branch.as_deref(), Action::Restart)
+    }
+
     /// Observe the project family in the selected checkout.
     fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, CopiesError> {
         Err(RunError::NotFound.into())
@@ -2165,6 +2173,23 @@ impl Source for LiveSource {
     ) -> Result<ConfigSaved, ConfigError> {
         let root = env_root(root).ok_or_else(ConfigError::unavailable)?;
         run_config(self.runner_for(false), &root, target, "apply", Some(patch))
+    }
+
+    fn config_restart(
+        &self,
+        root: &Path,
+        target: &ConfigTarget,
+    ) -> Result<ActionOutcome, SourceError> {
+        let Some(overlay) = target.overlay.as_deref() else {
+            return self.act(root, false, target.branch.as_deref(), Action::Restart);
+        };
+        let branch = target.branch.as_deref().map(validate_branch).transpose()?;
+        let root = trusted_root(root)?;
+        let mut args = with_branch(Action::Restart.cli_args(), branch);
+        args.extend(["--env", overlay]);
+        Ok(ActionOutcome::Lifecycle(
+            self.runner.run_json_to_completion(&args, Some(&root))?,
+        ))
     }
 
     fn copies(&self, root: &Path, native: bool) -> Result<CopiesReport, CopiesError> {
@@ -5562,6 +5587,20 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
             }
             src.act(&p, false, None, Action::Start).unwrap();
             assert!(!argv(&b).iter().any(|a| a == "--branch"));
+            for overlay in [Some("qa"), Some("default"), None] {
+                src.config_restart(
+                    &p,
+                    &ConfigTarget {
+                        branch: Some("fix-login".into()),
+                        overlay: overlay.map(str::to_owned),
+                    },
+                )
+                .unwrap();
+                let got = argv(&b);
+                assert_eq!(got[..3], ["restart", "--branch", "fix-login"]);
+                let passed = got.windows(2).find(|args| args[0] == "--env");
+                assert_eq!(passed.map(|args| args[1].as_str()), overlay);
+            }
         } else {
             eprintln!("skipped actions: temp dir ancestors are not private on this host");
         }

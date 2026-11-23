@@ -554,6 +554,9 @@ function parseProjectLayer(
   if (layer.text === null) {
     return {};
   }
+  if (!(layer.file.endsWith(".toml") || jsonConfigTree(layer.text).ok)) {
+    return null;
+  }
   try {
     const raw: unknown = layer.file.endsWith(".toml")
       ? Bun.TOML.parse(layer.text)
@@ -592,9 +595,14 @@ function projectModel(
     issues.push({
       layer: layer.id,
       path: [],
-      line: configLine(layer.text, tree.error?.offset ?? 0),
+      line: configLine(
+        layer.text,
+        tree.duplicate?.offset ?? tree.error?.offset ?? 0
+      ),
       code: "E_CONFIG_PARSE",
-      message: "Expected a valid JSON object.",
+      message: tree.duplicate
+        ? "Each JSON field must appear once."
+        : "Expected a valid JSON object.",
     });
     return {};
   }

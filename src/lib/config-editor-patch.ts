@@ -1,4 +1,5 @@
 import { basename, dirname, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { applyEdits, findNodeAtLocation, modify } from "jsonc-parser";
 import { z } from "zod";
 import {
@@ -31,6 +32,7 @@ import {
 import {
   configLine,
   isConfigSecret,
+  jsonConfigDiagnostic,
   jsonConfigTree,
   restoreConfigSource,
 } from "./config-editor-source.ts";
@@ -39,6 +41,7 @@ import {
   applyEnvMigration,
   type ImplicitEnvMigrationPlan,
   prepareImplicitEnvMigration,
+  recordEnvMigrationConfigEdit,
 } from "./env-migration.ts";
 import { migrationDigest } from "./env-migration-files.ts";
 import { envMigrationSnapshots } from "./env-migration-snapshot.ts";
@@ -46,6 +49,7 @@ import {
   AtomicWriteConflictError,
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
+import { isRecord } from "./guards.ts";
 import { readHackEnvContract } from "./hack-env.ts";
 import {
   ENV_BASE_SELECTION_ALIASES,
@@ -58,6 +62,7 @@ import {
   isValidProjectEnvScopeName,
   mutateProjectEnvLayer,
   type ProjectEnvLayerChange,
+  preflightLegacyEnvContract,
   projectEnvConfigExistsForMutation,
   projectEnvLayerFits,
 } from "./project-env-config.ts";
@@ -329,11 +334,6 @@ function prepareService(
   }
 }
 
-function invalidJsonSourceLine(text: string): number | null {
-  const tree = jsonConfigTree(text);
-  return tree.ok ? null : configLine(text, tree.error?.offset ?? 0);
-}
-
 function prepareSource(
   change: Extract<Change, { kind: "source" }>,
   file: Prepared
@@ -349,16 +349,16 @@ function prepareSource(
   const json = file.layer.kind === "project";
   // Diagnose a syntactically invalid draft without passing it to an output
   // path that could render a pasted credential from the invalid source.
-  const invalidLine = json
-    ? invalidJsonSourceLine(change.text)
-    : parseComposeSource(change.text).invalid;
-  if (invalidLine !== null) {
+  const invalid = json
+    ? jsonConfigDiagnostic(change.text)
+    : composeSourceDiagnostic(change.text);
+  if (invalid) {
     return configIssue(
       change,
       [],
-      json ? "Expected a valid JSON object." : "Expected valid Compose YAML.",
+      invalid.message,
       "E_CONFIG_PARSE",
-      invalidLine
+      invalid.line
     );
   }
   const restored = restoreConfigSource({
@@ -376,6 +376,13 @@ function prepareSource(
   file.text = restored;
   file.source = true;
   return null;
+}
+
+function composeSourceDiagnostic(text: string) {
+  const line = parseComposeSource(text).invalid;
+  return line === null
+    ? null
+    : { line, message: "Expected valid Compose YAML." };
 }
 
 function prepareEnv(change: Extract<Change, { kind: "env" }>, file: Prepared) {
@@ -600,7 +607,8 @@ function layerSizeIssues(
 
 export async function assessConfigPatch(
   snapshot: ConfigSnapshot,
-  patch: Patch
+  patch: Patch,
+  mode: "validate" | "apply" = "validate"
 ) {
   const initial = preparePatch(snapshot, patch);
   const { issues } = initial;
@@ -620,7 +628,7 @@ export async function assessConfigPatch(
   }
   const { migration, issue } =
     issues.length === 0
-      ? await stageConfigMigration(snapshot, initial.files)
+      ? await stageConfigMigration(snapshot, initial.files, mode)
       : { migration: null, issue: undefined };
   if (issue) {
     return { ...invalid, issues: [...issues, issue] };
@@ -661,7 +669,8 @@ function layerDestination(layer: LayerSnapshot): string {
 
 async function stageConfigMigration(
   snapshot: ConfigSnapshot,
-  files: ReadonlyMap<string, Prepared>
+  files: ReadonlyMap<string, Prepared>,
+  mode: "validate" | "apply"
 ): Promise<{
   migration: ImplicitEnvMigrationPlan | null;
   issue?: ConfigIssue;
@@ -673,10 +682,24 @@ async function stageConfigMigration(
   const { project } = snapshot;
   try {
     await assertConfigLayerDirectory(env.layer);
-    if (
-      (await projectEnvConfigExistsForMutation(project)) ||
-      !(await readHackEnvContract(project)).exists
-    ) {
+    if (await projectEnvConfigExistsForMutation(project)) {
+      return { migration: null };
+    }
+    const legacy = await readHackEnvContract(project);
+    if (!legacy.exists) {
+      return { migration: null };
+    }
+    if (legacy.parseError) {
+      throw new ClosedCliError(
+        "Fix the legacy env contract before saving env changes."
+      );
+    }
+    await preflightLegacyEnvContract({
+      ...project,
+      contract: legacy.contract,
+      maxLayerBytes: CONFIG_SOURCE_LIMIT,
+    });
+    if (mode === "validate") {
       return { migration: null };
     }
     const migration = await prepareImplicitEnvMigration({
@@ -766,6 +789,18 @@ function prepareAfterMigration(opts: {
     const migrated = { ...file, layer: { ...file.layer, text: baseline } };
     opts.files.set(file.layer.id, migrated);
     if (file.source) {
+      const text = mergeMigratedSource(file.layer.text, file.text, baseline);
+      if (text === null) {
+        opts.issues.push({
+          layer: file.layer.id,
+          path: [],
+          line: null,
+          code: "E_CONFIG_INVALID",
+          message:
+            "This Source edit and the env migration change the same setting.",
+        });
+      }
+      migrated.text = text;
       continue;
     }
     migrated.text = baseline;
@@ -781,11 +816,84 @@ function prepareAfterMigration(opts: {
   return opts.files;
 }
 
+function mergeMigratedSource(
+  original: string | null,
+  draft: string | null,
+  migrated: string
+): string | null {
+  if (!(original && draft)) {
+    return null;
+  }
+  const edits: { path: string[]; value: unknown }[] = [];
+  if (
+    !collectMigrationSourceEdits(
+      JSON.parse(original),
+      JSON.parse(draft),
+      JSON.parse(migrated),
+      [],
+      edits
+    )
+  ) {
+    return null;
+  }
+  return edits.reduce(
+    (text, edit) =>
+      applyEdits(
+        text,
+        modify(text, edit.path, edit.value, {
+          formattingOptions: { insertSpaces: true, tabSize: 2 },
+        })
+      ),
+    draft
+  );
+}
+
+function collectMigrationSourceEdits(
+  original: unknown,
+  edited: unknown,
+  migrated: unknown,
+  path: string[],
+  edits: { path: string[]; value: unknown }[]
+): boolean {
+  if (
+    isDeepStrictEqual(original, migrated) ||
+    isDeepStrictEqual(edited, migrated)
+  ) {
+    return true;
+  }
+  if (isRecord(original) && isRecord(edited) && isRecord(migrated)) {
+    return [
+      ...new Set([...Object.keys(original), ...Object.keys(migrated)]),
+    ].every((key) =>
+      collectMigrationSourceEdits(
+        ownJsonProperty(original, key),
+        ownJsonProperty(edited, key),
+        ownJsonProperty(migrated, key),
+        [...path, key],
+        edits
+      )
+    );
+  }
+  if (isDeepStrictEqual(original, edited)) {
+    edits.push({ path, value: migrated });
+    return true;
+  }
+  return false;
+}
+
+function ownJsonProperty(
+  record: Record<string, unknown>,
+  key: string
+): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 /** Validate a whole patch before effect and publish each affected file once. */
 export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
   const { files, issues, prospective, migration } = await assessConfigPatch(
     snapshot,
-    patch
+    patch,
+    "apply"
   );
   const code = patchIssueCode(issues);
   if (code !== null) {
@@ -798,10 +906,18 @@ export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
   const changed: string[] = [];
   try {
     await assertConfigBaseUnchanged(snapshot, patch.base);
-    if (migration) {
-      await publishConfigMigration(snapshot, migration, changed);
-    }
-    await publishPreparedLayers({ snapshot: prospective, files, changed });
+    const manifestPath = migration
+      ? await publishConfigMigration(snapshot, migration, changed)
+      : null;
+    await publishPreparedLayers({
+      snapshot: prospective,
+      files,
+      changed,
+      migrationReceipt:
+        migration && manifestPath
+          ? { project: migration.project, manifestPath }
+          : null,
+    });
   } catch (error) {
     if (error instanceof AtomicWriteConflictError) {
       throw new HackCliError({
@@ -859,6 +975,10 @@ async function publishPreparedLayers(opts: {
   readonly snapshot: ConfigSnapshot;
   readonly files: Map<string, Prepared>;
   readonly changed: string[];
+  readonly migrationReceipt: Pick<
+    Parameters<typeof recordEnvMigrationConfigEdit>[0],
+    "project" | "manifestPath"
+  > | null;
 }) {
   const { snapshot, files, changed } = opts;
   const ordered = [...files.values()];
@@ -867,11 +987,23 @@ async function publishPreparedLayers(opts: {
     ...ordered.filter((file) => file.layer.kind !== "env"),
     ...ordered.filter((file) => file.layer.kind === "env"),
   ]) {
-    if (
-      (await writePreparedLayer(snapshot, file)) &&
-      !changed.includes(file.layer.id)
-    ) {
+    if (!(await writePreparedLayer(snapshot, file))) {
+      continue;
+    }
+    if (!changed.includes(file.layer.id)) {
       changed.push(file.layer.id);
+    }
+    if (
+      opts.migrationReceipt &&
+      file.layer.kind !== "env" &&
+      file.text !== null
+    ) {
+      await recordEnvMigrationConfigEdit({
+        ...opts.migrationReceipt,
+        path: layerDestination(file.layer),
+        before: file.layer.text,
+        after: file.text,
+      });
     }
   }
 }
@@ -890,10 +1022,8 @@ async function publishConfigMigration(
   if (!projectLayer) {
     throw new AtomicWriteConflictError();
   }
-  const layerIds = new Map(
-    snapshot.layers.map((layer) => [layerDestination(layer), layer.id])
-  );
-  await applyEnvMigration({
+  const layerIds = migrationLayerIds(snapshot, migration);
+  const result = await applyEnvMigration({
     project: migration.project,
     plan: migration,
     acceptTrackedChanges: false,
@@ -908,8 +1038,35 @@ async function publishConfigMigration(
       }
     },
   });
+  return result.manifestPath;
 }
 
+function migrationLayerIds(
+  snapshot: ConfigSnapshot,
+  migration: ImplicitEnvMigrationPlan
+): Map<string, string> {
+  const layers = new Map(
+    snapshot.layers.map((layer) => [layerDestination(layer), layer.id])
+  );
+  for (const file of migration.prepared.files) {
+    if (
+      layers.has(file.path) ||
+      (file.kind !== "layer" && file.kind !== "local_layer")
+    ) {
+      continue;
+    }
+    const stem = basename(file.path).slice("hack.env.".length, -".yaml".length);
+    const local = file.kind === "local_layer";
+    const overlay =
+      local && stem.endsWith(".local") ? stem.slice(0, -".local".length) : stem;
+    const id = local ? "5" : "3";
+    layers.set(
+      file.path,
+      ["local", "default"].includes(overlay) ? id : `${id}:${overlay}`
+    );
+  }
+  return layers;
+}
 function patchIssueCode(issues: readonly ConfigIssue[]): HackErrorCode | null {
   if (issues.length === 0) {
     return null;

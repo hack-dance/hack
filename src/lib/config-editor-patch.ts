@@ -63,6 +63,7 @@ import {
   discoverComposeServiceNames,
   isGitIgnoredProjectEnvPath,
   isValidProjectEnvScopeName,
+  listProjectEnvOverlays,
   mutateProjectEnvLayer,
   type ProjectEnvLayerChange,
   preflightLegacyEnvContract,
@@ -573,6 +574,15 @@ function sourceIssues(files: Map<string, Prepared>): ConfigIssue[] {
   return issues;
 }
 
+function removedPrivateOverlays(
+  before: ConfigSnapshot,
+  after: ConfigSnapshot
+): string[] {
+  return [...before.privateOverlays].filter(
+    (name) => !after.privateOverlays.has(name)
+  );
+}
+
 function layerSizeIssues(
   snapshot: ConfigSnapshot,
   files: Map<string, Prepared>,
@@ -644,6 +654,28 @@ export async function assessConfigPatch(
     return { ...invalid, issues: [...issues, ...projectSizes] };
   }
   const prospective = await prospectiveSnapshot(snapshot, files);
+  if (
+    removedPrivateOverlays(snapshot, prospective).some(
+      (name) =>
+        snapshot.existingOverlays.has(name) ||
+        prospective.existingOverlays.has(name)
+    )
+  ) {
+    return {
+      ...invalid,
+      issues: [
+        ...issues,
+        {
+          layer: "1",
+          path: ["env", "defaultOverlay"],
+          line: null,
+          code: "E_CONFIG_INVALID",
+          message:
+            "Move or rename the env layer with a private filename before replacing this setting.",
+        } satisfies ConfigIssue,
+      ],
+    };
+  }
   const envSizes = layerSizeIssues(prospective, files, true);
   if (envSizes.length > 0) {
     return { ...invalid, issues: [...issues, ...envSizes] };
@@ -972,7 +1004,12 @@ export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
     const manifestPath = migration
       ? await publishConfigMigration(snapshot, migration, changed)
       : null;
-    const publication = { snapshot: prospective, files, changed };
+    const publication = {
+      snapshot: prospective,
+      files,
+      changed,
+      removedPrivateOverlays: removedPrivateOverlays(snapshot, prospective),
+    };
     if (migration && manifestPath) {
       await withEnvMigrationConfigEdits({
         project: migration.project,
@@ -1040,6 +1077,7 @@ async function publishPreparedLayers(
     readonly snapshot: ConfigSnapshot;
     readonly files: Map<string, Prepared>;
     readonly changed: string[];
+    readonly removedPrivateOverlays: readonly string[];
   },
   edits?: {
     readonly prepare: (write: MigrationConfigWrite) => Promise<void>;
@@ -1058,7 +1096,14 @@ async function publishPreparedLayers(
       ? (after: string, mode: number) =>
           edits.prepare({ path, before: file.layer.text, after, mode })
       : undefined;
-    if (!(await writePreparedLayer(snapshot, file, beforePublish))) {
+    if (
+      !(await writePreparedLayer(
+        snapshot,
+        file,
+        beforePublish,
+        opts.removedPrivateOverlays
+      ))
+    ) {
       continue;
     }
     if (!changed.includes(file.layer.id)) {
@@ -1142,7 +1187,8 @@ function patchIssueCode(issues: readonly ConfigIssue[]): HackErrorCode | null {
 async function writePreparedLayer(
   snapshot: ConfigSnapshot,
   file: Prepared,
-  beforePublish?: (text: string, mode: number) => Promise<void>
+  beforePublish: ((text: string, mode: number) => Promise<void>) | undefined,
+  removedOverlayNames: readonly string[]
 ): Promise<boolean> {
   const { layer, text } = file;
   const validate = async () => {
@@ -1155,6 +1201,16 @@ async function writePreparedLayer(
         snapshot.project.projectRoot,
         inheritedEnvDir(snapshot)
       );
+    }
+    if (layer.kind === "project" && removedOverlayNames.length > 0) {
+      const overlays = await listProjectEnvOverlays({
+        ...snapshot.project,
+        primaryDir: inheritedEnvDir(snapshot),
+        defaultEnv: null,
+      });
+      if (overlays.some((entry) => removedOverlayNames.includes(entry.name))) {
+        throw new AtomicWriteConflictError();
+      }
     }
   };
   if (layer.kind === "env") {

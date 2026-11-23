@@ -1425,6 +1425,68 @@ test("show withholds a credential-bearing default overlay and its derived layer 
   expect(base.default_overlay).toBe("default");
   expect(base.overlay).toBeNull();
   expect(JSON.stringify(base).includes(marker)).toBe(false);
+
+  await writeFile(
+    join(f.project, "hack.config.json"),
+    JSON.stringify({
+      env: { defaultOverlay: derived, default_overlay: authored },
+      defaultEnvConfig: legacy,
+      default_env_config: legacySnake,
+    })
+  );
+  const collision = await show(f.root, f.main, "--env", "default");
+  expect(collision.default_overlay).toBe("[redacted]");
+  expect(JSON.stringify(collision).includes(marker)).toBe(false);
+});
+
+test("replacing a private canonical default cannot expose a derived layer filename", async () => {
+  const f = await fixture();
+  const marker = "canonical-private-overlay-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const path = join(f.project, `hack.env.${name}.local.yaml`);
+  const projectPath = join(f.project, "hack.config.json");
+  const original = JSON.stringify({ env: { defaultOverlay: authored } });
+  await writeFile(projectPath, original);
+  await writeFile(path, env("  global:\n    MODE: unsafe-default", name));
+  const report = await show(f.root, f.main);
+  const patch = {
+    base: bases(report),
+    changes: [
+      {
+        layer: "1",
+        kind: "project",
+        path: "env.defaultOverlay",
+        value: "default",
+      },
+    ],
+  };
+  for (const command of ["validate", "apply"]) {
+    const result = await cli({
+      root: f.root,
+      cwd: f.main,
+      args: [command],
+      patch,
+    });
+    const issues =
+      result.payload.data?.issues ?? result.payload.error?.detail.issues;
+    expect(issues).toEqual([
+      expect.objectContaining({ layer: "1", code: "E_CONFIG_INVALID" }),
+    ]);
+    expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+  }
+  expect((await readFile(projectPath, "utf8")) === original).toBe(true);
+  await rm(path);
+  const saved = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["apply"],
+    patch,
+  });
+  expect(saved.payload.ok).toBe(true);
+  const next = await show(f.root, f.main);
+  expect(next.default_overlay).toBe("default");
+  expect(JSON.stringify(next).includes(marker)).toBe(false);
 });
 
 test("validation reads newly selected layers and honors an explicit selection", async () => {

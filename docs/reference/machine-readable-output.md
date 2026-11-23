@@ -202,6 +202,8 @@ legacy keys, independently of the selected `overlay`. It is `"default"` for
 base layers and `"[redacted]"` when the authored value contains credentials.
 A missing checkout or malformed project settings report `null`. A failure
 to read the file returns an `E_PERMISSION` error envelope.
+When an existing env filename was derived from a private setting, move or
+rename that file before replacing the setting in Config.
 Config honors the env migration journal for the selected checkout and any
 inherited layers. On the first env write to a project
 with a legacy contract, apply migrates that contract through the same

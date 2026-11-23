@@ -8,7 +8,9 @@ import { type ConfigIssue, composeModel } from "./config-editor-compose.ts";
 import {
   configLine,
   isConfigSecret,
+  isPrivateOverlayValue,
   jsonConfigTree,
+  privateProjectOverlayNames,
   safeJsonSource,
   safeYamlSource,
 } from "./config-editor-source.ts";
@@ -25,7 +27,6 @@ import {
   findProjectContext,
   findProjectContextAtRoot,
   legacyProjectDevHost,
-  normalizeEnvConfigName,
   type ProjectConfig,
   type ProjectContext,
   parseEnvConfigSelection,
@@ -455,6 +456,14 @@ async function configLayers(opts: {
     ],
     overlay,
     overlays: names,
+    existingOverlays: new Set(
+      overlays
+        .filter(
+          (entry) =>
+            entry.exists || entry.localExists || entry.inheritedLocalExists
+        )
+        .map((entry) => entry.name)
+    ),
   };
 }
 
@@ -506,15 +515,7 @@ function configOverlaySelection(
     ? (current[0] ?? current[1])
     : (legacy[0] ?? legacy[1]);
   // Even an overridden alias may have a layer on disk under its normalized name.
-  const privateOverlays = new Set(
-    [...current, ...legacy]
-      .filter(
-        (value): value is string =>
-          value !== undefined && isConfigSecret("", value)
-      )
-      .map(normalizeEnvConfigName)
-      .filter((name) => name !== null)
-  );
+  const privateOverlays = privateProjectOverlayNames(raw);
   const redactDefault =
     isConfigSecret("", authoredDefault) ||
     (configured !== null && privateOverlays.has(configured));
@@ -572,6 +573,7 @@ export async function captureConfigEditor(opts: {
           layers: [projectLayer],
           overlay: selection.requested ?? null,
           overlays: [],
+          existingOverlays: new Set<string>(),
         }
       : await configLayers({
           project,
@@ -589,6 +591,7 @@ export async function captureConfigEditor(opts: {
     branch,
     baseHosts,
     defaultOverlay: raw === null ? null : selection.displayDefault,
+    privateOverlays: selection.privateOverlays,
     explicitBranch,
     requestedOverlay: selection.requested,
   };
@@ -627,7 +630,9 @@ function projectModel(
   if (basename(layer.file) === PROJECT_CONFIG_LEGACY_FILENAME) {
     try {
       const raw: unknown = Bun.TOML.parse(layer.text);
-      return isRecord(raw) ? scrubLegacyProject(raw) : {};
+      return isRecord(raw)
+        ? scrubLegacyProject(raw, privateProjectOverlayNames(raw))
+        : {};
     } catch {
       issues.push({
         layer: layer.id,
@@ -661,18 +666,20 @@ function projectModel(
 }
 
 function scrubLegacyProject(
-  record: Record<string, unknown>
+  record: Record<string, unknown>,
+  privateOverlays: ReadonlySet<string>
 ): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(record).flatMap(([key, value]) => {
       if (
         ["startup", "lifecycle"].includes(key) ||
+        isPrivateOverlayValue(value, privateOverlays) ||
         (isConfigSecret(key, value) && key !== "oauth")
       ) {
         return [[key, "[redacted]"]];
       }
       if (isRecord(value)) {
-        return [[key, scrubLegacyProject(value)]];
+        return [[key, scrubLegacyProject(value, privateOverlays)]];
       }
       return Array.isArray(value) ? [] : [[key, value]];
     })

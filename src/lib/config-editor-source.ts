@@ -8,6 +8,11 @@ import {
   parseDocument,
   visit,
 } from "yaml";
+import { isRecord } from "./guards.ts";
+import {
+  normalizeEnvConfigName,
+  readAuthoredProjectOverlaySettings,
+} from "./project.ts";
 
 const SECRET_KEY =
   /(?:access[_-]?key|auth(?:orization)?|credential|pass(?:word|phrase|wd)?\b|secret|secure|token|private[_-]?key|api[_-]?key)/i;
@@ -24,6 +29,32 @@ export function isConfigSecret(key: string, value: unknown): boolean {
     SECRET_KEY.test(key) ||
     (typeof value === "string" && SECRET_TEXT.test(value))
   );
+}
+
+export function privateProjectOverlayNames(
+  project: Record<string, unknown>
+): ReadonlySet<string> {
+  const { current, legacy } = readAuthoredProjectOverlaySettings(project);
+  return new Set(
+    [...current, ...legacy]
+      .filter(
+        (value): value is string =>
+          value !== undefined && isConfigSecret("", value)
+      )
+      .map(normalizeEnvConfigName)
+      .filter((name) => name !== null)
+  );
+}
+
+export function isPrivateOverlayValue(
+  value: unknown,
+  names: ReadonlySet<string>
+): boolean {
+  if (names.size === 0 || typeof value !== "string") {
+    return false;
+  }
+  const name = normalizeEnvConfigName(value);
+  return name !== null && names.has(name);
 }
 
 function secretProperty(key: string): boolean {
@@ -132,12 +163,19 @@ function privateProjectCommand(path: SourcePath): boolean {
   );
 }
 
-function jsonSecretRanges(node: Node, path: SourcePath, ranges: Range[]): void {
+function jsonSecretRanges(
+  node: Node,
+  path: SourcePath,
+  ranges: Range[],
+  privateOverlays: ReadonlySet<string>
+): void {
   const key = path.at(-1);
   if (
     (typeof key === "string" && secretProperty(key)) ||
     (node.type === "string" &&
-      (privateProjectCommand(path) || isConfigSecret("", node.value)))
+      (privateProjectCommand(path) ||
+        isConfigSecret("", node.value) ||
+        isPrivateOverlayValue(node.value, privateOverlays)))
   ) {
     ranges.push({ start: node.offset, length: node.length, path });
     return;
@@ -146,10 +184,15 @@ function jsonSecretRanges(node: Node, path: SourcePath, ranges: Range[]): void {
     if (child.type === "property") {
       const [property, value] = child.children ?? [];
       if (value && typeof property?.value === "string") {
-        jsonSecretRanges(value, [...path, property.value], ranges);
+        jsonSecretRanges(
+          value,
+          [...path, property.value],
+          ranges,
+          privateOverlays
+        );
       }
     } else {
-      jsonSecretRanges(child, [...path, index], ranges);
+      jsonSecretRanges(child, [...path, index], ranges, privateOverlays);
     }
   });
 }
@@ -161,7 +204,11 @@ function jsonRanges(text: string): Range[] | null {
     return null;
   }
   const ranges: Range[] = [];
-  jsonSecretRanges(tree.root, [], ranges);
+  const project: unknown = JSON.parse(text);
+  const privateOverlays = isRecord(project)
+    ? privateProjectOverlayNames(project)
+    : new Set<string>();
+  jsonSecretRanges(tree.root, [], ranges, privateOverlays);
   return ranges;
 }
 

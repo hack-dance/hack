@@ -388,18 +388,20 @@ fn card(
     cx: &mut Context<HackApp>,
 ) -> AnyElement {
     let p = ui.p;
-    let skipped = pane.skipped.contains(&c.id);
+    let skipped = c.status != Status::Blocked && pane.skipped.contains(&c.id);
     let (label, colors) = match (c.status, skipped) {
         (_, true) => ("Skipped for now", p.states.unknown),
         (Status::Passed, false) => ("Passed", p.states.running),
         (Status::NeedsAttention, false) => ("Needs attention", p.states.degraded),
         (Status::Unknown, false) => ("Unknown", p.states.unknown),
+        (Status::Blocked, false) => ("Blocked", p.states.unknown),
     };
     let cli = pane.report.cli_ready();
     let mut actions = div().flex().items_center().gap(space::S3);
     let mut command_line: Option<String> = None;
-    if c.status != Status::Passed {
+    if !matches!(c.status, Status::Passed | Status::Blocked) {
         match &c.remedy {
+            Remedy::None => {}
             Remedy::Copy(cmd) => {
                 command_line = Some(short_command(cmd));
                 let cmd = cmd.clone();

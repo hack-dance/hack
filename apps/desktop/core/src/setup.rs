@@ -14,6 +14,8 @@ pub enum Status {
     Passed,
     NeedsAttention,
     Unknown,
+    /// A prerequisite did not pass, so this step could not run.
+    Blocked,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SafeAction {
@@ -30,11 +32,20 @@ impl SafeAction {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Remedy {
+    None,
     Copy(String),
     Admin(Vec<String>),
     Run(SafeAction),
     Doc(String),
 }
+/// One DNS check, including passing and unobserved pieces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Check {
+    pub id: String,
+    pub status: Status,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Card {
     pub id: String,
@@ -42,6 +53,7 @@ pub struct Card {
     pub status: Status,
     pub detail: String,
     pub remedy: Remedy,
+    pub checks: Vec<Check>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Report {
@@ -233,6 +245,7 @@ pub(crate) fn card(id: &str, title: &str, evidence: (Status, String), remedy: Re
         status: evidence.0,
         detail: evidence.1,
         remedy,
+        checks: Vec::new(),
     }
 }
 /// Docker readiness for the engine Setup itself checks: the machine Doctor

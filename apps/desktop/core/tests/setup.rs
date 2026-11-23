@@ -461,6 +461,7 @@ fn bound_commands_keep_only_controlled_path_directories() {
         status: Status::Passed,
         detail: String::new(),
         remedy: setup::Remedy::Doc(String::new()),
+        checks: Vec::new(),
     });
     report.cli_program = Some("/checked/hack-next".into());
     let path = format!("{}:{}", shared.display(), own.display());
@@ -494,6 +495,7 @@ fn compose_remedies_override_native_but_keep_checked_home_and_program() {
         status: Status::Passed,
         detail: String::new(),
         remedy: setup::Remedy::Doc(String::new()),
+        checks: Vec::new(),
     });
     report.cli_program = Some("/checked/hack-next".into());
     report.context = Some(

@@ -104,6 +104,8 @@ success behavior stays covered by command-specific suites.
 | `hack env protect --json` | Legacy bare object (no `data` envelope) |
 | `hack exec --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack exec-sessions --json` | Legacy bare object (no `data` envelope) |
+| `hack files cat --json` | Envelope; versioned `data.schema`: `hack.files.v1` |
+| `hack files ls --json` | Envelope; versioned `data.schema`: `hack.files.v1` |
 | `hack global dns preview --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack global install --plan --json` | Envelope; versioned `data.schema`: `hack.global-admin-plan.v1` |
 | `hack global status --json` | Legacy bare object (no `data` envelope) |

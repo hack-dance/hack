@@ -425,6 +425,10 @@ pub trait Source: Send + Sync {
         self.act(root, false, target.branch.as_deref(), Action::Restart)
     }
 
+    fn config_init_command(&self) -> Result<crate::terminal::CommandSpec, String> {
+        Err("The Hack CLI is unavailable.".into())
+    }
+
     /// Observe the project family in the selected checkout.
     fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, CopiesError> {
         Err(RunError::NotFound.into())
@@ -528,6 +532,19 @@ pub trait Source: Send + Sync {
         _entry: &crate::upgrade::SnapshotEntry,
     ) -> Result<crate::upgrade::Rollback, String> {
         Err("Upgrade restore is unavailable for this source".into())
+    }
+
+    /// Read files in one running Compose service.
+    ///
+    /// # Errors
+    /// The CLI or the selected service could not complete the read.
+    fn service_files(
+        &self,
+        _target: &crate::files::Target,
+        _op: crate::files::Read,
+        _path: &str,
+    ) -> Result<crate::files::Report, String> {
+        Err("Files are unavailable for this source.".into())
     }
 
     /// CPU and memory per service of a Compose project and its branch
@@ -1988,6 +2005,15 @@ impl Source for LiveSource {
         serde_json::from_str(&out).ok()
     }
 
+    fn service_files(
+        &self,
+        target: &crate::files::Target,
+        op: crate::files::Read,
+        path: &str,
+    ) -> Result<crate::files::Report, String> {
+        crate::files::read(&self.runner_for(false).fixed(), target, op, path)
+    }
+
     fn service_usage(&self, root: &Path) -> Result<crate::usage::UsageReport, String> {
         // Compose only: an inherited HACK_RUNTIME_BACKEND=native must not
         // change these reads.
@@ -2192,6 +2218,18 @@ impl Source for LiveSource {
         ))
     }
 
+    fn config_init_command(&self) -> Result<crate::terminal::CommandSpec, String> {
+        let runner = self.runner_for(false);
+        let program = runner
+            .resolve_program()
+            .map_err(|_| "The Hack CLI is unavailable.")?;
+        let context = crate::execution::ExecutionContext::capture(&runner)?;
+        context.bind(&crate::terminal::CommandSpec {
+            program: program.to_str().ok_or("The Hack CLI path is unavailable.")?.into(),
+            args: vec!["init".into()],
+        })
+    }
+
     fn copies(&self, root: &Path, native: bool) -> Result<CopiesReport, CopiesError> {
         let root = trusted_root(root).map_err(|error| CopiesError {
             reason: describe_error(&error),
@@ -2333,6 +2371,15 @@ pub fn parse_log_tail(out: &str, err: &str, code: Option<i32>) -> Result<Vec<Log
 /// # Errors
 /// `E_APP_UNTRUSTED_ROOT` with the reason.
 pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
+    trusted_checkout(root, true)
+}
+
+/// Init starts from a checkout before a Hack project marker exists.
+pub fn trusted_init_root(root: &Path) -> Result<PathBuf, SourceError> {
+    trusted_checkout(root, false)
+}
+
+fn trusted_checkout(root: &Path, require_config: bool) -> Result<PathBuf, SourceError> {
     use std::os::unix::fs::MetadataExt;
     let refuse = |why: String| SourceError::Cli {
         code: "E_APP_UNTRUSTED_ROOT".into(),
@@ -2386,7 +2433,7 @@ pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
         Ok(())
     };
     // The CLI must select exactly this root (see `discoverProjectInputs`).
-    if !cli_selects_exactly(&real) {
+    if require_config && !cli_selects_exactly(&real) {
         return Err(refuse(
             "the project folder is not the project the CLI would select from it".into(),
         ));

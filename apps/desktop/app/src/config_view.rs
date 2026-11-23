@@ -30,7 +30,7 @@ mod map;
 #[cfg(feature = "screenshots")]
 pub(crate) mod screenshots;
 
-pub(crate) const TAB: usize = 4;
+pub(crate) const TAB: usize = 5;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum View {
@@ -937,6 +937,47 @@ impl HackApp {
             .into_any_element()
     }
 
+    #[cfg(hack_terminal)]
+    fn run_config_init(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use hack_desktop_core::terminal::{
+            CommandAvailability, CommandControl, CommandControlSize, CommandExit,
+        };
+        let selection = self.config.selection.clone();
+        let spec = match self.source.config_init_command() {
+            Ok(spec) => spec,
+            Err(message) => {
+                self.config.error = Some(ConfigError {
+                    message,
+                    ..ConfigError::unavailable()
+                });
+                cx.notify();
+                return;
+            }
+        };
+        self.config.error = None;
+        self.run_init_in_drawer(
+            CommandControl {
+                id: format!("config-init:{}", selection.root.display()),
+                label: "hack init".into(),
+                title: "Terminal".into(),
+                availability: CommandAvailability::Ready(spec),
+                size: CommandControlSize::Standard,
+                cwd: Some(selection.root.clone()),
+                expects_password: false,
+            },
+            move |app, completion, cx| {
+                if completion.exit == CommandExit::Code(0) {
+                    app.refresh_now_async(cx);
+                    if app.config.selection == selection {
+                        app.reload_config(cx);
+                    }
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
     fn config_missing(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
         let can_run = cfg!(hack_terminal) && !self.config.selection.root.as_os_str().is_empty();
         let run = if can_run {
@@ -961,17 +1002,7 @@ impl HackApp {
                     run.w(px(76.))
                         .on_click(cx.listener(|_app, _, _window, _cx| {
                             #[cfg(hack_terminal)]
-                            if let Some(detail) = _app.model.detail() {
-                                _app.ensure_panel(_window, _cx);
-                                _app.open_tab(
-                                    &detail,
-                                    crate::terminal::NewTab::Init(
-                                        _app.config.selection.root.clone(),
-                                    ),
-                                    _window,
-                                    _cx,
-                                );
-                            }
+                            _app.run_config_init(_window, _cx);
                         })),
                 )
                 .child(
@@ -986,6 +1017,12 @@ impl HackApp {
             "Run opens the terminal drawer and runs it there.",
             ui,
         ))
+        .children(
+            self.config
+                .error
+                .as_ref()
+                .map(|error| muted(error.message.clone(), ui)),
+        )
         .into_any_element()
     }
 

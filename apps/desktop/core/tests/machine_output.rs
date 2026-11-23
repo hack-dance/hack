@@ -14,6 +14,10 @@ fn migrated_payloads_require_the_expected_envelope_and_schema() {
             "hack.version.v1",
         ),
         (
+            include_str!("fixtures/machine-output/files-cat.json"),
+            "hack.files.v1",
+        ),
+        (
             include_str!("fixtures/machine-output/projects-observe.json"),
             "hack.projects.observe.v1",
         ),
@@ -38,6 +42,43 @@ fn migrated_payloads_require_the_expected_envelope_and_schema() {
         assert!(parse_schema_result(text, "", Some(0), "unknown.schema").is_err());
         assert!(parse_schema_result(text, "", Some(1), schema).is_err());
     }
+}
+
+#[test]
+fn files_preview_preserves_text_and_the_worktree_mapping() {
+    use hack_desktop_core::files::{Encoding, FileSource, Report};
+    let value = parse_schema_result(
+        include_str!("fixtures/machine-output/files-cat.json"),
+        "",
+        Some(0),
+        "hack.files.v1",
+    )
+    .unwrap();
+    let Report::Cat {
+        entry,
+        encoding,
+        content,
+        truncated,
+    } = serde_json::from_value(value).unwrap()
+    else {
+        panic!("expected a preview");
+    };
+    assert!(entry.source == FileSource::Worktree && encoding == Encoding::Utf8);
+    assert_eq!(entry.path, "/app/example.txt");
+    assert_eq!(
+        entry.host_path.as_deref(),
+        Some(std::path::Path::new("/example/checkout/example.txt"))
+    );
+    assert_eq!(content, "example\n");
+    assert!(!truncated);
+
+    // A service recreated with a different bind must not open the old path.
+    let mut current = entry.clone();
+    current.host_path = Some("/example/checkout/other/example.txt".into());
+    assert_eq!(
+        entry.editor_path(&current, std::path::Path::new("/example/checkout")),
+        Err("The service's worktree mount changed. Refresh Files and try again.")
+    );
 }
 
 #[test]

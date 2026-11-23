@@ -89,7 +89,6 @@ pub enum NewTab {
     Logs,
     Container(String),
     Host,
-    Init(PathBuf),
     HostWithEnv {
         overlay: String,
         scope: String,
@@ -101,6 +100,7 @@ pub enum NewTab {
 #[derive(Default)]
 pub struct Panels {
     pub by_key: HashMap<InstanceKey, ProjectPanel>,
+    pub(crate) command: crate::command_control::Drawer,
     look: Option<GhosttyLook>,
     /// The handle is being dragged.
     pub dragging: bool,
@@ -123,6 +123,9 @@ impl Panels {
 fn tab_kind(kind: &SessionKind) -> TabKind {
     match kind {
         SessionKind::Logs => TabKind::Logs,
+        SessionKind::Command { label, .. } => TabKind::Command {
+            label: label.clone(),
+        },
         SessionKind::ContainerShell { service, shell } => TabKind::ContainerShell {
             service: service.clone(),
             shell: shell.clone(),
@@ -310,6 +313,17 @@ fn note_core(text: &str) -> std::io::Result<TerminalCore> {
 }
 
 impl HackApp {
+    /// Shared embedded Ghostty panel. The host supplies the chrome.
+    pub(crate) fn embedded_terminal(cx: &mut Context<Self>) -> Entity<TerminalPanel> {
+        let sessions = cx.new(|cx| {
+            let mut panel = TerminalPanel::new(cx);
+            panel.set_embedded(true, cx);
+            panel
+        });
+        cx.observe(&sessions, |_, _, cx| cx.notify()).detach();
+        sessions
+    }
+
     fn instance_root(&self) -> Option<(PathBuf, bool, Option<String>)> {
         let row = self.model.selected_row()?;
         Some((
@@ -322,6 +336,8 @@ impl HackApp {
     /// End every tab in every panel and drop the panels: they ran the
     /// previous Hack CLI. Each instance's panel starts again when shown.
     pub(crate) fn close_all_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_command_drawer(window, cx);
+        self.setup_command_check = None;
         for panel in self.panels.by_key.values() {
             panel.sessions.update(cx, |s, cx| {
                 for i in (0..s.tab_count()).rev() {
@@ -350,12 +366,7 @@ impl HackApp {
         if self.panels.by_key.contains_key(&d.key) {
             return;
         }
-        let sessions = cx.new(|cx| {
-            let mut p = TerminalPanel::new(cx);
-            p.set_embedded(true, cx);
-            p
-        });
-        cx.observe(&sessions, |_, _, cx| cx.notify()).detach();
+        let sessions = Self::embedded_terminal(cx);
         self.panels.by_key.insert(
             d.key.clone(),
             ProjectPanel {
@@ -406,7 +417,7 @@ impl HackApp {
         }
     }
 
-    fn look(&mut self, cx: &App) -> GhosttyLook {
+    pub(crate) fn terminal_look(&mut self, cx: &App) -> GhosttyLook {
         use gpui_kit::component::ActiveTheme as _;
         self.panels
             .look
@@ -456,34 +467,6 @@ impl HackApp {
                 TerminalCore::session(for_cli(
                     container_plan(hack, &cli_root(root)?, branch.as_deref(), service)?,
                     *native,
-                    std::env::var_os("PATH").as_deref(),
-                ))
-                .map_err(io)
-            }
-            NewTab::Init(root) => {
-                let hack = hack
-                    .as_ref()
-                    .ok_or("Running Hack init needs the Hack CLI.")?;
-                let root = root
-                    .canonicalize()
-                    .map_err(|_| "The checkout folder is unavailable.")?;
-                if !root.is_dir() {
-                    return Err("The checkout folder is unavailable.".into());
-                }
-                let mut options = PtyOptions::new(hack);
-                options.env = launch::terminal_identity("xterm-256color");
-                options.cwd = Some(root);
-                options.args = vec!["init".into()];
-                TerminalCore::session(for_cli(
-                    SessionPlan {
-                        attempts: vec![Launch {
-                            kind: SessionKind::HostShell {
-                                shell: "hack init".into(),
-                            },
-                            options,
-                        }],
-                    },
-                    false,
                     std::env::var_os("PATH").as_deref(),
                 ))
                 .map_err(io)
@@ -564,7 +547,7 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         let core = self.core_for(d, &tab);
-        let look = self.look(cx);
+        let look = self.terminal_look(cx);
         let Some(panel) = self.panels.by_key.get_mut(&d.key) else {
             return;
         };

@@ -22,6 +22,7 @@ import {
   saveNativeProjectRun as save,
 } from "../src/backends/native-project-run.ts";
 import type { NativeRuntimeSelection } from "../src/backends/native-runtime-client.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -51,8 +52,8 @@ async function fixture() {
   roots.push(projectRoot);
   const projectDir = join(projectRoot, ".hack");
   const nativeHome = join(projectRoot, "candidate");
-  await mkdir(projectDir);
-  await mkdir(nativeHome);
+  await mkdirOwnedFixture(projectDir);
+  await mkdirOwnedFixture(nativeHome);
   const scope: NativeProjectRunScope = {
     projectRoot,
     projectDir,
@@ -338,8 +339,8 @@ test("Doctor inspects a current mapping read-only and reports its graph", async 
   roots.push(projectRoot);
   const projectDir = join(projectRoot, ".hack");
   const nativeHome = join(projectRoot, "candidate");
-  await mkdir(projectDir);
-  await mkdir(nativeHome);
+  await mkdirOwnedFixture(projectDir);
+  await mkdirOwnedFixture(nativeHome);
   const scope: NativeProjectRunScope = {
     projectRoot,
     projectDir,

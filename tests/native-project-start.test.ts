@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   chmod,
-  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -80,6 +79,7 @@ import {
 import { isRecord } from "../src/lib/guards.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -91,7 +91,7 @@ afterEach(async () => {
 async function fixture(withEnvironment = true) {
   const root = await mkdtemp(join(tmpdir(), "native-start-test-"));
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await writeFile(
     join(root, "hack-relay-guest"),
     "synthetic public test artifact"

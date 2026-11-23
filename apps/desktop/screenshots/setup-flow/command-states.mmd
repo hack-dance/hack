@@ -1,0 +1,32 @@
+---
+title: Desktop setup · Run and recheck
+---
+stateDiagram-v2
+    direction TB
+    state Result <<choice>>
+    state "Needs action" as Action
+    state "Password prompt" as Password
+    state "No permission" as NoPermission
+    state "Done · closing" as Done
+
+    classDef live stroke-width:1.6px
+    class Running live
+    classDef wait stroke-width:1.6px
+    class Password wait
+    classDef fail stroke-width:1.6px
+    class Failed fail
+
+    [*] --> Action
+    Action --> Running : Run
+    Running --> Password : sudo requests password
+    Password --> Running : Prompt accepted
+    Password --> Exited : Refused or cancelled
+    Running --> Exited : Command exits
+    Exited --> Recheck : Read fresh evidence
+    Recheck --> Result
+    Result --> Done : Exit 0 and check passes
+    Result --> Failed : Command or check failed
+    Result --> NoPermission : Admin access refused
+    Failed --> Running : Try again
+    NoPermission --> [*] : Hand off to admin
+    Done --> [*] : Close drawer and advance

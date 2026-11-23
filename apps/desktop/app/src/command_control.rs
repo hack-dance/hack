@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+#[cfg(all(test, feature = "screenshots"))]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, Entity, Focusable, IntoElement, ParentElement,
     SharedString, Styled, Subscription, Window, div, prelude::*, px, relative,
@@ -688,6 +690,8 @@ pub(crate) fn render(
                 );
             }));
     }
+    #[cfg(all(test, feature = "screenshots"))]
+    let run = run.test_support();
 
     let compact = props.size == CommandControlSize::Compact;
     let p = ui.p;

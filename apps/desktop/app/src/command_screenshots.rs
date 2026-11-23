@@ -178,30 +178,37 @@ fn wait_for_frame(index: usize, app: &Entity<HackApp>, cx: &mut HeadlessAppConte
     if index == 1 {
         return;
     }
+    wait_for_command(app, cx, FRAMES[index], |drawer, run, cx| match index {
+        0 => drawer
+            .session
+            .as_ref()
+            .and_then(|panel| panel.read(cx).active())
+            .and_then(|term| term.read(cx).output_text())
+            .is_some_and(|output| output.contains("Waiting for hackd to answer")),
+        2 | 6 => run.waiting_for_password,
+        _ => !run.running(),
+    });
+}
+
+fn wait_for_command(
+    app: &Entity<HackApp>,
+    cx: &mut HeadlessAppContext,
+    frame: &str,
+    ready: impl Fn(&Drawer, &Run, &gpui_kit::App) -> bool,
+) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         cx.update(|cx| app.update(cx, settle));
-        let ready = cx.update(|cx| {
+        if cx.update(|cx| {
             let drawer = &app.read(cx).panels.command;
             let run = drawer.last.as_ref().expect("command fixture run");
-            match index {
-                0 => drawer
-                    .session
-                    .as_ref()
-                    .and_then(|panel| panel.read(cx).active())
-                    .and_then(|term| term.read(cx).output_text())
-                    .is_some_and(|output| output.contains("Waiting for hackd to answer")),
-                2 | 6 => run.waiting_for_password,
-                _ => !run.running(),
-            }
-        });
-        if ready {
+            ready(drawer, run, cx)
+        }) {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "fixture {} did not reach its state",
-            FRAMES[index]
+            "fixture {frame} did not reach its state"
         );
     }
 }
@@ -214,6 +221,14 @@ mod tests {
     use std::sync::Arc;
 
     fn open(index: usize) -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
+        let (mut cx, window, app) = open_with(|window, cx| fixture(index, window, cx));
+        wait_for_frame(index, &app, &mut cx);
+        (cx, window, app)
+    }
+
+    fn open_with(
+        make: impl FnOnce(&mut Window, &mut Context<HackApp>) -> HackApp,
+    ) -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_kit::NoopTextSystem::new()),
             Arc::new(hack_desktop_ui::icons::Assets),
@@ -229,12 +244,57 @@ mod tests {
                         ..WindowOptions::default()
                     },
                     cx,
-                    |window, cx| cx.new(|cx| fixture(index, window, cx)),
+                    |window, cx| cx.new(|cx| make(window, cx)),
                 )
             })
             .unwrap();
-        wait_for_frame(index, &app, &mut cx);
         (cx, window, app)
+    }
+
+    #[test]
+    fn setup_run_opens_the_drawer_on_daemon_dns_and_skipped_https_screens() {
+        for (frame, step, args) in [
+            (
+                "h04",
+                Step::Daemon,
+                &["daemon", "start", "--no-interactive"][..],
+            ),
+            ("h09", Step::Domains, &["global", "install"][..]),
+            ("h14", Step::Https, &["global", "trust"][..]),
+        ] {
+            let (mut cx, window, app) = open_with(|window, cx| {
+                let mut app =
+                    HackApp::new(crate::source_for(Some(Fixture::Empty)), false, window, cx);
+                crate::setup_frames::load(&mut app, frame);
+                app
+            });
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("run", cx);
+            })
+            .unwrap();
+            cx.update(|cx| {
+                let drawer = &app.read(cx).panels.command;
+                assert!(drawer.visible(), "{frame} Run did not open the drawer");
+                let run = drawer.last.as_ref().expect("Run started a command");
+                assert_eq!(run.props.id, crate::setup_command::control_id(step));
+                let bound_args = &run.spec.args;
+                let command = bound_args.len() - args.len() - 1;
+                assert_eq!(bound_args[command], "/usr/bin/true");
+                assert_eq!(&bound_args[command + 1..], args);
+            });
+            wait_for_command(&app, &mut cx, frame, |_, run, _| !run.running());
+            cx.update(|cx| {
+                let drawer = &app.read(cx).panels.command;
+                assert!(matches!(
+                    drawer.last.as_ref().unwrap().phase,
+                    Phase::Ended {
+                        exit: CommandExit::Code(0),
+                        ..
+                    }
+                ));
+            });
+        }
     }
 
     #[test]

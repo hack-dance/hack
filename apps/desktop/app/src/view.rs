@@ -1767,7 +1767,12 @@ impl HackApp {
 
     fn status_items(&self, list: &ListView) -> Vec<(Option<Status>, String)> {
         if list.cli_version.is_none() {
-            return vec![(None, "not connected".into())];
+            let label = if matches!(list.phase, Phase::CliMissing) {
+                "Hack CLI not found"
+            } else {
+                "not connected"
+            };
+            return vec![(None, label.into())];
         }
         let c = list.counts;
         let always_on = list

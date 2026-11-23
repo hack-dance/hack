@@ -2,6 +2,8 @@
 
 use std::time::Instant;
 
+use hack_desktop_core::cli_choice::{Channel, Install};
+use hack_desktop_core::execution::ExecutionContext;
 use hack_desktop_core::setup::{Report, Status};
 use hack_desktop_core::setup_fixtures;
 use hack_desktop_core::terminal::CommandExit;
@@ -11,6 +13,7 @@ use crate::view::HackApp;
 
 #[derive(Default)]
 pub(crate) struct Overlay {
+    pub alternate_cli: Option<(Install, &'static str)>,
     pub state: Option<StepState>,
     pub copy: Option<(&'static str, Option<&'static str>)>,
     pub dns: Option<usize>,
@@ -63,6 +66,18 @@ pub(crate) fn load(app: &mut HackApp, name: &str) {
             cli.status = Status::VersionMismatch;
             cli.detail = "Hack 4.3.1 is installed. This app needs Hack 5.".into();
             report.force_cli_gate = true;
+            overlay.alternate_cli = Some((
+                Install {
+                    name: "hack-next".into(),
+                    channel: Channel::Prerelease,
+                    path: "/work/user/.hack-next/bin/hack-next".into(),
+                },
+                "5.0.0-next.24",
+            ));
+            overlay.copy = Some((
+                "Hack 4.3.1 is installed. This app needs Hack 5.",
+                Some("Found hack-next 5.0.0-next.24. It runs beside 4.3.1 and keeps its own home."),
+            ));
         }
         "h04" | "h05" => report = partial,
         "h07" => {
@@ -117,6 +132,16 @@ pub(crate) fn load(app: &mut HackApp, name: &str) {
             ));
         }
         _ => {}
+    }
+    if matches!(&name[..3], "h04" | "h08" | "h09" | "h14") {
+        // Exercise the live Run control against a harmless checked executable.
+        // The source itself still supplies only synthetic setup observations.
+        report.cli_program = Some("/usr/bin/true".into());
+        report.context = Some(
+            ExecutionContext::from_values(&[("HOME".into(), "/".into())])
+                .expect("fixture execution context"),
+        );
+        app.live = true;
     }
     app.show_setup_now(report);
     for step in Step::ALL.into_iter().take(target.index() + 1) {

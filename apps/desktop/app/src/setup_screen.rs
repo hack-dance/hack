@@ -560,24 +560,30 @@ fn remedy(
     cx: &mut Context<HackApp>,
 ) -> Option<AnyElement> {
     if step == Step::Cli
-        && let Some(other) = setup_alternate_cli(app)
+        && let Some((other, label)) = setup_alternate_cli(app)
     {
+        return Some(
+            div()
+                .flex()
+                .child(button("setup-switch-cli", label, None, true, ui).on_click(
+                    cx.listener(move |this, _, window, cx| this.use_cli(&other.path, window, cx)),
+                ))
+                .into_any_element(),
+        );
+    }
+    if inline_daemon_recheck(step, state) {
         return Some(
             div()
                 .flex()
                 .child(
                     button(
-                        "setup-switch-cli",
-                        format!("Use {}", other.name),
-                        None,
+                        "setup-recheck",
+                        "Check again",
+                        Some(Glyph::Restart),
                         true,
                         ui,
                     )
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.use_cli(&other.path, window, cx)
-                        }),
-                    ),
+                    .on_click(cx.listener(|this, _, _, cx| this.retry_setup_check(cx))),
                 )
                 .into_any_element(),
         );
@@ -602,10 +608,27 @@ fn remedy(
     )
 }
 
-fn setup_alternate_cli(app: &HackApp) -> Option<hack_desktop_core::cli_choice::Install> {
+fn setup_alternate_cli(app: &HackApp) -> Option<(hack_desktop_core::cli_choice::Install, String)> {
+    #[cfg(feature = "screenshots")]
+    if let Some((install, version)) = app
+        .setup_flow
+        .fixture
+        .as_ref()
+        .and_then(|overlay| overlay.alternate_cli.as_ref())
+    {
+        return Some((install.clone(), format!("Use {} {version}", install.name)));
+    }
     app.source
         .cli_choice()
         .and_then(|c| c.others().next().cloned())
+        .map(|install| {
+            let label = format!("Use {}", install.name);
+            (install, label)
+        })
+}
+
+fn inline_daemon_recheck(step: Step, state: StepState) -> bool {
+    step == Step::Daemon && state == StepState::Unchecked
 }
 
 fn setup_guide(
@@ -661,6 +684,9 @@ fn footer(
         || matches!(state, StepState::Running | StepState::Password)
     {
         return None;
+    }
+    if inline_daemon_recheck(step, state) {
+        return has_action.then_some(row);
     }
     if step == Step::Cli
         && (state == StepState::VersionMismatch

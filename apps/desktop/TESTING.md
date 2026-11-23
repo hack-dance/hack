@@ -6,6 +6,12 @@ with `bash scripts/build.sh --features screenshots` and
 run harmless fixture processes through real PTYs, including an echo-disabled
 password prompt. They never run the production commands shown in their labels.
 
+Run `target/debug/hack-desktop --setup-frames <directory>` for the setup flow.
+The macOS fixture windows render at 1280×800 points and produce 2560×1600 PNGs.
+The Run buttons on the daemon, DNS details, and skipped HTTPS frames bind to
+`/usr/bin/true`. A focused test clicks each button and checks the resulting
+command and exit in the shared drawer.
+
 Run `bash scripts/test.sh` from `apps/desktop`. It checks the exact nextest pin
 from the repository installer, runs the workspace tests in separate processes
 with zero retries, then runs doctests. Each invocation creates and removes its

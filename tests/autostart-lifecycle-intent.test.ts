@@ -162,6 +162,7 @@ async function installComposeNameFixture(opts?: {
   readonly shellStack?: string;
   readonly startContainers?: boolean;
   readonly savedContextOnly?: boolean;
+  readonly trackNamedStacks?: boolean;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
@@ -171,11 +172,11 @@ const fixture = ${JSON.stringify(root)};
 const options = ${JSON.stringify(opts ?? {})};
 const args = process.argv.slice(2);
 const mode = args.find((arg) => ["config", "ps", "inspect", "up", "down", "exec", "stop", "logs"].includes(arg));
-const running = fixture + "/compose-running";
 const created = fixture + "/compose-created";
 const containerId = "f".repeat(64);
 const context = process.env.DOCKER_CONTEXT || "none";
 const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || options.defaultStack || "sample";
+const running = fixture + (options.trackNamedStacks ? "/compose-running-" + stack : "/compose-running");
 if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   const model = JSON.parse(await Bun.stdin.text());
   if (options.failFirstProbe && !(await Bun.file(fixture + "/name-probed").exists())) {
@@ -196,12 +197,12 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   process.stdout.write("sha256:" + "a".repeat(64) + "\\n");
 } else if (mode === "ps" && args.includes("--quiet")) {
   if (process.env.DOCKER_CONTEXT !== "saved-files-context") process.exit(9);
-  if (!args.includes("-p") || !args.includes("sample")) process.exit(10);
+  if (!args.includes("-p") || stack !== (options.shellStack || "sample")) process.exit(10);
   if (await Bun.file(running).exists()) process.stdout.write(containerId + "\\n");
 } else if (mode === "inspect" && args.includes("--type")) {
   process.stdout.write(JSON.stringify({
     id: containerId, service: "app", state: "running", number: "1",
-    oneOff: "False", project: "sample", workingDir: process.cwd(), mounts: []
+    oneOff: "False", project: options.shellStack || "sample", workingDir: process.cwd(), mounts: []
   }) + "\\n");
 } else if (mode === "exec") {
   if (args[0] === "compose") {
@@ -1085,6 +1086,90 @@ test("ordinary Down refuses an interpolated branch stack owned by another checko
 });
 
 const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
+test("explicit Down stops only the Compose identity selected by its overlay", async () => {
+  const projectDir = join(root, "project", ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    '{"name":"sample","dev_host":"sample.hack"}'
+  );
+  await installComposeNameFixture({
+    startContainers: true,
+    trackNamedStacks: true,
+  });
+  for (const envName of ["qa", "staging"]) {
+    await writeOwnedFixture(
+      join(projectDir, `hack.env.${envName}.yaml`),
+      `version: 1\nenvironment: ${envName}\nsecretsprovider: project_key\nvalues:\n  global:\n    COMPOSE_PROJECT_NAME: sample-${envName}\n`
+    );
+    const result = await run(["up", "-d", "--env", envName, "--json"]);
+    expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+  }
+  const stopped = await run(["down", "--env", "qa", "--json"]);
+  expect(stopped.exitCode, stopped.stdout + stopped.stderr).toBe(0);
+  expect(
+    (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+  ).toEqual(["compose", "-p", "sample-qa"]);
+  expect(await Bun.file(join(root, "compose-running-sample-qa")).exists()).toBe(
+    false
+  );
+  expect(
+    await Bun.file(join(root, "compose-running-sample-staging")).exists()
+  ).toBe(true);
+}, 40_000);
+
+for (const action of ["up", "down", "restart"] as const) {
+  test(`${action} recovers an underscore stack from its old key only when ownership is unambiguous`, async () => {
+    const projectDir = join(root, "project", ".hack");
+    await writeOwnedFixture(
+      join(projectDir, "hack.config.json"),
+      '{"name":"sample","dev_host":"sample.hack"}'
+    );
+    await writeOwnedFixture(
+      join(projectDir, "docker-compose.yml"),
+      "name: demo_team\nservices:\n  app:\n    image: example.invalid/app\n"
+    );
+    await installComposeNameFixture({
+      startContainers: true,
+      trackNamedStacks: true,
+      defaultStack: "demo_team",
+    });
+    const exact = Bun.file(join(root, "compose-running-demo_team"));
+    const alias = Bun.file(join(root, "compose-running-demo-team"));
+    await Bun.write(exact, "demo_team");
+    await Bun.write(alias, "demo-team");
+    await upsertProjectRuntimeStateEntry({
+      projectDir,
+      entry: {
+        composeProject: "demo-team",
+        envName: null,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const args = [action, ...(action === "up" ? ["-d"] : []), "--json"];
+    const blocked = await run(args);
+    expect(blocked.exitCode).toBe(1);
+    expect(blocked.stdout + blocked.stderr).toContain(
+      "ambiguous Compose project name"
+    );
+    expect(await exact.exists()).toBe(true);
+    expect(await alias.exists()).toBe(true);
+    await alias.delete();
+    const recovered = await run(args);
+    expect(recovered.exitCode, recovered.stdout + recovered.stderr).toBe(0);
+    expect(JSON.parse(recovered.stdout)).toMatchObject({
+      ok: true,
+      data: { composeProject: "demo_team" },
+    });
+    if (action === "down") {
+      expect(
+        (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+      ).toEqual(["compose", "-p", "demo_team"]);
+    }
+    expect(
+      await Bun.file(join(root, "compose-running-demo_team")).exists()
+    ).toBe(action !== "down");
+  }, 40_000);
+}
 test("Exec and Restart use the configured secret namespace of an overridden Compose stack", async () => {
   const project = join(root, "project");
   const projectDir = join(project, ".hack");
@@ -1253,6 +1338,7 @@ test.skipIf(!supervisorBinary)(
       foreignCheckout: join(root, "foreign", ".hack"),
       foreignStack: "demo_team",
       foreignContext: "none",
+      shellStack: "alternate",
     });
     const env = {
       HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
@@ -1282,6 +1368,33 @@ test.skipIf(!supervisorBinary)(
       const pid = state?.processes[0]?.processGroupId ?? 0;
       expect(pid).toBeGreaterThan(1);
       expect(() => process.kill(-pid, 0)).not.toThrow();
+      const files = await run(
+        ["files", "ls", "--json", "app", "/app"],
+        false,
+        project,
+        env
+      );
+      expect(files.exitCode, files.stdout + files.stderr).toBe(0);
+      expect(JSON.parse(files.stdout)).toMatchObject({
+        ok: true,
+        data: { service: "app", entry: { path: "/app" } },
+      });
+      const configPath = join(projectDir, "hack.config.json");
+      const config = await Bun.file(configPath).json();
+      config.lifecycle.up = { before: [{ command: "exit 17" }] };
+      await writeOwnedFixture(configPath, JSON.stringify(config));
+      const failed = await run(["up", "-d", "--json"], false, project, env);
+      expect(failed.exitCode).toBe(17);
+      expect(JSON.parse(failed.stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_LIFECYCLE_FAILED" },
+      });
+      expect(
+        await readProjectRuntimeStateEntry({
+          projectDir,
+          composeProject: "demo_team",
+        })
+      ).toBeNull();
       const stopped = await run(["down", "--json"], false, project, env);
       expect(stopped.exitCode, stopped.stdout + stopped.stderr).toBe(0);
       expect(

@@ -65,6 +65,10 @@ logical copy in its checkout. A source CLI regression supplies the name override
 only through the launch overlay and verifies that a plain Down selects the
 recorded name and engine. A separate upgrade fixture starts with a live owner
 under the old lifecycle key and checks that Start leaves only one host owner.
+The overlay regression also runs a failed before hook and checks that it leaves
+the earlier association available to Down. The two-overlay regression checks that
+an explicit selection resolves its own Compose name. Legacy underscore recovery
+requires an owned exact stack and no containers for the competing normalized name.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

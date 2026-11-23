@@ -410,6 +410,15 @@ test("files uses the managed overlay's Docker engine and base Compose project", 
       "",
     ].join("\n")
   );
+  const replicasPath = join(root, "replicas");
+  const replicas = await Bun.file(replicasPath).text();
+  await Bun.write(
+    replicasPath,
+    replicas.replaceAll(
+      '"project":"files-test--branch"',
+      '"project":"alternate-project"'
+    )
+  );
   const result = await run({
     operation: "ls",
     path: ".",

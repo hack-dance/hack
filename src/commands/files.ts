@@ -7,24 +7,16 @@ import type {
 import { defineCommand, withHandler } from "../cli/command.ts";
 import { optBranch, optJson, optPath, optProject } from "../cli/options.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
-import {
-  branchComposeProjectName,
-  resolveComposeProjectName,
-} from "../lib/compose-project-name.ts";
-import { resolveHackEnv } from "../lib/hack-env.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { readProjectConfig } from "../lib/project.ts";
-import { resolveProjectEnvConfig } from "../lib/project-env-config.ts";
 import { readServiceFiles } from "../lib/service-files.ts";
 import { TARGET_SERVICE_PATTERN } from "../lib/target-inspect.ts";
 import {
-  desktopComposeTarget,
   optExpectComposeProject,
-  resolveCommandComposeBase,
+  resolveComposeCommandTarget,
   resolveEffectiveBranchForCommand,
+  resolveProjectExecutionEnv,
   resolveProjectForArgs,
-  resolveStoredComposeLifecycleKey,
-  resolveStoredRuntimeEnvName,
 } from "./project.ts";
 
 const options = [
@@ -85,59 +77,30 @@ async function runFiles(
     noticeToStderr: args.options.json === true,
   });
   const cfg = await readProjectConfig(project);
-  const expected = args.options.expectComposeProject;
-  const base = await resolveCommandComposeBase({
+  const target = await resolveComposeCommandTarget({
     project,
     cfg,
-    expected,
-    forBranch: branch !== null,
-  });
-  const composeProject = desktopComposeTarget({
-    expected,
-    base,
-    computed: branch ? branchComposeProjectName({ base, branch }) : null,
-  });
-  const { projectName, lifecycleComposeProject } =
-    await resolveStoredComposeLifecycleKey({
-      project,
-      branch,
-      base,
-      legacyBase:
-        expected === undefined
-          ? base
-          : await resolveComposeProjectName({ project, cfg }),
-    });
-  const envName = await resolveStoredRuntimeEnvName({
-    requestedEnvName: undefined,
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
-  });
-  // Compose's project selection can come from either the invoked environment
-  // or its own .env. Use the environment sources used by exec without its
-  // migration prompts or generated-file writes.
-  const modern = await resolveProjectEnvConfig({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
-    envName,
+    branch,
+    options: args.options,
+    readOnly: true,
     serviceNames: [service],
   });
-  const env =
-    modern?.globalEnv ??
-    (
-      await resolveHackEnv({
-        projectDir: project.projectDir,
-        projectName,
-        envName,
-        allowKeyProvisioning: false,
-      })
-    ).envForCompose;
+  const { env } =
+    target.selected ??
+    (await resolveProjectExecutionEnv({
+      project,
+      projectName: target.lifecycle.projectName,
+      envName: target.envName,
+      readOnly: true,
+      serviceNames: [service],
+    }));
   const result = await readServiceFiles({
     operation,
     project,
-    expectedProject: expected,
+    expectedProject: target.expected,
     composeArgs: buildComposeArgs({
       composeFiles: [project.composeFile],
-      composeProject,
+      composeProject: target.composeProjectName,
       cwd: project.projectDir,
       profiles: ["*"],
     }),

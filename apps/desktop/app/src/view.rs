@@ -485,6 +485,18 @@ impl HackApp {
             if self.tab == 2 {
                 self.read_env(cx);
             }
+        } else if let Some(name) = &self.stats_service
+            && self.model.project_list_readable()
+            && self
+                .model
+                .snapshot()
+                .is_some_and(|s| !s.projects.engine_down())
+            && self
+                .model
+                .detail()
+                .is_some_and(|detail| !detail.services.iter().any(|service| service.name == *name))
+        {
+            self.stats_service = None;
         }
         if self.tab == 1 && selection_changed {
             self.open_logs(cx);

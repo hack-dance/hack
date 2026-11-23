@@ -1,11 +1,12 @@
 //! Point-in-time Compose usage and the desktop's rolling service history.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::models::{ProjectRuntime, ProjectsPayload};
+use crate::models::{Container, ProjectRow, ProjectRuntime, ProjectsPayload};
 use crate::viewmodel::InstanceKey;
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
@@ -39,13 +40,68 @@ pub struct ContainerUsage {
     pub block_input_bytes: Option<u64>,
     #[serde(default, deserialize_with = "crate::usage::byte_count")]
     pub block_output_bytes: Option<u64>,
+    #[serde(default)]
+    pub io_counter_error_bytes: IoCounterErrorBytes,
+}
+
+/// An upper bound on the rounding error of each printed Docker counter.
+/// Missing precision prevents rate calculations for that counter.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IoCounterErrorBytes {
+    pub net_input: Option<u64>,
+    pub net_output: Option<u64>,
+    pub block_input: Option<u64>,
+    pub block_output: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ServiceKey {
-    pub instance: InstanceKey,
-    pub project_id: Option<String>,
-    pub service: String,
+    instance: InstanceKey,
+    owner: ServiceOwner,
+    service: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ServiceOwner {
+    Registered(String),
+    Checkout(PathBuf),
+}
+
+impl ServiceKey {
+    /// A registered project uses its own ID. A name reused by a different
+    /// unregistered checkout cannot inherit that checkout's history.
+    #[must_use]
+    pub fn new(
+        instance: InstanceKey,
+        project: &ProjectRow,
+        runtime: Option<&ProjectRuntime>,
+        service: &str,
+    ) -> Option<Self> {
+        let owner = match project.project_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => ServiceOwner::Registered(id.into()),
+            None => {
+                let dir = runtime
+                    .and_then(|rt| rt.working_dir.as_deref())
+                    .or_else(|| {
+                        project
+                            .repo_root
+                            .as_deref()
+                            .filter(|_| instance.branch.is_none())
+                    })?;
+                let dir = Path::new(dir);
+                if !dir.is_absolute() {
+                    return None;
+                }
+                ServiceOwner::Checkout(dir.into())
+            }
+        };
+        Some(Self {
+            instance,
+            owner,
+            service: service.into(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -92,11 +148,37 @@ struct ContainerCounters {
     id: String,
     started_at: Option<String>,
     totals: Counters,
+    error: Counters,
 }
 
 /// Docker uses either the 12-character ID or the full ID in its JSON.
 fn docker_id(id: &str) -> &str {
     id.get(..12).unwrap_or(id)
+}
+
+fn measurable(container: &Container) -> bool {
+    container.is_running()
+        && container
+            .labels
+            .get("hack.lifecycle.process")
+            .map(String::as_str)
+            != Some("true")
+}
+
+#[must_use]
+pub fn has_running_services(projects: &ProjectsPayload) -> bool {
+    projects
+        .projects
+        .iter()
+        .filter(|p| !p.is_native())
+        .any(|p| {
+            p.runtime
+                .iter()
+                .chain(p.branch_runtime.iter().map(|branch| &branch.runtime))
+                .flat_map(|rt| &rt.services)
+                .flat_map(|service| &service.containers)
+                .any(measurable)
+        })
 }
 
 impl StatsHistory {
@@ -127,13 +209,7 @@ impl StatsHistory {
                     )
                 }));
             for (instance, runtime) in instances {
-                self.record_instance(
-                    runtime,
-                    &instance,
-                    project.project_id.as_deref(),
-                    &by_service,
-                    now,
-                );
+                self.record_instance(runtime, &instance, project, &by_service, now);
             }
         }
         // A missing/partial sample, stopped service or absent project must
@@ -149,7 +225,7 @@ impl StatsHistory {
         &mut self,
         runtime: &ProjectRuntime,
         instance: &InstanceKey,
-        project_id: Option<&str>,
+        project: &ProjectRow,
         by_service: &HashMap<(&str, &str), Vec<&ContainerUsage>>,
         now: Instant,
     ) {
@@ -163,11 +239,7 @@ impl StatsHistory {
             let expected_ids: Option<Vec<_>> = service
                 .containers
                 .iter()
-                .filter(|c| {
-                    c.is_running()
-                        && c.labels.get("hack.lifecycle.process").map(String::as_str)
-                            != Some("true")
-                })
+                .filter(|c| measurable(c))
                 .map(|c| c.id.as_deref().map(docker_id))
                 .collect();
             let Some(mut expected_ids) = expected_ids else {
@@ -182,10 +254,10 @@ impl StatsHistory {
             {
                 continue;
             }
-            let key = ServiceKey {
-                instance: instance.clone(),
-                project_id: project_id.map(str::to_owned),
-                service: service.service.clone(),
+            let Some(key) =
+                ServiceKey::new(instance.clone(), project, Some(runtime), &service.service)
+            else {
+                continue;
             };
             self.services.entry(key).or_default().push(rows, now);
         }
@@ -247,6 +319,12 @@ impl Series {
                         r.block_input_bytes,
                         r.block_output_bytes,
                     ],
+                    error: [
+                        r.io_counter_error_bytes.net_input,
+                        r.io_counter_error_bytes.net_output,
+                        r.io_counter_error_bytes.block_input,
+                        r.io_counter_error_bytes.block_output,
+                    ],
                 })
                 .collect(),
         };
@@ -297,10 +375,11 @@ impl CounterSample {
             return [None; 4];
         }
         let pairs = self.containers.iter().zip(&previous.containers);
-        if pairs
-            .clone()
-            .any(|(now, before)| now.id != before.id || now.started_at != before.started_at)
-        {
+        if pairs.clone().any(|(now, before)| {
+            now.id != before.id
+                || now.started_at.as_ref().is_none_or(String::is_empty)
+                || now.started_at != before.started_at
+        }) {
             return [None; 4];
         }
         std::array::from_fn(|i| {
@@ -309,7 +388,18 @@ impl CounterSample {
                     .clone()
                     .map(|(now, before)| now.totals[i]?.checked_sub(before.totals[i]?)),
             )?;
-            #[allow(clippy::cast_precision_loss)] // display rate from Docker's rounded counters
+            let error = sum_bytes(
+                pairs
+                    .clone()
+                    .map(|(now, before)| now.error[i]?.checked_add(before.error[i]?)),
+            )?;
+            // A bucket crossing at high cumulative totals can look like a
+            // large burst. Render a gap when rounding could account for
+            // at least a quarter of the apparent change.
+            if error > 0 && delta <= error.saturating_mul(4) {
+                return None;
+            }
+            #[allow(clippy::cast_precision_loss)] // display estimate
             Some(delta as f64 / elapsed.as_secs_f64())
         })
     }
@@ -362,7 +452,7 @@ mod tests {
     fn key(instance: InstanceKey) -> ServiceKey {
         ServiceKey {
             instance,
-            project_id: Some("registered-shop".into()),
+            owner: ServiceOwner::Registered("registered-shop".into()),
             service: "api".into(),
         }
     }
@@ -380,6 +470,12 @@ mod tests {
             net_output_bytes: Some(1000),
             block_input_bytes: Some(500),
             block_output_bytes: Some(1000),
+            io_counter_error_bytes: IoCounterErrorBytes {
+                net_input: Some(0),
+                net_output: Some(0),
+                block_input: Some(0),
+                block_output: Some(0),
+            },
         };
         StatsReport {
             containers: vec![
@@ -412,7 +508,7 @@ mod tests {
             MemoryLimit::Unlimited
         );
         let mut unrelated = main.clone();
-        unrelated.project_id = Some("new-registration".into());
+        unrelated.owner = ServiceOwner::Registered("new-registration".into());
         assert_eq!(history.points(&unrelated, now).count(), 0);
 
         report.containers[0].net_input_bytes = Some(600);
@@ -512,6 +608,111 @@ mod tests {
         );
         history.record(&listing, &StatsReport::default(), t + HISTORY_WINDOW);
         assert!(history.services.is_empty());
+    }
+
+    #[test]
+    fn unknown_container_start_and_rounding_do_not_look_like_measured_traffic() {
+        let mut history = StatsHistory::default();
+        let now = Instant::now();
+        let preview = key(InstanceKey::branch("shop", "preview"));
+        let mut sample = report();
+        let row = &mut sample.containers[2];
+        row.started_at = None;
+        row.net_input_bytes = Some(1_230_000_000);
+        row.io_counter_error_bytes.net_input = Some(5_000_000);
+        history.record(&projects(), &sample, now);
+        sample.containers[2].net_input_bytes = Some(1_330_000_000);
+        let t = now + SAMPLE_INTERVAL;
+        history.record(&projects(), &sample, t);
+        assert_eq!(
+            history
+                .points(&preview, t)
+                .next_back()
+                .unwrap()
+                .net_in_per_second,
+            None
+        );
+
+        sample.containers[2].started_at = Some("recognized start".into());
+        let t = t + SAMPLE_INTERVAL;
+        history.record(&projects(), &sample, t);
+        sample.containers[2].net_input_bytes = Some(1_340_000_000);
+        let t = t + SAMPLE_INTERVAL;
+        history.record(&projects(), &sample, t);
+        assert_eq!(
+            history
+                .points(&preview, t)
+                .next_back()
+                .unwrap()
+                .net_in_per_second,
+            None
+        );
+
+        sample.containers[2].net_input_bytes = Some(1_440_000_000);
+        let t = t + SAMPLE_INTERVAL;
+        history.record(&projects(), &sample, t);
+        assert_eq!(
+            history
+                .points(&preview, t)
+                .next_back()
+                .unwrap()
+                .net_in_per_second,
+            Some(20_000_000.0)
+        );
+    }
+
+    #[test]
+    fn reusing_an_unregistered_compose_name_in_another_checkout_starts_a_new_series() {
+        let mut history = StatsHistory::default();
+        let now = Instant::now();
+        let mut listing = projects();
+        let project = &mut listing.projects[0];
+        project.project_id = None;
+        project.runtime.as_mut().unwrap().working_dir = Some("/work/first/.hack".into());
+        let key_for = |project: &ProjectRow| {
+            ServiceKey::new(
+                InstanceKey::project("shop"),
+                project,
+                project.runtime.as_ref(),
+                "api",
+            )
+            .unwrap()
+        };
+        let first = key_for(project);
+        history.record(&listing, &report(), now);
+        let runtime = listing.projects[0].runtime.as_mut().unwrap();
+        runtime.working_dir = Some("/work/second/.hack".into());
+        runtime.services[0].containers[0].id = Some("333333333333".into());
+        let second = key_for(&listing.projects[0]);
+        let mut sample = report();
+        sample.containers[0].container_id = Some("333333333333".into());
+        let t = now + SAMPLE_INTERVAL;
+        history.record(&listing, &sample, t);
+        assert_ne!(first, second);
+        assert_eq!(history.points(&first, t).next_back().unwrap().at, now);
+        assert_eq!(history.points(&second, t).count(), 1);
+        assert_eq!(
+            history
+                .points(&second, t)
+                .next_back()
+                .unwrap()
+                .net_in_per_second,
+            None
+        );
+    }
+
+    #[test]
+    fn lifecycle_processes_do_not_start_background_usage_reads() {
+        let mut listing = projects();
+        assert!(has_running_services(&listing));
+        let project = &mut listing.projects[0];
+        project.branch_runtime.clear();
+        for container in &mut project.runtime.as_mut().unwrap().services[0].containers {
+            container
+                .labels
+                .insert("hack.lifecycle.process".into(), "true".into());
+        }
+        assert!(!has_running_services(&listing));
     }
 
     #[test]

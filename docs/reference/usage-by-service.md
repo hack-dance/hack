@@ -77,6 +77,7 @@ For a machine-wide sample, `hack usage --json --details --no-host` includes
 container. `0` means unlimited, and `null` means it could not be read.
 `memLimitBytes` remains the limit shown by Docker stats, which can be the
 engine's capacity. `startedAt` is the current container start time, when
-available. Network and disk byte counters are cumulative. Use successive
-samples and the actual elapsed time to compute rates for the same container
-run.
+available. Network and disk byte counters are cumulative. The
+`ioCounterErrorBytes` fields bound Docker's display rounding for each
+counter. The desktop uses successive samples from the same known container
+run and draws gaps when the rounding bound is large relative to the change.

@@ -181,6 +181,12 @@ type DockerStatsSample = {
   readonly netOutputBytes: number | null;
   readonly blockInputBytes: number | null;
   readonly blockOutputBytes: number | null;
+  readonly ioCounterErrorBytes?: {
+    readonly netInput: number | null;
+    readonly netOutput: number | null;
+    readonly blockInput: number | null;
+    readonly blockOutput: number | null;
+  };
   readonly pids: number | null;
 };
 
@@ -910,10 +916,16 @@ function parseDockerStatsSampleLine(opts: {
     memUsedBytes: memUsage.usedBytes,
     memLimitBytes: memUsage.limitBytes,
     memPercent,
-    netInputBytes: netIo.inputBytes,
-    netOutputBytes: netIo.outputBytes,
-    blockInputBytes: blockIo.inputBytes,
-    blockOutputBytes: blockIo.outputBytes,
+    netInputBytes: netIo.input?.bytes ?? null,
+    netOutputBytes: netIo.output?.bytes ?? null,
+    blockInputBytes: blockIo.input?.bytes ?? null,
+    blockOutputBytes: blockIo.output?.bytes ?? null,
+    ioCounterErrorBytes: {
+      netInput: netIo.input?.errorBytes ?? null,
+      netOutput: netIo.output?.errorBytes ?? null,
+      blockInput: blockIo.input?.errorBytes ?? null,
+      blockOutput: blockIo.output?.errorBytes ?? null,
+    },
     pids,
   };
 }
@@ -1370,35 +1382,30 @@ function parsePercent(opts: { readonly value: string | null }): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+type ByteReading = { readonly bytes: number; readonly errorBytes: number };
+
 function parseIoPair(opts: { readonly value: string | null }): {
-  readonly inputBytes: number | null;
-  readonly outputBytes: number | null;
+  readonly input: ByteReading | null;
+  readonly output: ByteReading | null;
 } {
-  if (!opts.value) {
-    return { inputBytes: null, outputBytes: null };
-  }
-  const [inputRaw = "", outputRaw = ""] = opts.value
-    .split("/")
-    .map((part) => part.trim());
+  const [inputRaw = "", outputRaw = ""] = opts.value?.split("/") ?? [];
   return {
-    inputBytes: parseBytes({ value: inputRaw.length > 0 ? inputRaw : null }),
-    outputBytes: parseBytes({ value: outputRaw.length > 0 ? outputRaw : null }),
+    input: parseByteReading(inputRaw),
+    output: parseByteReading(outputRaw),
   };
 }
 
 function parseBytes(opts: { readonly value: string | null }): number | null {
-  if (!opts.value) {
-    return null;
-  }
-  const trimmed = opts.value.trim();
-  if (!trimmed) {
-    return null;
-  }
-  const match = trimmed.match(BYTES_PATTERN);
+  return parseByteReading(opts.value ?? "")?.bytes ?? null;
+}
+
+function parseByteReading(raw: string): ByteReading | null {
+  const match = raw.trim().match(BYTES_PATTERN);
   if (!match) {
     return null;
   }
-  const value = Number.parseFloat(match[1] ?? "");
+  const digits = match[1] ?? "";
+  const value = Number.parseFloat(digits);
   if (!Number.isFinite(value)) {
     return null;
   }
@@ -1408,7 +1415,14 @@ function parseBytes(opts: { readonly value: string | null }): number | null {
   if (multiplier === null) {
     return null;
   }
-  return value * multiplier;
+  const decimals = digits.split(".")[1]?.length ?? 0;
+  // Docker may trim trailing zeroes. Use the printed precision as a
+  // conservative rounding bound and allow for rounding to whole bytes.
+  const errorBytes =
+    multiplier === 1 && decimals === 0
+      ? 0
+      : Math.ceil(multiplier / 10 ** decimals / 2);
+  return { bytes: value * multiplier, errorBytes };
 }
 
 /**
@@ -1497,6 +1511,7 @@ export const __testOnlyUsage = {
   collectTrackedHostPids,
   buildHostUsageReport,
   buildServiceUsageRows,
+  parseDockerStatsSampleLine,
 };
 
 type UsageServiceRow = {

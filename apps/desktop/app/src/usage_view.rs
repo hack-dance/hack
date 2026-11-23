@@ -418,6 +418,35 @@ mod tests {
     }
 
     #[test]
+    fn the_services_table_resumes_usage_after_the_stats_service_disappears() {
+        let (mut cx, app, _) = window();
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.stats_service = Some("api".into());
+                assert!(a.usage_target().is_none());
+                let mut snapshot = a.model.snapshot().unwrap().clone();
+                let project = snapshot
+                    .projects
+                    .projects
+                    .iter_mut()
+                    .find(|p| p.name == "storefront")
+                    .unwrap();
+                project.defined_services.retain(|name| name != "api");
+                project
+                    .runtime
+                    .as_mut()
+                    .unwrap()
+                    .services
+                    .retain(|s| s.service != "api");
+                let token = a.model.begin_refresh();
+                assert!(a.apply_refresh(token, Ok(snapshot), cx));
+                assert!(a.stats_service.is_none());
+                assert!(a.usage_target().is_some());
+            });
+        });
+    }
+
+    #[test]
     fn usage_is_read_only_for_a_shown_services_tab_of_a_running_compose_instance() {
         let (mut cx, app, source) = window();
         cx.update(|cx| {

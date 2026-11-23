@@ -5,10 +5,11 @@ use std::time::Instant;
 use gpui_kit::{
     AnyElement, Div, FontWeight, IntoElement, SharedString, Stateful, div, prelude::*, px, relative,
 };
-use hack_desktop_core::models::{Container, ProjectRow, ProjectsPayload};
+use hack_desktop_core::models::{Container, ProjectRow};
 use hack_desktop_core::state::ServiceView;
 use hack_desktop_core::stats::{
     HISTORY_WINDOW, MemoryLimit, SAMPLE_INTERVAL, ServiceKey, StatsHistory, StatsPoint,
+    has_running_services,
 };
 use hack_desktop_core::usage;
 use hack_desktop_core::viewmodel::DetailView;
@@ -29,22 +30,6 @@ pub(crate) struct ServiceStats {
     attempted_at: Option<Instant>,
     in_flight: bool,
     sample_failed: bool,
-}
-
-fn has_running_services(projects: &ProjectsPayload) -> bool {
-    !projects.engine_down()
-        && projects
-            .projects
-            .iter()
-            .filter(|p| !p.is_native())
-            .any(|p| {
-                p.runtime
-                    .iter()
-                    .chain(p.branch_runtime.iter().map(|b| &b.runtime))
-                    .flat_map(|rt| &rt.services)
-                    .flat_map(|s| &s.containers)
-                    .any(Container::is_running)
-            })
 }
 
 impl HackApp {
@@ -121,22 +106,32 @@ impl HackApp {
         cx: &mut gpui_kit::Context<Self>,
     ) -> impl IntoElement {
         let row = self.model.selected_row();
-        let key = ServiceKey {
-            instance: detail.key.clone(),
-            project_id: row.as_ref().and_then(|r| r.project_id.clone()),
-            service: service.name.clone(),
-        };
+        let key = row.as_ref().and_then(|row| {
+            ServiceKey::new(detail.key.clone(), row, row.runtime.as_ref(), &service.name)
+        });
         let now = Instant::now();
-        let points: Vec<_> = self.stats.history.points(&key, now).collect();
-        let current = (self.model.project_list_readable()
+        let points: Vec<_> = key
+            .iter()
+            .flat_map(|key| self.stats.history.points(key, now))
+            .collect();
+        let readable = self.model.project_list_readable()
+            && self
+                .model
+                .snapshot()
+                .is_some_and(|s| !s.projects.engine_down());
+        let current = (readable
             && service.running
-            && self.stats.history.fresh(&key, now))
+            && key
+                .as_ref()
+                .is_some_and(|key| self.stats.history.fresh(key, now)))
         .then(|| points.last().copied())
         .flatten();
-        let status = if !self.model.project_list_readable() {
-            "Usage is unavailable"
-        } else if row.as_ref().is_some_and(ProjectRow::is_native) {
+        let status = if row.as_ref().is_some_and(ProjectRow::is_native) {
             "Usage is available for Compose services"
+        } else if !readable {
+            "Usage is unavailable"
+        } else if !service.created {
+            "Service has not been created"
         } else if !service.running {
             "Service is stopped"
         } else if self.stats.sample_failed {
@@ -179,9 +174,7 @@ fn cards(
         ui,
     );
 
-    let limit = points
-        .last()
-        .map_or(MemoryLimit::Unknown, |p| p.memory_limit);
+    let limit = current.map_or(MemoryLimit::Unknown, |p| p.memory_limit);
     let (memory, unit) = byte_value(current.and_then(|p| p.memory_bytes), false);
     let limit_note = match limit {
         MemoryLimit::Bytes(n) => format!("of {} limit", usage::bytes(n)),
@@ -486,6 +479,7 @@ fn service_info(
                     ("bind", Some(root)) if std::path::Path::new(source).starts_with(root) => {
                         "worktree"
                     }
+                    ("bind", _) => "bind",
                     ("volume", _) => "volume",
                     _ => "container",
                 };
@@ -662,7 +656,7 @@ impl HackApp {
     /// Fill ten minutes through the same history path as live samples.
     pub(crate) fn show_stats_fixture(&mut self, cx: &mut gpui_kit::Context<Self>) {
         use hack_desktop_core::models::ContainerMount;
-        use hack_desktop_core::stats::{ContainerUsage, StatsReport};
+        use hack_desktop_core::stats::{ContainerUsage, IoCounterErrorBytes, StatsReport};
         use hack_desktop_core::viewmodel::Event;
 
         let Some(mut snapshot) = self.model.snapshot().cloned() else {
@@ -732,6 +726,7 @@ impl HackApp {
                     container_id: fixture_id.clone(),
                     project: "storefront".into(),
                     service: "api".into(),
+                    started_at: Some("fixture start".into()),
                     cpu_percent: Some(cpu[bucket]),
                     mem_used_bytes: Some(if bucket < 7 { 128 * MIB } else { 148 * MIB }),
                     configured_memory_limit_bytes: Some(512 * MIB),
@@ -739,7 +734,12 @@ impl HackApp {
                     net_output_bytes: Some(sent),
                     block_input_bytes: Some(0),
                     block_output_bytes: Some(1229 * MIB),
-                    ..ContainerUsage::default()
+                    io_counter_error_bytes: IoCounterErrorBytes {
+                        net_input: Some(0),
+                        net_output: Some(0),
+                        block_input: Some(0),
+                        block_output: Some(0),
+                    },
                 }],
             };
             self.stats.history.record(

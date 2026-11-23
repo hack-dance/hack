@@ -98,6 +98,28 @@ test("usage samples only running Docker containers and retains service/mount att
   });
 });
 
+test("Docker usage retains the precision of printed network and disk counters", () => {
+  const sample = __testOnlyUsage.parseDockerStatsSampleLine({
+    line: JSON.stringify({
+      ID: "running",
+      NetIO: "1.23GB / 4.2kB",
+      BlockIO: "0B / 2MiB",
+    }),
+  });
+  expect(sample).toMatchObject({
+    netInputBytes: 1_230_000_000,
+    netOutputBytes: 4200,
+    blockInputBytes: 0,
+    blockOutputBytes: 2_097_152,
+    ioCounterErrorBytes: {
+      netInput: 5_000_000,
+      netOutput: 50,
+      blockInput: 0,
+      blockOutput: 524_288,
+    },
+  });
+});
+
 test("project-scoped host usage includes branch descendants and excludes other projects from totals", () => {
   const records: HostCommandRecord[] = [
     "alpha",

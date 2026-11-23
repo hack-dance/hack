@@ -51,8 +51,9 @@ does not invent a value.
 
 The app samples running Compose services every five seconds, including while
 you view another pane. For a stopped service, its recent samples age out of
-the chart. Network rates need two samples from the same container run. The
-history starts fresh each time you open the app or switch CLI installations.
+the chart. Network rates need two samples with the same known container
+start time. Rounded Docker counters can leave gaps in the chart. The history
+starts fresh each time you open the app or switch CLI installations.
 
 ## How it finds the CLI
 

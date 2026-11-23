@@ -1821,6 +1821,11 @@ mod tests {
         let runner = runner.with_env("PATH", bin.to_str().unwrap());
         let clone = runner.clone();
         assert_eq!(clone.resolve_program().unwrap(), hack, "positive control");
+        // Keep first-launch executable validation outside the bounded checks.
+        clone
+            .run_raw(&["x"], None, Duration::from_secs(60))
+            .expect("trusted CLI runs before rediscovery");
+        std::fs::remove_file(&marker).expect("reset the fixture's run marker");
         // Another user can now replace it: rediscovery refuses it ...
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(matches!(runner.rediscover(), Err(RunError::Spawn(_))));
@@ -1870,6 +1875,10 @@ mod tests {
         let runner = CliRunner::selectable(&hack);
         let clone = runner.clone();
         assert_eq!(runner.rediscover().unwrap(), hack, "positive control");
+        clone
+            .run_raw(&["x"], None, Duration::from_secs(60))
+            .expect("trusted selected CLI runs before rediscovery");
+        std::fs::remove_file(&marker).expect("reset the fixture's run marker");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(matches!(runner.rediscover(), Err(RunError::Spawn(_))));
         for r in [&runner, &clone] {

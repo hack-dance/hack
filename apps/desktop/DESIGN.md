@@ -16,7 +16,7 @@ second implementation of them.
 | The CLI is the only writer | Every action is one `hack <cmd> --no-interactive` run as the user with `--path <repo_root>`. Commands without `--json` are judged by exit code, then a fresh read. |
 | Reads observe only | A poll never starts Docker, hackd, a VM or anything else. A command that can start something (today: `hack global status`) is not polled until it has an observe-only mode (R13). |
 | No app state beyond window layout | Selected project, window size, sidebar width, theme override. Nothing else is stored. |
-| No credentials, no passwords | No password field, no `sudo` from the app. Admin steps go to the user's terminal ([Onboarding](#2-first-run-onboarding)). |
+| No credentials, no passwords | Explicit Run actions use an app-owned PTY. The CLI invokes `sudo` when needed and owns the prompt. The app has no password field. |
 | Env values only through the CLI, one at a time | Owner decision (Nov 17): Env shows plaintext values and reveals a secret's value on request. Every read goes through the CLI on a pipe (`hack env get KEY` per name); the app never parses env files, decrypts or holds the key. A revealed value hides after 60 s and on any move; nothing bulk-reveals ([Env tab](#env-tab)). Logs are unredacted service output (which can include values Hack injected), shown as the CLI emits them, with a warning, never written to disk and with no copy-all (owner decision: the Logs tab is in scope). |
 | Unknown is not absent | A failed or timed-out read shows "could not read" with the error, never "stopped" or "0 projects". |
 | Small | Target under 4,000 lines of Rust for v0.1. The old `apps/macos` grew to 13,800 lines through an embedded terminal, command palette, editor and agent integrations, tickets and remote features. None of those come back. |
@@ -197,7 +197,11 @@ progress list. The CLI is required by the other steps and cannot be skipped.
 Other skips are session-only and do not satisfy checks. Before completion,
 the wizard returns to the first unresolved step without a session skip.
 
-Terminal hand-off (recommended for both platforms; comparison in [Appendix A](#appendix-a-system-prompt-vs-terminal)):
+Terminal builds use the shared command drawer for starting hackd and for
+Compose DNS and trust commands. Enter passwords at the system prompt in the
+drawer. The login service keeps its dedicated ownership and installation
+checks. The drawer menu offers a terminal hand-off, which is also the default
+for administrative setup commands on builds without the drawer.
 
 | Platform | Open Terminal adapter | Otherwise |
 |---|---|---|
@@ -230,6 +234,10 @@ call `HackApp::command_checked` with that run ID and its result. A zero exit
 with a passing check closes the drawer after 1.5 seconds. A failed command
 or check leaves its output available. Use `HackApp::run_drawer_command` for
 an explicit run initiated outside a button pair, such as Doctor's Fix all.
+Use `HackApp::show_command_output` with the control ID to reopen the latest
+run from a banner. Use `command_control::render_history` when a passing check
+removes its Run and Copy buttons. Closing the drawer retains the latest output until
+the next command starts or the CLI changes.
 
 Source: `hack doctor --json --path <root>` per registered project, plus
 `hack doctor --machine --json` for machine findings, on open and every 10

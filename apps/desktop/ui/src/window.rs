@@ -528,6 +528,7 @@ impl MainWindow {
     fn panel_lines(&self) -> Vec<Vec<Span>> {
         match self.panel_tabs.get(self.panel_selected) {
             Some(TabKind::Logs) | None => log_lines(&self.data.tail),
+            Some(TabKind::Command { label }) => vec![vec![span(label.clone(), Ansi::Fg)]],
             Some(TabKind::ContainerShell { service, .. }) => vec![
                 vec![span("/app # ", Ansi::Fg), span("ls", Ansi::Fg)],
                 vec![

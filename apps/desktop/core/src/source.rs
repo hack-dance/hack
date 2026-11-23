@@ -492,6 +492,19 @@ pub trait Source: Send + Sync {
         Err("Upgrade restore is unavailable for this source".into())
     }
 
+    /// Read files in one running Compose service.
+    ///
+    /// # Errors
+    /// The CLI or the selected service could not complete the read.
+    fn service_files(
+        &self,
+        _target: &crate::files::Target,
+        _op: crate::files::Read,
+        _path: &str,
+    ) -> Result<crate::files::Report, String> {
+        Err("Files are unavailable for this source.".into())
+    }
+
     /// CPU and memory per service of a Compose project and its branch
     /// instances (`hack usage --json --by-service --path <root>`).
     ///
@@ -1955,6 +1968,15 @@ impl Source for LiveSource {
             .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
             .ok()?;
         serde_json::from_str(&out).ok()
+    }
+
+    fn service_files(
+        &self,
+        target: &crate::files::Target,
+        op: crate::files::Read,
+        path: &str,
+    ) -> Result<crate::files::Report, String> {
+        crate::files::read(&self.runner_for(false).fixed(), target, op, path)
     }
 
     fn service_usage(&self, root: &Path) -> Result<crate::usage::UsageReport, String> {

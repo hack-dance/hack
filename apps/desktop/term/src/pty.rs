@@ -394,6 +394,21 @@ impl Pty {
         self.session.as_ref().and_then(OwnedSession::exit)
     }
 
+    /// Whether the slave has turned off terminal echo, as sudo does while
+    /// reading a password. No terminal input is read by this query.
+    #[cfg(feature = "ghostty")]
+    pub(crate) fn echo_disabled(&self) -> bool {
+        let Some(master) = &self.master else {
+            return false;
+        };
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: the master is open and tcgetattr initializes the struct on success.
+        unsafe {
+            libc::tcgetattr(master.as_raw_fd(), termios.as_mut_ptr()) == 0
+                && termios.assume_init().c_lflag & libc::ECHO == 0
+        }
+    }
+
     /// End the session on this thread and wait until the leader is reaped
     /// and no session member remains, or `deadline` passes.
     pub fn terminate_blocking(self, deadline: Duration) -> Teardown {

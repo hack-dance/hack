@@ -55,7 +55,12 @@ pub(crate) fn render(
                         .hairline(ui.p.border)
                         .bg(ui.p.surface)
                         .child(body),
-                ),
+                )
+                .map(|pane| {
+                    #[cfg(hack_terminal)]
+                    let pane = pane.children(app.render_command_drawer(ui, cx));
+                    pane
+                }),
         )
         .into_any_element()
 }
@@ -106,11 +111,11 @@ fn sidebar(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> Div {
         .count();
     let mut rows = div().flex().flex_col().gap(space::S2);
     for step in Step::ALL {
-        let state = flow.state(step, &app.setup);
+        let state = app.setup_step_state(step);
         let current = flow.step() == Some(step);
         let meta = progress_meta(app, step, state);
         let enabled = !current
-            && !app.setup.action_busy
+            && !app.setup_command_running()
             && !app.setup.loading
             && flow.can_open(step, &app.setup);
         rows = rows.child(
@@ -366,7 +371,7 @@ fn done(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
         .rounded(radius::PANEL)
         .hairline(p.border);
     for step in Step::ALL {
-        let state = app.setup_flow.state(step, &app.setup);
+        let state = app.setup_step_state(step);
         let fact = match state {
             StepState::Passed => success_copy(step, app),
             StepState::Skipped => "Skipped · set up later in Doctor".into(),
@@ -424,7 +429,7 @@ fn done(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
 
 fn screen(app: &HackApp, step: Step, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
     let p = ui.p;
-    let state = app.setup_flow.state(step, &app.setup);
+    let state = app.setup_step_state(step);
     let (summary, note) = status_copy(step, state, app);
     let mut body = div()
         .flex()
@@ -480,6 +485,15 @@ fn screen(app: &HackApp, step: Step, ui: &Ui, cx: &mut Context<HackApp>) -> AnyE
     match state {
         StepState::Checking | StepState::Blocked => {}
         StepState::Passed => {
+            #[cfg(hack_terminal)]
+            if let Some(history) = crate::command_control::render_history(
+                &setup_command::control_id(step),
+                app,
+                ui,
+                cx,
+            ) {
+                body = body.child(div().mt(space::S7).child(history));
+            }
             if app.setup_flow.advance_at.is_some() {
                 let key: SharedString = format!("setup-advance-{}", step.id()).into();
                 body = body.child(
@@ -570,43 +584,8 @@ fn remedy(
     }
     let card = step.remedy_card(&app.setup.report)?;
     let remedy = &card.remedy;
-    let p = ui.p;
-    let password = match step {
-        Step::Domains => "May ask for your password to set up local domains.",
-        Step::Https => "May ask for your password to trust Hack’s certificate.",
-        _ => "",
-    };
-    if let Some(control) = setup_command::for_step(step, &app.setup.report, remedy) {
-        let note = control.expects_password && state != StepState::Password;
-        let running = matches!(state, StepState::Running | StepState::Password);
-        return Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::S4)
-                .child(setup_command::render(
-                    control,
-                    remedy,
-                    app.machine.busy() || running,
-                    running,
-                    state == StepState::Failed,
-                    ui,
-                    cx,
-                ))
-                .when(note, |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(space::S3)
-                            .type_step(text::SMALL)
-                            .text_color(p.text_secondary)
-                            .child(icon(Glyph::SetupBlocked, px(12.), p.text_secondary))
-                            .child(password),
-                    )
-                })
-                .into_any_element(),
-        );
+    if let Some(command) = setup_command::render(app, step, remedy, state, ui, cx) {
+        return Some(command);
     }
     let Remedy::Doc(url) = remedy else {
         return None;
@@ -899,10 +878,7 @@ fn status_copy(step: Step, state: StepState, app: &HackApp) -> (String, Option<S
             .into(),
             Some("This step checks again when the command finishes.".into()),
         ),
-        StepState::Password => (
-            "Type your password in the terminal below.".into(),
-            Some("Your operating system handles the password prompt.".into()),
-        ),
+        StepState::Password => copy("Waiting for your password."),
         StepState::Failed => (
             "Setup stopped before it finished.".into(),
             app.setup_flow

@@ -5,7 +5,7 @@ use hack_desktop_core::machine_gate::Holder;
 use hack_desktop_core::setup::{CheckScope, Remedy, Report, SafeAction, Status};
 
 use crate::doctor_view::Pane;
-use crate::setup_flow::{ADVANCE_DELAY, Screen, Step};
+use crate::setup_flow::{ADVANCE_DELAY, Screen, Step, StepState};
 use crate::view::HackApp;
 
 impl HackApp {
@@ -17,12 +17,65 @@ impl HackApp {
         match self.setup_flow.screen {
             Screen::Welcome => "welcome".into(),
             Screen::Done => "done".into(),
-            Screen::Step(step) => format!(
-                "{} {:?}",
-                step.id(),
-                self.setup_flow.state(step, &self.setup)
-            ),
+            Screen::Step(step) => format!("{} {:?}", step.id(), self.setup_step_state(step)),
         }
+    }
+
+    pub(super) fn setup_step_state(&self, step: Step) -> StepState {
+        if self.setup_flow.step() == Some(step)
+            && let Some((id, waiting)) = self.running_setup_command()
+            && id == step.id()
+        {
+            return if waiting {
+                StepState::Password
+            } else {
+                StepState::Running
+            };
+        }
+        self.setup_flow.state(step, &self.setup)
+    }
+
+    fn running_setup_command(&self) -> Option<(&str, bool)> {
+        #[cfg(hack_terminal)]
+        return self
+            .panels
+            .command
+            .running_control()
+            .and_then(|(id, waiting)| {
+                Some((
+                    id.strip_prefix(crate::setup_command::CONTROL_PREFIX)?,
+                    waiting,
+                ))
+            });
+        #[cfg(not(hack_terminal))]
+        None
+    }
+
+    pub(super) fn setup_command_running(&self) -> bool {
+        self.setup.action_busy || self.running_setup_command().is_some()
+    }
+
+    #[cfg(hack_terminal)]
+    pub(super) fn setup_drawer_finished(
+        &mut self,
+        epoch: u64,
+        step: Step,
+        completion: crate::command_control::CommandCompletion,
+        cx: &mut Context<Self>,
+    ) {
+        use hack_desktop_core::terminal::CommandExit;
+        if self.setup.source_epoch() != epoch {
+            return;
+        }
+        if completion.exit == CommandExit::Code(0) {
+            self.setup_command_check = Some((completion.run, step));
+        }
+        self.setup_flow.outcome = Some(crate::setup_flow::RunOutcome {
+            step,
+            exit: completion.exit,
+            diagnosis: completion.diagnosis,
+        });
+        self.load_setup(cx);
     }
 
     /// Use a report without machine reads when drawing fixtures.
@@ -52,7 +105,7 @@ impl HackApp {
             self.setup.refresh_again = true;
             return;
         }
-        if self.setup.action_busy {
+        if self.setup_command_running() {
             return;
         }
         let generation = self.setup.begin();
@@ -105,6 +158,15 @@ impl HackApp {
             self.load_setup(cx);
         } else {
             self.setup.pending_fix = false;
+            #[cfg(hack_terminal)]
+            if let Some((run, step)) = self.setup_command_check.take() {
+                let result = if self.setup_flow.evidence(step, &self.setup) == StepState::Passed {
+                    Ok(())
+                } else {
+                    Err(format!("{} still needs a passing check.", step.name()))
+                };
+                self.command_checked(run, result, cx);
+            }
             self.schedule_setup_advance(cx);
         }
         cx.notify();
@@ -136,11 +198,13 @@ impl HackApp {
     }
 
     pub(super) fn start_setup(&mut self, cx: &mut Context<Self>) {
-        self.enter_setup_step(Step::Cli, cx);
+        if !self.setup_command_running() {
+            self.enter_setup_step(Step::Cli, cx);
+        }
     }
 
     pub(super) fn reopen_setup_step(&mut self, step: Step, cx: &mut Context<Self>) {
-        if !self.setup.action_busy
+        if !self.setup_command_running()
             && !self.setup.loading
             && self.setup_flow.can_open(step, &self.setup)
         {
@@ -160,7 +224,10 @@ impl HackApp {
     }
 
     pub(super) fn advance_setup(&mut self, cx: &mut Context<Self>) {
-        if self.pane != Pane::Setup || !self.setup_flow.can_advance(&self.setup) {
+        if self.pane != Pane::Setup
+            || self.setup_command_running()
+            || !self.setup_flow.can_advance(&self.setup)
+        {
             return;
         }
         if let Some(step) = self.setup_flow.step() {
@@ -171,7 +238,7 @@ impl HackApp {
     }
 
     pub(super) fn skip_setup(&mut self, step: Step, cx: &mut Context<Self>) {
-        if self.setup_flow.can_skip(step, &self.setup) {
+        if !self.setup_command_running() && self.setup_flow.can_skip(step, &self.setup) {
             self.setup_flow.skip(step, &mut self.setup);
             self.check_next_setup_step(cx);
         }

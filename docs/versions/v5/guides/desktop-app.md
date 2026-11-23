@@ -38,9 +38,10 @@ refuses, the app cannot do.
 | Project header | Start, Stop, Restart and Open, with progress and errors. | `hack up`, `down`, `restart`, `open` |
 | Services tab | Each service, its state and its routes. For a running Compose project, also CPU and memory per service, and an **emulated** mark on a service whose image runs under CPU emulation. | `hackd`; `hack ps --json`; `hack usage --json --by-service` |
 | Logs tab | Live logs with pause, search and a filter for one service. | `hack logs --json` |
+| Files tab | Browse a running Compose service's directories, preview files, copy container paths and open worktree files in an editor. | `hack files ls --json`, `hack files cat --json` |
 | Env tab | Variable names and values per overlay and scope. See below. | `hack env list`, `get`, `add` |
 | Terminal panel | Log and shell tabs inside the window. On Linux, only in a build with the `terminal` feature. | `hack logs --pretty`, shells |
-| Setup | One card per setup step: the CLI, the runtime, `hackd`, routing and DNS, certificate trust, the login service. | read-only checks |
+| Setup | A step-by-step flow for the CLI, `hackd`, Docker, local domains, HTTPS, and optional start at login. Passing checks advance automatically. | read-only checks and explicit Run actions |
 | Doctor | Machine checks once, and project checks for each registered checkout. | `hack doctor --json` |
 | hackd | Whether `hackd` runs and matches the CLI, and a summary of always-on projects. | `hack daemon status --json` |
 | Upgrade | The upgrade review pane. See below. | `hack upgrade check`, `review`, `snapshot`, `rollback` |
@@ -70,6 +71,18 @@ Your choice is saved in the app's settings file
 `$XDG_CONFIG_HOME/hack-desktop/settings.json` elsewhere, by default under
 `~/.config`). No environment
 variable selects the CLI.
+
+## The Files tab
+
+Choose a Compose service to start in its working directory. Click a directory
+to browse it, or enter a relative or absolute path under **Go to file**.
+**Show hidden** includes filenames that start with a dot.
+
+Each row shows where the file lives. **Worktree** files come from the checkout
+and can open in your host editor. **Container** files and files in a named
+**volume** have read-only previews. **Copy path** copies the container path.
+The preview shows up to 64 KiB of text. The tab needs a CLI that exposes
+`hack.files.v1` and a running container with common shell utilities.
 
 ## The Env tab
 

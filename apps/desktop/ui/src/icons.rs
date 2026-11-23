@@ -67,6 +67,8 @@ pub enum Glyph {
     /// Env tab: edit a value.
     Pencil,
     Copy,
+    Lock,
+    More,
     /// Header: copied.
     Check,
     SetupDone,
@@ -77,6 +79,13 @@ pub enum Glyph {
     SetupSkipped,
     Clock,
     ChevronRight,
+    /// Service file browser.
+    Directory,
+    FileText,
+    Link,
+    Server,
+    Ellipsis,
+    Info,
 }
 
 impl Glyph {
@@ -109,6 +118,8 @@ impl Glyph {
             Self::Upgrade => "icons/circle-arrow-up.svg",
             Self::Branch => "icons/git-branch.svg",
             Self::Copy => "icons/copy.svg",
+            Self::Lock => "icons/lock-keyhole.svg",
+            Self::More => "icons/ellipsis.svg",
             Self::Check => "icons/check.svg",
             Self::Eye => "icons/eye.svg",
             Self::EyeOff => "icons/eye-off.svg",
@@ -122,6 +133,12 @@ impl Glyph {
             Self::SetupSkipped => "icons/skip-forward.svg",
             Self::Clock => "icons/clock.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
+            Self::Directory => "icons/folder.svg",
+            Self::FileText => "icons/file-text.svg",
+            Self::Link => "icons/link.svg",
+            Self::Server => "icons/server.svg",
+            Self::Ellipsis => "icons/ellipsis.svg",
+            Self::Info => "icons/info.svg",
         }
     }
 }
@@ -155,6 +172,8 @@ icon_assets!(
         CircleArrowUp,
         GitBranch,
         Copy,
+        LockKeyhole,
+        Ellipsis,
         Check,
         Eye,
         EyeOff,
@@ -162,12 +181,16 @@ icon_assets!(
         Pencil,
         CircleCheck,
         Circle,
-        LockKeyhole,
         CircleQuestionMark,
         CircleX,
         SkipForward,
         Clock,
         ChevronRight,
+        Folder,
+        FileText,
+        Link,
+        Server,
+        Info,
     ]
 );
 
@@ -223,6 +246,8 @@ mod tests {
             Glyph::Upgrade,
             Glyph::Branch,
             Glyph::Copy,
+            Glyph::Lock,
+            Glyph::More,
             Glyph::Check,
             Glyph::Eye,
             Glyph::EyeOff,

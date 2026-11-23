@@ -4040,8 +4040,10 @@ async function writeInternalComposeOverride(opts: {
   readonly path: string;
   readonly text: string;
 }): Promise<string> {
-  await ensureDir(dirname(opts.path));
-  await writeTextFileAtomicIfChanged(opts.path, opts.text);
+  await ensureDir(dirname(opts.path), 0o700);
+  await writeTextFileAtomicIfChanged(opts.path, opts.text, {
+    createMode: 0o600,
+  });
   return opts.path;
 }
 

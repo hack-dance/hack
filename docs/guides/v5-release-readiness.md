@@ -48,6 +48,40 @@ MCP workflows (HACK-1133) and
 agent cost (HACK-1141).
 Linear is canonical; this document supplies the reproducible gate structure.
 
+## Qualify linked-worktree HTTPS on macOS
+
+Use an installed candidate with a disposable web/database project and a linked
+worktree on a named branch. Use the sharing procedure in the
+[native candidate guide](native-candidate.md) so both source roots are available
+to the same pool. Give each checkout a distinct page marker and write a data
+marker to each instance before exercising routing.
+
+1. Start both checkouts and get each URL from the candidate's project output.
+   Resolve each hostname with the macOS system resolver. Open each URL in a
+   fresh Chromium profile using system DNS and certificate trust. Record the
+   final origin, page marker and successful asset load for each. A loopback
+   override, a manual DNS entry or an ignored certificate error cannot qualify
+   this row.
+2. Repeat the branch check after a retaining stop and start, then after
+   applying and rolling back the documented domain migration. Verify the
+   expected origins and certificates, both stored markers, and the other
+   instance's continued availability.
+3. For a CA rotation fixture, record the exact SHA-256 fingerprints of the
+   temporary roots before trusting them. Demonstrate the stale-root refusal
+   and successful authorized trust repair using the
+   [macOS certificate trust guide](macos-certificate-trust.md). After stopping
+   the fixture, remove only its recorded certificates through the macOS
+   administrator path. Match each SHA-256 fingerprint to the deletion
+   identifier as described in the guide. Read back the keychain and confirm
+   that the fixture fingerprints are gone and unrelated roots remain.
+
+Record the source commit, installed artifact digest, macOS version and observed
+results in the routing and CA qualification receipts. Use the
+`domain-migration` Docker E2E scenario and `tests/mac-ca-trust.test.ts`,
+`tests/global-mac-trust-plan.test.ts` and
+`tests/doctor-domain-migration.test.ts` for regression coverage. These tests
+complement the live worktree, browser and System keychain checks.
+
 ## Staged, reversible primary-driver plan
 
 1. **Record the baseline.** Capture stable/candidate versions and executable paths,

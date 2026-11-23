@@ -9,6 +9,11 @@ Projects the pool was started with can run together. If a running pool does
 not share a project root, `hack up` refuses the start. Stop the pool and add
 the root before the next boot. A pool accepts up to eight project shares.
 
+The host image cache keeps up to 64 verified registry archives. An online
+acquisition at the slot limit can discard the oldest archive that retained
+graph state does not reference. Images already loaded in the pool stay loaded.
+If every archive is referenced, the acquisition refuses.
+
 ## Native startup limits
 
 See the [native startup settings and refusal codes](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md#native-startup-limits)

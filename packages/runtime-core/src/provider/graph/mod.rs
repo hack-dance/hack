@@ -23,6 +23,7 @@ mod admission;
 #[cfg(any(target_os = "macos", test))]
 mod boot_match;
 mod cache_provenance;
+mod cache_retention;
 mod dependency_hosts;
 #[cfg(target_os = "macos")]
 mod dependency_slots;
@@ -968,7 +969,18 @@ impl Session<'_, '_> {
                 ));
             }
             if resource.cache.is_some() {
-                check_cache_capacity(&self.engine, &self.receipt.owner)?;
+                let run_dir = self
+                    .root
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .ok_or_else(|| {
+                        error(
+                            "graph_cache_inventory",
+                            "Cannot verify cache volume admission inventory.",
+                        )
+                    })?
+                    .to_path_buf();
+                check_cache_capacity(&self.engine, &self.receipt.owner, &run_dir)?;
             }
             self.check_cancelled()?;
             self.reserve(&key, "create-intent")?;
@@ -2713,7 +2725,11 @@ pub(super) fn check_reservations(
     Ok(())
 }
 
-fn check_cache_capacity(engine: &Engine<'_>, owner: &str) -> Result<(), CandidateError> {
+fn check_cache_capacity(
+    engine: &Engine<'_>,
+    owner: &str,
+    run_dir: &std::path::Path,
+) -> Result<(), CandidateError> {
     let listing = engine.request(Method::GET, "/v1.53/volumes", None)?;
     let volumes = match listing.get("Volumes") {
         Some(Value::Array(volumes)) => volumes.as_slice(),
@@ -2725,18 +2741,35 @@ fn check_cache_capacity(engine: &Engine<'_>, owner: &str) -> Result<(), Candidat
             ));
         }
     };
-    if volumes
+    let mut count = volumes
         .iter()
         .filter(|v| {
             v["Labels"]["io.hack-local.owner"] == owner
                 && v["Labels"]["io.hack-local.kind"] == "dependency-cache"
         })
-        .count()
-        >= 64
-    {
+        .count();
+    if count < cache_retention::LIMIT {
+        return Ok(());
+    }
+    // HACK-2576: the oldest caches nothing refers to make room (see `cache_retention`).
+    let references = cache_retention::references(run_dir)?;
+    let (_, offered) = cache_retention::evictable(volumes, owner, &references);
+    for name in offered {
+        if count < cache_retention::LIMIT {
+            break;
+        }
+        // Without force: the engine keeps a volume that a container still uses.
+        if engine
+            .request(Method::DELETE, &format!("/v1.53/volumes/{name}"), None)
+            .is_ok()
+        {
+            count -= 1;
+        }
+    }
+    if count >= cache_retention::LIMIT {
         return Err(error(
             "graph_cache_capacity",
-            "Runtime cache limit of 64 volumes reached; explicit cache retention is required.",
+            "64 dependency cache volumes are kept and each is still used by a retained run; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
         ));
     }
     Ok(())

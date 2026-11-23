@@ -1250,8 +1250,12 @@ Downloads never pass through a shell, proxy configuration, keychain or admin pro
 Networks that require an HTTP proxy must use the offline form below; setup ignores
 proxy environment variables.
 
-Private partial files and verified archives stay under
-`<candidate-home>/.hack-local/setup/downloads`. A rerun resumes a partial download
+Private partial files and verified archives are downloaded under
+`<candidate-home>/.hack-local/setup/downloads`. After durable provider publication,
+online setup removes its two recorded provider downloads, and a later setup retries
+interrupted cleanup. Older or replaced files without matching ownership evidence are
+reported and kept. Offline inputs and provider repair archives are kept.
+A rerun resumes a partial download
 when the server supports ranges, otherwise restarts it. Every complete file is
 hashed before any extraction; a mismatch reports `setup_hash_mismatch` with the
 filename and publishes no provider. A corrupt complete cache file is preserved

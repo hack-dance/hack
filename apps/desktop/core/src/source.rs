@@ -386,7 +386,37 @@ impl From<RunError> for CopiesError {
     }
 }
 
+use crate::config::{
+    ConfigError, ConfigPatch, ConfigReport, ConfigSaved, ConfigTarget, ConfigValidation, run_config,
+};
+
 pub trait Source: Send + Sync {
+    fn config_show(
+        &self,
+        _root: &Path,
+        _target: &ConfigTarget,
+    ) -> Result<ConfigReport, ConfigError> {
+        Err(ConfigError::unavailable())
+    }
+
+    fn config_validate(
+        &self,
+        _root: &Path,
+        _target: &ConfigTarget,
+        _patch: &ConfigPatch,
+    ) -> Result<ConfigValidation, ConfigError> {
+        Err(ConfigError::unavailable())
+    }
+
+    fn config_apply(
+        &self,
+        _root: &Path,
+        _target: &ConfigTarget,
+        _patch: &ConfigPatch,
+    ) -> Result<ConfigSaved, ConfigError> {
+        Err(ConfigError::unavailable())
+    }
+
     /// Observe the project family in the selected checkout.
     fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, CopiesError> {
         Err(RunError::NotFound.into())
@@ -2101,6 +2131,40 @@ impl Source for LiveSource {
 
     fn native_ps(&self, repo_root: &Path) -> Option<crate::models::NativePs> {
         Self::read_native_ps(&Self::native_runner(&self.runner.fixed()), repo_root)
+    }
+
+    fn config_show(&self, root: &Path, target: &ConfigTarget) -> Result<ConfigReport, ConfigError> {
+        if root.is_absolute() && root.is_dir() && !cli_selects_exactly(root) {
+            return Ok(ConfigReport::default());
+        }
+        let root = trusted_root(root).map_err(|_| ConfigError::unavailable())?;
+        run_config(self.runner_for(false), &root, target, "show", None)
+    }
+
+    fn config_validate(
+        &self,
+        root: &Path,
+        target: &ConfigTarget,
+        patch: &ConfigPatch,
+    ) -> Result<ConfigValidation, ConfigError> {
+        let root = env_root(root).ok_or_else(ConfigError::unavailable)?;
+        run_config(
+            self.runner_for(false),
+            &root,
+            target,
+            "validate",
+            Some(patch),
+        )
+    }
+
+    fn config_apply(
+        &self,
+        root: &Path,
+        target: &ConfigTarget,
+        patch: &ConfigPatch,
+    ) -> Result<ConfigSaved, ConfigError> {
+        let root = env_root(root).ok_or_else(ConfigError::unavailable)?;
+        run_config(self.runner_for(false), &root, target, "apply", Some(patch))
     }
 
     fn copies(&self, root: &Path, native: bool) -> Result<CopiesReport, CopiesError> {

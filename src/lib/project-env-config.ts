@@ -995,7 +995,7 @@ async function isLegacyTrackedLocalOverlay(opts: {
   });
 }
 
-async function resolveProjectEnvEffectiveLocalConfigPath(opts: {
+export async function resolveProjectEnvEffectiveLocalConfigPath(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName: string | null;
@@ -1263,7 +1263,7 @@ async function readProjectEnvConfigFile(opts: {
   });
 }
 
-function parseProjectEnvConfigText(opts: {
+export function parseProjectEnvConfigText(opts: {
   readonly path: string;
   readonly environment: string;
   readonly text: string | null;
@@ -3627,235 +3627,207 @@ export async function protectProjectEnvEntries(
   return protectedEntries;
 }
 
-export async function setProjectEnvValue(opts: {
+type ProjectEnvLayerTarget = {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName: string | null;
-  readonly scope: string;
-  readonly key: string;
-  readonly value: string;
-  readonly secret: boolean;
   readonly local?: boolean;
   /** Bounded wait for the layer lock; tests only. */
   readonly layerLockTimeoutMs?: number;
-}): Promise<ProjectEnvMutationResult> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  if (!PROJECT_ENV_KEY_PATTERN.test(opts.key)) {
-    throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
-  }
-  const scope = assertValidProjectEnvScopeName({
-    scopeName: opts.scope,
-  });
+};
 
-  const filePath =
-    opts.local === true
-      ? await resolveProjectEnvEffectiveLocalConfigPath({
-          projectRoot: opts.projectRoot,
-          projectDir: opts.projectDir,
-          envName: opts.envName,
-        })
-      : resolveProjectEnvConfigPath({
-          projectDir: opts.projectDir,
-          envName: opts.envName,
-        });
-  await assertProjectEnvLayerPath({
-    projectRoot: opts.projectRoot,
-    path: filePath,
-  });
-  // The read, the change and the write form one critical section per layer,
-  // so a concurrent set or unset of another key is never lost (HACK-1376).
-  return await withEnvLayerLock({
-    layerPath: filePath,
-    timeoutMs: opts.layerLockTimeoutMs,
-    run: async () =>
-      await setLockedProjectEnvValue({ ...opts, scope, filePath }),
-  });
-}
-
-async function setLockedProjectEnvValue(opts: {
-  readonly projectRoot: string;
-  readonly projectDir: string;
-  readonly envName: string | null;
+export type ProjectEnvLayerChange = {
   readonly scope: string;
   readonly key: string;
-  readonly value: string;
-  readonly secret: boolean;
-  readonly local?: boolean;
-  readonly filePath: string;
-}): Promise<ProjectEnvMutationResult> {
-  const { filePath, scope } = opts;
-  const { read, text } = await readProjectEnvLayerForMutation({
-    projectRoot: opts.projectRoot,
-    path: filePath,
-    environment: opts.envName ?? "default",
-  });
+} & (
+  | { readonly op: "set"; readonly value: string; readonly secret: boolean }
+  | { readonly op: "unset" }
+);
 
-  const nextValues: ProjectEnvValuesByScope = {
-    ...read.config.values,
-    [scope]: {
-      ...(read.config.values[scope] ?? {}),
-    },
-  };
-
-  let createdKey = false;
-  let storedValue: ProjectEnvStoredValue = opts.value;
-  if (opts.secret) {
-    // The same key rules as hydration (HACK-2169): every secret already in
-    // this layer must open with the key readers use, and a key is never
-    // created while only HACK_ENV_SECRET_KEY is set (the new file would
-    // shadow it, so existing secrets would stop decrypting). Checked before
-    // any key or layer is written.
-    // The entry being replaced is left out: overwriting it (re-encrypting a
-    // value whose old ciphertext no longer opens) leaves no mixed keys.
-    const otherScopeValues = { ...(read.config.values[scope] ?? {}) };
-    delete otherScopeValues[opts.key];
-    const resolvedKey = await resolveProjectEnvHydrationKey({
-      projectRoot: opts.projectRoot,
-      config: {
-        ...read.config,
-        values: { ...read.config.values, [scope]: otherScopeValues },
+export async function setProjectEnvValue(
+  opts: ProjectEnvLayerTarget & {
+    readonly scope: string;
+    readonly key: string;
+    readonly value: string;
+    readonly secret: boolean;
+  }
+): Promise<ProjectEnvMutationResult> {
+  const scope = assertValidProjectEnvScopeName({ scopeName: opts.scope });
+  const result = await mutateProjectEnvLayer({
+    ...opts,
+    changes: [
+      {
+        op: "set",
+        scope,
+        key: opts.key,
+        value: opts.value,
+        secret: opts.secret,
       },
-      secret: true,
-      refuse: projectEnvSetKeyRefusal,
-    });
-    if (resolvedKey.keyText === null) {
-      throw projectEnvSetKeyRefusal("wrong_key");
-    }
-    createdKey = resolvedKey.createdKey;
-    storedValue = stableProjectEnvSecretValue({
-      previous: read.config.values[scope]?.[opts.key],
-      plaintext: opts.value,
-      keyText: resolvedKey.keyText,
-    });
-  }
-  if (opts.local === true) {
-    await ensureHackDirGitignoreForLocalEnvWrite({
-      projectDir: opts.projectDir,
-    });
-  }
-
-  const nextScopeValues = nextValues[scope] ?? {};
-  nextScopeValues[opts.key] = storedValue;
-  nextValues[scope] = nextScopeValues;
-  if (!("global" in nextValues)) {
-    nextValues.global = {};
-  }
-
-  const nextConfig: ProjectEnvConfig = {
-    version: PROJECT_ENV_CONFIG_VERSION,
-    environment: opts.envName ?? "default",
-    secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
-    values: nextValues,
-  };
-  // The lock excludes cooperating writers; the compare-and-swap turns a write
-  // by anything else since the read into a closed, retryable conflict.
-  const changed = await writeProjectEnvConfigFile({
-    projectRoot: opts.projectRoot,
-    path: filePath,
-    config: nextConfig,
-    expectedExisting: text,
-    machineLocal: opts.local === true,
+    ],
   });
-  return {
-    filePath,
-    scope,
-    createdKey,
-    changed,
-    local: opts.local === true,
-  };
+  return { ...result, scope, local: opts.local === true };
 }
 
-export async function unsetProjectEnvValue(opts: {
-  readonly projectRoot: string;
-  readonly projectDir: string;
-  readonly envName: string | null;
-  readonly scope: string;
-  readonly key: string;
-  readonly local?: boolean;
-  /** Bounded wait for the layer lock; tests only. */
-  readonly layerLockTimeoutMs?: number;
-}): Promise<{ readonly changed: boolean; readonly filePath: string }> {
+export async function unsetProjectEnvValue(
+  opts: ProjectEnvLayerTarget & { readonly scope: string; readonly key: string }
+): Promise<{ readonly changed: boolean; readonly filePath: string }> {
+  return await mutateProjectEnvLayer({
+    ...opts,
+    changes: [{ op: "unset", scope: opts.scope, key: opts.key }],
+  });
+}
+
+/** Publish all changes to one layer with the same lock and writer as env add/unset. */
+export async function mutateProjectEnvLayer(
+  opts: ProjectEnvLayerTarget & {
+    readonly changes: readonly ProjectEnvLayerChange[];
+    readonly expected?: { readonly file: string; readonly text: string | null };
+  }
+): Promise<{
+  readonly changed: boolean;
+  readonly filePath: string;
+  readonly createdKey: boolean;
+}> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  for (const change of opts.changes) {
+    if (!PROJECT_ENV_KEY_PATTERN.test(change.key)) {
+      throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
+    }
+    assertValidProjectEnvScopeName({ scopeName: change.scope });
+  }
   const filePath =
     opts.local === true
-      ? await resolveProjectEnvEffectiveLocalConfigPath({
-          projectRoot: opts.projectRoot,
-          projectDir: opts.projectDir,
-          envName: opts.envName,
-        })
-      : resolveProjectEnvConfigPath({
-          projectDir: opts.projectDir,
-          envName: opts.envName,
-        });
+      ? await resolveProjectEnvEffectiveLocalConfigPath(opts)
+      : resolveProjectEnvConfigPath(opts);
+  if (opts.expected && opts.expected.file !== filePath) {
+    throw new AtomicWriteConflictError();
+  }
   await assertProjectEnvLayerPath({
     projectRoot: opts.projectRoot,
     path: filePath,
   });
-  // Same per-layer critical section as `setProjectEnvValue` (HACK-1376).
   return await withEnvLayerLock({
     layerPath: filePath,
     timeoutMs: opts.layerLockTimeoutMs,
-    run: async () => await unsetLockedProjectEnvValue({ ...opts, filePath }),
+    run: async () => await mutateLockedProjectEnvLayer({ ...opts, filePath }),
   });
 }
 
-async function unsetLockedProjectEnvValue(opts: {
-  readonly projectRoot: string;
-  readonly projectDir: string;
-  readonly envName: string | null;
-  readonly scope: string;
-  readonly key: string;
-  readonly local?: boolean;
-  readonly filePath: string;
-}): Promise<{ readonly changed: boolean; readonly filePath: string }> {
+async function mutateLockedProjectEnvLayer(
+  opts: Parameters<typeof mutateProjectEnvLayer>[0] & {
+    readonly filePath: string;
+  }
+) {
   const { filePath } = opts;
   const { read, text } = await readProjectEnvLayerForMutation({
     projectRoot: opts.projectRoot,
     path: filePath,
     environment: opts.envName ?? "default",
   });
-
-  const scopeValues = { ...(read.config.values[opts.scope] ?? {}) };
+  if (opts.expected && opts.expected.text !== text) {
+    throw new AtomicWriteConflictError();
+  }
+  const values: ProjectEnvValuesByScope = structuredClone(read.config.values);
+  const secrets = await projectEnvMutationKey(opts, read.config);
+  const hasSet = opts.changes.some((change) => change.op === "set");
+  if (hasSet && opts.local === true) {
+    await ensureHackDirGitignoreForLocalEnvWrite({
+      projectDir: opts.projectDir,
+    });
+  }
   const inheritsLocal =
-    opts.local === true && (await resolvePrimaryLocalProjectDir(opts)) !== null;
-  if (inheritsLocal) {
-    if (scopeValues[opts.key] === null) {
-      return { changed: false, filePath };
-    }
-    scopeValues[opts.key] = null;
-  } else {
-    if (!(opts.key in scopeValues)) {
-      return { changed: false, filePath };
-    }
-    delete scopeValues[opts.key];
+    opts.local === true &&
+    opts.changes.some((change) => change.op === "unset") &&
+    (await resolvePrimaryLocalProjectDir(opts)) !== null;
+  let changed = false;
+  for (const change of opts.changes) {
+    changed =
+      applyProjectEnvLayerChange({
+        values,
+        change,
+        inheritsLocal,
+        keyText: secrets.keyText,
+      }) || changed;
   }
+  if (changed || hasSet) {
+    changed = await writeProjectEnvConfigFile({
+      projectRoot: opts.projectRoot,
+      path: filePath,
+      config: {
+        ...read.config,
+        environment: opts.envName ?? "default",
+        values,
+      },
+      expectedExisting: text,
+      machineLocal: opts.local === true,
+    });
+  }
+  return { changed, filePath, createdKey: secrets.createdKey };
+}
 
-  const nextValues: ProjectEnvValuesByScope = {
-    ...read.config.values,
-    [opts.scope]: scopeValues,
-  };
-  if (opts.scope !== "global" && Object.keys(scopeValues).length === 0) {
-    delete nextValues[opts.scope];
+async function projectEnvMutationKey(
+  opts: Parameters<typeof mutateProjectEnvLayer>[0],
+  config: ProjectEnvConfig
+) {
+  if (!opts.changes.some((change) => change.op === "set" && change.secret)) {
+    return { keyText: null, createdKey: false };
   }
-  if (!("global" in nextValues)) {
-    nextValues.global = {};
+  // Entries being replaced do not need to open with the current reader key.
+  // All untouched ciphertext must still open with it.
+  const values = structuredClone(config.values);
+  for (const change of opts.changes) {
+    if (Object.hasOwn(values, change.scope)) {
+      delete values[change.scope]?.[change.key];
+    }
   }
-
-  const changed = await writeProjectEnvConfigFile({
+  const result = await resolveProjectEnvHydrationKey({
     projectRoot: opts.projectRoot,
-    path: filePath,
-    config: {
-      version: PROJECT_ENV_CONFIG_VERSION,
-      environment: opts.envName ?? "default",
-      secretsprovider: PROJECT_ENV_SECRETS_PROVIDER,
-      values: nextValues,
-    },
-    expectedExisting: text,
-    machineLocal: opts.local === true,
+    config: { ...config, values },
+    secret: true,
+    refuse: projectEnvSetKeyRefusal,
   });
-  return { changed, filePath };
+  if (result.keyText === null) {
+    throw projectEnvSetKeyRefusal("wrong_key");
+  }
+  return result;
+}
+
+function applyProjectEnvLayerChange(opts: {
+  readonly values: ProjectEnvValuesByScope;
+  readonly change: ProjectEnvLayerChange;
+  readonly inheritsLocal: boolean;
+  readonly keyText: string | null;
+}): boolean {
+  const { values, change } = opts;
+  const entries = { ...values[change.scope] };
+  if (change.op === "set") {
+    entries[change.key] =
+      change.secret && opts.keyText !== null
+        ? stableProjectEnvSecretValue({
+            previous: entries[change.key],
+            plaintext: change.value,
+            keyText: opts.keyText,
+          })
+        : change.value;
+  } else if (opts.inheritsLocal) {
+    if (entries[change.key] === null) {
+      return false;
+    }
+    entries[change.key] = null;
+  } else {
+    if (!Object.hasOwn(entries, change.key)) {
+      return false;
+    }
+    delete entries[change.key];
+  }
+
+  if (change.scope !== "global" && Object.keys(entries).length === 0) {
+    delete values[change.scope];
+  } else {
+    values[change.scope] = entries;
+  }
+  return true;
 }
 
 /** Closed reasons `hydrateProjectEnvLocalLayer` refuses with; none writes a layer. */

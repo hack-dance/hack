@@ -36,6 +36,7 @@ import {
 import { parseSessionsMuxMode } from "../mux/mux-config.ts";
 import { logger } from "../ui/logger.ts";
 import { configAdoptCommand } from "./config-adopt.ts";
+import { configApplyCommand, configShowCommand } from "./config-editor.ts";
 import { configImportCommand } from "./config-import.ts";
 import { configPlanCommand } from "./config-plan.ts";
 import { configValidateCommand } from "./config-validate.ts";
@@ -218,7 +219,9 @@ export const configCommand = defineCommand({
   subcommands: [
     withHandler(configGetSpec, handleConfigGet),
     withHandler(configSetSpec, handleConfigSet),
+    configShowCommand,
     configValidateCommand,
+    configApplyCommand,
     configPlanCommand,
     configImportCommand,
     configAdoptCommand,

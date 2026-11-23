@@ -89,6 +89,7 @@ pub enum NewTab {
     Logs,
     Container(String),
     Host,
+    Init(PathBuf),
     HostWithEnv {
         overlay: String,
         scope: String,
@@ -367,6 +368,9 @@ impl HackApp {
             },
         );
         self.open_tab(&d, NewTab::Logs, window, cx);
+        if self.tab == crate::config_view::TAB {
+            self.set_state(&d.key, PanelState::Collapsed, cx);
+        }
     }
 
     /// Keep the selected instance's panel in step with the snapshot: a new
@@ -452,6 +456,34 @@ impl HackApp {
                 TerminalCore::session(for_cli(
                     container_plan(hack, &cli_root(root)?, branch.as_deref(), service)?,
                     *native,
+                    std::env::var_os("PATH").as_deref(),
+                ))
+                .map_err(io)
+            }
+            NewTab::Init(root) => {
+                let hack = hack
+                    .as_ref()
+                    .ok_or("Running Hack init needs the Hack CLI.")?;
+                let root = root
+                    .canonicalize()
+                    .map_err(|_| "The checkout folder is unavailable.")?;
+                if !root.is_dir() {
+                    return Err("The checkout folder is unavailable.".into());
+                }
+                let mut options = PtyOptions::new(hack);
+                options.env = launch::terminal_identity("xterm-256color");
+                options.cwd = Some(root);
+                options.args = vec!["init".into()];
+                TerminalCore::session(for_cli(
+                    SessionPlan {
+                        attempts: vec![Launch {
+                            kind: SessionKind::HostShell {
+                                shell: "hack init".into(),
+                            },
+                            options,
+                        }],
+                    },
+                    false,
                     std::env::var_os("PATH").as_deref(),
                 ))
                 .map_err(io)
@@ -641,6 +673,12 @@ impl HackApp {
             p.state = state;
             p.menu = Menu::Closed;
             cx.notify();
+        }
+    }
+
+    pub(crate) fn collapse_config_terminal(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.model.selected_key() {
+            self.set_state(&key, PanelState::Collapsed, cx);
         }
     }
 
@@ -1133,6 +1171,9 @@ impl HackApp {
             return div().into_any_element();
         };
         let state = panel.state;
+        if self.tab == crate::config_view::TAB && state == PanelState::Collapsed {
+            return div().into_any_element();
+        }
         let sessions = panel.sessions.clone();
         let strip = self.strip(d, panel, ui, cx).into_any_element();
         let surface = div()

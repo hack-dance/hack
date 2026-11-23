@@ -63,6 +63,12 @@ found”** when discovery wrote a placeholder `app` service (a Bun image running
 before `up`. The notice does not appear for a discovered service or when you
 explicitly chose `--manual` or `--no-discovery`.
 
+The desktop project's **Config** tab shows routes, service dependencies and
+which file supplies each setting. Choose **Viewing as** to inspect a checkout
+and **Env** to select an overlay. Save edits to the layer shown. Route changes
+offer a restart, and env-only changes apply the next time a service starts.
+Use `hack config show --json` for the same Compose model from the CLI.
+
 ## Start and open
 
 ```sh

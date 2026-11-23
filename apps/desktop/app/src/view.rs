@@ -36,7 +36,7 @@ use hack_desktop_core::viewmodel::{
 };
 use hack_desktop_ui::components::{
     BannerTone, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, banner, caption,
-    count_pill, dot, empty_pane, icon_button, machine_row, neutral_pill, pill_tab, primary_button,
+    count_pill, dot, empty_pane, icon_button, machine_row, neutral_pill, primary_button,
     project_row, services_table, skeleton, state_pill, status_bar,
 };
 use hack_desktop_ui::icons::Glyph;
@@ -124,6 +124,7 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) config: crate::config_view::ConfigPane,
     pub(crate) copies: crate::copies_view::CopiesPane,
     pub(crate) env: hack_desktop_core::env::EnvModel,
     /// The Env tab's open edit, if any (`env_view`).
@@ -198,6 +199,7 @@ impl HackApp {
             source,
             logs,
             tab: 0,
+            config: Default::default(),
             copies: Default::default(),
             pane: Pane::Project,
             doctor: DoctorPane::default(),
@@ -476,6 +478,7 @@ impl HackApp {
             self.logs.model.set_service(None);
             self.reset_env_selection();
             self.refresh_copies_if_open(cx);
+            self.sync_config_tab(cx);
             if self.tab == 2 {
                 self.read_env(cx);
             }
@@ -661,7 +664,7 @@ impl HackApp {
         .detach();
     }
 
-    fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
         let source = self.source.clone();
         let token = self.model.begin_refresh();
         cx.spawn(async move |this, cx| {
@@ -909,6 +912,7 @@ impl HackApp {
             self.refresh_now();
         }
         self.refresh_copies_if_open(cx);
+        self.sync_config_tab(cx);
         // A service filter belongs to one project: reset it on every
         // project change, whichever tab is open.
         self.logs.model.set_service(None);
@@ -925,7 +929,12 @@ impl HackApp {
             return;
         }
         self.tab = to;
+        #[cfg(hack_terminal)]
+        if to == crate::config_view::TAB {
+            self.collapse_config_terminal(cx);
+        }
         self.refresh_copies_if_open(cx);
+        self.sync_config_tab(cx);
         self.env_edit = None;
         self.env.begin();
         if to == 1 {
@@ -1498,7 +1507,11 @@ impl HackApp {
                             .child(t)
                     }))
                     .child(div().flex_1())
-                    .child(actions),
+                    .child(if self.tab == crate::config_view::TAB && !compact {
+                        self.config_checkout_picker(cx)
+                    } else {
+                        actions.into_any_element()
+                    }),
             )
             .when(!compact, |col| col.child(url_row))
             .children(
@@ -1623,22 +1636,18 @@ impl HackApp {
                 }
             })
             .collect();
-        // With the terminal panel, logs live in the panel's Logs tab.
-        #[cfg(hack_terminal)]
-        let pills: &[(usize, &'static str)] = &[(0, "Services"), (2, "Env"), (3, "Copies")];
-        #[cfg(not(hack_terminal))]
-        let pills: &[(usize, &'static str)] =
-            &[(0, "Services"), (1, "Logs"), (2, "Env"), (3, "Copies")];
-        let mut tabs = div().flex().items_center().gap(space::S2);
-        for &(i, label) in pills {
+        let pills = [(0, "Services"), (1, "Logs"), (2, "Env"), (3, "Copies")];
+        let mut tabs = div().flex().items_center().gap(space::S6);
+        for &(i, label) in pills.iter().chain(&[(crate::config_view::TAB, "Config")]) {
             tabs = tabs.child(
-                pill_tab(("detail-tab", i), label, self.tab == i, ui)
+                crate::config_view::config_tab(("detail-tab", i), label, self.tab == i, ui)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_tab(i, cx))),
             );
         }
         let body: AnyElement = match self.tab {
+            crate::config_view::TAB => self.config_view(ui, window, cx),
             3 => self.copies_view(ui, cx).into_any_element(),
-            1 if cfg!(not(hack_terminal)) => {
+            1 => {
                 // The Logs tab scrolls inside its own virtualized list.
                 let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
                 self.render_logs(&names, cx).into_any_element()

@@ -11,6 +11,7 @@
 //! credentials; every action is one CLI command.
 
 pub mod cli_choice;
+pub mod config;
 pub mod daemon;
 pub mod doctor;
 mod doctor_acl;

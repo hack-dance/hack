@@ -22,6 +22,7 @@ screenshots = ["gpui-kit/test-support", "dep:image", "hack-desktop-ui/screenshot
 terminal = ["dep:hack-desktop-term", "hack-desktop-term/ghostty"]
 
 [dependencies]
+serde_json.workspace = true
 hack-desktop-core.workspace = true
 hack-desktop-ui.workspace = true
 hack-desktop-term = { workspace = true, optional = true }

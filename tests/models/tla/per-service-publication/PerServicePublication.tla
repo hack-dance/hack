@@ -5,6 +5,7 @@ Services == {"first", "second"}
 Aborted == {"failed", "cancelled", "dead", "down"}
 VARIABLES ready, child, recorded, phase, stale, lateBind
 vars == <<ready, child, recorded, phase, stale, lateBind>>
+Retiring == (Aborted \ {"dead"}) \cup {"recovering"}
 Committed == {"committed", "authorized", "bound"}
 Init == /\ ready = {} /\ recorded = {} /\ stale = {} /\ lateBind = FALSE
         /\ child = [s \in Services |-> "absent"] /\ phase = "starting"
@@ -23,7 +24,7 @@ Authorize(s) == /\ phase = "starting" /\ s \notin stale /\ child[s] = "committed
                 /\ UNCHANGED <<ready, recorded, phase, stale, lateBind>>
 Bind(s) == /\ (child[s] = "authorized" \/ (UnsafeBind /\ phase = "starting" /\ child[s] = "gated"))
            /\ child' = [child EXCEPT ![s] = IF @ = "gated" THEN "uncommitted-bind" ELSE "bound"]
-           /\ lateBind' = (lateBind \/ phase = "dead")
+           /\ lateBind' = (lateBind \/ phase \in {"dead", "recovering"})
            /\ UNCHANGED <<ready, recorded, phase, stale>>
 Record(s) == /\ phase = "starting" /\ s \notin recorded
              /\ (child[s] = "bound" \/ (UnsafeRecord /\ child[s] = "gated"))
@@ -37,20 +38,23 @@ Finish == /\ phase = "starting" /\ recorded = Services
           /\ phase' = "ready" /\ UNCHANGED <<ready, child, recorded, stale, lateBind>>
 Abort(reason) == /\ phase = "starting" /\ phase' = reason
                  /\ UNCHANGED <<ready, child, recorded, stale, lateBind>>
-EOFExit(s) == /\ phase \in Aborted /\ child[s] = "gated"
+EOFExit(s) == /\ phase \in Aborted \cup {"recovering"} /\ child[s] = "gated"
               /\ child' = [child EXCEPT ![s] = "absent"]
               /\ UNCHANGED <<ready, recorded, phase, stale, lateBind>>
-Retire(s) == /\ phase \in Aborted /\ child[s] \in Committed
+SelectDeadOwner == /\ phase = "dead"
+                   /\ phase' = "recovering"
+                   /\ UNCHANGED <<ready, child, recorded, stale, lateBind>>
+Retire(s) == /\ phase \in Retiring /\ child[s] \in Committed
              /\ child' = [child EXCEPT ![s] = "absent"]
              /\ recorded' = recorded \ {s}
              /\ UNCHANGED <<ready, phase, stale, lateBind>>
-Settled == /\ phase \in Aborted /\ \A s \in Services : child[s] = "absent"
+Settled == /\ phase \in Retiring /\ \A s \in Services : child[s] = "absent"
            /\ phase' = "retired" /\ UNCHANGED <<ready, child, recorded, stale, lateBind>>
 Next == \/ \E s \in Services :
           Ready(s) \/ Admit(s) \/ Commit(s) \/ Authorize(s) \/ Bind(s)
           \/ Record(s) \/ Stale(s) \/ EOFExit(s) \/ Retire(s)
         \/ \E reason \in Aborted : Abort(reason)
-        \/ Finish \/ Settled
+        \/ Finish \/ SelectDeadOwner \/ Settled
 Safe == /\ \A s \in Services :
              /\ child[s] # "uncommitted-bind"
              /\ (child[s] # "absent" => s \in ready)

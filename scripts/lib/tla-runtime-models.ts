@@ -2428,7 +2428,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "per-service-publication",
     module: "PerServicePublication",
-    states: 669,
+    states: 811,
     invariant: "Safe",
     action: "Record",
     fields: [

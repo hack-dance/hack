@@ -142,7 +142,7 @@ liveness/reachability controls have their own documented assumptions.
 | [authority-lifetime](../../tests/models/tla/authority-lifetime/Lifetime.tla) | 9 | 2 |
 | [publication-journal](../../tests/models/tla/publication-journal/Journal.tla) | 50 | 2 |
 | [publication](../../tests/models/tla/publication/Publication.tla) | 16 | 2 |
-| [per-service-publication](../../tests/models/tla/per-service-publication/COVERAGE.md) | 669 | 4 |
+| [per-service-publication](../../tests/models/tla/per-service-publication/COVERAGE.md) | 811 | 4 |
 | [fence-first](../../tests/models/tla/fence-first/First.tla) | 24 | 2 |
 | [fence-pending](../../tests/models/tla/fence-pending/Fence.tla) | 7 | 2 |
 | [relay-staging](../../tests/models/tla/relay-staging/Stage.tla) | 9 | 2 |

@@ -32,6 +32,11 @@ import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { emptyNativeDependencyPlanId } from "./native-dependency-plan.ts";
 import {
+  awaitNativeEndedBootOwner,
+  NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
+  nativePoolBootProvenEnded,
+} from "./native-ended-boot-owner.ts";
+import {
   adaptNativeGcloudEnvironment,
   hasNativeGcloudCredentialMount,
   type NativeGcloudSelection,
@@ -231,7 +236,10 @@ import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
-import { watchNativeStartPool } from "./native-start-pool-watch.ts";
+import {
+  NATIVE_START_POOL_GRACE_MS,
+  watchNativeStartPool,
+} from "./native-start-pool-watch.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
@@ -466,6 +474,10 @@ type Dependencies = {
   exitMonitorIntervalMs: number;
   /** How often a waiting start reads its graph status (HACK-2351). */
   startupStatusIntervalMs: number;
+  /** Whether the pool record proves the run's owner's boot ended (HACK-2572). */
+  poolBootEnded: (home: string) => Promise<boolean>;
+  /** How long a start waits for such an owner to go (HACK-2572). */
+  endedBootOwnerWaitMs: number;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -500,6 +512,8 @@ const DEFAULTS: Dependencies = {
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
   startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
+  poolBootEnded: nativePoolBootProvenEnded,
+  endedBootOwnerWaitMs: NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
 };
 /**
  * Reports forwarded source names and unset-reference notices for active services.
@@ -2048,21 +2062,55 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   readonly recover: (() => Promise<void>) | undefined;
   readonly warn: (line: string) => void;
   readonly signal?: AbortSignal;
+  readonly poolBootEnded: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs: number;
 }): ReturnType<typeof selectNativeStartup> {
+  let failure: unknown;
   try {
     return await opts.select();
   } catch (error) {
-    if (
-      !(
-        opts.recover &&
-        error instanceof NativeRuntimeRequestError &&
-        error.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
-        !opts.signal?.aborted &&
-        (await nativeRuntimePoolStopped(opts))
-      )
-    ) {
-      throw error;
+    failure = error;
+  }
+  // HACK-2572: the owner of a pool boot that has ended is still exiting. Wait,
+  // bounded, for its refusal to change, then decide as before. A live owner on a
+  // running pool never satisfies the proof and keeps its refusal at once.
+  if (
+    isForegroundOwnerRunning(failure) &&
+    !opts.signal?.aborted &&
+    (await opts.poolBootEnded(opts.runtime.home))
+  ) {
+    let selected: Awaited<ReturnType<typeof selectNativeStartup>> | undefined;
+    await awaitNativeEndedBootOwner({
+      home: opts.runtime.home,
+      notice: opts.warn,
+      signal: opts.signal,
+      waitMs: opts.endedBootOwnerWaitMs,
+      read: async (home) =>
+        (await opts.poolBootEnded(home)) ? ENDED_RECORD : undefined,
+      ownerRunning: async () => {
+        try {
+          selected = await opts.select();
+          return false;
+        } catch (error) {
+          failure = error;
+          return isForegroundOwnerRunning(error);
+        }
+      },
+    });
+    if (selected) {
+      return selected;
     }
+  }
+  if (
+    !(
+      opts.recover &&
+      failure instanceof NativeRuntimeRequestError &&
+      failure.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
+      !opts.signal?.aborted &&
+      (await nativeRuntimePoolStopped(opts))
+    )
+  ) {
+    throw failure;
   }
   await opts.recover();
   requireActiveStartup(opts.signal);
@@ -2072,6 +2120,19 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   return await opts.select();
 }
 const NATIVE_FOREGROUND_OWNER_EXITED = "graph_foreground_owner_exited";
+/** A pool record that proves an ended boot, for the wait's own recheck. */
+const ENDED_RECORD = { token: "", phase: "stopped" };
+/**
+ * Refusals of an owner that may still be alive: running, or ending (its process
+ * exited but not yet reaped, or its publication read mid-change; HACK-2572).
+ */
+function isForegroundOwnerRunning(error: unknown): boolean {
+  return (
+    error instanceof NativeRuntimeRequestError &&
+    (error.nativeCode === "graph_foreground_owner_running" ||
+      error.nativeCode === "graph_foreground_owner_uncertain")
+  );
+}
 /**
  * Before any hook, refuse a retained run whose recorded env selection changed: its
  * env must resolve the same, and it keeps the managed env files it started with. Only
@@ -2679,6 +2740,8 @@ async function startNativeProjectAttempt(
       recover: opts.recoverStoppedPool,
       warn: deps.warn,
       signal: opts.signal,
+      poolBootEnded: deps.poolBootEnded,
+      endedBootOwnerWaitMs: deps.endedBootOwnerWaitMs,
     });
   requireActiveStartup(opts.signal);
   const runtimeMetadata = nativeRuntimeMetadataSelected({
@@ -2814,6 +2877,12 @@ async function startNativeProjectAttempt(
     projectRoot: opts.scope.projectRoot,
     signal: opts.signal,
     invoke: deps.invoke,
+    // A detached owner hands the line to the launcher, as image notices do.
+    notice: (line) => {
+      if (!reportNativeImageNotice(line)) {
+        deps.warn(line);
+      }
+    },
   });
   await deps.prepareStorage(opts.scope);
   // A graph that captures source (bind mounts or a dependency cache) measures it
@@ -3685,13 +3754,17 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
+  // Ready and not stopping: the start has nothing left to finish on its own.
+  let serving = false;
   // A detached start whose pool boot has ended releases its marker and exits,
   // as a crash would, so the next up or down --recover need not wait for it
-  // (HACK-2550). A foreground start stays with the user's terminal.
+  // (HACK-2550). A ready one exits at once, a start still in progress after the
+  // grace. A foreground start stays with the user's terminal.
   const stopPoolWatch =
     (opts.watchPool ?? isNativeDetachedOwnerProcess())
       ? watchNativeStartPool({
           home: opts.runtime.home,
+          graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
           onEnded: async () => {
             await finish?.();
             (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
@@ -3699,9 +3772,22 @@ export async function startNativeProject(
         })
       : undefined;
   try {
-    return await startNativeProjectAttempt(opts, async () => {
-      finish = await beginNativeProjectStartupObservation(opts.scope);
-    });
+    return await startNativeProjectAttempt(
+      {
+        ...opts,
+        onProgress: (event) => {
+          if (event.phase === "ready") {
+            serving = true;
+          } else if (event.phase === "stopping" || event.phase === "stopped") {
+            serving = false;
+          }
+          opts.onProgress?.(event);
+        },
+      },
+      async () => {
+        finish = await beginNativeProjectStartupObservation(opts.scope);
+      }
+    );
   } catch (error) {
     throw withStartupLockBlocker(error);
   } finally {

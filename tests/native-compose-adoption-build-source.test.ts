@@ -2,7 +2,6 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   chmod,
   link,
-  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -27,6 +26,11 @@ import {
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import {
+  mkdirOwnedFixture,
+  ownedFixtureCommand,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 
 const CANARY = "synthetic-private-build-source";
 let root: string;
@@ -43,19 +47,28 @@ beforeEach(async () => {
   root = await realpath(
     await mkdtemp(join(tmpdir(), "retained-build-source-"))
   );
-  await mkdir(join(root, ".hack"));
-  await mkdir(join(root, ".git"));
-  await mkdir(join(root, "src"));
-  await writeFile(join(root, "src/marker"), CANARY);
-  await writeFile(join(root, "Dockerfile"), "FROM scratch\nCOPY src /source\n");
-  await writeFile(join(root, ".dockerignore"), "**\n!Dockerfile\n!src\n");
-  await writeFile(join(root, ".hack/hack.config.json"), '{"name":"fixture"}');
+  await mkdirOwnedFixture(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".git"));
+  await mkdirOwnedFixture(join(root, "src"));
+  await writeOwnedFixture(join(root, "src/marker"), CANARY);
+  await writeOwnedFixture(
+    join(root, "Dockerfile"),
+    "FROM scratch\nCOPY src /source\n"
+  );
+  await writeOwnedFixture(
+    join(root, ".dockerignore"),
+    "**\n!Dockerfile\n!src\n"
+  );
+  await writeOwnedFixture(
+    join(root, ".hack/hack.config.json"),
+    '{"name":"fixture"}'
+  );
   composeText = JSON.stringify({
     name: "fixture",
     services: { db: { build: "..", volumes: ["data:/data"] } },
     volumes: { data: {} },
   });
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
 });
 afterEach(async () => {
   restoreEnv("CI", previousCi);
@@ -86,16 +99,19 @@ async function red(pending: Promise<unknown>) {
 }
 async function linkedSource() {
   async function git(args: readonly string[]) {
-    const child = Bun.spawn(["/usr/bin/git", "-C", root, ...args], {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      env: {
-        ...process.env,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-      },
-    });
+    const child = Bun.spawn(
+      ownedFixtureCommand(["/usr/bin/git", "-C", root, ...args]),
+      {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        env: {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        },
+      }
+    );
     if ((await child.exited) !== 0) {
       throw new Error("Synthetic linked source setup refused; values omitted.");
     }
@@ -179,7 +195,7 @@ test.each([
         : {}),
     },
   });
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
   const inputs = { configText: '{"name":"fixture"}', composeText };
   expect(mapLegacyNativeImport(inputs).report.complete).toBe(true);
   const retained = mapLegacyNativeRetainedBasicBuild(inputs);
@@ -237,7 +253,7 @@ test.each([
     },
     networks: { private: { driver: "bridge", internal } },
   });
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
   const inputs = { configText: '{"name":"fixture"}', composeText };
   const preview = mapLegacyNativeImport(inputs);
   expect(preview.report.complete).toBe(true);
@@ -292,7 +308,7 @@ test.each([
       edge: { driver: "bridge", internal: false },
     },
   });
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
   const inputs = { configText: '{"name":"fixture"}', composeText };
   const preview = mapLegacyNativeImport(inputs);
   expect(preview.report.complete).toBe(true);
@@ -347,7 +363,7 @@ test.each([
     },
     [namespace]: { settings: { file: `./${CANARY}` } },
   });
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
   const inputs = { configText: '{"name":"fixture"}', composeText };
   const preview = mapLegacyNativeImport(inputs);
   expect(preview.report.complete).toBe(true);
@@ -385,7 +401,7 @@ test.each([
 });
 test("creation and edits inside actually ignored owned outputs do not invalidate included source", async () => {
   const captured = await acquire();
-  await mkdir(join(root, ".hack/.internal"));
+  await mkdirOwnedFixture(join(root, ".hack/.internal"));
   await writeFile(join(root, ".hack/.internal/private-output"), CANARY);
   await captured.assertFresh();
   await writeFile(
@@ -406,8 +422,8 @@ test("creation and edits inside actually ignored owned outputs do not invalidate
   });
 });
 test("Dockerfile-specific ignore wins, while both optional ignore identities remain pinned", async () => {
-  await writeFile(join(root, ".dockerignore"), "src\n.git\n.hack\n");
-  await writeFile(
+  await writeOwnedFixture(join(root, ".dockerignore"), "src\n.git\n.hack\n");
+  await writeOwnedFixture(
     join(root, "Dockerfile.dockerignore"),
     "**\n!Dockerfile\n!src\n"
   );
@@ -417,7 +433,7 @@ test("Dockerfile-specific ignore wins, while both optional ignore identities rem
   );
   await writeFile(join(root, "src/marker"), "changed included source");
   await red(captured.assertFresh());
-  await writeFile(join(root, "src/marker"), CANARY);
+  await writeOwnedFixture(join(root, "src/marker"), CANARY);
   await captured.assertFresh();
   await rm(join(root, "Dockerfile.dockerignore"));
   await red(captured.assertFresh());
@@ -469,14 +485,14 @@ test.each([
 test("a held root or included directory replacement cannot match same bytes", async () => {
   const captured = await acquire();
   await rename(join(root, "src"), join(root, "old-src"));
-  await mkdir(join(root, "src"));
-  await writeFile(join(root, "src/marker"), CANARY);
+  await mkdirOwnedFixture(join(root, "src"));
+  await writeOwnedFixture(join(root, "src/marker"), CANARY);
   await red(captured.assertFresh());
 });
 test("parents of an excluded Dockerfile remain identity-bound special builder inputs", async () => {
-  await mkdir(join(root, "definitions"));
+  await mkdirOwnedFixture(join(root, "definitions"));
   await rename(join(root, "Dockerfile"), join(root, "definitions/Dockerfile"));
-  await writeFile(join(root, ".dockerignore"), "**\n!src\n");
+  await writeOwnedFixture(join(root, ".dockerignore"), "**\n!src\n");
   composeText = JSON.stringify({
     name: "fixture",
     services: {
@@ -487,10 +503,10 @@ test("parents of an excluded Dockerfile remain identity-bound special builder in
     },
     volumes: { data: {} },
   });
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
   const captured = await acquire();
   await rename(join(root, "definitions"), join(root, "old-definitions"));
-  await mkdir(join(root, "definitions"));
+  await mkdirOwnedFixture(join(root, "definitions"));
   await rename(
     join(root, "old-definitions/Dockerfile"),
     join(root, "definitions/Dockerfile")
@@ -518,10 +534,13 @@ test("an ignored symlink cannot become a included input or leak its target", asy
   await captured.assertFresh();
 });
 test("a disjoint context without ignore files pins absent ignore presence", async () => {
-  await mkdir(join(root, ".hack/build"));
-  await writeFile(join(root, ".hack/build/Dockerfile"), "FROM scratch\n");
+  await mkdirOwnedFixture(join(root, ".hack/build"));
+  await writeOwnedFixture(
+    join(root, ".hack/build/Dockerfile"),
+    "FROM scratch\n"
+  );
   composeText = composeText.replace('"build":".."', '"build":"build"');
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
   const captured = await acquire();
   expect(captured.proof.contexts[0]?.effectiveIgnore).toBeNull();
   await writeFile(
@@ -534,7 +553,7 @@ test("same ignore bytes at a replacement inode cannot repair saved source", asyn
   const captured = await acquire();
   const text = await readFile(join(root, ".dockerignore"));
   await rename(join(root, ".dockerignore"), join(root, "old-ignore"));
-  await writeFile(join(root, ".dockerignore"), text);
+  await writeOwnedFixture(join(root, ".dockerignore"), text);
   await red(captured.assertFresh());
 });
 test("a cloned source cannot issue a build capability", async () => {
@@ -559,7 +578,7 @@ test("explicit build policy refuses before any included context file is opened",
     },
     volumes: { data: {} },
   });
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
   const source = await acquireLegacyAdoptionSourceInputs({
     projectRoot: root,
     allowLinkedWorktree: true,
@@ -657,10 +676,13 @@ test.each([
   }
 });
 test(".hack context excludes switched authored files while preserving its included inputs", async () => {
-  await writeFile(join(root, ".hack/Dockerfile"), "FROM scratch\n");
-  await writeFile(join(root, ".hack/.dockerignore"), "**\n!Dockerfile\n");
+  await writeOwnedFixture(join(root, ".hack/Dockerfile"), "FROM scratch\n");
+  await writeOwnedFixture(
+    join(root, ".hack/.dockerignore"),
+    "**\n!Dockerfile\n"
+  );
   composeText = composeText.replace('"build":".."', '"build":"."');
-  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), composeText);
   const captured = await acquire();
   expect(captured.proof.contexts[0]?.context).toBe(".hack");
   await captured.assertFresh();

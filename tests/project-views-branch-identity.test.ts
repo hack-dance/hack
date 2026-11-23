@@ -8,6 +8,10 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import {
+  listNativeBranchRecords,
+  listNativeCopyInstances,
+} from "../src/lib/branch-instance-identity.ts";
 import { readBranchUsage, recordBranchUsage } from "../src/lib/branch-usage.ts";
 import {
   buildProjectViews,
@@ -664,4 +668,20 @@ test("an explicit --branch is its name, except when login autostart replays the 
   } finally {
     restoreEnv("HACK_AUTOSTART_LOGIN", previous);
   }
+});
+
+test("copies discovers authored start scopes before a ready mapping exists", async () => {
+  const { repoRoot, projectDir } = await createProject({});
+  await writeNativeRun({
+    projectDir,
+    dir: "native-authored-runs",
+    branch: "first-start",
+    suffix: ".start",
+  });
+  const checkout = { root: repoRoot, projectDir, kind: "primary" as const };
+  const opts = { checkout, store: "authored" as const };
+  expect(
+    await listNativeCopyInstances({ ...opts, includePending: true })
+  ).toEqual(["first-start"]);
+  expect(await listNativeBranchRecords(opts)).toEqual([]);
 });

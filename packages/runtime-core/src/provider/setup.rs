@@ -255,6 +255,7 @@ fn verified_install(candidate: &Candidate) -> Result<(), CandidateError> {
 fn observe_existing(
     candidate: &Candidate,
     verify: &impl Fn(&Candidate) -> Result<(), CandidateError>,
+    retire: Option<&[FilePin]>,
 ) -> Result<bool, CandidateError> {
     let target = candidate.state_root.join("providers");
     crate::reject_aliased_state(&target).map_err(|_| {
@@ -266,22 +267,38 @@ fn observe_existing(
     if !target.try_exists().map_err(state::io)? {
         return Ok(false);
     }
+    let setup = candidate.state_root.join("setup");
+    let setup_lock = retire.and_then(|_| {
+        let downloads = setup.join("downloads");
+        downloads.symlink_metadata().ok()?;
+        state::Lock::acquire_existing(&setup).ok().or_else(|| {
+            eprintln!(
+                "Native setup kept provider downloads because the setup lock was unavailable."
+            );
+            None
+        })
+    });
     // Existing-only admission never creates directories or a lock before consent.
     let _lock = state::Lock::acquire_existing(&candidate.state_root.join("run/smolvm")).map_err(|e| {
         if e.code == "provider_busy" { e } else { CandidateError::new("setup_existing_invalid", "Existing provider lock is missing or unsafe; files were preserved. Finish manual preparation or use a fresh native home.") }
     })?;
-    reuse(candidate, &target, verify)
+    let ready = reuse(candidate, &target, verify)?;
+    if ready && let (Some(_setup_lock), Some(files)) = (setup_lock, retire) {
+        retire_downloads(candidate, files);
+    }
+    Ok(ready)
 }
 
 /// Verify a complete installation before asking for download consent. An absent home
-/// creates nothing; an existing home uses its retained lock. The provider set is only
-/// read. With [`BuilderSource::Absent`] the image builder is only read too; with a
-/// source, a complete home that lacks the builder gains it and nothing else changes.
+/// creates nothing; an existing home uses its retained lock. Online reuse may retire
+/// proven setup downloads. Offline reuse preserves all possible caller inputs.
 pub fn reuse_existing(
     candidate: &Candidate,
     builder: BuilderSource<'_>,
+    offline: bool,
 ) -> Result<Option<serde_json::Value>, CandidateError> {
-    if !observe_existing(candidate, &verified_install)? {
+    let (files, _) = pin_set()?;
+    if !observe_existing(candidate, &verified_install, (!offline).then_some(&files))? {
         return Ok(None);
     }
     let installation =
@@ -300,7 +317,7 @@ pub fn run(
     accepted: bool,
 ) -> Result<serde_json::Value, CandidateError> {
     let builder = BuilderSource::select(inputs, accepted);
-    if let Some(result) = reuse_existing(candidate, builder)? {
+    if let Some(result) = reuse_existing(candidate, builder, inputs.is_some())? {
         return Ok(result);
     }
     if inputs.is_none() {
@@ -414,6 +431,9 @@ fn install(
     {
         let _provider_lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
         if reuse(candidate, &target, &verify)? {
+            if inputs.is_none() {
+                retire_downloads(candidate, files);
+            }
             return Ok(Installation::reused());
         }
     }
@@ -436,8 +456,12 @@ fn install(
     } else {
         state::private_directory(&downloads)?;
         let client = client()?;
-        for pin in files {
-            results.push(download::acquire(&client, &downloads, pin)?);
+        for (index, pin) in files.iter().enumerate() {
+            results.push(if index < 2 {
+                download::acquire_provider_archive(&client, &downloads, pin)?
+            } else {
+                download::acquire(&client, &downloads, pin)?
+            });
         }
         (
             downloads.join(files[0].name()?),
@@ -451,6 +475,9 @@ fn install(
     if reuse(candidate, &target, &verify)? {
         // A manual prepare may have finished while inputs were acquired. Keep
         // the actual transfer accounting even though publication is now a no-op.
+        if inputs.is_none() {
+            retire_downloads(candidate, files);
+        }
         return Ok(Installation::new("reused", results));
     }
     publish(candidate, &setup, &target, |staged| {
@@ -465,7 +492,35 @@ fn install(
         )?;
         verify(staged)
     })?;
+    if inputs.is_none() {
+        retire_downloads(candidate, files);
+    }
     Ok(Installation::new("installed", results))
+}
+
+/// A retry may have observed publication before the original setup synced it.
+fn retire_downloads(candidate: &Candidate, files: &[FilePin]) {
+    let directory = download_directory(candidate);
+    if matches!(directory.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        return;
+    }
+    if fs::File::open(&candidate.state_root)
+        .and_then(|home| home.sync_all())
+        .is_err()
+    {
+        eprintln!("Native setup kept provider downloads because it could not sync publication.");
+        return;
+    }
+    for pin in files.iter().take(2) {
+        if download::remove_provider_archive(&directory, pin).is_err() {
+            eprintln!(
+                "Native setup kept {} because safe archive removal could not be proven.",
+                pin.name().unwrap_or("provider archive")
+            );
+        }
+        #[cfg(test)]
+        tests::publication_checkpoint("between_unlinks");
+    }
 }
 
 fn reuse(

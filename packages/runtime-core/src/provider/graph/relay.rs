@@ -616,6 +616,86 @@ pub(super) fn verify_cleanup(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn relay_start_prepares_compact_socket_parent_and_refuses_replacements() {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
+        use std::os::unix::net::UnixListener;
+        use std::process::Command;
+
+        // A real Unix bind needs a short path even when TMPDIR is deep.
+        let fixture = super::super::tests::Fixture(crate::private_test_root(
+            std::path::Path::new("/tmp"),
+            "hack-relay",
+        ));
+        let base = fixture.0.join("hack-local");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&base)
+            .unwrap();
+        let owner = base.metadata().unwrap();
+        let compact = fixture.0.join("hb");
+        let body = script("", "start");
+        // Run the real launch checks up to payload staging. This fixture
+        // substitutes the guest filesystem and uid, and needs no container netns.
+        let prefix = body.split_once(" mkdir -m 700 \"$root\"").unwrap().0;
+        let program = format!("{prefix}\nfi\n")
+            .replace(
+                "test \"$(findmnt -n -o FSTYPE --target /run/hack-local)\" = tmpfs",
+                ":",
+            )
+            .replace("/run/hack-local", base.to_str().unwrap())
+            .replace("/run/hb", compact.to_str().unwrap())
+            .replace("0:0:", &format!("{}:{}:", owner.uid(), owner.gid()));
+        let run = |socket: &str, slot: &str| {
+            // Each call represents an independent guest start selection.
+            let controls = base.join("relay-slots");
+            if controls.exists() {
+                std::fs::remove_dir_all(controls).unwrap();
+            }
+            let path = socket
+                .replace("/run/hack-local", base.to_str().unwrap())
+                .replace("/run/hb", compact.to_str().unwrap());
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &program,
+                    "relay-start-test",
+                    "start",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "marker",
+                    &path,
+                    "digest",
+                    "1",
+                    "1",
+                    "8080",
+                    "1",
+                    slot,
+                    "reservation-v1",
+                ])
+                .output()
+                .unwrap()
+        };
+        let legacy = super::super::super::PoolLayout::Legacy.bridge(0);
+        assert!(run(&legacy, "0").status.success());
+        assert!(!compact.exists());
+
+        let socket = super::super::super::PoolLayout::CompactV1.bridge(1);
+        let result = run(&socket, "1");
+        assert!(result.status.success(), "{:?}", result.stderr);
+        let listener = UnixListener::bind(compact.join("01")).unwrap();
+        assert!(!run(&socket, "1").status.success());
+        drop(listener);
+        std::fs::remove_file(compact.join("01")).unwrap();
+        assert!(!run(&socket, "2").status.success());
+
+        std::fs::set_permissions(&compact, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!run(&socket, "1").status.success());
+        std::fs::remove_dir(&compact).unwrap();
+        symlink(&base, &compact).unwrap();
+        assert!(!run(&socket, "1").status.success());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn retirement_inspection_refuses_reused_pid_before_live_classification() {

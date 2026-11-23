@@ -459,7 +459,13 @@ if (role === "channel-holder") {
       unwindMs: 3000,
     });
   } catch (error) {
+    if (mode === "build-progress" && process.env.FIXTURE_TEXT_OUTPUT) {
+      process.stderr.write(`${String(error)}\n`);
+    }
     process.exitCode = [
+      ...(mode === "build-progress" && !process.env.FIXTURE_TEXT_OUTPUT
+        ? ["build-progress"]
+        : []),
       "wrapped-failure",
       "wrapped-static-failure",
       "builder-missing",
@@ -469,7 +475,6 @@ if (role === "channel-holder") {
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
-      "build-progress",
       "image-batch-errors",
       "prestart-refusal",
       "prestart-after-runtime",
@@ -481,10 +486,7 @@ if (role === "channel-holder") {
       "images-ceiling",
       "images-wait-ceiling",
     ].includes(mode)
-      ? await handleRunCliError({
-          error,
-          jsonRequested: !process.env.FIXTURE_TEXT_OUTPUT,
-        })
+      ? await handleRunCliError({ error, jsonRequested: true })
       : 1;
   } finally {
     restore?.();

@@ -21,6 +21,7 @@ import {
 import { resolveDesktopComposeProjectName } from "../src/lib/compose-project-name.ts";
 import { readLifecycleState } from "../src/lib/lifecycle-runtime.ts";
 import { sanitizeProjectSlug } from "../src/lib/project.ts";
+import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import {
   mkdirOwnedFixture,
@@ -144,9 +145,11 @@ async function writeInterpolatedStack(projectRoot: string, variable: string) {
 async function installComposeNameFixture(opts?: {
   readonly failFirstProbe?: boolean;
   readonly holdStart?: boolean;
+  readonly holdBeforePin?: boolean;
   readonly foreignCheckout?: string;
   readonly foreignStack?: string;
   readonly startContainers?: boolean;
+  readonly savedContextOnly?: boolean;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
@@ -155,9 +158,10 @@ import { rm } from "node:fs/promises";
 const fixture = ${JSON.stringify(root)};
 const options = ${JSON.stringify(opts ?? {})};
 const args = process.argv.slice(2);
-const mode = args.find((arg) => ["config", "ps", "inspect", "up", "down", "exec"].includes(arg));
+const mode = args.find((arg) => ["config", "ps", "inspect", "up", "down", "exec", "stop"].includes(arg));
 const running = fixture + "/compose-running";
 const containerId = "f".repeat(64);
+const context = process.env.DOCKER_CONTEXT || "none";
 if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   const model = JSON.parse(await Bun.stdin.text());
   if (options.failFirstProbe && !(await Bun.file(fixture + "/name-probed").exists())) {
@@ -190,13 +194,25 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   process.stdout.write("/app\\x0041ed:10:32\\0");
 } else if (mode === "ps" || mode === "inspect") {
   const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || "sample";
+  if (options.holdBeforePin && mode === "ps" && stack === "sample" && !(await Bun.file(fixture + "/release-start").exists())) {
+    await Bun.write(fixture + "/before-pin", "entered");
+    const deadline = Date.now() + 12000;
+    while (!(await Bun.file(fixture + "/release-start").exists())) {
+      if (Date.now() > deadline) process.exit(99);
+      await Bun.sleep(10);
+    }
+  }
   const foreign = !options.foreignStack || options.foreignStack === stack;
-  const directory = (foreign ? options.foreignCheckout : undefined) ?? (await Bun.file(running).exists() ? process.cwd() : null);
+  const inSavedContext = !options.savedContextOnly || context === "saved-files-context";
+  const directory = (foreign ? options.foreignCheckout : undefined) ?? (inSavedContext && await Bun.file(running).exists() ? process.cwd() : null);
   process.stdout.write(JSON.stringify(directory ? [{
     ID: "fixture-container", Service: "app", State: "running",
     Labels: "com.docker.compose.project.working_dir=" + directory
   }] : []));
 } else if (mode === "up") {
+  if (args.includes("--force-recreate")) {
+    await Bun.write(fixture + "/restart-context", context);
+  }
   if (options.holdStart && args.includes("--no-start")) {
     await Bun.write(fixture + "/compose-start", JSON.stringify(args));
     const deadline = Date.now() + 12000;
@@ -210,6 +226,9 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
 } else if (mode === "down") {
   await Bun.write(fixture + "/compose-down", JSON.stringify(args));
   await Bun.write(fixture + "/down-overlay", process.env.COMPOSE_PROJECT_NAME || "none");
+  await rm(running, { force: true });
+} else if (mode === "stop") {
+  await Bun.write(fixture + "/stop-context", context);
   await rm(running, { force: true });
 }
 `,
@@ -487,6 +506,110 @@ test("ordinary Down checks ownership of a stack named by a managed override", as
   expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
 }, 40_000);
 
+test("ordinary Down waits for desktop Start to publish its pin before selecting the stack", async () => {
+  const projectDir = join(root, "project", ".hack");
+  await configureManagedNameOverlay({ defaultOverlay: true });
+  await writeRegistry(false);
+  await installComposeNameFixture({
+    startContainers: true,
+    holdBeforePin: true,
+  });
+  const start = run([
+    "up",
+    "-d",
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "sample",
+    "--json",
+  ]);
+  const release = Bun.file(join(root, "release-start"));
+  let down: ReturnType<typeof run> | undefined;
+  try {
+    await waitForCondition(
+      () => Bun.file(join(root, "before-pin")).exists(),
+      "Start did not reach the ownership preflight"
+    );
+    expect(
+      await readProjectRuntimeStateEntry({
+        projectDir,
+        composeProject: "sample",
+      })
+    ).toBeNull();
+    down = run(["down", "--json"]);
+    await waitForCondition(
+      async () => (await marker()).paused,
+      "Down did not publish pause before waiting"
+    );
+    await Promise.race([Bun.sleep(250), down]);
+    expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+    await Bun.write(release, "release");
+    const started = await start;
+    expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+    const stopped = await down;
+    expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+    expect(
+      (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+    ).toEqual(["compose", "-p", "sample"]);
+    expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
+  } finally {
+    await Bun.write(release, "release");
+    await Promise.allSettled([start, down]);
+  }
+}, 40_000);
+
+test("ordinary Down publishes pause before reading an invalid managed overlay", async () => {
+  await configureManagedNameOverlay({ defaultOverlay: true });
+  await writeOwnedFixture(
+    join(root, "project", ".hack", "hack.env.qa.yaml"),
+    "invalid: [\n"
+  );
+  await writeRegistry(false);
+  await installComposeNameFixture();
+  const stopped = await run(["down", "--json"]);
+  expect(stopped.exitCode).toBe(1);
+  expect(stopped.stderr || stopped.stdout).toContain("Failed to parse");
+  expect((await marker()).paused).toBe(true);
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+});
+
+test("bound service Restart and Stop use the legacy stack's saved Docker context", async () => {
+  const projectRoot = join(root, "project");
+  const projectDir = join(projectRoot, ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    '{"name":"sample","dev_host":"sample.hack"}'
+  );
+  await writeInterpolatedStack(projectRoot, "STACK_A");
+  await installComposeNameFixture({
+    startContainers: true,
+    savedContextOnly: true,
+  });
+  await writeOwnedFixture(
+    join(projectDir, "hack.env.qa.yaml"),
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n"
+  );
+  const started = await run(["up", "-d", "--env", "qa", "--json"]);
+  expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+  const bound = [
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "sample",
+    "--json",
+  ];
+  const restarted = await run(["restart", "app", ...bound]);
+  expect(restarted.exitCode, restarted.stderr || restarted.stdout).toBe(0);
+  expect(await Bun.file(join(root, "restart-context")).text()).toBe(
+    "saved-files-context"
+  );
+  const stopped = await run(["down", "--service", "app", ...bound]);
+  expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+  expect(await Bun.file(join(root, "stop-context")).text()).toBe(
+    "saved-files-context"
+  );
+}, 40_000);
+
 test("ordinary Down refuses an interpolated branch stack owned by another checkout", async () => {
   await writeInterpolatedStack(join(root, "project"), "STACK_A");
   await installComposeNameFixture({
@@ -504,11 +627,28 @@ test("ordinary Down refuses an interpolated branch stack owned by another checko
 });
 
 const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
-for (const desktopStarts of [true, false]) {
+for (const { desktopStarts, action, description } of [
+  {
+    desktopStarts: true,
+    action: "down",
+    description:
+      "ordinary Down stops the host process launched by desktop Start",
+  },
+  {
+    desktopStarts: false,
+    action: "down",
+    description:
+      "desktop Stop retires the legacy host process launched by ordinary Start",
+  },
+  {
+    desktopStarts: false,
+    action: "restart",
+    description:
+      "desktop Restart replaces the legacy host process launched by ordinary Start",
+  },
+]) {
   test.skipIf(!supervisorBinary)(
-    desktopStarts
-      ? "ordinary Down stops the host process launched by desktop Start"
-      : "desktop Stop retires the legacy host process launched by ordinary Start",
+    description,
     async () => {
       const projectRoot = join(root, "project");
       const projectDir = join(projectRoot, ".hack");
@@ -555,14 +695,16 @@ for (const desktopStarts of [true, false]) {
         expect(pid).toBeGreaterThan(1);
         expect(() => process.kill(-pid, 0)).not.toThrow();
         const stopped = await run(
-          ["down", ...(desktopStarts ? ["--json"] : bound)],
+          [action, ...(desktopStarts ? ["--json"] : bound)],
           false,
           projectRoot,
           env
         );
         expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
-        expect(await readLifecycleState({ projectDir })).toHaveLength(0);
         expect(() => process.kill(-pid, 0)).toThrow();
+        expect(await readLifecycleState({ projectDir })).toHaveLength(
+          action === "restart" ? 1 : 0
+        );
       } finally {
         await run(["down", ...bound], false, projectRoot, env);
       }

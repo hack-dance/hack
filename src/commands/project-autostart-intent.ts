@@ -72,6 +72,62 @@ interface AutostartCommandSelection {
   readonly branch?: string;
 }
 
+async function resolveAutostartDownBranch(opts: {
+  readonly project: ProjectContext;
+  readonly cfg: ProjectConfig;
+  readonly branch?: string;
+}) {
+  const raw = opts.branch?.trim();
+  const explicitBranch = raw ? sanitizeBranchSlug(raw) || "branch" : null;
+  const effective = await resolveEffectiveBranch({
+    explicitBranch,
+    projectRoot: opts.project.projectRoot,
+    autoBranchEnabled: resolveWorktreeAutoBranch(opts.cfg),
+  });
+  if (effective.source === "detached-worktree") {
+    throw new CliUsageError(
+      "Detached linked worktree requires an explicit --branch <name>."
+    );
+  }
+  return { explicitBranch, effective };
+}
+
+/** Serialize name discovery with publishing a desktop Start's explicit pin. */
+export async function withComposeCheckoutLock<T>(
+  opts: AutostartCommandSelection & {
+    readonly beforeLock?: (target: {
+      readonly branch: string | null;
+    }) => Promise<void>;
+    readonly run: () => Promise<T>;
+  }
+): Promise<T> {
+  const registry = await readProjectsRegistry();
+  const context = await discoverAutostartCommandContext({ ...opts, registry });
+  if (!context) {
+    return await opts.run();
+  }
+  const { project } = context;
+  if (opts.beforeLock) {
+    const { explicitBranch, effective } = await resolveAutostartDownBranch({
+      project,
+      cfg: await readProjectConfig(project),
+      branch: opts.branch,
+    });
+    if (explicitBranch !== null || effective.branch === null) {
+      await opts.beforeLock({ branch: effective.branch });
+    }
+  }
+  return await withAutostartProjectLock({
+    scope: {
+      projectId: "",
+      // A checkout lock uses a distinct namespace from valid Compose names.
+      composeProject: `checkout:${await realpath(project.projectDir)}`,
+      branch: null,
+    },
+    run: opts.run,
+  });
+}
+
 /** Resolve once before pause, locking and shutdown; an owned base target is explicit null. */
 export async function resolveFinalAutostartDownTarget(
   opts: AutostartCommandSelection & {
@@ -96,18 +152,11 @@ export async function resolveFinalAutostartDownTarget(
   }
   const { project, registration } = context;
   const cfg = await readProjectConfig(project);
-  const raw = opts.branch?.trim();
-  const explicitBranch = raw ? sanitizeBranchSlug(raw) || "branch" : null;
-  const effective = await resolveEffectiveBranch({
-    explicitBranch,
-    projectRoot: project.projectRoot,
-    autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
+  const { explicitBranch, effective } = await resolveAutostartDownBranch({
+    project,
+    cfg,
+    branch: opts.branch,
   });
-  if (effective.source === "detached-worktree") {
-    throw new CliUsageError(
-      "Detached linked worktree requires an explicit --branch <name>."
-    );
-  }
   const targetFor = async (
     branch: string | null
   ): Promise<AutostartDownTarget> => {
@@ -359,14 +408,20 @@ export async function withAutostartCommandLock<T>(opts: {
     if (opts.expectComposeProject !== undefined) {
       // The desktop sends the full name, including any branch suffix.
       // Execution revalidates it under this lock before mutating Compose.
-      return await withAutostartProjectLock({
-        scope: {
-          projectId: "",
-          composeProject: opts.expectComposeProject,
-          branch: null,
-        },
-        run: opts.run,
-      });
+      const name = opts.expectComposeProject;
+      const run = () =>
+        withAutostartProjectLock({
+          scope: {
+            projectId: "",
+            composeProject: name,
+            branch: null,
+          },
+          run: opts.run,
+        });
+      if (opts.action === "up" || opts.action === "restart") {
+        return await withComposeCheckoutLock({ ...opts, run });
+      }
+      return await run();
     }
     if (opts.action !== "down") {
       return await opts.run();

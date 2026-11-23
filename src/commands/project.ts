@@ -603,6 +603,7 @@ import {
   resolveFinalAutostartDownTarget,
   updateNativeAutostartIntent,
   withAutostartCommandLock,
+  withComposeCheckoutLock,
 } from "./project-autostart-intent.ts";
 import { enableAutostartForUp } from "./project-autostart-opt-in.ts";
 import {
@@ -8938,38 +8939,64 @@ async function handleDown(
   const flagTimeoutSeconds = isNativeBackend
     ? undefined
     : parseComposeDownTimeoutFlag(input.args.options.timeout);
+  const discoverComposeTarget =
+    !isNativeBackend && input.args.options.expectComposeProject === undefined;
+  const run = () =>
+    runWholeDown({ input, flagTimeoutSeconds, discoverComposeTarget });
+  if (!discoverComposeTarget) {
+    return await run();
+  }
+  return await withComposeCheckoutLock({
+    cwd: input.ctx.cwd,
+    path: input.args.options.path,
+    project: input.args.options.project,
+    branch: input.args.options.branch,
+    beforeLock: (resolvedDownTarget) =>
+      updateAutostartIntent({ ...input, action: "down", resolvedDownTarget }),
+    run,
+  });
+}
+
+async function runWholeDown({
+  input,
+  flagTimeoutSeconds,
+  discoverComposeTarget,
+}: {
+  readonly input: Parameters<typeof handleDownUnlocked>[0];
+  readonly flagTimeoutSeconds?: number;
+  readonly discoverComposeTarget: boolean;
+}): Promise<number> {
   // Publish stop intent before waiting for an earlier start to release its lock.
-  const resolvedDownTarget =
-    isNativeBackend || input.args.options.expectComposeProject !== undefined
-      ? undefined
-      : await resolveFinalAutostartDownTarget(
-          {
-            cwd: input.ctx.cwd,
-            path: input.args.options.path,
-            project: input.args.options.project,
-            branch: input.args.options.branch,
-            writeNotice: (notice) =>
-              writeDownNotice({
-                json: input.args.options.json === true,
-                ...notice,
-              }),
-          },
-          {
-            resolveComposeTarget: (target) =>
-              resolveLocalDownComposeTarget({
-                ...target,
-                target: input.args.options.target,
-                envOption: input.args.options.env,
-              }),
-            isLocalTarget: async (project) =>
-              (
-                await resolveProjectLifecycleTarget({
-                  project,
-                  requestedTarget: input.args.options.target,
-                })
-              ).resolvedTarget === "local",
-          }
-        );
+  const resolvedDownTarget = discoverComposeTarget
+    ? await resolveFinalAutostartDownTarget(
+        {
+          cwd: input.ctx.cwd,
+          path: input.args.options.path,
+          project: input.args.options.project,
+          branch: input.args.options.branch,
+          writeNotice: (notice) =>
+            writeDownNotice({
+              json: input.args.options.json === true,
+              ...notice,
+            }),
+        },
+        {
+          resolveComposeTarget: (target) =>
+            resolveLocalDownComposeTarget({
+              ...target,
+              target: input.args.options.target,
+              envOption: input.args.options.env,
+            }),
+          isLocalTarget: async (project) =>
+            (
+              await resolveProjectLifecycleTarget({
+                project,
+                requestedTarget: input.args.options.target,
+              })
+            ).resolvedTarget === "local",
+        }
+      )
+    : undefined;
   const pinned = {
     ...input,
     flagTimeoutSeconds,
@@ -9043,23 +9070,25 @@ async function handleServiceDown({
       expected: args.options.expectComposeProject,
     });
     const targetNames = resolveRestartTarget({ baseProjectName: base, branch });
-    const { lifecycleComposeProject } = targetNames;
     const composeProjectName = desktopComposeTarget({
       expected: args.options.expectComposeProject,
       base,
       computed: targetNames.composeProjectName,
     });
-    const envName = await resolveStoredRuntimeEnvName({
-      requestedEnvName: resolveRequestedEnvName({
+    const { projectName, lifecycleComposeProject } =
+      await resolveStoredComposeLifecycleKey({
+        project,
+        branch,
+        base,
+        legacyBase: await resolveComposeProjectName({ project, cfg }),
+      });
+    const { env } = await resolveDownRuntimeEnv({
+      project,
+      projectName,
+      lifecycleComposeProject,
+      envName: resolveRequestedEnvName({
         envOption: args.options.env,
       }),
-      projectDir: project.projectDir,
-      composeProject: lifecycleComposeProject,
-    });
-    const env = await resolveLifecycleEnvForProject({
-      project,
-      projectName: sanitizeProjectSlug(base),
-      envName,
     });
     const { profiles } = await resolveInstanceStopSelection({
       projectDir: project.projectDir,
@@ -9369,18 +9398,18 @@ async function resolveLocalDownComposeTarget(opts: {
   };
 }
 
-async function resolveDownLifecycleEnv(opts: {
+async function resolveDownRuntimeEnv(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
   readonly lifecycleComposeProject: string;
   readonly envName: string | null | undefined;
-}): Promise<Readonly<Record<string, string>>> {
+}): ReturnType<typeof resolveProjectExecutionEnv> {
   const envName = await resolveStoredRuntimeEnvName({
     requestedEnvName: opts.envName,
     projectDir: opts.project.projectDir,
     composeProject: opts.lifecycleComposeProject,
   });
-  return await resolveLifecycleEnvForProject({ ...opts, envName });
+  return await resolveProjectExecutionEnv({ ...opts, envName });
 }
 
 export async function resolveStoredComposeLifecycleKey(opts: {
@@ -9763,16 +9792,15 @@ async function runDownCommand({
           : await resolveComposeProjectName({ project, cfg }),
     }));
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
-  const lifecycleEnv =
-    lockedTarget?.lifecycleEnv ??
-    (await resolveDownLifecycleEnv({
+  const { lifecycleEnv, env: composeEnv } =
+    lockedTarget ??
+    (await resolveDownRuntimeEnv({
       project,
       projectName,
       lifecycleComposeProject,
       envName,
     }));
 
-  const composeEnv = lockedTarget?.env ?? lifecycleEnv;
   const interruptionCheck = await checkOneShotInterruption({
     project,
     composeProjectName,
@@ -11285,14 +11313,19 @@ async function runRestartCommand({
     await preflightLifecycleSupervisor();
   }
   const targetNames = resolveRestartTarget({ baseProjectName, branch });
-  const { lifecycleComposeProject } = targetNames;
   const composeProjectName = desktopComposeTarget({
     expected: args.options.expectComposeProject,
     base: baseProjectName,
     computed: targetNames.composeProjectName,
   });
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
-  const projectName = sanitizeProjectSlug(baseProjectName);
+  const { projectName, lifecycleComposeProject } =
+    await resolveStoredComposeLifecycleKey({
+      project,
+      branch,
+      base: baseProjectName,
+      legacyBase: await resolveComposeProjectName({ project, cfg }),
+    });
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
     requested: args.positionals.services,
@@ -11354,11 +11387,6 @@ async function runRestartCommand({
       exitCode: 0,
     });
   }
-  const lifecycleEnv = await resolveLifecycleEnvForProject({
-    project,
-    projectName,
-    envName: effectiveEnvName,
-  });
   const preflightEnv = await resolveComposeEnvOverrides({
     project,
     projectName,
@@ -11390,7 +11418,7 @@ async function runRestartCommand({
     project,
     composeProjectName,
     profiles,
-    env: lifecycleEnv,
+    env: preflightEnv.env,
     action: "restart",
   });
   const downPhase = await runRestartDownPhase({
@@ -11402,7 +11430,7 @@ async function runRestartCommand({
     lifecycleComposeProject,
     profiles,
     branch,
-    envForCompose: lifecycleEnv,
+    envForCompose: preflightEnv.lifecycleEnv,
     routeStdoutToStderr: json,
     preserveComposeRuntime: true,
   });

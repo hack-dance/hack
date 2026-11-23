@@ -45,6 +45,11 @@ checks that Down publishes pause and waits for the lock on that effective stack
 before sending teardown to the same name. This exercises the name mapping that
 the model assumes. A separate source regression checks that Down keeps the name
 pinned by Desktop Start while delivering its saved overlay.
+Ordinary Down publishes pause for a known copy before reading its overlay or
+waiting for its checkout lock. A pre-publication race regression holds Desktop
+Start before its pin is saved and verifies that Down waits and then stops that
+same stack. This checkout lock and overlay-read failure are implementation
+details outside the finite model.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

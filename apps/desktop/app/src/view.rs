@@ -125,6 +125,7 @@ pub struct HackApp {
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
     pub(crate) copies: crate::copies_view::CopiesPane,
+    pub(crate) files: crate::files_view::ProjectFiles,
     pub(crate) env: hack_desktop_core::env::EnvModel,
     /// The Env tab's open edit, if any (`env_view`).
     pub(crate) env_edit: Option<crate::env_view::EnvEdit>,
@@ -199,6 +200,7 @@ impl HackApp {
             logs,
             tab: 0,
             copies: Default::default(),
+            files: Default::default(),
             pane: Pane::Project,
             doctor: DoctorPane::default(),
             window_visible: true,
@@ -899,6 +901,7 @@ impl HackApp {
 
     pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Project;
+        self.files = Default::default();
         self.user_navigated();
         self.copied = None;
         self.reset_env_selection();
@@ -925,6 +928,7 @@ impl HackApp {
             return;
         }
         self.tab = to;
+        self.files = Default::default();
         self.refresh_copies_if_open(cx);
         self.env_edit = None;
         self.env.begin();
@@ -1625,10 +1629,20 @@ impl HackApp {
             .collect();
         // With the terminal panel, logs live in the panel's Logs tab.
         #[cfg(hack_terminal)]
-        let pills: &[(usize, &'static str)] = &[(0, "Services"), (2, "Env"), (3, "Copies")];
+        let pills: &[(usize, &'static str)] = &[
+            (0, "Services"),
+            (2, "Env"),
+            (3, "Copies"),
+            (crate::files_view::FILES_TAB, "Files"),
+        ];
         #[cfg(not(hack_terminal))]
-        let pills: &[(usize, &'static str)] =
-            &[(0, "Services"), (1, "Logs"), (2, "Env"), (3, "Copies")];
+        let pills: &[(usize, &'static str)] = &[
+            (0, "Services"),
+            (1, "Logs"),
+            (2, "Env"),
+            (3, "Copies"),
+            (crate::files_view::FILES_TAB, "Files"),
+        ];
         let mut tabs = div().flex().items_center().gap(space::S2);
         for &(i, label) in pills {
             tabs = tabs.child(
@@ -1636,7 +1650,13 @@ impl HackApp {
                     .on_click(cx.listener(move |this, _, _, cx| this.set_tab(i, cx))),
             );
         }
+        if self.tab == crate::files_view::FILES_TAB {
+            tabs = tabs.child(self.project_files_picker(d, cx));
+        }
         let body: AnyElement = match self.tab {
+            crate::files_view::FILES_TAB => {
+                self.project_files(d, ui, window, cx).into_any_element()
+            }
             3 => self.copies_view(ui, cx).into_any_element(),
             1 if cfg!(not(hack_terminal)) => {
                 // The Logs tab scrolls inside its own virtualized list.

@@ -701,6 +701,20 @@ running an upgrade (`hack upgrade apply`, installing a new version) come in
 later units. The design and the CLI/daemon requests they need
 are in `DESIGN.md` (PR #800).
 
+## Files tab
+
+Choose a running Compose service to browse its working directory. Use the
+parent row, open a directory, or type a path into **Go to file** and press
+Enter. **Show hidden** includes dotfiles.
+
+Worktree files open in the host's text editor. Container and named-volume
+files have read-only previews. **Copy path** copies the path inside the
+container. The app calls `hack files ls|cat --json` for the selected service
+and branch instance and reads the `hack.files.v1` response.
+
+Use `--fixtures files --screenshots <dir>` with the screenshots build to
+render the Files tab in both themes.
+
 ## Logs tab
 
 `hack logs --json` for the selected project, following by default:

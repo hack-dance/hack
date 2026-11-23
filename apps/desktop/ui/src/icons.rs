@@ -69,6 +69,13 @@ pub enum Glyph {
     Copy,
     /// Header: copied.
     Check,
+    /// Service file browser.
+    Directory,
+    FileText,
+    Link,
+    Server,
+    Ellipsis,
+    Info,
 }
 
 impl Glyph {
@@ -106,6 +113,12 @@ impl Glyph {
             Self::EyeOff => "icons/eye-off.svg",
             Self::Key => "icons/key-round.svg",
             Self::Pencil => "icons/pencil.svg",
+            Self::Directory => "icons/folder.svg",
+            Self::FileText => "icons/file-text.svg",
+            Self::Link => "icons/link.svg",
+            Self::Server => "icons/server.svg",
+            Self::Ellipsis => "icons/ellipsis.svg",
+            Self::Info => "icons/info.svg",
         }
     }
 }
@@ -144,6 +157,12 @@ icon_assets!(
         EyeOff,
         KeyRound,
         Pencil,
+        Folder,
+        FileText,
+        Link,
+        Server,
+        Ellipsis,
+        Info,
     ]
 );
 

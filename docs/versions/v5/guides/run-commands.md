@@ -53,6 +53,27 @@ flowchart TD
   U --> D
 ```
 
+## Browse a service's files
+
+```sh
+hack files ls --json api .
+hack files cat --json --branch feature-search api /app/search.config.ts
+```
+
+`files` reads the lowest-numbered running Compose replica. Relative paths
+start in the container's working directory. A linked worktree selects its
+branch instance the same way as `hack exec`. To choose another checkout,
+pass `--path <checkout>`.
+
+Both commands return a `hack.files.v1` success envelope. The `entry` describes
+the resolved target. For directory listings, `entries` includes direct
+children, including dotfiles. Each entry has a `source` of `worktree`,
+`volume` or `container`. The deepest actual mount determines the source.
+Worktree entries also carry `hostPath` for the corresponding checkout path.
+`cat` returns the first 64 KiB with an `encoding` of `utf8` or `base64` and sets
+`truncated` if there are more bytes. These commands use `sh`, `readlink`,
+`stat`, `timeout` and `head` in the container.
+
 ## Overlay and scope
 
 These two words answer two different questions.

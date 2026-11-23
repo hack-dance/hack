@@ -29,6 +29,22 @@ export function machineOutputFixtures() {
       install_kind: "standalone",
       binary_path: "/example/bin/hack",
     }),
+    "files-cat.json": success(MACHINE_SCHEMAS.files, {
+      service: "api",
+      operation: "cat",
+      entry: {
+        name: "example.txt",
+        path: "/app/example.txt",
+        kind: "file",
+        source: "worktree",
+        hostPath: "/example/checkout/example.txt",
+        sizeBytes: 8,
+        modifiedAtMs: 0,
+      },
+      encoding: "utf8",
+      content: "example\n",
+      truncated: false,
+    }),
     "projects-observe.json": success(MACHINE_SCHEMAS.projectsObserve, {
       observe: true,
       runtime_requested: false,

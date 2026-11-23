@@ -640,9 +640,10 @@ Config:
 - Project: `.hack/hack.config.json` → `sessions.mux = auto|tmux|none` (`auto` detects tmux only)
 - Env override: `HACK_SESSIONS_MUX=auto|tmux|none`
 
-Lifecycle session name:
-- No branch: `<project>--lifecycle`
-- With `--branch <name>`: `<project>--lifecycle-<branch>`
+New mux sessions append `--lifecycle` to the exact Compose project name. A
+branch instance named `<project>--<branch>` uses
+`<project>--<branch>--lifecycle`. Hack can still reuse or stop verified sessions
+recorded under the earlier name.
 
 Lifecycle hooks and processes run on the host. They receive the selected overlay's `global` values
 plus `host` overrides, with `host` taking precedence. Service-scoped values remain container-specific

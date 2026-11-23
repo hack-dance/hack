@@ -25,6 +25,7 @@ import { sanitizeProjectSlug } from "../src/lib/project.ts";
 import {
   readProjectRuntimeState,
   readProjectRuntimeStateEntry,
+  removeProjectRuntimeStateEntry,
   upsertProjectRuntimeStateEntry,
 } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -251,6 +252,7 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   }
 } else if (mode === "down") {
   await Bun.write(fixture + "/compose-down", JSON.stringify(args));
+  await Bun.write(fixture + "/down-context", context);
   await Bun.write(fixture + "/down-overlay", process.env.COMPOSE_PROJECT_NAME || "none");
   await rm(running, { force: true });
 } else if (mode === "stop") {
@@ -260,6 +262,29 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
 `,
     { mode: 0o755 }
   );
+}
+
+async function storeLegacyInterpolatedOverlay(projectDir: string) {
+  const current = await readProjectRuntimeStateEntry({
+    projectDir,
+    composeProject: "sample",
+  });
+  if (!current) {
+    throw new Error("The fixture did not save its launch overlay");
+  }
+  await upsertProjectRuntimeStateEntry({
+    projectDir,
+    entry: {
+      ...current,
+      composeProject: sanitizeProjectSlug("${STACK_A:-sample}"),
+      launchComposeBase: undefined,
+      pinnedComposeBase: undefined,
+    },
+  });
+  await removeProjectRuntimeStateEntry({
+    projectDir,
+    composeProject: "sample",
+  });
 }
 
 test("bound Files uses the legacy overlay saved by ordinary Start", async () => {
@@ -278,6 +303,7 @@ test("bound Files uses the legacy overlay saved by ordinary Start", async () => 
   try {
     const started = await run(["up", "-d", "--env", "qa", "--json"]);
     expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+    await storeLegacyInterpolatedOverlay(projectDir);
     const files = await run([
       "files",
       "ls",
@@ -587,6 +613,36 @@ test("Down refuses a normalized saved pin for a different Compose identity", asy
   expect(down.exitCode).toBe(1);
   expect(down.stderr + down.stdout).toContain("ambiguous Compose project name");
   expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+});
+
+test("Down refuses an unpinned state record shared by a legacy and exact Compose name", async () => {
+  const project = join(root, "project");
+  const projectDir = join(project, ".hack");
+  await installComposeNameFixture();
+  await writeOwnedFixture(
+    join(projectDir, "docker-compose.yml"),
+    "name: demo_team\nservices:\n  app:\n    image: example.invalid/app\n"
+  );
+  await upsertProjectRuntimeStateEntry({
+    projectDir,
+    entry: {
+      composeProject: "demo-team",
+      envName: null,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  const down = await run(["down", "--json"], false, project, {
+    COMPOSE_PROJECT_NAME: "demo-team",
+  });
+  expect(down.exitCode).toBe(1);
+  expect(down.stderr + down.stdout).toContain("ambiguous Compose project name");
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "demo-team",
+    })
+  ).not.toBeNull();
 });
 
 test("ordinary Down checks ownership of a stack named by a managed override", async () => {
@@ -968,6 +1024,7 @@ test("bound service Shell, Logs, Restart and Stop use the legacy stack's saved D
   );
   const started = await run(["up", "-d", "--env", "qa", "--json"]);
   expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+  await storeLegacyInterpolatedOverlay(projectDir);
   const shell = await run([
     "exec",
     "--expect-compose-project",
@@ -1023,6 +1080,71 @@ test("ordinary Down refuses an interpolated branch stack owned by another checko
 });
 
 const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
+test.skipIf(!supervisorBinary)(
+  "ordinary Start records its overridden Compose name and nondefault overlay",
+  async () => {
+    const project = join(root, "project");
+    const projectDir = join(project, ".hack");
+    await writeOwnedFixture(
+      join(projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "sample",
+        dev_host: "sample.hack",
+        lifecycle: {
+          runner: "supervisor",
+          processes: [{ name: "sleeper", command: "exec /bin/sleep 120" }],
+        },
+      })
+    );
+    await writeOwnedFixture(
+      join(projectDir, "docker-compose.yml"),
+      "name: demo_team\nservices:\n  app:\n    image: example.invalid/app\n"
+    );
+    await writeOwnedFixture(
+      join(projectDir, "hack.env.qa.yaml"),
+      "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n"
+    );
+    await installComposeNameFixture({
+      startContainers: true,
+      savedContextOnly: true,
+    });
+    const env = {
+      COMPOSE_PROJECT_NAME: "alternate",
+      HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
+      PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+    };
+    try {
+      const started = await run(
+        ["up", "-d", "--env", "qa", "--json"],
+        false,
+        project,
+        env
+      );
+      expect(started.exitCode, started.stdout + started.stderr).toBe(0);
+      expect(
+        await readProjectRuntimeStateEntry({
+          projectDir,
+          composeProject: "alternate",
+        })
+      ).toMatchObject({ launchComposeBase: "alternate", envName: "qa" });
+      const [state] = await readLifecycleState({ projectDir });
+      expect(state).toMatchObject({ composeProject: "alternate" });
+      const pid = state?.processes[0]?.processGroupId ?? 0;
+      expect(pid).toBeGreaterThan(1);
+      expect(() => process.kill(-pid, 0)).not.toThrow();
+      const stopped = await run(["down", "--json"], false, project, env);
+      expect(stopped.exitCode, stopped.stdout + stopped.stderr).toBe(0);
+      expect(await Bun.file(join(root, "down-context")).text()).toBe(
+        "saved-files-context"
+      );
+      expect(() => process.kill(-pid, 0)).toThrow();
+    } finally {
+      await run(["down", "--json"], false, project, env);
+    }
+  },
+  30_000
+);
+
 for (const { desktopStarts, action, description } of [
   {
     desktopStarts: true,
@@ -1034,13 +1156,13 @@ for (const { desktopStarts, action, description } of [
     desktopStarts: false,
     action: "down",
     description:
-      "desktop Stop retires the legacy host process launched by ordinary Start",
+      "desktop Stop retires the host process launched by ordinary Start",
   },
   {
     desktopStarts: false,
     action: "restart",
     description:
-      "desktop Restart replaces the legacy host process launched by ordinary Start",
+      "desktop Restart replaces the host process launched by ordinary Start",
   },
 ]) {
   test.skipIf(!supervisorBinary)(
@@ -1083,9 +1205,7 @@ for (const { desktopStarts, action, description } of [
         const state = await readLifecycleState({ projectDir });
         expect(state[0]).toMatchObject({
           backend: "supervisor",
-          composeProject: desktopStarts
-            ? "sample"
-            : sanitizeProjectSlug("${STACK_A:-sample}"),
+          composeProject: "sample",
         });
         const pid = state[0]?.processes[0]?.processGroupId ?? 0;
         expect(pid).toBeGreaterThan(1);

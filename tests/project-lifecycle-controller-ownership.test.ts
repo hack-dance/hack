@@ -58,7 +58,7 @@ afterEach(async () => {
 });
 
 const COMPOSE_PROJECT = "demo--branch-a";
-const SESSION = "demo--lifecycle-branch-a";
+const SESSION = "demo--branch-a--lifecycle";
 
 type FakeMux = Omit<MuxBackend, "createsWithOwnerToken"> & {
   readonly sessions: Map<string, string>;
@@ -224,6 +224,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
     readonly prepareLaunch?: () => Promise<void>;
     readonly muxCommandTimeoutMs?: number;
     readonly env?: Readonly<Record<string, string>>;
+    readonly composeProject?: string;
     /** Receives the cleanup the controller registers for SIGINT/SIGTERM. */
     readonly onSignalCleanup?: (cleanup: () => Promise<unknown>) => void;
     readonly retireSession?: Parameters<
@@ -240,7 +241,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
       ...(opts.muxCommandTimeoutMs
         ? { muxCommandTimeoutMs: opts.muxCommandTimeoutMs }
         : {}),
-      composeProject: COMPOSE_PROJECT,
+      composeProject: opts.composeProject ?? COMPOSE_PROJECT,
       definitionHash: "sha256:test",
       ...(opts.sessionOwnership
         ? { sessionOwnership: opts.sessionOwnership }
@@ -300,6 +301,74 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
     newOwnership,
   };
 }
+
+for (const backend of ["tmux", "zellij"] as const) {
+  test(`${backend} keeps distinct Compose names in distinct lifecycle sessions`, async () => {
+    const { bin, mux, controller } = await fixture(backend);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath ?? ""}`;
+    const first = controller({
+      sessionOwnership: undefined,
+      composeProject: "demo_team--branch-a",
+    });
+    const second = controller({
+      sessionOwnership: undefined,
+      composeProject: "demo-team--branch-a",
+    });
+    try {
+      await first.startMany({ processes: [PROCESS] });
+      await first.finalize();
+      await second.startMany({ processes: [PROCESS] });
+      await second.finalize();
+      expect([...mux.sessions.keys()].sort()).toEqual([
+        "demo-team--branch-a--lifecycle",
+        "demo_team--branch-a--lifecycle",
+      ]);
+    } finally {
+      try {
+        await second.abort();
+        await first.abort();
+      } finally {
+        restoreEnv("PATH", previousPath);
+      }
+    }
+  });
+}
+
+test("the controller adopts and stops a verified legacy lifecycle session by its saved name", async () => {
+  const { projectDir, mux, controller, stop } = await fixture();
+  const sessionName = "demo--lifecycle-branch-a";
+  const ownershipToken = "legacy-owned";
+  mux.sessions.set(sessionName, ownershipToken);
+  await upsertLifecycleStateEntry({
+    projectDir,
+    entry: {
+      composeProject: COMPOSE_PROJECT,
+      projectName: "demo",
+      branch: "branch-a",
+      sessionName,
+      backend: "zellij",
+      ownershipToken,
+      definitionHash: "sha256:test",
+      processes: [
+        {
+          name: PROCESS.name,
+          windowName: "helper-client",
+          logPath: join(projectDir, "fixture.log"),
+        },
+      ],
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  const existing = controller({ sessionOwnership: undefined });
+  await existing.startMany({ processes: [PROCESS] });
+  await existing.finalize();
+  expect(existing.sessionName).toBe(sessionName);
+  expect([...mux.sessions.keys()]).toEqual([sessionName]);
+  await stop();
+  expect(mux.killed).toEqual([ownershipToken]);
+  expect(mux.sessions.size).toBe(0);
+});
 
 const PROCESS = { name: "helper-client", command: "sleep 600" };
 

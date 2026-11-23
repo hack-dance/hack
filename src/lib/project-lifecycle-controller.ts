@@ -94,6 +94,23 @@ export function resolveLifecycleSessionName(opts: {
   return buildLifecycleSessionName(opts);
 }
 
+function resolveMuxLifecycleSessionName(composeProject: string): string {
+  return buildLifecycleSessionName({
+    projectName: composeProject,
+    branch: null,
+  });
+}
+
+function recordedLifecycleSessionName(
+  entry: LifecycleStateEntry | null,
+  current: string
+): string {
+  if (entry && entry.sessionName === resolveLifecycleSessionName(entry)) {
+    return entry.sessionName;
+  }
+  return current;
+}
+
 export function resolveLifecycleCwd(opts: {
   readonly projectRoot: string;
   readonly cwd: string | undefined;
@@ -323,10 +340,10 @@ export function createLifecycleProcessController(opts: {
         }),
     });
   }
-  const sessionName = resolveLifecycleSessionName({
-    projectName: opts.projectName,
-    branch: opts.branch,
-  });
+  const currentSessionName = resolveMuxLifecycleSessionName(
+    opts.composeProject
+  );
+  let sessionName = currentSessionName;
   const startedProcesses: StartedLifecycleProcess[] = [];
   const retireSession =
     opts.retireSession ??
@@ -387,21 +404,26 @@ export function createLifecycleProcessController(opts: {
       entries.find(
         (candidate) => candidate.composeProject === opts.composeProject
       ) ?? null;
+    const recordedName = recordedLifecycleSessionName(
+      persistedEntry,
+      currentSessionName
+    );
     const entry = await reconcileChangedLifecycleBackend({
       mux,
       entry: persistedEntry,
       resolvedBackend,
-      sessionName,
+      sessionName: recordedName,
       projectRoot: opts.project.projectRoot,
       projectDir: opts.project.projectDir,
       composeProject: opts.composeProject,
       definitionHash: opts.definitionHash,
     });
+    const inspectionName = entry ? recordedName : currentSessionName;
     backendName = resolvedBackend;
     const inspection = await inspectLifecycleSession({
       backend,
       entry,
-      expectedSessionName: sessionName,
+      expectedSessionName: inspectionName,
       expectedProjectRoot: opts.project.projectRoot,
       expectedDefinitionHash: opts.definitionHash,
     });
@@ -409,6 +431,7 @@ export function createLifecycleProcessController(opts: {
       throw new Error(inspection.decision.reason);
     }
     if (inspection.decision.kind === "adopt") {
+      sessionName = inspectionName;
       adoptedEntry = inspection.decision.entry;
       startedProcesses.push(...inspection.decision.entry.processes);
       sessionReady = true;
@@ -420,7 +443,7 @@ export function createLifecycleProcessController(opts: {
       await replaceInspectedLifecycleSession({
         backend,
         inspection,
-        sessionName,
+        sessionName: inspectionName,
         projectDir: opts.project.projectDir,
         composeProject: opts.composeProject,
       });
@@ -779,7 +802,9 @@ export function createLifecycleProcessController(opts: {
   };
 
   return {
-    sessionName,
+    get sessionName() {
+      return sessionName;
+    },
     startFromCommand: async ({ command, serviceName }) => {
       await startProcess({
         name: serviceName,
@@ -1207,10 +1232,6 @@ export async function stopLifecycleProcessController(opts: {
   readonly readIdentities?: typeof readProcessIdentities;
 }): Promise<void> {
   await opts.assertFresh?.();
-  const sessionName = resolveLifecycleSessionName({
-    projectName: opts.projectName,
-    branch: opts.branch,
-  });
   const lifecycleEntries = await readLifecycleState({
     projectDir: opts.project.projectDir,
   });
@@ -1218,6 +1239,10 @@ export async function stopLifecycleProcessController(opts: {
     lifecycleEntries.find(
       (entry) => entry.composeProject === opts.composeProject
     ) ?? null;
+  const sessionName = recordedLifecycleSessionName(
+    lifecycleEntry,
+    resolveMuxLifecycleSessionName(opts.composeProject)
+  );
 
   if (lifecycleEntry?.backend === "supervisor") {
     await stopSupervisorEntry(opts, lifecycleEntry);

@@ -55,6 +55,11 @@ the copy-lock handoff, then rechecks ownership under that name's lock. The
 handoff. Shared
 runtime state writes use a separate lock and atomic replacement. These locks
 and overlay-read failure are implementation details outside the finite model.
+The source CLI also records the effective launch identity before startup. The
+supervisor regression starts under a Compose name override and a nondefault
+overlay, then checks that Down uses that overlay and retires the matching host
+process. The mux controller tests exercise distinct names that normalize to
+the same registry slug, plus adoption and retirement of an owned legacy session.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

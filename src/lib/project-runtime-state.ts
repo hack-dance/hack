@@ -18,6 +18,8 @@ export type ProjectRuntimeStateEntry = {
   readonly composeProject: string;
   readonly envName: string | null;
   readonly updatedAt: string;
+  /** Effective Compose base name when this instance last started. */
+  readonly launchComposeBase?: string;
   /** Base name explicitly passed to Compose at startup, before any branch suffix. */
   readonly pinnedComposeBase?: string;
   /**
@@ -207,6 +209,7 @@ function parseProjectRuntimeStateEntry(
 
   const envFingerprint = parseComposeEnvFingerprintRecord(value.envFingerprint);
   const pinnedComposeBase = getString(value, "pinnedComposeBase");
+  const launchComposeBase = getString(value, "launchComposeBase");
   const composeProfiles = Array.isArray(value.composeProfiles)
     ? value.composeProfiles.filter(
         (profile): profile is string =>
@@ -218,6 +221,7 @@ function parseProjectRuntimeStateEntry(
     composeProject,
     envName,
     updatedAt,
+    ...(launchComposeBase ? { launchComposeBase } : {}),
     ...(pinnedComposeBase ? { pinnedComposeBase } : {}),
     ...(envFingerprint ? { envFingerprint } : {}),
     ...(composeProfiles ? { composeProfiles } : {}),

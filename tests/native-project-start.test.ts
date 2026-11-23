@@ -21,6 +21,7 @@ import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-pol
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import {
   admitNativeProjectBuilds,
+  NativeBuildRegistryError,
   nativeBuildIdentity,
 } from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
@@ -146,6 +147,49 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (opts.args[1] === "ensure-images") {
+        const jobs = JSON.parse(
+          new TextDecoder().decode(opts.privateInput)
+        ) as [string, string][];
+        return await Promise.all(
+          jobs.map(async ([reference, policy], index) => {
+            try {
+              const args = [
+                "runtime",
+                "ensure-image",
+                "--reference",
+                reference,
+                ...(policy === "native" ? [] : ["--emulation", policy]),
+                "--json",
+              ];
+              return [
+                index,
+                {
+                  Ok: await dependencies.invoke!({
+                    ...opts,
+                    args,
+                    privateInput: undefined,
+                  }),
+                },
+                1,
+              ];
+            } catch (error) {
+              return [
+                index,
+                {
+                  Err: {
+                    code:
+                      error instanceof NativeRuntimeRequestError
+                        ? error.nativeCode
+                        : "fixture",
+                  },
+                },
+                1,
+              ];
+            }
+          })
+        );
+      }
       if (opts.args[1] === "source-size") {
         return nativeSourceSizeReceipt();
       }
@@ -3797,9 +3841,10 @@ test("retained startup refuses missing, unacknowledged or changed finalization b
       https: httpsSelection,
       adaptationFile: join(opts.scope.projectRoot, "unread-adaptation.json"),
     });
-    await expect(attempt).rejects.toThrow(
-      "frontend finalization is unconfirmed"
-    );
+    await expect(attempt).rejects.toMatchObject({
+      code: "E_RECOVERY_REQUIRED",
+      message: expect.stringContaining("Run hack down --recover"),
+    });
     try {
       await attempt;
     } catch (error) {
@@ -4022,9 +4067,7 @@ test("retained acknowledgement cannot authorize a newer or concurrently changed 
       };
     }
     await expect(startNativeProject(opts)).rejects.toThrow(
-      fault === "newer-run"
-        ? "frontend finalization is unconfirmed"
-        : "mapping changed"
+      fault === "newer-run" ? "has no confirmed shutdown" : "mapping changed"
     );
     expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
   }
@@ -5138,7 +5181,7 @@ test("startup admits each reference once and reuses validated pins for shared se
     if (request.args[1] === "ensure-image") {
       order.push(`ensure ${request.args[3]}`);
       // Acquisition plus import gets the runtime's whole bounded request budget.
-      expect(request.timeoutMs).toBe(NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
+      expect(request.timeoutMs).toBe(2 * NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
       expect(request.args.slice(0, 5)).toEqual([
         "runtime",
         "ensure-image",
@@ -5160,6 +5203,69 @@ test("startup admits each reference once and reuses validated pins for shared se
     "ensure redis",
   ]);
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
+});
+
+test("one image batch uses the combined deadline and stops before the next wave", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "a:1", worker: "b:1", cache: "c:1", db: "d:1" });
+  const original = opts.dependencies.invoke!;
+  let waves = 0;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] !== "ensure-images") {
+      return await original(request);
+    }
+    waves += 1;
+    expect(request.timeoutMs).toBe(1_800_000);
+    return [
+      [0, { Err: { code: "provider_busy" } }, 1],
+      [1, { Err: { code: "image_disk_space" } }, 2],
+      [2, { Ok: { image_id: `sha256:${"c".repeat(64)}` } }, 3],
+    ];
+  };
+  const error = await startNativeProject(opts).catch(
+    (failure: unknown) => failure
+  );
+  expect(waves).toBe(1);
+  expect(error).toMatchObject({
+    code: "E_LIFECYCLE_FAILED",
+    detail: {
+      images: [
+        {
+          reference: "a:1",
+          code: "provider_busy",
+          recovery: "Run hack up again after the current image work finishes.",
+        },
+        {
+          reference: "b:1",
+          code: "image_disk_space",
+          recovery: "Free disk space and run hack up again.",
+        },
+      ],
+    },
+  });
+});
+
+test("an older runtime falls back to ordinary image selection", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "alpine:1", worker: "redis:1" });
+  const original = opts.dependencies.invoke!;
+  const calls: string[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-images") {
+      calls.push("batch");
+      throw new NativeRuntimeRequestError({
+        nativeCode: "unsupported_command",
+        message: "Older runtime",
+      });
+    }
+    if (request.args[1] === "ensure-image") {
+      calls.push(String(request.args[3]));
+      return { image_id: `sha256:${"c".repeat(64)}` };
+    }
+    return await original(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(calls).toEqual(["batch", "alpine:1", "redis:1"]);
 });
 
 test("a changed 11-service plan uses the loaded selections of two recorded references", async () => {
@@ -5523,6 +5629,89 @@ test("retained startup asks the runtime to confirm the tag before review", async
     return await review(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("a parallel build registry refusal keeps its blocker after the sibling settles", async () => {
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    const { opts } = await fixture(false);
+    const base = "docker.io/library/python:3.12-alpine";
+    const loaded = "docker.io/library/alpine:3.22";
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { build: "." },
+          worker: { build: { context: ".", target: "worker" } },
+          other: { image: loaded },
+        },
+      }),
+    });
+    const siblingStarted = Promise.withResolvers<void>();
+    const siblingAborted = Promise.withResolvers<void>();
+    const allowSettlement = Promise.withResolvers<void>();
+    let starts = 0;
+    let siblingSettled = false;
+    opts.dependencies.build = async ({ signal }) => {
+      starts += 1;
+      if (starts === 1) {
+        await siblingStarted.promise;
+        throw new NativeBuildRegistryError(base, "registry_http_429");
+      }
+      signal?.addEventListener("abort", () => siblingAborted.resolve(), {
+        once: true,
+      });
+      siblingStarted.resolve();
+      await allowSettlement.promise;
+      siblingSettled = true;
+      throw new Error("sibling canceled");
+    };
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "up" && request.args[0] === "runtime") {
+        await invoke(request);
+        return { profile: "development" };
+      }
+      if (request.args[1] === "image-tag-status") {
+        expect(siblingSettled).toBe(true);
+        expect(request.args).toEqual([
+          "runtime",
+          "image-tag-status",
+          "--present",
+          "--json",
+          base,
+          loaded,
+        ]);
+        return [loaded];
+      }
+      return await invoke(request);
+    };
+    const result = startNativeProject(opts);
+    try {
+      const aborted = await Promise.race([
+        siblingAborted.promise.then(() => true),
+        result.then(() => false),
+        Bun.sleep(2000).then(() => false),
+      ]);
+      expect(aborted).toBe(true);
+      expect(starts).toBe(2);
+      expect(siblingSettled).toBe(false);
+    } finally {
+      siblingStarted.resolve();
+      allowSettlement.resolve();
+    }
+    await expect(result).rejects.toThrow(
+      `Image unavailable: could not resolve build base ${base} (registry rate limit reached).\nAlready present: ${loaded}.\nRetry hack up when the registry is reachable.`
+    );
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+  }
 });
 
 test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {
@@ -6665,6 +6854,9 @@ test("a missing shared tag names the requested image and every affected active s
       };
     }
     if (request.args[1] === "ensure-image") {
+      if (request.args[3] === "another:latest") {
+        return { image_id: `sha256:${"f".repeat(64)}` };
+      }
       throw new NativeRuntimeRequestError({
         nativeCode: "registry_image_not_found",
         message: "private registry detail",
@@ -7013,6 +7205,87 @@ for (const [name, hotReload, expected] of [
     ).toEqual(expected ? [renderNativeHotReloadNotice(expected)] : []);
   });
 }
+
+// HACK-2456: the pool stopped under the run while its foreground owner died.
+function ownerExitedRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_exited",
+    message: "The run's foreground owner exited.",
+  });
+}
+async function stoppedPoolUnderRunFixture(poolPhase: "stopped" | "running") {
+  const { opts, events } = await retainedFinalizationFixture();
+  const saved = await opts.dependencies.load!(opts.scope);
+  await acknowledgeRetainedFrontend(opts.scope, saved!);
+  let recovered = false;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && !recovered) {
+      events.push("graph retained-preflight refused");
+      throw ownerExitedRefusal();
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "status") {
+      events.push("runtime status");
+      return poolPhase === "running"
+        ? { phase: "running", process_alive: true }
+        : { phase: "stopped", process_alive: false };
+    }
+    return await invoke(request);
+  };
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const start = {
+    ...opts,
+    recoverStoppedPool: async () => {
+      events.push("down --recover");
+      recovered = true;
+    },
+  };
+  return { start, events, notices };
+}
+
+test("up on a stopped pool whose run's owner died recovers the run with data retained, then starts it", async () => {
+  const { start, events, notices } =
+    await stoppedPoolUnderRunFixture("stopped");
+  expect(await startNativeProject(start)).toBe(0);
+  expect(events.slice(0, 5)).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+    "down --recover",
+    "graph retained-preflight",
+    "graph inspect",
+  ]);
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(events.indexOf("down --recover")).toBeLessThan(
+    events.indexOf("runtime up")
+  );
+  expect(events).toContain("save");
+  expect(notices.join("\n")).toContain("recovered with data retained");
+});
+
+test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {
+  const { start, events } = await stoppedPoolUnderRunFixture("running");
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_exited"
+  );
+  expect(events).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+  ]);
+});
+
+test("up without a recovery callback keeps the owner-exited refusal and reads no status", async () => {
+  const { start, events } = await stoppedPoolUnderRunFixture("stopped");
+  const { recoverStoppedPool: _omitted, ...plain } = start;
+  await expect(startNativeProject(plain)).rejects.toBeInstanceOf(
+    NativeRuntimeRequestError
+  );
+  expect(events).toEqual(["graph retained-preflight refused"]);
+});
 
 test.each([
   [

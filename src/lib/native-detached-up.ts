@@ -6,6 +6,9 @@ import {
   renderNativeHotReloadNotice,
 } from "../backends/native-hot-reload-notice.ts";
 import {
+  type ImageFailure,
+  imageBatchFailures,
+  NativeImageBatchError,
   NativeImageBlocker,
   type NativeImageBlockerDetail,
   nativeImageBlockerDetail,
@@ -20,6 +23,7 @@ import {
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
+import { writeLifecycleStarted } from "../ui/lifecycle-closing.ts";
 import {
   noteActivityFailedServices,
   suppressActivityRecording,
@@ -58,15 +62,18 @@ type Ready = {
   readonly project: string;
   readonly branch: string | null;
   readonly composeProject: string;
+  readonly address?: string;
   readonly started: readonly string[];
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
 let publishImageBlocker:
-  | ((detail: NativeImageBlockerDetail) => Promise<void>)
+  | ((
+      detail: NativeImageBlockerDetail | readonly ImageFailure[]
+    ) => Promise<void>)
   | undefined;
 let publishImageDownloadWait: ((reference: string | null) => void) | undefined;
-let publishImageTagOffline: ((notice: string) => void) | undefined;
+let publishImageNotice: ((notice: string) => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
 let publishHotReload: ((notice: NativeHotReloadNotice) => void) | undefined;
@@ -85,6 +92,10 @@ let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
 let publishProgress:
   | ((phase: Exclude<NativeDetachedStartPhase, "launching">) => void)
   | undefined;
+let workingImages: readonly string[] = [];
+export function reportNativeImageWork(images: readonly string[]): void {
+  workingImages = images;
+}
 let progressHeartbeat: ReturnType<typeof setInterval> | undefined;
 let heartbeatIntervalMs = NATIVE_DETACHED_HEARTBEAT_MS;
 
@@ -351,6 +362,10 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   if (!publishFailure) {
     return;
   }
+  if (error instanceof NativeImageBatchError) {
+    await publishImageBlocker?.(error.failures);
+    return;
+  }
   if (error instanceof NativeImageBlocker) {
     await publishImageBlocker?.(error.observation);
     return;
@@ -585,19 +600,19 @@ export function reportNativeImageDownloadWait(reference: string | null): void {
   publishImageDownloadWait?.(reference);
 }
 
-export function reportNativeImageTagOffline(notice: string): boolean {
-  if (!publishImageTagOffline) {
+export function reportNativeImageNotice(notice: string): boolean {
+  if (!publishImageNotice) {
     return false;
   }
-  publishImageTagOffline(notice);
+  publishImageNotice(notice);
   return true;
 }
 
-function writeImageTagOffline(value: unknown): boolean {
+function writeImageNotice(value: unknown): boolean {
   if (
     !(
       isRecord(value) &&
-      value.kind === "image-tag-offline" &&
+      value.kind === "image-notice" &&
       typeof value.notice === "string" &&
       value.notice.length <= 512 &&
       [...value.notice].every((character) => {
@@ -615,7 +630,7 @@ function writeImageTagOffline(value: unknown): boolean {
 /** Prints any validated owner notice; true when `value` was one. */
 function writeOwnerNotice(value: unknown): boolean {
   return (
-    writeImageTagOffline(value) ||
+    writeImageNotice(value) ||
     writeProfileNotice(value) ||
     writeBranchDropped(value) ||
     writeHotReload(value)
@@ -722,16 +737,17 @@ export async function runNativeDetachedOwner(opts: {
         }
       | {
           readonly kind: "image-blocker";
-          readonly detail: NativeImageBlockerDetail;
+          readonly detail: NativeImageBlockerDetail | readonly ImageFailure[];
         }
       | {
           readonly kind: "image-download-wait";
           readonly reference: string | null;
         }
-      | { readonly kind: "image-tag-offline"; readonly notice: string }
+      | { readonly kind: "image-notice"; readonly notice: string }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
       | {
           readonly kind: "progress";
+          readonly images?: readonly string[];
           readonly phase: Exclude<NativeDetachedStartPhase, "launching">;
         }
   ): Promise<void> =>
@@ -792,9 +808,9 @@ export async function runNativeDetachedOwner(opts: {
       void send({ kind: "image-download-wait", reference });
     }
   };
-  publishImageTagOffline = (notice) => {
+  publishImageNotice = (notice) => {
     if (!stopping) {
-      send({ kind: "image-tag-offline", notice });
+      send({ kind: "image-notice", notice });
     }
   };
   publishProfileNotice = (notice) => {
@@ -831,16 +847,23 @@ export async function runNativeDetachedOwner(opts: {
       stopProgressHeartbeat();
       return;
     }
-    send({ kind: "progress", phase });
+    send({
+      kind: "progress",
+      phase,
+      ...(phase === "images" && workingImages.length
+        ? { images: workingImages }
+        : {}),
+    });
   };
   try {
     return await opts.run(opts.args);
   } finally {
     stopping = true;
+    workingImages = [];
     publishReady = undefined;
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
-    publishImageTagOffline = undefined;
+    publishImageNotice = undefined;
     publishImageDownloadWait = undefined;
     publishImageBlocker = undefined;
     publishBranchDropped = undefined;
@@ -909,9 +932,11 @@ export function nativeDetachedOwnerArgs(opts: {
   return args;
 }
 
-function nativeDetachedReadyLine(action: "up" | "restart"): string {
-  const done = action === "restart" ? "restarted and is ready" : "is ready";
-  return `Project ${done}. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n`;
+function nativeReadyAddress(address: unknown): string | undefined {
+  const url = typeof address === "string" ? URL.parse(address) : null;
+  return url?.protocol === "https:" && !url.username && !url.password
+    ? url.origin
+    : undefined;
 }
 
 /**
@@ -942,7 +967,8 @@ function watchStartDeadline(opts: {
     }
     if (
       isRecord(value) &&
-      Object.keys(value).length === 2 &&
+      (Object.keys(value).length === 2 ||
+        (value.phase === "images" && Array.isArray(value.images))) &&
       value.kind === "progress" &&
       isNativeDetachedStartPhase(value.phase)
     ) {
@@ -1069,7 +1095,7 @@ export async function startNativeDetachedUp(opts: {
       new HackCliError({
         code: "E_CANCELLED",
         message:
-          "Native detached startup canceled; ordinary owned stop was requested. Inspect hack ps before retrying.",
+          "Native detached startup interrupted; ordinary owned stop was requested. Inspect hack ps before retrying.",
       })
     );
   };
@@ -1093,13 +1119,14 @@ export async function startNativeDetachedUp(opts: {
     if (failed) {
       return;
     }
-    const imageBlocked =
-      !ready &&
-      isRecord(value) &&
-      value.kind === "image-blocker" &&
-      nativeImageBlockerDetail(value.detail)
-        ? new NativeImageBlocker(value.detail)
-        : undefined;
+    let imageBlocked: NativeImageBatchError | NativeImageBlocker | undefined;
+    if (!ready && isRecord(value) && value.kind === "image-blocker") {
+      if (imageBatchFailures(value.detail)) {
+        imageBlocked = new NativeImageBatchError(value.detail);
+      } else if (nativeImageBlockerDetail(value.detail)) {
+        imageBlocked = new NativeImageBlocker(value.detail);
+      }
+    }
     const refused = ready ? undefined : (imageBlocked ?? startupRefusal(value));
     if (refused) {
       failed = true;
@@ -1178,8 +1205,16 @@ export async function startNativeDetachedUp(opts: {
           },
         }),
       });
+    } else if (action === "up") {
+      writeLifecycleStarted({
+        url: nativeReadyAddress(data.address),
+        backend: "native",
+        durationMs: Date.now() - startedAt,
+      });
     } else {
-      process.stdout.write(nativeDetachedReadyLine(action));
+      process.stdout.write(
+        "Project restarted and is ready. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n"
+      );
     }
     return 0;
   } catch (error) {

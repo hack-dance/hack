@@ -45,6 +45,38 @@ pub(super) fn sleeping_executable(binary: &Path) {
     fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+/// Like [`sleeping_executable`], but the process sleeps `seconds` whatever its arguments,
+/// so a test can give it the exact argument vector of a helper it stands in for.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) fn argument_free_sleeper(binary: &Path, seconds: u32) {
+    assert!(!binary.try_exists().unwrap());
+    assert!((1..=120).contains(&seconds));
+    let source = binary.with_extension("c");
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&source)
+        .unwrap();
+    file.write_all(
+        format!("#include <unistd.h>\nint main(void) {{ sleep({seconds}u); return 0; }}\n")
+            .as_bytes(),
+    )
+    .unwrap();
+    drop(file);
+    assert!(
+        Command::new("cc")
+            .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
+            .arg(&source)
+            .arg("-o")
+            .arg(binary)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 /// Test bound for one whole-host disk-handle scan. The scan walks every process on the
 /// host, so on a loaded machine with other tests scanning at the same time one scan can
 /// take well over its production budget (HACK-1457: the `lsof` child the scan then ran took

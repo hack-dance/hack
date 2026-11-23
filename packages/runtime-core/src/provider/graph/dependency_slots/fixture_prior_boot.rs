@@ -48,7 +48,7 @@ pub(in crate::provider::graph) fn synthesize(
         .values()
         .flat_map(|service| service.bindings.values().map(|binding| binding.slot))
         .collect::<BTreeSet<_>>();
-    if owner.previous_guest_boot_id.as_deref() != Some(record.boot.as_str())
+    if !crate::provider::boot_history::earlier_boots(candidate, &owner)?.contains(&record.boot)
         || owner.guest_boot_id.as_deref() == Some(record.boot.as_str())
         || record.slots.values().copied().collect::<BTreeSet<_>>() != slots
         || record.sockets.len() != record.slots.len()

@@ -68,6 +68,27 @@ fn digest(config: &Value, resources: &BTreeMap<String, Resource>) -> Digest {
     of(config, &context(resources)).unwrap().digest
 }
 
+#[test]
+fn restart_uses_authored_cadence_only_for_the_matching_cold_create_spec() {
+    let resources = resources(RUN);
+    let context = context(&resources);
+    let mut fast = config(RUN, "owner", "plan");
+    fast["Healthcheck"]["StartInterval"] = json!(crate::project::DEFAULT_START_INTERVAL_NANOS);
+    let mut authored = fast.clone();
+    authored["Healthcheck"]
+        .as_object_mut()
+        .unwrap()
+        .remove("StartInterval");
+    let mut actual = authored.clone();
+    actual["Healthcheck"]["StartInterval"] = json!(5_000_000_000u64);
+    for (created, expected) in [(&authored, &authored), (&fast, &fast)] {
+        let inspected = json!({"Config":stamped(&actual, &of(created, &context).unwrap())});
+        let mut replay = fast.clone();
+        super::super::restart_health_cadence(&context, &mut replay, false, &inspected).unwrap();
+        assert_eq!(&replay, expected);
+    }
+}
+
 type Edit = Box<dyn Fn(&mut Value)>;
 
 const RUN: &str = "11111111111111111111111111111111";

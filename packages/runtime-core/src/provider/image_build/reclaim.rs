@@ -13,7 +13,12 @@
 //!   verified receipt without a declaration or sequence (written before they existed)
 //!   always protects its image;
 //! - no retained graph state (`run/graphs`, `run/native-graphs`, `run/graph-archive`)
-//!   mentions its content ID anywhere, whatever the graph's phase or branch;
+//!   mentions its content ID anywhere, whatever the graph's phase or branch. A run's
+//!   restore history (`restore-history.json`, its `.pending` replacement and legacy
+//!   `restore-<n>` directories) is not read: it is diagnostic, and recovery only
+//!   compares its container IDs, phases and names with the current receipt; nothing
+//!   starts a container from it (HACK-2554). The current receipt and every recovery
+//!   sidecar are still read;
 //! - the engine agrees to remove it without force, which it refuses while any
 //!   container, running or stopped, uses the image. Untagged parent images are never
 //!   pruned along with it (`noprune=true`); each must pass these checks itself.
@@ -120,6 +125,14 @@ pub(super) fn referenced_images(candidate: &Candidate) -> Result<BTreeSet<String
     Ok(found)
 }
 
+/// A legacy restore-history directory (`restore-1` to `restore-8`). Only a real
+/// directory is skipped: a symlink under that name still makes the scan unprovable.
+fn restore_history_directory(name: &str) -> bool {
+    name.strip_prefix("restore-")
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| (1..=8).contains(&n) && name == format!("restore-{n}"))
+}
+
 fn scan_directory(
     directory: &Path,
     depth: usize,
@@ -136,9 +149,19 @@ fn scan_directory(
         }
         let path = entry.map_err(|_| unprovable())?.path();
         let metadata = fs::symlink_metadata(&path).map_err(|_| unprovable())?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         if metadata.is_dir() {
+            if restore_history_directory(name) {
+                continue;
+            }
             scan_directory(&path, depth + 1, entries, found)?;
         } else if metadata.is_file() {
+            if matches!(name, "restore-history.json" | "restore-history.pending") {
+                continue;
+            }
             if metadata.len() > MAX_SCAN_FILE {
                 return Err(unprovable());
             }
@@ -434,6 +457,7 @@ mod tests {
     const B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const D: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const E: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
     fn image(id: &str, owner: &str) -> Value {
         serde_json::json!({"Id": id, "Labels": {
@@ -514,6 +538,38 @@ mod tests {
             referenced_images(&candidate).unwrap(),
             BTreeSet::from([A.to_owned(), B.to_owned()])
         );
+        // Restore history is diagnostic: its images are not references (HACK-2554).
+        let graph = candidate.state_root.join("run/graphs/r2");
+        crate::provider::state::private_directory(&graph.join("restore-3")).unwrap();
+        fs::write(graph.join("state.json"), format!("{{\"image\":\"{C}\"}}")).unwrap();
+        fs::write(graph.join("restore-history.json"), format!("[\"{D}\"]")).unwrap();
+        fs::write(graph.join("restore-history.pending"), format!("[\"{D}\"]")).unwrap();
+        fs::write(graph.join("restore-3/previous.json"), format!("[\"{D}\"]")).unwrap();
+        fs::write(graph.join("dead-owner-cleanup.json"), format!("[\"{E}\"]")).unwrap();
+        assert_eq!(
+            referenced_images(&candidate).unwrap(),
+            BTreeSet::from([A, B, C, E].map(str::to_owned))
+        );
+        // Only exact names are skipped: a lookalike is still read.
+        fs::write(graph.join("restore-history.json.old"), format!("[\"{D}\"]")).unwrap();
+        crate::provider::state::private_directory(&graph.join("restore-9")).unwrap();
+        assert!(referenced_images(&candidate).unwrap().contains(D));
+        fs::remove_file(graph.join("restore-history.json.old")).unwrap();
+        fs::write(graph.join("restore-9/previous.json"), format!("[\"{D}\"]")).unwrap();
+        assert!(referenced_images(&candidate).unwrap().contains(D));
+        fs::remove_dir_all(graph.join("restore-9")).unwrap();
+        // A symlink under a history name is not skipped: the scan refuses.
+        fs::remove_file(graph.join("restore-history.pending")).unwrap();
+        std::os::unix::fs::symlink(
+            graph.join("state.json"),
+            graph.join("restore-history.pending"),
+        )
+        .unwrap();
+        assert_eq!(
+            referenced_images(&candidate).unwrap_err().code,
+            "native_build_reclaim_unprovable"
+        );
+        fs::remove_file(graph.join("restore-history.pending")).unwrap();
         std::os::unix::fs::symlink(run.join("receipt.json"), archive.join("alias")).unwrap();
         assert_eq!(
             referenced_images(&candidate).unwrap_err().code,

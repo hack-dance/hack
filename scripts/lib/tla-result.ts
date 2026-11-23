@@ -83,7 +83,7 @@ export function verifyRestoreHistoryModelResult(opts: {
   );
 }
 
-const TRACE_STATES = /(?=State \d+:)/;
+const TRACE_STATES = /(?=^State \d+:)/m;
 const DISTINCT_STATES =
   /\b(\d{1,3}(?:,\d{3})+|\d+) distinct states found, 0 states left on queue\b/;
 
@@ -124,22 +124,20 @@ export function verifyFiniteModelResult(opts: {
   ) {
     return false;
   }
+  const finalState = opts.output.split(TRACE_STATES).at(-1) ?? "";
+  const lines = finalState.split(/\r?\n/);
+  const header = lines[0] ?? "";
   return (
     opts.exitCode === 12 &&
     opts.output.includes(`Invariant ${opts.invariant} is violated.`) &&
-    opts.output.split(TRACE_STATES).some((state) => {
-      const lines = state.split(/\r?\n/);
-      if (!/^State \d+: </.test(lines[0] ?? "")) {
-        return false;
-      }
-      return [
-        { action: opts.action, fields: opts.fields },
-        ...(opts.alternativeWitnesses ?? []),
-      ].some(
-        (witness) =>
-          lines[0]?.includes(`<${witness.action} `) &&
-          witness.fields.every((field) => lines.includes(`/\\ ${field}`))
-      );
-    })
+    /^State \d+: </.test(header) &&
+    [
+      { action: opts.action, fields: opts.fields },
+      ...(opts.alternativeWitnesses ?? []),
+    ].some(
+      (witness) =>
+        header.slice(header.indexOf("<")).startsWith(`<${witness.action} `) &&
+        witness.fields.every((field) => lines.includes(`/\\ ${field}`))
+    )
   );
 }

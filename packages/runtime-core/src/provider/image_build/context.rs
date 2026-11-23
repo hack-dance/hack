@@ -264,6 +264,23 @@ pub(super) fn unreadable() -> CandidateError {
         "An entry of the build context cannot be read; fix its permissions or exclude it in the ignore file.",
     )
 }
+fn descriptor_limit(error: &std::io::Error) -> Option<CandidateError> {
+    let message = match error.raw_os_error() {
+        Some(libc::EMFILE) => {
+            "Build context capture reached the open-file limit. Raise the limit or reduce the context depth, then retry."
+        }
+        Some(libc::ENFILE) => {
+            "The system ran out of open file descriptors while capturing the build context. Free system file descriptors, then retry."
+        }
+        _ => return None,
+    };
+    Some(refusal("native_build_context_descriptor_limit", message))
+}
+
+fn read_error(error: std::io::Error) -> CandidateError {
+    descriptor_limit(&error).unwrap_or_else(unreadable)
+}
+
 pub(super) fn changed() -> CandidateError {
     refusal(
         "native_build_context_changed",
@@ -397,7 +414,7 @@ fn before_descend(relative: &[u8]) {
 fn moved(error: &std::io::Error) -> CandidateError {
     match error.raw_os_error() {
         Some(libc::ELOOP | libc::ENOTDIR | libc::ENOENT) => changed(),
-        _ => unreadable(),
+        _ => descriptor_limit(error).unwrap_or_else(unreadable),
     }
 }
 
@@ -405,7 +422,7 @@ fn moved(error: &std::io::Error) -> CandidateError {
 /// symlink, so no component of it can be redirected.
 fn open_path(path: &Path) -> Result<fsat::Dir, CandidateError> {
     use std::path::Component;
-    let mut directory = fsat::Dir::open(Path::new("/")).map_err(|_| unreadable())?;
+    let mut directory = fsat::Dir::open(Path::new("/")).map_err(read_error)?;
     for component in path.components() {
         match component {
             Component::RootDir => {}
@@ -507,7 +524,7 @@ fn hash_file(
     listed: &fsat::Status,
 ) -> Result<[u8; 32], CandidateError> {
     let file = directory.file(name).map_err(|e| moved(&e))?;
-    let opened = fsat::status(&file).map_err(|_| unreadable())?;
+    let opened = fsat::status(&file).map_err(read_error)?;
     if !opened.is_file() || (opened.dev, opened.ino) != (listed.dev, listed.ino) {
         return Err(changed());
     }
@@ -525,7 +542,7 @@ fn hash_file(
     let mut buffer = vec![0_u8; READ_BUFFER];
     let mut total = 0_u64;
     loop {
-        let read = reader.read(&mut buffer).map_err(|_| unreadable())?;
+        let read = reader.read(&mut buffer).map_err(read_error)?;
         if read == 0 {
             break;
         }
@@ -535,7 +552,7 @@ fn hash_file(
         }
         digest.update(&buffer[..read]);
     }
-    let after = fsat::status(&file).map_err(|_| unreadable())?;
+    let after = fsat::status(&file).map_err(read_error)?;
     if total != limit || Stat::of(&after) != Stat::of(listed) {
         return Err(changed());
     }
@@ -601,7 +618,7 @@ pub(super) fn digest(
     #[cfg(test)]
     PEAK_PATH_BYTES.with(|peak| peak.set(0));
     let root = open_path(context)?;
-    let status = root.status().map_err(|_| unreadable())?;
+    let status = root.status().map_err(read_error)?;
     walk.include(Entry {
         path: Vec::new(),
         mode: status.mode & 0o7777,
@@ -612,6 +629,8 @@ pub(super) fn digest(
     // Excluded directories walked because a `!` pattern may re-include beneath them.
     let mut excluded_directories: BTreeMap<Vec<u8>, Entry> = BTreeMap::new();
     let mut visited = 0usize;
+    // Pending siblings share their parent's descriptor. A single-child spine
+    // releases each parent when entered, while pending siblings can pin one per level.
     let mut stack: Vec<Pending> = Vec::new();
     let mut current = (Rc::new(root), Vec::new(), Some(vec![false; rules.len()]), 0);
     loop {
@@ -634,7 +653,7 @@ pub(super) fn digest(
                     Ok(())
                 }
             },
-            |_| unreadable(),
+            read_error,
         )?;
         walk.keep(listing)?;
         for name in names {
@@ -722,7 +741,7 @@ pub(super) fn digest(
         // Entered through the parent's descriptor, never through a symlink, and only
         // if it is still the directory that was listed.
         let entered = next.parent.dir(&next.name).map_err(|e| moved(&e))?;
-        let status = entered.status().map_err(|_| unreadable())?;
+        let status = entered.status().map_err(read_error)?;
         if (status.dev, status.ino) != (next.listed.dev, next.listed.ino) {
             return Err(changed());
         }

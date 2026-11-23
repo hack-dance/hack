@@ -94,6 +94,7 @@ Usage:
   hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
   hack-local graph serve ... [--route-slot <service=index|auto>]...
   hack-local graph serve|serve-restore ... [--auto-dependency-slots]
+  hack-local graph serve|serve-restore ... [--report-started]
   hack-local graph start-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph publish-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> (--port <loopback-port> | --unix [--hostname <name>]...)
   hack-local graph unpublish-bridge --run-id <32-hex> --expect-reservation <32-hex> [--json]
@@ -149,6 +150,19 @@ Runtime commands affect only the candidate pool. Graph commands support a bounde
 The installed hack and its state are never used as a fallback.";
 
 fn main() {
+    hack_runtime_core::raise_open_file_limit();
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-publication-child"))
+    {
+        hack_runtime_core::timings::exit(
+            if hack_runtime_core::provider::publication::run_publication_child().is_ok() {
+                0
+            } else {
+                1
+            },
+        );
+    }
     if let Some(argument) = std::env::args_os()
         .nth(1)
         .and_then(|value| value.into_string().ok())
@@ -1260,6 +1274,32 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(archive),
             )?)?;
         }
+        ["runtime", "ensure-images", "--json", flags @ ..] => {
+            use std::io::Read;
+            let mut input = Vec::new();
+            std::io::stdin()
+                .take(65_537)
+                .read_to_end(&mut input)
+                .map_err(|_| {
+                    CandidateError::new("invalid_arguments", "Cannot read the image batch.")
+                })?;
+            let jobs: Vec<(
+                String,
+                hack_runtime_core::provider::image_platform::PlatformPolicy,
+            )> = serde_json::from_slice(&input)
+                .map_err(|_| CandidateError::new("invalid_arguments", "Invalid image batch."))?;
+            if input.len() > 65_536 || jobs.len() > 64 {
+                return Err(CandidateError::new(
+                    "invalid_arguments",
+                    "Image batch exceeds its input bound.",
+                ));
+            }
+            print_json(&hack_runtime_core::provider::image_ensure::ensure_batch(
+                &discover_candidate(&requested)?,
+                &jobs,
+                &image_policy(flags)?,
+            ))?;
+        }
         [
             "runtime",
             command @ ("ensure-image" | "cache-image"),
@@ -1425,6 +1465,21 @@ fn run() -> Result<(), CandidateError> {
                 "recover" => hack_runtime_core::provider::recover(&candidate),
                 _ => return Err(CandidateError::new("unsupported_command", HELP)),
             }?;
+            // Typed by hand: say what stopped with the pool and what brings it back (HACK-2456).
+            if let Some(runs) = result
+                .interrupted_runs
+                .as_ref()
+                .filter(|runs| !runs.is_empty())
+            {
+                eprintln!(
+                    "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. Run hack up in each project to start the runtime again and recover its run.",
+                    runs.len()
+                );
+            } else if result.interrupted_runs_unknown {
+                eprintln!(
+                    "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a project recovers its run."
+                );
+            }
             if *action == "up" {
                 sweep_running_pool(&result.phase, result.process_alive);
             }
@@ -2114,4 +2169,14 @@ fn print_json(value: &impl Serialize) -> Result<(), CandidateError> {
             .map_err(|error| { CandidateError::new("serialization_failed", error.to_string()) })?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod usage_tests {
+    #[test]
+    fn the_usage_names_the_report_started_flag() {
+        assert!(
+            super::HELP.contains("hack-local graph serve|serve-restore ... [--report-started]")
+        );
+    }
 }

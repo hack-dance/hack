@@ -594,6 +594,10 @@ another test's spawned child to inherit a socket and delay EOF. Retries are zero
 The admission-pool test group retains the old mutex's serialization of whole-host
 disk-handle scans. Ignored helpers remain ignored and their owning tests still invoke
 them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+Candidate core runs the rest of each scheduled test suite and its doctests after
+a test failure. A failed qualification pass still stops subsequent repetitions.
+The job runs independent later checks and summarizes failed step IDs. Setup
+dependencies and the kill-harness check still require their input artifacts.
 Focused target selections such as `bun run test:local --lib` or `--test <name>`
 skip doctests, matching Cargo; explicit `--doc` selection runs through Cargo alone.
 The wrapper accepts Cargo build, feature and target options; nextest-specific
@@ -1145,7 +1149,7 @@ relay enrollment left when an older publisher exited before cleanup. The old
 coordinator must be EffectStarted for the exact dead owner, graph, operation,
 effect and saved bridge/environment inventories. Recovery pins its bytes in a
 new version3/4 intent (present/absent relay respectively); version1/2 recovery
-records remain unchanged. After an audited immediate successor boot, the frontend
+records remain unchanged. After an audited later boot, the frontend
 selects `recover-cleanup` followed by publication retirement. Its new version2
 intent pins the legacy Ready/Pending coordinator; ordinary version1 predecessor
 recovery records remain unchanged. The old coordinator is retained without an ACK or

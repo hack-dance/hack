@@ -33,7 +33,20 @@ fn executable(path: &Path) -> String {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     https_recovery::executable_hash(path).unwrap()
 }
+/// Which executables the recorded binding names.
+#[derive(Clone, Copy, Default)]
+struct Binaries {
+    /// The frontend is a real process image that sleeps this long whatever its
+    /// arguments, so a test can run it as a CLI command or as the owner.
+    frontend_sleeper: Option<u32>,
+    /// The runtime is this test binary itself, as when the CLI asks the same bundle's
+    /// runtime for the archive.
+    runtime_is_self: bool,
+}
 fn fixture(present_socket: bool) -> Fixture {
+    fixture_with(present_socket, Binaries::default())
+}
+fn fixture_with(present_socket: bool, binaries: Binaries) -> Fixture {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -59,8 +72,23 @@ fn fixture(present_socket: bool) -> Fixture {
     let frontend = home.join("old-frontend");
     let runtime = home.join("old-runtime");
     let caddy = home.join("old-caddy");
-    let frontend_sha = executable(&frontend);
-    let runtime_sha = executable(&runtime);
+    let frontend_sha = match binaries.frontend_sleeper {
+        Some(seconds) => {
+            crate::provider::test_executable::argument_free_sleeper(&frontend, seconds);
+            https_recovery::executable_hash(&frontend).unwrap()
+        }
+        None => executable(&frontend),
+    };
+    let runtime = if binaries.runtime_is_self {
+        fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+    } else {
+        runtime
+    };
+    let runtime_sha = if binaries.runtime_is_self {
+        https_recovery::executable_hash(&runtime).unwrap()
+    } else {
+        executable(&runtime)
+    };
     let caddy_sha = executable(&caddy);
     let port = crate::provider::test_socket::unallocated_tcp_port();
     let generation = "a".repeat(32);
@@ -193,6 +221,7 @@ fn real_subprocess_socket_and_absent_parent_archive_preserve_exact_bytes_and_ino
         .unwrap();
         run_archive(
             &f.paths,
+            &f.home,
             &f.journal,
             dir(&f.paths.storage).unwrap(),
             &mut || Ok(()),
@@ -224,6 +253,7 @@ fn real_subprocess_socket_and_absent_parent_archive_preserve_exact_bytes_and_ino
         );
         run_archive(
             &f.paths,
+            &f.home,
             &f.journal,
             dir(&f.paths.storage).unwrap(),
             &mut || Ok(()),
@@ -239,6 +269,7 @@ fn interrupted_owner_move_requires_same_selection_and_retains_barrier_for_resume
     assert!(
         run_archive(
             &f.paths,
+            &f.home,
             &f.journal,
             dir(&f.paths.storage).unwrap(),
             &mut || {
@@ -257,6 +288,7 @@ fn interrupted_owner_move_requires_same_selection_and_retains_barrier_for_resume
     assert!(
         run_archive(
             &f.paths,
+            &f.home,
             &stale,
             dir(&f.paths.storage).unwrap(),
             &mut || Ok(())
@@ -266,6 +298,7 @@ fn interrupted_owner_move_requires_same_selection_and_retains_barrier_for_resume
     assert!(absent(&f.paths.complete).unwrap());
     run_archive(
         &f.paths,
+        &f.home,
         &f.journal,
         dir(&f.paths.storage).unwrap(),
         &mut || Ok(()),
@@ -280,6 +313,7 @@ fn missing_graph_proof_or_partial_socket_never_archives_owner() {
     assert!(
         run_archive(
             &f.paths,
+            &f.home,
             &f.journal,
             dir(&f.paths.storage).unwrap(),
             &mut || Err(refused())
@@ -370,7 +404,7 @@ fn live_pinned_executable_refuses_quiescence() {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let refusal = prove_quiescence(&config, None);
+    let refusal = prove_quiescence(&config, &f.home, None);
     let live_after = child.try_wait().unwrap().is_none();
     child.kill().unwrap();
     child.wait().unwrap();
@@ -389,6 +423,7 @@ fn replaced_admission_refuses_before_archive_effect() {
     let mut replaced = false;
     let result = run_archive(
         &f.paths,
+        &f.home,
         &f.journal,
         dir(&f.paths.storage).unwrap(),
         &mut || {
@@ -416,6 +451,7 @@ fn completed_replay_refuses_when_a_new_shared_owner_has_published() {
     let f = fixture(false);
     run_archive(
         &f.paths,
+        &f.home,
         &f.journal,
         dir(&f.paths.storage).unwrap(),
         &mut || Ok(()),
@@ -427,6 +463,7 @@ fn completed_replay_refuses_when_a_new_shared_owner_has_published() {
     assert!(
         run_archive(
             &f.paths,
+            &f.home,
             &f.journal,
             dir(&f.paths.storage).unwrap(),
             &mut || Ok(())
@@ -438,4 +475,161 @@ fn completed_replay_refuses_when_a_new_shared_owner_has_published() {
         fs::read(f.paths.source.join("new-owner")).unwrap(),
         b"another app"
     );
+}
+
+fn config_of(f: &Fixture) -> Configuration {
+    let (bytes, _) = read_file(&f.paths.source.join("configuration.json"), MAX_FILE, true).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Spawn the recorded frontend with `arguments` and wait until the kernel reports it
+/// running that executable.
+fn spawn_frontend(f: &Fixture, arguments: &[&std::ffi::OsStr]) -> std::process::Child {
+    let frontend = f.home.join("old-frontend");
+    let mut child = Command::new(&frontend).args(arguments).spawn().unwrap();
+    let deadline =
+        std::time::Instant::now() + crate::provider::test_executable::LOADED_EVENT_HANG_GUARD;
+    loop {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "frontend stand-in exited early"
+        );
+        if identity::observe(child.id() as i32)
+            .is_ok_and(|observed| observed.executable == frontend)
+        {
+            return child;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "frontend stand-in never became observable"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn owner_arguments(f: &Fixture) -> [std::ffi::OsString; 2] {
+    [
+        OWNER_ARGUMENT.into(),
+        f.home
+            .join("native-https/shared-owner/configuration.json")
+            .into_os_string(),
+    ]
+}
+
+/// HACK-2456, seen on a real VM: the CLI that asks for the archive runs the recorded
+/// frontend executable, and the archive itself runs the recorded runtime executable.
+/// Neither is the owner, so neither may block the archive.
+#[test]
+fn the_same_bundles_cli_and_runtime_do_not_block_the_archive() {
+    let f = fixture_with(
+        true,
+        Binaries {
+            frontend_sleeper: Some(60),
+            runtime_is_self: true,
+        },
+    );
+    let mut cli = spawn_frontend(&f, &["up".as_ref(), "-d".as_ref()]);
+    let result = run_archive(
+        &f.paths,
+        &f.home,
+        &f.journal,
+        dir(&f.paths.storage).unwrap(),
+        &mut || Ok(()),
+    );
+    cli.kill().unwrap();
+    cli.wait().unwrap();
+    result.unwrap();
+    assert!(absent(&f.paths.source).unwrap());
+    assert!(!absent(&f.paths.complete).unwrap());
+}
+
+/// A live owner (the frontend run with this home's exact owner invocation) refuses
+/// quiescence and leaves every record in place; once it exits the archive proceeds.
+#[test]
+fn a_live_owner_invocation_refuses_until_it_exits() {
+    let f = fixture_with(
+        false,
+        Binaries {
+            frontend_sleeper: Some(60),
+            runtime_is_self: true,
+        },
+    );
+    let config = config_of(&f);
+    let arguments = owner_arguments(&f);
+    let mut owner = spawn_frontend(&f, &[arguments[0].as_os_str(), arguments[1].as_os_str()]);
+    assert!(owner_running(&config, &f.home).unwrap());
+    assert!(prove_quiescence(&config, &f.home, None).is_err());
+    let refused = run_archive(
+        &f.paths,
+        &f.home,
+        &f.journal,
+        dir(&f.paths.storage).unwrap(),
+        &mut || Ok(()),
+    );
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+    assert!(refused.is_err());
+    assert!(!absent(&f.paths.source).unwrap());
+    assert!(absent(&f.paths.complete).unwrap());
+    // Once it exits, nothing matches.
+    assert!(!owner_running(&config, &f.home).unwrap());
+    prove_quiescence(&config, &f.home, None).unwrap();
+}
+
+/// An owner that retires itself after its pool boot ended is waited for, bounded.
+#[test]
+fn a_retiring_owner_is_awaited_before_the_archive() {
+    let f = fixture_with(
+        false,
+        Binaries {
+            frontend_sleeper: Some(1),
+            runtime_is_self: true,
+        },
+    );
+    let config = config_of(&f);
+    let arguments = owner_arguments(&f);
+    let owner = spawn_frontend(&f, &[arguments[0].as_os_str(), arguments[1].as_os_str()]);
+    // Reap it as soon as it exits, as launchd reaps a detached owner.
+    let reaper = std::thread::spawn(move || {
+        let mut owner = owner;
+        owner.wait().unwrap()
+    });
+    let started = std::time::Instant::now();
+    await_owner_exit(&config, &f.home).unwrap();
+    assert!(started.elapsed() < OWNER_EXIT_WAIT);
+    assert!(reaper.join().unwrap().success());
+    prove_quiescence(&config, &f.home, None).unwrap();
+}
+
+/// Codex finding on #1017: an owner still retiring when the archive starts unlinks
+/// its socket and directory as it closes. The evidence is read after it exits, so the
+/// archive sees the socket absent and succeeds the first time.
+#[test]
+fn socket_evidence_is_captured_after_a_retiring_owner_removes_it() {
+    let f = fixture_with(
+        true,
+        Binaries {
+            frontend_sleeper: Some(1),
+            runtime_is_self: true,
+        },
+    );
+    let config = config_of(&f);
+    let (bytes, _) = read_file(&f.paths.source.join("endpoint.json"), MAX_FILE, true).unwrap();
+    let endpoint: Endpoint = serde_json::from_slice(&bytes).unwrap();
+    assert!(!absent(&endpoint.socket).unwrap());
+    let arguments = owner_arguments(&f);
+    let owner = spawn_frontend(&f, &[arguments[0].as_os_str(), arguments[1].as_os_str()]);
+    // The owner's closeServer: unlink the socket, then remove its directory.
+    let socket = endpoint.socket.clone();
+    let closing = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        fs::remove_file(&socket).unwrap();
+        fs::remove_dir(socket.parent().unwrap()).unwrap();
+        let mut owner = owner;
+        owner.wait().unwrap()
+    });
+    let evidence = capture_socket(&endpoint, &config, &f.home).unwrap();
+    assert!(closing.join().unwrap().success());
+    assert!(matches!(evidence, SocketEvidence::Absent { .. }));
+    prove_quiescence(&config, &f.home, None).unwrap();
 }

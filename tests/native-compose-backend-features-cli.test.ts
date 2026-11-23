@@ -501,18 +501,26 @@ test(
 );
 
 test(
-  "with native builds enabled, a build field native builds lack still selects the Compose backend",
+  "with native builds enabled, a build field native builds lack names the service and field in three lines",
   async () => {
-    await expectComposeBackendRefusal({
-      compose: {
-        services: {
-          web: { build: { context: "../app", ssh: ["default"] } },
-        },
+    const f = await fixture({
+      services: {
+        web: { build: { context: "../app", ssh: ["synthetic-ssh-canary"] } },
       },
-      env: BUILDS_ENV,
-      phrase:
-        "a Compose build field other than context, dockerfile, target and args, or image together with build",
     });
+    f.env({});
+    const before = await tree(f.root);
+    const result = await cli(f, ["up"], BUILDS_ENV);
+    expect(result.output).toContain(
+      [
+        "! build  web uses build.ssh (SSH agent forwarding into a native build is not supported)",
+        "  remove build.ssh for native builds, or run this project on the Compose backend. run:",
+        `  HACK_RUNTIME_BACKEND=compose hack up --path ${f.project}`,
+      ].join("\n")
+    );
+    expect(result.output).not.toContain("synthetic-ssh-canary");
+    expect(await f.calls()).toEqual([]);
+    expect(await tree(f.root)).toEqual(before);
   },
   SPAWN_TIMEOUT_MS
 );

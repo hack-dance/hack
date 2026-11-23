@@ -59,9 +59,9 @@ beforeEach(async () => {
   process.env.CI = "";
   process.env.HACK_EXECUTION_MODE = "";
   root = await realpath(await mkdtemp(join(tmpdir(), "source-bind-owner-")));
-  await mkdir(join(root, ".git"));
-  await mkdir(join(root, ".hack"));
-  await mkdir(join(root, "ignored"));
+  await mkdir(join(root, ".git"), { mode: 0o755 });
+  await mkdir(join(root, ".hack"), { mode: 0o755 });
+  await mkdir(join(root, "ignored"), { mode: 0o755 });
   await writeFile(join(root, ".gitignore"), "ignored/\n");
   await writeFile(join(root, "ignored/marker"), CANARY);
   configText = '{"name":"fixture"}';
@@ -211,7 +211,7 @@ test.each([
     await symlink(join(root, ".hack"), join(root, "ignored"));
   }
   if (kind === "unsafe mode") {
-    await mkdir(join(root, "ignored"));
+    await mkdir(join(root, "ignored"), { mode: 0o755 });
     await chmod(join(root, "ignored"), 0o777);
   }
   await red(acquire());
@@ -224,16 +224,16 @@ test.each([
   "parent",
 ])("held %s replacement refuses before and after the observation", async (kind) => {
   if (kind === "parent") {
-    await mkdir(join(root, "ignored/nested"));
+    await mkdir(join(root, "ignored/nested"), { mode: 0o755 });
     await setMount(declaration("../ignored/nested"));
   }
   const owned = await acquire();
   await red(
     owned.withFresh({}, async () => {
       await rename(join(root, "ignored"), join(root, "original"));
-      await mkdir(join(root, "ignored"));
+      await mkdir(join(root, "ignored"), { mode: 0o755 });
       if (kind === "parent") {
-        await mkdir(join(root, "ignored/nested"));
+        await mkdir(join(root, "ignored/nested"), { mode: 0o755 });
       }
     })
   );
@@ -260,7 +260,7 @@ test("saved proof remains key-free and rejects forged, absent, changed or replac
   await red(held.assertFresh());
   await red(holdSavedLegacyComposeSourceBind({ ...opts, proof: {} }));
   await rename(join(root, "ignored"), join(root, "original"));
-  await mkdir(join(root, "ignored"));
+  await mkdir(join(root, "ignored"), { mode: 0o755 });
   await red(holdSavedLegacyComposeSourceBind(opts));
 });
 
@@ -289,7 +289,7 @@ test.each([
     if (armed && !replaced) {
       replaced = true;
       await rename(join(root, "ignored"), join(root, "original"));
-      await mkdir(join(root, "ignored"));
+      await mkdir(join(root, "ignored"), { mode: 0o755 });
     }
     return result;
   });
@@ -322,7 +322,7 @@ test("replacement during the final issued-source await is rechecked by mounted-d
     if (observed && !replaced) {
       replaced = true;
       await rename(join(root, "ignored"), join(root, "original"));
-      await mkdir(join(root, "ignored"));
+      await mkdir(join(root, "ignored"), { mode: 0o755 });
     }
     return result;
   });
@@ -381,7 +381,8 @@ test("two linked checkout directories are independent and wrong-family source ch
   ]);
   const linked = join(root, "linked");
   await git(["worktree", "add", "--quiet", "-b", "linked", linked]);
-  await mkdir(join(linked, "ignored"));
+  await chmod(linked, 0o755);
+  await mkdir(join(linked, "ignored"), { mode: 0o755 });
   await writeFile(
     join(linked, "ignored/marker"),
     "independent runtime contents"
@@ -397,7 +398,7 @@ test("two linked checkout directories are independent and wrong-family source ch
   const second = await acquireLegacyComposeSourceBind({ source: selected });
   expect(second.proof.directories).not.toEqual(original.proof.directories);
   await rename(join(linked, "ignored"), join(linked, "original"));
-  await mkdir(join(linked, "ignored"));
+  await mkdir(join(linked, "ignored"), { mode: 0o755 });
   await red(second.withFresh({}, async () => {}));
   await original.withFresh({}, async () => {});
   await writeFile(

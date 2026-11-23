@@ -135,7 +135,11 @@ Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
 An exact repository at `$HOME/.codex/worktrees/<id>/<repo>` is allowed only when
 bounded Git registration metadata verifies its worktree root, common directory and
 backlink. The enclosing Codex directories are never exported. Sensitive ancestors,
-aliases and unsafe ownership or permissions remain refused.
+aliases and unsafe ownership or permissions remain refused. Git can create
+group-writable worktree directories and registration files under umask `002`.
+Create a worktree intended for sharing with umask `022` or stricter, and ensure
+its existing registration directories and metadata are also free of group and
+other write permissions.
 
 The internal planning path accepts a canonical lowercase DNS-label `--branch`.
 It gives each checkout/branch pair a separate enrollment and source namespace;
@@ -469,6 +473,10 @@ With it:
   interpolation, a list item without `=` (host variable inheritance), `null`, other
   build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
   remote contexts and `image` together with `build` refuse. Values are never shown.
+  With `HACK_NATIVE_BUILDS=1`, `up` names the first such service and the field in the
+  three-line form, for example `! build  web uses build.ssh (SSH agent forwarding into
+  a native build is not supported)`, then the Compose-backend command. Only Compose's
+  own build field names are printed; any other key is not.
 - Build args are not secrets: as with Docker, the image records them in its history.
   A build arg whose value equals a `hack env` secret value of this project and
   environment refuses before any hook or VM effect, naming the service and the
@@ -909,6 +917,84 @@ data, and requires inspection before retry. No guest is started by alias recover
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
 
+`runtime down` stops the pool even while projects run in it, because a crash or a
+host reboot ends the same way. Their containers stop with the guest and their data is
+kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live, including a failed start that kept its started services, in
+`interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
+and it writes one line on stderr saying how many it stopped. `hack up` in each of those
+projects starts the pool again and recovers its run.
+
+How a run moves across a pool stop. It is checked as the TLA+ model
+`tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
+one is recovered too: another project's `hack up` or a `runtime up` by hand booted
+the pool and it stopped again before this project recovered, or the pool stopped
+again between a recovery's `runtime up` and its recovery. Each boot records the boots
+it supersedes in a bounded history (`run/smolvm/boot-history.json`, the last 16,
+bound to the pool), and recovery selects the one earlier boot the run's receipt
+names, never the current one. A run whose boot has left that history, or whose
+evidence names more than one boot, is refused with its data kept. Two paths stay
+limited to the previous boot: a `graph recover-cleanup` selection made while the
+pool was stopped (another boot in between may have restarted the run's containers),
+and absent-publication cleanup after a host reboot.
+
+```mermaid
+---
+title: PoolStop · run and pool stop
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> none
+    none --> ready : hack up
+    retained --> ready : hack up
+    ready --> retained : hack down
+    ready --> orphaned : runtime down, owner dies
+    ready --> crashed : VM or provider dies
+    crashed --> orphaned : hack native recover
+    orphaned --> recover : hack up, down --recover
+    state recover <<choice>>
+    recover --> retained : [boot known, no HTTPS lease]
+    recover --> finalizing : [boot known, HTTPS lease]
+    recover --> stranded : [boot not known]
+    finalizing --> retained : lease released or archived
+
+    note left of orphaned
+        Receipt still ready-observed,
+        owner dead, publication left.
+        Pool stopped or in a new boot.
+    end note
+    note right of recover
+        runtime up first, then the
+        existing recovery as its own
+        request, data kept.
+    end note
+    note right of stranded
+        Refused, data kept: the run's
+        boot left the 16-boot history,
+        or its evidence is ambiguous.
+    end note
+    note right of finalizing
+        Graph stopped, HTTPS lease held.
+        The old owner retires when its
+        boot ends; up refuses until
+        down --recover finishes.
+    end note
+    note left of retained
+        INV NoDeadEnd: some named
+        command always acts.
+        PROP Recovers.
+    end note
+
+    class ready ok
+    class orphaned wait
+    class crashed wait
+    class finalizing wait
+    class stranded fail
+```
+
 `runtime down` first quiesces the guest engine, which leaves the pool in phase
 `quiescing` until the engine exits. A guest agent that answers no ping lets `down`
 or `recover` stop the provider. A guest that still answers pings but whose engine
@@ -1070,10 +1156,25 @@ that names the owning home and what to do. The refusal has its own code,
 - **Live.** The owning frontend's PID still exists. The refusal names the home and
   PID. Stop it with Ctrl-C in that `hack up`, or run `hack down` with the version
   that owns that home, then retry. Release refuses.
+- **Gone (HACK-2524).** The recorded path no longer holds that home: it is absent,
+  not a directory, or another directory, so its records cannot be read there. An
+  absent path may be a disk that is not mounted: when the missing directory sits
+  directly under `/Volumes`, `/mnt`, `/media` or `/run/media/<user>`, inspection adds
+  `missingVolume` and the refusal says so. Mount it and stop the run there instead;
+  its data is still on that disk.
+  Inspection reports `owner: "gone"` with a `selectionSha256`, and the refusal names
+  the same release command. The release first lists this user's processes. It
+  refuses, naming each PID, while any process names the old home's path in its
+  command line or works inside it. Otherwise it keeps the mapping, its restart intent
+  and its down-hook journal in an audit file (`<scope>.gone-home-release-<sha>.json`;
+  owed hooks are skipped, because their services went with the home) and removes
+  them. A home that was moved rather than deleted, and started again from its new
+  path, has processes that name only the new path, so this check cannot see it;
+  release again from the moved home afterwards.
 - **Interrupted or unproven.** The frontend exited without acknowledging cleanup, or
-  the home has no readable record for the run (for example a legacy mapping, or a
-  home that was moved or replaced). Use the owning version's
-  `hack doctor --native-cleanup inspect` and `hack down`. Release refuses.
+  the home has no readable record for the run (for example a legacy mapping). Use
+  the owning version's `hack doctor --native-cleanup inspect` and `hack down`.
+  Release refuses.
 
 Release proves ownership; it never just overwrites. The stored scope must differ
 from this checkout in its native home only, that home must still be the recorded
@@ -1325,8 +1426,9 @@ tree, stop the runtime and run:
 
 The repair holds the provider lock and requires a stopped (or uninitialized) runtime.
 It requires the preparation record to match this executor's pins and the kept archive
-to be an owned regular file with the pinned SHA-256. It then copies and hashes the
-archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
+to be an owned regular file with the pinned SHA-256. Group- or other-writable
+archives and staging directories are refused. New preparations create both with
+owner-only permissions. The repair then copies and hashes the archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
 tree to match the digest recorded at preparation. Only then does it rename the changed
 tree aside as `providers/<tree>-changed-<id>` and put the fresh tree in its place. It
 keeps the changed tree for inspection and never deletes it; remove it yourself once
@@ -1364,6 +1466,12 @@ and leaves it in place when it is anything else, such as a symlink or a director
 If the prepared tree changes, `runtime probe` and every build
 refuse with `artifact_digest_mismatch`. `runtime probe` reports `builder_prepared`:
 `true` when the client is present and unchanged, `false` for a home without it.
+
+A native start can build distinct images together, including a retained start after edits. The
+four-CPU development pool runs at most three builds at once. Identical build
+requests still share one build. A failure or Ctrl-C requests cancellation of
+the other builds, and the CLI waits for all started builds to settle before
+returning. The foreground labels output by build and reports its elapsed time.
 
 A home without the image builder refuses a build with `builder_not_prepared`:
 "The image builder is not installed in this native home", with the setup command
@@ -1450,7 +1558,8 @@ JSON file (a singly linked, mode-`0600` file owned by you):
 replaced. For each build declaration (project root and branch, context, Dockerfile and
 target) it keeps the image of the most recently built or reused key (`current`) and of
 the one before it (`previous`, for a quick revert). It also keeps every image that any
-retained run's saved state mentions, every image a container still uses (the engine
+retained run's saved state mentions, apart from its restore history (a diagnostic
+record recovery only compares against; nothing starts a container from it), every image a container still uses (the engine
 refuses those), every image of a receipt written before this rule, and every image
 whose ownership labels are not exactly this runtime's. An `up` that built an image runs
 it with `--best-effort` once the project is ready: that form never fails, reports a
@@ -2373,7 +2482,35 @@ present it exits 0 and reports `runtime_not_running` (no phase, no service rows)
 and text output prints "Native runtime is not running; no services are running."
 That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
 `recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
-failed there with `runtime_changed`.
+failed there with `runtime_changed`. When a command that needs the running pool finds it in any other phase (stopped,
+or still booting or quiescing), it refuses with `runtime_not_running` and says only
+that it did not connect: "The native runtime is not in its running state, so this
+command did not connect to it; nothing was changed." `hack down` adds the next
+commands: `hack ps --json` to see the phase, then `hack up` or `hack down --recover`
+once the pool is stopped.
+When the pool stopped or the VM died under a running project, the run's foreground
+owner exits and the run is left neither running nor stopped (after a VM crash, run
+`hack native recover` first so the pool is recorded as stopped). `hack up` then starts the
+pool, recovers the run with its data retained, and starts it again. `hack down --recover`
+(and plain `hack down`) start the pool to recover the run the same way, then leave the
+pool running and say so; run `runtime down` to stop it. A run whose owner is still alive,
+or that is already stopped with data retained, keeps the refusal above, and so does one
+whose only recovery needs the boot it ran in (a failed start, or an interrupted
+same-boot recovery): starting the pool begins a new boot, so it would not help.
+
+A project with HTTPS routes also holds a lease on the shared HTTPS owner, a host
+process bound to the pool boot it started in. `runtime down` does not stop it; the
+owner retires on its own within a few seconds once its boot has ended (the pool
+stopped, crashed or booted again), keeping its records. The recovery then archives
+those records and releases the run's lease, waiting up to 20 seconds for an owner
+that is still retiring. If a recovery stopped the run but could not finish that step,
+`hack up` refuses with `E_RECOVERY_REQUIRED` and names `hack down --recover`, which
+starts a stopped pool to finish it, with data kept.
+
+A detached start (`hack up -d`) whose pool stopped or booted again ends on its
+own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
+--recover` recovers its run. A command that finds an earlier start of the instance
+still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,
@@ -2427,6 +2564,11 @@ reports the original startup failure. A retained or restored run, and a run whos
 mapping write was attempted (its reply may have been lost), keep their data. When
 removal is not confirmed, `up` prints one line naming the run and the explicit
 `graph cleanup --run-id RUN --remove-data --json` request, and keeps the graph.
+
+Ctrl-C during startup exits with status 130 once the frontend's existing cleanup
+checks confirm the interruption. The CLI reports that startup was interrupted.
+An image fetch or a before hook can be interrupted before a graph is reserved.
+Any existing retained data stays subject to the usual ownership and cleanup rules.
 
 Ctrl-C (or SIGTERM) on a ready graph whose `up.after` completed stops the project the
 way `hack down` does on the Compose backend: `down.before` runs first, then graph
@@ -3397,6 +3539,12 @@ Failures inside the startup period don't count toward `retries`, as the engine
 defines it. Declared values are kept, and a disabled check gets neither. Authored
 native readiness (`readiness.exec`) gets the same cadence. A container started by an
 earlier build, without these fields, is still accepted as the same container.
+
+For a Compose service that mounts a data volume created during this start, native
+uses the authored timing when `start_interval` is omitted. Restoring with the
+retained volume uses the fast defaults again. For Postgres, use
+`pg_isready -h 127.0.0.1` so a temporary socket-only server during initialization
+cannot release dependents before the final server starts.
 
 The 250 ms cadence applies only inside the startup period that follows a container
 start. After a pause and resume the container's startup period is not restarted, so
@@ -4626,15 +4774,15 @@ owned containers and networks, and retains named volumes and dependency caches.
 It neither marks incomplete package caches valid nor replays initializers.
 
 If a foreground owner died after its graph reached `ready-observed` and the pool
-has already restarted once, the same explicit command can select recovery on that
-immediate successor boot. It requires the retained dead-owner identity, exact receipt
-hash, and bridge assignments belonging to the recorded previous boot. The recovery
-intent pins those assignments before effects and refuses replacements on retry.
+has restarted since, the same explicit command can select recovery on any later
+boot. It requires the retained dead-owner identity, exact receipt hash, the one
+earlier boot of the pool that the receipt names, and bridge assignments belonging
+to that boot. The recovery intent pins those assignments before effects and refuses replacements on retry.
 A remaining legacy device-rebound dependency reservation also requires the
 original recovery boot and host-pin witness. A further boot change refuses its
 release; no automatic recovery command for that state is implemented.
-Do not restart again to attempt this path: another boot rollover invalidates the
-previous-boot evidence. Old guest helper absence follows the verified boot transition;
+Do not restart while a selected recovery is unfinished: its intent is bound to the
+boot it was selected on, and another boot refuses it. Old guest helper absence follows the verified boot transition;
 it is not recorded as a live helper acknowledgement.
 
 Recovery retains its own durable intent and completion evidence. A guest completion

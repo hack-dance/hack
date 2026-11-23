@@ -409,8 +409,8 @@ test("projects without down hooks keep the attached owner and need no journal", 
   expect(
     await startNativeProject({
       ...startup,
-      before: async (input) => {
-        const hooks = await before(input);
+      before: async (input, signal) => {
+        const hooks = await before(input, signal);
         return { cleanup: hooks.cleanup, ready: hooks.ready };
       },
     })

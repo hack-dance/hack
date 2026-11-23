@@ -17,6 +17,7 @@ import {
   printedShellCommand,
   scopedHackCommand,
 } from "../lib/printed-shell-command.ts";
+import { withProcessDeadline } from "../lib/process-deadline.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -35,14 +36,20 @@ import {
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import {
+  selectLifecycleAddress,
+  writeLifecycleStopped,
+} from "../ui/lifecycle-closing.ts";
+import {
   writeStartBlocker,
   writeUpHookBlocker,
 } from "../ui/start-refusal-output.ts";
-import { createTextOutput } from "../ui/text-output.ts";
+import { createTextOutput, formatDuration } from "../ui/text-output.ts";
+import { writeComposeStarted } from "./compose-lifecycle-closing.ts";
 import {
-  writeComposeStarted,
-  writeComposeStopped,
-} from "./compose-lifecycle-closing.ts";
+  createComposeUpProgress,
+  type HookCompletion,
+  type HookStart,
+} from "./compose-up-progress.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -95,6 +102,7 @@ import {
 } from "../backends/native-profile-selection.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
+  NATIVE_RECOVERY_RUNTIME_STARTED_NOTE,
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
@@ -138,6 +146,7 @@ import {
 } from "../backends/native-project-settings.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
+  NativeStartupCanceledError,
   type NativeStartupProgress,
   startNativeProject,
 } from "../backends/native-project-start.ts";
@@ -2482,6 +2491,7 @@ function runLifecycleChild(opts: {
   readonly signal?: AbortSignal;
   /** The hook's log sink, shared with its end record. */
   readonly sink: LifecycleLogSink;
+  readonly beforeOutput?: () => void;
   /** Each output line, for a bounded tail of a failed hook's output. */
   readonly onLine?: (line: string) => void;
 }): Promise<number> {
@@ -2498,6 +2508,7 @@ function runLifecycleChild(opts: {
         service: opts.service,
         sink,
         onLine: opts.onLine,
+        beforeWrite: opts.beforeOutput,
       }),
   });
 }
@@ -2517,6 +2528,8 @@ export async function runLifecycleCommands(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
   readonly routeStdoutToStderr?: boolean;
+  readonly onHookStart?: HookStart;
+  readonly onHookComplete?: HookCompletion;
   readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly onPersistentCommand?: (opts: {
     readonly command: ProjectLifecycleCommand;
@@ -2528,24 +2541,35 @@ export async function runLifecycleCommands(opts: {
    * result is then 130.
    */
   readonly signal?: AbortSignal;
+  /** Report a stop during native startup after the attached hook settles. */
+  readonly startupSignal?: AbortSignal;
 }): Promise<number> {
   const commands = opts.commands ?? [];
   assertAutostartHostCommandsAllowed({ hasCommands: commands.length > 0 });
   for (const [index, cmd] of commands.entries()) {
     const label = cmd.name ? `${cmd.name}: ${cmd.command}` : cmd.command;
-    logger.step({ message: `${opts.title}: ${label}` });
+    const startedAt = opts.onHookComplete ? performance.now() : 0;
+    if (!opts.onHookComplete) {
+      logger.step({ message: `${opts.title}: ${label}` });
+    }
     const serviceName = resolveLifecycleCommandServiceName({
       command: cmd,
       index,
     });
     if (cmd.persistent === true && opts.onPersistentCommand) {
+      const clear = opts.onHookStart?.(serviceName);
       try {
-        await opts.onPersistentCommand({
-          command: cmd,
-          index,
-          serviceName,
-        });
+        await opts
+          .onPersistentCommand({
+            command: cmd,
+            index,
+            serviceName,
+          })
+          .finally(clear);
       } catch (error: unknown) {
+        if (opts.startupSignal?.aborted) {
+          return 130;
+        }
         const message =
           error instanceof Error
             ? error.message
@@ -2563,6 +2587,11 @@ export async function runLifecycleCommands(opts: {
         });
         return 1;
       }
+      opts.onHookComplete?.(
+        serviceName,
+        "running",
+        performance.now() - startedAt
+      );
       continue;
     }
     if (cmd.persistent === true) {
@@ -2590,12 +2619,15 @@ export async function runLifecycleCommands(opts: {
       message: `[start] ${opts.title}: ${label}`,
     });
     const tail = failedHookTail();
+    const env = await mergeLifecycleCommandEnv(opts.env);
+    const clear = opts.onHookStart?.(serviceName);
     const exitCode = await runLifecycleChild({
       sink,
       onLine: tail.onLine,
+      beforeOutput: clear,
       command: cmd.command,
       cwd,
-      env: await mergeLifecycleCommandEnv(opts.env),
+      env,
       // Under Hack's own `--json`, stdout holds only the envelope
       // (HACK-2311), whatever this call site passed.
       output:
@@ -2606,7 +2638,7 @@ export async function runLifecycleCommands(opts: {
       composeProject: opts.composeProject,
       service: serviceName,
       signal: opts.signal,
-    });
+    }).finally(clear);
 
     await sink.append({
       timestamp: new Date().toISOString(),
@@ -2615,6 +2647,9 @@ export async function runLifecycleCommands(opts: {
       message: `[end] ${opts.title}: exit ${exitCode}`,
     });
 
+    if (opts.startupSignal?.aborted) {
+      return 130;
+    }
     if (exitCode !== 0) {
       const failure = `${opts.title} failed (exit ${exitCode}): ${label}`;
       if (opts.summarizeFailure) {
@@ -2629,6 +2664,7 @@ export async function runLifecycleCommands(opts: {
       });
       return exitCode;
     }
+    opts.onHookComplete?.(serviceName, "done", performance.now() - startedAt);
   }
   return 0;
 }
@@ -2740,6 +2776,9 @@ function hasPersistentLifecycleCommands(
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly title: string;
+  readonly startupSignal?: AbortSignal;
+  readonly onHookStart?: HookStart;
+  readonly onHookComplete?: HookCompletion;
   readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
@@ -2808,7 +2847,10 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     const beforeCode = await runLifecycleCommands({
       title: opts.title,
       summarizeFailure: opts.summarizeFailure,
+      onHookStart: opts.onHookStart,
+      onHookComplete: opts.onHookComplete,
       commands: beforeCommands,
+      startupSignal: opts.startupSignal,
       projectRoot: opts.project.projectRoot,
       env: opts.env,
       projectDir: opts.project.projectDir,
@@ -2868,7 +2910,10 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   const beforeCode = await runLifecycleCommands({
     title: opts.title,
     summarizeFailure: opts.summarizeFailure,
+    onHookStart: opts.onHookStart,
+    onHookComplete: opts.onHookComplete,
     commands: beforeCommands,
+    startupSignal: opts.startupSignal,
     projectRoot: opts.project.projectRoot,
     env: opts.env,
     projectDir: opts.project.projectDir,
@@ -6578,6 +6623,11 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
     case "runtime":
       logger.step({ message: "Starting the native runtime…" });
       return;
+    case "build-settled":
+      logger.info({
+        message: `Build ${event.services.join(", ")}: ${event.outcome} in ${formatDuration(event.durationMs)}`,
+      });
+      return;
     case "images":
       logger.step({ message: "Acquiring service images…" });
       return;
@@ -6825,6 +6875,7 @@ async function handleNativeUp({
     createNativeEnvFingerprintSession(envFingerprintScope);
   const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
     await resolveNativeInternalExtraHostSelection({ project, cfg });
+  let ready = false;
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -6878,11 +6929,22 @@ async function handleNativeUp({
       await envFingerprints.record(
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
-    onReady: (services) => {
+    onReady: (services, addresses) => {
+      const primaryHost = branch
+        ? applyBranchToHost({
+            branch,
+            host: devHost,
+            baseHosts: resolveProjectRouteBaseHosts({
+              devHost,
+              aliasHost: resolveBranchAliasHost({ devHost, cfg }),
+            }),
+          })
+        : devHost;
       nativeDetachedUpReady({
         project: projectName,
         branch,
         composeProject,
+        address: selectLifecycleAddress(addresses, primaryHost),
         ...services,
       });
     },
@@ -6890,6 +6952,31 @@ async function handleNativeUp({
       env: process.env,
       project: cfg.native?.startTimeoutSeconds,
     }),
+    // HACK-2456: the pool stopped under this run; `hack down --recover`
+    // starts it and stops the run with data retained before this start.
+    // Restart keeps its own refusals.
+    ...(restart
+      ? {}
+      : {
+          recoverStoppedPool: async () => {
+            const scope = {
+              projectRoot: project.projectRoot,
+              projectDir: project.projectDir,
+              nativeHome: native.home,
+              branch,
+            };
+            await nativeProjectDown({
+              ...(await nativeDownRequest({
+                project,
+                native,
+                scope,
+                branch,
+                routeStdoutToStderr: args.options.json === true,
+              })),
+              recover: true,
+            });
+          },
+        }),
     onProgress: (event) => {
       if (event.phase === "runtime") {
         // VM work starts: later failures keep the runtime's own reports.
@@ -6897,11 +6984,20 @@ async function handleNativeUp({
       }
       // A detached launcher's clocks follow these phases (HACK-2351).
       nativeDetachedUpProgress(event.phase);
-      reportNativeStartupProgress(event);
+      if (event.phase === "ready") {
+        ready = true;
+      }
+      if (
+        (restart || ready || event.phase !== "stopped") &&
+        (event.phase !== "build-settled" || args.options.json !== true)
+      ) {
+        reportNativeStartupProgress(event);
+      }
     },
-    before: async (input) => {
+    before: async (input, signal) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
+        startupSignal: signal,
         project,
         cfg,
         projectName,
@@ -6948,7 +7044,7 @@ async function handleNativeUp({
         ...(down?.before?.length || down?.after?.length
           ? { stop: { before: stopPhase("before"), after: stopPhase("after") } }
           : {}),
-        ready: async () => {
+        ready: async (readySignal: AbortSignal) => {
           await assertNativeSharedHelpersCurrent({
             lifecycle,
             cleanup,
@@ -6956,12 +7052,16 @@ async function handleNativeUp({
           });
           const code = await runLifecycleCommands({
             title: "Lifecycle (native up after)",
+            startupSignal: readySignal,
             commands: cfg.lifecycle?.up?.after,
             projectRoot: project.projectRoot,
             env: input.lifecycleHostEnvironment,
             projectDir: project.projectDir,
             composeProject,
           });
+          if (readySignal.aborted) {
+            return;
+          }
           if (code !== 0) {
             throw new HackCliError({
               code: "E_LIFECYCLE_FAILED",
@@ -6989,7 +7089,16 @@ async function handleNativeUp({
   };
   if (!restart) {
     try {
-      return await startNativeProject(startup);
+      const code = await startNativeProject(startup).catch((error: unknown) => {
+        if (error instanceof NativeStartupCanceledError) {
+          return error.interruptedExit;
+        }
+        throw error;
+      });
+      if (code === 130 && !ready) {
+        process.stderr.write("Native project startup interrupted.\n");
+      }
+      return code;
     } finally {
       await envFingerprints.release();
     }
@@ -7179,9 +7288,9 @@ async function restartNativeImageProject({
         verifiedBuildImages,
         // The restart's own bookkeeping first, then the startup's ready
         // report: a detached owner (`restart --json`) tells its launcher here.
-        onReady: async (services) => {
+        onReady: async (services, addresses) => {
           await onReady();
-          await startup.onReady?.(services);
+          await startup.onReady?.(services, addresses);
         },
         signal,
         onStopSignals,
@@ -7895,6 +8004,14 @@ async function runUpCommand({
     });
   }
 
+  const progress =
+    detach && !json
+      ? createComposeUpProgress({
+          services: targetServices,
+          before: serviceScoped ? undefined : cfg.lifecycle?.up?.before,
+          after: serviceScoped ? undefined : cfg.lifecycle?.up?.after,
+        })
+      : undefined;
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   let assertHelpersCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
@@ -7931,6 +8048,8 @@ async function runUpCommand({
       ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
       : await runLifecycleUpBeforeAndProcesses({
           title: "Lifecycle (up before)",
+          onHookStart: progress?.beforeStart,
+          onHookComplete: progress?.before,
           summarizeFailure,
           project,
           cfg,
@@ -8089,7 +8208,9 @@ async function runUpCommand({
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    reportComposeStartupBudget({ budgets, detach });
+    if (!progress) {
+      reportComposeStartupBudget({ budgets, detach });
+    }
     const bootstrapCode = await bootstrapDependencyCaches({
       timeoutMs: detach ? startupTimeoutMs : undefined,
       services: cacheBootstrapServices,
@@ -8242,10 +8363,52 @@ async function runUpCommand({
           budgets.startupTimeoutMs - (performance.now() - upPhase.progressAt())
         )
       : budgets.startupTimeoutMs;
+    const readStartup = (strict: boolean) =>
+      readComposeServiceStates({
+        project,
+        composeProjectName,
+        profiles,
+        services: targetServices,
+        env: envOverrides.env,
+        strict,
+      });
+    const completionServices = async () =>
+      new Set(
+        await discoverSuccessfulCompletionServices({
+          composeFile: project.composeFile,
+          activeProfiles: resolveEffectiveComposeProfiles({
+            cliProfiles: profiles,
+            composeEnv: envOverrides.env,
+          }),
+          selectedServices: serviceScoped ? targetServices : undefined,
+        })
+      );
+    const showBeforeAfter =
+      progress && !serviceScoped && (cfg.lifecycle?.up?.after?.length ?? 0) > 0;
+    if (showBeforeAfter) {
+      // Display a snapshot before hooks without moving the authoritative
+      // post-hook confirmation or making the display read a startup gate.
+      const clear = progress.serviceWait();
+      const snapshot = await Promise.all([
+        withProcessDeadline(Date.now() + 1000, () => readStartup(false)),
+        completionServices(),
+      ])
+        .catch(() => null)
+        .finally(clear);
+      if (snapshot) {
+        progress.services(
+          classifyComposeStartupState(snapshot[0], {
+            successfulCompletionServices: snapshot[1],
+          })
+        );
+      }
+    }
     const afterCode = serviceScoped
       ? 0
       : await runLifecycleCommands({
           title: "Lifecycle (up after)",
+          onHookStart: progress?.afterStart,
+          onHookComplete: progress?.after,
           summarizeFailure,
           commands: cfg.lifecycle?.up?.after,
           projectRoot: project.projectRoot,
@@ -8269,30 +8432,13 @@ async function runUpCommand({
       });
     }
 
-    const effectiveProfiles = resolveEffectiveComposeProfiles({
-      cliProfiles: profiles,
-      composeEnv: envOverrides.env,
-    });
-    const successfulCompletionServices = new Set(
-      await discoverSuccessfulCompletionServices({
-        composeFile: project.composeFile,
-        activeProfiles: effectiveProfiles,
-        selectedServices: serviceScoped ? targetServices : undefined,
-      })
-    );
+    const successfulCompletionServices = await completionServices();
+    const clearServiceWait = progress?.serviceWait();
     const { states, startup } = await waitForComposeStartupState({
       successfulCompletionServices,
       deadlineMs: performance.now() + observationBudgetMs,
-      read: () =>
-        readComposeServiceStates({
-          project,
-          composeProjectName,
-          profiles,
-          services: targetServices,
-          env: envOverrides.env,
-          strict: true,
-        }),
-    });
+      read: () => readStartup(true),
+    }).finally(clearServiceWait);
     if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
       await lifecycleCleanup?.();
       await removeProjectRuntimeStateEntry({
@@ -8322,6 +8468,9 @@ async function runUpCommand({
         }),
         exitCode: 1,
       });
+    }
+    if (!showBeforeAfter) {
+      progress?.services(startup);
     }
     if (!serviceScoped) {
       await recordEnvMigrationProjectRun({
@@ -8504,6 +8653,94 @@ function refuseNativeDownOptions(options: DownArgs["options"]): void {
   }
 }
 
+/**
+ * The project half of a native down: lifecycle hooks, host process retirement
+ * and shared-helper marking. Shared by `hack down` and by `hack up`, which
+ * runs `hack down --recover` when the pool stopped under its run (HACK-2456).
+ */
+async function nativeDownRequest(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+  readonly scope: Parameters<typeof nativeProjectDown>[0]["scope"];
+  readonly branch: string | null;
+  readonly routeStdoutToStderr: boolean;
+}): Promise<
+  Pick<
+    Parameters<typeof nativeProjectDown>[0],
+    "runtime" | "scope" | "retireHostProcesses" | "hooks" | "beforeCleanup"
+  >
+> {
+  const { project, scope, branch } = opts;
+  const cfg = await readProjectConfig(project);
+  if (cfg.parseError) {
+    throw new CliUsageError(
+      "Native down requires valid lifecycle configuration; values omitted."
+    );
+  }
+  let lifecycleEnv: Readonly<Record<string, string>> | undefined;
+  const hasHooks = Boolean(
+    cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
+  );
+  const projectName = sanitizeProjectSlug(
+    await resolveComposeProjectName({ project, cfg })
+  );
+  const composeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  const hook = async (phase: "before" | "after", graphStopped: boolean) => {
+    const code = await runLifecycleCommands({
+      title: `Lifecycle (native down ${phase})`,
+      commands: cfg.lifecycle?.down?.[phase],
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      composeProject,
+      env: lifecycleEnv ?? {},
+      routeStdoutToStderr: opts.routeStdoutToStderr,
+    });
+    if (code !== 0) {
+      throw new Error(
+        `Native down ${phase} hook failed (exit ${code})${graphStopped ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
+      );
+    }
+  };
+  return {
+    runtime: opts.native,
+    scope,
+    retireHostProcesses: async () => {
+      await stopLifecycleProcesses({
+        project,
+        cfg,
+        projectName,
+        branch,
+        composeProject,
+      });
+    },
+    // Journaled: a foreground Ctrl-C may already have run them, or left
+    // them owed after a crash; unknown completion refuses.
+    hooks: {
+      configured: hasHooks,
+      run: async ({ phase, run, graphStopped }) => {
+        if (!hasHooks) {
+          return;
+        }
+        lifecycleEnv ??= await nativeDownEnvironment({
+          scope,
+          run,
+          serviceNames: await readComposeServiceNames(project.composeFile),
+        });
+        await hook(phase, graphStopped);
+      },
+    },
+    // Only a committed down (its before hook succeeded and the ownership
+    // and finalization rechecks passed) may supersede a concurrent up.
+    beforeCleanup: () =>
+      markLifecycleSharedHelpersStopping({ cfg, composeProject }),
+  };
+}
+
 async function handleDown(
   input: Parameters<typeof handleDownUnlocked>[0]
 ): Promise<number> {
@@ -8575,6 +8812,7 @@ async function handleDownUnlocked({
   readonly invoke?: typeof invokeNativeRuntime;
   readonly flagTimeoutSeconds?: number;
 }): Promise<number> {
+  const startedAt = performance.now();
   prepareLifecycleProgress({
     action: "down",
     progress: args.options.progress,
@@ -8640,84 +8878,28 @@ async function handleDownUnlocked({
         json: args.options.json === true,
       });
     }
-    const cfg = await readProjectConfig(project);
-    if (cfg.parseError) {
-      throw new CliUsageError(
-        "Native down requires valid lifecycle configuration; values omitted."
-      );
-    }
-    let lifecycleEnv: Readonly<Record<string, string>> | undefined;
-    const hasHooks = Boolean(
-      cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
-    );
-    const projectName = sanitizeProjectSlug(
-      await resolveComposeProjectName({ project, cfg })
-    );
-    const composeProject = resolveLifecycleComposeProjectName({
-      projectName,
-      branch,
-    });
-    const hook = async (phase: "before" | "after", graphStopped: boolean) => {
-      const code = await runLifecycleCommands({
-        title: `Lifecycle (native down ${phase})`,
-        commands: cfg.lifecycle?.down?.[phase],
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        composeProject,
-        env: lifecycleEnv ?? {},
-        routeStdoutToStderr: args.options.json === true,
-      });
-      if (code !== 0) {
-        throw new Error(
-          `Native down ${phase} hook failed (exit ${code})${graphStopped ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
-        );
-      }
-    };
     const result = await nativeProjectDown({
-      runtime: native,
-      scope,
+      ...(await nativeDownRequest({
+        project,
+        native,
+        scope,
+        branch,
+        routeStdoutToStderr: args.options.json === true,
+      })),
       recover: args.options.recoverNativeCompose,
       deferFinalization,
       invoke,
-      retireHostProcesses: async () => {
-        await stopLifecycleProcesses({
-          project,
-          cfg,
-          projectName,
-          branch,
-          composeProject,
-        });
-      },
-      // Journaled: a foreground Ctrl-C may already have run them, or left
-      // them owed after a crash; unknown completion refuses.
-      hooks: {
-        configured: hasHooks,
-        run: async ({ phase, run, graphStopped }) => {
-          if (!hasHooks) {
-            return;
-          }
-          lifecycleEnv ??= await nativeDownEnvironment({
-            scope,
-            run,
-            serviceNames: await readComposeServiceNames(project.composeFile),
-          });
-          await hook(phase, graphStopped);
-        },
-      },
-      // Only a committed down (its before hook succeeded and the ownership
-      // and finalization rechecks passed) may supersede a concurrent up.
-      beforeCleanup: () =>
-        markLifecycleSharedHelpersStopping({ cfg, composeProject }),
     });
     if (args.options.json) {
       process.stdout.write(`${JSON.stringify(result)}\n`);
     } else {
-      logger.info({
-        message:
-          result.status === "stopped"
-            ? "Native project stopped; data retained."
-            : "Native project is not started.",
+      writeLifecycleStopped(performance.now() - startedAt, {
+        retained: result.status === "stopped",
+        unchanged: result.status === "not_started",
       });
+      if (result.runtimeStarted) {
+        logger.info({ message: NATIVE_RECOVERY_RUNTIME_STARTED_NOTE });
+      }
     }
     return 0;
   }
@@ -9145,7 +9327,7 @@ async function runDownCommand({
       return 1;
     }
     if (afterCode === 0) {
-      writeComposeStopped(performance.now() - startedAt);
+      writeLifecycleStopped(performance.now() - startedAt);
     }
     return afterCode;
   }

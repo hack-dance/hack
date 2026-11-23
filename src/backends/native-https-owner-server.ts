@@ -39,6 +39,10 @@ import {
   nativeHttpsWriteNew,
 } from "./native-https-owner-storage.ts";
 import {
+  NATIVE_HTTPS_POOL_BOOT_CHECK_MS,
+  readNativeHttpsPoolBootEnded,
+} from "./native-https-pool-boot.ts";
+import {
   type NativeHttpsReleaseStage,
   nativeHttpsReleaseFailureFrame,
   sendNativeHttpsReleaseFailure,
@@ -68,6 +72,16 @@ export interface NativeHttpsOwnerServerDependencies {
     phase: "acquire" | "release"
   ) => Promise<void>;
   readonly verifyIdle: (binding: NativeHttpsOwnerBinding) => Promise<void>;
+  /**
+   * Whether the pool boot this owner is bound to has ended
+   * (`native-https-pool-boot.ts`). A running owner checks it every
+   * `poolBootCheckMs` and, once it has ended, retires with its configuration and
+   * lease records kept for the previous-boot archive (HACK-2456). None: no check.
+   */
+  readonly poolBootEnded?: (
+    binding: NativeHttpsOwnerBinding
+  ) => Promise<boolean>;
+  readonly poolBootCheckMs?: number;
   /**
    * Test seam: runs after the control socket is published and before its first
    * ownership observation. Production passes none.
@@ -197,6 +211,33 @@ export async function verifyNativeHttpsLeaseGraph(
     }
     await inspect();
   }
+}
+
+/**
+ * Check the owner's pool boot every `poolBootCheckMs` while it runs and retire it
+ * once the boot has ended (HACK-2456). Checks are serialized with requests, so a
+ * release in progress finishes first; a failed check proves nothing.
+ */
+function watchPoolBoot(opts: {
+  readonly binding: NativeHttpsOwnerBinding;
+  readonly dependencies: NativeHttpsOwnerServerDependencies;
+  readonly serialize: (operation: () => Promise<void>) => Promise<void>;
+  readonly running: () => boolean;
+  readonly retire: () => Promise<void>;
+}): ReturnType<typeof setInterval> | undefined {
+  const ended = opts.dependencies.poolBootEnded;
+  if (!ended) {
+    return;
+  }
+  return setInterval(() => {
+    void opts
+      .serialize(async () => {
+        if (opts.running() && (await ended(opts.binding))) {
+          await opts.retire();
+        }
+      })
+      .catch(() => undefined);
+  }, opts.dependencies.poolBootCheckMs ?? NATIVE_HTTPS_POOL_BOOT_CHECK_MS);
 }
 
 /** Tests supply a fake child pair while retaining the real lease process/socket boundary. */
@@ -658,6 +699,7 @@ export async function serveNativeHttpsOwner(opts: {
     void serialize(failOwner);
   };
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
+  let poolBootTimer: ReturnType<typeof setInterval> | undefined;
   let startupStage: ConstructorParameters<typeof NativeHttpsStartupError>[0] =
     "frontend-start";
   try {
@@ -702,6 +744,13 @@ export async function serveNativeHttpsOwner(opts: {
     }
     state = "running";
     settleStartup();
+    poolBootTimer = watchPoolBoot({
+      binding,
+      dependencies: opts.dependencies,
+      serialize,
+      running: () => state === "running",
+      retire: failOwner,
+    });
     process.on("SIGTERM", onSignal);
     process.on("SIGINT", onSignal);
     startupTimer = setTimeout(() => {
@@ -743,6 +792,7 @@ export async function serveNativeHttpsOwner(opts: {
     if (startupTimer) {
       clearTimeout(startupTimer);
     }
+    clearInterval(poolBootTimer);
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
   }
@@ -778,6 +828,7 @@ async function runPinnedNativeHttpsOwner(opts: {
     dependencies: {
       start: (selected) => startNativeProjectHttps(selected),
       verify: verifyNativeHttpsLeaseGraph,
+      poolBootEnded: readNativeHttpsPoolBootEnded,
       verifyIdle: async (selected) => {
         const claims = await invokeNativeRuntime({
           runtime: selected.runtime,

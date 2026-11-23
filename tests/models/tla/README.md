@@ -686,6 +686,118 @@ not prove the kqueue exit delivery, timer accuracy, provider lease acquisition
 or that a replacement listener appears; it abstracts the listener as live, gone
 or replaced, and the retry delays as an ordered bound.
 
+## Native pool stop under a live run
+
+`native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down`)
+or dies (VM or provider crash, host reboot) while a project's graph is ready. It
+models:
+
+- the pool: running, stopped or crashed, with a boot counter;
+- the run receipt: none, ready or retained, and the boot its containers belong to;
+- the foreground owner (live or dead) and its publication.
+
+The user commands are the ones the CLI names: `hack up`, `hack down` /
+`hack down --recover` and `hack native recover`. Faults are bounded to three:
+`runtime down`, a crash, an owner crash, and a boot by something else (another
+project's `hack up`, or `runtime up` by hand). A live owner notices when its guest
+is gone (the pool stopped, or a later boot replaced it) and exits without retiring its
+publication.
+
+`NoDeadEnd` says that from every reachable state some named command can act, or
+the owner is still noticing its guest is gone. `Recovers` (`[]<>Settled` under weak
+fairness of the user commands) says the project keeps reaching up or down. Up means
+ready in the current boot with a live owner; down means nothing running and no
+publication left. `BootBoundUnreached` shows the boot bound (8) never limits a command.
+
+| Control | Switches | Result |
+| --- | --- | --- |
+| `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 210 states; `NoDeadEnd`, `BootBoundUnreached` and `Recovers` hold |
+| `negative` | `next` before HACK-2456 | `NoDeadEnd` fails in an `OwnerCrash` or `OwnerNotices` state: stopped pool, ready run, dead owner, publication left |
+| `by-hand` | `next`, counting an unnamed `runtime up` | fails in a `RuntimeUp` state with `boot = 3`, `runBoot = 1` |
+| `strict` | stopped-pool recovery with the old predecessor-only rule, while something else boots the pool | fails in `RecoverStopped` (or `RuntimeUp`) with `boot = 3`, `runBoot = 1` |
+| `crash-in-recovery` | the old predecessor-only rule; the pool stops between the recovery's boot and its graph recovery | fails in `RecoverStopped` with `boot = 3`, `runBoot = 1`, `recovering = TRUE` |
+| `https` | recovery from any earlier boot with every fault, for a project with HTTPS routes (`Https`) | 608 states; all hold, including `NoArchiveOverListener` |
+| `https-no-retire` | `https` controls: the shared HTTPS owner keeps running after its boot ended | fails in `RecoverRunning` (or `RecoverStopped`): pool running, `https = "live"` bound to the old boot, `fin = TRUE` |
+| `https-archive` | the previous-boot archive cannot prove the owner quiescent | fails with `https = "records"`, `fin = TRUE`, pool running |
+| `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | fails with the pool stopped, `run = "retained"`, `fin = TRUE` |
+| `https-finish-bound` | `https`, but a completed recovery's archive may run only in the boot the recovery ran in (`FinishAnyBoot = FALSE`) | fails once that boot ends with the archive still owed: `https = "records"`, `fin = TRUE`, pool running |
+| `reuse-no-check` | `https`, with the archive's port claim binding with address reuse but of the wildcard alone, without the exact claim of every local address (`ListenerCheck = FALSE`) | `NoArchiveOverListener` fails: the archive runs while another process listens on the port |
+
+`Recovers` also fails on `next` (TLC exit 13: the behavior stutters in the dead end).
+That is checked by hand, because the runner's controls are invariant violations only.
+
+`strict` and `crash-in-recovery` document the old rule: recovery of a dead owner's
+ready run accepted only the immediate predecessor boot, because it needs that boot's
+raw id to find its host-side relays, and `owner.json` keeps only the current and
+previous ids. Each boot now first records the ids it supersedes in a bounded
+boot history (`provider/boot_history.rs`, 16 boots, bound to the pool's owner
+token), and `graph/boot_match.rs` selects the one earlier boot the run's receipt
+names (relay cleanup marker, control root, or one-off job boot); zero or several
+matches, or the current boot, refuse. The model does not bound the history: a run
+whose boot was evicted after 16 later boots is refused with its data kept. Two paths
+stay predecessor-only and are not modeled: a stopped-pool `graph recover-cleanup`
+selection (`prepare`; boots in between may have restarted the run's containers),
+and absent-publication cleanup after a host reboot.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `RuntimeDown` | `provider/lifecycle.rs::down`, which reports `interrupted_runs` (`lifecycle/pool_users.rs::live_graph_runs`) |
+| `RecoverStopped` | `inspectOrStartStoppedPool` / `StoppedPoolStarted` in `native-project-down.ts`; `selectNativeStartupRecoveringStoppedPool` in `native-project-start.ts` |
+| `RecoverRunning` | `resumeSelectedOwner` → `recover-cleanup` → `retire-recovered-publisher`; `CanRecover` without `Strict` is `graph/dead_owner_cleanup.rs` `recovery_selection` / `execute` with `graph/boot_match.rs` over `provider/boot_history.rs` |
+| `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |
+| `PoolRecover` | `hack native recover` (`lifecycle::recover`) |
+| `OwnerRetire` | `native-https-owner-server.ts` pool-boot check (`native-https-pool-boot.ts`), which retires through `failOwner` and keeps the configuration and lease |
+| `TimeWaitEnds`, `Listen`, `ListenerExits`, `PortClaimable` | the shared HTTPS port after the owner's Caddy stops: TIME_WAIT expires on its own, or another process listens and later stops. The archive claims the port through `https_recovery::port_absent`: with `ReuseBind` (HACK-2550) it binds with `SO_REUSEADDR` (never `SO_REUSEPORT`), so TIME_WAIT does not block it, and it binds the wildcard, the loopback and every interface address from `getifaddrs` exactly, so another listener on any of them refuses it; the addresses are listed again after binding and must match. Otherwise it falls back to the strict claim, which waits for TIME_WAIT to end |
+| `FinishCompleted` | the same archive after the recovery's boot ended (HACK-2550, z338, z282): `HttpsArchiveGuard` admits the completed intent from any boot, and `host_relay::inspect_cleanup_completed` with `bridges::cleanup::read_completed_recovery` admit its bridge selection by the run's own evidence; everything else is observed in the current boot |
+| `Finalize` | the frontend finalization's `recoverNativeHttpsLease`: release through a live owner of this boot, or `runtime archive-previous-boot-shared-https` (`provider/shared_https_recovery.rs`), whose quiescence proof is `prove_quiescence` plus `await_owner_exit` |
+| `RecoverStopped` (finalization) | `deadOwnerOfLiveRun` in `native-project-down.ts`: a retained stop with no owner and an interrupted frontend lifetime |
+
+The model does not represent bridges. On a real VM, the run that recovery met had been
+stopped in one boot and restored in a later one. The first boot's bridge sidecar was still in
+its directory, two boots back. Recovery accepts a completed earlier generation with routes
+from any boot but the live one, because what proves it complete does not depend on its boot.
+That proof is the restore history's stopped receipt, plus every current route having
+launched after it (`graph/bridges/cleanup.rs` `prior_generation`). An empty sidecar keeps
+the previous boot.
+
+The shared HTTPS owner (HACK-2456, seen on a real VM) is a host process bound to one
+pool boot that holds the run's lease. `runtime down` does not stop it. Before this change it
+kept running after its boot ended, its lease could not be released (release requires the
+same boot), and the previous-boot archive could never succeed, because it required the
+frontend and runtime executables to run nowhere while the CLI asking for it ran them. A
+recovery then stopped the graph and retired the publication, failed at the lease, and
+left a retained run that `up` refused and `down --recover` could not reach once the pool
+stopped again. The three `https-*` controls each restore one of those parts. The model
+abstracts the owner's 5-second boot check and the archive's 20-second wait for a retiring
+owner as one `OwnerRetire` step; it does not represent several projects sharing one owner.
+
+The CLI tests in `tests/native-project-down.test.ts`, `tests/native-project-start.test.ts`
+and `tests/native-refusal-cli.test.ts` walk these transitions against a fake runtime.
+`tests/native-https-owner.test.ts` runs the real owner process through its boot check;
+`provider/shared_https_recovery/tests.rs` (macOS) runs the archive with the same bundle's
+CLI and runtime processes present and with a live or retiring owner invocation.
+The model does not represent concurrent starts of the same instance, the startup
+marker, or image and admission work. A real VM must qualify `runtime up` booting a
+stopped pool as it was recorded.
+
+## Native run mapping release after the home is gone
+
+`native-run-mapping-release/MappingRelease.tla` checks HACK-2524. A checkout's run mapping names the native home that owns its run. When that home is deleted, its records (the proof of a clean stop) go with it. The model covers the home at its recorded path (present, deleted, moved, or replaced by another identity), whether a process of the home is alive and whether it names the recorded path, and the mapping (held or released).
+
+`NoStrandedMapping` says a held mapping whose home is gone, with no process of it alive, can always be released. `NeverReleaseLive` says no release happens while a process of the home that names the recorded path is alive.
+
+| Control | Switches | Result |
+| --- | --- | --- |
+| `positive` | the gone-home release: the path no longer holds the home and the process scan finds no process naming it | 21 states; both invariants hold |
+| `negative` | today: only the clean-stop release from the home's own records | `NoStrandedMapping` fails right after `Delete` (or `Move`) |
+| `path-only` | the gone-home release without the process scan | `NeverReleaseLive` fails: released while a process of the home lives |
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `CleanRelease` | `releaseNativeProjectRunForeignHome` (the home's frontend records show a completed lifetime) |
+| `GoneHomeRelease` | the gone-home release in `native-project-run.ts`: the recorded path is absent, not a directory, or another identity, and the runtime's process scan finds no process naming the home |
+| `StartMoved` | the residual: a moved home started from its new path has processes that do not name the recorded path, so a release then leaves that home's run without a checkout mapping (its data and its own recovery stay in that home) |
+
 ## Pool amd64 emulation
 
 `pool-emulation/Emulation.tla` checks the Rosetta 2 translation intent of one shared

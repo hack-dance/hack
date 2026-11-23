@@ -1,5 +1,6 @@
 import { declaredComposeProfiles } from "../backends/native-profile-selection.ts";
 import {
+  describeNativeFailureAfterStarted,
   type NativeProjectPsResult,
   nativeProjectPs,
 } from "../backends/native-project-observe.ts";
@@ -279,9 +280,9 @@ function noteFailureAfterStarted(
   if (!result.failure || json) {
     return;
   }
-  const { service, code, at } = result.failure;
+  const { service, at } = result.failure;
   process.stderr.write(
-    `The last start failed after up returned: ${service ?? "a service"} (${code}) at ${new Date(at * 1000).toISOString()}. Starting again.\n`
+    `The last start failed after up returned: ${service ?? "a service"} ${describeNativeFailureAfterStarted(result.failure)} at ${new Date(at * 1000).toISOString()}. Starting again.\n`
   );
 }
 

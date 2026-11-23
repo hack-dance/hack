@@ -2455,6 +2455,56 @@ test("a foreground started return whose owner fails later prints the log tails a
   expect(message).toContain("crashed");
 });
 
+test("after a started return each ready service and a later failure get their own line", async () => {
+  const { opts, state } = await fixture();
+  const serve = opts.dependencies.serve!;
+  let served = false;
+  opts.dependencies.serve = async (request) => {
+    await serve(request);
+    served = true;
+    request.onServiceReady?.("web");
+    request.onExitDiagnostic?.({
+      exitCode: 1,
+      nativeCode: "graph_service_failed",
+    });
+    return 1;
+  };
+  const invoke = opts.dependencies.invoke!;
+  // After the owner's cleanup the snapshot carries the failure record.
+  opts.dependencies.invoke = async (request) => {
+    const value = await invoke(request);
+    return served && request.args[1] === "inspect" && isRecord(value)
+      ? {
+          ...value,
+          failed_after_started: {
+            code: "graph_service_failed",
+            service: "web",
+            at: 1,
+            reason: "exited",
+            exit_code: 3,
+          },
+        }
+      : value;
+  };
+  const progress: string[] = [];
+  const failure = await startNativeProject({
+    ...opts,
+    waitForReady: false,
+    onProgress: (event) => {
+      if (event.phase === "service-ready") {
+        progress.push(`ready:${event.service}`);
+      } else if (event.phase === "service-failed") {
+        progress.push(`failed:${event.service} ${event.reason}`);
+      } else if (event.phase === "started") {
+        progress.push("started");
+      }
+    },
+  }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect(progress).toEqual(["started", "ready:web", "failed:web exited (3)"]);
+  expect(state.refused).toEqual([]);
+});
+
 test("failed services' output is printed with managed values redacted and never saved", async () => {
   const { opts, events } = await fixture();
   const invoke = opts.dependencies.invoke!;

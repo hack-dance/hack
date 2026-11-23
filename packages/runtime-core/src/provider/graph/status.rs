@@ -211,6 +211,8 @@ mod tests {
                 code: "graph_timeout".into(),
                 service: Some("web".into()),
                 at: 1,
+                reason: Some("not_ready".into()),
+                exit_code: None,
             },
         )
         .unwrap();
@@ -223,7 +225,7 @@ mod tests {
             serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
         assert_eq!(
             json["failed_after_started"],
-            json!({"code":"graph_timeout","service":"web","at":1})
+            json!({"code":"graph_timeout","service":"web","at":1,"reason":"not_ready"})
         );
         assert!(json["receipt"].get("failed_after_started").is_none());
         // Invalid content is not reported and never fails the read.
@@ -241,6 +243,8 @@ mod tests {
                         code: "graph_timeout".into(),
                         service: None,
                         at: 2,
+                        reason: Some("not_ready".into()),
+                        exit_code: None,
                     },
                 )
                 .unwrap();

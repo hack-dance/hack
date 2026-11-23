@@ -47,6 +47,26 @@ pub struct AfterStarted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
     pub at: u64,
+    /// Closed: `not_ready` (the deadline passed first), `unhealthy`, `exited`
+    /// (with `exit_code`) or `dead`; absent when the failure names no observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+}
+/// The closed reason for a failure after started, from the failed service's own
+/// observation, else from the code (`graph_timeout`: its goal was not met in time).
+fn after_started_reason(receipt: &Receipt, code: &str) -> (Option<String>, Option<i64>) {
+    use crate::project::execution::Health;
+    match receipt.startup_failure.as_ref().map(|f| f.observation) {
+        Some(Observation::Exited { code }) => (Some("exited".into()), Some(code)),
+        Some(Observation::Dead) => (Some("dead".into()), None),
+        Some(Observation::Running {
+            health: Health::Unhealthy,
+        }) => (Some("unhealthy".into()), None),
+        _ if code == "graph_timeout" => (Some("not_ready".into()), None),
+        _ => (None, None),
+    }
 }
 impl AfterStarted {
     pub(super) fn valid(&self) -> bool {
@@ -55,6 +75,11 @@ impl AfterStarted {
                 .code
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b == b'_')
+            && self
+                .reason
+                .as_deref()
+                .is_none_or(|reason| ["not_ready", "unhealthy", "exited", "dead"].contains(&reason))
+            && (self.exit_code.is_some() == (self.reason.as_deref() == Some("exited")))
             && self.service.as_ref().is_none_or(|service| {
                 (1..=128).contains(&service.len())
                     && service
@@ -81,10 +106,13 @@ pub(super) fn record_after_started(root: &Path, receipt: &Receipt, failure: &Can
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
+    let (reason, exit_code) = after_started_reason(receipt, failure.code);
     let recorded = AfterStarted {
         code: failure.code.into(),
         service,
         at,
+        reason,
+        exit_code,
     };
     if recorded.valid() {
         // An interrupted earlier write may have left the temporary behind.
@@ -244,6 +272,9 @@ mod tests {
         assert_eq!(recorded.code, "graph_service_failed");
         assert_eq!(recorded.service.as_deref(), Some("web"));
         assert!(recorded.at > 0);
+        // The closed reason comes from the failed service's own observation.
+        assert_eq!(recorded.reason.as_deref(), Some("exited"));
+        assert_eq!(recorded.exit_code, Some(3));
         // The receipt an older runtime parses strictly carries no new field.
         let json = serde_json::to_value(&receipt).unwrap();
         assert!(json.get("failed_after_started").is_none());
@@ -261,14 +292,36 @@ mod tests {
             &timed_out,
             &CandidateError::new("graph_timeout", "x"),
         );
-        assert_eq!(after_started(&root).unwrap().service, None);
+        let timed = after_started(&root).unwrap();
+        assert_eq!(timed.service, None);
+        // A deadline with no failed observation: the goal was not met in time.
+        assert_eq!(timed.reason.as_deref(), Some("not_ready"));
+        assert_eq!(timed.exit_code, None);
         timed_out.startup_failure = None;
         let invalid = AfterStarted {
             code: "Not value-free".into(),
             service: None,
             at: 1,
+            reason: None,
+            exit_code: None,
         };
         assert!(!invalid.valid());
+        // Only the closed reasons, and an exit code exactly with `exited`.
+        for (reason, exit_code) in [
+            (Some("crashed"), None),
+            (Some("exited"), None),
+            (Some("unhealthy"), Some(1)),
+            (None, Some(1)),
+        ] {
+            let bad = AfterStarted {
+                code: "graph_service_failed".into(),
+                service: None,
+                at: 1,
+                reason: reason.map(Into::into),
+                exit_code,
+            };
+            assert!(!bad.valid(), "{reason:?} {exit_code:?}");
+        }
     }
     #[test]
     fn an_invalid_or_oversized_record_reads_as_none() {

@@ -158,6 +158,10 @@ import {
 } from "./native-project-interrupted-cleanup.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import {
+  describeNativeFailureAfterStarted,
+  nativeFailureAfterStarted,
+} from "./native-project-observe.ts";
+import {
   ensuredPlatformAccepted,
   type NativeEmulationPolicy,
   nativeAmd64EmulationUpArgs,
@@ -2414,7 +2418,19 @@ export type NativeStartupProgress =
       readonly endpoints: readonly string[];
     }
   | ({ readonly phase: "service-exited" } & NativeServiceExit)
-  | ({ readonly phase: "build-settled" } & NativeBuildSettlement);
+  | ({ readonly phase: "build-settled" } & NativeBuildSettlement)
+  | {
+      /** After a started return: this service met its goal (published, if routed). */
+      readonly phase: "service-ready";
+      readonly service: string;
+      readonly elapsedMs: number;
+    }
+  | {
+      /** After a started return the run failed: this service, and why (value-free). */
+      readonly phase: "service-failed";
+      readonly service: string | null;
+      readonly reason: string;
+    };
 
 function progressReporter(
   observe: ((event: NativeStartupProgress) => void) | undefined
@@ -3654,6 +3670,13 @@ async function startNativeProjectAttempt(
               onAllReady: () => {
                 void allReady();
               },
+              onServiceReady: (service) => {
+                progress({
+                  phase: "service-ready",
+                  service,
+                  elapsedMs: performance.now() - servicesRequestedAt,
+                });
+              },
               signal: controller.signal,
               // Down hooks run on the first stop request of a ready graph.
               ...stop?.serve,
@@ -3785,6 +3808,18 @@ async function startNativeProjectAttempt(
             let final: unknown;
             try {
               final = await invokeInspect();
+              // A failure after a started return names its service and reason,
+              // before the error and its log tails.
+              const failed = returnAtStarted
+                ? nativeFailureAfterStarted(final)
+                : undefined;
+              if (failed && serveFailure !== undefined) {
+                progress({
+                  phase: "service-failed",
+                  service: failed.service ?? null,
+                  reason: describeNativeFailureAfterStarted(failed),
+                });
+              }
               // The runtime's deadline names no service: say which were not
               // ready, from the last startup status read before it (HACK-2351).
               serveFailure = withGraphTimeoutDetail({

@@ -19,6 +19,7 @@ import {
 import { AtomicWriteConflictError } from "./fs.ts";
 import { listGitWorktrees } from "./git-worktree.ts";
 import { isRecord } from "./guards.ts";
+import { MACHINE_SCHEMAS } from "./machine-output.ts";
 import {
   defaultProjectDevHost,
   findProjectContext,
@@ -50,7 +51,7 @@ import {
   validatePrimaryLocalFile,
 } from "./worktree-local-config.ts";
 
-export const CONFIG_EDITOR_SCHEMA = "hack.config.v1";
+export const CONFIG_EDITOR_SCHEMA = MACHINE_SCHEMAS.config;
 export const CONFIG_SOURCE_LIMIT = 512 * 1024;
 
 type Layer = {

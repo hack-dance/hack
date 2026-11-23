@@ -78,10 +78,11 @@ success behavior stays covered by command-specific suites.
 | `hack commands read --json` | NDJSON events / terminal event, not a single envelope |
 | `hack commands show --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack config adopt --json` | Legacy bare object (no `data` envelope) |
+| `hack config apply --json` | Envelope; versioned `data.schema`: `hack.config.v1` |
 | `hack config import --json` | Legacy bare object (no `data` envelope) |
 | `hack config plan --json` | Native compiler protocol object (`transport_version`, `ok`, result / diagnostics) |
-| `hack config validate --json` without a patch | Native compiler protocol object (`transport_version`, `ok`, result / diagnostics) |
-| `hack config show --json`, or `hack config validate --json` / `hack config apply --json` with a patch on stdin | Result envelope, `data.schema: hack.config.v1`; see [Compose Config patches](#compose-config-patches) |
+| `hack config show --json` | Envelope; versioned `data.schema`: `hack.config.v1` |
+| `hack config validate --json` | Envelope with `data.schema: hack.config.v1` for a Compose patch on stdin. Native compiler protocol object without a patch |
 | `hack daemon install --json` | Envelope; versioned `data.schema`: `hack.daemon-install.v1` |
 | `hack daemon restart --json` | Envelope; versioned `data.schema`: `hack.daemon-restart.v1` |
 | `hack daemon start --json` | Envelope; versioned `data.schema`: `hack.daemon-start.v1` |

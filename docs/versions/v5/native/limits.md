@@ -11,6 +11,12 @@ the pool (one line says so). When another project is running there, or
 the pool is starting or stopping, `hack up` refuses the start and names up to three
 of those projects: run `hack down` in them first. A pool accepts up to eight project shares.
 
+A native home keeps up to 64 graph runs. A run whose data was removed
+(`hack down --remove-data`, or a fresh start that failed) is archived on its own
+when a new run needs the room. Runs that keep their data are never archived; when
+64 of them fill the home, `hack up` refuses with `graph_retention_budget` until you
+remove the data of a project you no longer use.
+
 ## Native startup limits
 
 See the [native startup settings and refusal codes](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md#native-startup-limits)

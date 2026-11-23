@@ -1,0 +1,30 @@
+---
+title: Fresh run · inventory room
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> count : fresh start, lease held
+    state count <<choice>>
+    count --> admit : [fewer than 64]
+    count --> archive : [64, a removed run]
+    count --> refused : [64 keep data]
+    archive --> count : oldest removed archived
+    admit --> [*]
+    refused --> [*]
+
+    note right of archive
+        Same proof as graph archive:
+        every owned resource absent,
+        no pending journal.
+    end note
+    note right of refused
+        graph_retention_budget:
+        remove the data of a
+        project you no longer use.
+    end note
+
+    class admit ok
+    class refused fail

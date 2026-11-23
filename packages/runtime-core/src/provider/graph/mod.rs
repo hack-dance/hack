@@ -2042,6 +2042,22 @@ fn observed_service_state(resource: &Resource, value: &Value) -> Result<Value, C
     }
 }
 
+/// Where inspection reads a run: its active directory, or, once a fresh start
+/// archived it as removed (HACK-2576), the archive. The project's CLI may still map
+/// such a run until it confirms the removal, so the archived receipt must stay
+/// readable there; the caller accepts it only in the `removed` phase.
+fn inspection_root(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
+    let active = directory(candidate, run)?;
+    if active.exists() || active.is_symlink() {
+        return Ok(active);
+    }
+    let archived = archive::path(candidate, run)?;
+    if archived.exists() || archived.is_symlink() {
+        return Ok(archived);
+    }
+    Ok(active)
+}
+
 /// A foreground start binds its publication before it creates the journal, so
 /// the journal is checked on both sides of the publication check.
 #[cfg(target_os = "macos")]
@@ -2180,7 +2196,15 @@ fn inspect_using(
     engine: &impl Inspection,
     run: &str,
 ) -> Result<Snapshot, CandidateError> {
-    let (receipt, root) = load_at(directory(candidate, run)?, run, engine.incarnation())?;
+    let (receipt, root) = load_at(inspection_root(candidate, run)?, run, engine.incarnation())?;
+    if root.starts_with(candidate.state_root.join("run/graph-archive"))
+        && receipt.phase != "removed"
+    {
+        return Err(error(
+            "graph_confirmation_location",
+            "An archived graph attempt is inspected only once it is removed.",
+        ));
+    }
     let mut observations = BTreeMap::new();
     let journal_incomplete = root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
@@ -2307,6 +2331,24 @@ pub fn cleanup(
 /// receipt resumes.
 pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
+    // HACK-2576: a fresh start may already have archived this removed run (see
+    // `archive::make_room`); removing its data again is then complete as it is.
+    let active = directory(candidate, run)?;
+    if !active.exists() && !active.is_symlink() {
+        let (receipt, root) = load_at(
+            archive::path(candidate, run)?,
+            run,
+            engine.guest().incarnation(),
+        )?;
+        if receipt.phase == "removed"
+            && !root.join("state.pending").exists()
+            && !root.join("state.pending").is_symlink()
+        {
+            archive::verify_removed(&engine, &receipt)?;
+            return Ok(receipt);
+        }
+        return Err(not_retained());
+    }
     let (receipt, root) = load(candidate, &engine, run)?;
     if receipt.relay_startup.is_some()
         || !["stopped-data-retained", "cleanup-intent", "removed"].contains(&receipt.phase.as_str())
@@ -2819,6 +2861,9 @@ pub(super) fn check_reservations(
     engine: &Engine<'_>,
     except: Option<&str>,
 ) -> Result<(), CandidateError> {
+    if except.is_none() {
+        archive::make_room(candidate, engine)?;
+    }
     let parent = candidate.state_root.join("run/graphs");
     if parent.exists() || parent.is_symlink() {
         state::check_private_directory(&parent)?;
@@ -2830,7 +2875,7 @@ pub(super) fn check_reservations(
         if entries.len() > 64 || (entries.len() == 64 && except.is_none()) {
             return Err(error(
                 "graph_retention_budget",
-                "Graph receipt retention exceeds 64 attempts; explicit archival is required.",
+                "64 graph attempts that keep data are retained, so no fresh run fits; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
             ));
         }
         for entry in entries {

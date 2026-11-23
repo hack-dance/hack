@@ -2122,10 +2122,15 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
 const NATIVE_FOREGROUND_OWNER_EXITED = "graph_foreground_owner_exited";
 /** A pool record that proves an ended boot, for the wait's own recheck. */
 const ENDED_RECORD = { token: "", phase: "stopped" };
+/**
+ * Refusals of an owner that may still be alive: running, or ending (its process
+ * exited but not yet reaped, or its publication read mid-change; HACK-2572).
+ */
 function isForegroundOwnerRunning(error: unknown): boolean {
   return (
     error instanceof NativeRuntimeRequestError &&
-    error.nativeCode === "graph_foreground_owner_running"
+    (error.nativeCode === "graph_foreground_owner_running" ||
+      error.nativeCode === "graph_foreground_owner_uncertain")
   );
 }
 /**

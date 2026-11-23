@@ -1425,6 +1425,44 @@ test("validation reads newly selected layers and honors an explicit selection", 
   expect(explicitCheck.payload.data.valid).toBe(false);
 });
 
+test("an include-only Compose root permits project and env edits", async () => {
+  const f = await fixture();
+  const composeFile = join(f.project, "docker-compose.yml");
+  const root = "include:\n  - path: [services.yml]\n";
+  await Promise.all([
+    writeFile(composeFile, root),
+    writeFile(
+      join(f.project, "services.yml"),
+      "services:\n  api:\n    image: alpine\n"
+    ),
+  ]);
+  const report = await show(f.root, f.main);
+  expect(report.state).toBe("ready");
+  expect(report.services).toEqual([]);
+  const patch = {
+    base: bases(report),
+    changes: [
+      { layer: "1", kind: "project", path: "name", value: "renamed" },
+      {
+        layer: "3",
+        kind: "env",
+        scope: "global",
+        key: "ADDED",
+        value: "shared",
+      },
+    ],
+  };
+  expect(
+    (await cli({ root: f.root, cwd: f.main, args: ["validate"], patch }))
+      .payload.data.valid
+  ).toBe(true);
+  expect(
+    (await cli({ root: f.root, cwd: f.main, args: ["apply"], patch })).payload
+      .ok
+  ).toBe(true);
+  expect(await readFile(composeFile, "utf8")).toBe(root);
+});
+
 test("Compose ports and labels match runtime interpretation and sequence edits keep comments", async () => {
   const f = await fixture();
   const file = join(f.project, "docker-compose.yml");
@@ -1461,6 +1499,8 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
         "80",
         "${PORT:-8080}:80",
         "127.0.0.${OCTET:-1}:8080:80",
+        "127.0.0.1:${PORT_MAPPING:-8080:80}",
+        "127.0.0.1:${PUBLISHED_AND_COLON:-8080:}80",
         "127${MIDDLE:-.0.}0.1:8080:80",
         ":8080:80",
         "[]:8080:80",
@@ -1502,6 +1542,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     "'127.0.0.999:8081:81'",
     "{published: 8081}",
     "'${PORT:-8080}:70000'",
+    "'127.0.0.1:${PUBLISHED_AND_COLON:-8080:}70000'",
     "'${PORT'",
     "'invalid-host.${OCTET:-1}:8080:80'",
     "'[12345::${ADDR:-1}]:8080:80'",

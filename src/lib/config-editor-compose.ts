@@ -59,6 +59,21 @@ export function validComposePort(value: unknown): boolean {
   ) {
     return false;
   }
+  if (validPortMapping(mapping)) {
+    return true;
+  }
+  // A variable in the final component can also supply the separator between
+  // the published and target ports, for example 127.0.0.1:${PORT_MAPPING}.
+  const variable = mapping.lastIndexOf("*");
+  return (
+    variable > mapping.lastIndexOf(":") &&
+    validPortMapping(
+      `${mapping.slice(0, variable)}*:*${mapping.slice(variable + 1)}`
+    )
+  );
+}
+
+function validPortMapping(mapping: string): boolean {
   // Split from the target end because a host can be an unbracketed IPv6 address.
   const [target, published, ...address] = mapping.split(":").toReversed();
   const host = address.toReversed().join(":");
@@ -220,7 +235,7 @@ function validPortRange(value: string, allowZero = false): boolean {
 function validPortNumber(value: string, allowZero = false): boolean {
   return (
     PORT_NUMBER.test(value) &&
-    (value.includes("*") ||
+    ((value.includes("*") && Number(value.replaceAll("*", "")) <= 65_535) ||
       (allowZero && value === "0") ||
       validPort(Number(value)))
   );
@@ -316,25 +331,49 @@ export function parseComposeSource(text: string) {
   }
   try {
     const compose: unknown = doc.toJS();
+    const root = isRecord(compose) ? compose : {};
+    const services = isRecord(root.services) ? root.services : null;
+    const includes = root.include;
+    const valid =
+      (includes === undefined || validComposeIncludes(includes)) &&
+      (services !== null ||
+        (root.services === undefined &&
+          Array.isArray(includes) &&
+          includes.length > 0));
     return {
       doc,
       lines,
-      invalid: isRecord(compose) && isRecord(compose.services) ? null : 1,
-      services:
-        isRecord(compose) && isRecord(compose.services) ? compose.services : {},
+      invalid: valid ? null : 1,
+      services: services ?? {},
       checksDependencies:
-        isRecord(compose) &&
-        compose.include === undefined &&
-        !(
-          isRecord(compose.services) &&
-          Object.values(compose.services).some(
-            (service) => isRecord(service) && service.extends !== undefined
-          )
+        services !== null &&
+        includes === undefined &&
+        !Object.values(services).some(
+          (service) => isRecord(service) && service.extends !== undefined
         ),
     };
   } catch {
     return { doc, lines, invalid: 1, services: {}, checksDependencies: false };
   }
+}
+
+function validComposeIncludes(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry: unknown) =>
+        nonemptyIncludePath(entry) ||
+        (isRecord(entry) &&
+          (nonemptyIncludePath(entry.path) ||
+            (Array.isArray(entry.path) &&
+              entry.path.length > 0 &&
+              entry.path.every(nonemptyIncludePath))))
+    )
+  );
+}
+
+function nonemptyIncludePath(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 type ComposeSource = ReturnType<typeof parseComposeSource>;
@@ -630,7 +669,7 @@ export function composeModel(opts: {
       path: [],
       line: source.invalid,
       code: "E_CONFIG_PARSE",
-      message: "Expected a Compose YAML document with a services map.",
+      message: "Expected Compose YAML with a services map or an include list.",
     });
   }
   const rows = Object.entries(services).flatMap(([name, service]) => {

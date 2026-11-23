@@ -523,6 +523,21 @@ pub trait Source: Send + Sync {
         action: Action,
     ) -> Result<ActionOutcome, SourceError>;
 
+    /// Run a lifecycle action and report progress when the selected CLI supports it.
+    ///
+    /// # Errors
+    /// The same errors as [Self::act].
+    fn act_with_progress(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        action: Action,
+        _update: Box<dyn FnMut(String) + Send>,
+    ) -> Result<ActionOutcome, SourceError> {
+        self.act(repo_root, native, branch, action)
+    }
+
     /// Last log lines for a project or one of its branch instances (no follow).
     ///
     /// # Errors
@@ -2104,6 +2119,40 @@ impl Source for LiveSource {
             // No app deadline: busy until the CLI exits (see LIFECYCLE_WARN_AFTER).
             _ => ActionOutcome::Lifecycle(runner.run_json_to_completion(&args, Some(repo_root))?),
         })
+    }
+
+    fn act_with_progress(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        action: Action,
+        update: Box<dyn FnMut(String) + Send>,
+    ) -> Result<ActionOutcome, SourceError> {
+        let runner = self.runner_for(native);
+        let supported = !native
+            && action != Action::Open
+            && self.cli_version(&runner).ok().is_some_and(|version| {
+                compare_versions(&version, "5.0.0-next.17").is_some_and(|order| order.is_ge())
+            });
+        if !supported {
+            return self.act(repo_root, native, branch, action);
+        }
+
+        let branch = branch.map(validate_branch).transpose()?;
+        let root = trusted_root(repo_root)?;
+        let mut args = with_branch(action.cli_args(), branch);
+        args.push("--progress");
+        match runner.run_lifecycle_progress(&args, &root, update) {
+            // The CLI refuses this combination before dispatching remotely.
+            Err(RunError::Cli(error))
+                if error.code == "E_USAGE"
+                    && error.message == "--progress is not supported for remote targets." =>
+            {
+                self.act(&root, native, branch, action)
+            }
+            result => Ok(ActionOutcome::Lifecycle(result?)),
+        }
     }
 
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {

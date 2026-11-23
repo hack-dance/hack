@@ -2814,6 +2814,12 @@ async function startNativeProjectAttempt(
     projectRoot: opts.scope.projectRoot,
     signal: opts.signal,
     invoke: deps.invoke,
+    // A detached owner hands the line to the launcher, as image notices do.
+    notice: (line) => {
+      if (!reportNativeImageNotice(line)) {
+        deps.warn(line);
+      }
+    },
   });
   await deps.prepareStorage(opts.scope);
   // A graph that captures source (bind mounts or a dependency cache) measures it

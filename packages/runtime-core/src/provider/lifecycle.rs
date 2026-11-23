@@ -111,6 +111,11 @@ pub struct RuntimeStatus {
     pub interrupted_runs: Option<Vec<String>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interrupted_runs_unknown: bool,
+    /// Graph runs whose receipt is live (`pool_users::live_graph_runs`), sorted, so the
+    /// CLI can name the projects that keep a running pool in use (HACK-2535). Absent
+    /// for an uninitialized pool or when the receipts cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_runs: Option<Vec<String>>,
     /// Whether this process hashes SHA-256 with the CPU's instructions (`sha256_backend`).
     pub hashing: crate::sha256_backend::Report,
 }
@@ -997,6 +1002,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             repaired_sockets: None,
             interrupted_runs: None,
             interrupted_runs_unknown: false,
+            live_runs: None,
             hashing: crate::sha256_backend::report(),
         });
     }
@@ -1071,6 +1077,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
         interrupted_runs: None,
         interrupted_runs_unknown: false,
+        live_runs: pool_users::live_graph_runs(&candidate.state_root),
         hashing: crate::sha256_backend::report(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
@@ -2667,11 +2674,35 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
 
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
-        down_observed(candidate)
+        down_observed(candidate, None)
     })
 }
 
-fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+/// Stop a running pool that nothing uses, so a stopped-pool share update can follow
+/// (HACK-2535). The pool is checked idle (`pool_users::require_idle`) under the provider
+/// lease, and again right before the guest stops. The lease is held from the first
+/// check to the stop, and graph starts and interactive sessions are admitted only under
+/// it, so a start that begins meanwhile waits for the lease and then finds the pool
+/// stopped. The second check is a second guard, should a receipt ever turn live
+/// without the lease; it costs one read of the receipts.
+pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        down_observed(
+            candidate,
+            Some(&|| pool_users::require_idle(&candidate.state_root)),
+        )
+    })
+}
+
+/// `runtime down`. With `idle` (HACK-2535) the check runs under the lease before any
+/// effect, and again right before the guest stops; the host-side releases (the managed
+/// hostname authority and every publisher) then follow that second check, so a refusal
+/// at either check has changed nothing. Plain `down` releases them before it verifies
+/// the live guest, as before.
+fn down_observed(
+    candidate: &Candidate,
+    idle: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
@@ -2680,6 +2711,9 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     let lock = state::Lock::acquire(&root(candidate))?;
     // Builds take their shared fence only under this lease, so none can start after this.
     super::image_build::require_no_active_build(candidate)?;
+    if let Some(idle) = idle {
+        idle()?;
+    }
     let mut owner = Owner::load(candidate)?;
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
     // When there is a pool to stop, one host sample is taken beside the stop, on its own
@@ -2703,10 +2737,16 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     if !stopped {
         artifact::verify(candidate)?;
     }
-    super::hostname_authority::managed::stop(candidate, &owner)?;
-    super::publication::release(candidate, &owner.token, None)?;
+    let release = |owner: &Owner| -> Result<(), CandidateError> {
+        super::hostname_authority::managed::stop(candidate, owner)?;
+        super::publication::release(candidate, &owner.token, None)
+    };
     if stopped {
+        release(&owner)?;
         return status(candidate);
+    }
+    if idle.is_none() {
+        release(&owner)?;
     }
     verify_live(candidate, &owner)?;
     // Stopping a running pool stops every graph's containers with the guest. This is
@@ -2721,6 +2761,12 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
             deadline,
         )
     });
+    // The second idle check, right before the guest stops (HACK-2535); nothing was
+    // released before it.
+    if let Some(idle) = idle {
+        idle()?;
+        release(&owner)?;
+    }
     let mut result = match guest_stop(candidate, &mut owner) {
         Ok(()) => status(candidate),
         Err(error)

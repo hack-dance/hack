@@ -3132,6 +3132,18 @@ const contracts: readonly ModelContract[] = [
           },
         ],
       },
+      // HACK-2535: another project's `up` stops an idle running pool to add its
+      // share. A run that became live before that stop is never stopped by it;
+      // without the second idle check right before the guest stops, a start
+      // between the two checks is.
+      { name: "idle-restart", negative: false, states: 302 },
+      {
+        name: "idle-restart-one-check",
+        negative: true,
+        invariant: "NoRestartOverLiveRun",
+        action: "RestartStop",
+        fields: ["stoppedLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
+      },
     ],
   },
   {

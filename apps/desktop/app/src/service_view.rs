@@ -885,7 +885,7 @@ fn render_info(facts: &ServiceFacts, live: bool, ui: &Ui) -> AnyElement {
                 .map(|(i, (label, value, note))| {
                     let health = match (label, value.as_deref()) {
                         ("Health", Some("healthy")) => Some(Status::Running),
-                        ("Health", Some("unhealthy")) => Some(Status::Failed),
+                        ("Health", Some("unhealthy")) => Some(Status::Degraded),
                         ("Health", Some("starting")) => Some(Status::Busy),
                         _ => None,
                     };

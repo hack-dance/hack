@@ -469,7 +469,10 @@ fn capture_service_shell_reopen(
         });
     })
     .expect("install shell screenshot fixture");
-    for (shot, active) in [("service-shell-ended", 1), ("service-shell-reopened", 2)] {
+    for (shot, active, prompt) in [
+        ("service-shell-ended", 1, "/app # exit"),
+        ("service-shell-reopened", 2, "/app #"),
+    ] {
         cx.update_window(handle, |_, window, cx| {
             window.click(("service-tab", 3_usize), cx);
             let app = app.read(cx);
@@ -477,10 +480,19 @@ fn capture_service_shell_reopen(
             let key = app.model.selected_key().expect("selected branch");
             let sessions = app.panels.by_key[&key].sessions.clone();
             let shell = sessions.read(cx).tab(active).expect("active shell").clone();
-            // The short screenshot idle interval can elapse during PTY startup
-            // or while the exited shell is still draining its last output.
+            // Allow the full capture budget for PTY startup or exit drain.
             shell.update(cx, |shell, cx| {
-                shell.settle(Duration::from_secs(2), Duration::from_secs(5), cx);
+                let timeout = Duration::from_secs(5);
+                shell.settle(timeout, timeout, cx);
+                let frame = shell
+                    .emulator()
+                    .frame()
+                    .expect("read fixture terminal frame");
+                assert_eq!(
+                    frame.row_text(0).trim_end(),
+                    prompt,
+                    "{shot}: terminal text"
+                );
             });
             window.render_frame(cx);
             let sessions = sessions.read(cx);

@@ -519,6 +519,7 @@ fn restore_inputs(
         &mut prepared.configs,
         &wrapped,
         &file_owners,
+        Some(&mut prepared.default_health_cadence),
     )?;
     super::validate_dependency_processes(&prepared.configs, &dependency_processes)?;
     for resource in receipt.resources.values() {
@@ -651,6 +652,7 @@ fn restore_inputs(
         root,
         receipt,
         configs: prepared.configs,
+        default_health_cadence: prepared.default_health_cadence,
         expected_environment,
         probe_findings: BTreeMap::new(),
         restarting: false,

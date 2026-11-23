@@ -49,6 +49,10 @@ pub enum Fixture {
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
     Branches,
+    CatalogNative,
+    CatalogAll,
+    CatalogEmpty,
+    CatalogPreview,
     ChangesError,
     ChangesLoading,
     ChangesClean,
@@ -78,7 +82,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 44] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -106,6 +110,10 @@ impl Fixture {
         Self::FailedStart,
         Self::NeedsAttention,
         Self::Branches,
+        Self::CatalogNative,
+        Self::CatalogAll,
+        Self::CatalogEmpty,
+        Self::CatalogPreview,
         Self::ChangesError,
         Self::ChangesLoading,
         Self::ChangesClean,
@@ -151,6 +159,10 @@ impl Fixture {
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
+            Self::CatalogNative => "catalog-native",
+            Self::CatalogAll => "catalog-all",
+            Self::CatalogEmpty => "catalog-empty",
+            Self::CatalogPreview => "catalog-preview",
             Self::ChangesError => "changes-error",
             Self::ChangesLoading => "changes-loading",
             Self::ChangesClean => "changes-clean",
@@ -459,6 +471,11 @@ pub fn project(f: Fixture) -> ProjectsPayload {
                 branch: Some("fix-login".into()),
             }];
             r
+        }
+        Fixture::CatalogNative => {
+            let mut row = storefront(vec![], "stopped");
+            row.backend = Some("native".into());
+            row
         }
         Fixture::Branches => {
             let mut r = storefront(vec![], "stopped");

@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { showConfigEditor } from "../src/lib/config-editor-model.ts";
 import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
+import { runFixtureGitSync } from "./helpers/fixture-git.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
 setDefaultTimeout(45_000);
@@ -56,6 +57,11 @@ function env(contents: string, name = "default"): string {
   return `version: 1\nenvironment: ${name}\nsecretsprovider: project_key\nvalues:\n${contents}\n`;
 }
 
+function git(cwd: string, ...args: string[]) {
+  const result = runFixtureGitSync({ cwd, args });
+  expect(result.exitCode, result.stderr).toBe(0);
+}
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "hack-config-editor-"));
   scratch.push(root);
@@ -83,23 +89,9 @@ async function fixture() {
       ".hack/.internal/\n.hack/hack.env*.local.yaml\n"
     ),
   ]);
-  const cliEnv = privateCliEnv({ root });
-  const git = (cwd: string, ...args: string[]) => {
-    const command = Bun.spawnSync(["git", "-C", cwd, ...args], { env: cliEnv });
-    expect(command.exitCode).toBe(0);
-  };
   git(main, "init", "-b", "main");
   git(main, "add", ".");
-  git(
-    main,
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.test",
-    "commit",
-    "-m",
-    "fixture"
-  );
+  git(main, "commit", "-m", "fixture");
   const linked = join(root, "linked");
   git(main, "worktree", "add", "-b", "feature/search", linked);
   await Promise.all([
@@ -1068,18 +1060,8 @@ test("legacy env validation accepts TOML and reports migration consent before Ap
           ),
     ]);
     if (format === "json") {
-      for (const args of [
-        ["init", "-b", "main"],
-        ["add", ".hack/hack.config.json"],
-      ]) {
-        expect(
-          Bun.spawnSync(["git", "-C", cwd, ...args], {
-            env: privateCliEnv({ root }),
-            stdout: "ignore",
-            stderr: "ignore",
-          }).exitCode
-        ).toBe(0);
-      }
+      git(cwd, "init", "-b", "main");
+      git(cwd, "add", ".hack/hack.config.json");
     }
     const selection = ["--env", "default"];
     const before = await show(root, cwd, ...selection);
@@ -1137,18 +1119,8 @@ test("legacy env validation matches empty values, Compose order, and normalized 
       '{"version":1,"vars":[{"key":"OPTIONAL","source":"plain_env"}]}\n'
     ),
   ]);
-  for (const args of [
-    ["init", "-b", "main"],
-    ["add", ".hack/.gitignore"],
-  ]) {
-    expect(
-      Bun.spawnSync(["git", "-C", root, ...args], {
-        env: privateCliEnv({ root }),
-        stdout: "ignore",
-        stderr: "ignore",
-      }).exitCode
-    ).toBe(0);
-  }
+  git(root, "init", "-b", "main");
+  git(root, "add", ".hack/.gitignore");
   const change = {
     layer: "3",
     kind: "env",

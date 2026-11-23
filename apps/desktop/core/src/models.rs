@@ -74,6 +74,9 @@ pub struct ProjectRow {
     pub defined_services: Vec<String>,
     #[serde(deserialize_with = "null_default")]
     pub service_hosts: std::collections::BTreeMap<String, Vec<String>>,
+    /// Authored Compose targets in the registered checkout. No resolution or probe.
+    #[serde(deserialize_with = "null_default")]
+    pub remotes: Vec<RemoteStatus>,
     pub input_diagnostic: Option<InputDiagnostic>,
     pub runtime: Option<ProjectRuntime>,
     // Summary-only counters.
@@ -105,6 +108,50 @@ pub struct ProjectRow {
     /// row describes. `None` for the project's base instance.
     #[serde(skip)]
     pub branch: Option<String>,
+}
+
+/// The authored descriptor from the Compose project report.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RemoteStatus {
+    pub service: String,
+    pub target: String,
+    pub state: String,
+    pub probe: String,
+    pub address: RemoteAddress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RemoteAddress {
+    Service {
+        service: String,
+        port: u16,
+    },
+    EnvRef {
+        name: String,
+        port: u16,
+    },
+    Hostname {
+        hostname: String,
+        port: u16,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+impl RemoteAddress {
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Service { service, port } => format!("{service}:{port}"),
+            Self::EnvRef { name, port } => format!("${name}:{port}"),
+            Self::Hostname { hostname, port } if hostname.contains(':') => {
+                format!("[{hostname}]:{port}")
+            }
+            Self::Hostname { hostname, port } => format!("{hostname}:{port}"),
+            Self::Unknown => "Address unavailable".into(),
+        }
+    }
 }
 
 /// One registered linked worktree in a `/v1/projects` row.

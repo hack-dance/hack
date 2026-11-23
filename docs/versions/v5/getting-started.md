@@ -123,6 +123,10 @@ When the project declares remotes, `hack ps` shows each default target with
 its configured address. An environment-backed hostname displays the variable
 name. This view reports declarations and whether their connection was checked.
 
+The desktop preview shows those descriptors on the registered project's
+**Services** tab. It shows the environment variable name for an
+environment-backed address and marks each target as unchecked.
+
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
 have no URL. Sign in or load a page that reads data to check the app itself.

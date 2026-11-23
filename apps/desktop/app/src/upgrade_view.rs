@@ -50,9 +50,8 @@ pub(crate) struct UpgradePane {
     pub restore: Option<Result<Rollback, String>>,
     /// A snapshot or restore is running (it holds the machine gate).
     pub working: Option<&'static str>,
-    /// Bumped when a snapshot or restore finishes: a check started before
-    /// describes the files before it, so its result is dropped and the
-    /// check runs again.
+    /// Bumped when a command, snapshot, or restore finishes. Reads from an
+    /// earlier generation are discarded and retried.
     pub generation: u64,
 }
 
@@ -99,7 +98,6 @@ impl HackApp {
                 }
                 this.upgrade.checking = false;
                 if this.upgrade.generation != generation {
-                    // A snapshot or restore finished meanwhile: read again.
                     this.load_upgrade(cx);
                     return;
                 }
@@ -123,6 +121,7 @@ impl HackApp {
         self.upgrade.reviewing = true;
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let epoch = self.model.source_epoch();
+        let generation = self.upgrade.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let review = cx
@@ -133,12 +132,25 @@ impl HackApp {
                 if this.model.source_epoch() != epoch {
                     return;
                 }
-                this.upgrade.reviewing = false;
-                this.upgrade.review = Some(review);
-                cx.notify();
+                this.finish_upgrade_review(generation, review, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_upgrade_review(
+        &mut self,
+        generation: u64,
+        review: Result<Review, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.upgrade.reviewing = false;
+        if self.upgrade.generation != generation {
+            self.review_upgrade(cx);
+            return;
+        }
+        self.upgrade.review = Some(review);
+        cx.notify();
     }
 
     /// Keep a snapshot, then list the snapshots again.
@@ -1135,6 +1147,22 @@ mod tests {
             finding.action.as_deref(),
             Some("Check the converted layers before committing them.")
         );
+    }
+
+    #[test]
+    fn a_review_read_before_a_command_finished_is_retried() {
+        let (mut cx, app) = window(Fixture::Upgrade);
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.upgrade.generation = 1;
+                app.upgrade.reviewing = true;
+                app.finish_upgrade_review(0, Err("stale result".into()), cx);
+
+                let review = app.upgrade.review.as_ref().unwrap().as_ref().unwrap();
+                assert_eq!(review.status, "review");
+                assert!(!app.upgrade.reviewing);
+            });
+        });
     }
 
     #[test]

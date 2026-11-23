@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   chmod,
-  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -22,6 +21,7 @@ import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-pol
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import {
   admitNativeProjectBuilds,
+  NativeBuildRegistryError,
   nativeBuildIdentity,
 } from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
@@ -79,6 +79,7 @@ import {
 import { isRecord } from "../src/lib/guards.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -90,7 +91,7 @@ afterEach(async () => {
 async function fixture(withEnvironment = true) {
   const root = await mkdtemp(join(tmpdir(), "native-start-test-"));
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await writeFile(
     join(root, "hack-relay-guest"),
     "synthetic public test artifact"
@@ -147,6 +148,49 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (opts.args[1] === "ensure-images") {
+        const jobs = JSON.parse(
+          new TextDecoder().decode(opts.privateInput)
+        ) as [string, string][];
+        return await Promise.all(
+          jobs.map(async ([reference, policy], index) => {
+            try {
+              const args = [
+                "runtime",
+                "ensure-image",
+                "--reference",
+                reference,
+                ...(policy === "native" ? [] : ["--emulation", policy]),
+                "--json",
+              ];
+              return [
+                index,
+                {
+                  Ok: await dependencies.invoke!({
+                    ...opts,
+                    args,
+                    privateInput: undefined,
+                  }),
+                },
+                1,
+              ];
+            } catch (error) {
+              return [
+                index,
+                {
+                  Err: {
+                    code:
+                      error instanceof NativeRuntimeRequestError
+                        ? error.nativeCode
+                        : "fixture",
+                  },
+                },
+                1,
+              ];
+            }
+          })
+        );
+      }
       if (opts.args[1] === "source-size") {
         return nativeSourceSizeReceipt();
       }
@@ -5138,7 +5182,7 @@ test("startup admits each reference once and reuses validated pins for shared se
     if (request.args[1] === "ensure-image") {
       order.push(`ensure ${request.args[3]}`);
       // Acquisition plus import gets the runtime's whole bounded request budget.
-      expect(request.timeoutMs).toBe(NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
+      expect(request.timeoutMs).toBe(2 * NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
       expect(request.args.slice(0, 5)).toEqual([
         "runtime",
         "ensure-image",
@@ -5160,6 +5204,69 @@ test("startup admits each reference once and reuses validated pins for shared se
     "ensure redis",
   ]);
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
+});
+
+test("one image batch uses the combined deadline and stops before the next wave", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "a:1", worker: "b:1", cache: "c:1", db: "d:1" });
+  const original = opts.dependencies.invoke!;
+  let waves = 0;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] !== "ensure-images") {
+      return await original(request);
+    }
+    waves += 1;
+    expect(request.timeoutMs).toBe(1_800_000);
+    return [
+      [0, { Err: { code: "provider_busy" } }, 1],
+      [1, { Err: { code: "image_disk_space" } }, 2],
+      [2, { Ok: { image_id: `sha256:${"c".repeat(64)}` } }, 3],
+    ];
+  };
+  const error = await startNativeProject(opts).catch(
+    (failure: unknown) => failure
+  );
+  expect(waves).toBe(1);
+  expect(error).toMatchObject({
+    code: "E_LIFECYCLE_FAILED",
+    detail: {
+      images: [
+        {
+          reference: "a:1",
+          code: "provider_busy",
+          recovery: "Run hack up again after the current image work finishes.",
+        },
+        {
+          reference: "b:1",
+          code: "image_disk_space",
+          recovery: "Free disk space and run hack up again.",
+        },
+      ],
+    },
+  });
+});
+
+test("an older runtime falls back to ordinary image selection", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "alpine:1", worker: "redis:1" });
+  const original = opts.dependencies.invoke!;
+  const calls: string[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-images") {
+      calls.push("batch");
+      throw new NativeRuntimeRequestError({
+        nativeCode: "unsupported_command",
+        message: "Older runtime",
+      });
+    }
+    if (request.args[1] === "ensure-image") {
+      calls.push(String(request.args[3]));
+      return { image_id: `sha256:${"c".repeat(64)}` };
+    }
+    return await original(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(calls).toEqual(["batch", "alpine:1", "redis:1"]);
 });
 
 test("a changed 11-service plan uses the loaded selections of two recorded references", async () => {
@@ -5523,6 +5630,89 @@ test("retained startup asks the runtime to confirm the tag before review", async
     return await review(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("a parallel build registry refusal keeps its blocker after the sibling settles", async () => {
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    const { opts } = await fixture(false);
+    const base = "docker.io/library/python:3.12-alpine";
+    const loaded = "docker.io/library/alpine:3.22";
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { build: "." },
+          worker: { build: { context: ".", target: "worker" } },
+          other: { image: loaded },
+        },
+      }),
+    });
+    const siblingStarted = Promise.withResolvers<void>();
+    const siblingAborted = Promise.withResolvers<void>();
+    const allowSettlement = Promise.withResolvers<void>();
+    let starts = 0;
+    let siblingSettled = false;
+    opts.dependencies.build = async ({ signal }) => {
+      starts += 1;
+      if (starts === 1) {
+        await siblingStarted.promise;
+        throw new NativeBuildRegistryError(base, "registry_http_429");
+      }
+      signal?.addEventListener("abort", () => siblingAborted.resolve(), {
+        once: true,
+      });
+      siblingStarted.resolve();
+      await allowSettlement.promise;
+      siblingSettled = true;
+      throw new Error("sibling canceled");
+    };
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "up" && request.args[0] === "runtime") {
+        await invoke(request);
+        return { profile: "development" };
+      }
+      if (request.args[1] === "image-tag-status") {
+        expect(siblingSettled).toBe(true);
+        expect(request.args).toEqual([
+          "runtime",
+          "image-tag-status",
+          "--present",
+          "--json",
+          base,
+          loaded,
+        ]);
+        return [loaded];
+      }
+      return await invoke(request);
+    };
+    const result = startNativeProject(opts);
+    try {
+      const aborted = await Promise.race([
+        siblingAborted.promise.then(() => true),
+        result.then(() => false),
+        Bun.sleep(2000).then(() => false),
+      ]);
+      expect(aborted).toBe(true);
+      expect(starts).toBe(2);
+      expect(siblingSettled).toBe(false);
+    } finally {
+      siblingStarted.resolve();
+      allowSettlement.resolve();
+    }
+    await expect(result).rejects.toThrow(
+      `Image unavailable: could not resolve build base ${base} (registry rate limit reached).\nAlready present: ${loaded}.\nRetry hack up when the registry is reachable.`
+    );
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+  }
 });
 
 test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {
@@ -6665,6 +6855,9 @@ test("a missing shared tag names the requested image and every affected active s
       };
     }
     if (request.args[1] === "ensure-image") {
+      if (request.args[3] === "another:latest") {
+        return { image_id: `sha256:${"f".repeat(64)}` };
+      }
       throw new NativeRuntimeRequestError({
         nativeCode: "registry_image_not_found",
         message: "private registry detail",

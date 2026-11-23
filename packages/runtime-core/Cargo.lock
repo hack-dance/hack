@@ -388,6 +388,7 @@ dependencies = [
  "cpufeatures",
  "flate2",
  "hack-config-compiler",
+ "hack-vm-protocol",
  "hmac",
  "ignore",
  "libc",
@@ -403,6 +404,13 @@ dependencies = [
  "tokio",
  "unicode-normalization",
  "zeroize",
+]
+
+[[package]]
+name = "hack-vm-protocol"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

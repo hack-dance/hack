@@ -109,6 +109,17 @@ const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
+/**
+ * Graph phases in which an exited foreground owner is recovered: ready, or every
+ * service started with some goal still unmet (`started-observed`, written only
+ * under `--report-started`). Only a run with a saved mapping gets here. A fresh
+ * start saves its mapping only at ready today, so in the started phase this is a
+ * restored run; PR B saves the mapping at started.
+ */
+const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
+  "ready-observed",
+  "started-observed",
+]);
 
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
 type ForegroundOwnerSelection = {
@@ -409,7 +420,7 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
   }
   if (
     selection.foreground === "exited" &&
-    selection.phase !== "ready-observed" &&
+    !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
     !(selection.phase === "failed-retained" && selection.failedStartRecoverable)
   ) {
     throw new ClosedCliError(
@@ -599,7 +610,7 @@ async function deadOwnerOfLiveRun(opts: {
     }
     if (
       selection.foreground === "exited" &&
-      (selection.phase === "ready-observed" ||
+      (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;

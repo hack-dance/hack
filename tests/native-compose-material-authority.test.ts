@@ -21,6 +21,10 @@ import {
   openNativeComposeGenerationStore,
   runNativeComposeMaterialAction,
 } from "../src/lib/native-compose-generation.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 
 const fixtures: string[] = [];
 const stores: NativeComposeGenerationStore[] = [];
@@ -79,8 +83,8 @@ async function fixture() {
   );
   fixtures.push(parent);
   const root = join(parent, "checkout");
-  await mkdir(join(root, ".hack"), { recursive: true });
-  await writeFile(
+  await mkdirOwnedFixture(join(root, ".hack"), true);
+  await writeOwnedFixture(
     join(root, ".hack/hack.project.json"),
     '{"schema_version":1,"name":"fixture"}'
   );

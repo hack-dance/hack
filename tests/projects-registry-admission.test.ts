@@ -15,6 +15,10 @@ import { join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
 import { readProjectsRegistry } from "../src/lib/projects-registry.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 
 let fixture = "";
 let registryDir = "";
@@ -35,7 +39,7 @@ beforeEach(async () => {
   const state = join(fixture, "state");
   await Promise.all(
     [registryDir, home, state, join(primary, ".hack")].map((path) =>
-      mkdir(path, { recursive: true })
+      mkdirOwnedFixture(path, true)
     )
   );
   env = {
@@ -72,7 +76,7 @@ beforeEach(async () => {
     "-m",
     "fixture",
   ]);
-  await writeFile(
+  await writeOwnedFixture(
     registryPath,
     JSON.stringify({
       version: 1,
@@ -764,7 +768,7 @@ test("fallback rereads the registry after an intervening real writer", async () 
   await git(secondary, ["init", "-b", "main"]);
   const touch = child("pause-fallback");
   await boundary(touch, "observed-absent");
-  await writeFile(
+  await writeOwnedFixture(
     registryPath,
     JSON.stringify({
       version: 1,
@@ -842,7 +846,7 @@ test("primary refresh preserves live sibling metadata and removes missing siblin
     branch: "feature/live",
     lastSeenAt: "2026-01-01T00:00:30Z",
   };
-  await writeFile(
+  await writeOwnedFixture(
     registryPath,
     JSON.stringify({
       version: 1,
@@ -919,7 +923,7 @@ test("legacy alias migration uses full upsert and preserves its identity", async
     join(primary, ".hack", "hack.config.json"),
     JSON.stringify({ name: "legacy_project", dev_host: "admission.hack.local" })
   );
-  await writeFile(
+  await writeOwnedFixture(
     registryPath,
     JSON.stringify({
       version: 1,

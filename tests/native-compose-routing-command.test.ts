@@ -1,16 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-} from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openNativeComposeRouteClaims } from "../src/lib/native-compose-route-claims.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const BINDING = {
@@ -74,8 +68,8 @@ async function fixture(
     await mkdtemp(join(tmpdir(), "native-routing-command-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
-  await mkdir(join(root, "home"));
+  await mkdirOwnedFixture(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, "home"));
   const source = join(root, ".hack", "hack.project.json");
   await Bun.write(
     source,

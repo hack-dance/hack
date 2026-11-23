@@ -582,6 +582,7 @@ mod tests {
             .into();
         }
         Receipt {
+            started_from: None,
             startup_failure: None,
             normalized_input: Some(identity.clone()),
             relay_startup: None,

@@ -3002,10 +3002,11 @@ sync"#,
     // this is cooperative same-user ownership, not hostile-process containment.
     identity::terminate(process, &binary(candidate))?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while identity::alive(process.pid)? && Instant::now() < deadline {
+    // A provider that exited but is not yet reaped (a zombie) is gone too (HACK-2579).
+    while !identity::provider_gone(process)? && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    if identity::alive(process.pid)? {
+    if !identity::provider_gone(process)? {
         return Err(CandidateError::new(
             "stop_uncertain",
             "Provider remains alive after TERM; no force-kill or false stopped receipt.",
@@ -3387,10 +3388,11 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
         return Err(io(std::io::Error::last_os_error()));
     }
     let deadline = Instant::now() + Duration::from_secs(15);
-    while identity::alive(recorded.pid)? && Instant::now() < deadline {
+    // A provider that exited but is not yet reaped (a zombie) is gone too (HACK-2579).
+    while !identity::provider_gone(recorded)? && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    if identity::alive(recorded.pid)? {
+    if !identity::provider_gone(recorded)? {
         return Err(CandidateError::new(
             "fixture_kill",
             "Owned VM remains alive after kill control.",

@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   chmod,
-  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -11,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NATIVE_ENDED_BOOT_OWNER_NOTICE } from "../src/backends/native-ended-boot-owner.ts";
 import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
 import {
   type acquireNativeHttpsLease,
@@ -21,6 +21,7 @@ import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-pol
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import {
   admitNativeProjectBuilds,
+  NativeBuildRegistryError,
   nativeBuildIdentity,
 } from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
@@ -79,6 +80,7 @@ import {
 import { isRecord } from "../src/lib/guards.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -90,7 +92,7 @@ afterEach(async () => {
 async function fixture(withEnvironment = true) {
   const root = await mkdtemp(join(tmpdir(), "native-start-test-"));
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await writeFile(
     join(root, "hack-relay-guest"),
     "synthetic public test artifact"
@@ -147,6 +149,49 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (opts.args[1] === "ensure-images") {
+        const jobs = JSON.parse(
+          new TextDecoder().decode(opts.privateInput)
+        ) as [string, string][];
+        return await Promise.all(
+          jobs.map(async ([reference, policy], index) => {
+            try {
+              const args = [
+                "runtime",
+                "ensure-image",
+                "--reference",
+                reference,
+                ...(policy === "native" ? [] : ["--emulation", policy]),
+                "--json",
+              ];
+              return [
+                index,
+                {
+                  Ok: await dependencies.invoke!({
+                    ...opts,
+                    args,
+                    privateInput: undefined,
+                  }),
+                },
+                1,
+              ];
+            } catch (error) {
+              return [
+                index,
+                {
+                  Err: {
+                    code:
+                      error instanceof NativeRuntimeRequestError
+                        ? error.nativeCode
+                        : "fixture",
+                  },
+                },
+                1,
+              ];
+            }
+          })
+        );
+      }
       if (opts.args[1] === "source-size") {
         return nativeSourceSizeReceipt();
       }
@@ -5138,7 +5183,7 @@ test("startup admits each reference once and reuses validated pins for shared se
     if (request.args[1] === "ensure-image") {
       order.push(`ensure ${request.args[3]}`);
       // Acquisition plus import gets the runtime's whole bounded request budget.
-      expect(request.timeoutMs).toBe(NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
+      expect(request.timeoutMs).toBe(2 * NATIVE_IMAGE_ENSURE_TIMEOUT_MS);
       expect(request.args.slice(0, 5)).toEqual([
         "runtime",
         "ensure-image",
@@ -5160,6 +5205,69 @@ test("startup admits each reference once and reuses validated pins for shared se
     "ensure redis",
   ]);
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
+});
+
+test("one image batch uses the combined deadline and stops before the next wave", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "a:1", worker: "b:1", cache: "c:1", db: "d:1" });
+  const original = opts.dependencies.invoke!;
+  let waves = 0;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] !== "ensure-images") {
+      return await original(request);
+    }
+    waves += 1;
+    expect(request.timeoutMs).toBe(1_800_000);
+    return [
+      [0, { Err: { code: "provider_busy" } }, 1],
+      [1, { Err: { code: "image_disk_space" } }, 2],
+      [2, { Ok: { image_id: `sha256:${"c".repeat(64)}` } }, 3],
+    ];
+  };
+  const error = await startNativeProject(opts).catch(
+    (failure: unknown) => failure
+  );
+  expect(waves).toBe(1);
+  expect(error).toMatchObject({
+    code: "E_LIFECYCLE_FAILED",
+    detail: {
+      images: [
+        {
+          reference: "a:1",
+          code: "provider_busy",
+          recovery: "Run hack up again after the current image work finishes.",
+        },
+        {
+          reference: "b:1",
+          code: "image_disk_space",
+          recovery: "Free disk space and run hack up again.",
+        },
+      ],
+    },
+  });
+});
+
+test("an older runtime falls back to ordinary image selection", async () => {
+  const { opts } = await fixture(false);
+  withImages(opts, { web: "alpine:1", worker: "redis:1" });
+  const original = opts.dependencies.invoke!;
+  const calls: string[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-images") {
+      calls.push("batch");
+      throw new NativeRuntimeRequestError({
+        nativeCode: "unsupported_command",
+        message: "Older runtime",
+      });
+    }
+    if (request.args[1] === "ensure-image") {
+      calls.push(String(request.args[3]));
+      return { image_id: `sha256:${"c".repeat(64)}` };
+    }
+    return await original(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(calls).toEqual(["batch", "alpine:1", "redis:1"]);
 });
 
 test("a changed 11-service plan uses the loaded selections of two recorded references", async () => {
@@ -5523,6 +5631,89 @@ test("retained startup asks the runtime to confirm the tag before review", async
     return await review(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("a parallel build registry refusal keeps its blocker after the sibling settles", async () => {
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    const { opts } = await fixture(false);
+    const base = "docker.io/library/python:3.12-alpine";
+    const loaded = "docker.io/library/alpine:3.22";
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { build: "." },
+          worker: { build: { context: ".", target: "worker" } },
+          other: { image: loaded },
+        },
+      }),
+    });
+    const siblingStarted = Promise.withResolvers<void>();
+    const siblingAborted = Promise.withResolvers<void>();
+    const allowSettlement = Promise.withResolvers<void>();
+    let starts = 0;
+    let siblingSettled = false;
+    opts.dependencies.build = async ({ signal }) => {
+      starts += 1;
+      if (starts === 1) {
+        await siblingStarted.promise;
+        throw new NativeBuildRegistryError(base, "registry_http_429");
+      }
+      signal?.addEventListener("abort", () => siblingAborted.resolve(), {
+        once: true,
+      });
+      siblingStarted.resolve();
+      await allowSettlement.promise;
+      siblingSettled = true;
+      throw new Error("sibling canceled");
+    };
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "up" && request.args[0] === "runtime") {
+        await invoke(request);
+        return { profile: "development" };
+      }
+      if (request.args[1] === "image-tag-status") {
+        expect(siblingSettled).toBe(true);
+        expect(request.args).toEqual([
+          "runtime",
+          "image-tag-status",
+          "--present",
+          "--json",
+          base,
+          loaded,
+        ]);
+        return [loaded];
+      }
+      return await invoke(request);
+    };
+    const result = startNativeProject(opts);
+    try {
+      const aborted = await Promise.race([
+        siblingAborted.promise.then(() => true),
+        result.then(() => false),
+        Bun.sleep(2000).then(() => false),
+      ]);
+      expect(aborted).toBe(true);
+      expect(starts).toBe(2);
+      expect(siblingSettled).toBe(false);
+    } finally {
+      siblingStarted.resolve();
+      allowSettlement.resolve();
+    }
+    await expect(result).rejects.toThrow(
+      `Image unavailable: could not resolve build base ${base} (registry rate limit reached).\nAlready present: ${loaded}.\nRetry hack up when the registry is reachable.`
+    );
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+  }
 });
 
 test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {
@@ -6665,6 +6856,9 @@ test("a missing shared tag names the requested image and every affected active s
       };
     }
     if (request.args[1] === "ensure-image") {
+      if (request.args[3] === "another:latest") {
+        return { image_id: `sha256:${"f".repeat(64)}` };
+      }
       throw new NativeRuntimeRequestError({
         nativeCode: "registry_image_not_found",
         message: "private registry detail",
@@ -7139,6 +7333,162 @@ test("up without a recovery callback keeps the owner-exited refusal and reads no
     NativeRuntimeRequestError
   );
   expect(events).toEqual(["graph retained-preflight refused"]);
+});
+
+// HACK-2572: right after the pool stopped, the run's detached owner is still exiting.
+function ownerRunningRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_running",
+    message: "Another foreground hack up still owns this run.",
+  });
+}
+async function exitingOwnerFixture(opts: {
+  readonly runningRefusals: number;
+  readonly poolEnded: boolean;
+  readonly waitMs?: number;
+}) {
+  const fixture = await stoppedPoolUnderRunFixture("stopped");
+  const { start, events } = fixture;
+  let refusals = 0;
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (
+      request.args[1] === "retained-preflight" &&
+      refusals < opts.runningRefusals
+    ) {
+      refusals += 1;
+      events.push("graph retained-preflight owner running");
+      throw ownerRunningRefusal();
+    }
+    return await invoke(request);
+  };
+  start.dependencies.poolBootEnded = async () => {
+    events.push("pool record");
+    return opts.poolEnded;
+  };
+  start.dependencies.endedBootOwnerWaitMs = opts.waitMs ?? 5000;
+  return fixture;
+}
+
+test("up waits, with one line, for the owner of an ended pool boot to go, then recovers the run", async () => {
+  const { start, events, notices } = await exitingOwnerFixture({
+    runningRefusals: 3,
+    poolEnded: true,
+  });
+  expect(await startNativeProject(start)).toBe(0);
+  expect(
+    events.filter((event) => event === "graph retained-preflight owner running")
+  ).toHaveLength(3);
+  // Then the refusal is the exited owner's, and the existing recovery runs once.
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(
+    notices.filter((line) => line === NATIVE_ENDED_BOOT_OWNER_NOTICE)
+  ).toHaveLength(1);
+});
+
+// HACK-2572: the owner's end seen by the preflight, point by point: alive, then
+// ending (exited but not yet reaped, or its publication read mid-change), then
+// exited. Every sequence must reach the same recovery, never a refusal to retry.
+function endingOwnerRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_uncertain",
+    message: "The previous foreground owner of this run is ending.",
+  });
+}
+async function endingOwnerFixture(
+  sequence: readonly ("running" | "uncertain")[],
+  recover = true
+) {
+  const fixture = await stoppedPoolUnderRunFixture("stopped");
+  const { start, events } = fixture;
+  let index = 0;
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && index < sequence.length) {
+      const point = sequence[index]!;
+      index += 1;
+      events.push(`graph retained-preflight owner ${point}`);
+      throw point === "running" ? ownerRunningRefusal() : endingOwnerRefusal();
+    }
+    return await invoke(request);
+  };
+  start.dependencies.poolBootEnded = async () => true;
+  start.dependencies.endedBootOwnerWaitMs = 5000;
+  if (!recover) {
+    const { recoverStoppedPool: _omitted, ...plain } = start;
+    return { ...fixture, start: plain };
+  }
+  return fixture;
+}
+
+for (const sequence of [
+  ["running", "uncertain", "uncertain"],
+  ["uncertain"],
+  ["running", "uncertain", "running", "uncertain"],
+] as const) {
+  test(`up through the owner's end (${sequence.join(", ")}, exited) waits with one line, then recovers once`, async () => {
+    const { start, events, notices } = await endingOwnerFixture(sequence);
+    expect(await startNativeProject(start)).toBe(0);
+    expect(events.filter((event) => event === "down --recover")).toHaveLength(
+      1
+    );
+    // One line when it actually waited: an owner already exited at the first
+    // re-read is not waited for.
+    expect(
+      notices.filter((line) => line === NATIVE_ENDED_BOOT_OWNER_NOTICE)
+    ).toHaveLength(sequence.length > 1 ? 1 : 0);
+  });
+}
+
+test("restart through the owner's end waits with one line, then keeps its own exited refusal as before", async () => {
+  // Restart passes no stopped-pool recovery: after the wait it decides as today.
+  const { start, events, notices } = await endingOwnerFixture(
+    ["running", "uncertain"],
+    false
+  );
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_exited"
+  );
+  expect(events).not.toContain("down --recover");
+  expect(notices).toEqual([NATIVE_ENDED_BOOT_OWNER_NOTICE]);
+});
+
+test("a live foreground owner on a running pool keeps its refusal at once, with no wait or line", async () => {
+  const { start, events, notices } = await exitingOwnerFixture({
+    runningRefusals: Number.POSITIVE_INFINITY,
+    poolEnded: false,
+  });
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_running"
+  );
+  expect(events).toEqual([
+    "graph retained-preflight owner running",
+    "runtime status",
+    "pool record",
+  ]);
+  expect(notices).toEqual([]);
+});
+
+test("an owner that outlives the bound keeps the owner-running refusal after the one line", async () => {
+  const { start, events, notices } = await exitingOwnerFixture({
+    runningRefusals: Number.POSITIVE_INFINITY,
+    poolEnded: true,
+    waitMs: 50,
+  });
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_running"
+  );
+  expect(events).not.toContain("down --recover");
+  expect(notices).toEqual([NATIVE_ENDED_BOOT_OWNER_NOTICE]);
 });
 
 test.each([

@@ -498,25 +498,37 @@ impl<'a> Engine<'a> {
         deadline: std::time::Instant,
         cancelled: impl Fn() -> bool,
     ) -> Result<Self, CandidateError> {
-        super::state::wait_for_acquisition(
-            deadline,
-            || {
-                if cancelled() {
-                    return Err(CandidateError::new(
-                        "provider_acquisition_cancelled",
-                        "Provider acquisition was cancelled before admission.",
-                    ));
-                }
+        Self::connect_for_start(candidate, ConnectionMode::Allocation, deadline, &|| {
+            if cancelled() {
+                Err(CandidateError::new(
+                    "provider_acquisition_cancelled",
+                    "Provider acquisition was cancelled before admission.",
+                ))
+            } else {
                 Ok(())
-            },
-            || Self::connect(candidate),
+            }
+        })
+    }
+
+    pub(super) fn connect_for_start(
+        candidate: &'a Candidate,
+        mode: ConnectionMode,
+        deadline: std::time::Instant,
+        check: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<Self, CandidateError> {
+        let engine = super::state::wait_for_acquisition(
+            deadline,
+            check,
+            || Self::connect_mode(candidate, mode == ConnectionMode::Cleanup),
             || {
                 CandidateError::new(
                     "provider_busy",
                     "Provider lease acquisition expired before admission.",
                 )
             },
-        )
+        )?;
+        check()?;
+        Ok(engine)
     }
 
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {

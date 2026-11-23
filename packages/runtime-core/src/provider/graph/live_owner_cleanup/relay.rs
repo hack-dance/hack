@@ -129,7 +129,7 @@ pub(super) fn verify_receipt(root: &Path, original: &Receipt) -> Result<(), Cand
         || immutable(&current)? != immutable(original)?
         || !matches!(
             current.phase.as_str(),
-            "ready-observed" | "cleanup-intent" | "stopped-data-retained"
+            "ready-observed" | "started-observed" | "cleanup-intent" | "stopped-data-retained"
         )
     {
         return Err(refused());

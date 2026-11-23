@@ -19,7 +19,8 @@ import {
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
   reportNativeImageDownloadWait,
-  reportNativeImageTagOffline,
+  reportNativeImageNotice,
+  reportNativeImageWork,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
@@ -30,6 +31,11 @@ import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { emptyNativeDependencyPlanId } from "./native-dependency-plan.ts";
+import {
+  awaitNativeEndedBootOwner,
+  NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
+  nativePoolBootProvenEnded,
+} from "./native-ended-boot-owner.ts";
 import {
   adaptNativeGcloudEnvironment,
   hasNativeGcloudCredentialMount,
@@ -60,7 +66,9 @@ import {
 } from "./native-https-owner.ts";
 import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-notices.ts";
 import {
+  batchImageFailure,
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  NativeImageBatchError,
   nativeImagePolicyArgs,
   nativeImageRegistryReason,
 } from "./native-image-policy.ts";
@@ -83,7 +91,9 @@ import {
   admitNativeProjectBuilds,
   buildNativeProjectImages,
   invokeNativeBuild,
+  NativeBuildRegistryError,
   type NativeBuildRequest,
+  type NativeBuildSettlement,
   type NativeVerifiedBuild,
   nativeBuildsEnabled,
   nativeRebuildRequested,
@@ -227,7 +237,10 @@ import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
-import { watchNativeStartPool } from "./native-start-pool-watch.ts";
+import {
+  NATIVE_START_POOL_GRACE_MS,
+  watchNativeStartPool,
+} from "./native-start-pool-watch.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
@@ -462,6 +475,10 @@ type Dependencies = {
   exitMonitorIntervalMs: number;
   /** How often a waiting start reads its graph status (HACK-2351). */
   startupStatusIntervalMs: number;
+  /** Whether the pool record proves the run's owner's boot ended (HACK-2572). */
+  poolBootEnded: (home: string) => Promise<boolean>;
+  /** How long a start waits for such an owner to go (HACK-2572). */
+  endedBootOwnerWaitMs: number;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -496,6 +513,8 @@ const DEFAULTS: Dependencies = {
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
   startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
+  poolBootEnded: nativePoolBootProvenEnded,
+  endedBootOwnerWaitMs: NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
 };
 /**
  * Reports forwarded source names and unset-reference notices for active services.
@@ -777,6 +796,8 @@ async function resolveNativeBuildImages(opts: {
   readonly specs: Record<string, Record<string, unknown>>;
   readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
   readonly signal: AbortSignal;
+  readonly guestCpus?: number;
+  readonly onBuildSettled?: (settlement: NativeBuildSettlement) => void;
   readonly invoke: typeof invokeNativeBuild | undefined;
   readonly onBuilt: () => void;
 }): Promise<ReadonlySet<string>> {
@@ -850,6 +871,173 @@ async function ensureNativeProjectImage(opts: {
     offline: offlineTagNotice(ensured),
   };
 }
+/** Feed independent references to the runtime cache coordinator. */
+async function pinNativeImageBatch(
+  opts: Parameters<typeof pinNativeProjectImages>[0]
+): Promise<void> {
+  const report = (line: string) => {
+    if (!reportNativeImageNotice(line)) {
+      opts.warn(line);
+    }
+  };
+  const jobs = new Map<
+    string,
+    {
+      reference: string;
+      input: string;
+      names: string[];
+      policy: NativeEmulationPolicy | undefined;
+      specs: Record<string, unknown>[];
+    }
+  >();
+  for (const [name, spec] of Object.entries(opts.specs)) {
+    if (!nativeServiceActive(spec, opts.profiles)) {
+      continue;
+    }
+    if (
+      typeof spec.image !== "string" ||
+      IMAGE.test(spec.image) ||
+      spec.build !== undefined
+    ) {
+      continue;
+    }
+    const reference = opts.canonicalImages.get(spec.image) ?? spec.image;
+    const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
+    const job = jobs.get(reference);
+    if (job && job.policy !== policy) {
+      // The existing path binds both platform policies to one command pin.
+      return;
+    }
+    if (job) {
+      job.specs.push(spec);
+      job.names.push(name);
+    } else {
+      jobs.set(reference, {
+        reference,
+        input: spec.image,
+        policy,
+        specs: [spec],
+        names: [name],
+      });
+    }
+  }
+  if (jobs.size < 2 || opts.imageTagMode) {
+    return;
+  }
+  const pending = [...jobs.values()];
+  for (let offset = 0; offset < pending.length; offset += 3) {
+    const wave = pending.slice(offset, offset + 3);
+    const waiting = new Set<string>();
+    const working = new Set<string>();
+    const reply = await opts
+      .invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: [
+          "runtime",
+          "ensure-images",
+          "--json",
+          ...nativeImagePolicyArgs(),
+        ],
+        privateInput: new TextEncoder().encode(
+          JSON.stringify(wave.map((job) => [job.input, job.policy ?? "native"]))
+        ),
+        signal: opts.signal,
+        onImageWait: (active, reference, work) => {
+          if (work) {
+            const image = wave[Number(reference)]?.reference;
+            if (image) {
+              if (active) {
+                working.add(image);
+              } else {
+                working.delete(image);
+              }
+              reportNativeImageWork([...working]);
+            }
+            return;
+          }
+          if (!(reference && wave.some((job) => job.reference === reference))) {
+            return;
+          }
+          if (active) {
+            waiting.add(reference);
+          } else {
+            waiting.delete(reference);
+          }
+          reportNativeImageDownloadWait(waiting.values().next().value ?? null);
+        },
+        timeoutMs: Math.min(
+          3_600_000,
+          wave.length * NATIVE_IMAGE_ENSURE_TIMEOUT_MS
+        ),
+      })
+      .catch((error: unknown) => {
+        // Older bundled runtimes reject the command before doing any work.
+        if (
+          error instanceof NativeRuntimeRequestError &&
+          error.nativeCode === "unsupported_command"
+        ) {
+          return null;
+        }
+        throw error;
+      });
+    if (reply === null) {
+      return;
+    }
+
+    if (!Array.isArray(reply) || reply.length !== wave.length) {
+      throw unconfirmed("the runtime image batch");
+    }
+    const failures: ReturnType<typeof batchImageFailure>[] = [];
+    const seen = new Set<number>();
+    for (const pair of reply) {
+      if (
+        !(Array.isArray(pair) && Number.isInteger(pair[0])) ||
+        seen.has(pair[0])
+      ) {
+        throw unconfirmed("the runtime image batch");
+      }
+      const [index, result, elapsed] = pair;
+      const job = wave[index];
+      if (
+        !(
+          job &&
+          isRecord(result) &&
+          Number.isSafeInteger(elapsed) &&
+          elapsed >= 0
+        )
+      ) {
+        throw unconfirmed("the runtime image batch");
+      }
+      seen.add(index);
+      const image = result.Ok;
+      if (
+        !(
+          isRecord(image) &&
+          typeof image.image_id === "string" &&
+          IMAGE.test(image.image_id) &&
+          ensuredPlatformAccepted(image.platform, job.policy)
+        )
+      ) {
+        report(`${job.reference} · image preparation failed · ${elapsed} ms`);
+        failures.push(batchImageFailure(job.reference, result.Err, job.names));
+        continue;
+      }
+      report(`${job.reference} · image verified in guest · ${elapsed} ms`);
+      const notice = offlineTagNotice(image);
+      if (notice && !reportNativeImageNotice(notice)) {
+        report(notice);
+      }
+      for (const spec of job.specs) {
+        spec.image = image.image_id;
+      }
+    }
+    if (failures.length) {
+      throw new NativeImageBatchError(failures);
+    }
+  }
+}
+
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -866,6 +1054,7 @@ async function pinNativeProjectImages(opts: {
   readonly warn: (line: string) => void;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
+  await pinNativeImageBatch(opts);
   const reportedOffline = new Set<string>();
   const confirmed = new Set<string>();
   const references = [...new Set(opts.canonicalImages.values())];
@@ -964,7 +1153,7 @@ async function pinNativeProjectImages(opts: {
     }
     const noticeKey = `${reference}\n${ensured.imageId}`;
     if (ensured.offline && !reportedOffline.has(noticeKey)) {
-      if (!reportNativeImageTagOffline(ensured.offline)) {
+      if (!reportNativeImageNotice(ensured.offline)) {
         opts.warn(ensured.offline);
       }
       reportedOffline.add(noticeKey);
@@ -1876,7 +2065,10 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   readonly signal?: AbortSignal;
   /** Set on the one retry after an exited provider was recovered (HACK-2579). */
   readonly exitedProviderRecovered?: true;
+  readonly poolBootEnded: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs: number;
 }): ReturnType<typeof selectNativeStartup> {
+  let failure: unknown;
   try {
     return await opts.select();
   } catch (error) {
@@ -1895,7 +2087,7 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
         invoke: opts.invoke,
         signal: opts.signal,
         notice: (line) => {
-          if (!reportNativeImageTagOffline(line)) {
+          if (!reportNativeImageNotice(line)) {
             opts.warn(line);
           }
         },
@@ -1906,17 +2098,48 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
         exitedProviderRecovered: true,
       });
     }
-    if (
-      !(
-        opts.recover &&
-        error instanceof NativeRuntimeRequestError &&
-        error.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
-        !opts.signal?.aborted &&
-        (await nativeRuntimePoolStopped(opts))
-      )
-    ) {
-      throw error;
+    failure = error;
+  }
+  // HACK-2572: the owner of a pool boot that has ended is still exiting. Wait,
+  // bounded, for its refusal to change, then decide as before. A live owner on a
+  // running pool never satisfies the proof and keeps its refusal at once.
+  if (
+    isForegroundOwnerRunning(failure) &&
+    !opts.signal?.aborted &&
+    (await opts.poolBootEnded(opts.runtime.home))
+  ) {
+    let selected: Awaited<ReturnType<typeof selectNativeStartup>> | undefined;
+    await awaitNativeEndedBootOwner({
+      home: opts.runtime.home,
+      notice: opts.warn,
+      signal: opts.signal,
+      waitMs: opts.endedBootOwnerWaitMs,
+      read: async (home) =>
+        (await opts.poolBootEnded(home)) ? ENDED_RECORD : undefined,
+      ownerRunning: async () => {
+        try {
+          selected = await opts.select();
+          return false;
+        } catch (error) {
+          failure = error;
+          return isForegroundOwnerRunning(error);
+        }
+      },
+    });
+    if (selected) {
+      return selected;
     }
+  }
+  if (
+    !(
+      opts.recover &&
+      failure instanceof NativeRuntimeRequestError &&
+      failure.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
+      !opts.signal?.aborted &&
+      (await nativeRuntimePoolStopped(opts))
+    )
+  ) {
+    throw failure;
   }
   await opts.recover();
   requireActiveStartup(opts.signal);
@@ -1929,9 +2152,23 @@ const NATIVE_FOREGROUND_OWNER_EXITED = "graph_foreground_owner_exited";
 /** Retained-preflight refusals a pool with an exited provider can give (HACK-2579). */
 const EXITED_PROVIDER_REFUSALS = new Set([
   "graph_foreground_owner_running",
+  "graph_foreground_owner_uncertain",
   "graph_retained_startup",
   "process_identity_unavailable",
 ]);
+/** A pool record that proves an ended boot, for the wait's own recheck. */
+const ENDED_RECORD = { token: "", phase: "stopped" };
+/**
+ * Refusals of an owner that may still be alive: running, or ending (its process
+ * exited but not yet reaped, or its publication read mid-change; HACK-2572).
+ */
+function isForegroundOwnerRunning(error: unknown): boolean {
+  return (
+    error instanceof NativeRuntimeRequestError &&
+    (error.nativeCode === "graph_foreground_owner_running" ||
+      error.nativeCode === "graph_foreground_owner_uncertain")
+  );
+}
 /**
  * Before any hook, refuse a retained run whose recorded env selection changed: its
  * env must resolve the same, and it keeps the managed env files it started with. Only
@@ -2142,7 +2379,8 @@ export type NativeStartupProgress =
       /** Indented route, unserved-route and published-port lines. */
       readonly endpoints: readonly string[];
     }
-  | ({ readonly phase: "service-exited" } & NativeServiceExit);
+  | ({ readonly phase: "service-exited" } & NativeServiceExit)
+  | ({ readonly phase: "build-settled" } & NativeBuildSettlement);
 
 function progressReporter(
   observe: ((event: NativeStartupProgress) => void) | undefined
@@ -2368,6 +2606,19 @@ function emitNativeLeftOutNotice(opts: {
   );
 }
 
+/** Guest CPU allocation is fixed by the runtime profile (provider/profile.rs). */
+function nativePoolBuildCpus(pool: unknown): number {
+  if (isRecord(pool)) {
+    if (pool.profile === "development") {
+      return 4;
+    }
+    if (pool.profile === "research") {
+      return 2;
+    }
+  }
+  return 1;
+}
+
 /**
  * Once per start, when the pool runs with hot reload on shared source off, or
  * forced on over a large share: printed, or handed to a detached launcher.
@@ -2525,6 +2776,8 @@ async function startNativeProjectAttempt(
       recover: opts.recoverStoppedPool,
       warn: deps.warn,
       signal: opts.signal,
+      poolBootEnded: deps.poolBootEnded,
+      endedBootOwnerWaitMs: deps.endedBootOwnerWaitMs,
     });
   requireActiveStartup(opts.signal);
   const runtimeMetadata = nativeRuntimeMetadataSelected({
@@ -2660,6 +2913,12 @@ async function startNativeProjectAttempt(
     projectRoot: opts.scope.projectRoot,
     signal: opts.signal,
     invoke: deps.invoke,
+    // A detached owner hands the line to the launcher, as image notices do.
+    notice: (line) => {
+      if (!reportNativeImageNotice(line)) {
+        deps.warn(line);
+      }
+    },
   });
   await deps.prepareStorage(opts.scope);
   // A graph that captures source (bind mounts or a dependency cache) measures it
@@ -2920,11 +3179,35 @@ async function startNativeProjectAttempt(
       builds,
       specs,
       verified: opts.verifiedBuildImages,
+      guestCpus: nativePoolBuildCpus(pool),
+      onBuildSettled: (settled) =>
+        progress({ phase: "build-settled", ...settled }),
       signal: controller.signal,
       invoke: deps.build,
       onBuilt: () => {
         rebuilt = true;
       },
+    }).catch(async (error: unknown) => {
+      if (!(error instanceof NativeBuildRegistryError)) {
+        throw error;
+      }
+      const references = Object.entries(specs).flatMap(([name, spec]) =>
+        nativeServiceActive(spec, profiles) &&
+        !builds.has(name) &&
+        typeof spec.image === "string"
+          ? [spec.image]
+          : []
+      );
+      throw await nativeImageBlocker({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        missing: error.reference,
+        buildBase: true,
+        reason: error.nativeCauseCode,
+        references: [...new Set([error.reference, ...references])],
+        confirmed: new Set(),
+        invoke: deps.invoke,
+      });
     });
     await pinNativeProjectImages({
       runtime: opts.runtime,
@@ -3507,13 +3790,17 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
+  // Ready and not stopping: the start has nothing left to finish on its own.
+  let serving = false;
   // A detached start whose pool boot has ended releases its marker and exits,
   // as a crash would, so the next up or down --recover need not wait for it
-  // (HACK-2550). A foreground start stays with the user's terminal.
+  // (HACK-2550). A ready one exits at once, a start still in progress after the
+  // grace. A foreground start stays with the user's terminal.
   const stopPoolWatch =
     (opts.watchPool ?? isNativeDetachedOwnerProcess())
       ? watchNativeStartPool({
           home: opts.runtime.home,
+          graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
           onEnded: async () => {
             await finish?.();
             (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
@@ -3521,9 +3808,22 @@ export async function startNativeProject(
         })
       : undefined;
   try {
-    return await startNativeProjectAttempt(opts, async () => {
-      finish = await beginNativeProjectStartupObservation(opts.scope);
-    });
+    return await startNativeProjectAttempt(
+      {
+        ...opts,
+        onProgress: (event) => {
+          if (event.phase === "ready") {
+            serving = true;
+          } else if (event.phase === "stopping" || event.phase === "stopped") {
+            serving = false;
+          }
+          opts.onProgress?.(event);
+        },
+      },
+      async () => {
+        finish = await beginNativeProjectStartupObservation(opts.scope);
+      }
+    );
   } catch (error) {
     throw withStartupLockBlocker(error);
   } finally {

@@ -5,6 +5,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { awaitNativeEndedBootOwner } from "./native-ended-boot-owner.ts";
 import {
   nativeFrontendGone,
   nativeFrontendGoneSettled,
@@ -108,6 +109,17 @@ const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
+/**
+ * Graph phases in which an exited foreground owner is recovered: ready, or every
+ * service started with some goal still unmet (`started-observed`, written only
+ * under `--report-started`). Only a run with a saved mapping gets here. A fresh
+ * start saves its mapping only at ready today, so in the started phase this is a
+ * restored run; PR B saves the mapping at started.
+ */
+const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
+  "ready-observed",
+  "started-observed",
+]);
 
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
 type ForegroundOwnerSelection = {
@@ -408,7 +420,7 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
   }
   if (
     selection.foreground === "exited" &&
-    selection.phase !== "ready-observed" &&
+    !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
     !(selection.phase === "failed-retained" && selection.failedStartRecoverable)
   ) {
     throw new ClosedCliError(
@@ -527,7 +539,7 @@ async function awaitPendingStartup(opts: {
     if (!waited) {
       // Say what this command waits for, once (HACK-2550).
       (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-        `Waiting up to ${Math.ceil(waitMs / 1000)} s for an earlier start of this instance to end; a start whose native runtime stopped ends on its own within about 15 s.`
+        `Waiting up to ${Math.ceil(waitMs / 1000)} s for an earlier start of this instance to end; a start whose native runtime stopped ends on its own within about 11 s.`
       );
     }
     waited = true;
@@ -598,7 +610,7 @@ async function deadOwnerOfLiveRun(opts: {
     }
     if (
       selection.foreground === "exited" &&
-      (selection.phase === "ready-observed" ||
+      (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;
@@ -637,17 +649,39 @@ async function inspectOrStartStoppedPool(opts: {
   readonly projectRoot: string;
   readonly run: NativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
+  /** Where the one-line wait notice goes; stderr by default. */
+  readonly notice?: (line: string) => void;
+  readonly poolBootEnded?: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs?: number;
 }): Promise<unknown> {
   try {
     return await opts.inspect();
   } catch (error) {
-    if (
-      !(
-        opts.startStoppedPool &&
-        isNativeRuntimeNotRunning(error) &&
-        (await deadOwnerOfLiveRun(opts))
-      )
-    ) {
+    if (!isNativeRuntimeNotRunning(error)) {
+      throw error;
+    }
+    // HACK-2572: the run's owner of a boot that has ended may still be exiting;
+    // wait for it, bounded, before deciding as before.
+    const ended = opts.poolBootEnded;
+    await awaitNativeEndedBootOwner({
+      home: opts.runtime.home,
+      waitMs: opts.endedBootOwnerWaitMs,
+      read: ended
+        ? async (home) =>
+            (await ended(home)) ? { token: "", phase: "stopped" } : undefined
+        : undefined,
+      notice:
+        opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)),
+      // Running, or ending (HACK-2572): an exited but unreaped process, or a
+      // publication read mid-change, shows as uncertain for a moment.
+      ownerRunning: async () => {
+        const foreground = (
+          await selectForegroundOwner(opts).catch(() => undefined)
+        )?.foreground;
+        return foreground === "running" || foreground === "uncertain";
+      },
+    });
+    if (!(opts.startStoppedPool && (await deadOwnerOfLiveRun(opts)))) {
       throw error;
     }
   }
@@ -737,6 +771,9 @@ async function nativeProjectDownOnce(opts: {
    * under a dead owner's live run may be started once (HACK-2456).
    */
   readonly startStoppedPool?: boolean;
+  /** Test seams of the HACK-2572 wait: the pool record proof and its bound. */
+  readonly poolBootEnded?: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs?: number;
 }) {
   const run = await downRun(opts);
   if (!run) {
@@ -762,6 +799,8 @@ async function nativeProjectDownOnce(opts: {
     projectRoot: opts.scope.projectRoot,
     run,
     invoke,
+    poolBootEnded: opts.poolBootEnded,
+    endedBootOwnerWaitMs: opts.endedBootOwnerWaitMs,
   });
   verify(initial, run, false);
   const finalization = opts.deferFinalization

@@ -116,7 +116,7 @@ const GIB: u64 = 1024 * 1024 * 1024;
 const STORAGE_FLOOR: u64 = 6 * GIB;
 /// BuildKit cache kept after each successful build. The cache in this engine is created
 /// only by Hack builds and is regenerable; pruning never touches images or volumes.
-pub(super) const CACHE_BUDGET: u64 = 8 * GIB;
+pub(super) const CACHE_BUDGET: u64 = 4 * GIB;
 /// Labels a Dockerfile (or a base image) must not set on an image Hack runs: the same
 /// reserved ownership namespaces the frontend refuses on authored services.
 const RESERVED_LABEL_PREFIXES: [&str; 5] = [
@@ -891,7 +891,13 @@ pub(super) fn run<P: BuildPool>(
         if Instant::now() >= deadline {
             return Err(expired_early());
         }
-        let resolved = pool.resolve(base, deadline, canceled)?;
+        let resolved = pool.resolve(base, deadline, canceled).map_err(|error| {
+            if error.code.starts_with("registry_") && error.cause_code.is_some() {
+                error.with_build_base_reference(base.reference.canonical())
+            } else {
+                error
+            }
+        })?;
         if !image_id(&resolved.source_digest)
             || !resolved
                 .pinned_reference

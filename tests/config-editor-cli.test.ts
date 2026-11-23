@@ -1380,20 +1380,51 @@ test("show withholds a credential-bearing default overlay and its derived layer 
   const marker = "overlay-credential-fixture";
   const authored = `https://fixture:${marker}@example.invalid`;
   const derived = normalizeEnvConfigName(authored) ?? "invalid";
+  const legacy = `https://fixture:${marker}-legacy@example.invalid`;
+  const legacySnake = `https://fixture:${marker}-snake@example.invalid`;
   await writeFile(
     join(f.project, "hack.config.json"),
-    JSON.stringify({ env: { default_overlay: authored } })
+    JSON.stringify({
+      env: { default_overlay: authored },
+      defaultEnvConfig: legacy,
+      default_env_config: legacySnake,
+    })
   );
-  await writeFile(
-    join(f.project, `hack.env.${derived}.yaml`),
-    env("  global:\n    MODE: unsafe-default", derived)
-  );
+  for (const value of [authored, legacy, legacySnake]) {
+    const name = normalizeEnvConfigName(value) ?? "invalid";
+    await writeFile(
+      join(f.project, `hack.env.${name}.yaml`),
+      env("  global:\n    MODE: unsafe-default", name)
+    );
+  }
+  const initial = await show(f.root, f.main);
   for (const args of [[], ["--env", "default"], ["--env", derived]]) {
     const report = await show(f.root, f.main, ...args);
     expect(JSON.stringify(report).includes(marker)).toBe(false);
     expect(report.default_overlay).toBe("[redacted]");
     expect(report.overlay).toBeNull();
   }
+  const saved = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["apply"],
+    patch: {
+      base: bases(initial),
+      changes: [
+        {
+          layer: "1",
+          kind: "project",
+          path: "env.defaultOverlay",
+          value: "default",
+        },
+      ],
+    },
+  });
+  expect(saved.payload.ok).toBe(true);
+  const base = await show(f.root, f.main);
+  expect(base.default_overlay).toBe("default");
+  expect(base.overlay).toBeNull();
+  expect(JSON.stringify(base).includes(marker)).toBe(false);
 });
 
 test("validation reads newly selected layers and honors an explicit selection", async () => {

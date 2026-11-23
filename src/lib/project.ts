@@ -724,13 +724,15 @@ export function readAuthoredProjectOverlaySettings(
 ) {
   const envConfig = getRecord(value, "env");
   return {
-    defaultEnvConfigRaw:
-      getString(value, "defaultEnvConfig") ??
+    legacy: [
+      getString(value, "defaultEnvConfig"),
       getString(value, "default_env_config"),
-    envDefaultOverlayRaw:
-      (envConfig ? getString(envConfig, "defaultOverlay") : undefined) ??
-      (envConfig ? getString(envConfig, "default_overlay") : undefined),
-  };
+    ],
+    current: [
+      envConfig ? getString(envConfig, "defaultOverlay") : undefined,
+      envConfig ? getString(envConfig, "default_overlay") : undefined,
+    ],
+  } as const;
 }
 
 /** Parse an already bounded configuration observation without additional file reads. */
@@ -758,8 +760,9 @@ export function parseProjectConfigRecord(
     : undefined;
   const name = getString(value, "name");
   const devHost = getString(value, "dev_host");
-  const { defaultEnvConfigRaw, envDefaultOverlayRaw } =
-    readAuthoredProjectOverlaySettings(value);
+  const { legacy, current } = readAuthoredProjectOverlaySettings(value);
+  const defaultEnvConfigRaw = legacy[0] ?? legacy[1];
+  const envDefaultOverlayRaw = current[0] ?? current[1];
   const logs = parseLogsConfig(getRecord(value, "logs"));
   const oauth = parseOauthConfig(getRecord(value, "oauth"));
   const parsedOpen = parseOpenConfig(getRecord(value, "open"));

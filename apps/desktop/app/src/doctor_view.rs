@@ -130,6 +130,56 @@ pub fn render(pane: &DoctorPane, ui: &Ui, cx: &mut Context<HackApp>) -> AnyEleme
         .into_any_element()
 }
 
+fn native_pool_card(report: hack_desktop_core::models::NativePoolReport, ui: &Ui) -> gpui_kit::Div {
+    use hack_desktop_core::models::NativePoolState;
+    let (status, label) = match report.state {
+        NativePoolState::Idle => (Status::Degraded, "Running · idle"),
+        NativePoolState::InUse => (Status::Running, "Running · in use"),
+        NativePoolState::Stopped => (Status::Stopped, "Stopped"),
+        NativePoolState::Unknown => (Status::Unknown, "Status unknown"),
+    };
+    let p = ui.p;
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::S3)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(space::S4)
+                .child(div().type_step(text::BODY_STRONG).child("Native VM pool"))
+                .child(dot(status, ui))
+                .child(
+                    div()
+                        .type_step(text::SMALL)
+                        .text_color(p.text_secondary)
+                        .child(label),
+                ),
+        )
+        .children(report.graph_runs.map(|count| {
+            div()
+                .type_step(text::BODY)
+                .text_color(p.text_secondary)
+                .child(format!("Recorded project graphs · {count}"))
+        }))
+        .children(report.memory_bytes.map(|bytes| {
+            div()
+                .type_step(text::BODY)
+                .text_color(p.text_secondary)
+                .child(format!(
+                    "Provider memory · {}",
+                    hack_desktop_core::usage::bytes(bytes)
+                ))
+        }))
+        .children(report.guest_memory_mib.map(|mib| {
+            div()
+                .type_step(text::BODY)
+                .text_color(p.text_secondary)
+                .child(format!("Guest memory · {mib} MiB"))
+        }))
+}
+
 fn cards(v: &DoctorView, pane: &DoctorPane, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
     let p = ui.p;
     let mut col = div()
@@ -164,6 +214,9 @@ fn cards(v: &DoctorView, pane: &DoctorPane, ui: &Ui, cx: &mut Context<HackApp>) 
                 .text_color(p.states.degraded.fg)
                 .child(line),
         );
+    }
+    if let Some(report) = v.native_pool.filter(|_| pane.filter.is_none()) {
+        col = col.child(native_pool_card(report, ui));
     }
     let shown = |c: &&Card| {
         pane.filter

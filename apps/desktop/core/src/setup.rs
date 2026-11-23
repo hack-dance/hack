@@ -633,6 +633,7 @@ mod routing_tests {
     #[test]
     fn a_project_suffix_doctor_does_not_check_is_unknown_and_says_why() {
         let ok = |id: &str| DoctorCheck {
+            native_pool: None,
             id: id.into(),
             status: "ok".into(),
             detail: String::new(),

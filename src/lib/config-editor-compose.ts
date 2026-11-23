@@ -26,6 +26,9 @@ const PORT_MAX = 65_535;
 const PORT_RANGE = /^([\d*]+)(?:-([\d*]+))?$/;
 const PORT_NUMBER = /^[\d*]+$/;
 const IPV6_TEMPLATE = /^[a-f\d:.*]+$/i;
+const ADJACENT_VARIABLES = /\*+/g;
+// Eight IPv6 groups, with space for an embedded IPv4 tail and brackets.
+const MAX_PORT_HOST_LENGTH = 47;
 const VARIABLE_REFERENCE =
   /\$(?:\$|\{[A-Za-z_]\w*(?:\}|(:?[-+?]))|[A-Za-z_]\w*)/y;
 const PORT_PROTOCOLS = ["tcp", "udp", "sctp"];
@@ -60,15 +63,25 @@ export function validComposePort(value: unknown): boolean {
   ) {
     return false;
   }
-  return validPortMapping(mapping) || validInterpolatedPortPair(mapping);
+  return (
+    validPortMapping(mapping) ||
+    validInterpolatedPortPair(mapping) ||
+    validInterpolatedHostMapping(mapping)
+  );
 }
 
 function validPortMapping(mapping: string): boolean {
   // Split from the target end because a host can be an unbracketed IPv6 address.
   const [target, published, ...address] = mapping.split(":").toReversed();
   const host = address.toReversed().join(":");
+  return validOptionalPortHost(host) && validPortNumbers(published, target);
+}
+
+function validPortNumbers(
+  published: string | undefined,
+  target: string | undefined
+): boolean {
   return (
-    validOptionalPortHost(host) &&
     (!published || validPortRange(published, true)) &&
     target !== undefined &&
     validPortRange(target) &&
@@ -86,13 +99,14 @@ function validOptionalPortHost(host: string): boolean {
 
 function validInterpolatedPortPair(mapping: string): boolean {
   const separator = mapping.lastIndexOf(":");
-  const tail = mapping.slice(separator + 1);
-  if (
-    !(
-      tail.includes("*") &&
-      validOptionalPortHost(mapping.slice(0, Math.max(separator, 0)))
-    )
-  ) {
+  return (
+    validOptionalPortHost(mapping.slice(0, Math.max(separator, 0))) &&
+    validVariablePortPair(mapping.slice(separator + 1))
+  );
+}
+
+function validVariablePortPair(tail: string): boolean {
+  if (!tail.includes("*")) {
     return false;
   }
   const published = new Set(portVariableSplits(tail, false));
@@ -102,6 +116,49 @@ function validInterpolatedPortPair(mapping: string): boolean {
     }
   }
   return false;
+}
+
+function validInterpolatedHostMapping(mapping: string): boolean {
+  const template = mapping.replace(ADJACENT_VARIABLES, "*");
+  let hostLength = 0;
+  for (
+    let index = 0;
+    index < template.length && hostLength <= MAX_PORT_HOST_LENGTH;
+    index += 1
+  ) {
+    if (template[index] !== "*") {
+      hostLength += 1;
+      continue;
+    }
+    const prefix = template.slice(0, index);
+    if (
+      validHostBeforeVariable(prefix) &&
+      validPortsAfterVariable(template.slice(index))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validHostBeforeVariable(prefix: string): boolean {
+  // A variable can finish the host before supplying its separator.
+  return (
+    validOptionalPortHost(prefix) ||
+    validPortHost(`${prefix}*`) ||
+    (prefix.startsWith("[") && validPortHost(`${prefix}*]`))
+  );
+}
+
+function validPortsAfterVariable(tail: string): boolean {
+  const separator = tail.indexOf(":");
+  if (separator < 0) {
+    return validVariablePortPair(tail);
+  }
+  return (
+    separator === tail.lastIndexOf(":") &&
+    validPortNumbers(tail.slice(0, separator), tail.slice(separator + 1))
+  );
 }
 
 /** A split variable can supply the colon and digits on either side of it. */

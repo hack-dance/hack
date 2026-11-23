@@ -513,8 +513,13 @@ impl HackApp {
         let Some(panel) = self.panels.by_key.get(&detail.key) else {
             return;
         };
-        let existing = panel.sessions.read(cx).kinds(cx).iter().position(|kind| {
-            matches!(kind, SessionKind::ContainerShell { service: current, .. } if current == service)
+        let sessions = panel.sessions.read(cx);
+        let existing = (0..sessions.tab_count()).find(|&index| {
+            sessions.tab(index).is_some_and(|tab| {
+                let view = tab.read(cx);
+                matches!(view.kind(), SessionKind::ContainerShell { service: current, .. } if current == service)
+                    && matches!(view.status(), TermStatus::Running)
+            })
         });
         if let Some(index) = existing {
             if panel.state == PanelState::Collapsed {
@@ -2302,6 +2307,74 @@ mod window_tests {
             assert_ne!(drawer.read(cx).tab(0), Some(&scoped));
         })
         .unwrap();
+    }
+
+    #[test]
+    fn reopening_a_service_shell_reuses_the_live_tab_and_leaves_ended_scrollback() {
+        use hack_desktop_core::runner::CliRunner;
+        use hack_desktop_core::source::LiveSource;
+        use hack_desktop_core::viewmodel::Event;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!("hack-service-shell-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        std::fs::create_dir(root.join(".hack")).unwrap();
+        std::fs::write(root.join(".hack/docker-compose.yml"), "services: {}\n").unwrap();
+        let cli = root.join("hack");
+        std::fs::write(
+            &cli,
+            concat!(
+                "#!/bin/sh\n[ \"$1\" = exec ] || exit 0\n",
+                "if [ ! -e .shell-exited ]; then : > .shell-exited; exit 0; fi\n",
+                "IFS= read -r line\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let (mut cx, window, app) = open(false);
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                let mut snapshot = fixtures::snapshot(Fixture::Running).unwrap();
+                let row = snapshot
+                    .projects
+                    .projects
+                    .iter_mut()
+                    .find(|row| row.name == fixtures::selected(Fixture::Running))
+                    .unwrap();
+                row.repo_root = Some(root.to_str().unwrap().to_owned());
+                app.model.apply(Event::Refreshed(Ok(snapshot)));
+                app.source = Arc::new(LiveSource::new(CliRunner::new(cli), None));
+                app.open_service_shell("api", window, cx);
+            });
+            let key = app.read(cx).model.selected_key().unwrap();
+            let sessions = app.read(cx).panels.by_key[&key].sessions.clone();
+            let first = sessions.read(cx).tab(1).cloned().unwrap();
+            first.update(cx, |view, cx| {
+                view.settle(
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(3),
+                    cx,
+                );
+            });
+            assert!(matches!(first.read(cx).status(), TermStatus::Ended(_)));
+
+            app.update(cx, |app, cx| app.open_service_shell("api", window, cx));
+            let reopened = sessions.read(cx).active().cloned().unwrap();
+            assert_ne!(reopened, first);
+            assert_eq!(reopened.read(cx).status(), &TermStatus::Running);
+            assert_eq!(sessions.read(cx).tab(1), Some(&first));
+
+            app.update(cx, |app, cx| app.open_service_shell("api", window, cx));
+            assert_eq!(sessions.read(cx).active(), Some(&reopened));
+            assert_eq!(sessions.read(cx).tab_count(), 3);
+            app.update(cx, |app, cx| app.close_all_terminals(window, cx));
+        })
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -838,9 +838,10 @@ Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
   **Only matching lines** to hide the rest. The menu also controls wrap and
   JSON key highlighting and opens the same scope in the terminal drawer.
 - **Terminal** docks the instance’s existing Ghostty drawer in the pane. It
-  opens or reselects a shell in the chosen service and keeps terminal tabs
-  alive when you switch detail tabs. The drawer keeps Ghostty’s configured
-  appearance.
+  reselects a running shell in the chosen service or starts a new one after
+  the last shell exits. The ended tab retains its scrollback. Terminal tabs
+  stay open when you switch detail tabs, and the drawer keeps Ghostty’s
+  configured appearance.
 - **Restart** calls Hack for the selected service. **Stop** targets its
   observed running Compose containers and confirms their identity with Docker
   before stopping by full ID. On macOS, the explicit service action accepts

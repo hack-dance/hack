@@ -82,6 +82,65 @@ pub struct CheckCli {
     pub channel: String,
 }
 
+/// Evidence from the read-only release check for the selected CLI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UpdateObservation {
+    Available(String),
+    NetworkUnavailable,
+    #[default]
+    NoNotice,
+}
+
+#[derive(Deserialize)]
+struct UpdateReport {
+    latest: Option<String>,
+    available: Option<bool>,
+    reason: Option<String>,
+}
+
+/// The checked CLI owns release selection and comparison. The desktop only
+/// displays the observation and never executes an upgrade command from it.
+#[must_use]
+pub fn observe_update(checked: &crate::setup::Report) -> UpdateObservation {
+    let read = || {
+        let program = checked.cli_program.as_ref()?;
+        let context = checked.context.as_ref()?.with_controlled_path().ok()?;
+        context
+            .runner(program)
+            .ok()?
+            .run_schema_json::<UpdateReport>(
+                &["update", "--check", "--json", "--observe"],
+                None,
+                std::time::Duration::from_secs(20),
+                "hack.update-check.v1",
+            )
+            .ok()
+    };
+    if !checked.cli_ready() {
+        return UpdateObservation::NoNotice;
+    }
+    match read() {
+        Some(UpdateReport {
+            available: Some(true),
+            latest: Some(version),
+            reason: None,
+        }) if !version.is_empty()
+            && version.len() <= 64
+            && version
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') =>
+        {
+            UpdateObservation::Available(version)
+        }
+        Some(UpdateReport {
+            available: None,
+            latest: None,
+            reason: Some(reason),
+        }) if reason == "network-unavailable" => UpdateObservation::NetworkUnavailable,
+        _ => UpdateObservation::NoNotice,
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct CheckProject {

@@ -62,6 +62,11 @@ pub enum Fixture {
     DoctorLink,
     /// No projects registered: the Doctor pane still shows machine checks.
     DoctorEmpty,
+    BannerDns,
+    BannersSheet,
+    DoctorHealth,
+    DoctorFixAll,
+    ErrorsSheet,
     // hackd pane (HACK-2288 item 6).
     /// hackd running, a login run under way, always-on projects in every
     /// state the summary shows.
@@ -78,7 +83,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 45] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -114,6 +119,11 @@ impl Fixture {
         Self::DoctorClean,
         Self::DoctorLink,
         Self::DoctorEmpty,
+        Self::BannerDns,
+        Self::BannersSheet,
+        Self::DoctorHealth,
+        Self::DoctorFixAll,
+        Self::ErrorsSheet,
         Self::Hackd,
         Self::HackdOff,
         Self::Upgrade,
@@ -159,6 +169,11 @@ impl Fixture {
             Self::DoctorClean => "doctor-clean",
             Self::DoctorLink => "doctor-link",
             Self::DoctorEmpty => "doctor-empty",
+            Self::BannerDns => "h17-app-banner-dns",
+            Self::BannersSheet => "h18-banners-sheet",
+            Self::DoctorHealth => "h19-doctor",
+            Self::DoctorFixAll => "h20-doctor-fix-all",
+            Self::ErrorsSheet => "h25-errors-sheet",
             Self::Hackd => "hackd",
             Self::HackdOff => "hackd-off",
             Self::Upgrade => "upgrade",
@@ -540,11 +555,13 @@ fn doctor(f: Fixture) -> DoctorReport {
             }
             .into(),
             detail: String::new(),
+            fix: None,
         },
         DoctorCheck {
             id: "caddy local ca".into(),
             status: "warn".into(),
             detail: "Local CA is not trusted by the system".into(),
+            fix: None,
         },
     ];
     if f == Fixture::NeedsAttention {
@@ -552,6 +569,7 @@ fn doctor(f: Fixture) -> DoctorReport {
             id: "project config".into(),
             status: "error".into(),
             detail: "notes: hack.config.json is not valid JSON".into(),
+            fix: None,
         });
     }
     DoctorReport {
@@ -909,6 +927,7 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
         id: id.into(),
         status: status.into(),
         detail: detail.into(),
+        fix: None,
     };
     let report = |checks: Vec<DoctorCheck>| {
         Ok(DoctorReport {

@@ -479,12 +479,22 @@ after the read, plus a known project-only check. A machine-only or ancestor-proj
 report cannot establish Compose project coverage.
 Machine diagnostics remain visible even when a checkout cannot be verified.
 
-Cards group findings by area and offer one copied command or documentation link.
-Project commands include the checkout path. The app never runs a Doctor fix:
-one-click fixes remain blocked on the CLI's explicit safe-fix metadata (R7a/R7b).
-The probes do not use `hack global status`, which can start Docker.
-Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
-[dark](screenshots/doctor-dark.png).
+Doctor groups machine and project findings and folds the passed checks. The
+project pane shows one follow-up at a time. Dismissing it hides that finding
+for the session until its evidence changes.
+
+**Fix all** runs the available repairs in row order in the shared terminal
+drawer. It checks again after each command exits. A failed command or a check
+that cannot confirm the repair stops the queue and keeps the terminal output.
+**Stop** interrupts the current command and cancels the remaining queue. Some
+machine repairs ask for your password inside the terminal. Project repairs
+require the CLI's scoped safe-fix metadata and exact checkout evidence. Guide
+links, manual commands and upgrades stay outside the queue.
+
+The probes do not use `hack global status`, which can start Docker. The update
+banner uses the CLI's read-only release check and opens the review when clicked.
+The fixtures `h17-app-banner-dns`, `h18-banners-sheet`, `h19-doctor`,
+`h20-doctor-fix-all` and `h25-errors-sheet` render both themes.
 
 For integrations, `Card.authored_remedy` exposes an `AuthoredRemedy`: `argv()`
 returns authored arguments without an executable or environment, including each

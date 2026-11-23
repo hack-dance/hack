@@ -53,7 +53,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             let opts = WindowOptions {
                 focus: false,
                 show: false,
-                ..crate::window_options()
+                ..crate::health_fixtures::window_options(Some(f))
             };
             let (handle, _app) = cx
                 .update(|cx| {
@@ -62,6 +62,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             let mut app =
                                 HackApp::new(crate::source_for(Some(f)), false, window, cx);
                             app.select(fixtures::selected(f));
+                            crate::health_fixtures::open(&mut app, f, window, cx);
                             if fixtures::loads_doctor(f) {
                                 app.show_doctor_now();
                                 if !fixtures::opens_doctor(f) {

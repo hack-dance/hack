@@ -142,7 +142,9 @@ fn archive_with(
             "Archived evidence already exists; it will not be replaced.",
         ));
     }
-    if fs::read_dir(parent).map_err(state::io)?.take(256).count() >= 256 {
+    // HACK-2576: the oldest archived removed runs are exported and pruned first.
+    retention::make_archive_room(candidate, engine)?;
+    if fs::read_dir(parent).map_err(state::io)?.take(256).count() >= retention::ARCHIVE_LIMIT {
         return Err(error(
             "graph_archive_budget",
             "Archive retains 256 attempts; explicit export/retention work is required.",

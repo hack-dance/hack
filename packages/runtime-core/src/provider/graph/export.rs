@@ -19,6 +19,15 @@ pub struct Export {
 /// Export private, bounded archive evidence without deleting the consumed attempt reservation.
 pub fn export(candidate: &Candidate, run: &str) -> Result<Export, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
+    export_with(candidate, &engine, run)
+}
+
+/// [`export`] under a provider lease the caller already holds.
+pub(super) fn export_with(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    run: &str,
+) -> Result<Export, CandidateError> {
     let root = archive::path(candidate, run)?;
     state::check_private_directory(&root)?;
     let receipt: Receipt = state::read(&root.join("state.json"))?;
@@ -33,8 +42,8 @@ pub fn export(candidate: &Candidate, run: &str) -> Result<Export, CandidateError
         ));
     }
     cleanup_enrollment::retention(&root, &receipt)?;
-    archive::verify_removed(&engine, &receipt)?;
-    environment::archive_slots(candidate, &engine, &receipt, &root)?;
+    archive::verify_removed(engine, &receipt)?;
+    environment::archive_slots(candidate, engine, &receipt, &root)?;
     let (bytes, files) = bundle(&root)?;
     let parent = candidate.state_root.join("exports/graphs");
     state::private_directory(&parent)?;

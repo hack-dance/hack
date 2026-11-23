@@ -1804,7 +1804,15 @@ provider lease it already holds and with the same proof `graph archive` uses (ev
 owned resource absent, no pending journal). Runs that keep data are never archived;
 when they alone fill the inventory, `hack up` refuses with `graph_retention_budget`
 and says to remove the data of a project you no longer use. The archive keeps up to
-256 runs; past that the refusal is `graph_archive_budget`. A project whose removed
+256 runs; at that bound the oldest archived removed runs are exported (as
+`graph export` does, into the home's `exports/graphs`) and pruned (as `graph prune`
+does), and each keeps a consumed-ID tombstone so its run ID cannot start a fresh run
+again. The store keeps 4096 tombstones; at that bound the oldest tombstones of fully
+pruned runs go. That is safe because a tombstone only refuses a fresh start with
+that ID, the CLI makes every fresh run ID from 128 random bits at the start, and a
+restore needs the run's receipt, which pruning already removed. The export of a
+fully pruned run is diagnostics: it is kept seven days, and at most 256 of them,
+oldest first. No step of this chain ends in a refusal for lack of room. A project whose removed
 run was archived this way before its `hack down --remove-data` confirmed the removal
 still confirms it: inspection reads a removed run from the archive.
 For a shared-source graph that reconciliation does not select (live source, a

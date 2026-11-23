@@ -82,6 +82,11 @@ fn bind_terminal_keys(cx: &mut App) {
     const TERMINAL: Option<&str> = Some("Terminal");
     if cfg!(target_os = "macos") {
         cx.bind_keys([
+            KeyBinding::new(
+                "cmd-up",
+                crate::command_control::MakeCommandTaller,
+                Some("TerminalCommand"),
+            ),
             KeyBinding::new("cmd-j", TogglePanel, None),
             KeyBinding::new("cmd-t", NewTab, None),
             KeyBinding::new("cmd-w", CloseTab, None),
@@ -94,6 +99,11 @@ fn bind_terminal_keys(cx: &mut App) {
         ]);
     } else {
         cx.bind_keys([
+            KeyBinding::new(
+                "ctrl-shift-up",
+                crate::command_control::MakeCommandTaller,
+                Some("TerminalCommand"),
+            ),
             KeyBinding::new("ctrl-shift-j", TogglePanel, None),
             KeyBinding::new("ctrl-shift-t", NewTab, None),
             KeyBinding::new("ctrl-shift-w", CloseTab, None),
@@ -168,6 +178,8 @@ pub struct HackApp {
     pub(crate) hackd_evidence_seen: String,
     /// Setup checks (DESIGN.md section 2; `setup_view`).
     pub(crate) setup: hack_desktop_core::setup::Pane,
+    #[cfg(hack_terminal)]
+    pub(crate) setup_command_check: Option<(crate::command_control::CommandRunId, String)>,
     /// The launch check has not reported yet: when it finds something to
     /// do, setup opens.
     pub(crate) setup_on_launch: bool,
@@ -225,6 +237,8 @@ impl HackApp {
             hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
+            #[cfg(hack_terminal)]
+            setup_command_check: None,
             setup_on_launch: live,
         };
         if live {
@@ -1671,10 +1685,14 @@ impl HackApp {
                 .into_any_element(),
         };
         #[cfg(hack_terminal)]
-        let (maximized, panel) = (
-            self.panels.maximized(&d.key),
-            Some(self.terminal_area(d, ui, window, cx)),
-        );
+        let (maximized, panel) = if self.panels.command.visible() {
+            (false, None)
+        } else {
+            (
+                self.panels.maximized(&d.key),
+                Some(self.terminal_area(d, ui, window, cx)),
+            )
+        };
         #[cfg(not(hack_terminal))]
         let (maximized, panel): (bool, Option<AnyElement>) = (false, None);
         div()
@@ -1776,14 +1794,47 @@ impl HackApp {
             gpui_kit::MouseButton::Left,
             cx.listener(|this, _, _, _| this.panels.dragging = false),
         )
-        .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
-        .on_action(cx.listener(|this, _: &ToggleMaximize, _, cx| this.toggle_maximize(cx)))
-        .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-            this.open_menu(crate::terminal::Menu::Main, cx);
+        .on_action(cx.listener(|this, _: &TogglePanel, _, cx| {
+            if this.panels.command.visible() {
+                this.close_command_drawer(cx);
+            } else {
+                this.toggle_panel(cx);
+            }
         }))
-        .on_action(cx.listener(|this, _: &CloseTab, window, cx| this.close_active_tab(window, cx)))
-        .on_action(cx.listener(|this, _: &NextTab, window, cx| this.step_tab(true, window, cx)))
-        .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.step_tab(false, window, cx)))
+        .on_action(cx.listener(|this, _: &ToggleMaximize, _, cx| {
+            if this.panels.command.visible() {
+                this.make_command_taller(cx);
+            } else {
+                this.toggle_maximize(cx);
+            }
+        }))
+        .on_action(cx.listener(
+            |this, _: &crate::command_control::MakeCommandTaller, _, cx| {
+                this.make_command_taller(cx);
+            },
+        ))
+        .on_action(cx.listener(|this, _: &NewTab, _, cx| {
+            if !this.panels.command.visible() {
+                this.open_menu(crate::terminal::Menu::Main, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+            if this.panels.command.visible() {
+                this.close_command_drawer(cx);
+            } else {
+                this.close_active_tab(window, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+            if !this.panels.command.visible() {
+                this.step_tab(true, window, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+            if !this.panels.command.visible() {
+                this.step_tab(false, window, cx);
+            }
+        }))
     }
 
     #[cfg(not(hack_terminal))]
@@ -1806,9 +1857,7 @@ impl Render for HackApp {
             // included.
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),
-            _ if self.pane == Pane::Setup => {
-                crate::setup_view::render(&self.setup, self.machine.busy(), &ui, cx)
-            }
+            _ if self.pane == Pane::Setup => crate::setup_view::render(self, &ui, cx),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.
@@ -1852,6 +1901,8 @@ impl Render for HackApp {
                 }
             },
         };
+        #[cfg(hack_terminal)]
+        let command_drawer = self.render_command_drawer(&ui, cx);
         div()
             .id("hack-window")
             .key_context("HackWindow")
@@ -1880,7 +1931,27 @@ impl Render for HackApp {
                             .flex()
                             .flex_col()
                             .child(self.banners(&list, &ui, cx))
-                            .child(main),
+                            .child({
+                                #[cfg(hack_terminal)]
+                                let main = if command_drawer.is_some() {
+                                    div()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_hidden()
+                                        .flex()
+                                        .flex_col()
+                                        .child(main)
+                                        .into_any_element()
+                                } else {
+                                    main
+                                };
+                                main
+                            })
+                            .map(|pane| {
+                                #[cfg(hack_terminal)]
+                                let pane = pane.children(command_drawer);
+                                pane
+                            }),
                     ),
             )
             .child(self.status_bar_with_cli(&list, &ui, cx))

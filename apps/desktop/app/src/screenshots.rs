@@ -23,6 +23,10 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(gpui_kit::init);
+    #[cfg(hack_terminal)]
+    if fixture.is_none() {
+        crate::command_control::capture(&dir.join("command-drawer"), &mut cx);
+    }
     // Every app fixture, then every Logs tab fixture on its base project state.
     let mut shots: Vec<(&'static str, Fixture, Option<LogsFixture>)> =
         Fixture::ALL.iter().map(|f| (f.name(), *f, None)).collect();

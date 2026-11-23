@@ -18,6 +18,8 @@
 //! ```
 
 mod clipboard;
+#[cfg(hack_terminal)]
+mod command_control;
 mod copies_view;
 mod doctor_view;
 #[cfg(hack_terminal)]

@@ -67,6 +67,19 @@ impl CommandSpec {
             .collect::<Result<Vec<_>, _>>()
             .map(|v| v.join(" "))
     }
+
+    /// Render the same command with a working directory for shell hand-off.
+    pub fn display_in(&self, cwd: Option<&Path>) -> Result<String, String> {
+        let command = self.display()?;
+        let Some(cwd) = cwd else {
+            return Ok(command);
+        };
+        let directory = cwd
+            .to_str()
+            .filter(|_| cwd.is_absolute())
+            .ok_or("Command directory must be an absolute UTF-8 path")?;
+        Ok(format!("cd {} && {command}", quote(directory)?))
+    }
 }
 pub fn quote(s: &str) -> Result<String, String> {
     if s.is_empty() || s.chars().any(char::is_control) {
@@ -163,7 +176,16 @@ pub struct Script {
 }
 impl Script {
     pub fn create(temp_root: &Path, spec: &CommandSpec) -> Result<Self, String> {
-        let command = spec.display()?;
+        Self::create_in(temp_root, spec, None)
+    }
+
+    /// Hand off the checked working directory along with argv.
+    pub fn create_in(
+        temp_root: &Path,
+        spec: &CommandSpec,
+        cwd: Option<&Path>,
+    ) -> Result<Self, String> {
+        let command = spec.display_in(cwd)?;
         if !temp_root.is_absolute() || temp_root.to_str().is_none() {
             return Err("Terminal temp root must be an absolute UTF-8 path".into());
         }

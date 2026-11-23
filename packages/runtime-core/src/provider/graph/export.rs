@@ -19,14 +19,18 @@ pub struct Export {
 /// Export private, bounded archive evidence without deleting the consumed attempt reservation.
 pub fn export(candidate: &Candidate, run: &str) -> Result<Export, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
-    export_with(candidate, &engine, run)
+    export_with(candidate, &engine, run, false)
 }
 
 /// [`export`] under a provider lease the caller already holds.
+/// With `any_owner`, a removed attempt archived under an earlier guest incarnation is
+/// exported too: it holds nothing, and its absence is proven against this engine as
+/// for any other (HACK-2576). Only the archive's own room-making passes it.
 pub(super) fn export_with(
     candidate: &Candidate,
     engine: &Engine<'_>,
     run: &str,
+    any_owner: bool,
 ) -> Result<Export, CandidateError> {
     let root = archive::path(candidate, run)?;
     state::check_private_directory(&root)?;
@@ -34,7 +38,11 @@ pub(super) fn export_with(
     if receipt.version != 1
         || receipt.run != run
         || receipt.phase != "removed"
-        || receipt.owner != engine.guest().incarnation()
+        || !super::retention::owner_accepted(
+            any_owner,
+            &receipt.owner,
+            engine.guest().incarnation(),
+        )
     {
         return Err(error(
             "graph_export_identity",

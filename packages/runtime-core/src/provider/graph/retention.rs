@@ -68,15 +68,20 @@ struct Tombstone {
 
 pub fn prune(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
-    prune_with(candidate, &engine, run)
+    prune_with(candidate, &engine, run, false)
 }
 
 /// [`prune`] under a provider lease the caller already holds.
+/// With `any_owner` (the archive's own room-making only), a removed attempt of an
+/// earlier guest incarnation is pruned once its export proves it removed; its
+/// tombstone records the run's own owner (HACK-2576).
 pub(super) fn prune_with(
     candidate: &Candidate,
     engine: &Engine<'_>,
     run: &str,
+    any_owner: bool,
 ) -> Result<Value, CandidateError> {
+    let owned = |owner: &str| owner_accepted(any_owner, owner, engine.guest().incarnation());
     let archive = archive::path(candidate, run)?;
     let target = consumed(candidate, run)?;
     match fs::symlink_metadata(archive.join("state.pending")) {
@@ -95,7 +100,7 @@ pub(super) fn prune_with(
             let receipt: Receipt = state::read(&archive.join("state.json"))?;
             if receipt.version != 1
                 || receipt.run != run
-                || receipt.owner != engine.guest().incarnation()
+                || !owned(&receipt.owner)
                 || receipt.phase != "removed"
             {
                 return Err(error(
@@ -147,7 +152,7 @@ pub(super) fn prune_with(
     .map_err(|_| error("graph_prune_export", "Export graph receipt is invalid."))?;
     if exported.version != 1
         || exported.run != run
-        || exported.owner != engine.guest().incarnation()
+        || !owned(&exported.owner)
         || exported.phase != "removed"
         || expected.contains_key(Path::new("state.pending"))
     {
@@ -167,7 +172,7 @@ pub(super) fn prune_with(
         let receipt: Tombstone = state::read(&target.join("state.json"))?;
         if receipt.version != 1
             || receipt.run != run
-            || receipt.owner != engine.guest().incarnation()
+            || !owned(&receipt.owner)
             || receipt.export_sha256 != digest
         {
             return Err(error(
@@ -180,7 +185,7 @@ pub(super) fn prune_with(
         let receipt: Receipt = state::read(&archive.join("state.json"))?;
         if receipt.run != run
             || receipt.phase != "removed"
-            || receipt.owner != engine.guest().incarnation()
+            || !owned(&receipt.owner)
             || export::bundle(&archive)?.0 != bytes
         {
             return Err(error(
@@ -214,7 +219,7 @@ pub(super) fn prune_with(
             &Tombstone {
                 version: 1,
                 run: run.into(),
-                owner: engine.guest().incarnation().into(),
+                owner: exported.owner.clone(),
                 export_sha256: digest.clone(),
             },
         )?;
@@ -264,6 +269,13 @@ fn remove_empty(path: &Path, depth: usize, remaining: &mut usize) -> Result<(), 
         remove_empty(&entry.map_err(state::io)?.path(), depth + 1, remaining)?;
     }
     fs::remove_dir(path).map_err(state::io)
+}
+
+/// Whether a removed attempt's recorded owner admits export and prune: the current
+/// guest incarnation always; with `any_owner`, any incarnation, because a removed
+/// attempt holds nothing and its export is the evidence (HACK-2576).
+pub(super) fn owner_accepted(any_owner: bool, owner: &str, incarnation: &str) -> bool {
+    any_owner || owner == incarnation
 }
 
 /// Archived graph attempts kept; past this `graph archive` used to refuse
@@ -358,8 +370,9 @@ pub(super) fn make_archive_room(
                 EXPORT_LIMIT,
             );
         }
-        let proven = (exported.exists() || export::export_with(candidate, engine, &run).is_ok())
-            && prune_with(candidate, engine, &run).is_ok();
+        let proven = (exported.exists()
+            || export::export_with(candidate, engine, &run, true).is_ok())
+            && prune_with(candidate, engine, &run, true).is_ok();
         if proven {
             count -= 1;
         }
@@ -523,6 +536,17 @@ mod chain_tests {
                 .exists()
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_the_archive_room_accepts_a_removed_run_of_an_earlier_incarnation() {
+        let current = "a".repeat(32);
+        let earlier = "b".repeat(32);
+        // Manual export and prune keep the current-incarnation rule.
+        assert!(owner_accepted(false, &current, &current));
+        assert!(!owner_accepted(false, &earlier, &current));
+        // The archive's own room-making accepts any incarnation's removed run.
+        assert!(owner_accepted(true, &earlier, &current));
     }
 
     #[test]

@@ -1541,6 +1541,13 @@ refusal as `skipped`, and never delays or fails the start. Each removal deletes 
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 
+When explicit reclaim frees at least 256 MiB on the guest storage filesystem,
+it also attempts a discard on `/storage` while holding the same pool lease.
+A confirmed trim adds `trim.guest_bytes_freed` and `trim.seconds` to the JSON.
+The byte count measures guest free space gained during reclaim. Host allocation
+can fall by a different amount. A failed or interrupted trim does not undo
+reclaim. The automatic `--best-effort` path does not trim.
+
 ### Network tool packages
 
 Before startup, network-tool preparation additionally requires all four pinned

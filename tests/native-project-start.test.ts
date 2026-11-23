@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NATIVE_ENDED_BOOT_OWNER_NOTICE } from "../src/backends/native-ended-boot-owner.ts";
 import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
 import {
   type acquireNativeHttpsLease,
@@ -7139,6 +7140,164 @@ test("up without a recovery callback keeps the owner-exited refusal and reads no
     NativeRuntimeRequestError
   );
   expect(events).toEqual(["graph retained-preflight refused"]);
+});
+
+// HACK-2572: right after the pool stopped, the run's detached owner is still exiting.
+function ownerRunningRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_running",
+    message: "Another foreground hack up still owns this run.",
+  });
+}
+async function exitingOwnerFixture(opts: {
+  readonly runningRefusals: number;
+  readonly poolEnded: boolean;
+  readonly waitMs?: number;
+}) {
+  const fixture = await stoppedPoolUnderRunFixture("stopped");
+  const { start, events } = fixture;
+  let refusals = 0;
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (
+      request.args[1] === "retained-preflight" &&
+      refusals < opts.runningRefusals
+    ) {
+      refusals += 1;
+      events.push("graph retained-preflight owner running");
+      throw ownerRunningRefusal();
+    }
+    return await invoke(request);
+  };
+  start.dependencies.poolBootEnded = async () => {
+    events.push("pool record");
+    return opts.poolEnded;
+  };
+  start.dependencies.endedBootOwnerWaitMs = opts.waitMs ?? 5000;
+  return fixture;
+}
+
+test("up waits, with one line, for the owner of an ended pool boot to go, then recovers the run", async () => {
+  const { start, events, notices } = await exitingOwnerFixture({
+    runningRefusals: 3,
+    poolEnded: true,
+  });
+  expect(await startNativeProject(start)).toBe(0);
+  expect(
+    events.filter((event) => event === "graph retained-preflight owner running")
+  ).toHaveLength(3);
+  // Then the refusal is the exited owner's, and the existing recovery runs once.
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(
+    notices.filter((line) => line === NATIVE_ENDED_BOOT_OWNER_NOTICE)
+  ).toHaveLength(1);
+});
+
+// HACK-2572: the owner's end seen by the preflight, point by point: alive, then
+// ending (exited but not yet reaped, or its publication read mid-change), then
+// exited. Every sequence must reach the same recovery, never a refusal to retry.
+function endingOwnerRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_uncertain",
+    message: "The previous foreground owner of this run is ending.",
+  });
+}
+async function endingOwnerFixture(
+  sequence: readonly ("running" | "uncertain")[],
+  recover = true
+) {
+  const fixture = await stoppedPoolUnderRunFixture("stopped");
+  const { start, events } = fixture;
+  let index = 0;
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && index < sequence.length) {
+      const point = sequence[index]!;
+      index += 1;
+      events.push(`graph retained-preflight owner ${point}`);
+      throw point === "running" ? ownerRunningRefusal() : endingOwnerRefusal();
+    }
+    return await invoke(request);
+  };
+  start.dependencies.poolBootEnded = async () => true;
+  start.dependencies.endedBootOwnerWaitMs = 5000;
+  if (!recover) {
+    const { recoverStoppedPool: _omitted, ...plain } = start;
+    return { ...fixture, start: plain };
+  }
+  return fixture;
+}
+
+for (const sequence of [
+  ["running", "uncertain", "uncertain"],
+  ["uncertain"],
+  ["running", "uncertain", "running", "uncertain"],
+] as const) {
+  test(`up through the owner's end (${sequence.join(", ")}, exited) waits with one line, then recovers once`, async () => {
+    const { start, events, notices } = await endingOwnerFixture(sequence);
+    expect(await startNativeProject(start)).toBe(0);
+    expect(events.filter((event) => event === "down --recover")).toHaveLength(
+      1
+    );
+    // One line when it actually waited: an owner already exited at the first
+    // re-read is not waited for.
+    expect(
+      notices.filter((line) => line === NATIVE_ENDED_BOOT_OWNER_NOTICE)
+    ).toHaveLength(sequence.length > 1 ? 1 : 0);
+  });
+}
+
+test("restart through the owner's end waits with one line, then keeps its own exited refusal as before", async () => {
+  // Restart passes no stopped-pool recovery: after the wait it decides as today.
+  const { start, events, notices } = await endingOwnerFixture(
+    ["running", "uncertain"],
+    false
+  );
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_exited"
+  );
+  expect(events).not.toContain("down --recover");
+  expect(notices).toEqual([NATIVE_ENDED_BOOT_OWNER_NOTICE]);
+});
+
+test("a live foreground owner on a running pool keeps its refusal at once, with no wait or line", async () => {
+  const { start, events, notices } = await exitingOwnerFixture({
+    runningRefusals: Number.POSITIVE_INFINITY,
+    poolEnded: false,
+  });
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_running"
+  );
+  // One status read rules out a provider that exited under a running record
+  // (HACK-2579); the pool is not process-exited, so nothing is recovered.
+  expect(events).toEqual([
+    "graph retained-preflight owner running",
+    "runtime status",
+    "pool record",
+  ]);
+  expect(notices).toEqual([]);
+});
+
+test("an owner that outlives the bound keeps the owner-running refusal after the one line", async () => {
+  const { start, events, notices } = await exitingOwnerFixture({
+    runningRefusals: Number.POSITIVE_INFINITY,
+    poolEnded: true,
+    waitMs: 50,
+  });
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_running"
+  );
+  expect(events).not.toContain("down --recover");
+  expect(notices).toEqual([NATIVE_ENDED_BOOT_OWNER_NOTICE]);
 });
 
 test.each([

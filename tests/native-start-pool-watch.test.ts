@@ -78,6 +78,41 @@ test("a start that finishes on its own within the grace is not ended", async () 
   ).toBe(0);
 });
 
+test("a ready start ends at the first check that sees its boot ended; one still starting keeps the grace", async () => {
+  // HACK-2535 real-VM run: the stopped run's ready owner outlived the pool by the
+  // grace, and a later `up` waited for it to be proven gone.
+  for (const [ready, expected] of [
+    [true, 1],
+    [false, 0],
+  ] as const) {
+    let index = 0;
+    let ended = 0;
+    let readAt = -1;
+    const records = [record({}), record({ phase: "stopped" })];
+    const stop = watchNativeStartPool({
+      home: "/fixture",
+      checkMs: 5,
+      graceMs: () => {
+        readAt = index;
+        return ready ? 0 : 10_000;
+      },
+      read: () => {
+        const value = records[Math.min(index, records.length - 1)];
+        index += 1;
+        return Promise.resolve(value);
+      },
+      onEnded: () => {
+        ended += 1;
+      },
+    });
+    await Bun.sleep(60);
+    stop();
+    expect(ended).toBe(expected);
+    // The grace is chosen when the ended boot is seen, not when the watch starts.
+    expect(readAt).toBeGreaterThan(1);
+  }
+});
+
 test("a start whose provider process vanished while the record still says running ends after the grace", async () => {
   // HACK-2579: a killed or crashed provider leaves the record `running`; only its
   // pid tells. A reused pid reads as alive, so only a gone pid ends the start.

@@ -3604,9 +3604,15 @@ mod tests {
                 None,
                 super::super::NetworkIntent::Internet,
                 None,
-                Some(share.clone()),
+                Some(
+                    share
+                        .clone()
+                        .with_layout(super::super::PoolLayout::CompactV1)
+                        .unwrap(),
+                ),
             )
             .unwrap();
+            super::super::project_share::check_boot(&owner.project_shares()).unwrap();
             let before = fs::read(root(&candidate).join("owner.json")).unwrap();
             assert_eq!(
                 check_project_share(&candidate, &share).unwrap(),

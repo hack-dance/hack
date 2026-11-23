@@ -133,7 +133,15 @@ impl ProjectShareIntent {
         Ok(format!("{}/{}", self.guest_path, source))
     }
     pub(super) fn validate(&self) -> Result<(), CandidateError> {
-        if Self::approve(&self.project, self.unfiltered_source)? != *self {
+        self.check_approval(Self::approve(&self.project, self.unfiltered_source)?)
+    }
+
+    fn check_approval(&self, mut approved: Self) -> Result<(), CandidateError> {
+        // Both guest paths are derived from the approved project root. Keep
+        // the stored layout and compare every host identity field.
+        self.validate_receipt()?;
+        approved.guest_path.clone_from(&self.guest_path);
+        if approved != *self {
             return Err(refused());
         }
         Ok(())
@@ -577,6 +585,27 @@ mod tests {
         fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o777)).unwrap();
         assert!(intent.validate().is_err());
     }
+    #[test]
+    fn project_share_approval_matches_both_layouts_and_checks_host_identity() {
+        let fixture = Fixture::new();
+        let approved = ProjectShareIntent::approve(&fixture.0, true).unwrap();
+        for layout in [PoolLayout::Legacy, PoolLayout::CompactV1] {
+            let share = approved.clone().with_layout(layout).unwrap();
+            share.check_approval(approved.clone()).unwrap();
+            check_request(layout, &[&share], Some(&approved)).unwrap();
+            check_boot(&[&share]).unwrap();
+            assert_eq!(share.bind_path(".").unwrap(), share.guest_path);
+
+            let mut replaced = share.clone();
+            replaced.inode += 1;
+            assert!(replaced.check_approval(approved.clone()).is_err());
+
+            let mut forged = share;
+            forged.guest_path.push_str("-other");
+            assert!(forged.check_approval(approved.clone()).is_err());
+        }
+    }
+
     #[test]
     fn project_share_pool_intent_cannot_change_implicitly() {
         let first = Fixture::new();

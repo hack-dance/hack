@@ -225,13 +225,7 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         if self.live {
-            self.start_drawer_command(
-                props,
-                Box::new(on_exit),
-                init_directory,
-                window,
-                cx,
-            );
+            self.start_drawer_command(props, Box::new(on_exit), init_directory, window, cx);
         }
     }
 

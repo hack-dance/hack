@@ -2381,14 +2381,15 @@ pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
 /// Init starts from a checkout before a Hack project marker exists.
 pub fn trusted_init_root(root: &Path) -> Result<PathBuf, SourceError> {
     let root = trusted_checkout(root, false)?;
-    let repo = root.ancestors().find(|ancestor| {
-        ancestor.join("package.json").exists() || ancestor.join(".git").exists()
-    });
+    let repo = root
+        .ancestors()
+        .find(|ancestor| ancestor.join("package.json").exists() || ancestor.join(".git").exists());
     if repo.is_some_and(|repo| repo != root) {
         return Err(SourceError::Cli {
             code: "E_APP_UNTRUSTED_ROOT".into(),
-            message: "Hack init would configure a parent repository. Select that repository to continue."
-                .into(),
+            message:
+                "Hack init would configure a parent repository. Select that repository to continue."
+                    .into(),
             failed: vec![],
         });
     }
@@ -5674,14 +5675,15 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
                 None,
             );
             for overlay in [Some("qa"), Some("default"), None] {
-                native.config_restart(
-                    &p,
-                    &ConfigTarget {
-                        branch: Some("fix-login".into()),
-                        overlay: overlay.map(str::to_owned),
-                    },
-                )
-                .unwrap();
+                native
+                    .config_restart(
+                        &p,
+                        &ConfigTarget {
+                            branch: Some("fix-login".into()),
+                            overlay: overlay.map(str::to_owned),
+                        },
+                    )
+                    .unwrap();
                 let got = argv(&b);
                 assert_eq!(got[..3], ["restart", "--branch", "fix-login"]);
                 let passed = got.windows(2).find(|args| args[0] == "--env");

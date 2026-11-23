@@ -14,6 +14,7 @@ import {
   touchesDocsSite,
 } from "../scripts/ci-change-scope.ts";
 import { fullPushPlan } from "../scripts/ci-pr-plan.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
@@ -37,6 +38,8 @@ type Workflow = {
         readonly matrix?: { readonly include?: unknown; readonly os?: unknown };
       };
       readonly steps?: readonly {
+        readonly id?: string;
+        readonly "continue-on-error"?: boolean;
         readonly name?: string;
         readonly if?: string;
         readonly run?: string;
@@ -345,6 +348,59 @@ describe("CI workflow wiring", () => {
     expect(changes?.steps?.at(-1)?.run).toContain('git archive "$base"');
     expect(changes?.steps?.at(-1)?.run).toContain(
       '--repo-root="$GITHUB_WORKSPACE"'
+    );
+  });
+
+  test("Candidate core reports later independent checks without masking failures", async () => {
+    const steps = (await ciWorkflow()).jobs["runtime-core"]?.steps ?? [];
+    for (const id of [
+      "bundle-guest",
+      "linux-pty",
+      "format",
+      "lint-default",
+      "test-default",
+      "lint-all-features",
+      "test-all-features",
+      "rust-results",
+      "release-build",
+    ]) {
+      const step = steps.find((entry) => entry.id === id);
+      expect(step?.if, id).toStartWith("${{ !cancelled()");
+      expect(step?.if, id).not.toMatch(
+        /steps\.(format|lint-|test-|bundle-guest)/
+      );
+      expect(step?.["continue-on-error"], id).toBeUndefined();
+    }
+    for (const id of ["lint-default", "test-default"]) {
+      expect(steps.find((step) => step.id === id)?.if).not.toContain(
+        "steps.zig"
+      );
+    }
+    expect(steps.find((step) => step.id === "kill-harness")?.if).toContain(
+      "steps.test-all-features.outcome == 'success' && steps.release-build.outcome == 'success'"
+    );
+
+    const summary = steps.at(-1);
+    expect(summary?.if).toBe("${{ !cancelled() }}");
+    const root = await mkdtemp(join(tmpdir(), "candidate-summary-"));
+    owned.push(root);
+    const path = join(root, "summary.md");
+    const result = spawnSyncBounded(["bash", "-e", "-c", summary?.run ?? ""], {
+      timeout: 5000,
+      env: {
+        ...process.env,
+        GITHUB_STEP_SUMMARY: path,
+        STEP_RESULTS: JSON.stringify({
+          format: { outcome: "failure" },
+          "test-default": { outcome: "failure" },
+          "test-all-features": { outcome: "success" },
+          "kill-harness": { outcome: "skipped" },
+        }),
+      },
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(await Bun.file(path).text()).toBe(
+      "### Candidate core failed steps\n- `format`\n- `test-default`\n"
     );
   });
 

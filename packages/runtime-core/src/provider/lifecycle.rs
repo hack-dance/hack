@@ -2865,11 +2865,15 @@ fn agent_silent(candidate: &Candidate, owner: &Owner) -> Result<bool, CandidateE
 /// Any reply, even an unexpected one, means the guest is alive and keeps the normal stop
 /// path.
 fn agent_silent_at(path: &Path) -> bool {
+    agent_silent_with(|| agent::answers_ping(path, SILENT_PING_TIMEOUT))
+}
+
+fn agent_silent_with(mut answers: impl FnMut() -> bool) -> bool {
     for attempt in 0..SILENT_PINGS {
         if attempt > 0 {
             std::thread::sleep(SILENT_PING_INTERVAL);
         }
-        if agent::answers_ping(path, SILENT_PING_TIMEOUT) {
+        if answers() {
             return false;
         }
     }
@@ -4438,60 +4442,67 @@ printf 'status=%s%s\n' "$status" "$left"
 
     #[test]
     fn only_a_guest_agent_that_never_starts_a_reply_counts_as_silent() {
-        use std::os::unix::net::UnixListener;
+        use std::net::Shutdown;
+        use std::os::unix::net::{UnixListener, UnixStream};
+
         let directory = ShortDirectory::new();
         let path = directory.0.join("agent.sock");
         // No listener: refused connections are silence.
         assert!(agent_silent_at(&path));
         let listener = UnixListener::bind(&path).unwrap();
-        // Accepted but never answered, as when the guest's vsock path is saturated.
-        let held = std::thread::spawn(move || {
-            // Keep every connection open and unanswered until the probe is over.
-            let kept: Vec<_> = listener
-                .incoming()
-                .take(SILENT_PINGS as usize)
-                .map(Result::unwrap)
-                .collect();
-            kept.len()
-        });
-        let started = Instant::now();
-        assert!(agent_silent_at(&path));
-        // Each probe waits out its deadline (the last sees the fake end the connection).
-        assert!(started.elapsed() >= SILENT_PING_TIMEOUT * (SILENT_PINGS - 1));
-        assert_eq!(held.join().unwrap(), SILENT_PINGS as usize);
-        fs::remove_file(&path).unwrap();
-        // Any reply byte, even of an unexpected response, is an answer.
-        let listener = UnixListener::bind(&path).unwrap();
-        // Answer every probe connection: on a loaded host the first ping can time out
-        // before this thread runs, and the next ping must still reach a listener.
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let answering = {
-            let done = std::sync::Arc::clone(&done);
-            std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    if done.load(std::sync::atomic::Ordering::SeqCst) {
-                        break;
-                    }
-                    // The probe may already have given up on this connection.
-                    let _ = stream.unwrap().write_all(b"?");
-                }
-            })
+        let connect = || -> std::io::Result<_> {
+            let client = UnixStream::connect(&path)?;
+            let (peer, _) = listener.accept()?;
+            Ok((client, peer))
         };
-        assert!(!agent_silent_at(&path));
-        done.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Wake the accept loop so it observes `done` and exits.
-        drop(std::os::unix::net::UnixStream::connect(&path));
-        answering.join().unwrap();
-        fs::remove_file(&path).unwrap();
-        // A connection the guest side ends before replying is silence.
-        let listener = UnixListener::bind(&path).unwrap();
-        let closing = std::thread::spawn(move || {
-            for stream in listener.incoming().take(SILENT_PINGS as usize) {
-                drop(stream.unwrap());
-            }
-        });
-        assert!(agent_silent_at(&path));
-        closing.join().unwrap();
+
+        // Keep every accepted connection open and unanswered through its deadline.
+        let mut kept = Vec::new();
+        let started = Instant::now();
+        assert!(agent_silent_with(|| agent::answers_ping_with(
+            || {
+                let (client, peer) = connect()?;
+                kept.push(peer);
+                Ok(client)
+            },
+            SILENT_PING_TIMEOUT,
+            Instant::now,
+        )));
+        assert!(started.elapsed() >= SILENT_PING_TIMEOUT * SILENT_PINGS);
+        assert_eq!(kept.len(), SILENT_PINGS as usize);
+
+        // Queue one byte before polling, with no responder thread to schedule.
+        // The agent never sends a complete reply. A fixed clock makes this check
+        // independent of how long the test process is descheduled.
+        let now = Instant::now();
+        let mut attempts = 0;
+        assert!(!agent_silent_with(|| {
+            attempts += 1;
+            agent::answers_ping_with(
+                || {
+                    let (client, mut peer) = connect()?;
+                    peer.write_all(b"?")?;
+                    peer.shutdown(Shutdown::Write)?;
+                    kept.push(peer);
+                    Ok(client)
+                },
+                SILENT_PING_TIMEOUT,
+                || now,
+            )
+        }));
+        assert_eq!(attempts, 1);
+
+        // EOF before the first reply byte is silence.
+        assert!(agent_silent_with(|| agent::answers_ping_with(
+            || {
+                let (client, peer) = connect()?;
+                peer.shutdown(Shutdown::Write)?;
+                kept.push(peer);
+                Ok(client)
+            },
+            SILENT_PING_TIMEOUT,
+            || now,
+        )));
     }
 
     /// A stand-in for the provider's forwarded engine socket. It holds its first `hold`

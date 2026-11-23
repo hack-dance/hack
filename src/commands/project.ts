@@ -280,6 +280,7 @@ import {
   composeEnvOverridePath,
   inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
+  withComposeEnvOverride,
   writeComposeEnvOverride,
 } from "../lib/compose-env-at-rest.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
@@ -359,6 +360,7 @@ import {
   removeDisposableCacheVolumes,
 } from "../lib/disposable-cache-volumes.ts";
 import {
+  dockerEngineSelectionFingerprint,
   dockerHelperEnvironment,
   dockerHelperRunEnvironment,
 } from "../lib/docker-helper-environment.ts";
@@ -2107,6 +2109,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
   readonly persist?: boolean;
 }): Promise<{
   readonly composeFiles: readonly string[];
+  readonly referenceText?: string;
   readonly env: Readonly<Record<string, string>>;
   readonly lifecycleEnv: Readonly<Record<string, string>>;
   readonly preflightEnvByService: Readonly<
@@ -2192,6 +2195,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
       persist: opts.persist,
       serviceNames: opts.allServiceNames,
     }),
+    referenceText: override.text,
     env: composeEnv,
     lifecycleEnv,
     preflightEnvByService,
@@ -2281,6 +2285,7 @@ async function resolveComposeEnvOverrides(opts: {
   readonly persist?: boolean;
 }): Promise<{
   readonly composeFiles: readonly string[];
+  readonly referenceText?: string;
   readonly env: Readonly<Record<string, string>>;
   readonly lifecycleEnv: Readonly<Record<string, string>>;
   readonly preflightEnvByService: Readonly<
@@ -2398,6 +2403,7 @@ async function resolveComposeEnvOverrides(opts: {
       persist: opts.persist,
       serviceNames: opts.allServiceNames,
     }),
+    referenceText: text,
     env: resolved.envForCompose,
     lifecycleEnv: selectHackEnvValues({ resolved }),
     preflightEnvByService,
@@ -8174,6 +8180,11 @@ async function runUpCommand({
     );
   const lifecycleComposeProject =
     serviceScoped || legacyOwner ? savedLifecycleKey : exactLifecycleKey;
+  await assertSavedDockerEngine({
+    projectDir: project.projectDir,
+    lifecycleComposeProject: savedLifecycleKey,
+    env: envOverrides.env,
+  });
 
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
@@ -8183,7 +8194,7 @@ async function runUpCommand({
   });
 
   await assertDesktopComposeOwnership({
-    expected: expectedComposeProject,
+    expected: args.options.expectComposeProject,
     project,
     composeProjectName,
     profiles,
@@ -8217,6 +8228,7 @@ async function runUpCommand({
           : savedLifecycleKey,
       pinnedComposeBase: expectedComposeProject ? baseProjectName : undefined,
       envName: envOverrides.effectiveEnvName,
+      dockerEnv: envOverrides.env,
       services: preparedServices,
       envByService: envOverrides.preflightEnvByService,
       composeProfiles: resolveEffectiveComposeProfiles({
@@ -8493,6 +8505,13 @@ async function runUpCommand({
             await publishRuntimeSelection();
           },
           beforeStart: async () => {
+            if (publishedLaunchId) {
+              await assertSavedDockerEngine({
+                projectDir: project.projectDir,
+                lifecycleComposeProject,
+                env: envOverrides.env,
+              });
+            }
             await assertDesktopComposeOwnership({
               expected: expectedComposeProject,
               project,
@@ -9193,6 +9212,11 @@ async function handleServiceDown({
         projectName: lifecycle.projectName,
         envName,
       }));
+    await assertSavedDockerEngine({
+      projectDir: project.projectDir,
+      lifecycleComposeProject: lifecycle.lifecycleComposeProject,
+      env,
+    });
     const { profiles } = await resolveInstanceStopSelection({
       projectDir: project.projectDir,
       lifecycleComposeProject: lifecycle.lifecycleComposeProject,
@@ -10322,6 +10346,13 @@ async function runDownCommand({
       ...lifecycle,
       envName,
     }));
+  const assertDownEngine = () =>
+    assertSavedDockerEngine({
+      projectDir: project.projectDir,
+      lifecycleComposeProject,
+      env: composeEnv,
+    });
+  await assertDownEngine();
 
   const interruptionCheck = await checkOneShotInterruption({
     project,
@@ -10413,6 +10444,7 @@ async function runDownCommand({
       return beforeCode;
     }
 
+    await assertDownEngine();
     await markLifecycleSharedHelpersStopping({
       cfg,
       composeProject: lifecycleComposeProject,
@@ -10439,6 +10471,7 @@ async function runDownCommand({
         downTimedOut = outcome.timedOut;
       },
     });
+    await assertDownEngine();
     if (code === 0) {
       const finish = await finishInstanceStop({
         project,
@@ -10646,6 +10679,7 @@ async function runRestartDownPhase(opts: {
   readonly branch: string | null;
   readonly routeStdoutToStderr?: boolean;
   readonly envForCompose: Readonly<Record<string, string>>;
+  readonly assertEngine: () => Promise<void>;
   readonly preserveComposeRuntime?: boolean;
 }): Promise<{
   readonly code: number;
@@ -10687,6 +10721,7 @@ async function runRestartDownPhase(opts: {
       return { code: downBefore };
     }
 
+    await opts.assertEngine();
     await markLifecycleSharedHelpersStopping({
       cfg: opts.cfg,
       composeProject: opts.lifecycleComposeProject,
@@ -10989,6 +11024,7 @@ async function runRestartUpPhase(opts: {
   readonly profiles: readonly string[];
   readonly branch: string | null;
   readonly envOverrides: Awaited<ReturnType<typeof resolveComposeEnvOverrides>>;
+  readonly assertEngine: () => Promise<void>;
   readonly publishLaunch: () => Promise<void>;
   readonly discardAbsentLaunch: () => Promise<void>;
   readonly detach?: boolean;
@@ -11009,6 +11045,18 @@ async function runRestartUpPhase(opts: {
   const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
 
   const { envOverrides } = opts;
+  const restartComposeUp = (
+    upOpts: Parameters<typeof composeRuntimeBackend.up>[0]
+  ) => {
+    const run = () => composeRuntimeBackend.up(upOpts);
+    return envOverrides.referenceText
+      ? withComposeEnvOverride({
+          projectDir: opts.project.projectDir,
+          text: envOverrides.referenceText,
+          run,
+        })
+      : run();
+  };
 
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
@@ -11116,8 +11164,9 @@ async function runRestartUpPhase(opts: {
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    const verifyOwnership = () =>
-      assertDesktopComposeOwnership({
+    const verifyOwnership = async () => {
+      await opts.assertEngine();
+      await assertDesktopComposeOwnership({
         expected: opts.expectComposeProject,
         project: opts.project,
         composeProjectName: opts.composeProjectName,
@@ -11126,6 +11175,7 @@ async function runRestartUpPhase(opts: {
         composeFiles: composeFilesWithEnv,
         action: "restart",
       });
+    };
     reportComposeStartupBudget({
       budgets: opts.budgets,
       detach: opts.detach === true,
@@ -11135,7 +11185,7 @@ async function runRestartUpPhase(opts: {
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,
       up: (beforeStart) =>
-        composeRuntimeBackend.up({
+        restartComposeUp({
           beforeCreate: async () => {
             await verifyOwnership();
             await opts.publishLaunch();
@@ -11184,7 +11234,7 @@ async function runRestartUpPhase(opts: {
         retainHelpersIfContainersMayRun,
         discardAbsentLaunch: opts.discardAbsentLaunch,
         up: (beforeStart) =>
-          composeRuntimeBackend.up({
+          restartComposeUp({
             beforeCreate: async () => {
               await verifyOwnership();
               await opts.publishLaunch();
@@ -11335,6 +11385,11 @@ async function runTargetedServiceRestart(opts: {
     targetServices: preparedServices,
     allServiceNames: opts.allServiceNames,
     envName: opts.envName,
+  });
+  await assertSavedDockerEngine({
+    projectDir: opts.project.projectDir,
+    lifecycleComposeProject: opts.lifecycleComposeProject,
+    env: envOverrides.env,
   });
   await assertRegistryCredentialsAvailable({
     projectRoot: opts.project.projectRoot,
@@ -11911,6 +11966,26 @@ async function runLocalRestart({
     allServiceNames,
     envName: effectiveEnvName,
   });
+  await assertSavedDockerEngine({
+    projectDir: project.projectDir,
+    lifecycleComposeProject,
+    env: preflightEnv.env,
+  });
+  const selection = {
+    env: preflightEnv.env,
+    cwd: project.projectDir,
+    launchId: crypto.randomUUID(),
+  };
+  const engineFingerprint = await dockerEngineSelectionFingerprint(selection);
+  const assertEngine = async () => {
+    if (
+      (await dockerEngineSelectionFingerprint(selection)) !== engineFingerprint
+    ) {
+      throw new CliUsageError(
+        "Docker connection settings changed during Restart. Restore the connection and retry."
+      );
+    }
+  };
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
@@ -11948,6 +12023,7 @@ async function runLocalRestart({
     profiles,
     branch,
     envForCompose: preflightEnv.lifecycleEnv,
+    assertEngine,
     routeStdoutToStderr: json,
     preserveComposeRuntime: true,
   });
@@ -12007,6 +12083,7 @@ async function runLocalRestart({
       envProjectName: projectName,
       pinnedComposeBase: baseProjectName,
       envName: preflightEnv.effectiveEnvName,
+      dockerEnv: preflightEnv.env,
       services: allServiceNames,
       envByService: preflightEnv.preflightEnvByService,
       composeProfiles: effectiveProfiles,
@@ -12033,6 +12110,7 @@ async function runLocalRestart({
     profiles,
     branch,
     envOverrides: preflightEnv,
+    assertEngine,
     publishLaunch,
     discardAbsentLaunch,
     detach: true,
@@ -12094,14 +12172,16 @@ async function runLocalRestart({
   const { states, startup } = await waitForComposeStartupState({
     successfulCompletionServices,
     deadlineMs: performance.now() + (upOutcome.observationBudgetMs ?? 0),
-    read: () =>
-      readComposeServiceStates({
+    read: async () => {
+      await assertEngine();
+      return await readComposeServiceStates({
         project,
         composeProjectName,
         profiles,
         env: preflightEnv.env,
         strict: true,
-      }),
+      });
+    },
   }).catch(async (error: unknown) => {
     await cleanupIncompleteStartup();
     throw error;
@@ -12215,6 +12295,7 @@ async function persistProjectRuntimeEnvSelection(opts: {
   readonly replaceComposeProject?: string;
   readonly pinnedComposeBase?: string;
   readonly envName: string | null;
+  readonly dockerEnv: Readonly<Record<string, string>>;
   readonly services: readonly string[];
   readonly envByService: Readonly<
     Record<string, Readonly<Record<string, string>>>
@@ -12233,6 +12314,11 @@ async function persistProjectRuntimeEnvSelection(opts: {
     entry: {
       composeProject: opts.composeProject,
       launchId,
+      dockerEngineSelection: await dockerEngineSelectionFingerprint({
+        env: opts.dockerEnv,
+        cwd: opts.projectDir,
+        launchId,
+      }),
       launchComposeBase: opts.launchComposeBase,
       launchBranch: opts.launchBranch,
       envProjectName: opts.envProjectName,
@@ -12255,6 +12341,31 @@ async function persistProjectRuntimeEnvSelection(opts: {
   return launchId;
 }
 
+async function assertSavedDockerEngine(opts: {
+  readonly projectDir: string;
+  readonly lifecycleComposeProject: string;
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<void> {
+  const record = await readProjectRuntimeStateEntry({
+    projectDir: opts.projectDir,
+    composeProject: opts.lifecycleComposeProject,
+  });
+  if (
+    record?.dockerEngineSelection &&
+    record.launchId &&
+    record.dockerEngineSelection !==
+      (await dockerEngineSelectionFingerprint({
+        env: opts.env,
+        cwd: opts.projectDir,
+        launchId: record.launchId,
+      }))
+  ) {
+    throw new CliUsageError(
+      "This copy was started with different Docker connection settings. Restore those settings before changing the running copy."
+    );
+  }
+}
+
 /** A failed launch remains selectable until all runtime owners are absent. */
 async function discardAbsentRuntimeLaunch(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -12266,6 +12377,20 @@ async function discardAbsentRuntimeLaunch(opts: {
   const { project, composeProject, lifecycleComposeProject, env, launchId } =
     opts;
   if (!launchId) {
+    return;
+  }
+  const assertEngine = () =>
+    assertSavedDockerEngine({
+      projectDir: project.projectDir,
+      lifecycleComposeProject,
+      env,
+    });
+  const currentEngine = () =>
+    assertEngine().then(
+      () => true,
+      () => false
+    );
+  if (!(await currentEngine())) {
     return;
   }
   const absent = await Promise.all([
@@ -12293,7 +12418,7 @@ async function discardAbsentRuntimeLaunch(opts: {
         )
     )
     .catch(() => false);
-  if (absent) {
+  if (absent && (await currentEngine())) {
     await removeProjectRuntimeStateEntry({
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
@@ -14199,6 +14324,26 @@ async function runLogsWithCompose(opts: {
   });
 }
 
+async function resolveComposeLogLifecycleKey(opts: {
+  readonly projectDir: string;
+  readonly current: string;
+  readonly legacy: string;
+}): Promise<string> {
+  const { projectDir, current, legacy } = opts;
+  if (current === legacy) {
+    return current;
+  }
+  const logPath = (composeProject: string) =>
+    resolveLifecycleLogPath({ projectDir, composeProject });
+  const [saved, currentLog, legacyLog] = await Promise.all([
+    readProjectRuntimeStateEntry({ projectDir, composeProject: current }),
+    pathExists(logPath(current)),
+    pathExists(logPath(legacy)),
+  ]);
+  // Older runtimes can leave only their log after Down cleared launch state.
+  return !(saved || currentLog) && legacyLog ? legacy : current;
+}
+
 /**
  * Split requested services between `docker compose logs` and the lifecycle log
  * that persistent `hack up` processes write.
@@ -14521,41 +14666,10 @@ async function handleLogs({
       message: `Failed to parse ${configPath}: ${cfg.parseError}`,
     });
   }
-  const baseProjectName = await resolveCommandComposeBase({
-    project,
-    cfg,
-    forBranch: branch !== null,
-    expected,
-  });
+  const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const projectNameForPrefix = branch
     ? `${baseProjectName}--${branch}`
     : baseProjectName;
-  const composeProject = desktopComposeTarget({
-    expected,
-    base: baseProjectName,
-    computed: branch ? projectNameForPrefix : null,
-  });
-  const lifecycle =
-    expected === undefined
-      ? undefined
-      : await resolveStoredComposeLifecycleKey({
-          project,
-          branch,
-          base: baseProjectName,
-          legacyBase: await resolveComposeProjectName({ project, cfg }),
-        });
-  const runtimeEnv = lifecycle
-    ? await resolveDownRuntimeEnv({ project, ...lifecycle, envName: undefined })
-    : undefined;
-  await assertDesktopComposeOwnership({
-    expected,
-    project,
-    composeProjectName: composeProject,
-    profiles,
-    env: runtimeEnv?.env ?? {},
-    services: services.length ? services : undefined,
-    action: "read logs for",
-  });
   const followBackend = cfg.logs?.followBackend ?? "compose";
   const snapshotBackend = cfg.logs?.snapshotBackend ?? "loki";
 
@@ -14577,12 +14691,50 @@ async function handleLogs({
       args.options.loki !== true && args.options.query === undefined,
   });
 
-  const runCompose = async (): Promise<number> =>
-    await runLogsWithCompose({
+  const runCompose = async (): Promise<number> => {
+    const { base, composeProjectName, lifecycle, envName, selected } =
+      await resolveComposeCommandTarget({
+        project,
+        cfg,
+        branch,
+        options: args.options,
+        readOnly: true,
+      });
+    const runtimeEnv =
+      selected ??
+      (expected === undefined
+        ? undefined
+        : await resolveProjectExecutionEnv({
+            project,
+            projectName: lifecycle.projectName,
+            envName,
+            readOnly: true,
+          }));
+    await assertDesktopComposeOwnership({
+      expected,
       project,
-      projectNameForPrefix,
-      composeProject: composeProject ?? undefined,
-      lifecycleComposeProject: lifecycle?.lifecycleComposeProject,
+      composeProjectName,
+      profiles,
+      env: runtimeEnv?.env ?? {},
+      services: services.length ? services : undefined,
+      action: "read logs for",
+    });
+    const lifecycleComposeProject =
+      expected === undefined
+        ? await resolveComposeLogLifecycleKey({
+            projectDir: project.projectDir,
+            current: lifecycle.lifecycleComposeProject,
+            legacy: resolveLifecycleComposeProjectName({
+              projectName: sanitizeProjectSlug(baseProjectName),
+              branch,
+            }),
+          })
+        : lifecycle.lifecycleComposeProject;
+    return await runLogsWithCompose({
+      project,
+      projectNameForPrefix: composeProjectName ?? base,
+      composeProject: composeProjectName ?? undefined,
+      lifecycleComposeProject,
       env: runtimeEnv?.env,
       branch,
       json,
@@ -14595,6 +14747,7 @@ async function handleLogs({
       until: args.options.until,
       maxLineBytes: args.options.maxLineBytes,
     });
+  };
 
   if (useLoki) {
     return await runLogsWithLoki({

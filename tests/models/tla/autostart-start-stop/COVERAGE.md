@@ -77,6 +77,10 @@ Restart carries one resolved Compose name and environment through ownership,
 recreation, repair and readiness. It retains the launch association for cleanup
 when those phases cannot establish absence. An unnamed base launch records the
 directory-derived Compose name, with overlay selection stored separately.
+New launch records retain a digest of Docker connection settings. Stop and
+Restart compare the settings they will pass to Docker before cleanup or
+recreation. Restart keeps its value-free reference file paired with its env
+through each Compose attempt and lets sibling hooks finish before claiming it.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

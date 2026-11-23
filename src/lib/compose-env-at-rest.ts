@@ -16,6 +16,7 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
 /**
  * At-rest ownership of `.hack/.internal/compose.env.override.yml`.
@@ -147,6 +148,19 @@ export async function writeComposeEnvOverride(opts: {
   /** Clock for the stale-aside age check; tests only, no authority. */
   readonly now?: () => number;
 }): Promise<string> {
+  return await withComposeEnvOverride({ ...opts, run: async (path) => path });
+}
+
+/**
+ * Keep a generated reference file paired with its process environment while
+ * Compose reads it. The path stays stable for existing container labels.
+ */
+export async function withComposeEnvOverride<T>(opts: {
+  readonly projectDir: string;
+  readonly text: string;
+  readonly now?: () => number;
+  readonly run: (path: string) => Promise<T>;
+}): Promise<T> {
   if (classifyComposeEnvOverrideText(opts.text).kind !== "references") {
     throw new Error(
       "Refused to write a Compose env override that holds literal values; values omitted."
@@ -159,18 +173,22 @@ export async function writeComposeEnvOverride(opts: {
     throw new Error(REFUSAL);
   }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const options = fileOptions(path);
-  const existing = await readReplaceablePrivateFile(options);
-  if (existing?.text !== opts.text || (existing.mode & 0o077) !== 0) {
-    await replacePrivateFileAtomic({ ...options, text: opts.text });
-  }
-  // An aside left by a crashed removal can hold values, so a rendering command
-  // sweeps stale ones too, once the directories passed the symlink checks
-  // above. Best effort: `hack doctor` reports what remains.
-  await removeStaleAsidesIfOwned({ path, now: opts.now ?? Date.now }).catch(
-    () => 0
-  );
-  return path;
+  return await withProjectsRegistryLock({
+    lockPath: `${path}.lock`,
+    label: "Compose env override",
+    run: async () => {
+      const options = fileOptions(path);
+      const existing = await readReplaceablePrivateFile(options);
+      if (existing?.text !== opts.text || (existing.mode & 0o077) !== 0) {
+        await replacePrivateFileAtomic({ ...options, text: opts.text });
+      }
+      // An interrupted removal can leave an older literal file beside this one.
+      await removeStaleAsidesIfOwned({ path, now: opts.now ?? Date.now }).catch(
+        () => 0
+      );
+      return await opts.run(path);
+    },
+  });
 }
 
 /**

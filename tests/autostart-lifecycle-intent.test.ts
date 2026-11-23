@@ -165,11 +165,13 @@ async function installComposeNameFixture(opts?: {
   readonly trackNamedStacks?: boolean;
   readonly failPs?: boolean;
   readonly failAfterCreate?: boolean;
+  readonly requireEngineHook?: boolean;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
     `#!${process.execPath}
 import { rm } from "node:fs/promises";
+import { YAML } from "bun";
 const fixture = ${JSON.stringify(root)};
 const options = ${JSON.stringify(opts ?? {})};
 const args = process.argv.slice(2);
@@ -218,6 +220,7 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   if (stack !== "sample" || context !== "saved-files-context") process.exit(9);
   process.stdout.write("app-1 | saved-overlay-log\\n");
 } else if (mode === "ps" || mode === "inspect") {
+  if (options.requireEngineHook && !(await Bun.file(fixture + "/engine-hook-ready").exists())) process.exit(9);
   if (options.failPs) process.exit(9);
   if (options.holdBeforePin && mode === "ps" && stack === "sample" && !(await Bun.file(fixture + "/release-start").exists())) {
     await Bun.write(fixture + "/before-pin", "entered");
@@ -244,6 +247,12 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   if (args.includes("--force-recreate")) {
     await Bun.write(fixture + "/restart-context", context);
     await Bun.write(fixture + "/restart-stack", stack);
+    const references = args.find((arg) => arg.endsWith("/compose.env.override.yml"));
+    if (references) {
+      const app = YAML.parse(await Bun.file(references).text()).services.app.environment;
+      const present = Object.fromEntries(Object.entries(app).map(([key, reference]) => [key, process.env[reference.slice(2, -1)] !== undefined]));
+      await Bun.write(fixture + "/restart-env-references", JSON.stringify(present));
+    }
   }
   const holdRestart = options.holdRestart && args.includes("--force-recreate");
   if (args.includes("--no-start") && (options.holdStart || holdRestart)) {
@@ -1326,6 +1335,21 @@ test("bare Down recovers Compose's directory-derived name after a named overlay 
 test("Restart uses the verified Docker context after a down hook edits the overlay", async () => {
   const projectDir = join(root, "project", ".hack");
   const overlay = join(projectDir, "hack.env.qa.yaml");
+  const dockerConfig = join(root, "home", ".docker");
+  const contextKey = createHash("sha256")
+    .update("saved-files-context")
+    .digest("hex");
+  const contextDir = join(dockerConfig, "contexts", "meta", contextKey);
+  const metadata = join(contextDir, "meta.json");
+  await mkdirOwnedFixture(contextDir, true);
+  const writeEndpoint = (name: string) =>
+    writeOwnedFixture(
+      metadata,
+      JSON.stringify({
+        Endpoints: { docker: { Host: `unix://${join(root, name)}` } },
+      })
+    );
+  await writeEndpoint("original.sock");
   const saved =
     "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n";
   const changed = saved.replace("saved-files-context", "changed-context");
@@ -1347,18 +1371,143 @@ test("Restart uses the verified Docker context after a down hook edits the overl
     startContainers: true,
     savedContextOnly: true,
   });
-  const started = await run(["up", "-d", "--env", "qa", "--json"]);
+  const env = {
+    PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+    DOCKER_CONFIG: dockerConfig,
+  };
+  const started = await run(
+    ["up", "-d", "--env", "qa", "--json"],
+    false,
+    undefined,
+    env
+  );
   expect(started.exitCode, started.stderr || started.stdout).toBe(0);
-  const env = { PATH: `${join(root, "bin")}:/usr/bin:/bin` };
   const restarted = await run(["restart", "--json"], false, undefined, env);
   expect(restarted.exitCode, restarted.stderr + restarted.stdout).toBe(0);
   expect(await Bun.file(overlay).text()).toBe(changed);
   expect(await Bun.file(join(root, "restart-context")).text()).toBe(
     "saved-files-context"
   );
+  const record = await readProjectRuntimeStateEntry({
+    projectDir,
+    composeProject: "sample",
+  });
+  expect(record?.dockerEngineSelection).toMatch(/^[a-f0-9]{64}$/);
+  const wrongEngine = await run(["down", "--json"], false, undefined, env);
+  expect(wrongEngine.exitCode).toBe(1);
+  expect(wrongEngine.stdout).toContain("different Docker connection settings");
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+  expect(
+    await readProjectRuntimeStateEntry({ projectDir, composeProject: "sample" })
+  ).toEqual(record);
   await writeOwnedFixture(overlay, saved);
+  await writeEndpoint("retargeted.sock");
+  const movedContext = await run(["down", "--json"], false, undefined, env);
+  expect(movedContext.exitCode).toBe(1);
+  expect(movedContext.stdout).toContain("different Docker connection settings");
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+  await writeEndpoint("original.sock");
   const stopped = await run(["down", "--json"], false, undefined, env);
   expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+}, 40_000);
+
+test("unnamed Start runs the engine hook before its implicit ownership probe and Logs finds the host output", async () => {
+  const projectDir = join(root, "project", ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "docker-compose.yml"),
+    "services:\n  app:\n    image: example.invalid/app\n"
+  );
+  const ready = quoteShellWord(join(root, "engine-hook-ready"));
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        up: {
+          before: [
+            {
+              name: "engine-hook",
+              command: `printf ready > ${ready} && printf 'fixture host output\\n'`,
+            },
+          ],
+        },
+      },
+    })
+  );
+  await installComposeNameFixture({
+    defaultStack: "hack",
+    requireEngineHook: true,
+    startContainers: true,
+  });
+  const env = { PATH: `${join(root, "bin")}:/usr/bin:/bin` };
+  const started = await run(["up", "-d", "--json"], false, undefined, env);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  const logs = await run(
+    ["logs", "--compose", "--no-follow", "engine-hook"],
+    false,
+    undefined,
+    env
+  );
+  expect(logs.exitCode, logs.stderr + logs.stdout).toBe(0);
+  expect(logs.stdout).toContain("fixture host output");
+}, 40_000);
+
+test("Restart delivers its frozen references after a hook starts a sibling with another overlay", async () => {
+  const projectDir = join(root, "project", ".hack");
+  for (const [envName, key] of [
+    ["qa", "QA_ONLY"],
+    ["staging", "SIBLING_ONLY"],
+  ] as const) {
+    await writeOwnedFixture(
+      join(projectDir, `hack.env.${envName}.yaml`),
+      `version: 1\nenvironment: ${envName}\nsecretsprovider: project_key\nvalues:\n  global:\n    ${key}: fixture\n`
+    );
+  }
+  const command = [
+    process.execPath,
+    "--preload",
+    DOCKER_TRUST_PRELOAD,
+    cli,
+    "--no-interactive",
+    "up",
+    "-d",
+    "--branch",
+    "sibling",
+    "--env",
+    "staging",
+    "--json",
+  ]
+    .map(quoteShellWord)
+    .join(" ");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      dev_host: "sample.hack",
+      lifecycle: { down: { before: [{ name: "start-sibling", command }] } },
+    })
+  );
+  await installComposeNameFixture({
+    startContainers: true,
+    trackNamedStacks: true,
+  });
+  const env = { PATH: `${join(root, "bin")}:/usr/bin:/bin` };
+  const started = await run(
+    ["up", "-d", "--env", "qa", "--json"],
+    false,
+    undefined,
+    env
+  );
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  const restarted = await run(["restart", "--json"], false, undefined, env);
+  expect(restarted.exitCode, restarted.stderr + restarted.stdout).toBe(0);
+  expect(
+    await Bun.file(join(root, "compose-running-sample--sibling")).exists()
+  ).toBe(true);
+  expect(await Bun.file(join(root, "restart-env-references")).json()).toEqual({
+    QA_ONLY: true,
+  });
 }, 40_000);
 
 test("a failed Restart and repair preserve an overlay launch for bare Down", async () => {

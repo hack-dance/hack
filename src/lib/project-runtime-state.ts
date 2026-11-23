@@ -20,6 +20,8 @@ export type ProjectRuntimeStateEntry = {
   readonly updatedAt: string;
   /** Unique publication identity for a launch's failure cleanup. */
   readonly launchId?: string;
+  /** Digest of the Docker engine selection used for the launch. */
+  readonly dockerEngineSelection?: string;
   /** Effective Compose base name when this instance last started. */
   readonly launchComposeBase?: string;
   /** Logical copy in this checkout. Missing on records predating copy association. */
@@ -245,6 +247,7 @@ function parseProjectRuntimeStateEntry(
   const pinnedComposeBase = getString(value, "pinnedComposeBase");
   const launchComposeBase = getString(value, "launchComposeBase");
   const launchId = getString(value, "launchId");
+  const dockerEngineSelection = getString(value, "dockerEngineSelection");
   const launchBranch = value.launchBranch;
   const envProjectName = getString(value, "envProjectName");
   const composeProfiles = Array.isArray(value.composeProfiles)
@@ -259,6 +262,7 @@ function parseProjectRuntimeStateEntry(
     envName,
     updatedAt,
     ...(launchId ? { launchId } : {}),
+    ...(dockerEngineSelection ? { dockerEngineSelection } : {}),
     ...(launchComposeBase ? { launchComposeBase } : {}),
     ...(launchBranch === null || typeof launchBranch === "string"
       ? { launchBranch }

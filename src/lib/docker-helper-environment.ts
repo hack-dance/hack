@@ -1,4 +1,9 @@
+import { createHash, createHmac } from "node:crypto";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { childEnvironment } from "./child-environment.ts";
+import { getString, isRecord } from "./guards.ts";
 
 /** Only platform and Docker transport settings are inputs to inspect/logs/events. */
 const DOCKER_HELPER_NAMES: ReadonlySet<string> = new Set([
@@ -23,6 +28,7 @@ const DOCKER_HELPER_NAMES: ReadonlySet<string> = new Set([
   "DOCKER_HOST",
   "DOCKER_CONTEXT",
   "DOCKER_CONFIG",
+  "DOCKER_TLS",
   "DOCKER_TLS_VERIFY",
   "DOCKER_CERT_PATH",
   "DOCKER_API_VERSION",
@@ -56,6 +62,104 @@ export function dockerHelperEnvironment(
     }
   }
   return env;
+}
+
+const ENGINE_SELECTION_NAMES = [
+  "HOME",
+  "DOCKER_CONTEXT",
+  "DOCKER_HOST",
+  "DOCKER_CONFIG",
+  "DOCKER_TLS",
+  "DOCKER_TLS_VERIFY",
+  "DOCKER_CERT_PATH",
+  "CONTAINER_HOST",
+  "CONTAINER_CONNECTION",
+  "CONTAINER_SSHKEY",
+  "PODMAN_CONNECTIONS_CONF",
+  "CONTAINERS_CONF",
+  "CONTAINERS_CONF_OVERRIDE",
+  "XDG_CONFIG_HOME",
+] as const;
+
+/** A launch can retain evidence of Docker selection without storing its values. */
+export async function dockerEngineSelectionFingerprint(opts: {
+  readonly env: Readonly<Record<string, string>>;
+  readonly launchId: string;
+  readonly cwd: string;
+}): Promise<string> {
+  const env = dockerHelperEnvironment(opts.env);
+  const configDir = resolve(
+    opts.cwd,
+    env.DOCKER_CONFIG || join(env.HOME || "", ".docker")
+  );
+  const context =
+    env.DOCKER_CONTEXT ||
+    (env.DOCKER_HOST
+      ? "default"
+      : getString(
+          await readDockerSelectionJson(join(configDir, "config.json")),
+          "currentContext"
+        ) || "default");
+  const endpoint =
+    context === "default"
+      ? null
+      : await readDockerContextEndpoint({ configDir, context });
+  return createHmac("sha256", opts.launchId)
+    .update("hack.docker-engine-selection.v1\0")
+    .update(
+      JSON.stringify([
+        ENGINE_SELECTION_NAMES.map((name) => env[name] ?? null),
+        context,
+        endpoint,
+      ])
+    )
+    .digest("hex");
+}
+
+async function readDockerContextEndpoint(opts: {
+  readonly configDir: string;
+  readonly context: string;
+}): Promise<readonly [string | null, boolean] | null> {
+  const key = createHash("sha256").update(opts.context).digest("hex");
+  const record = await readDockerSelectionJson(
+    join(opts.configDir, "contexts", "meta", key, "meta.json")
+  );
+  const docker = isRecord(record.Endpoints)
+    ? record.Endpoints.docker
+    : undefined;
+  return isRecord(docker)
+    ? [getString(docker, "Host") ?? null, docker.SkipTLSVerify === true]
+    : null;
+}
+
+async function readDockerSelectionJson(
+  path: string
+): Promise<Record<string, unknown>> {
+  const maxSize = 1024 * 1024;
+  const file = await open(
+    path,
+    constants.O_RDONLY | constants.O_NONBLOCK
+  ).catch(() => null);
+  if (!file) {
+    return {};
+  }
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.size > maxSize) {
+      return {};
+    }
+    const buffer = Buffer.alloc(info.size + 1);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    if (bytesRead !== info.size) {
+      return {};
+    }
+    const parsed: unknown = JSON.parse(buffer.toString("utf8", 0, bytesRead));
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  } finally {
+    await file.close();
+  }
 }
 
 /** Shell runners otherwise merge the caller environment back into the allow-list. */

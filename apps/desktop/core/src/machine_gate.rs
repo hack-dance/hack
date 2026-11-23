@@ -4,7 +4,8 @@
 //! twice, or restart it under an install that is still running, so a second
 //! is refused until the first finishes.
 //!
-//! A Setup step handed to the user's terminal is not admitted here: the app
+//! Embedded command runs also hold this gate until their process exits.
+//! A command handed to the user's terminal is not admitted here: the app
 //! only opens the terminal, cannot see the command finish, and must not
 //! block recovery for as long as that window stays open. It does not start
 //! while an admitted action runs.
@@ -16,6 +17,8 @@
 /// Who holds the gate: the window labels that one as working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Holder {
+    /// A checked command running in the embedded terminal.
+    Command,
     /// A Setup action (Start or Install hackd).
     Setup,
     /// Start or Restart hackd from the project pane.

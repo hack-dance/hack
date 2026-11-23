@@ -15,14 +15,24 @@ use hack_desktop_core::logs::fixtures::LogsFixture;
 
 use crate::view::HackApp;
 
-pub fn run(dir: &Path, fixture: Option<Fixture>) {
-    std::fs::create_dir_all(dir).expect("create screenshot dir");
+fn fixture_context() -> HeadlessAppContext {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
         Arc::new(hack_desktop_ui::icons::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(gpui_kit::init);
+    cx
+}
+
+#[cfg(hack_terminal)]
+pub(crate) fn run_command_drawer(dir: &Path) {
+    crate::command_control::capture(dir, &mut fixture_context());
+}
+
+pub fn run(dir: &Path, fixture: Option<Fixture>) {
+    std::fs::create_dir_all(dir).expect("create screenshot dir");
+    let mut cx = fixture_context();
     // Every app fixture, then every Logs tab fixture on its base project state.
     let mut shots: Vec<(&'static str, Fixture, Option<LogsFixture>)> =
         Fixture::ALL.iter().map(|f| (f.name(), *f, None)).collect();
@@ -73,6 +83,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture(f.name(), window, cx);
                             }
+                            if f == Fixture::Files {
+                                app.show_files_fixture(window, cx);
+                            }
                             if matches!(
                                 f,
                                 Fixture::DaemonDown | Fixture::DaemonMismatch | Fixture::HackdOff
@@ -96,6 +109,10 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             // output arrive, then draw again.
             #[cfg(hack_terminal)]
             cx.update_window(handle, |_, window, cx| {
+                if f == Fixture::Files {
+                    _app.update(cx, HackApp::toggle_panel);
+                    window.render_frame(cx);
+                }
                 _app.update(cx, |app, cx| app.settle_terminals(cx));
                 window.render_frame(cx);
                 window.render_frame(cx);

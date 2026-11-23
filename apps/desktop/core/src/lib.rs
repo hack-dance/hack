@@ -16,6 +16,7 @@ pub mod doctor;
 mod doctor_acl;
 mod doctor_plugins;
 mod doctor_tools;
+pub mod files;
 pub mod fixtures;
 pub mod logs;
 pub mod machine;

@@ -361,8 +361,8 @@ fn service_fixture_look(dark: bool) -> GhosttyLook {
     look
 }
 
-/// A private checkout and a fake Hack CLI that exits on the first shell
-/// launch and opens an interactive PTY on the next.
+/// A private checkout and a fake Hack CLI that opens an interactive PTY
+/// and exits after one input line.
 #[cfg(feature = "screenshots")]
 pub(crate) struct ServiceShellFixture(PathBuf);
 
@@ -384,11 +384,6 @@ impl ServiceShellFixture {
             &cli,
             concat!(
                 "#!/bin/sh\n[ \"$1\" = exec ] || exit 0\n",
-                "if [ ! -e .shell-exited ]; then\n",
-                "  : > .shell-exited\n",
-                "  printf '\\033[32m/app\\033[0m # exit\\n'\n",
-                "  exit 0\n",
-                "fi\n",
                 "printf '\\033[32m/app\\033[0m # '\n",
                 "IFS= read -r line\n",
             ),
@@ -436,6 +431,45 @@ impl ServiceShellFixture {
         app.panels.look = Some(service_fixture_look(
             app.ui(cx).p.mode == hack_desktop_ui::tokens::Mode::Dark,
         ));
+    }
+
+    /// Wait for the fixture line and session state together. Leave the
+    /// entity update before asserting so a failed fixture can shut down.
+    pub(crate) fn wait_for(
+        shell: &Entity<TerminalView>,
+        line: &str,
+        expects_exit: bool,
+        cx: &mut App,
+    ) {
+        use std::time::{Duration, Instant};
+
+        let result = shell.update(cx, |shell, cx| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let wait = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(50));
+                shell.settle(wait, wait, cx);
+                let ended = matches!(shell.status(), TermStatus::Ended(_));
+                let frame = shell
+                    .emulator()
+                    .frame()
+                    .map_err(|error| error.to_string())?;
+                let visible =
+                    (0..frame.rows.len()).any(|row| frame.row_text(row).trim_end() == line);
+                if ended == expects_exit && visible {
+                    return Ok(());
+                }
+                if ended || wait.is_zero() {
+                    return Err(format!(
+                        "expected {line:?}, got {:?} with first row {:?}",
+                        shell.status(),
+                        frame.row_text(0)
+                    ));
+                }
+            }
+        });
+        result.expect("observe shell fixture");
     }
 }
 
@@ -2412,14 +2446,9 @@ mod window_tests {
             let key = app.read(cx).model.selected_key().unwrap();
             let sessions = app.read(cx).panels.by_key[&key].sessions.clone();
             let first = sessions.read(cx).tab(1).cloned().unwrap();
-            first.update(cx, |view, cx| {
-                view.settle(
-                    std::time::Duration::from_secs(1),
-                    std::time::Duration::from_secs(3),
-                    cx,
-                );
-            });
-            assert!(matches!(first.read(cx).status(), TermStatus::Ended(_)));
+            ServiceShellFixture::wait_for(&first, "/app #", false, cx);
+            first.update(cx, |view, cx| view.type_text("exit\n", cx));
+            ServiceShellFixture::wait_for(&first, "/app # exit", true, cx);
 
             app.update(cx, |app, cx| app.open_service_shell("api", window, cx));
             let reopened = sessions.read(cx).active().cloned().unwrap();

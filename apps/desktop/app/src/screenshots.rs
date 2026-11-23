@@ -459,7 +459,6 @@ fn capture_service_shell_reopen(
     use crate::service_view::ServiceTab;
     use crate::terminal::ServiceShellFixture;
     use hack_desktop_term::view::Status;
-    use std::time::{Duration, Instant};
 
     let fixture = ServiceShellFixture::new();
     cx.update_window(handle, |_, window, cx| {
@@ -469,10 +468,7 @@ fn capture_service_shell_reopen(
         });
     })
     .expect("install shell screenshot fixture");
-    for (shot, active, prompt) in [
-        ("service-shell-ended", 1, "/app # exit"),
-        ("service-shell-reopened", 2, "/app #"),
-    ] {
+    for (shot, active) in [("service-shell-ended", 1), ("service-shell-reopened", 2)] {
         cx.update_window(handle, |_, window, cx| {
             window.click(("service-tab", 3_usize), cx);
             let app = app.read(cx);
@@ -480,25 +476,11 @@ fn capture_service_shell_reopen(
             let key = app.model.selected_key().expect("selected branch");
             let sessions = app.panels.by_key[&key].sessions.clone();
             let shell = sessions.read(cx).tab(active).expect("active shell").clone();
-            shell.update(cx, |shell, cx| {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                let expects_exit = active == 1;
-                loop {
-                    let wait = deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(Duration::from_millis(50));
-                    shell.settle(wait, wait, cx);
-                    let ended = matches!(shell.status(), Status::Ended(_));
-                    let frame = shell
-                        .emulator()
-                        .frame()
-                        .expect("read fixture terminal frame");
-                    if ended == expects_exit && frame.row_text(0).trim_end() == prompt {
-                        break;
-                    }
-                    assert!(!ended && !wait.is_zero(), "{shot}: expected {prompt:?}");
-                }
-            });
+            ServiceShellFixture::wait_for(&shell, "/app #", false, cx);
+            if active == 1 {
+                shell.update(cx, |shell, cx| shell.type_text("exit\n", cx));
+                ServiceShellFixture::wait_for(&shell, "/app # exit", true, cx);
+            }
             window.render_frame(cx);
             let sessions = sessions.read(cx);
             assert_eq!(sessions.tab_count(), active + 1);

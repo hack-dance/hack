@@ -265,11 +265,9 @@ export class CommandTimings {
 /** Await before returning the command code; child drains additionally register exit holds. */
 export async function withCommandTimings<T>(
   file: string,
-  action: () => Promise<T>,
-  selectedTransport?: Transport
+  action: () => Promise<T>
 ): Promise<T> {
-  const transport =
-    selectedTransport ?? (await import("./native-timing-transport.ts"));
+  const transport = await import("./native-timing-transport.ts");
   const fd = openSync(file, "wx", 0o600);
   let trace: CommandTimings;
   try {
@@ -290,20 +288,13 @@ export async function withCommandTimings<T>(
     await trace.finish();
   }
 }
-export function prepareRuntimeTiming(fd = 3) {
-  return context.getStore()?.trace.child(fd);
-}
 /** Bun calls retain their existing stdin/stdout/stderr contracts. A selected extra fd is added. */
 export function timedNativeSpawn(
   command: string[],
   options: RuntimeOptions,
   fd = 3
 ) {
-  const executable = command[0];
-  if (!executable) {
-    throw new Error("Missing runtime executable; values omitted.");
-  }
-  const timing = prepareRuntimeTiming(fd);
+  const timing = context.getStore()?.trace.child(fd);
   if (!timing) {
     return Bun.spawn(command, options);
   }
@@ -312,10 +303,13 @@ export function timedNativeSpawn(
       ? [...options.stdio]
       : [options.stdin ?? "ignore", "pipe", "pipe"];
     stdio[fd] = timing.sender;
-    const child = Bun.spawn([executable, ...timing.args, ...command.slice(1)], {
-      ...options,
-      stdio,
-    });
+    const child = Bun.spawn(
+      [command[0] ?? "", ...timing.args, ...command.slice(1)],
+      {
+        ...options,
+        stdio,
+      }
+    );
     timing.started(child.exited);
     return child;
   } catch (error) {

@@ -67,6 +67,7 @@ const shellMock = await registerScopedModuleMock({
         expect(command[3]).not.toContain(".Error");
         expect(command[3]).toContain(".State.StartedAt");
         expect(command[3]).toContain(".HostConfig.Memory");
+        expect(command[3]).toContain('index .HostConfig "Tmpfs"');
         const ids = [...command.slice(4)];
         inspectCalls.push(ids);
         const returnedIds = inspectExitCode === 0 ? ids : ids.slice(0, 1);

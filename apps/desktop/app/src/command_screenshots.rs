@@ -8,7 +8,7 @@ use hack_desktop_core::setup_fixtures;
 
 use super::*;
 
-const FRAMES: [&str; 7] = [
+const FRAMES: [&str; 8] = [
     "h05-hackd-running",
     "h08-dns-needs-action",
     "h10-dns-password",
@@ -16,6 +16,7 @@ const FRAMES: [&str; 7] = [
     "h12-dns-succeeded",
     "h13-drawer-closed-last-run",
     "h26-drawer-menu",
+    "h13-successful-run-history",
 ];
 
 pub(crate) fn capture(dir: &Path, cx: &mut HeadlessAppContext) {
@@ -44,7 +45,7 @@ pub(crate) fn capture(dir: &Path, cx: &mut HeadlessAppContext) {
             wait_for_frame(index, &app, cx);
             cx.update_window(handle, |_, window, cx| {
                 app.update(cx, |app, cx| {
-                    if index == 5 {
+                    if matches!(index, 5 | 7) {
                         app.close_command_drawer(cx);
                     }
                     if index == 6 {
@@ -105,7 +106,9 @@ fn fixture(index: usize, window: &mut Window, cx: &mut Context<HackApp>) -> Hack
         3 | 5 => {
             "printf '%s\\n' 'Installing local DNS and routing for *.hack' 'error Port 53 is already used by another app.' 'hint Stop the other app, then try again.'; exit 1"
         }
-        4 => "printf '%s\\n' 'Installing local DNS and routing for *.hack' 'Local domains ready.'",
+        4 | 7 => {
+            "printf '%s\\n' 'Installing local DNS and routing for *.hack' 'Local domains ready.'"
+        }
         _ => unreachable!(),
     };
     let props = CommandControl {
@@ -129,7 +132,7 @@ fn fixture(index: usize, window: &mut Window, cx: &mut Context<HackApp>) -> Hack
     assert!(app.run_drawer_command(
         props,
         move |app, completion, cx| {
-            if index == 4 && completion.exit == CommandExit::Code(0) {
+            if matches!(index, 4 | 7) && completion.exit == CommandExit::Code(0) {
                 let mut checked = app.setup.report.clone();
                 let card = checked
                     .cards
@@ -275,7 +278,7 @@ mod tests {
 
     #[test]
     fn fresh_success_closes_after_the_delay_and_nonzero_exit_stays_open() {
-        let (mut cx, _, app) = open(4);
+        let (mut cx, window, app) = open(4);
         cx.update(|cx| {
             let app = app.read(cx);
             assert!(matches!(
@@ -294,6 +297,27 @@ mod tests {
         cx.advance_clock(Duration::from_millis(2));
         cx.run_until_parked();
         assert!(!cx.update(|cx| app.read(cx).panels.command.visible()));
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                let card = app
+                    .setup
+                    .report
+                    .cards
+                    .iter()
+                    .find(|c| c.id == "routing")
+                    .unwrap();
+                assert_eq!(card.status, Status::Passed);
+                let ui = app.ui(cx);
+                assert!(render_history("setup:routing", app, &ui, cx).is_some());
+                assert!(render_history("setup:trust", app, &ui, cx).is_none());
+                app.show_command_output("setup:routing", window, cx);
+                assert!(app.panels.command.visible());
+                let terminal = app.panels.command.session.as_ref().unwrap().read(cx);
+                let text = terminal.active().unwrap().read(cx).output_text().unwrap();
+                assert!(text.contains("Local domains ready."));
+            });
+        })
+        .unwrap();
 
         let (mut cx, _, app) = open(3);
         cx.update(|cx| {

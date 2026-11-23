@@ -235,7 +235,8 @@ with a passing check closes the drawer after 1.5 seconds. A failed command
 or check leaves its output available. Use `HackApp::run_drawer_command` for
 an explicit run initiated outside a button pair, such as Doctor's Fix all.
 Use `HackApp::show_command_output` with the control ID to reopen the latest
-run from a banner. Closing the drawer retains that run and its output until
+run from a banner. Use `command_control::render_history` when a passing check
+removes its Run and Copy buttons. Closing the drawer retains the latest output until
 the next command starts or the CLI changes.
 
 Source: `hack doctor --json --path <root>` per registered project, plus

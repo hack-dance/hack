@@ -721,44 +721,25 @@ pub(crate) fn render(
         }
         if let Phase::Ended {
             exit,
-            at,
             diagnosis,
             check,
+            ..
         } = &last.phase
         {
-            if let Some(reason) = match (exit, check) {
+            let reason = match (exit, check) {
                 (CommandExit::LaunchFailed(reason), _) | (_, Check::NeedsAttention(reason)) => {
                     Some(reason)
                 }
                 _ => diagnosis.as_ref(),
-            } {
-                control = control.child(
+            };
+            control = control.when_some(reason, |control, reason| {
+                control.child(
                     div()
                         .type_step(text::SMALL)
                         .text_color(p.text_secondary)
                         .child(reason.clone()),
-                );
-            }
-            if !drawer.visible {
-                let summary = match (exit, check) {
-                    (CommandExit::StatusUnavailable, _) => "ended",
-                    (CommandExit::Code(0), Check::NeedsAttention(_)) => "needs a fix",
-                    (CommandExit::Code(0), _) => "finished",
-                    _ => "failed",
-                };
-                control = control.child(last_run_line(
-                    last,
-                    format!(
-                        "· {summary} · {} · {}",
-                        exit_label(exit),
-                        elapsed_label(*at)
-                    ),
-                    ui,
-                    cx,
-                ));
-            }
-        } else if !drawer.visible {
-            control = control.child(last_run_line(last, "· running".into(), ui, cx));
+                )
+            });
         }
     }
     if props.expects_password && !running && !retry && !compact {
@@ -774,40 +755,74 @@ pub(crate) fn render(
                 .child(note),
         );
     }
-    control.into_any_element()
+    control
+        .children(render_history(&props.id, app, ui, cx))
+        .into_any_element()
 }
 
-fn last_run_line(run: &Run, status: String, ui: &Ui, cx: &mut Context<HackApp>) -> gpui_kit::Div {
+/// Recover the latest output when the drawer is closed, including when a
+/// passing check removes the command's Run/Copy buttons.
+pub(crate) fn render_history(
+    control_id: &str,
+    app: &HackApp,
+    ui: &Ui,
+    cx: &mut Context<HackApp>,
+) -> Option<gpui_kit::Div> {
+    let drawer = &app.panels.command;
+    let run = drawer
+        .last
+        .as_ref()
+        .filter(|run| !drawer.visible && run.props.id == control_id)?;
+    let status = match &run.phase {
+        Phase::Running => "· running".into(),
+        Phase::Ended {
+            exit, at, check, ..
+        } => {
+            let summary = match (exit, check) {
+                (CommandExit::StatusUnavailable, _) => "ended",
+                (CommandExit::Code(0), Check::NeedsAttention(_)) => "needs a fix",
+                (CommandExit::Code(0), _) => "finished",
+                _ => "failed",
+            };
+            format!(
+                "· {summary} · {} · {}",
+                exit_label(exit),
+                elapsed_label(*at)
+            )
+        }
+    };
     let id = run.props.id.clone();
     let p = ui.p;
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(space::S2)
-        .type_step(text::SMALL)
-        .text_color(p.text_muted)
-        .child(icon(Glyph::Terminal, px(12.), p.text_muted))
-        .child("Last run ·")
-        .child(
-            div()
-                .font_family(ui.mono.clone())
-                .child(run.props.label.clone()),
-        )
-        .child(status)
-        .child(
-            div()
-                .id("show-output")
-                .focusable()
-                .cursor_pointer()
-                .text_color(p.text_primary)
-                .hover(|d| d.underline())
-                .px(space::S2)
-                .child("Show output")
-                .on_click(
-                    cx.listener(move |app, _, window, cx| app.show_command_output(&id, window, cx)),
-                ),
-        )
+    Some(
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(space::S2)
+            .type_step(text::SMALL)
+            .text_color(p.text_muted)
+            .child(icon(Glyph::Terminal, px(12.), p.text_muted))
+            .child("Last run ·")
+            .child(
+                div()
+                    .font_family(ui.mono.clone())
+                    .child(run.props.label.clone()),
+            )
+            .child(status)
+            .child(
+                div()
+                    .id("show-output")
+                    .focusable()
+                    .cursor_pointer()
+                    .text_color(p.text_primary)
+                    .hover(|d| d.underline())
+                    .px(space::S2)
+                    .child("Show output")
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.show_command_output(&id, window, cx)
+                    })),
+            ),
+    )
 }
 
 impl HackApp {

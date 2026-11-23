@@ -456,6 +456,15 @@ fn card(
     let cli = pane.report.cli_ready();
     let mut actions = div().flex().items_center().gap(space::S3);
     let mut command_line: Option<String> = None;
+    #[cfg(hack_terminal)]
+    if c.status == Status::Passed {
+        actions = actions.children(crate::command_control::render_history(
+            &format!("setup:{}", c.id),
+            app,
+            ui,
+            cx,
+        ));
+    }
     if c.status != Status::Passed {
         match &c.remedy {
             Remedy::Copy(cmd) => {

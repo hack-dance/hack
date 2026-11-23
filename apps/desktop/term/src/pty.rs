@@ -396,6 +396,7 @@ impl Pty {
 
     /// Whether the slave has turned off terminal echo, as sudo does while
     /// reading a password. No terminal input is read by this query.
+    #[cfg(feature = "ghostty")]
     pub(crate) fn echo_disabled(&self) -> bool {
         let Some(master) = &self.master else {
             return false;

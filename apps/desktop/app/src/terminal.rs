@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, Entity, IntoElement, MouseButton, ParentElement,
-    SharedString, Styled, Window, div, prelude::*, px, relative,
+    SharedString, Styled, TestSupportExt as _, Window, div, prelude::*, px, relative,
 };
 use hack_desktop_core::viewmodel::{DetailView, InstanceKey};
 use hack_desktop_term::ghostty_config::{ConfigEnv, GhosttyLook};
@@ -45,6 +45,7 @@ use hack_desktop_ui::icons::Glyph;
 use hack_desktop_ui::panel::{PanelState, TabKind};
 use hack_desktop_ui::tokens::{TermPalette, panel as tok, radius, size, space, text};
 
+use crate::service_view::ServiceTab;
 use crate::view::HackApp;
 
 /// Lines of history the Logs tab asks for when it opens.
@@ -72,6 +73,7 @@ pub struct ProjectPanel {
     /// restarted in a loop. Stopping the instance clears it, so the next
     /// start follows again.
     logs_follow: bool,
+    logs_service: Option<String>,
 }
 
 /// The new-tab menu.
@@ -186,11 +188,22 @@ fn branch_args(branch: Option<&str>) -> Result<Vec<OsString>, String> {
 
 /// The Logs tab: `hack logs` on an app-owned PTY, so it prints exactly what
 /// it prints in a terminal (colours included), read-only.
+#[cfg(test)]
 pub fn logs_plan(
     hack: &Path,
     root: &Path,
     branch: Option<&str>,
     follow: bool,
+) -> Result<SessionPlan, String> {
+    logs_plan_for_service(hack, root, branch, follow, None)
+}
+
+fn logs_plan_for_service(
+    hack: &Path,
+    root: &Path,
+    branch: Option<&str>,
+    follow: bool,
+    service: Option<&str>,
 ) -> Result<SessionPlan, String> {
     let mut options = PtyOptions::new(hack);
     options.env = launch::terminal_identity("xterm-256color");
@@ -204,6 +217,10 @@ pub fn logs_plan(
     // The CLI's own styling: coloured service names, dim timestamps, levels.
     // Without it only what each service prints itself is coloured.
     args.push("--pretty".into());
+    if let Some(service) = service {
+        let name = Name::new(service).map_err(|e| e.0)?;
+        args.push(name.as_str().into());
+    }
     options.args = args;
     Ok(SessionPlan {
         attempts: vec![Launch {
@@ -364,6 +381,7 @@ impl HackApp {
                 origin: self.instance_root().map(|(root, native, _)| (root, native)),
                 was_active: d.state.is_active(),
                 logs_follow: false,
+                logs_service: None,
             },
         );
         self.open_tab(&d, NewTab::Logs, window, cx);
@@ -375,7 +393,7 @@ impl HackApp {
     /// stream that keeps failing is not restarted on every frame).
     fn reconcile_panel(&mut self, d: &DetailView, window: &mut Window, cx: &mut Context<Self>) {
         let origin = self.instance_root().map(|(root, native, _)| (root, native));
-        let active = d.state.is_active();
+        let active = self.panel_logs_follow(d);
         let Some(panel) = self.panels.by_key.get_mut(&d.key) else {
             return;
         };
@@ -412,6 +430,102 @@ impl HackApp {
             .clone()
     }
 
+    fn panel_logs_follow(&self, detail: &DetailView) -> bool {
+        self.panels
+            .by_key
+            .get(&detail.key)
+            .and_then(|panel| panel.logs_service.as_ref())
+            .map_or_else(
+                || detail.state.is_active(),
+                |service| {
+                    detail
+                        .services
+                        .iter()
+                        .any(|row| &row.name == service && row.running)
+                },
+            )
+    }
+
+    pub(crate) fn reconcile_selected_service_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_service().is_some()
+            && let Some(detail) = self.model.detail()
+        {
+            self.reconcile_panel(&detail, window, cx);
+        }
+    }
+
+    pub(crate) fn open_service_shell(
+        &mut self,
+        service: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = self.model.detail() else {
+            return;
+        };
+        self.ensure_panel(window, cx);
+        self.reconcile_panel(&detail, window, cx);
+        let Some(panel) = self.panels.by_key.get(&detail.key) else {
+            return;
+        };
+        let existing = panel.sessions.read(cx).kinds(cx).iter().position(|kind| {
+            matches!(kind, SessionKind::ContainerShell { service: current, .. } if current == service)
+        });
+        if let Some(index) = existing {
+            if panel.state == PanelState::Collapsed {
+                self.set_state(&detail.key, PanelState::half(), cx);
+            }
+            let sessions = self.panels.by_key[&detail.key].sessions.clone();
+            sessions.update(cx, |panel, cx| panel.activate(index, window, cx));
+        } else if detail.shells.iter().any(|name| name == service) {
+            self.open_tab(&detail, NewTab::Container(service.to_owned()), window, cx);
+        } else {
+            self.panels.error = Some(format!("A shell in {service} needs a running service"));
+        }
+    }
+
+    pub(crate) fn open_service_logs_in_terminal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = self.model.detail() else {
+            return;
+        };
+        self.service_pane.menu = None;
+        self.service_pane.tab = ServiceTab::Terminal;
+        self.logs.close();
+        self.ensure_panel(window, cx);
+        self.reconcile_panel(&detail, window, cx);
+        let Some(panel) = self.panels.by_key.get_mut(&detail.key) else {
+            return;
+        };
+        panel.logs_service.clone_from(&self.logs.model.service);
+        panel.was_active = self.logs.model.service.as_ref().map_or_else(
+            || detail.state.is_active(),
+            |service| {
+                detail
+                    .services
+                    .iter()
+                    .any(|row| row.name == *service && row.running)
+            },
+        );
+        self.open_tab(&detail, NewTab::Logs, window, cx);
+    }
+
+    pub(crate) fn terminal_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_service().is_some() && self.service_pane.tab == ServiceTab::Logs {
+            self.open_service_logs_in_terminal(window, cx);
+        } else if self.selected_service().is_none() || self.service_pane.tab == ServiceTab::Terminal
+        {
+            self.open_menu(Menu::Main, cx);
+        }
+    }
+
     fn core_for(&self, d: &DetailView, tab: &NewTab) -> Result<TerminalCore, String> {
         // `cli_root` validates the checkout a CLI tab runs in; see there.
         let hack = self.source.hack_program();
@@ -425,11 +539,15 @@ impl HackApp {
                 ))
                 .map_err(io),
                 (Some(hack), Some((root, false, branch))) => TerminalCore::session(for_cli(
-                    logs_plan(
+                    logs_plan_for_service(
                         hack,
                         &cli_root(root)?,
                         branch.as_deref(),
-                        d.state.is_active(),
+                        self.panel_logs_follow(d),
+                        self.panels
+                            .by_key
+                            .get(&d.key)
+                            .and_then(|panel| panel.logs_service.as_deref()),
                     )?,
                     false,
                     std::env::var_os("PATH").as_deref(),
@@ -532,6 +650,7 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         let core = self.core_for(d, &tab);
+        let follow = self.panel_logs_follow(d);
         let look = self.look(cx);
         let Some(panel) = self.panels.by_key.get_mut(&d.key) else {
             return;
@@ -540,7 +659,7 @@ impl HackApp {
             // Recorded whether or not the stream starts: a failed start is
             // shown and retried by a click on the tab or the next start,
             // never on every frame.
-            panel.logs_follow = d.state.is_active();
+            panel.logs_follow = follow;
         }
         if !quiet {
             panel.menu = Menu::Closed;
@@ -641,6 +760,26 @@ impl HackApp {
             p.state = state;
             p.menu = Menu::Closed;
             cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_visible_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_service().is_some() && self.service_pane.tab != ServiceTab::Terminal {
+            self.set_service_tab(ServiceTab::Terminal, window, cx);
+        } else {
+            self.toggle_panel(cx);
+            if self.selected_service().is_some()
+                && let Some(panel) = self.selected_panel()
+            {
+                if panel.state == PanelState::Collapsed {
+                    self.service_focus.focus(window, cx);
+                } else if let Some(index) = panel.sessions.read(cx).active_index() {
+                    panel
+                        .sessions
+                        .clone()
+                        .update(cx, |panel, cx| panel.activate(index, window, cx));
+                }
+            }
         }
     }
 
@@ -904,10 +1043,18 @@ impl HackApp {
         &self,
         d: &DetailView,
         panel: &ProjectPanel,
+        docked: bool,
         ui: &Ui,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let t = TermPalette::fallback();
+        let mut t = TermPalette::fallback();
+        if docked {
+            t.strip = ui.p.chrome;
+            t.bg = ui.p.surface;
+            t.fg = ui.p.text_primary;
+            t.tab_fg = ui.p.text_secondary;
+            t.strip_border = ui.p.border;
+        }
         let sessions = panel.sessions.read(cx);
         let active = sessions.active_index();
         let kinds: Vec<TabKind> = sessions.kinds(cx).iter().map(tab_kind).collect();
@@ -922,7 +1069,10 @@ impl HackApp {
                 .items_center()
                 .gap(space::S3)
                 .px(space::S5)
-                .hairline_r(t.strip_border)
+                .when(!docked, |tab| tab.hairline_r(t.strip_border))
+                .when(docked, |tab| {
+                    tab.my(space::S2).mx(space::S1).rounded(radius::CONTROL)
+                })
                 .when(sel, |d| d.bg(t.bg))
                 .text_color(fg)
                 .type_step(if sel { text::SMALL_STRONG } else { text::SMALL })
@@ -942,8 +1092,30 @@ impl HackApp {
                             .update(cx, |s, cx| s.activate(i, window, cx));
                     }
                 }))
-                .child(icon(kind.glyph(), size::ICON, fg))
-                .child(kind.label());
+                .child(icon(
+                    if docked && matches!(kind, TabKind::ContainerShell { .. }) {
+                        Glyph::Terminal
+                    } else {
+                        kind.glyph()
+                    },
+                    size::ICON,
+                    fg,
+                ))
+                .child(if i == 0 && (docked || panel.logs_service.is_some()) {
+                    let copy = panel
+                        .logs_service
+                        .as_deref()
+                        .or(d.branch.as_deref())
+                        .unwrap_or("main");
+                    format!("Logs · {copy}")
+                } else if docked {
+                    match kind {
+                        TabKind::ContainerShell { service, .. } => format!("Shell in {service}"),
+                        _ => kind.label(),
+                    }
+                } else {
+                    kind.label()
+                });
             if let Some((label, warn)) = kind.badge() {
                 let (bg, bfg) = if warn {
                     (t.badge_warn_bg, t.badge_warn_fg)
@@ -961,7 +1133,7 @@ impl HackApp {
                         .child(label),
                 );
             }
-            if kind.closable() {
+            if kind.closable() && (!docked || sel) {
                 tab = tab.child(
                     div()
                         .id(("term-tab-close", i))
@@ -988,7 +1160,7 @@ impl HackApp {
             .child(icon(Glyph::Plus, size::ICON, t.tab_fg))
             .child(icon(Glyph::ChevronDown, px(12.), t.tab_fg))
             .on_click(cx.listener(|this, _, _, cx| this.open_menu(Menu::Main, cx)))
-            .when(panel.menu != Menu::Closed, |d0| {
+            .when(!docked && panel.menu != Menu::Closed, |d0| {
                 // Toward the larger space: above when docked, below when
                 // maximized (the strip is then near the top).
                 let anchor = div().absolute().left(px(0.));
@@ -1042,7 +1214,7 @@ impl HackApp {
                     .items_center()
                     .gap(space::S5)
                     .px(space::S5)
-                    .when(find, |d| {
+                    .when(find && !docked, |d| {
                         d.child(
                             div()
                                 .id("term-find")
@@ -1080,7 +1252,47 @@ impl HackApp {
                                     this.toggle_maximize(cx);
                                 }
                             })),
-                    ),
+                    )
+                    .when(docked, |controls| {
+                        controls
+                            .child(
+                                div()
+                                    .id("term-dock-menu")
+                                    .relative()
+                                    .cursor_pointer()
+                                    .child(icon(Glyph::More, size::ICON, t.tab_fg))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.open_menu(Menu::Main, cx)
+                                        }),
+                                    )
+                                    .when(panel.menu != Menu::Closed, |trigger| {
+                                        trigger.child(
+                                            gpui_kit::deferred(
+                                                div()
+                                                    .absolute()
+                                                    .top(px(24.))
+                                                    .right_0()
+                                                    .child(self.menu(d, panel.menu, ui, cx)),
+                                            )
+                                            .with_priority(1),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("term-dock-close")
+                                    .cursor_pointer()
+                                    .child(icon(Glyph::Close, size::ICON, t.tab_fg))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(key) = this.model.selected_key() {
+                                            this.set_state(&key, PanelState::Collapsed, cx);
+                                            this.service_focus.focus(window, cx);
+                                        }
+                                    }))
+                                    .test_support(),
+                            )
+                    }),
             )
     }
 
@@ -1120,6 +1332,122 @@ impl HackApp {
 
     /// The panel for the selected instance: handle, strip and terminal, at
     /// the height its state gives.
+    #[cfg(feature = "screenshots")]
+    pub(crate) fn show_service_terminal_fixture(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use hack_desktop_term::color::Rgb;
+        self.service_pane.tab = ServiceTab::Terminal;
+        self.logs.close();
+        self.ensure_panel(window, cx);
+        let Some(detail) = self.model.detail() else {
+            return;
+        };
+        let sessions = self.panels.by_key[&detail.key].sessions.clone();
+        let dark = self.ui(cx).p.mode == hack_desktop_ui::tokens::Mode::Dark;
+        let mut look = GhosttyLook {
+            background: Rgb::from_hex(if dark { "101418" } else { "ffffff" }),
+            foreground: Rgb::from_hex(if dark { "e5ebef" } else { "171717" }),
+            padding_x: Some((12., 12.)),
+            padding_y: Some((10., 10.)),
+            ..Default::default()
+        };
+        look.palette.insert(
+            2,
+            if dark {
+                Rgb::new(63, 190, 80)
+            } else {
+                Rgb::new(0, 119, 0)
+            },
+        );
+        self.panels.error = None;
+        for (service, transcript) in [
+            (
+                "api",
+                concat!(
+                    "\x1b[32m/app\x1b[0m # ls src\r\n",
+                    "cart.ts  health.ts  search.ts  server.ts\r\n",
+                    "\x1b[32m/app\x1b[0m # curl -s localhost:3000/health\r\n",
+                    "{\"ok\":true,\"version\":\"example-1.4.0\"}\r\n",
+                    "\x1b[32m/app\x1b[0m # \u{2588}",
+                ),
+            ),
+            ("db", "/var/lib/postgresql # "),
+        ] {
+            let mut options = PtyOptions::new(Path::new("/bin/sh"));
+            options.args = [
+                "-c".into(),
+                "printf '%s' \"$1\"; IFS= read -r line".into(),
+                "service-pane-fixture".into(),
+                transcript.into(),
+            ]
+            .into();
+            let core = TerminalCore::session(SessionPlan {
+                attempts: vec![Launch {
+                    options,
+                    kind: SessionKind::ContainerShell {
+                        service: service.into(),
+                        shell: "bash".into(),
+                    },
+                }],
+            })
+            .expect("start Ghostty fixture PTY");
+            let view = cx.new(|cx| {
+                let mut terminal = TerminalView::from_core(core, cx);
+                terminal.set_look(look.clone(), cx);
+                terminal
+            });
+            sessions.update(cx, |panel, cx| panel.add_tab(view, window, cx));
+        }
+        sessions.update(cx, |panel, cx| panel.activate(1, window, cx));
+    }
+
+    pub(crate) fn render_service_terminal(
+        &self,
+        detail: &DetailView,
+        ui: &Ui,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(panel) = self.panels.by_key.get(&detail.key) else {
+            return div().into_any_element();
+        };
+        let p = ui.p;
+        let collapsed = panel.state == PanelState::Collapsed;
+        let command = panel.sessions.read(cx).active().and_then(|view| {
+            let SessionKind::ContainerShell { service, shell } = view.read(cx).kind() else {
+                return None;
+            };
+            let branch = detail
+                .branch
+                .as_ref()
+                .map_or_else(String::new, |b| format!(" --branch {b}"));
+            Some(format!("hack exec{branch} {service} -- {shell}"))
+        });
+        div().flex().flex_col().flex_1().min_h_0().gap(space::S6)
+            .child(div().flex().flex_col().min_h_0()
+                .rounded(radius::PANEL).border_1().border_color(p.border).overflow_hidden()
+                .when(!collapsed, |d| d.flex_1())
+                .child(self.strip(detail, panel, true, ui, cx))
+                .when(!collapsed, |d| {
+                    d.children(command.map(|command| {
+                        div().px(space::S6).pt(space::S4).pb(space::S2)
+                            .type_step(text::MONO).text_color(p.text_muted)
+                            .font_family(ui.mono.clone()).truncate().child(command)
+                    })).child(div().flex_1().min_h_0().child(panel.sessions.clone()))
+                }))
+            .when(panel.state != PanelState::Maximized, |d| d.child(
+                div().type_step(text::SMALL).text_color(p.text_muted)
+                    .child(if cfg!(target_os = "macos") {
+                        "⌘J shows or hides the drawer. Your terminal tabs stay open when you switch tabs."
+                    } else {
+                        "Ctrl+Shift+J shows or hides the drawer. Your terminal tabs stay open when you switch tabs."
+                    }),
+            )).into_any_element()
+    }
+
     pub(crate) fn terminal_area(
         &mut self,
         d: &DetailView,
@@ -1134,7 +1462,7 @@ impl HackApp {
         };
         let state = panel.state;
         let sessions = panel.sessions.clone();
-        let strip = self.strip(d, panel, ui, cx).into_any_element();
+        let strip = self.strip(d, panel, false, ui, cx).into_any_element();
         let surface = div()
             .flex_1()
             .min_h_0()
@@ -1380,6 +1708,40 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn opening_service_logs_in_terminal_preserves_the_branch_and_service() {
+        let plan = logs_plan_for_service(
+            Path::new("/bin/hack"),
+            Path::new("/work/wt"),
+            Some("feature-search"),
+            true,
+            Some("api"),
+        )
+        .expect("valid names");
+        assert_eq!(
+            argv(&plan),
+            [[
+                "logs",
+                "--branch",
+                "feature-search",
+                "--tail",
+                "500",
+                "--pretty",
+                "api"
+            ]]
+        );
+        assert!(
+            logs_plan_for_service(
+                Path::new("/bin/hack"),
+                Path::new("/work/wt"),
+                None,
+                true,
+                Some("--help")
+            )
+            .is_err()
+        );
     }
 
     #[test]

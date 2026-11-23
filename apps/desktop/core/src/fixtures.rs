@@ -182,7 +182,7 @@ fn container(state: &str, status: &str) -> Container {
         state: state.into(),
         status: status.into(),
         labels: BTreeMap::new(),
-        working_dir: None,
+        ..Container::default()
     }
 }
 
@@ -208,6 +208,25 @@ fn checkout_dir(branch: &str) -> String {
 
 /// A running branch instance of storefront with web and api routes.
 fn running_branch(branch: &str) -> BranchRuntime {
+    let mut api = routed(
+        "running",
+        "Up 2 hours (healthy)",
+        &format!("api.{branch}.storefront.hack"),
+    );
+    api.name = Some(format!("storefront--{branch}-api-1"));
+    api.image = Some("storefront-api:dev".into());
+    api.labels
+        .insert("caddy.reverse_proxy".into(), "{{upstreams 3000}}".into());
+    api.labels.insert(
+        "com.docker.compose.project".into(),
+        format!("storefront--{branch}"),
+    );
+    api.mounts.push(crate::models::ContainerMount {
+        source: checkout_dir(branch).trim_end_matches("/.hack").into(),
+        destination: "/app".into(),
+        kind: "bind".into(),
+        name: None,
+    });
     BranchRuntime {
         owner: None,
         branch: branch.into(),
@@ -215,14 +234,7 @@ fn running_branch(branch: &str) -> BranchRuntime {
             project: Some(format!("storefront--{branch}")),
             working_dir: Some(checkout_dir(branch)),
             services: vec![
-                svc(
-                    "api",
-                    routed(
-                        "running",
-                        "Up 20 minutes (healthy)",
-                        &format!("api.{branch}.storefront.hack"),
-                    ),
-                ),
+                svc("api", api),
                 svc("db", container("running", "Up 20 minutes")),
                 svc(
                     "web",

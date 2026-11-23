@@ -37,7 +37,7 @@ use hack_desktop_core::viewmodel::{
 use hack_desktop_ui::components::{
     BannerTone, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, banner, caption,
     count_pill, dot, empty_pane, icon_button, machine_row, neutral_pill, pill_tab, primary_button,
-    project_row, services_table, skeleton, state_pill, status_bar,
+    project_row, services_table_with_rows, skeleton, state_pill, status_bar,
 };
 use hack_desktop_ui::icons::Glyph;
 use hack_desktop_ui::status::{Status, project_label, service_label};
@@ -64,6 +64,7 @@ const ALWAYS_ON_REASON: &str = "Read-only here: change always-on with hack autos
 /// The window's key bindings.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(SEARCH_KEY, FocusSearch, SEARCH_CONTEXT)]);
+    crate::service_view::bind_keys(cx);
     #[cfg(hack_terminal)]
     bind_terminal_keys(cx);
 }
@@ -124,6 +125,8 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) service_pane: crate::service_view::ServicePane,
+    pub(crate) service_focus: gpui_kit::FocusHandle,
     pub(crate) copies: crate::copies_view::CopiesPane,
     pub(crate) env: hack_desktop_core::env::EnvModel,
     /// The Env tab's open edit, if any (`env_view`).
@@ -198,6 +201,8 @@ impl HackApp {
             source,
             logs,
             tab: 0,
+            service_pane: Default::default(),
+            service_focus: cx.focus_handle(),
             copies: Default::default(),
             pane: Pane::Project,
             doctor: DoctorPane::default(),
@@ -473,6 +478,7 @@ impl HackApp {
         if selection_changed {
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
+            self.clear_selected_service();
             self.logs.model.set_service(None);
             self.reset_env_selection();
             self.refresh_copies_if_open(cx);
@@ -480,12 +486,12 @@ impl HackApp {
                 self.read_env(cx);
             }
         }
-        if self.tab == 1 && selection_changed {
+        if self.shows_json_logs() && selection_changed {
             self.open_logs(cx);
-        } else if self.tab == 1 {
+        } else if self.shows_json_logs() {
             // A stopped project's finite read becomes a followed stream once
             // the project runs (started here or elsewhere).
-            let running = self.model.detail().is_some_and(|d| d.state.is_active());
+            let running = self.displayed_logs_running();
             if self.logs.model.should_follow_now(running) {
                 self.open_logs(cx);
             }
@@ -599,6 +605,15 @@ impl HackApp {
     }
 
     pub(crate) fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
+        self.run_scoped_action(action, None, cx);
+    }
+
+    pub(crate) fn run_scoped_action(
+        &mut self,
+        action: Action,
+        service: Option<hack_desktop_core::source::ServiceActionTarget>,
+        cx: &mut Context<Self>,
+    ) {
         if self.machine.busy() {
             return;
         }
@@ -633,7 +648,13 @@ impl HackApp {
                 .background_executor()
                 .spawn({
                     let branch = key.branch.clone();
-                    async move { source.act(&root, native, branch.as_deref(), action) }
+                    async move {
+                        if let Some(target) = service {
+                            source.act_on_service(&root, branch.as_deref(), &target, action)
+                        } else {
+                            source.act(&root, native, branch.as_deref(), action)
+                        }
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -899,6 +920,7 @@ impl HackApp {
 
     pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Project;
+        self.clear_selected_service();
         self.user_navigated();
         self.copied = None;
         self.reset_env_selection();
@@ -919,6 +941,7 @@ impl HackApp {
     }
 
     pub(crate) fn set_tab(&mut self, to: usize, cx: &mut Context<Self>) {
+        self.clear_selected_service();
         self.user_navigated();
         let from = self.tab;
         if from == to {
@@ -1002,6 +1025,7 @@ impl HackApp {
             self.recovery_error = Some(why);
         }
         if before != after {
+            self.clear_selected_service();
             self.model.source_changed();
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
@@ -1666,7 +1690,16 @@ impl HackApp {
                         .text_color(ui.p.text_muted)
                         .child("No services reported for this project")
                 } else {
-                    services_table(&rows, ui)
+                    services_table_with_rows(&rows, ui, |row, service| {
+                        let key = d.key.clone();
+                        let service = service.name.clone();
+                        let p = ui.p;
+                        row.cursor_pointer()
+                            .hover(move |d| d.bg(p.surface_1))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_service(key.clone(), service.clone(), window, cx);
+                            }))
+                    })
                 })
                 .into_any_element(),
         };
@@ -1776,10 +1809,12 @@ impl HackApp {
             gpui_kit::MouseButton::Left,
             cx.listener(|this, _, _, _| this.panels.dragging = false),
         )
-        .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
+        .on_action(
+            cx.listener(|this, _: &TogglePanel, window, cx| this.toggle_visible_panel(window, cx)),
+        )
         .on_action(cx.listener(|this, _: &ToggleMaximize, _, cx| this.toggle_maximize(cx)))
-        .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-            this.open_menu(crate::terminal::Menu::Main, cx);
+        .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+            this.terminal_new_tab(window, cx);
         }))
         .on_action(cx.listener(|this, _: &CloseTab, window, cx| this.close_active_tab(window, cx)))
         .on_action(cx.listener(|this, _: &NextTab, window, cx| this.step_tab(true, window, cx)))
@@ -1801,6 +1836,9 @@ impl Render for HackApp {
         let list = self.model.list();
         let ui = self.ui(cx);
         let p = ui.p;
+        self.sync_service_logs(cx);
+        #[cfg(hack_terminal)]
+        self.reconcile_selected_service_panel(window, cx);
         let main: AnyElement = match &list.phase {
             // Setup applies whatever the project list shows, a missing CLI
             // included.
@@ -1846,6 +1884,9 @@ impl Render for HackApp {
                 empty_pane(Glyph::Loader, "Loading projects…", "", None, &ui).into_any_element()
             }
             Phase::Ready => match self.model.detail() {
+                Some(d) if self.selected_service().is_some() => {
+                    self.service_detail(&d, &ui, window, cx)
+                }
                 Some(d) => self.detail(&d, &ui, window, cx).into_any_element(),
                 None => {
                     empty_pane(Glyph::Folder, "Select a project", "", None, &ui).into_any_element()
@@ -1858,6 +1899,7 @@ impl Render for HackApp {
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
+            .map(|root| self.service_handlers(root, cx))
             .map(|root| self.terminal_handlers(root, cx))
             .size_full()
             .flex()

@@ -27,6 +27,7 @@ mod logs_view;
 mod machine_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+mod service_view;
 mod setup_view;
 #[cfg(hack_terminal)]
 mod terminal;
@@ -46,6 +47,7 @@ pub(crate) struct Args {
     pub logs_fixture: Option<hack_desktop_core::logs::fixtures::LogsFixture>,
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
+    pub service_screenshots: Option<std::path::PathBuf>,
     pub sequence: Option<std::path::PathBuf>,
     /// `--drive`: run the steps file in a child app and report.
     pub drive: Option<std::path::PathBuf>,
@@ -71,6 +73,7 @@ fn parse_args() -> Args {
         logs_fixture: None,
         theme: None,
         screenshots: None,
+        service_screenshots: None,
         sequence: None,
         drive: None,
         drive_child: None,
@@ -125,6 +128,9 @@ fn parse_args() -> Args {
                 });
             }
             "--screenshots" => a.screenshots = Some(it.next().unwrap_or_else(|| usage()).into()),
+            "--service-screenshots" => {
+                a.service_screenshots = Some(it.next().unwrap_or_else(|| usage()).into())
+            }
             "--sequence" => a.sequence = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--drive-child" => {
                 let steps = it.next().unwrap_or_else(|| usage());
@@ -204,12 +210,17 @@ fn main() {
         return;
     }
     #[cfg(feature = "screenshots")]
+    if let Some(dir) = &args.service_screenshots {
+        screenshots::service_pane(dir);
+        return;
+    }
+    #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.screenshots {
         screenshots::run(dir, args.fixture);
         return;
     }
     #[cfg(not(feature = "screenshots"))]
-    if args.screenshots.is_some() || args.sequence.is_some() {
+    if args.screenshots.is_some() || args.sequence.is_some() || args.service_screenshots.is_some() {
         eprintln!("--screenshots and --sequence need a build with --features screenshots");
         std::process::exit(2);
     }

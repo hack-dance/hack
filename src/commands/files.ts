@@ -7,11 +7,13 @@ import type {
 import { defineCommand, withHandler } from "../cli/command.ts";
 import { optBranch, optJson, optPath, optProject } from "../cli/options.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
-import { branchComposeProjectName } from "../lib/compose-project-name.ts";
+import {
+  branchComposeProjectName,
+  resolveComposeProjectName,
+} from "../lib/compose-project-name.ts";
 import { resolveHackEnv } from "../lib/hack-env.ts";
-import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
-import { readProjectConfig, sanitizeProjectSlug } from "../lib/project.ts";
+import { readProjectConfig } from "../lib/project.ts";
 import { resolveProjectEnvConfig } from "../lib/project-env-config.ts";
 import { readServiceFiles } from "../lib/service-files.ts";
 import { TARGET_SERVICE_PATTERN } from "../lib/target-inspect.ts";
@@ -21,6 +23,7 @@ import {
   resolveCommandComposeBase,
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
+  resolveStoredComposeLifecycleKey,
   resolveStoredRuntimeEnvName,
 } from "./project.ts";
 
@@ -83,17 +86,31 @@ async function runFiles(
   });
   const cfg = await readProjectConfig(project);
   const expected = args.options.expectComposeProject;
-  const base = await resolveCommandComposeBase({ project, cfg, expected });
-  const projectName = sanitizeProjectSlug(base);
+  const base = await resolveCommandComposeBase({
+    project,
+    cfg,
+    expected,
+    forBranch: branch !== null,
+  });
   const composeProject = desktopComposeTarget({
     expected,
     base,
     computed: branch ? branchComposeProjectName({ base, branch }) : null,
   });
+  const { projectName, lifecycleComposeProject } =
+    await resolveStoredComposeLifecycleKey({
+      project,
+      branch,
+      base,
+      legacyBase:
+        expected === undefined
+          ? base
+          : await resolveComposeProjectName({ project, cfg }),
+    });
   const envName = await resolveStoredRuntimeEnvName({
     requestedEnvName: undefined,
     projectDir: project.projectDir,
-    composeProject: resolveLifecycleComposeProjectName({ projectName, branch }),
+    composeProject: lifecycleComposeProject,
   });
   // Compose's project selection can come from either the invoked environment
   // or its own .env. Use the environment sources used by exec without its

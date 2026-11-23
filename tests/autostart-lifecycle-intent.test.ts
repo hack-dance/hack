@@ -154,8 +154,9 @@ import { rm } from "node:fs/promises";
 const fixture = ${JSON.stringify(root)};
 const options = ${JSON.stringify(opts ?? {})};
 const args = process.argv.slice(2);
-const mode = args.find((arg) => ["config", "ps", "inspect", "up", "down"].includes(arg));
+const mode = args.find((arg) => ["config", "ps", "inspect", "up", "down", "exec"].includes(arg));
 const running = fixture + "/compose-running";
+const containerId = "f".repeat(64);
 if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   const model = JSON.parse(await Bun.stdin.text());
   if (options.failFirstProbe && !(await Bun.file(fixture + "/name-probed").exists())) {
@@ -170,6 +171,18 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   process.stdout.write(JSON.stringify({name: "sample", services: {app: {image: "example.invalid/app"}}}));
 } else if (mode === "inspect" && args[0] === "image") {
   process.stdout.write("sha256:" + "a".repeat(64) + "\\n");
+} else if (mode === "ps" && args.includes("--quiet")) {
+  if (process.env.DOCKER_CONTEXT !== "saved-files-context") process.exit(9);
+  if (!args.includes("-p") || !args.includes("sample")) process.exit(10);
+  if (await Bun.file(running).exists()) process.stdout.write(containerId + "\\n");
+} else if (mode === "inspect" && args.includes("--type")) {
+  process.stdout.write(JSON.stringify({
+    id: containerId, service: "app", state: "running", number: "1",
+    oneOff: "False", project: "sample", workingDir: process.cwd(), mounts: []
+  }) + "\\n");
+} else if (mode === "exec") {
+  if (args[1] !== containerId || process.env.DOCKER_CONTEXT !== "saved-files-context") process.exit(9);
+  process.stdout.write("/app\\x0041ed:10:32\\0");
 } else if (mode === "ps" || mode === "inspect") {
   const directory = options.foreignCheckout ?? (await Bun.file(running).exists() ? process.cwd() : null);
   process.stdout.write(JSON.stringify(directory ? [{
@@ -195,6 +208,52 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
     { mode: 0o755 }
   );
 }
+
+test("bound Files uses the legacy overlay saved by ordinary Start", async () => {
+  const projectRoot = join(root, "project");
+  const projectDir = join(projectRoot, ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    '{"name":"sample","dev_host":"sample.hack"}'
+  );
+  await writeInterpolatedStack(projectRoot, "STACK_A");
+  await installComposeNameFixture({ startContainers: true });
+  await writeOwnedFixture(
+    join(projectDir, "hack.env.qa.yaml"),
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n"
+  );
+  try {
+    const started = await run(["up", "-d", "--env", "qa", "--json"]);
+    expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+    const files = await run([
+      "files",
+      "ls",
+      "--expect-compose-project",
+      "sample",
+      "--json",
+      "app",
+      "/app",
+    ]);
+    expect(files.exitCode, files.stderr || files.stdout).toBe(0);
+    expect(JSON.parse(files.stdout)).toMatchObject({
+      ok: true,
+      data: {
+        schema: "hack.files.v1",
+        service: "app",
+        entry: { path: "/app" },
+      },
+    });
+  } finally {
+    await run([
+      "down",
+      "--target",
+      "local",
+      "--expect-compose-project",
+      "sample",
+      "--json",
+    ]);
+  }
+}, 40_000);
 
 test("desktop Stop and Start update Always on intent for an interpolated name", async () => {
   await writeInterpolatedStack(join(root, "project"), "STACK_A");

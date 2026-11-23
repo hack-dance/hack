@@ -655,6 +655,37 @@ composeTest(
         compose_project: "shell_stack",
         runtime: { project: "shell_stack" },
       });
+
+      await writeFile(compose, "name: demo\nservices: {}\n");
+      await writeFile(
+        join(registration.projectDir, ".env"),
+        "COMPOSE_PROJECT_NAME=alternate\n"
+      );
+      await recordBranchUsage({
+        projectDir: registration.projectDir,
+        branch: "preview",
+        name: "preview",
+      });
+      const overridden = await serializedProject({
+        registration,
+        runtime: ["alternate", "demo--preview"].map((name) => ({
+          ...branchRuntime({
+            slug: "preview",
+            workingDir: registration.projectDir,
+          }),
+          project: name,
+        })),
+      });
+      expect(overridden).toMatchObject({
+        compose_project: "alternate",
+        runtime: { project: "alternate" },
+        branch_copies: [
+          { branch: "preview", compose_project: "demo--preview" },
+        ],
+      });
+      expect(branchEntries(overridden, "branch_runtime")).toMatchObject([
+        { branch: "preview", compose_project: "demo--preview" },
+      ]);
     } finally {
       restoreEnv("HACK_TEST_STACK_NAME", previousName);
       restoreEnv("COMPOSE_PROJECT_NAME", previousComposeName);

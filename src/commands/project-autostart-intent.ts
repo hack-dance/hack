@@ -344,6 +344,7 @@ export async function withAutostartCommandLock<T>(opts: {
   readonly resolveLoginComposeBase?: (opts: {
     readonly project: ProjectContext;
     readonly cfg: ProjectConfig;
+    readonly branch: string | null;
   }) => Promise<string | undefined>;
   readonly run: (loginComposeBase?: string) => Promise<T>;
 }): Promise<T> {
@@ -401,7 +402,11 @@ export async function withAutostartCommandLock<T>(opts: {
     });
   }
   const loginComposeBase = login
-    ? await opts.resolveLoginComposeBase?.({ project, cfg })
+    ? await opts.resolveLoginComposeBase?.({
+        project,
+        cfg,
+        branch: effective.branch,
+      })
     : undefined;
   const scope = {
     projectId: projectId ?? "",

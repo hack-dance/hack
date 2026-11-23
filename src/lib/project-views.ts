@@ -460,11 +460,15 @@ async function buildRegisteredProjectView(opts: {
     withProcessDeadline(opts.composeDeadline, () =>
       resolveDesktopComposeProjectName(input)
     );
-  const baseName = await resolveComposeName({
+  const composeNameInput = {
     project: { composeFile, projectRoot: registration.repoRoot },
     cfg: config ?? undefined,
     composeName: composeDefinition?.name ?? null,
-  });
+  };
+  const baseName = await resolveComposeName(composeNameInput);
+  const branchBaseName = composeNameInput.composeName?.includes("$")
+    ? baseName
+    : await resolveComposeName({ ...composeNameInput, forBranch: true });
   const runtime = resolveRegisteredRuntime({ ...opts, registration, baseName });
   const definedServices = composeDefinition?.names ?? null;
   const serviceHosts = composeExists
@@ -484,20 +488,29 @@ async function buildRegisteredProjectView(opts: {
     running,
   });
   const checkoutNames = new Map([
-    [canonicalPath(registration.projectDir), Promise.resolve(baseName)],
+    [
+      composeNameCacheKey(registration.projectDir, false),
+      Promise.resolve(baseName),
+    ],
+    [
+      composeNameCacheKey(registration.projectDir, true),
+      Promise.resolve(branchBaseName),
+    ],
   ]);
   const checkoutComposeName: CheckoutComposeName = ({
     project,
     cfg,
     composeName,
+    forBranch,
   }) => {
-    const key = canonicalPath(project.projectDir);
+    const key = composeNameCacheKey(project.projectDir, forBranch);
     let name = checkoutNames.get(key);
     if (!name) {
       name = resolveCheckoutName({
         project,
         cfg,
         composeName,
+        forBranch,
         resolveComposeName,
       });
       checkoutNames.set(key, name);
@@ -510,7 +523,8 @@ async function buildRegisteredProjectView(opts: {
     allRuntime: opts.allRuntime,
     branchRuntime: await collectBranchRuntime({
       ...catalog,
-      baseName,
+      baseName: branchBaseName,
+      primaryRuntime: runtime,
       checkoutComposeName,
       runtimeProjects: opts.allRuntime,
     }),
@@ -721,17 +735,21 @@ async function describeBranchInstances(opts: {
     }
   }
 
+  const branchCopies = await describeBranchCopies({
+    registration: opts.registration,
+    checkouts,
+    settingsFor,
+    checkoutComposeName: opts.checkoutComposeName,
+    runtime: opts.allRuntime,
+    gitWorktrees: opts.gitWorktrees,
+    verifiedRoots: opts.verifiedRoots,
+  });
+  const linkedBaseRuntimes = new Set(branchCopies.map((copy) => copy.runtime));
   return {
-    branchRuntime,
-    branchCopies: await describeBranchCopies({
-      registration: opts.registration,
-      checkouts,
-      settingsFor,
-      checkoutComposeName: opts.checkoutComposeName,
-      runtime: opts.allRuntime,
-      gitWorktrees: opts.gitWorktrees,
-      verifiedRoots: opts.verifiedRoots,
-    }),
+    branchRuntime: branchRuntime.filter(
+      (entry) => !linkedBaseRuntimes.has(entry.runtime)
+    ),
+    branchCopies,
     nativeBranchRuntime,
     openUrl: primarySettings
       ? resolvePrimaryOpenUrl({ settings: primarySettings, branch: null })
@@ -751,7 +769,12 @@ type CheckoutComposeName = (opts: {
   readonly project: ReturnType<typeof checkoutContext>;
   readonly cfg?: ProjectConfig;
   readonly composeName?: string | null;
+  readonly forBranch: boolean;
 }) => Promise<string | null>;
+
+function composeNameCacheKey(path: string, forBranch: boolean): string {
+  return `${canonicalPath(path)}\0${forBranch}`;
+}
 
 async function resolveCheckoutName(
   opts: Parameters<CheckoutComposeName>[0] & {
@@ -951,21 +974,25 @@ async function describeBranchCopies(opts: {
               composeFile: project.composeFile,
             }).catch(() => null)
           : null;
-      const base =
+      const nameFor = (forBranch: boolean) =>
         compose && config
-          ? await opts.checkoutComposeName({
+          ? opts.checkoutComposeName({
               project,
               cfg: config,
               composeName: compose.name,
+              forBranch,
             })
-          : null;
+          : Promise.resolve(null);
       // A linked checkout can explicitly use its own base instance.
       const worktreeUsesBase =
         checkout.kind === "worktree" &&
         linked.has(canonicalPath(checkout.root)) &&
         config !== null &&
         !resolveWorktreeAutoBranch(config);
-      const worktreeBase = worktreeUsesBase ? base : null;
+      const worktreeBase = worktreeUsesBase ? await nameFor(false) : null;
+      const branchBase = [...branches.keys()].some((branch) => branch !== null)
+        ? await nameFor(true)
+        : null;
       const baseRuntime = worktreeBase
         ? opts.runtime.find(
             (row) =>
@@ -982,11 +1009,14 @@ async function describeBranchCopies(opts: {
         definedServices: compose?.names ?? [],
         recorded: branch !== null && usage.has(branch),
         composeProject:
-          branch === null ? worktreeBase : composeBranchName(base, branch),
+          branch === null
+            ? worktreeBase
+            : composeBranchName(branchBase, branch),
         composeProjectUnresolved:
-          (branch !== null || worktreeUsesBase) &&
           compose !== null &&
-          base === null,
+          (branch === null
+            ? worktreeUsesBase && worktreeBase === null
+            : branchBase === null),
         ...(branch === null && baseRuntime ? { runtime: baseRuntime } : {}),
         url:
           settings && (branch || worktreeUsesBase)
@@ -1474,12 +1504,13 @@ async function collectBranchRuntime(opts: {
   readonly registration: RegisteredProject;
   readonly verifiedRoots: ReadonlySet<string>;
   readonly baseName: string | null;
+  readonly primaryRuntime: RuntimeProject | null;
   readonly runtimeProjects: readonly RuntimeProject[];
   readonly checkoutComposeName: CheckoutComposeName;
 }): Promise<readonly BranchRuntime[]> {
   const out: BranchRuntime[] = [];
   for (const runtime of opts.runtimeProjects) {
-    if (!runtime.project.includes("--")) {
+    if (runtime === opts.primaryRuntime || !runtime.project.includes("--")) {
       continue;
     }
     const checkout = resolveOwningCheckout({
@@ -1492,7 +1523,7 @@ async function collectBranchRuntime(opts: {
       : false;
     if (checkout?.kind === "worktree" && checkoutVerified) {
       const project = checkoutContext({ ...opts, checkout });
-      baseName = await opts.checkoutComposeName({ project });
+      baseName = await opts.checkoutComposeName({ project, forBranch: true });
     }
     // The registered slug is the legacy match for observations without a
     // checkout. Configured Compose names can be shared by unrelated projects.

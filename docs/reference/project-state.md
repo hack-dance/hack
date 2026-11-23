@@ -147,8 +147,10 @@ linked Git worktrees and locally recorded branch instances for a
 Compose project. Each entry has `branch`, `branch_name`, `checkout`, `url`,
 `defined_services` and `recorded`. The URL uses the checkout's configuration
 and the same open preference as `hack open`. When Compose can target a
-copy, `compose_project` names that stack. Full rows and branch entries set
-`compose_project_unresolved: true` when the effective name lookup fails.
+copy, `compose_project` names that stack. Base copies honor
+`COMPOSE_PROJECT_NAME` from the shell or checkout dotenv. Full rows and
+branch entries set `compose_project_unresolved: true` when the effective
+name lookup fails.
 A worktree configured with
 `worktree.auto_branch=false` has a null branch, a base URL, and a `runtime`
 when it owns the base stack. An unaddressable worktree has a null branch and

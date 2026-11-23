@@ -315,6 +315,7 @@ import {
   isComposeProjectName,
   resolveComposeProjectName,
   resolveDesktopComposeProjectName,
+  shouldResolveComposeProjectName,
 } from "../lib/compose-project-name.ts";
 import {
   composeEnvValuesToRedact,
@@ -7446,7 +7447,11 @@ async function updateAutostartIntent(opts: {
     : resolvedBranch.branch;
   const expected = opts.args.options.expectComposeProject;
   if (expected !== undefined) {
-    const base = await requireResolvedComposeBase({ project, cfg });
+    const base = await requireResolvedComposeBase({
+      project,
+      cfg,
+      forBranch: branch !== null,
+    });
     desktopComposeTarget({
       expected,
       base,
@@ -7615,10 +7620,11 @@ async function handleUp(
     project: input.args.options.project,
     branch: input.args.options.branch,
     expectComposeProject: input.args.options.expectComposeProject,
-    resolveLoginComposeBase: ({ project, cfg }) =>
+    resolveLoginComposeBase: ({ project, cfg, branch }) =>
       resolveInterpolatedLoginComposeBase({
         project,
         cfg,
+        branch,
         envOption: input.args.options.env,
       }),
     run,
@@ -8039,6 +8045,7 @@ async function runUpCommand({
     (await resolveCommandComposeBase({
       project,
       cfg,
+      forBranch: branch !== null,
       expected: args.options.expectComposeProject,
     }));
   const composeProjectName = desktopComposeTarget({
@@ -9014,6 +9021,7 @@ async function handleServiceDown({
     const base = await resolveCommandComposeBase({
       project,
       cfg,
+      forBranch: branch !== null,
       expected: args.options.expectComposeProject,
     });
     const targetNames = resolveRestartTarget({ baseProjectName: base, branch });
@@ -9180,6 +9188,7 @@ async function requireOwnedServiceContainers(
 export async function resolveCommandComposeBase(
   opts: Parameters<typeof resolveComposeProjectName>[0] & {
     readonly expected?: string;
+    readonly forBranch?: boolean;
   }
 ): Promise<string> {
   if (opts.expected === undefined) {
@@ -9204,6 +9213,7 @@ async function requireResolvedComposeBase(
 async function resolveInterpolatedLoginComposeBase(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly branch: string | null;
   readonly envOption?: string;
 }): Promise<string | undefined> {
   if (resolveNativeRuntimeSelection()) {
@@ -9211,7 +9221,15 @@ async function resolveInterpolatedLoginComposeBase(opts: {
   }
   const { project, cfg } = opts;
   const configured = await resolveComposeProjectName({ project, cfg });
-  if (!configured.includes("$")) {
+  const forBranch = opts.branch !== null;
+  if (
+    !(await shouldResolveComposeProjectName({
+      composeFile: project.composeFile,
+      configuredName: configured,
+      disableEnvFile: true,
+      forBranch,
+    }))
+  ) {
     return undefined;
   }
   await assertAutostartEnvironment({ project });
@@ -9230,6 +9248,7 @@ async function resolveInterpolatedLoginComposeBase(opts: {
     composeName: configured,
     env: env.env,
     disableEnvFile: true,
+    forBranch,
   });
 }
 
@@ -9242,8 +9261,13 @@ async function resolveInterpolatedDownTarget(opts: {
 }): Promise<AutostartDownTarget["compose"]> {
   const { project, cfg, branch } = opts;
   const configured = await resolveComposeProjectName({ project, cfg });
+  const forBranch = branch !== null;
   if (
-    !configured.includes("$") ||
+    !(await shouldResolveComposeProjectName({
+      composeFile: project.composeFile,
+      configuredName: configured,
+      forBranch,
+    })) ||
     (
       await resolveProjectLifecycleTarget({
         project,
@@ -9257,8 +9281,9 @@ async function resolveInterpolatedDownTarget(opts: {
     project,
     cfg,
     composeName: configured,
+    forBranch,
   });
-  const lifecycle = await resolveDownLifecycleKey({
+  const lifecycle = await resolveStoredComposeLifecycleKey({
     project,
     branch,
     base: hinted ?? configured,
@@ -9275,6 +9300,7 @@ async function resolveInterpolatedDownTarget(opts: {
     cfg,
     composeName: configured,
     env,
+    forBranch,
   });
   return { base, projectDir: project.projectDir, env };
 }
@@ -9293,7 +9319,7 @@ async function resolveDownLifecycleEnv(opts: {
   return await resolveLifecycleEnvForProject({ ...opts, envName });
 }
 
-async function resolveDownLifecycleKey(opts: {
+export async function resolveStoredComposeLifecycleKey(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branch: string | null;
   readonly base: string;
@@ -9602,6 +9628,7 @@ async function runDownCommand({
   const baseProjectName = await resolveCommandComposeBase({
     project,
     cfg,
+    forBranch: branch !== null,
     expected: args.options.expectComposeProject,
   });
   let runtime: readonly RuntimeProject[] | null = null;
@@ -9660,7 +9687,7 @@ async function runDownCommand({
         })
       : [];
   const { projectName, lifecycleComposeProject } =
-    await resolveDownLifecycleKey({
+    await resolveStoredComposeLifecycleKey({
       project,
       branch,
       base: lockedTarget?.base ?? baseProjectName,
@@ -11178,6 +11205,7 @@ async function runRestartCommand({
   const baseProjectName = await resolveCommandComposeBase({
     project,
     cfg,
+    forBranch: branch !== null,
     expected: args.options.expectComposeProject,
   });
   if (
@@ -12595,6 +12623,7 @@ async function handleExec({
   const baseProjectName = await resolveCommandComposeBase({
     project,
     cfg,
+    forBranch: branch !== null,
     expected: args.options.expectComposeProject,
   });
   const composeProjectName = desktopComposeTarget({
@@ -13801,6 +13830,7 @@ async function handleLogs({
   const baseProjectName = await resolveCommandComposeBase({
     project,
     cfg,
+    forBranch: branch !== null,
     expected,
   });
   const projectNameForPrefix = branch

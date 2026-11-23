@@ -1,5 +1,6 @@
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { YAML } from "bun";
+import { childEnvironment } from "./child-environment.ts";
 import { readTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import type { ProjectConfig, ProjectContext } from "./project.ts";
@@ -44,28 +45,83 @@ export function isComposeProjectName(name: string): boolean {
   return COMPOSE_PROJECT_SLUG.test(name);
 }
 
+type ComposeNameEnvironment = {
+  readonly env?: Readonly<Record<string, string>>;
+  readonly disableEnvFile?: boolean;
+  /** A branch is explicitly named with `-p`, so a literal name keeps its suffix base. */
+  readonly forBranch?: boolean;
+};
+
+const DOTENV_PROJECT_NAME =
+  /^(?:[ \t]*export[ \t]+)?[ \t]*COMPOSE_PROJECT_NAME[ \t]*(?:=|:|\r?$)/m;
+const DISABLE_DEFAULT_DOTENV = /^(?:1|t|T|true|TRUE|True)$/;
+
+export async function shouldResolveComposeProjectName(
+  opts: ComposeNameEnvironment & {
+    readonly composeFile: string;
+    readonly configuredName: string;
+  }
+): Promise<boolean> {
+  if (opts.configuredName.includes("$")) {
+    return true;
+  }
+  if (opts.forBranch) {
+    return false;
+  }
+  const env = childEnvironment(process.env, opts.env);
+  if (env.COMPOSE_PROJECT_NAME) {
+    return true;
+  }
+  if (opts.disableEnvFile) {
+    return false;
+  }
+  const named =
+    env.COMPOSE_ENV_FILES?.split(",")
+      .map((file) => file.trim())
+      .filter(Boolean) ?? [];
+  const defaults = DISABLE_DEFAULT_DOTENV.test(
+    env.COMPOSE_DISABLE_ENV_FILE ?? ""
+  )
+    ? []
+    : [".env"];
+  for (const file of named.length ? named : defaults) {
+    const text = await readTextFile(resolve(dirname(opts.composeFile), file));
+    if (text && DOTENV_PROJECT_NAME.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
- * Resolve an interpolated name before the desktop can pin it with `-p`.
+ * Resolve an interpolated or overridden name before pinning it with `-p`.
  * Compose evaluates the name in the checkout's normal dotenv and shell
  * environment. Only the name and a dummy service are parsed, so unrelated
  * service configuration, env files and Docker availability do not affect it.
  */
 export async function resolveDesktopComposeProjectName(
-  opts: ComposeProjectNameOptions & {
-    readonly env?: Readonly<Record<string, string>>;
-    readonly disableEnvFile?: boolean;
-  }
+  opts: ComposeProjectNameOptions & ComposeNameEnvironment
 ): Promise<string | null> {
   const composeName =
     opts.composeName === undefined
       ? await readComposeProjectName(opts.project.composeFile)
       : opts.composeName;
-  if (!composeName?.includes("$")) {
-    return await resolveComposeProjectName({ ...opts, composeName });
+  const configuredName = await resolveComposeProjectName({
+    ...opts,
+    composeName,
+  });
+  if (
+    !(await shouldResolveComposeProjectName({
+      ...opts,
+      composeFile: opts.project.composeFile,
+      configuredName,
+    }))
+  ) {
+    return configuredName;
   }
   const cwd = dirname(opts.project.composeFile);
   const config = JSON.stringify({
-    name: composeName,
+    name: configuredName,
     services: { probe: { image: "scratch" } },
   });
   try {

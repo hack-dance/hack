@@ -1101,10 +1101,17 @@ test("plain down refuses missing owner recovery proof without replaying cleanup"
 });
 
 test.each([
-  { enrollment: false, label: "ready owner" },
-  { enrollment: true, label: "legacy pending cleanup" },
+  { enrollment: false, label: "ready owner", phase: "ready-observed" },
+  // Every service started, some goal unmet: a real run with a mapping.
+  { enrollment: false, label: "started owner", phase: "started-observed" },
+  {
+    enrollment: true,
+    label: "legacy pending cleanup",
+    phase: "ready-observed",
+  },
 ])("down --recover stops $label selected by its exact receipt", async ({
   enrollment,
+  phase,
 }) => {
   const opts = await fixture();
   const events: string[] = [];
@@ -1131,7 +1138,7 @@ test.each([
           run.run,
           "--json",
         ]);
-        return ownerSelection("exited");
+        return ownerSelection("exited", phase);
       }
       if (request.args[1] === "recover-live-owner") {
         expect(request.args).toEqual([
@@ -1882,7 +1889,10 @@ function poolStoppedError() {
   });
 }
 
-test("down --recover on a stopped pool with a dead owner starts the pool once and recovers with data retained", async () => {
+test.each([
+  "ready-observed",
+  "started-observed",
+])("down --recover on a stopped pool with a dead owner starts the pool once and recovers with data retained (%s)", async (phase) => {
   const opts = await fixture();
   const calls: string[] = [];
   let pool = false;
@@ -1909,7 +1919,7 @@ test("down --recover on a stopped pool with a dead owner starts the pool once an
       }
       if (command === "foreground-owner") {
         return {
-          ...ownerSelection("exited"),
+          ...ownerSelection("exited", phase),
           dead_owner_recovery: pool ? "7".repeat(64) : null,
         };
       }

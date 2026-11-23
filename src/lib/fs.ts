@@ -10,6 +10,7 @@ import {
   rename,
   stat,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
@@ -33,8 +34,11 @@ export async function pathExists(absolutePath: string): Promise<boolean> {
   }
 }
 
-export async function ensureDir(absoluteDir: string): Promise<void> {
-  await mkdir(absoluteDir, { recursive: true });
+export async function ensureDir(
+  absoluteDir: string,
+  mode?: number
+): Promise<void> {
+  await mkdir(absoluteDir, { recursive: true, mode });
 }
 
 /**
@@ -46,9 +50,12 @@ export async function ensureDir(absoluteDir: string): Promise<void> {
  * reports as EEXIST) is refused as `not_a_directory_entry`. Other failures
  * propagate as is.
  */
-export async function ensureDirForWrite(absoluteDir: string): Promise<void> {
+export async function ensureDirForWrite(
+  absoluteDir: string,
+  mode?: number
+): Promise<void> {
   try {
-    await mkdir(absoluteDir, { recursive: true });
+    await mkdir(absoluteDir, { recursive: true, mode });
   } catch (error: unknown) {
     if (hasErrorCode(error, "EEXIST")) {
       throw new FileWriteRefusedError({
@@ -75,10 +82,11 @@ export async function ensureDirForWrite(absoluteDir: string): Promise<void> {
  * refused too; it is not a fence against a later swap.
  */
 export async function ensureRealDirectoryForWrite(
-  absoluteDir: string
+  absoluteDir: string,
+  mode?: number
 ): Promise<void> {
   if (await isRealDirectoryOrAbsent(absoluteDir)) {
-    await ensureDirForWrite(absoluteDir);
+    await ensureDirForWrite(absoluteDir, mode);
     if (await isRealDirectoryOrAbsent(absoluteDir)) {
       return;
     }
@@ -328,20 +336,26 @@ function isMissingPathError(error: unknown): boolean {
 
 export async function writeTextFile(
   absolutePath: string,
-  content: string
+  content: string,
+  createMode?: number
 ): Promise<void> {
-  await Bun.write(absolutePath, content);
+  if (createMode === undefined) {
+    await Bun.write(absolutePath, content);
+  } else {
+    await writeFile(absolutePath, content, { mode: createMode });
+  }
 }
 
 export async function writeTextFileIfChanged(
   absolutePath: string,
-  content: string
+  content: string,
+  createMode?: number
 ): Promise<{ readonly changed: boolean }> {
   const existing = await readTextFile(absolutePath);
   if (existing === content) {
     return { changed: false };
   }
-  await writeTextFile(absolutePath, content);
+  await writeTextFile(absolutePath, content, createMode);
   return { changed: true };
 }
 

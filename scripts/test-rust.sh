@@ -17,6 +17,12 @@ runner=${HACK_RUST_TEST_RUNNER:-auto}
 repetitions=${HACK_RUST_TEST_REPETITIONS:-1}
 case "$runner" in auto|nextest) ;; *) echo 'HACK_RUST_TEST_RUNNER must be auto or nextest.' >&2; exit 2 ;; esac
 case "$repetitions" in 1|20) ;; *) echo 'HACK_RUST_TEST_REPETITIONS must be 1 or 20.' >&2; exit 2 ;; esac
+cargo_test_flags=(--jobs 2)
+nextest_run_flags=(--retries 0)
+if [[ "${HACK_RUST_TEST_KEEP_GOING:-0}" == 1 ]]; then
+  cargo_test_flags+=(--no-fail-fast)
+  nextest_run_flags+=(--no-fail-fast)
+fi
 common=(--locked --manifest-path "packages/$crate/Cargo.toml" --target-dir "${HACK_RUST_TEST_TARGET_DIR:-$target}")
 # Cargo's subcommand lookup can differ from a direct PATH lookup. Probe the
 # same command used below, and leave a contributor's other nextest version alone.
@@ -31,7 +37,7 @@ case "$actual" in
     echo "cargo nextest $version unavailable; using cargo test. Optional install: $install" >&2
     # A single libtest thread avoids cross-test spawn/close races in the fallback.
     if [[ "$(uname -s)" == Darwin ]]; then export RUST_TEST_THREADS=1; fi
-    exec cargo test "${common[@]}" --jobs 2 "$@"
+    exec cargo test "${common[@]}" "${cargo_test_flags[@]}" "$@"
     ;;
 esac
 mode=default
@@ -52,7 +58,7 @@ if [[ "$doc_only" == true ]]; then
     echo 'Documentation-only selection cannot produce nextest qualification evidence.' >&2
     exit 2
   fi
-  exec cargo test "${common[@]}" --jobs 2 "$@"
+  exec cargo test "${common[@]}" "${cargo_test_flags[@]}" "$@"
 fi
 if [[ -n "${HACK_RUST_TEST_REPORT_DIR:-}" ]]; then
   mkdir -p "$HACK_RUST_TEST_REPORT_DIR"
@@ -67,8 +73,8 @@ if [[ -n "${HACK_RUST_TEST_REPORT_DIR:-}" ]]; then
     echo 'The macOS disk-probe tests are missing their serial nextest group.' >&2
     exit 2
   fi
-  cargo test "${common[@]}" --jobs 2 "$@" -- --list > "$HACK_RUST_TEST_REPORT_DIR/$mode-libtest.txt"
-  cargo test "${common[@]}" --jobs 2 "$@" -- --list --ignored > "$HACK_RUST_TEST_REPORT_DIR/$mode-ignored.txt"
+  cargo test "${common[@]}" "${cargo_test_flags[@]}" "$@" -- --list > "$HACK_RUST_TEST_REPORT_DIR/$mode-libtest.txt"
+  cargo test "${common[@]}" "${cargo_test_flags[@]}" "$@" -- --list --ignored > "$HACK_RUST_TEST_REPORT_DIR/$mode-ignored.txt"
 fi
 for ((iteration=1; iteration<=repetitions; iteration++)); do
   echo "Rust $mode suite $iteration/$repetitions: process per test, retries=0"
@@ -82,7 +88,7 @@ for ((iteration=1; iteration<=repetitions; iteration++)); do
   fi
   status=0
   cargo nextest run "${common[@]}" --build-jobs 2 \
-    --config-file "$root/.config/nextest.toml" --profile ci --retries 0 "$@" || status=$?
+    --config-file "$root/.config/nextest.toml" --profile ci "${nextest_run_flags[@]}" "$@" || status=$?
   if [[ -n "${HACK_RUST_TEST_REPORT_DIR:-}" ]]; then
     if [[ -f "$source" ]]; then
       mkdir -p "$HACK_RUST_TEST_REPORT_DIR"
@@ -94,9 +100,12 @@ for ((iteration=1; iteration<=repetitions; iteration++)); do
       exit 2
     fi
   fi
-  # Never reset a failing streak, retry, or continue to another suite after failure.
+  # Keep the first failed status. In Candidate core, doctests still run after
+  # a red nextest pass, but the qualification loop stops at that pass.
+  if [[ "$run_doctests" == true && ( "$status" == 0 || "${HACK_RUST_TEST_KEEP_GOING:-0}" == 1 ) ]]; then
+    doc_status=0
+    cargo test --doc "${common[@]}" "${cargo_test_flags[@]}" "$@" || doc_status=$?
+    if [[ "$status" == 0 ]]; then status=$doc_status; fi
+  fi
   if [[ "$status" != 0 ]]; then exit "$status"; fi
-  # Nextest excludes doctests. Cargo excludes them for explicit target selection
-  # too, and rejects --doc combined with those selectors.
-  if [[ "$run_doctests" == true ]]; then cargo test --doc "${common[@]}" --jobs 2 "$@"; fi
 done

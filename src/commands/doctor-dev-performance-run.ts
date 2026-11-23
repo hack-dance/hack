@@ -33,7 +33,7 @@ import { findProjectContext, readProjectConfig } from "../lib/project.ts";
 export type { DevPerformanceReport } from "../lib/doctor-dev-performance.ts";
 
 type CheckRunner<T> = (
-  name: string,
+  name: DevPerformanceCheck["name"],
   fn: () => Promise<DevPerformanceCheck>
 ) => Promise<T>;
 
@@ -76,7 +76,7 @@ export async function runDevPerformanceDoctorChecks<T>(opts: {
   return rows;
 }
 
-function skipped(name: string): DevPerformanceCheck {
+function skipped(name: DevPerformanceCheck["name"]): DevPerformanceCheck {
   return {
     name,
     status: "warn",
@@ -169,7 +169,6 @@ export function renderDevPerformanceNotes(
       (result) =>
         (DEV_PERFORMANCE_CHECKS as readonly string[]).includes(result.name) &&
         hasDevPerformanceDetail({
-          name: result.name,
           status: result.status === "ok" ? "ok" : "warn",
           message: result.message,
           devPerformance: result.devPerformance,
@@ -187,7 +186,7 @@ export type PollingFixOutcome = {
   readonly changed: boolean;
   readonly confirmed: boolean;
   readonly check: {
-    readonly name: string;
+    readonly name: typeof POLLING_FIX_ID;
     readonly status: "ok" | "error";
     readonly message: string;
   };

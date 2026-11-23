@@ -35,6 +35,7 @@ import {
   cleanupRetainedBuildFixtureImages,
   nativeComposeAdoptionBuildWorktreesScenario,
 } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { retainedBuildFixture } from "./helpers/retained-build-adoption.ts";
 
 const CANARY = "synthetic-private-builder-canary";
@@ -98,8 +99,8 @@ for (const mode of ["root-specific", "hack-default"] as const) {
       await mkdtemp(join(tmpdir(), "retained-build-fixture-source-"))
     );
     try {
-      await mkdir(join(root, ".git"));
-      await mkdir(join(root, ".hack"));
+      await mkdirOwnedFixture(join(root, ".git"));
+      await mkdirOwnedFixture(join(root, ".hack"));
       await prepareRetainedBuildFixtureSources({ root, name: "fixture", mode });
       const configText = '{"name":"fixture"}';
       const composeText = JSON.stringify({

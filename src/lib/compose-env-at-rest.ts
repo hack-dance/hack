@@ -158,7 +158,7 @@ export async function writeComposeEnvOverride(opts: {
   if ((await holdOverrideDirectories(path)).kind === "refused") {
     throw new Error(REFUSAL);
   }
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const options = fileOptions(path);
   const existing = await readReplaceablePrivateFile(options);
   if (existing?.text !== opts.text || (existing.mode & 0o077) !== 0) {

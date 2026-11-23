@@ -1,3 +1,5 @@
+import projectPrivateFiles from "./project-private-files.json";
+
 export const HACK_PROJECT_DIR_PRIMARY = ".hack" as const;
 export const HACK_PROJECT_DIR_LEGACY = ".dev" as const;
 
@@ -88,7 +90,7 @@ export const PROJECT_ENV_CONFIG_DEFAULT_FILENAME =
 export const PROJECT_ENV_CONFIG_FILENAME_PREFIX = "hack.env." as const;
 export const PROJECT_ENV_CONFIG_FILENAME_SUFFIX = ".yaml" as const;
 export const PROJECT_ENV_LOCAL_SEGMENT = "local" as const;
-export const PROJECT_ENV_KEY_FILENAME = ".hack.secret.key" as const;
+export const PROJECT_ENV_KEY_FILENAME = projectPrivateFiles.envKey;
 export const PROJECT_ENV_STATE_FILENAME = ".env.state.json" as const;
 export const PROJECT_CONFIG_FILENAME = "hack.config.json" as const;
 export const PROJECT_CONFIG_LEGACY_FILENAME = "hack.toml" as const;

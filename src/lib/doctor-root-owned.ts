@@ -109,7 +109,11 @@ export async function findCheckoutFilesOwnedBy(opts: {
 export async function checkRootOwnedCheckout(
   opts: { readonly projectRoot: string; readonly composeFile: string },
   ownerUid = 0
-) {
+): Promise<{
+  readonly name: typeof ROOT_OWNED_CHECK;
+  readonly status: "ok" | "warn";
+  readonly message: string;
+}> {
   const observed = await findCheckoutFilesOwnedBy({
     root: opts.projectRoot,
     uid: ownerUid,
@@ -117,7 +121,7 @@ export async function checkRootOwnedCheckout(
   if (observed.paths.length === 0) {
     return {
       name: ROOT_OWNED_CHECK,
-      status: "ok" as const,
+      status: "ok",
       message: observed.incomplete
         ? `No root-owned checkout paths found in a partial scan (up to ${ENTRY_LIMIT.toLocaleString("en-US")} entries, ${WALK_MS} ms, and 32 directory levels).`
         : "No root-owned checkout paths found.",
@@ -159,7 +163,7 @@ export async function checkRootOwnedCheckout(
   );
   return {
     name: ROOT_OWNED_CHECK,
-    status: "warn" as const,
+    status: "warn",
     message: [
       `Root-owned checkout paths: ${paths.join(", ")}.`,
       observed.incomplete

@@ -27,6 +27,7 @@ mod doctor_view;
 #[cfg(hack_terminal)]
 mod drive;
 mod env_view;
+mod files_view;
 mod follow_up_view;
 mod health_commands;
 mod health_fixtures;
@@ -285,6 +286,9 @@ fn main() {
                         }
                         if f.name().starts_with("env-") {
                             app.show_env_fixture(f.name(), window, cx);
+                        }
+                        if f == Fixture::Files {
+                            app.show_files_fixture(window, cx);
                         }
                         if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
                             app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);

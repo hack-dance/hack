@@ -41,6 +41,7 @@ pub enum Fixture {
     Stopped,
     Starting,
     Running,
+    Files,
     Degraded,
     Stopping,
     FailedStart,
@@ -83,7 +84,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -105,6 +106,7 @@ impl Fixture {
         Self::Stopped,
         Self::Starting,
         Self::Running,
+        Self::Files,
         Self::Degraded,
         Self::Stopping,
         Self::FailedStart,
@@ -155,6 +157,7 @@ impl Fixture {
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Files => "files",
             Self::Degraded => "degraded",
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
@@ -463,7 +466,7 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             r.runtime = None;
             r
         }
-        Fixture::Running => {
+        Fixture::Running | Fixture::Files => {
             let mut r = storefront(all_up(), "running");
             r.branch_runtime = owned(vec![
                 running_branch("feature-search"),

@@ -237,6 +237,7 @@ pub struct TerminalView {
     selecting: bool,
     scroll_carry: f32,
     search_open: bool,
+    waiting_for_password: bool,
     query: String,
     search: SearchState,
     applied_theme: Option<TermTheme>,
@@ -337,6 +338,7 @@ impl TerminalView {
             selecting: false,
             scroll_carry: 0.,
             search_open: false,
+            waiting_for_password: false,
             query: String::new(),
             search: SearchState::default(),
             applied_theme: None,
@@ -568,6 +570,18 @@ impl TerminalView {
         self.core.status()
     }
 
+    pub fn exit_status(&self) -> Option<crate::session::ExitInfo> {
+        self.core.exit_status()
+    }
+
+    pub fn waiting_for_password(&self) -> bool {
+        self.waiting_for_password
+    }
+
+    pub fn output_text(&self) -> Option<String> {
+        self.core.emu().output_text()
+    }
+
     pub fn follow(&self) -> bool {
         self.core.emu().follow()
     }
@@ -597,6 +611,7 @@ impl TerminalView {
     /// passes. For headless capture and tests; the window uses its timer.
     pub fn settle(&mut self, quiet: Duration, deadline: Duration, cx: &mut Context<Self>) {
         self.core.settle(quiet, deadline);
+        self.waiting_for_password = self.core.waiting_for_password();
         cx.notify();
     }
 
@@ -613,7 +628,9 @@ impl TerminalView {
     /// Process pending output. Returns whether anything arrived.
     fn pump(&mut self, cx: &mut Context<Self>) -> bool {
         let busy = self.core.pump();
-        if busy {
+        let waiting = self.core.waiting_for_password();
+        if busy || waiting != self.waiting_for_password {
+            self.waiting_for_password = waiting;
             // The find count is brought up to date in `render`, in the
             // same pass as the frame's highlights.
             cx.notify();
@@ -953,7 +970,9 @@ impl Render for TerminalView {
         // A notice about undelivered input outranks the status line.
         let status = match (self.core.notice(), self.core.status()) {
             (Some(notice), _) => Some(notice.to_owned()),
-            (None, Status::Ended(s)) => Some(s.clone()),
+            (None, Status::Ended(s)) if !matches!(self.kind(), SessionKind::Command { .. }) => {
+                Some(s.clone())
+            }
             (None, Status::Running) if self.core.read_only() && !self.core.emu().follow() => {
                 Some("paused".into())
             }
@@ -962,6 +981,9 @@ impl Render for TerminalView {
         // Contexts for the app's key bindings; see `crate::actions`.
         let mut key_context = gpui_kit::KeyContext::default();
         key_context.add("Terminal");
+        if matches!(self.kind(), SessionKind::Command { .. }) {
+            key_context.add("TerminalCommand");
+        }
         if self.core.read_only() {
             key_context.add("TerminalLogs");
         }

@@ -10,6 +10,8 @@
 //!                                      click-through, on fixtures
 //! hack-desktop --screenshots <dir>     (feature `screenshots`) render every
 //!                                      fixture, light and dark, offscreen
+//! hack-desktop --command-screenshots <dir>
+//!                                      render only the shared drawer fixtures
 //! hack-desktop --drive <steps> [--hidden]
 //!                                      (feature `terminal`) run a steps file
 //!                                      in the real window, quit, and report
@@ -18,6 +20,8 @@
 //! ```
 
 mod clipboard;
+#[cfg(hack_terminal)]
+mod command_control;
 mod copies_view;
 mod doctor_view;
 #[cfg(hack_terminal)]
@@ -46,6 +50,7 @@ pub(crate) struct Args {
     pub logs_fixture: Option<hack_desktop_core::logs::fixtures::LogsFixture>,
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
+    pub command_screenshots: Option<std::path::PathBuf>,
     pub sequence: Option<std::path::PathBuf>,
     /// `--drive`: run the steps file in a child app and report.
     pub drive: Option<std::path::PathBuf>,
@@ -60,7 +65,7 @@ pub(crate) struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>] [--drive <steps> [--hidden]]"
+        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir> | --command-screenshots <dir>] [--drive <steps> [--hidden]]"
     );
     std::process::exit(2)
 }
@@ -71,6 +76,7 @@ fn parse_args() -> Args {
         logs_fixture: None,
         theme: None,
         screenshots: None,
+        command_screenshots: None,
         sequence: None,
         drive: None,
         drive_child: None,
@@ -125,6 +131,9 @@ fn parse_args() -> Args {
                 });
             }
             "--screenshots" => a.screenshots = Some(it.next().unwrap_or_else(|| usage()).into()),
+            "--command-screenshots" => {
+                a.command_screenshots = Some(it.next().unwrap_or_else(|| usage()).into());
+            }
             "--sequence" => a.sequence = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--drive-child" => {
                 let steps = it.next().unwrap_or_else(|| usage());
@@ -207,6 +216,19 @@ fn main() {
     if let Some(dir) = &args.screenshots {
         screenshots::run(dir, args.fixture);
         return;
+    }
+    if let Some(dir) = &args.command_screenshots {
+        #[cfg(all(feature = "screenshots", hack_terminal))]
+        {
+            screenshots::run_command_drawer(dir);
+            return;
+        }
+        #[cfg(not(all(feature = "screenshots", hack_terminal)))]
+        {
+            let _ = dir;
+            eprintln!("--command-screenshots needs the terminal and screenshots features");
+            std::process::exit(2);
+        }
     }
     #[cfg(not(feature = "screenshots"))]
     if args.screenshots.is_some() || args.sequence.is_some() {

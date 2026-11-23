@@ -5,8 +5,7 @@
 //! Every effect needs an explicit click. Reads never start services. The
 //! only actions the app runs are the fixed daemon start and install, each
 //! followed by fresh checks. Admin steps (`hack global install`, `hack
-//! global trust`) go to the user's own terminal, which shows the command
-//! and waits for Enter: no password passes through the app. Skips last for
+//! global trust`) run in the embedded terminal where available. Skips last for
 //! this session only and never satisfy a check.
 
 use gpui_kit::{
@@ -14,7 +13,7 @@ use gpui_kit::{
     prelude::*, px,
 };
 use hack_desktop_core::machine_gate::Holder;
-use hack_desktop_core::setup::{Card, Pane as SetupPane, Remedy, SafeAction, Status};
+use hack_desktop_core::setup::{Card, Remedy, SafeAction, Status};
 use hack_desktop_ui::components::{
     StyledExt as _, Ui, action_button, empty_pane, pill, primary_button,
 };
@@ -90,6 +89,24 @@ impl HackApp {
             self.load_setup(cx);
         } else {
             self.setup.pending_fix = false;
+            #[cfg(hack_terminal)]
+            if let Some((run, id)) = self.setup_command_check.take() {
+                let result = self
+                    .setup
+                    .report
+                    .cards
+                    .iter()
+                    .find(|card| card.id == id)
+                    .ok_or_else(|| "Could not confirm setup. Check again.".to_owned())
+                    .and_then(|card| {
+                        if card.status == Status::Passed {
+                            Ok(())
+                        } else {
+                            Err(card.detail.clone())
+                        }
+                    });
+                self.command_checked(run, result, cx);
+            }
         }
         if std::mem::take(&mut self.setup_on_launch) && needed {
             self.pane = Pane::Setup;
@@ -172,6 +189,7 @@ impl HackApp {
 
     /// Hand an admin step to the user's terminal: it shows the command and
     /// waits for Enter. Launching proves nothing; checks run again after.
+    #[cfg(any(not(hack_terminal), all(test, feature = "screenshots")))]
     fn open_setup_terminal(&mut self, args: Vec<String>, cx: &mut Context<Self>) {
         use hack_desktop_core::terminal::{Platform, Script, SystemLauncher, linux_adapter};
         let offered = self
@@ -243,14 +261,10 @@ impl HackApp {
 
 /// `machine_busy`: another machine action (Start / Restart hackd from the
 /// project pane) holds the shared gate, so this pane's actions wait too.
-pub fn render(
-    pane: &SetupPane,
-    machine_busy: bool,
-    ui: &Ui,
-    cx: &mut Context<HackApp>,
-) -> AnyElement {
+pub fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
     let p = ui.p;
-    let busy = pane.loading || pane.action_busy || machine_busy;
+    let pane = &app.setup;
+    let busy = pane.loading || pane.action_busy || app.machine.busy();
     let mut recheck = action_button(
         "setup-recheck",
         Glyph::Restart,
@@ -323,7 +337,11 @@ pub fn render(
                 div()
                     .type_step(text::BODY)
                     .text_color(p.text_secondary)
-                    .child("Checks only read. Skipped and unknown steps stay unresolved. Admin steps open in your terminal and wait for Enter."),
+                    .child(if cfg!(hack_terminal) {
+                        "Checks only read. Commands run in the terminal when you press Run."
+                    } else {
+                        "Checks only read. Admin steps open in your terminal and wait for Enter."
+                    }),
             );
         if let Some(result) = &pane.result {
             col = col.child(
@@ -338,7 +356,7 @@ pub fn render(
             );
         }
         for (i, c) in pane.report.cards.iter().enumerate() {
-            col = col.child(card(i, c, pane, busy, ui, cx));
+            col = col.child(card(i, c, app, busy, ui, cx));
         }
         col.into_any_element()
     };
@@ -379,14 +397,54 @@ fn short_command(bound: &str) -> String {
     }
 }
 
+#[cfg(hack_terminal)]
+fn setup_command(
+    card: &Card,
+    mut args: Vec<String>,
+    expects_password: bool,
+    busy: bool,
+    app: &HackApp,
+    ui: &Ui,
+    cx: &mut Context<HackApp>,
+) -> AnyElement {
+    use hack_desktop_core::terminal::{
+        CommandAvailability, CommandControl, CommandControlSize, CommandExit,
+    };
+    let id = card.id.clone();
+    let label = format!("hack {}", args.join(" "));
+    if matches!(card.remedy, Remedy::Run(_)) {
+        // Preserve the old safe action's non-interactive CLI mode.
+        args.push("--no-interactive".into());
+    }
+    let props = CommandControl {
+        id: format!("setup:{id}"),
+        label,
+        title: "Terminal".into(),
+        availability: match app.setup.report.command(args) {
+            Ok(spec) => CommandAvailability::Ready(spec),
+            Err(reason) => CommandAvailability::Blocked(reason),
+        },
+        size: CommandControlSize::Standard,
+        cwd: None,
+        expects_password,
+    };
+    crate::command_control::render(props, busy, app, ui, cx, move |app, completion, cx| {
+        if completion.exit == CommandExit::Code(0) {
+            app.setup_command_check = Some((completion.run, id.clone()));
+        }
+        app.load_setup(cx);
+    })
+}
+
 fn card(
     i: usize,
     c: &Card,
-    pane: &SetupPane,
+    app: &HackApp,
     busy: bool,
     ui: &Ui,
     cx: &mut Context<HackApp>,
 ) -> AnyElement {
+    let pane = &app.setup;
     let p = ui.p;
     let skipped = pane.skipped.contains(&c.id);
     let (label, colors) = match (c.status, skipped) {
@@ -398,6 +456,15 @@ fn card(
     let cli = pane.report.cli_ready();
     let mut actions = div().flex().items_center().gap(space::S3);
     let mut command_line: Option<String> = None;
+    #[cfg(hack_terminal)]
+    if c.status == Status::Passed {
+        actions = actions.children(crate::command_control::render_history(
+            &format!("setup:{}", c.id),
+            app,
+            ui,
+            cx,
+        ));
+    }
     if c.status != Status::Passed {
         match &c.remedy {
             Remedy::Copy(cmd) => {
@@ -422,13 +489,22 @@ fn card(
             }
             Remedy::Run(action) => {
                 let action = *action;
-                let label = match action {
-                    SafeAction::StartDaemon => "Start hackd",
-                    SafeAction::InstallDaemon => "Install hackd",
-                };
-                let enabled = cli && !busy;
-                actions =
-                    actions.child(
+                #[cfg(hack_terminal)]
+                let embedded = (action == SafeAction::StartDaemon).then(|| {
+                    let args = action.args().iter().map(|arg| (*arg).into()).collect();
+                    setup_command(c, args, false, busy, app, ui, cx)
+                });
+                #[cfg(not(hack_terminal))]
+                let embedded: Option<AnyElement> = None;
+                if let Some(control) = embedded {
+                    actions = actions.child(div().flex_1().min_w_0().child(control));
+                } else {
+                    let label = match action {
+                        SafeAction::StartDaemon => "Start hackd",
+                        SafeAction::InstallDaemon => "Install hackd",
+                    };
+                    let enabled = cli && !busy;
+                    actions = actions.child(
                         action_button(("setup-run", i), Glyph::Play, label, enabled, ui).when(
                             enabled,
                             |b| {
@@ -438,7 +514,9 @@ fn card(
                             },
                         ),
                     );
+                }
             }
+            #[cfg(not(hack_terminal))]
             Remedy::Admin(args) => {
                 let bound = pane.report.command(args.clone()).and_then(|c| c.display());
                 let available = cli && bound.is_ok();
@@ -476,6 +554,18 @@ fn card(
                         }))
                     }),
                 );
+            }
+            #[cfg(hack_terminal)]
+            Remedy::Admin(args) => {
+                actions = actions.child(div().flex_1().min_w_0().child(setup_command(
+                    c,
+                    args.clone(),
+                    true,
+                    busy,
+                    app,
+                    ui,
+                    cx,
+                )));
             }
         }
         // The CLI cannot be skipped: everything else needs it.

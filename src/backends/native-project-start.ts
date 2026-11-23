@@ -86,7 +86,9 @@ import {
   admitNativeProjectBuilds,
   buildNativeProjectImages,
   invokeNativeBuild,
+  NativeBuildRegistryError,
   type NativeBuildRequest,
+  type NativeBuildSettlement,
   type NativeVerifiedBuild,
   nativeBuildsEnabled,
   nativeRebuildRequested,
@@ -779,6 +781,8 @@ async function resolveNativeBuildImages(opts: {
   readonly specs: Record<string, Record<string, unknown>>;
   readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
   readonly signal: AbortSignal;
+  readonly guestCpus?: number;
+  readonly onBuildSettled?: (settlement: NativeBuildSettlement) => void;
   readonly invoke: typeof invokeNativeBuild | undefined;
   readonly onBuilt: () => void;
 }): Promise<ReadonlySet<string>> {
@@ -2278,7 +2282,8 @@ export type NativeStartupProgress =
       /** Indented route, unserved-route and published-port lines. */
       readonly endpoints: readonly string[];
     }
-  | ({ readonly phase: "service-exited" } & NativeServiceExit);
+  | ({ readonly phase: "service-exited" } & NativeServiceExit)
+  | ({ readonly phase: "build-settled" } & NativeBuildSettlement);
 
 function progressReporter(
   observe: ((event: NativeStartupProgress) => void) | undefined
@@ -2502,6 +2507,19 @@ function emitNativeLeftOutNotice(opts: {
     },
     opts.warn
   );
+}
+
+/** Guest CPU allocation is fixed by the runtime profile (provider/profile.rs). */
+function nativePoolBuildCpus(pool: unknown): number {
+  if (isRecord(pool)) {
+    if (pool.profile === "development") {
+      return 4;
+    }
+    if (pool.profile === "research") {
+      return 2;
+    }
+  }
+  return 1;
 }
 
 /**
@@ -3062,11 +3080,35 @@ async function startNativeProjectAttempt(
       builds,
       specs,
       verified: opts.verifiedBuildImages,
+      guestCpus: nativePoolBuildCpus(pool),
+      onBuildSettled: (settled) =>
+        progress({ phase: "build-settled", ...settled }),
       signal: controller.signal,
       invoke: deps.build,
       onBuilt: () => {
         rebuilt = true;
       },
+    }).catch(async (error: unknown) => {
+      if (!(error instanceof NativeBuildRegistryError)) {
+        throw error;
+      }
+      const references = Object.entries(specs).flatMap(([name, spec]) =>
+        nativeServiceActive(spec, profiles) &&
+        !builds.has(name) &&
+        typeof spec.image === "string"
+          ? [spec.image]
+          : []
+      );
+      throw await nativeImageBlocker({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        missing: error.reference,
+        buildBase: true,
+        reason: error.nativeCauseCode,
+        references: [...new Set([error.reference, ...references])],
+        confirmed: new Set(),
+        invoke: deps.invoke,
+      });
     });
     await pinNativeProjectImages({
       runtime: opts.runtime,

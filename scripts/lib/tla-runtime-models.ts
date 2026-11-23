@@ -181,6 +181,30 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "guest-execution",
+    module: "GuestAgent",
+    states: 3900,
+    invariant: "ResultBeforeRelease",
+    action: "Release",
+    fields: ['job = "released"', 'saved = "none"'],
+    additionalControls: [
+      {
+        name: "duplicate",
+        negative: true,
+        invariant: "StartedOnce",
+        action: "Next",
+        fields: ["starts = <<2, 0>>", "id = 1"],
+      },
+      {
+        name: "record-running",
+        negative: true,
+        invariant: "SavedOutcome",
+        action: "Record",
+        fields: ['belief = "running"', 'saved = "running"'],
+      },
+    ],
+  },
+  {
     name: "project-prerequisites",
     module: "ProjectPrerequisites",
     states: 13,
@@ -2426,6 +2450,46 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "per-service-publication",
+    module: "PerServicePublication",
+    states: 622,
+    invariant: "Safe",
+    action: "Record",
+    fields: [
+      'recorded = {"first"}',
+      'child = [first |-> "gated", second |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "Record",
+        fields: [
+          'recorded = {"second"}',
+          'child = [first |-> "absent", second |-> "gated"]',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "bind-before-commit",
+        negative: true,
+        action: "Bind",
+        fields: [
+          'child = [first |-> "uncommitted-bind", second |-> "absent"]',
+          "recorded = {}",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Bind",
+            fields: [
+              'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+              "recorded = {}",
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
     // Loopback TCP publication of Compose `ports`: one listener per host
     // port, no forwarding to a replaced container, no recovery of a live
     // owner, no listener after acknowledged stop; see tests/models/tla/README.md.
@@ -2806,6 +2870,23 @@ const contracts: readonly ModelContract[] = [
           "unsafeTerminal = FALSE",
           "lateStart = FALSE",
         ],
+      },
+    ],
+  },
+  {
+    name: "native-build-batch",
+    module: "BuildBatch",
+    states: 296,
+    invariant: "NoLiveReturn",
+    action: "Return",
+    fields: ["result = -2"],
+    additionalControls: [
+      {
+        name: "cancel-wins",
+        negative: true,
+        invariant: "FirstOutcome",
+        action: "Return",
+        fields: ["active = {}"],
       },
     ],
   },

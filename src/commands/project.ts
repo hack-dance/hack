@@ -43,13 +43,14 @@ import {
   writeStartBlocker,
   writeUpHookBlocker,
 } from "../ui/start-refusal-output.ts";
-import { createTextOutput } from "../ui/text-output.ts";
+import { createTextOutput, formatDuration } from "../ui/text-output.ts";
 import { writeComposeStarted } from "./compose-lifecycle-closing.ts";
 import {
   createComposeUpProgress,
   type HookCompletion,
   type HookStart,
 } from "./compose-up-progress.ts";
+import { runProjectCopies } from "./project-copies.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -825,6 +826,12 @@ const restartOptions = [
   optExpectFrontendPid,
 ] as const;
 const psOptions = [
+  defineOption({
+    name: "copies",
+    type: "boolean",
+    long: "--copies",
+    description: "Show all checkouts and branch instances of the project",
+  }),
   defineOption({
     name: "wide",
     type: "boolean",
@@ -6623,6 +6630,11 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
     case "runtime":
       logger.step({ message: "Starting the native runtime…" });
       return;
+    case "build-settled":
+      logger.info({
+        message: `Build ${event.services.join(", ")}: ${event.outcome} in ${formatDuration(event.durationMs)}`,
+      });
+      return;
     case "images":
       logger.step({ message: "Acquiring service images…" });
       return;
@@ -6982,7 +6994,10 @@ async function handleNativeUp({
       if (event.phase === "ready") {
         ready = true;
       }
-      if (restart || ready || event.phase !== "stopped") {
+      if (
+        (restart || ready || event.phase !== "stopped") &&
+        (event.phase !== "build-settled" || args.options.json !== true)
+      ) {
         reportNativeStartupProgress(event);
       }
     },
@@ -11196,6 +11211,37 @@ async function handlePs({
   readonly ctx: CliContext;
   readonly args: PsArgs;
 }): Promise<number> {
+  if (args.options.copies) {
+    if (
+      args.options.branch !== undefined ||
+      args.options.profile !== undefined ||
+      args.options.wide
+    ) {
+      throw new CliUsageError(
+        "--copies cannot be combined with --branch, --profile or --wide."
+      );
+    }
+    return await runProjectCopies({
+      cwd: ctx.cwd,
+      path: args.options.path,
+      project: args.options.project,
+      json: args.options.json === true,
+      legacyContext: () =>
+        resolveProjectForArgs({
+          ctx,
+          pathOpt: args.options.path,
+          projectOpt: args.options.project,
+          touchRegistration: false,
+        }),
+      addresses: async (project, branch, native) =>
+        readProjectServiceAddresses({
+          project,
+          cfg: await readProjectConfig(project),
+          branch,
+          native,
+        }),
+    });
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,

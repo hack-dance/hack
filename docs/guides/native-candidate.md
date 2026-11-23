@@ -137,7 +137,11 @@ Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
 An exact repository at `$HOME/.codex/worktrees/<id>/<repo>` is allowed only when
 bounded Git registration metadata verifies its worktree root, common directory and
 backlink. The enclosing Codex directories are never exported. Sensitive ancestors,
-aliases and unsafe ownership or permissions remain refused.
+aliases and unsafe ownership or permissions remain refused. Git can create
+group-writable worktree directories and registration files under umask `002`.
+Create a worktree intended for sharing with umask `022` or stricter, and ensure
+its existing registration directories and metadata are also free of group and
+other write permissions.
 
 The internal planning path accepts a canonical lowercase DNS-label `--branch`.
 It gives each checkout/branch pair a separate enrollment and source namespace;
@@ -1248,8 +1252,12 @@ Downloads never pass through a shell, proxy configuration, keychain or admin pro
 Networks that require an HTTP proxy must use the offline form below; setup ignores
 proxy environment variables.
 
-Private partial files and verified archives stay under
-`<candidate-home>/.hack-local/setup/downloads`. A rerun resumes a partial download
+Private partial files and verified archives are downloaded under
+`<candidate-home>/.hack-local/setup/downloads`. After durable provider publication,
+online setup removes its two recorded provider downloads, and a later setup retries
+interrupted cleanup. Older or replaced files without matching ownership evidence are
+reported and kept. Offline inputs and provider repair archives are kept.
+A rerun resumes a partial download
 when the server supports ranges, otherwise restarts it. Every complete file is
 hashed before any extraction; a mismatch reports `setup_hash_mismatch` with the
 filename and publishes no provider. A corrupt complete cache file is preserved
@@ -1424,8 +1432,9 @@ tree, stop the runtime and run:
 
 The repair holds the provider lock and requires a stopped (or uninitialized) runtime.
 It requires the preparation record to match this executor's pins and the kept archive
-to be an owned regular file with the pinned SHA-256. It then copies and hashes the
-archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
+to be an owned regular file with the pinned SHA-256. Group- or other-writable
+archives and staging directories are refused. New preparations create both with
+owner-only permissions. The repair then copies and hashes the archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
 tree to match the digest recorded at preparation. Only then does it rename the changed
 tree aside as `providers/<tree>-changed-<id>` and put the fresh tree in its place. It
 keeps the changed tree for inspection and never deletes it; remove it yourself once
@@ -1463,6 +1472,12 @@ and leaves it in place when it is anything else, such as a symlink or a director
 If the prepared tree changes, `runtime probe` and every build
 refuse with `artifact_digest_mismatch`. `runtime probe` reports `builder_prepared`:
 `true` when the client is present and unchanged, `false` for a home without it.
+
+A native start can build distinct images together, including a retained start after edits. The
+four-CPU development pool runs at most three builds at once. Identical build
+requests still share one build. A failure or Ctrl-C requests cancellation of
+the other builds, and the CLI waits for all started builds to settle before
+returning. The foreground labels output by build and reports its elapsed time.
 
 A home without the image builder refuses a build with `builder_not_prepared`:
 "The image builder is not installed in this native home", with the setup command
@@ -3548,6 +3563,12 @@ Failures inside the startup period don't count toward `retries`, as the engine
 defines it. Declared values are kept, and a disabled check gets neither. Authored
 native readiness (`readiness.exec`) gets the same cadence. A container started by an
 earlier build, without these fields, is still accepted as the same container.
+
+For a Compose service that mounts a data volume created during this start, native
+uses the authored timing when `start_interval` is omitted. Restoring with the
+retained volume uses the fast defaults again. For Postgres, use
+`pg_isready -h 127.0.0.1` so a temporary socket-only server during initialization
+cannot release dependents before the final server starts.
 
 The 250 ms cadence applies only inside the startup period that follows a container
 start. After a pause and resume the container's startup period is not restarted, so

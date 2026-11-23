@@ -264,6 +264,7 @@ export async function nativeImageBlocker(
   opts: ReadTagStatuses & {
     readonly missing: string;
     readonly downloading?: boolean;
+    readonly buildBase?: true;
     readonly reason?: string;
     readonly references: readonly string[];
     readonly confirmed: ReadonlySet<string>;
@@ -294,6 +295,7 @@ export async function nativeImageBlocker(
     missing: opts.missing,
     present,
     ...(opts.downloading ? { downloading: true as const } : {}),
+    ...(opts.buildBase ? { buildBase: true as const } : {}),
     ...(nativeImageRegistryReason(opts.reason) ? { reason: opts.reason } : {}),
   };
   return new NativeImageBlocker(

@@ -78,6 +78,7 @@ export type RuntimeProjectsResult =
     }
   | {
       readonly ok: false;
+      readonly code?: "E_TIMEOUT" | "E_DOCKER_UNAVAILABLE";
       readonly runtime: readonly RuntimeProject[];
       readonly error: string;
       readonly checkedAtMs: number;
@@ -158,6 +159,7 @@ export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean;
   readonly inspectCache?: RuntimeInspectCache;
   readonly forceInspect?: boolean;
+  readonly inventoryOnly?: boolean;
   readonly profiler?: OperationTimings;
 }): Promise<RuntimeProjectsResult> {
   const profiler = opts.profiler ?? createOperationTimings();
@@ -184,7 +186,10 @@ export async function readRuntimeProjects(opts: {
           "--format",
           "json",
         ],
-        { stdin: "ignore" }
+        {
+          stdin: "ignore",
+          ...(opts.inventoryOnly ? { timeoutMs: 15_000 } : {}),
+        }
       )
     );
   } catch (error: unknown) {
@@ -199,6 +204,14 @@ export async function readRuntimeProjects(opts: {
     return {
       ok: false,
       runtime: [],
+      ...(opts.inventoryOnly
+        ? {
+            code:
+              res.exitCode === 124
+                ? ("E_TIMEOUT" as const)
+                : ("E_DOCKER_UNAVAILABLE" as const),
+          }
+        : {}),
       error: formatDockerError({
         exitCode: res.exitCode,
         stdout: res.stdout,
@@ -212,21 +225,23 @@ export async function readRuntimeProjects(opts: {
   const ids = baseRows
     .map((row) => getString(row, "ID") ?? getString(row, "Id") ?? "")
     .filter((id) => id.length > 0);
-  const inspectById = await profiler.measure("docker_inspect_ms", async () =>
-    opts.inspectCache
-      ? await readCachedContainerInspectData({
-          cache: opts.inspectCache,
-          forceInspect: opts.forceInspect ?? true,
-          states: new Map(
-            baseRows.map((row) => [
-              getString(row, "ID") ?? getString(row, "Id") ?? "",
-              getString(row, "State") ?? "",
-            ])
-          ),
-          ids,
-        })
-      : await readContainerInspectData({ ids })
-  );
+  const inspectById = opts.inventoryOnly
+    ? new Map<string, ContainerInspectData>()
+    : await profiler.measure("docker_inspect_ms", async () =>
+        opts.inspectCache
+          ? await readCachedContainerInspectData({
+              cache: opts.inspectCache,
+              forceInspect: opts.forceInspect ?? true,
+              states: new Map(
+                baseRows.map((row) => [
+                  getString(row, "ID") ?? getString(row, "Id") ?? "",
+                  getString(row, "State") ?? "",
+                ])
+              ),
+              ids,
+            })
+          : await readContainerInspectData({ ids })
+      );
 
   const globalRoot = resolveGlobalHackDir();
 
@@ -280,6 +295,7 @@ export async function readRuntimeProjects(opts: {
   const byProject = new Map<
     string,
     {
+      project: string;
       workingDir: string | null;
       byService: Map<string, RuntimeContainer[]>;
       isGlobal: boolean;
@@ -291,35 +307,41 @@ export async function readRuntimeProjects(opts: {
       globalRoot.length > 0 && workingDir
         ? workingDir.startsWith(globalRoot)
         : false;
-    const p = byProject.get(c.project) ?? {
+    const key = opts.inventoryOnly
+      ? JSON.stringify([c.project, workingDir])
+      : c.project;
+    const p = byProject.get(key) ?? {
+      project: c.project,
       workingDir,
       byService: new Map(),
       isGlobal,
     };
     const arr = p.byService.get(c.service) ?? [];
     p.byService.set(c.service, [...arr, c]);
-    byProject.set(c.project, p);
+    byProject.set(key, p);
   }
 
   const out: RuntimeProject[] = [];
-  for (const [project, value] of byProject.entries()) {
+  for (const value of byProject.values()) {
     const services = new Map<string, RuntimeService>();
     for (const [service, containersByService] of value.byService.entries()) {
       services.set(service, { service, containers: containersByService });
     }
     out.push({
-      project,
+      project: value.project,
       workingDir: value.workingDir,
       services,
       isGlobal: value.isGlobal,
     });
   }
 
-  const runtimeWithLifecycle = await profiler.measure("lifecycle_ms", () =>
-    addLifecycleProcessServices({
-      runtime: out,
-    })
-  );
+  const runtimeWithLifecycle = opts.inventoryOnly
+    ? out
+    : await profiler.measure("lifecycle_ms", () =>
+        addLifecycleProcessServices({
+          runtime: out,
+        })
+      );
 
   return {
     ok: true,

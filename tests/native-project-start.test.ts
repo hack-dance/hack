@@ -21,6 +21,7 @@ import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-pol
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import {
   admitNativeProjectBuilds,
+  NativeBuildRegistryError,
   nativeBuildIdentity,
 } from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
@@ -5628,6 +5629,89 @@ test("retained startup asks the runtime to confirm the tag before review", async
     return await review(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("a parallel build registry refusal keeps its blocker after the sibling settles", async () => {
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    const { opts } = await fixture(false);
+    const base = "docker.io/library/python:3.12-alpine";
+    const loaded = "docker.io/library/alpine:3.22";
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { build: "." },
+          worker: { build: { context: ".", target: "worker" } },
+          other: { image: loaded },
+        },
+      }),
+    });
+    const siblingStarted = Promise.withResolvers<void>();
+    const siblingAborted = Promise.withResolvers<void>();
+    const allowSettlement = Promise.withResolvers<void>();
+    let starts = 0;
+    let siblingSettled = false;
+    opts.dependencies.build = async ({ signal }) => {
+      starts += 1;
+      if (starts === 1) {
+        await siblingStarted.promise;
+        throw new NativeBuildRegistryError(base, "registry_http_429");
+      }
+      signal?.addEventListener("abort", () => siblingAborted.resolve(), {
+        once: true,
+      });
+      siblingStarted.resolve();
+      await allowSettlement.promise;
+      siblingSettled = true;
+      throw new Error("sibling canceled");
+    };
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "up" && request.args[0] === "runtime") {
+        await invoke(request);
+        return { profile: "development" };
+      }
+      if (request.args[1] === "image-tag-status") {
+        expect(siblingSettled).toBe(true);
+        expect(request.args).toEqual([
+          "runtime",
+          "image-tag-status",
+          "--present",
+          "--json",
+          base,
+          loaded,
+        ]);
+        return [loaded];
+      }
+      return await invoke(request);
+    };
+    const result = startNativeProject(opts);
+    try {
+      const aborted = await Promise.race([
+        siblingAborted.promise.then(() => true),
+        result.then(() => false),
+        Bun.sleep(2000).then(() => false),
+      ]);
+      expect(aborted).toBe(true);
+      expect(starts).toBe(2);
+      expect(siblingSettled).toBe(false);
+    } finally {
+      siblingStarted.resolve();
+      allowSettlement.resolve();
+    }
+    await expect(result).rejects.toThrow(
+      `Image unavailable: could not resolve build base ${base} (registry rate limit reached).\nAlready present: ${loaded}.\nRetry hack up when the registry is reachable.`
+    );
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+  }
 });
 
 test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {

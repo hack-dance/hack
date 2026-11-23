@@ -57,6 +57,8 @@ const FILE_LIMIT = 32 * 1024 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
 const PAYLOAD_NAME = /^[0-9]+\.payload$/;
 const ENV_KEY = /^[A-Z_][A-Z0-9_]*$/;
+const CONFIG_ENV_LAYER =
+  /^hack\.env\.[a-z0-9][a-z0-9-]{0,127}(?:\.local)?\.yaml$/;
 
 export type EnvMigrationProject = {
   readonly projectRoot: string;
@@ -89,6 +91,12 @@ type Publication = EnvMigrationFileState & {
   readonly done: boolean;
 };
 
+type ConfigPublication = {
+  readonly before: EnvMigrationFileState;
+  readonly after: EnvMigrationFileState;
+  readonly committed: boolean;
+};
+
 type Journal = {
   readonly version: 1;
   readonly kind: "hack-env-migration";
@@ -102,8 +110,8 @@ type Journal = {
     | "rolled_back"
     | "rolling_back";
   readonly sources: readonly EnvMigrationFileState[];
-  /** Authored files committed by the same save after migration. */
-  readonly configEdits?: readonly EnvMigrationFileState[];
+  /** Expected before and after revisions of files in the initiating Config save. */
+  readonly configEdits?: readonly ConfigPublication[];
   readonly writes: readonly Publication[];
   readonly removable: readonly string[];
   readonly overlayNames: readonly string[];
@@ -226,13 +234,30 @@ function validState(
   );
 }
 
-function isAuthoredMigrationConfigPath(
+function isMigrationConfigEditPath(
   project: EnvMigrationProject,
   path: string
 ): boolean {
   return (
     path === join(project.projectDir, "hack.config.json") ||
-    path === join(project.projectDir, "docker-compose.yml")
+    path === join(project.projectDir, "docker-compose.yml") ||
+    (dirname(path) === project.projectDir &&
+      CONFIG_ENV_LAYER.test(basename(path)))
+  );
+}
+
+function validConfigPublication(
+  entry: unknown,
+  project: EnvMigrationProject
+): entry is ConfigPublication {
+  return (
+    isRecord(entry) &&
+    validState(entry.before) &&
+    validState(entry.after) &&
+    entry.before.path === entry.after.path &&
+    entry.after.sha256 !== null &&
+    typeof entry.committed === "boolean" &&
+    isMigrationConfigEditPath(project, entry.after.path)
   );
 }
 
@@ -309,11 +334,8 @@ async function readJournal(
       raw.sources.every(validState) &&
       (raw.configEdits === undefined ||
         (Array.isArray(raw.configEdits) &&
-          raw.configEdits.length <= 2 &&
-          raw.configEdits.every(
-            (file) =>
-              validState(file) &&
-              isAuthoredMigrationConfigPath(project, file.path)
+          raw.configEdits.every((entry) =>
+            validConfigPublication(entry, project)
           ))) &&
       (raw.composeRepair === undefined ||
         ["deferred", "applying", "complete"].includes(
@@ -401,7 +423,8 @@ export type ImplicitEnvMigrationPlan = Preparation & {
 
 /** Preflight immutable migration payloads as part of a larger validated edit. */
 export async function prepareImplicitEnvMigration(
-  input: EnvMigrationProject
+  input: EnvMigrationProject,
+  edits: readonly { readonly path: string; readonly text: string | null }[] = []
 ): Promise<ImplicitEnvMigrationPlan> {
   const project = await canonicalProject(input);
   assertFreshMigration(
@@ -413,7 +436,18 @@ export async function prepareImplicitEnvMigration(
     plan.prepared.files.map((file) => file.path),
     false
   );
-  return { ...plan, project };
+  const sources = new Map(plan.sources.map((file) => [file.path, file]));
+  for (const edit of edits) {
+    if (!isMigrationConfigEditPath(project, edit.path)) {
+      throw new AtomicWriteConflictError();
+    }
+    const observed = await readState(edit.path);
+    if (observed.text !== edit.text) {
+      throw new AtomicWriteConflictError();
+    }
+    sources.set(edit.path, sources.get(edit.path) ?? observed.state);
+  }
+  return { ...plan, sources: [...sources.values()], project };
 }
 
 function assertFreshMigration(journal: Journal | null): void {
@@ -616,21 +650,24 @@ async function assertSources(
     );
     const edited = revised
       ? undefined
-      : journal.configEdits?.find((entry) => entry.path === source.path);
+      : journal.configEdits?.find((entry) => entry.after.path === source.path);
     const write =
       edited || (revised && publication?.kind !== "compose")
         ? undefined
         : publication;
     if (
       allowLayerChanges &&
-      (publication?.kind === "layer" || publication?.kind === "local_layer")
+      (publication?.kind === "layer" ||
+        publication?.kind === "local_layer" ||
+        (dirname(source.path) === journal.project.projectDir &&
+          CONFIG_ENV_LAYER.test(basename(source.path))))
     ) {
       continue;
     }
     if (
       !matchesMigrationSource({
         current,
-        source: edited ?? source,
+        source: configEditRevision(edited, current) ?? source,
         write,
         allowTighterModes,
       })
@@ -640,6 +677,18 @@ async function assertSources(
       );
     }
   }
+}
+
+function configEditRevision(
+  edit: ConfigPublication | undefined,
+  current: EnvMigrationFileState
+): EnvMigrationFileState | undefined {
+  if (!edit) {
+    return undefined;
+  }
+  return !edit.committed && same(current, edit.before)
+    ? edit.before
+    : edit.after;
 }
 
 function matchesMigrationSource({
@@ -1518,66 +1567,103 @@ async function cleanupLocked(
   };
 }
 
-/** Record only the exact authored revision committed by the save that ran this migration. */
-export async function recordEnvMigrationConfigEdit(input: {
-  readonly project: EnvMigrationProject;
-  readonly manifestPath: string;
+export type MigrationConfigWrite = {
   readonly path: string;
   readonly before: string | null;
   readonly after: string;
-}): Promise<void> {
+  readonly mode: number;
+};
+
+type MigrationConfigEdits = {
+  readonly prepare: (write: MigrationConfigWrite) => Promise<void>;
+  readonly commit: (path: string) => Promise<void>;
+};
+
+/** Hold the migration lock across Config writes so cleanup and rollback see either side of a recorded intent. */
+export async function withEnvMigrationConfigEdits<T>(input: {
+  readonly project: EnvMigrationProject;
+  readonly manifestPath: string;
+  readonly run: (edits: MigrationConfigEdits) => Promise<T>;
+}): Promise<T> {
   const { project } = input;
   const path = envMigrationJournalPath(project.projectRoot);
-  if (!isAuthoredMigrationConfigPath(project, input.path)) {
-    throw new AtomicWriteConflictError();
-  }
-  await withProjectsRegistryLock({
+  return await withProjectsRegistryLock({
     lockPath: `${path}.lock`,
     label: "env migration",
     run: async () => {
-      const journal = await readJournal(path, project);
+      const initial = await readJournal(path, project);
       if (
-        !journal ||
-        journal.state !== "complete" ||
-        journal.manifestPath !== input.manifestPath ||
-        journal.composeRepairSources !== undefined
+        !initial ||
+        initial.state !== "complete" ||
+        initial.manifestPath !== input.manifestPath ||
+        initial.configEdits !== undefined ||
+        initial.composeRepairSources !== undefined
       ) {
         throw new AtomicWriteConflictError();
       }
-      const original = journal.sources.find(
-        (entry) => entry.path === input.path
-      );
-      if (!original) {
-        throw new AtomicWriteConflictError();
-      }
-      const expected =
-        journal.writes.find((entry) => entry.path === input.path) ?? original;
-      const before =
-        input.before === null ? null : digest(Buffer.from(input.before));
-      const current = (await readState(input.path)).state;
-      if (
-        expected.sha256 !== before ||
-        current.sha256 !== digest(Buffer.from(input.after)) ||
-        (expected.mode !== null && current.mode !== expected.mode)
-      ) {
-        throw new AtomicWriteConflictError();
-      }
-      await envMigrationSnapshots().recordAfter({
-        manifestPath: journal.manifestPath,
-        files: [current],
-      });
-      await writeMetadata(path, {
-        ...journal,
-        validated: undefined,
-        configEdits: [
-          ...(journal.configEdits ?? []).filter(
-            (entry) => entry.path !== current.path
-          ),
-          current,
-        ],
+      let journal: Journal = initial;
+      const publishIntent = async (intent: ConfigPublication) => {
+        journal = {
+          ...journal,
+          validated: undefined,
+          configEdits: [
+            ...(journal.configEdits ?? []).filter(
+              (entry) => entry.after.path !== intent.after.path
+            ),
+            intent,
+          ],
+        };
+        await writeMetadata(path, journal);
+      };
+      return await input.run({
+        prepare: async (write) => {
+          const intent = await prepareMigrationConfigWrite(journal, write);
+          await publishIntent(intent);
+        },
+        commit: async (target) => {
+          const intent = journal.configEdits?.find(
+            (entry) => entry.after.path === target
+          );
+          if (
+            !(intent && same((await readState(target)).state, intent.after))
+          ) {
+            throw new AtomicWriteConflictError();
+          }
+          await publishIntent({ ...intent, committed: true });
+        },
       });
     },
   });
+}
+
+async function prepareMigrationConfigWrite(
+  journal: Journal,
+  write: MigrationConfigWrite
+): Promise<ConfigPublication> {
+  const original = journal.sources.find((entry) => entry.path === write.path);
+  if (
+    !(original && isMigrationConfigEditPath(journal.project, write.path)) ||
+    journal.configEdits?.some((entry) => entry.after.path === write.path)
+  ) {
+    throw new AtomicWriteConflictError();
+  }
+  const expected =
+    journal.writes.find((entry) => entry.path === write.path) ?? original;
+  const current = await readState(write.path);
+  if (!same(current.state, expected) || current.text !== write.before) {
+    throw new AtomicWriteConflictError();
+  }
+  const bytes = Buffer.from(write.after);
+  return {
+    before: current.state,
+    after: {
+      path: write.path,
+      sha256: digest(bytes),
+      size: bytes.length,
+      mode: write.mode,
+    },
+    committed: false,
+  };
 }
 
 /** Called only by successful full-project startup paths, never by preview or env resolution. */
@@ -1677,8 +1763,9 @@ async function rollbackLocked(
     const publication = journal.writes.find(
       (write) => write.path === source.path
     );
-    const edited = journal.configEdits?.find(
-      (entry) => entry.path === source.path
+    const edited = configEditRevision(
+      journal.configEdits?.find((entry) => entry.after.path === source.path),
+      current
     );
     let expected =
       (publication?.kind === "compose"

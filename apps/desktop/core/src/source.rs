@@ -2214,7 +2214,8 @@ impl Source for LiveSource {
         let mut args = with_branch(Action::Restart.cli_args(), branch);
         args.extend(["--env", overlay]);
         Ok(ActionOutcome::Lifecycle(
-            self.runner.run_json_to_completion(&args, Some(&root))?,
+            self.runner_for(false)
+                .run_json_to_completion(&args, Some(&root))?,
         ))
     }
 
@@ -2225,7 +2226,10 @@ impl Source for LiveSource {
             .map_err(|_| "The Hack CLI is unavailable.")?;
         let context = crate::execution::ExecutionContext::capture(&runner)?;
         context.bind(&crate::terminal::CommandSpec {
-            program: program.to_str().ok_or("The Hack CLI path is unavailable.")?.into(),
+            program: program
+                .to_str()
+                .ok_or("The Hack CLI path is unavailable.")?
+                .into(),
             args: vec!["init".into()],
         })
     }
@@ -2376,7 +2380,19 @@ pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
 
 /// Init starts from a checkout before a Hack project marker exists.
 pub fn trusted_init_root(root: &Path) -> Result<PathBuf, SourceError> {
-    trusted_checkout(root, false)
+    let root = trusted_checkout(root, false)?;
+    let repo = root.ancestors().find(|ancestor| {
+        ancestor.join("package.json").exists() || ancestor.join(".git").exists()
+    });
+    if repo.is_some_and(|repo| repo != root) {
+        return Err(SourceError::Cli {
+            code: "E_APP_UNTRUSTED_ROOT".into(),
+            message: "Hack init would configure a parent repository. Select that repository to continue."
+                .into(),
+            failed: vec![],
+        });
+    }
+    Ok(root)
 }
 
 fn trusted_checkout(root: &Path, require_config: bool) -> Result<PathBuf, SourceError> {
@@ -4952,6 +4968,25 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
     }
 
     #[test]
+    fn init_checkout_cannot_resolve_to_a_parent_repository() {
+        if !host_temp_is_trustworthy() {
+            return;
+        }
+        let root = base("init-root");
+        let checkout = root.join("checkout");
+        let child = checkout.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(checkout.join("package.json"), "{}").unwrap();
+        assert!(untrusted(trusted_init_root(&child)));
+        assert_eq!(
+            trusted_init_root(&checkout).unwrap(),
+            checkout.canonicalize().unwrap()
+        );
+        assert!(untrusted(trusted_root(&checkout)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn trusted_root_refuses_unsafe_or_ambiguous_roots() {
         use std::os::unix::fs::PermissionsExt;
         let set = |p: &Path, m: u32| {
@@ -5564,7 +5599,7 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
         let hack = dir.join("hack");
         crate::test_support::script(
             &hack,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HACK_HOME/argv\"\nif [ \"$1\" = logs ]; then echo '{\"type\":\"start\"}'; echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 0; fi\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"url\":\"https://fix-login.storefront.hack\",\"services\":{\"failed\":[]}}}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HACK_HOME/argv\"\nprintf '%s\\n' \"$HACK_RUNTIME_BACKEND\" > \"$HACK_HOME/backend\"\nif [ \"$1\" = logs ]; then echo '{\"type\":\"start\"}'; echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 0; fi\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"url\":\"https://fix-login.storefront.hack\",\"services\":{\"failed\":[]}}}'\n",
         );
         hack
     }
@@ -5634,8 +5669,12 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
             }
             src.act(&p, false, None, Action::Start).unwrap();
             assert!(!argv(&b).iter().any(|a| a == "--branch"));
+            let native = LiveSource::new(
+                fixture_runner(&hack).with_env("HACK_RUNTIME_BACKEND", "native"),
+                None,
+            );
             for overlay in [Some("qa"), Some("default"), None] {
-                src.config_restart(
+                native.config_restart(
                     &p,
                     &ConfigTarget {
                         branch: Some("fix-login".into()),
@@ -5647,6 +5686,10 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
                 assert_eq!(got[..3], ["restart", "--branch", "fix-login"]);
                 let passed = got.windows(2).find(|args| args[0] == "--env");
                 assert_eq!(passed.map(|args| args[1].as_str()), overlay);
+                assert_eq!(
+                    std::fs::read_to_string(b.join("backend")).unwrap().trim(),
+                    "compose"
+                );
             }
         } else {
             eprintln!("skipped actions: temp dir ancestors are not private on this host");

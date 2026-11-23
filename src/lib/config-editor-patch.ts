@@ -40,8 +40,9 @@ import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   applyEnvMigration,
   type ImplicitEnvMigrationPlan,
+  type MigrationConfigWrite,
   prepareImplicitEnvMigration,
-  recordEnvMigrationConfigEdit,
+  withEnvMigrationConfigEdits,
 } from "./env-migration.ts";
 import { migrationDigest } from "./env-migration-files.ts";
 import { envMigrationSnapshots } from "./env-migration-snapshot.ts";
@@ -626,17 +627,17 @@ export async function assessConfigPatch(
   if (sizeIssues.length > 0) {
     return { ...invalid, issues: [...issues, ...sizeIssues] };
   }
-  const { migration, issue } =
+  const { migration, outputs, issue } =
     issues.length === 0
       ? await stageConfigMigration(snapshot, initial.files, mode)
-      : { migration: null, issue: undefined };
+      : { migration: null, outputs: null, issue: undefined };
   if (issue) {
     return { ...invalid, issues: [...issues, issue] };
   }
-  const files = migration
-    ? prepareAfterMigration({ files: initial.files, migration, patch, issues })
+  const files = outputs
+    ? prepareAfterMigration({ files: initial.files, outputs, patch, issues })
     : initial.files;
-  const projectSizes = migration ? layerSizeIssues(snapshot, files, false) : [];
+  const projectSizes = outputs ? layerSizeIssues(snapshot, files, false) : [];
   if (projectSizes.length > 0) {
     return { ...invalid, issues: [...issues, ...projectSizes] };
   }
@@ -673,48 +674,66 @@ async function stageConfigMigration(
   mode: "validate" | "apply"
 ): Promise<{
   migration: ImplicitEnvMigrationPlan | null;
+  outputs: ReadonlyMap<string, string> | null;
   issue?: ConfigIssue;
 }> {
   const env = [...files.values()].find(({ layer }) => layer.kind === "env");
   if (!env) {
-    return { migration: null };
+    return { migration: null, outputs: null };
   }
   const { project } = snapshot;
   try {
     await assertConfigLayerDirectory(env.layer);
     if (await projectEnvConfigExistsForMutation(project)) {
-      return { migration: null };
+      return { migration: null, outputs: null };
     }
     const legacy = await readHackEnvContract(project);
     if (!legacy.exists) {
-      return { migration: null };
+      return { migration: null, outputs: null };
     }
     if (legacy.parseError) {
       throw new ClosedCliError(
         "Fix the legacy env contract before saving env changes."
       );
     }
-    await preflightLegacyEnvContract({
+    const outputs = await preflightLegacyEnvContract({
       ...project,
       contract: legacy.contract,
+      projectText:
+        snapshot.layers.find((layer) => layer.id === "1")?.text ?? null,
       maxLayerBytes: CONFIG_SOURCE_LIMIT,
     });
     if (mode === "validate") {
-      return { migration: null };
+      return { migration: null, outputs };
     }
-    const migration = await prepareImplicitEnvMigration({
-      ...project,
-      projectName: snapshot.projectName,
-      serviceNames: await discoverComposeServiceNames({
-        composeFile: project.composeFile,
-      }),
-    });
+    const migration = await prepareImplicitEnvMigration(
+      {
+        ...project,
+        projectName: snapshot.projectName,
+        serviceNames: await discoverComposeServiceNames({
+          composeFile: project.composeFile,
+        }),
+      },
+      [...files.values()].map(({ layer }) => ({
+        path: layerDestination(layer),
+        text: layer.text,
+      }))
+    );
     await assertConfigMigrationInputs(snapshot, migration);
-    return { migration };
+    return {
+      migration,
+      outputs: new Map(
+        migration.prepared.files.map(({ path }) => [
+          path,
+          migration.prepared.payload(path),
+        ])
+      ),
+    };
   } catch (error) {
     const conflict = error instanceof AtomicWriteConflictError;
     return {
       migration: null,
+      outputs: null,
       issue: {
         layer: env.layer.id,
         path: [],
@@ -774,18 +793,15 @@ async function assertConfigMigrationInputs(
 
 function prepareAfterMigration(opts: {
   readonly files: Map<string, Prepared>;
-  readonly migration: ImplicitEnvMigrationPlan;
+  readonly outputs: ReadonlyMap<string, string>;
   readonly patch: Patch;
   readonly issues: ConfigIssue[];
 }): Map<string, Prepared> {
-  const { prepared } = opts.migration;
-  const outputs = new Set(prepared.files.map((file) => file.path));
   for (const file of opts.files.values()) {
-    const destination = layerDestination(file.layer);
-    if (!outputs.has(destination)) {
+    const baseline = opts.outputs.get(layerDestination(file.layer));
+    if (baseline === undefined) {
       continue;
     }
-    const baseline = prepared.payload(destination);
     const migrated = { ...file, layer: { ...file.layer, text: baseline } };
     opts.files.set(file.layer.id, migrated);
     if (file.source) {
@@ -909,15 +925,16 @@ export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
     const manifestPath = migration
       ? await publishConfigMigration(snapshot, migration, changed)
       : null;
-    await publishPreparedLayers({
-      snapshot: prospective,
-      files,
-      changed,
-      migrationReceipt:
-        migration && manifestPath
-          ? { project: migration.project, manifestPath }
-          : null,
-    });
+    const publication = { snapshot: prospective, files, changed };
+    if (migration && manifestPath) {
+      await withEnvMigrationConfigEdits({
+        project: migration.project,
+        manifestPath,
+        run: (edits) => publishPreparedLayers(publication, edits),
+      });
+    } else {
+      await publishPreparedLayers(publication);
+    }
   } catch (error) {
     if (error instanceof AtomicWriteConflictError) {
       throw new HackCliError({
@@ -971,15 +988,17 @@ async function assertConfigBaseUnchanged(
     }
   }
 }
-async function publishPreparedLayers(opts: {
-  readonly snapshot: ConfigSnapshot;
-  readonly files: Map<string, Prepared>;
-  readonly changed: string[];
-  readonly migrationReceipt: Pick<
-    Parameters<typeof recordEnvMigrationConfigEdit>[0],
-    "project" | "manifestPath"
-  > | null;
-}) {
+async function publishPreparedLayers(
+  opts: {
+    readonly snapshot: ConfigSnapshot;
+    readonly files: Map<string, Prepared>;
+    readonly changed: string[];
+  },
+  edits?: {
+    readonly prepare: (write: MigrationConfigWrite) => Promise<void>;
+    readonly commit: (path: string) => Promise<void>;
+  }
+) {
   const { snapshot, files, changed } = opts;
   const ordered = [...files.values()];
   // Apply project policy before the env writer evaluates inheritance for unsets.
@@ -987,24 +1006,18 @@ async function publishPreparedLayers(opts: {
     ...ordered.filter((file) => file.layer.kind !== "env"),
     ...ordered.filter((file) => file.layer.kind === "env"),
   ]) {
-    if (!(await writePreparedLayer(snapshot, file))) {
+    const path = layerDestination(file.layer);
+    const beforePublish = edits
+      ? (after: string, mode: number) =>
+          edits.prepare({ path, before: file.layer.text, after, mode })
+      : undefined;
+    if (!(await writePreparedLayer(snapshot, file, beforePublish))) {
       continue;
     }
     if (!changed.includes(file.layer.id)) {
       changed.push(file.layer.id);
     }
-    if (
-      opts.migrationReceipt &&
-      file.layer.kind !== "env" &&
-      file.text !== null
-    ) {
-      await recordEnvMigrationConfigEdit({
-        ...opts.migrationReceipt,
-        path: layerDestination(file.layer),
-        before: file.layer.text,
-        after: file.text,
-      });
-    }
+    await edits?.commit(path);
   }
 }
 
@@ -1081,7 +1094,8 @@ function patchIssueCode(issues: readonly ConfigIssue[]): HackErrorCode | null {
 
 async function writePreparedLayer(
   snapshot: ConfigSnapshot,
-  file: Prepared
+  file: Prepared,
+  beforePublish?: (text: string, mode: number) => Promise<void>
 ): Promise<boolean> {
   const { layer, text } = file;
   const validate = async () => {
@@ -1104,6 +1118,7 @@ async function writePreparedLayer(
         local: layer.ownership === "local",
         changes: file.env,
         expected: { file: layer.file, text: layer.text, validate },
+        beforePublish,
         maxBytes: CONFIG_SOURCE_LIMIT,
       })
     ).changed;
@@ -1119,6 +1134,9 @@ async function writePreparedLayer(
         await writeTextFileAtomicIfChanged(layer.file, text, {
           expectedExisting: layer.text,
           validatePath: validate,
+          beforePublish: beforePublish
+            ? (mode) => beforePublish(text, mode)
+            : undefined,
           noFollowTarget: true,
         })
       ).changed,

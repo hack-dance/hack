@@ -23,9 +23,9 @@ import {
   prepareImplicitEnvMigration,
   previewEnvCleanup,
   previewEnvMigration,
-  recordEnvMigrationConfigEdit,
   recordEnvMigrationProjectRun,
   rollbackEnvMigration,
+  withEnvMigrationConfigEdits,
 } from "../src/lib/env-migration.ts";
 import { migrationDigest } from "../src/lib/env-migration-files.ts";
 import { stageMigrationPayloads } from "../src/lib/env-migration-payloads.ts";
@@ -767,25 +767,51 @@ test("a prepared implicit migration reports committed bytes and keeps an interru
   await expect(assertEnvMigrationReadable(project)).resolves.toBeUndefined();
 });
 
-test("cleanup and rollback honor a Config save receipt while refusing subsequent authored edits", async () => {
+test("cleanup and rollback recover an interrupted Config save and remove its new env layer", async () => {
   const snapshots = envMigrationSnapshots();
-  const migration = await apply({
+  const path = join(project.projectDir, "hack.config.json");
+  const overlay = join(project.projectDir, "hack.env.new.local.yaml");
+  const before = await readFile(path, "utf8");
+  const plan = await prepareImplicitEnvMigration(project, [
+    { path, text: before },
+    { path: overlay, text: null },
+  ]);
+  const migration = await applyEnvMigration({
     project,
     snapshots,
     acceptTrackedChanges: false,
     repairCompose: false,
+    plan,
   });
-  const path = join(project.projectDir, "hack.config.json");
-  const before = await readFile(path, "utf8");
+  if (!migration.manifestPath) {
+    throw new Error("Expected a migration snapshot");
+  }
   const after = '{"name":"renamed"}\n';
-  await writeFile(path, after);
-  await recordEnvMigrationConfigEdit({
-    project,
-    manifestPath: migration.manifestPath,
-    path,
-    before,
-    after,
-  });
+  const overlayText = "version: 1\nenvironment: new\nvalues: {}\n";
+  await expect(
+    withEnvMigrationConfigEdits({
+      project,
+      manifestPath: migration.manifestPath,
+      run: async ({ prepare, commit }) => {
+        await prepare({
+          path: overlay,
+          before: null,
+          after: overlayText,
+          mode: 0o600,
+        });
+        await writeFile(overlay, overlayText, { mode: 0o600 });
+        await commit(overlay);
+        await prepare({
+          path,
+          before,
+          after,
+          mode: (await lstat(path)).mode & 0o777,
+        });
+        await writeFile(path, after);
+        throw new Error("interrupted after rename");
+      },
+    })
+  ).rejects.toThrow("interrupted after rename");
   const renamed = { ...project, projectName: "renamed" };
   await recordEnvMigrationProjectRun(renamed);
   const cleanup = { project: renamed, snapshots, acceptTrackedChanges: false };
@@ -799,6 +825,7 @@ test("cleanup and rollback honor a Config save receipt while refusing subsequent
     manifestPath: migration.manifestPath,
   });
   expect(await readFile(path, "utf8")).toBe(before);
+  expect(await Bun.file(overlay).exists()).toBe(false);
 }, 30_000);
 
 test("later Compose repair refuses damaged originals before changing the completed journal", async () => {

@@ -436,6 +436,8 @@ export async function writeTextFileAtomicIfChanged(
      * bits are kept. Without it an existing file keeps its mode exactly.
      */
     readonly tightenExisting?: boolean;
+    /** Publish a caller's recovery intent before changing the destination. */
+    readonly beforePublish?: (mode: number) => Promise<void>;
     /**
      * Never resolve the destination through a symlink (HACK-2165): a link
      * at `absolutePath` is refused, and the commit renames onto
@@ -501,6 +503,9 @@ export async function writeTextFileAtomicIfChanged(
     await file.writeFile(content, "utf8");
     await file.sync();
     await options.validatePath?.(absolutePath);
+    if (options.beforePublish) {
+      await options.beforePublish((await file.stat()).mode & 0o777);
+    }
     if (
       expectsExisting &&
       targetText(await inspectAtomicWriteTarget(absolutePath)) !==

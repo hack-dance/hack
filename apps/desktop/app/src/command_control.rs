@@ -47,6 +47,7 @@ pub(crate) struct CommandCompletion {
 }
 
 type OnExit = Box<dyn FnOnce(&mut HackApp, CommandCompletion, &mut Context<HackApp>)>;
+type ResolveDirectory = fn(&CommandControl, &CommandSpec) -> Result<Option<PathBuf>, String>;
 
 #[derive(Default)]
 pub(crate) struct Drawer {
@@ -68,6 +69,7 @@ struct Run {
     id: CommandRunId,
     props: CommandControl,
     spec: CommandSpec,
+    resolve_directory: ResolveDirectory,
     phase: Phase,
     waiting_for_password: bool,
     fallback: Option<String>,
@@ -120,6 +122,16 @@ fn command_directory(
             .map_err(|e| format!("Could not use the checked project directory: {e:?}"));
     }
     Ok(checked_home(spec).map(Path::to_owned))
+}
+
+fn init_directory(props: &CommandControl, _: &CommandSpec) -> Result<Option<PathBuf>, String> {
+    let root = props.cwd.as_deref().ok_or("The checkout is unavailable.")?;
+    hack_desktop_core::source::trusted_init_root(root)
+        .map(Some)
+        .map_err(|error| match error {
+            hack_desktop_core::source::SourceError::Cli { message, .. } => message,
+            _ => "The checkout is unavailable.".into(),
+        })
 }
 
 fn command_options(spec: &CommandSpec, cwd: Option<PathBuf>) -> Result<PtyOptions, String> {
@@ -216,12 +228,7 @@ impl HackApp {
             self.start_drawer_command(
                 props,
                 Box::new(on_exit),
-                |props, _| {
-                    let root = props.cwd.as_deref().ok_or("The checkout is unavailable.")?;
-                    hack_desktop_core::source::trusted_init_root(root)
-                        .map(Some)
-                        .map_err(|_| "The checkout is unavailable.".into())
-                },
+                init_directory,
                 window,
                 cx,
             );
@@ -232,7 +239,7 @@ impl HackApp {
         &mut self,
         props: CommandControl,
         on_exit: OnExit,
-        resolve_directory: impl FnOnce(&CommandControl, &CommandSpec) -> Result<Option<PathBuf>, String>,
+        resolve_directory: ResolveDirectory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -258,6 +265,7 @@ impl HackApp {
             id,
             props,
             spec,
+            resolve_directory,
             phase: Phase::Running,
             waiting_for_password: false,
             fallback: None,
@@ -543,6 +551,7 @@ impl HackApp {
         let id = run.id;
         let spec = run.spec.clone();
         let props = run.props.clone();
+        let resolve_directory = run.resolve_directory;
         cx.spawn(async move |app, cx| {
             let result = cx
                 .background_executor()
@@ -552,7 +561,7 @@ impl HackApp {
                     } else {
                         Platform::Linux
                     };
-                    let cwd = command_directory(&props, &spec)?;
+                    let cwd = resolve_directory(&props, &spec)?;
                     Script::create_in(&std::env::temp_dir(), &spec, cwd.as_deref())?.open(
                         platform,
                         linux_adapter().as_deref(),

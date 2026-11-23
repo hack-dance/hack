@@ -26,13 +26,12 @@ const PORT_RANGE = /^([\d*]+)(?:-([\d*]+))?$/;
 const PORT_NUMBER = /^[\d*]+$/;
 const VARIABLE_REFERENCE =
   /\$(?:\$|\{[A-Za-z_]\w*(?:\}|(:?[-+?]))|[A-Za-z_]\w*)/y;
-const PORT_PROTOCOLS = new Set(["tcp", "udp", "sctp", "*"]);
-const DEPENDENCY_CONDITIONS = new Set([
+const PORT_PROTOCOLS = ["tcp", "udp", "sctp"];
+const DEPENDENCY_CONDITIONS = [
   "service_started",
   "service_healthy",
   "service_completed_successfully",
-  "*",
-]);
+];
 
 export const validHost = (host: string): boolean =>
   host.length <= 253 && host.split(".").every((part) => HOST_LABEL.test(part));
@@ -55,7 +54,7 @@ export function validComposePort(value: unknown): boolean {
   if (
     mapping === undefined ||
     extra !== undefined ||
-    (protocol !== undefined && !PORT_PROTOCOLS.has(protocol))
+    (protocol !== undefined && !matchesComposeOption(protocol, PORT_PROTOCOLS))
   ) {
     return false;
   }
@@ -78,7 +77,20 @@ export function validComposePort(value: unknown): boolean {
 function validPortHost(value: string): boolean {
   const host =
     value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
-  return host === "*" || isIP(host) !== 0;
+  // An interpolated component can supply some or all of an IP address.
+  return host.includes("*") || isIP(host) !== 0;
+}
+
+function matchesComposeOption(
+  template: string,
+  options: readonly string[]
+): boolean {
+  const pattern = template
+    .split("*")
+    .map((part) => RegExp.escape(part))
+    .join(".*");
+  const match = new RegExp(`^${pattern}$`);
+  return options.some((option) => match.test(option));
 }
 
 function portRangeSpan(value: string): number {
@@ -124,8 +136,8 @@ function portTemplate(value: unknown): string | null {
     if (character !== "$") {
       if (depth === 0) {
         template += character;
-      } else if (character === "}") {
-        depth -= 1;
+      } else {
+        depth -= Number(character === "}");
       }
       continue;
     }
@@ -412,7 +424,8 @@ function validDependencies(value: unknown, complete: boolean): boolean {
 function validDependencyCondition(value: unknown, complete: boolean): boolean {
   const condition = portTemplate(value);
   return (
-    (condition !== null && DEPENDENCY_CONDITIONS.has(condition)) ||
+    (condition !== null &&
+      matchesComposeOption(condition, DEPENDENCY_CONDITIONS)) ||
     (value === undefined && !complete)
   );
 }

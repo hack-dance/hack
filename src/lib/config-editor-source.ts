@@ -12,7 +12,7 @@ import {
 const SECRET_KEY =
   /(?:access[_-]?key|auth(?:orization)?|credential|pass(?:word|phrase|wd)?\b|secret|secure|token|private[_-]?key|api[_-]?key)/i;
 const SECRET_TEXT =
-  /(?:[a-z][a-z\d+.-]*:\/\/[^\s/?#@]+@|[?&](?:token|key|secret|password|signature)=|-----BEGIN [^-]+PRIVATE KEY-----|\bauthorization\s*:?\s+(?:bearer|basic)\s+\S)/i;
+  /(?:(?<![a-z\d+.-])[a-z][a-z\d+.-]*:\/\/[^\s/?#@]+@|[?&](?:token|key|secret|password|signature)=|-----BEGIN [^-]+PRIVATE KEY-----|\bauthorization\s*:?\s+(?:bearer|basic)\s+\S)/i;
 const PRIVATE_COMPOSE_FIELDS = /^(?:command|entrypoint|args|secrets|test)$/;
 const CADDY_HEADER =
   /^caddy(?:[._].*)?[._](?:header_up|header_down|header|request_header)(?:[._]|$)/i;

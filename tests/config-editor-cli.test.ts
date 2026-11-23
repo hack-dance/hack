@@ -896,7 +896,7 @@ test("the first Config env write migrates an existing legacy contract before pub
     stderr: "ignore",
   });
   expect(await store.exited).toBe(0);
-  const selection = ["--env", "default"];
+  const selection = ["--env", "new"];
   const before = await show(root, cwd, ...selection);
   const source = before.layers.find((layer) => layer.id === "1")?.source ?? "";
   const patch = {
@@ -908,6 +908,13 @@ test("the first Config env write migrates an existing legacy contract before pub
         text: source.replace('"legacy"', '"renamed"'),
       },
       { layer: "5", kind: "env", scope: "api", key: "NEW", value: "added" },
+      {
+        layer: "5:new",
+        kind: "env",
+        scope: "api",
+        key: "NEW_OVERLAY",
+        value: "chosen",
+      },
     ],
   };
   const heldKey = join(cwd, "held-test-key");
@@ -920,6 +927,23 @@ test("the first Config env write migrates an existing legacy contract before pub
   });
   expect(validation.payload.data.valid).toBe(true);
   expect(await Bun.file(keyPath).exists()).toBe(false);
+  const overlap = await cli({
+    root,
+    cwd,
+    args: ["validate", ...selection],
+    patch: {
+      ...patch,
+      changes: [
+        {
+          layer: "1",
+          kind: "source",
+          text: source.replace('"qa"', '"staging"'),
+        },
+        patch.changes[1],
+      ],
+    },
+  });
+  expect(overlap.payload.data.issues[0]?.message).toContain("same setting");
   await rename(heldKey, keyPath);
   const applied = await cli({
     root,
@@ -930,7 +954,7 @@ test("the first Config env write migrates an existing legacy contract before pub
   expect(applied.payload.ok).toBe(true);
   expect(applied.payload.data.restart_offered).toBe(true);
   expect(applied.payload.data.changed).toEqual(
-    expect.arrayContaining(["3:qa", "5:qa"])
+    expect.arrayContaining(["3:qa", "5:qa", "5:new"])
   );
   const after = await show(root, cwd);
   expect(after.project.name).toBe("renamed");
@@ -990,6 +1014,25 @@ test("Config preflights malformed and oversized legacy migration data before app
   expect(oversized.payload.error.detail.issues[0]?.message).toContain(
     "512 KiB"
   );
+  await writeFile(join(project, ".env"), `EXISTING=${"a".repeat(300_000)}\n`);
+  const combined = await cli({
+    root,
+    cwd: root,
+    args: ["validate"],
+    patch: {
+      ...patch,
+      changes: [
+        {
+          layer: "5",
+          kind: "env",
+          scope: "api",
+          key: "NEW",
+          value: "b".repeat(300_000),
+        },
+      ],
+    },
+  });
+  expect(combined.payload.data.issues[0]?.message).toContain("512 KiB");
   expect(await readFile(projectFile, "utf8")).toBe(original);
   expect(bases(await show(root, root))).toEqual(bases(before));
 });
@@ -1119,6 +1162,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
         "443",
         "80",
         "${PORT:-8080}:80",
+        "127.0.0.${OCTET:-1}:8080:80",
         "::1:8080:80",
         "127.0.0.1::80",
         "8082:81",
@@ -1133,6 +1177,14 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     },
   ]);
   expect(valid.payload.data.valid).toBe(true);
+  const interpolatedDependency = await check([
+    {
+      layer: "2",
+      kind: "source",
+      text: 'services:\n  web:\n    depends_on:\n      api: {condition: "service_${WHEN:-started}"}\n  api: {}\n',
+    },
+  ]);
+  expect(interpolatedDependency.payload.data.valid).toBe(true);
   for (const comment of [
     "# loopback target",
     "# published target",

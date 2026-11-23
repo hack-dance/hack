@@ -943,7 +943,9 @@ impl HackApp {
             CommandAvailability, CommandControl, CommandControlSize, CommandExit,
         };
         let selection = self.config.selection.clone();
-        let spec = match self.source.config_init_command() {
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        let epoch = self.model.source_epoch();
+        let spec = match source.config_init_command() {
             Ok(spec) => spec,
             Err(message) => {
                 self.config.error = Some(ConfigError {
@@ -967,10 +969,7 @@ impl HackApp {
             },
             move |app, completion, cx| {
                 if completion.exit == CommandExit::Code(0) {
-                    app.refresh_now_async(cx);
-                    if app.config.selection == selection {
-                        app.reload_config(cx);
-                    }
+                    app.check_config_init(selection, source, epoch, completion.run, cx);
                 }
             },
             window,
@@ -978,8 +977,44 @@ impl HackApp {
         );
     }
 
+    #[cfg(hack_terminal)]
+    fn check_config_init(
+        &mut self,
+        selection: Selection,
+        source: std::sync::Arc<dyn hack_desktop_core::source::Source>,
+        epoch: u64,
+        run: crate::command_control::CommandRunId,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |app, cx| {
+            let target = selection.clone();
+            let report = cx
+                .background_executor()
+                .spawn(async move { source.config_show(&target.root, &target.target) })
+                .await;
+            let _ = app.update(cx, |app, cx| {
+                if app.model.source_epoch() != epoch {
+                    return;
+                }
+                let check = match &report {
+                    Ok(report) if report.state == ConfigState::Ready => Ok(()),
+                    _ => Err("The checkout’s Config is still unavailable.".into()),
+                };
+                app.command_checked(run, check, cx);
+                app.refresh_now_async(cx);
+                if app.config.selection == selection && app.tab == TAB {
+                    app.load_config(true, cx);
+                    app.load_config_copies(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn config_missing(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
-        let can_run = cfg!(hack_terminal) && !self.config.selection.root.as_os_str().is_empty();
+        let can_run = cfg!(hack_terminal)
+            && !self.config.selection.root.as_os_str().is_empty()
+            && !self.machine.busy();
         let run = if can_run {
             primary_button("config-init", Glyph::Play, "Run", ui)
         } else {

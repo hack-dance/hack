@@ -3735,6 +3735,7 @@ export async function mutateProjectEnvLayer(
       readonly text: string | null;
       readonly validate?: () => Promise<void>;
     };
+    readonly beforePublish?: (text: string, mode: number) => Promise<void>;
     readonly maxBytes?: number;
   }
 ): Promise<{
@@ -3824,6 +3825,7 @@ async function mutateLockedProjectEnvLayer(
       config: next.config,
       maxBytes: opts.maxBytes,
       validate: opts.expected?.validate,
+      beforePublish: opts.beforePublish,
       noFollow: opts.expected !== undefined,
       expectedExisting: text,
       machineLocal: opts.local === true,
@@ -4948,6 +4950,7 @@ async function writeProjectEnvConfigFile(opts: {
   readonly maxBytes?: number;
   readonly validate?: () => Promise<void>;
   readonly noFollow?: boolean;
+  readonly beforePublish?: (text: string, mode: number) => Promise<void>;
   /**
    * A machine-local layer, which may hold plaintext values: when this write
    * creates it, it is private (0600) from creation, and an existing layer
@@ -4959,6 +4962,7 @@ async function writeProjectEnvConfigFile(opts: {
   readonly machineLocal?: boolean;
 }): Promise<boolean> {
   const text = serializeProjectEnvConfig(opts.config);
+  const beforePublish = opts.beforePublish;
   if (opts.maxBytes !== undefined && Buffer.byteLength(text) > opts.maxBytes) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
@@ -4982,6 +4986,9 @@ async function writeProjectEnvConfigFile(opts: {
         ? { createMode: 0o600, tightenExisting: true }
         : {}),
       noFollowTarget: opts.machineLocal === true || opts.noFollow === true,
+      beforePublish: beforePublish
+        ? (mode) => beforePublish(text, mode)
+        : undefined,
       validatePath: async (path) => {
         await opts.validate?.();
         if (
@@ -7154,8 +7161,9 @@ export async function preflightLegacyEnvContract(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly contract: HackEnvContract;
+  readonly projectText: string | null;
   readonly maxLayerBytes: number;
-}): Promise<void> {
+}): Promise<ReadonlyMap<string, string>> {
   const overlayNames = await discoverLegacyOverlayNames({
     ...opts,
     includeSymlinks: false,
@@ -7170,6 +7178,11 @@ export async function preflightLegacyEnvContract(opts: {
   const plain = opts.contract.vars.filter(
     (entry) => entry.source === "plain_env"
   );
+  const outputs = new Map<string, string>();
+  const project = migratedProjectConfigText(opts.projectText, opts.projectRoot);
+  if (project !== null) {
+    outputs.set(resolve(opts.projectDir, PROJECT_CONFIG_FILENAME), project);
+  }
   const { storePlaintextInBackend } = await readHackEnvRuntimeConfig(opts);
   for (const envName of [null, ...overlayNames]) {
     const own =
@@ -7196,14 +7209,39 @@ export async function preflightLegacyEnvContract(opts: {
       environment: envName ?? "default",
       values,
     });
-    if (
-      Buffer.byteLength(serializeProjectEnvConfig(config)) > opts.maxLayerBytes
-    ) {
+    const text = serializeProjectEnvConfig(config);
+    if (Buffer.byteLength(text) > opts.maxLayerBytes) {
       throw new ClosedCliError(
         `A migrated config file exceeds the ${opts.maxLayerBytes / 1024} KiB limit.`
       );
     }
+    if (Object.values(values).some((scope) => Object.keys(scope).length > 0)) {
+      const path = await resolveProjectEnvEffectiveLocalConfigPath({
+        ...opts,
+        envName,
+      });
+      outputs.set(path, text);
+    }
   }
+  return outputs;
+}
+
+function migratedProjectConfigText(
+  text: string | null,
+  projectRoot: string
+): string | null {
+  const parsed: unknown = text === null ? null : JSON.parse(text);
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const normalized = normalizeLegacyProjectTopLevelConfig({
+    parsed,
+    projectRoot,
+    keepStorePointer: true,
+  });
+  return normalized.changed
+    ? `${JSON.stringify(normalized.config, null, 2)}\n`
+    : null;
 }
 
 /**
@@ -7462,22 +7500,15 @@ async function prepareContractMigration(
     ),
   });
   const configCandidates = retained.candidates;
-  const configText = await readTextFile(planned.path);
-  if (configText) {
-    const parsed: unknown = JSON.parse(configText);
-    if (isRecord(parsed)) {
-      const normalized = normalizeLegacyProjectTopLevelConfig({
-        parsed,
-        projectRoot: opts.projectRoot,
-        keepStorePointer: true,
-      });
-      if (normalized.changed) {
-        await add(
-          { path: planned.path, kind: "config", keys: [], mode: 0o644 },
-          `${JSON.stringify(normalized.config, null, 2)}\n`
-        );
-      }
-    }
+  const configText = migratedProjectConfigText(
+    await readTextFile(planned.path),
+    opts.projectRoot
+  );
+  if (configText !== null) {
+    await add(
+      { path: planned.path, kind: "config", keys: [], mode: 0o644 },
+      configText
+    );
   }
   return { overlayNames, store, deliveredValues, configCandidates };
 }

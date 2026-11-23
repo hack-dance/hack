@@ -1557,7 +1557,7 @@ JSON file (a singly linked, mode-`0600` file owned by you):
 - A cold build needs at least 6 GiB free on the runtime's storage disk, or twice the
   last image of the same build if that is larger; otherwise it refuses with
   `native_build_storage` and deletes nothing. After each successful build, BuildKit's
-  cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
+  cache is pruned to 4 GiB. The cache holds only build steps; pruning never removes
   images, containers or volumes.
 
 `runtime reclaim-build-images --json` removes build images that newer builds
@@ -1816,7 +1816,14 @@ once instead of reusing the shared one. Any other edit to another service, such 
 environment value on the app, keeps the cache. An edit to one of those inputs,
 including a lockfile, selects the cache for the new identity as a fresh `up` would, so the initializer installs into it; the old cache
 is shared and is only released by this run. Each such `up` publishes the current
-source snapshot. A retained named volume is never reused as a dependency cache:
+source snapshot. A pool keeps at most 64 dependency cache volumes. When a new one is
+needed at that bound, cache volumes that nothing refers to are deleted, oldest
+created first, to make room (HACK-2576): no graph receipt that is not removed, no native-authored
+receipt and no cache quarantine record names them, and the engine refuses to delete
+one a container still uses. A retained run always finds every cache it recorded.
+Only when every cache is still referred to does `hack up` refuse with
+`graph_cache_capacity`, and it says to remove the data of a project you no longer
+use. A retained named volume is never reused as a dependency cache:
 declaring one refuses and names the service and the `hack.dependencies.cache-volume`
 field. Caches recorded by earlier builds, whose identity also covered the whole
 Compose file, are kept while that file is unchanged and replaced once on the first
@@ -1827,6 +1834,18 @@ hostname change mixed with other edits refuses with `graph_hostname_change` and 
 service name. Every refusal says to revert the edit, or to run
 `hack down --remove-data` and then `hack up`. `hack restart` of a stopped graph
 refuses and points to `hack up`.
+The home's active graph inventory (`run/graphs`) holds at most 64 runs. Removed
+runs used to stay in it until an explicit `graph archive`, which no `hack` command
+ran, so every `down --remove-data` and every failed fresh start used a place for
+good, and the 65th fresh start refused for ever (HACK-2576). Now a start (or a source
+job) that needs a new run and finds the inventory full archives removed runs itself, oldest first, under the
+provider lease it already holds and with the same proof `graph archive` uses (every
+owned resource absent, no pending journal). Runs that keep data are never archived;
+when they alone fill the inventory, `hack up` refuses with `graph_retention_budget`
+and says to remove the data of a project you no longer use. The archive keeps up to
+256 runs; past that the refusal is `graph_archive_budget`. A project whose removed
+run was archived this way before its `hack down --remove-data` confirmed the removal
+still confirms it: inspection reads a removed run from the archive.
 For a shared-source graph that reconciliation does not select (live source, a
 carried cache scope, a pending source-device rebind or initializer cache release)
 and that was admitted with a retained compatibility contract, ordinary
@@ -2538,7 +2557,10 @@ finish or unwind first. The next `hack up` or `hack down --recover` waits for th
 process to be gone, then recovers its run. A `hack up`, `hack restart` or `hack down
 --recover` that meets that start still exiting (the pool record shows the pool
 stopped) says so in one line and waits up to 15 seconds for it before it decides as
-for an exited owner; a live foreground owner on a running pool still refuses at once. A command that finds an earlier start of the instance
+for an exited owner; a live foreground owner on a running pool still refuses at once.
+An owner that is ending can read for a moment as neither running nor exited (its
+process exited but is not yet reaped, or its publication is read mid-change); the
+runtime reports that as `graph_foreground_owner_uncertain`, and the same wait covers it. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0

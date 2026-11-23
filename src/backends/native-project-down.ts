@@ -672,9 +672,14 @@ async function inspectOrStartStoppedPool(opts: {
         : undefined,
       notice:
         opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)),
-      ownerRunning: async () =>
-        (await selectForegroundOwner(opts).catch(() => undefined))
-          ?.foreground === "running",
+      // Running, or ending (HACK-2572): an exited but unreaped process, or a
+      // publication read mid-change, shows as uncertain for a moment.
+      ownerRunning: async () => {
+        const foreground = (
+          await selectForegroundOwner(opts).catch(() => undefined)
+        )?.foreground;
+        return foreground === "running" || foreground === "uncertain";
+      },
     });
     if (!(opts.startStoppedPool && (await deadOwnerOfLiveRun(opts)))) {
       throw error;

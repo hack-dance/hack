@@ -2,6 +2,7 @@ import { ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { NativeImageBlocker } from "../../src/backends/native-image-policy.ts";
 import {
   batchImageFailure,
   NativeImageBatchError,
@@ -414,6 +415,7 @@ if (role === "channel-holder") {
       "wrapped-failure",
       "wrapped-static-failure",
       "builder-missing",
+      "build-registry-limit",
       "provider-pin",
       "wrapped-provider-pin",
       "immediate-failure",
@@ -485,6 +487,16 @@ if (role === "channel-holder") {
         nativeDetachedUpShellVariables([], true);
         nativeDetachedUpShellVariables([], true);
       }
+      if (mode === "build-registry-limit") {
+        await nativeDetachedUpFailure(
+          new NativeImageBlocker({
+            missing: "docker.io/library/python:3.12-alpine",
+            buildBase: true,
+            reason: "registry_http_429",
+            present: ["docker.io/library/alpine:3.22"],
+          })
+        );
+      }
       if (mode === "builder-missing") {
         await nativeDetachedUpFailure(
           new NativeRuntimeRequestError({
@@ -514,6 +526,7 @@ if (role === "channel-holder") {
           ...PRESTART_MODES,
           "fail",
           "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)

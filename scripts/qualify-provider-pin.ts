@@ -37,6 +37,7 @@
  *      every 50 ms: launcher until `graph retained-preflight`, the preflight, the gap, `runtime
  *      up`, and serve to ready. `--warm-only` runs steps 1-3 and these warm runs only, for a
  *      quick before/after comparison.
+ *  10a. multi-service: add and remove a worker across retained stops and verify SQL.
  *  11. unclean stop, last and recorded only: SIGKILL to the provider VM, then what the
  *      foreground, `down --recover`, `runtime recover` and the next `up -d` do.
  *
@@ -83,6 +84,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { isRecord } from "../src/lib/guards.ts";
 
 export const GIB = 1024 * 1024 * 1024;
 
@@ -775,7 +777,8 @@ export function compose(
   webImage: string,
   dbImage: string,
   alias: string,
-  routeHost: string | null = null
+  routeHost: string | null = null,
+  topology: "web-db" | "web-db-worker" = "web-db"
 ): string {
   const labels = routeHost
     ? `
@@ -784,6 +787,13 @@ export function compose(
       caddy.reverse_proxy: "{{upstreams 8080}}"
       caddy.tls: internal`
     : "";
+  const worker =
+    topology === "web-db-worker"
+      ? `
+  worker:
+    image: ${webImage}
+    command: ["sleep", "3600"]`
+      : "";
   return `services:
   web:
     image: ${webImage}${labels}
@@ -797,10 +807,54 @@ export function compose(
     environment:
       POSTGRES_PASSWORD: qualification
     volumes:
-      - "db-data:/var/lib/postgresql/data"
+      - "db-data:/var/lib/postgresql/data"${worker}
 volumes:
   db-data: {}
 `;
+}
+
+/** Require engine-observed compute absence and retained data for an exact run. */
+export function stoppedFixtureVolume(
+  snapshot: Record<string, unknown>,
+  run: string,
+  services: readonly string[]
+): string | null {
+  const { receipt, observations } = snapshot;
+  if (
+    !isRecord(receipt) ||
+    receipt.run !== run ||
+    receipt.phase !== "stopped-data-retained" ||
+    snapshot.journal_incomplete !== false ||
+    !isRecord(receipt.resources) ||
+    !isRecord(observations)
+  ) {
+    return null;
+  }
+  const volume = receipt.resources["volume:db-data"];
+  const observedVolume = observations["volume:db-data"];
+  if (
+    !isRecord(volume) ||
+    typeof volume.name !== "string" ||
+    !volume.name ||
+    !isRecord(observedVolume) ||
+    observedVolume.state !== "present"
+  ) {
+    return null;
+  }
+  const compute = Object.keys(receipt.resources).filter(
+    (key) => key.startsWith("container:") || key.startsWith("network:")
+  );
+  const containers = compute.filter((key) => key.startsWith("container:"));
+  const expected = new Set(services.map((service) => `container:${service}`));
+  return compute.length > containers.length &&
+    containers.length === expected.size &&
+    containers.every((key) => expected.has(key)) &&
+    compute.every((key) => {
+      const item = observations[key];
+      return isRecord(item) && item.state === "absent";
+    })
+    ? volume.name
+    : null;
 }
 
 /** Native Caddy's local root CA under a native home (`native-https/data`). */
@@ -2205,6 +2259,11 @@ export class Qualification {
           await this.warm();
         },
       ],
+      [
+        "10a multi-service reconciliation",
+        false,
+        () => this.reconcileServices(marker),
+      ],
       ["11 unclean stop (recorded)", false, () => this.uncleanStop(identity)],
     ];
     // --warm-only: steps 1-3 and the warm `up -d` runs, for a quick before/after comparison.
@@ -2462,6 +2521,97 @@ export class Qualification {
       "disk identity is unchanged at the end",
       JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
     );
+  }
+
+  async reconcileServices(marker: string): Promise<void> {
+    await this.ensureDown("down-before-topology");
+    const composePath = join(this.project, ".hack/docker-compose.yml");
+    const original = readFileSync(composePath, "utf8");
+    const initial = await this.upForeground("up-before-add-worker", "up");
+    const run = initial.ps.run;
+    if (typeof run !== "string") {
+      throw new Failure("multi-service baseline did not report a run ID");
+    }
+    const volume = await this.stopTopology(run, "before-add-worker", [
+      "web",
+      "db",
+    ]);
+    writeFileSync(
+      composePath,
+      compose(
+        this.options.webImage,
+        this.options.dbImage,
+        "dependency.qualification.test",
+        this.options.caddy ? HTTPS_ROUTE_HOST : null,
+        "web-db-worker"
+      )
+    );
+    const added = await this.upForeground(
+      "up-with-worker",
+      "up",
+      readyContainer(initial.ps)
+    );
+    this.check("adding a service retains the run ID", added.ps.run === run);
+    this.check(
+      "the added worker reaches web by service name",
+      this.inContainer(
+        "worker-to-web",
+        "worker",
+        "wget -qO- http://web:8080/index.txt"
+      ).trim() === "ready"
+    );
+    const addedVolume = await this.stopTopology(run, "with-worker", [
+      "web",
+      "db",
+      "worker",
+    ]);
+    this.check(
+      "adding a service retains the database volume",
+      addedVolume === volume
+    );
+    writeFileSync(composePath, original);
+    const removed = await this.upForeground(
+      "up-after-remove-worker",
+      "up",
+      readyContainer(added.ps)
+    );
+    this.check("removing a service retains the run ID", removed.ps.run === run);
+    await this.dbReady();
+    this.check(
+      "SQL data survives adding and removing a service",
+      this.psql("db-read-after-topology", "SELECT v FROM qualification") ===
+        marker
+    );
+    const removedVolume = await this.stopTopology(run, "after-remove-worker", [
+      "web",
+      "db",
+    ]);
+    this.check(
+      "removing a service retains the database volume",
+      removedVolume === volume
+    );
+  }
+
+  async stopTopology(
+    run: string,
+    phase: string,
+    services: string[]
+  ): Promise<string> {
+    await this.down(`down-${phase}`);
+    const snapshot = this.runtime(
+      this.main,
+      `inspect-stopped-${phase}`,
+      ["graph", "inspect", "--run-id", run, "--json"],
+      60
+    );
+    const volume = stoppedFixtureVolume(snapshot, run, services);
+    if (!volume) {
+      throw new Failure(
+        `${phase}: graph inspection did not confirm absent compute and retained data`
+      );
+    }
+    this.check(`${phase}: stopped topology and retained data confirmed`, true);
+    return volume;
   }
 
   /** Fetch the fixture's route over native HTTPS, trusting only this home's Caddy root. */
@@ -3200,6 +3350,7 @@ export async function main(argv: string[]): Promise<number> {
       "8 rosetta",
       "9 web+db",
       "10 measurements",
+      "10a multi-service reconciliation",
       "11 unclean stop (recorded)",
     ],
   };

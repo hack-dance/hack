@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
+  NATIVE_IDLE_POOL_RESTART_NOTICE,
   NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
+  NATIVE_PROJECT_SHARE_POOL_IN_USE,
   preflightNativeProjectSource,
 } from "../src/backends/native-project-source-preflight.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
@@ -110,13 +112,114 @@ test("a stopped shared pool adds another project root before hooks, then re-admi
   ]);
 });
 
-test("a running shared pool never changes mounts and explains the stop-then-up path", async () => {
+const addArgs = (root: string, extra: readonly string[] = []) => [
+  "runtime",
+  "project-share",
+  "add",
+  "--project-share",
+  root,
+  "--unfiltered-source",
+  ...extra,
+  "--json",
+];
+
+test("an idle running pool is stopped by the share update, which prints one line before the start boots it", async () => {
+  const calls: string[][] = [];
+  const lines: string[] = [];
+  let shared = false;
+  await preflightNativeProjectSource({
+    runtime,
+    projectRoot: "/work/second-app",
+    notice: (line) => lines.push(line),
+    invoke: async (request) => {
+      calls.push([...request.args]);
+      if (request.args[1] === "check-project-share") {
+        if (!shared) {
+          throw extensionRequired();
+        }
+        return { source_admitted: true, pool_initialized: true };
+      }
+      if (request.args[1] === "status") {
+        return { phase: "running", process_alive: true };
+      }
+      expect(request.timeoutMs).toBe(120_000);
+      shared = true;
+      return { ...added("/work/second-app"), stopped_idle_pool: true };
+    },
+  });
+  expect(calls).toEqual([
+    checkArgs("/work/second-app"),
+    ["runtime", "status", "--json"],
+    addArgs("/work/second-app", ["--stop-idle-pool"]),
+    checkArgs("/work/second-app"),
+  ]);
+  expect(lines).toEqual([NATIVE_IDLE_POOL_RESTART_NOTICE]);
+});
+
+test("a running pool in use names the projects that use it, or says why it cannot", async () => {
+  const inUse = new NativeRuntimeRequestError({
+    message: "Native runtime request failed (project_share_pool_in_use).",
+    nativeCode: NATIVE_PROJECT_SHARE_POOL_IN_USE,
+  });
+  // The runtime refuses an in-use pool, or a pool another start booted meanwhile.
+  for (const [refusal, liveRuns, says] of [
+    [inUse, ["a".repeat(32)], "in use by first-app"],
+    [extensionRequired(), ["a".repeat(32)], "in use by first-app"],
+    [inUse, [], "an open interactive session"],
+    [inUse, undefined, "its live runs could not be read"],
+    [
+      new NativeRuntimeRequestError({
+        message: "Native runtime request failed (provider_busy).",
+        nativeCode: "provider_busy",
+      }),
+      undefined,
+      "a native image build is running",
+    ],
+  ] as const) {
+    const lines: string[] = [];
+    const described: (readonly string[])[] = [];
+    let statuses = 0;
+    const error = await preflightNativeProjectSource({
+      runtime,
+      projectRoot: "/work/second-app",
+      notice: (line) => lines.push(line),
+      describe: async (runs) => {
+        described.push(runs);
+        return "first-app";
+      },
+      invoke: async (request) => {
+        if (request.args[1] === "check-project-share") {
+          throw extensionRequired();
+        }
+        if (request.args[1] === "status") {
+          statuses += 1;
+          return {
+            phase: "running",
+            process_alive: true,
+            ...(statuses > 1 && liveRuns ? { live_runs: liveRuns } : {}),
+          };
+        }
+        throw refusal;
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ClosedCliError);
+    expect(String(error)).toContain(says);
+    expect(String(error)).toContain("mounts never change");
+    expect(String(error)).toContain("`down` in each");
+    expect(String(error)).toContain("Startup hooks were not run");
+    expect(described).toEqual(liveRuns?.length ? [liveRuns] : []);
+    expect(lines).toEqual([]);
+  }
+});
+
+test("a pool starting or stopping, or a running record whose provider is gone, is never updated", async () => {
   for (const status of [
-    { phase: "running", process_alive: true },
     { phase: "process-exited", process_alive: true },
+    { phase: "running", process_alive: false },
+    { phase: "running" },
   ]) {
     const calls: string[][] = [];
-    const refusal = await preflightNativeProjectSource({
+    const error = await preflightNativeProjectSource({
       runtime,
       projectRoot: "/work/second-app",
       invoke: async (request) => {
@@ -126,10 +229,10 @@ test("a running shared pool never changes mounts and explains the stop-then-up p
         }
         return status;
       },
-    }).catch((error: unknown) => error);
-    expect(refusal).toBeInstanceOf(ClosedCliError);
-    expect(String(refusal)).toContain("mounts never change");
-    expect(String(refusal)).toContain("Startup hooks were not run");
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ClosedCliError);
+    expect(String(error)).toContain("starting or stopping, or its provider");
+    expect(String(error)).toContain("mounts never change");
     expect(calls.some((args) => args[1] === "project-share")).toBe(false);
   }
 });
@@ -147,6 +250,8 @@ test("share update and status receipts must be exact before admission continues"
       { phase: "stopped", process_alive: false },
       { ...added("/work/second-app"), kind: "project_share_removed" },
     ],
+    // A running pool's update must say whether it stopped the pool.
+    [{ phase: "running", process_alive: true }, added("/work/second-app")],
   ] as const) {
     let checks = 0;
     const refusal = await preflightNativeProjectSource({

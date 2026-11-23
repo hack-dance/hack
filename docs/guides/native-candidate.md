@@ -126,9 +126,11 @@ the installed stable executable.
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
 worktree when its exact source root can be shared with a fresh or matching pool.
 The runtime checks source compatibility before startup hooks; `restart` repeats
-this check before stopping the existing graph. A root that a running pool does not
-already share is refused, because a running VM's mounts never change. Stop the pool
-and run `up` again: the root joins at the next boot. Projects and worktrees the pool was started with can run together; see
+this check before stopping the existing graph. A running VM's mounts never change, so
+a root that a running pool does not already share needs a restart of the pool. When
+nothing uses the pool live, `up` restarts it for the root and prints one line saying
+so. Otherwise it refuses: stop the projects that use the pool (`down` in
+each) and run `up` again. Projects and worktrees the pool was started with can run together; see
 [one pool, several project roots](#explicit-writable-development-source).
 
 Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
@@ -2350,9 +2352,27 @@ pool's primary share. Native `up` in another root adds that root itself when the
 pool is **stopped**, before any lifecycle hook runs, with the same unfiltered-source
 consent the first root gave; the share is mounted at the next boot. The explicit
 form is `runtime project-share add --project-share /absolute/other-project --unfiltered-source --json`.
-A running pool's mounts never change: `up` in a root outside the set refuses before
-hooks and says to stop the projects using the pool (`down` in each), stop the pool
-(`runtime down --json` on the native home), and run `up` again. Remove an additional root (for
+A running pool's mounts never change. When it is **running but idle**, `up` in a root
+outside the set stops it, adds the root as above and boots it again, before any hook
+runs, printing `Restarting the native runtime to add this project's folder.`
+(HACK-2535; `runtime project-share add … --stop-idle-pool --json`). Idle means no
+project run whose receipt is live (running, starting, restoring, stopping, or a failed
+start that kept its services), no pending dead-owner recovery, no open interactive
+session and no image build. The runtime checks this under its provider lease before
+any effect and again right before the guest stops, and holds that lease in between,
+so a start that begins meanwhile waits for the lease (up to 5 s) and then finds the
+pool stopped; it is never stopped itself. A pool found in use refuses with
+`project_share_pool_in_use`. The host-side
+releases of a stop (the managed hostname authority and the pool's publishers) follow
+that second check, so either refusal changes nothing. The same rule applies to a
+pool started by hand with `runtime up`. A pool in use, or one still starting or
+stopping, refuses before hooks and says to stop the projects using the pool (`down` in
+each), then run `up` again. It names up to three of them, from the live run ids that
+`runtime status` reports (`live_runs`) and the run mappings of registered projects and
+their worktrees, then "and N more"; when no registered checkout maps a live run, it
+says so. A full or conflicting share set refuses with
+`project_share_limit` before anything stops. See the [idle restart chart](../diagrams/native-idle-pool-restart.svg)
+([source](../diagrams/native-idle-pool-restart.mmd)). Remove an additional root (for
 example a deleted worktree) from a stopped pool with
 `runtime project-share remove --project-share /absolute/old-worktree --json`; removal
 refuses with `project_share_in_use` while any retained graph still names that

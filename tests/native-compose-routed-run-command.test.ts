@@ -2,7 +2,6 @@ import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
-  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -17,6 +16,7 @@ import { openNativeComposeRouteClaims } from "../src/lib/native-compose-route-cl
 import { prepareNativeComposeRouteOwner } from "../src/lib/native-compose-route-owner.ts";
 import type { NativeRoutingResolution } from "../src/lib/native-routing-plan-protocol.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -56,8 +56,8 @@ async function fixture(mode: Mode = "ordinary") {
     await mkdtemp(join(tmpdir(), "native-routed-run-command-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
-  await mkdir(join(root, "home"));
+  await mkdirOwnedFixture(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, "home"));
   const input = composeFixture();
   input.plan.worktree.auto_branch = false;
   const web = input.plan.services.web;

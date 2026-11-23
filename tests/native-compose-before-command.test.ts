@@ -1,7 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -34,7 +38,7 @@ async function fixture(hook: string) {
     await mkdtemp(join(tmpdir(), "native-before-command-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   const source = {
     schema_version: 1,
     name: "fixture",
@@ -60,11 +64,11 @@ async function fixture(hook: string) {
       },
     },
   };
-  await Bun.write(
+  await writeOwnedFixture(
     join(root, ".hack/hack.project.json"),
     JSON.stringify(source)
   );
-  await Bun.write(
+  await writeOwnedFixture(
     join(root, ".hack/hack.env.default.yaml"),
     JSON.stringify({
       version: 1,

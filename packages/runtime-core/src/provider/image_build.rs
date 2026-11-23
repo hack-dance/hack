@@ -548,7 +548,20 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
             "The build context must be an existing project directory.",
         ));
     }
+    let private = context::private::PrivateFiles::new()?;
+    if private.excludes(&context)? {
+        return Err(refusal(
+            "native_build_source",
+            "The build context is Hack's own machine-local directory, which is never sent to a build.",
+        ));
+    }
     let dockerfile = crate::project::resolve_source(&root, &context, &request.dockerfile, false)?;
+    if private.excludes(&dockerfile)? {
+        return Err(refusal(
+            "native_build_source",
+            "The Dockerfile is Hack's own machine-local file, which is never sent to a build.",
+        ));
+    }
     // Every input file is read through descriptors held from the project root down.
     let project = context::ProjectRoot::open(&root)?;
     let bytes = project
@@ -559,11 +572,14 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
                 "The Dockerfile must be an existing regular project file.",
             )
         })?;
-    let scan = build_scan::scan(&build_scan::ScanRequest {
-        dockerfile: &bytes,
-        target: request.target.as_deref(),
-        args: &request.args,
-    })?;
+    let scan = build_scan::scan_with_context(
+        &build_scan::ScanRequest {
+            dockerfile: &bytes,
+            target: request.target.as_deref(),
+            args: &request.args,
+        },
+        &|source| private.copy_source(&context, source),
+    )?;
     let namespace = namespace(&root, request.branch.as_deref());
     let relative = |path: &Path, base: &Path| -> String {
         path.strip_prefix(base)
@@ -875,7 +891,13 @@ pub(super) fn run<P: BuildPool>(
         if Instant::now() >= deadline {
             return Err(expired_early());
         }
-        let resolved = pool.resolve(base, deadline, canceled)?;
+        let resolved = pool.resolve(base, deadline, canceled).map_err(|error| {
+            if error.code.starts_with("registry_") && error.cause_code.is_some() {
+                error.with_build_base_reference(base.reference.canonical())
+            } else {
+                error
+            }
+        })?;
         if !image_id(&resolved.source_digest)
             || !resolved
                 .pinned_reference

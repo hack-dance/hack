@@ -1785,8 +1785,8 @@ environment value on the app, keeps the cache. An edit to one of those inputs,
 including a lockfile, selects the cache for the new identity as a fresh `up` would, so the initializer installs into it; the old cache
 is shared and is only released by this run. Each such `up` publishes the current
 source snapshot. A pool keeps at most 64 dependency cache volumes. When a new one is
-needed at that bound, the oldest cache volumes that nothing refers to are deleted to
-make room (HACK-2576): no graph receipt that is not removed, no native-authored
+needed at that bound, cache volumes that nothing refers to are deleted, oldest
+created first, to make room (HACK-2576): no graph receipt that is not removed, no native-authored
 receipt and no cache quarantine record names them, and the engine refuses to delete
 one a container still uses. A retained run always finds every cache it recorded.
 Only when every cache is still referred to does `hack up` refuse with

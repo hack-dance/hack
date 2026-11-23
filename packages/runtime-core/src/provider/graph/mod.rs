@@ -969,17 +969,7 @@ impl Session<'_, '_> {
                 ));
             }
             if resource.cache.is_some() {
-                let run_dir = self
-                    .root
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .ok_or_else(|| {
-                        error(
-                            "graph_cache_inventory",
-                            "Cannot verify cache volume admission inventory.",
-                        )
-                    })?
-                    .to_path_buf();
+                let run_dir = self.engine.guest().candidate().state_root.join("run");
                 check_cache_capacity(&self.engine, &self.receipt.owner, &run_dir)?;
             }
             self.check_cancelled()?;
@@ -2758,18 +2748,19 @@ fn check_cache_capacity(
         if count < cache_retention::LIMIT {
             break;
         }
-        // Without force: the engine keeps a volume that a container still uses.
-        if engine
-            .request(Method::DELETE, &format!("/v1.53/volumes/{name}"), None)
-            .is_ok()
-        {
-            count -= 1;
+        // Without force: the engine refuses (keeps) a volume a container still uses.
+        // A volume already gone frees its place too; any other failure is reported.
+        match engine.request(Method::DELETE, &format!("/v1.53/volumes/{name}"), None) {
+            Ok(_) => count -= 1,
+            Err(error) if error.code == "engine_not_found" => count -= 1,
+            Err(error) if error.code == "engine_rejected" => {}
+            Err(error) => return Err(error),
         }
     }
     if count >= cache_retention::LIMIT {
         return Err(error(
             "graph_cache_capacity",
-            "64 dependency cache volumes are kept and each is still used by a retained run; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
+            "64 dependency cache volumes are kept and each is still referred to by a retained run or in use by a container; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
         ));
     }
     Ok(())

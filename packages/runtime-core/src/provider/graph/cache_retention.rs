@@ -101,18 +101,25 @@ fn read(path: &Path) -> Result<Vec<u8>, CandidateError> {
     }
     fs::read(path).map_err(|_| unreadable())
 }
-/// Every regular file directly in `directory`, concatenated.
+/// Every file directly in `directory`, concatenated. Anything else in it (a
+/// subdirectory, a symlink) or more entries than the bound cannot be read as "no
+/// reference", so it refuses.
 fn read_tree(directory: &Path) -> Result<Vec<u8>, CandidateError> {
-    let mut bytes = Vec::new();
-    for entry in fs::read_dir(directory)
+    if !fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(unreadable());
+    }
+    let entries: Vec<_> = fs::read_dir(directory)
         .map_err(|_| unreadable())?
         .take(ENTRIES + 1)
-    {
-        let path = entry.map_err(|_| unreadable())?.path();
-        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
-            bytes.extend(read(&path)?);
-            bytes.push(b'\n');
-        }
+        .collect::<Result<_, _>>()
+        .map_err(|_| unreadable())?;
+    if entries.len() > ENTRIES {
+        return Err(unreadable());
+    }
+    let mut bytes = Vec::new();
+    for entry in entries {
+        bytes.extend(read(&entry.path())?);
+        bytes.push(b'\n');
     }
     Ok(bytes)
 }

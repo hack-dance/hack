@@ -7,8 +7,9 @@ use super::{
 };
 use crate::provider::{
     image_ensure,
+    image_platform::PlatformPolicy,
     image_policy::{ImagePolicy, ImageTagMode},
-    state,
+    image_tag_store, state,
 };
 use crate::{Candidate, CandidateError};
 use serde::Serialize;
@@ -52,6 +53,7 @@ pub fn run(
 ) -> Result<RetentionReport, CandidateError> {
     policy.local_registries.clear();
     policy.tag_mode = ImageTagMode::Normal;
+    policy.opportunistic_locks = true;
     let deadline = Instant::now() + BUDGET;
     policy.build_deadline = Some(deadline);
     let mut report = RetentionReport::default();
@@ -89,17 +91,56 @@ pub fn run(
         let result = (|| {
             let (lease, _) = pool.try_lease()?;
             let _fence = idle_retention_fence(candidate)?;
-            if pins.insert(pin.clone()) {
+            // An intervening solve can retire a queued input between visits.
+            if !reclaim::current_images(candidate)?
+                .inputs
+                .contains(&(reference.clone(), pin.clone()))
+            {
+                return Ok(());
+            }
+            if !pins.contains(&pin) {
                 let (base, _) = select_build_base(candidate, &pin, &policy, None)?;
                 retain_verified(&pool, &lease, &base, || {
                     image_ensure::retain_build_image(candidate, &pin, &policy, &lease).map(|_| ())
                 })?;
+                pins.insert(pin.clone());
                 report.retained += 1;
             }
             if !reference.contains('@') && tags.insert(reference.clone()) {
-                // Metadata only. A newly available pin will be used for the next
-                // solve, whose receipt can then schedule its exact digest.
-                select_build_base(candidate, &reference, &policy, None)?;
+                let mut tag = image_tag_store::resolve(
+                    candidate,
+                    &reference,
+                    &policy,
+                    PlatformPolicy::Native,
+                    None,
+                )?;
+                tag.confirm(|tag| {
+                    if pins.contains(&tag.pinned_reference) {
+                        return Ok(());
+                    }
+                    let (base, _) =
+                        select_build_base(candidate, &tag.pinned_reference, &policy, None)?;
+                    if base.image_id != tag.image_id {
+                        return Err(super::refusal(
+                            "native_build_base_image",
+                            "The refreshed build base proof differs from its selection.",
+                        ));
+                    }
+                    // Keep the previous selection usable offline until the
+                    // replacement has both a verified image and its keeper.
+                    retain_verified(&pool, &lease, &base, || {
+                        image_ensure::retain_build_image(
+                            candidate,
+                            &tag.pinned_reference,
+                            &policy,
+                            &lease,
+                        )
+                        .map(|_| ())
+                    })?;
+                    pins.insert(tag.pinned_reference.clone());
+                    report.retained += 1;
+                    Ok(())
+                })?;
             }
             Ok::<_, CandidateError>(())
         })();

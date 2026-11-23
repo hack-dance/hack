@@ -70,11 +70,15 @@ impl ImageCache {
         if let Some(lease) = &cache.lease {
             lease.verify_path(root)?;
         } else {
-            let lease = state::wait_for_image_lock(
-                policy.image_wait(std::time::Duration::from_secs(590))?,
-                "image-cache",
-                || state::Lock::acquire(root),
-            )?;
+            let lease = if policy.opportunistic_locks {
+                state::Lock::acquire(root)?
+            } else {
+                state::wait_for_image_lock(
+                    policy.image_wait(std::time::Duration::from_secs(590))?,
+                    "image-cache",
+                    || state::Lock::acquire(root),
+                )?
+            };
             let staging = root.with_file_name("image-staging");
             if staging.try_exists().map_err(state::io)? {
                 clean_staging(&staging, 0)?;

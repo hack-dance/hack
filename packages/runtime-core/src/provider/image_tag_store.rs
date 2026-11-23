@@ -490,7 +490,7 @@ fn resolve_pending(
     // Recheck under the writer lock so an automatic refresh can reuse a
     // resolution another process just published.
     let lock = match state::Lock::acquire(&root) {
-        Err(error) if error.code == "provider_busy" => {
+        Err(error) if error.code == "provider_busy" && !policy.opportunistic_locks => {
             let lock = policy
                 .image_wait(std::time::Duration::from_secs(590))
                 .and_then(|wait| {

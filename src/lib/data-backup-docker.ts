@@ -40,6 +40,11 @@ export interface DataBackupDocker {
     readonly argv: readonly string[];
     readonly path: string;
   }): Promise<DataBackupStreamResult>;
+  /** Run `argv` with the file at `path` as its stdin (a tar stream to extract). */
+  streamFromFile(opts: {
+    readonly argv: readonly string[];
+    readonly path: string;
+  }): Promise<{ readonly exitCode: number; readonly stderr: string }>;
 }
 
 function utf8(latin1: string): string {
@@ -69,17 +74,7 @@ export const hostDataBackupDocker: DataBackupDocker = {
     let proc: ReturnType<typeof spawnPiped> | undefined;
     try {
       proc = spawnPiped(argv);
-      const errors = proc.stderr;
-      const stderr = (async () => {
-        let text = "";
-        await eachChunk(errors, (chunk) => {
-          if (text.length < MAX_STDERR_BYTES) {
-            text += Buffer.from(chunk).toString("utf8");
-          }
-          return Promise.resolve();
-        });
-        return text.slice(0, MAX_STDERR_BYTES);
-      })();
+      const stderr = boundedText(proc.stderr);
       await eachChunk(proc.stdout, async (chunk) => {
         hash.update(chunk);
         bytes += chunk.byteLength;
@@ -108,6 +103,16 @@ export const hostDataBackupDocker: DataBackupDocker = {
       await file.close();
     }
   },
+  async streamFromFile({ argv, path }) {
+    const proc = Bun.spawn([...argv], {
+      env: childEnvironment(process.env),
+      stdin: Bun.file(path),
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const stderr = await boundedText(proc.stderr);
+    return { exitCode: await proc.exited, stderr };
+  },
 };
 
 async function eachChunk(
@@ -126,6 +131,19 @@ async function eachChunk(
   } finally {
     reader.releaseLock();
   }
+}
+
+async function boundedText(
+  stream: ReadableStream<Uint8Array>
+): Promise<string> {
+  let text = "";
+  await eachChunk(stream, (chunk) => {
+    if (text.length < MAX_STDERR_BYTES) {
+      text += Buffer.from(chunk).toString("utf8");
+    }
+    return Promise.resolve();
+  });
+  return text.slice(0, MAX_STDERR_BYTES);
 }
 
 function spawnPiped(argv: readonly string[]) {

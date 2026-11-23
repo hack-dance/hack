@@ -129,6 +129,7 @@ function fakeDocker(state: FakeState): DataBackupDocker {
         sha256: createHash("sha256").update(bytes).digest("hex"),
       };
     },
+    streamFromFile: () => Promise.reject(new Error("export never extracts")),
   };
 }
 
@@ -468,6 +469,7 @@ describe("exportProjectData", () => {
             "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
         }),
       streamToFile: () => Promise.reject(new Error("not reached")),
+      streamFromFile: () => Promise.reject(new Error("not reached")),
     };
     const error = await caught(
       exportProjectData({ ...input(baseState()), docker })

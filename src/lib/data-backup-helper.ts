@@ -1,0 +1,184 @@
+import { open } from "node:fs/promises";
+import { HackCliError } from "./cli-result.ts";
+import type { DataBackupDocker } from "./data-backup-docker.ts";
+import {
+  DATA_BACKUP_DIGEST_SCRIPT,
+  DATA_BACKUP_TREE_DIGEST,
+  dataBackupHelperImage,
+} from "./data-backup-format.ts";
+import { dockerReadError, runningContainers } from "./data-backup-volumes.ts";
+import { closedFileWriteError, type FileWriteOperation } from "./fs.ts";
+import { isRecord } from "./guards.ts";
+
+/**
+ * Shared pieces of `hack data export` and `hack data import`: the helper
+ * container argv, the in-helper tree digest, the running refusal and the
+ * closed filesystem step wrapper.
+ */
+
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+
+export function parseJsonText(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Run one filesystem step; a classified errno becomes a closed refusal. */
+export async function fsStep<T>(
+  opts: { readonly path: string; readonly operation: FileWriteOperation },
+  action: () => Promise<T>
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error: unknown) {
+    throw closedFileWriteError({ error, ...opts });
+  }
+}
+
+export async function syncPath(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * `docker run` of the pinned helper with one volume at `/v`: removed on exit,
+ * no network, read-only root file system, no privilege gain. `readOnly`
+ * mounts the volume read-only; `stdin` keeps stdin open for a tar stream.
+ */
+export function dataBackupHelperArgv(opts: {
+  readonly volume: string;
+  readonly readOnly: boolean;
+  readonly entrypoint: string;
+  readonly purpose: "export" | "import";
+  readonly stdin?: boolean;
+  readonly extra?: readonly string[];
+}): string[] {
+  return [
+    "docker",
+    "run",
+    "--rm",
+    "--network",
+    "none",
+    "--pull",
+    "missing",
+    "--read-only",
+    "--security-opt",
+    "no-new-privileges",
+    "--label",
+    `io.hack.data-backup=${opts.purpose}`,
+    ...(opts.stdin ? ["--interactive"] : []),
+    ...(opts.extra ?? []),
+    "--volume",
+    `${opts.volume}:/v${opts.readOnly ? ":ro" : ""}`,
+    "--entrypoint",
+    opts.entrypoint,
+    dataBackupHelperImage(),
+  ];
+}
+
+/** A failed helper run, classified as an engine problem when it is one. */
+export function helperFailure(opts: {
+  readonly volume: string;
+  readonly action: string;
+  readonly result: { readonly exitCode: number; readonly stderr: string };
+  readonly consequence: string;
+}): HackCliError {
+  const engine = dockerReadError({
+    result: { ...opts.result, stdout: "" },
+    command: "docker run",
+  });
+  if (engine.code !== "E_UNEXPECTED") {
+    return engine;
+  }
+  return new HackCliError({
+    code: "E_UNEXPECTED",
+    message: `The backup helper failed to ${opts.action} volume ${opts.volume} (exit ${opts.result.exitCode}); ${opts.consequence} The helper image is ${dataBackupHelperImage()}; check that Docker can run it.`,
+  });
+}
+
+export type TreeDigest = { readonly entries: number; readonly digest: string };
+
+/** The {@link DATA_BACKUP_TREE_DIGEST} of one volume, read-only in the helper. */
+export async function treeDigest(opts: {
+  readonly docker: DataBackupDocker;
+  readonly volume: string;
+  readonly purpose: "export" | "import";
+  readonly consequence: string;
+}): Promise<TreeDigest> {
+  const result = await opts.docker.capture(
+    [
+      ...dataBackupHelperArgv({
+        volume: opts.volume,
+        readOnly: true,
+        entrypoint: "bun",
+        purpose: opts.purpose,
+        extra: [
+          "--tmpfs",
+          "/tmp",
+          "--env",
+          "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
+        ],
+      }),
+      "-e",
+      DATA_BACKUP_DIGEST_SCRIPT,
+    ],
+    { unbounded: true }
+  );
+  if (result.exitCode !== 0) {
+    throw helperFailure({
+      volume: opts.volume,
+      action: "digest",
+      result,
+      consequence: opts.consequence,
+    });
+  }
+  const tree = parseJsonText(result.stdout.trim());
+  if (
+    !(
+      isRecord(tree) &&
+      tree.algorithm === DATA_BACKUP_TREE_DIGEST &&
+      typeof tree.entries === "number" &&
+      Number.isSafeInteger(tree.entries) &&
+      tree.entries > 0 &&
+      typeof tree.digest === "string" &&
+      SHA256_HEX.test(tree.digest)
+    )
+  ) {
+    throw new HackCliError({
+      code: "E_UNEXPECTED",
+      message: `The backup helper returned an unreadable digest for volume ${opts.volume}; ${opts.consequence}`,
+    });
+  }
+  return { entries: tree.entries, digest: tree.digest };
+}
+
+/**
+ * Refuse with `E_PROJECT_RUNNING` while a container of the Compose project,
+ * or any container mounting one of `volumeNames`, runs. Never stops anything.
+ */
+export async function refuseRunning(opts: {
+  readonly docker: DataBackupDocker;
+  readonly composeProject: string;
+  readonly volumeNames: readonly string[];
+  readonly stopCommand: string;
+  /** First sentence: what the refusal means for this command. */
+  readonly lead: string;
+  readonly command: "export" | "import";
+}): Promise<void> {
+  const running = await runningContainers(opts);
+  if (running.length === 0) {
+    return;
+  }
+  throw new HackCliError({
+    code: "E_PROJECT_RUNNING",
+    message: `${opts.lead} Stop it with \`${opts.stopCommand}\`, then retry. Hack never stops containers for an ${opts.command}.`,
+    detail: { running },
+  });
+}

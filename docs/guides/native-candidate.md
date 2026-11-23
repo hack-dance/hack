@@ -1525,7 +1525,7 @@ JSON file (a singly linked, mode-`0600` file owned by you):
 - A cold build needs at least 6 GiB free on the runtime's storage disk, or twice the
   last image of the same build if that is larger; otherwise it refuses with
   `native_build_storage` and deletes nothing. After each successful build, BuildKit's
-  cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
+  cache is pruned to 4 GiB. The cache holds only build steps; pruning never removes
   images, containers or volumes.
 
 `runtime reclaim-build-images --json` removes build images that newer builds

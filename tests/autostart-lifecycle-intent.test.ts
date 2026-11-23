@@ -20,8 +20,13 @@ import {
 } from "../src/lib/autostart-project-lock.ts";
 import { resolveDesktopComposeProjectName } from "../src/lib/compose-project-name.ts";
 import { readLifecycleState } from "../src/lib/lifecycle-runtime.ts";
+import { quoteShellWord } from "../src/lib/logs.ts";
 import { sanitizeProjectSlug } from "../src/lib/project.ts";
-import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
+import {
+  readProjectRuntimeState,
+  readProjectRuntimeStateEntry,
+  upsertProjectRuntimeStateEntry,
+} from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import {
   mkdirOwnedFixture,
@@ -635,6 +640,94 @@ test("bound service Stop waits for ordinary Restart after it creates the contain
     await Promise.allSettled([restart, stop]);
   }
 }, 40_000);
+
+test("desktop Start can stop a sibling branch from an attached lifecycle hook", async () => {
+  const projectRoot = join(root, "project");
+  const projectDir = join(projectRoot, ".hack");
+  const configPath = join(projectDir, "hack.config.json");
+  const config = { name: "sample", dev_host: "sample.hack" };
+  await writeOwnedFixture(configPath, JSON.stringify(config));
+  await writeOwnedFixture(
+    join(projectDir, "docker-compose.yml"),
+    "name: sample\nservices:\n  app:\n    image: example.invalid/app\n"
+  );
+  await installComposeNameFixture({ startContainers: true });
+  const env = { PATH: `${join(root, "bin")}:/usr/bin:/bin` };
+  const preview = await run(
+    ["up", "-d", "--branch", "preview", "--json"],
+    false,
+    projectRoot,
+    env
+  );
+  expect(preview.exitCode, preview.stderr || preview.stdout).toBe(0);
+
+  const hook = join(root, "stop-preview.ts");
+  await writeOwnedFixture(
+    hook,
+    `
+const child = Bun.spawn([process.execPath, ${JSON.stringify(cli)}, "--no-interactive", "down", "--target", "local", "--branch", "preview", "--json"], {
+  timeout: 8000, stdin: "ignore", stdout: "inherit", stderr: "inherit",
+});
+process.exit(await child.exited);
+`
+  );
+  await writeOwnedFixture(
+    configPath,
+    JSON.stringify({
+      ...config,
+      lifecycle: {
+        up: {
+          before: [
+            {
+              name: "stop-preview",
+              command: [process.execPath, hook].map(quoteShellWord).join(" "),
+            },
+          ],
+        },
+      },
+    })
+  );
+  const start = await run(
+    [
+      "up",
+      "-d",
+      "--target",
+      "local",
+      "--expect-compose-project",
+      "sample",
+      "--json",
+    ],
+    false,
+    projectRoot,
+    env
+  );
+  expect(start.exitCode, start.stderr || start.stdout).toBe(0);
+  expect(
+    (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+  ).toEqual(["compose", "-p", "sample--preview"]);
+  expect(
+    (await readProjectRuntimeState({ projectDir })).map(
+      (entry) => entry.composeProject
+    )
+  ).toEqual(["sample"]);
+  expect(await Bun.file(join(root, "compose-running")).text()).toBe("sample");
+}, 30_000);
+
+test("parallel sibling writes keep each copy's runtime pin and overlay", async () => {
+  const projectDir = join(root, "project", ".hack");
+  const entries = Array.from({ length: 8 }, (_, index) => ({
+    composeProject: `sample--copy-${index}`,
+    envName: `overlay-${index}`,
+    pinnedComposeBase: "sample",
+    updatedAt: "2026-11-23T00:00:00.000Z",
+  }));
+  await Promise.all(
+    entries.map((entry) =>
+      upsertProjectRuntimeStateEntry({ projectDir, entry })
+    )
+  );
+  expect(await readProjectRuntimeState({ projectDir })).toEqual(entries);
+});
 
 test("ordinary Down waits for desktop Start to publish its pin before selecting the stack", async () => {
   const projectDir = join(root, "project", ".hack");

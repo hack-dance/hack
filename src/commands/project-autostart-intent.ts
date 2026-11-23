@@ -75,6 +75,10 @@ interface AutostartCommandSelection {
   readonly branch?: string;
 }
 
+interface ComposeCheckoutCopy {
+  readonly branch: string | null;
+}
+
 async function resolveAutostartDownBranch(opts: {
   readonly project: ProjectContext;
   readonly cfg: ProjectConfig;
@@ -95,13 +99,13 @@ async function resolveAutostartDownBranch(opts: {
   return { explicitBranch, effective };
 }
 
-/** Serialize name discovery with publishing a desktop Start's explicit pin. */
+/** Serialize name discovery and pin publication for one logical copy. Sibling
+ * copies have separate locks so a lifecycle hook can act on one synchronously. */
 export async function withComposeCheckoutLock<T>(
   opts: AutostartCommandSelection & {
-    readonly beforeLock?: (target: {
-      readonly branch: string | null;
-    }) => Promise<void>;
-    readonly run: () => Promise<T>;
+    readonly selectedCopy?: ComposeCheckoutCopy;
+    readonly beforeLock?: (target: ComposeCheckoutCopy) => Promise<void>;
+    readonly run: (copy?: ComposeCheckoutCopy) => Promise<T>;
   }
 ): Promise<T> {
   const registry = await readProjectsRegistry();
@@ -110,24 +114,27 @@ export async function withComposeCheckoutLock<T>(
     return await opts.run();
   }
   const { project } = context;
-  if (opts.beforeLock) {
-    const { explicitBranch, effective } = await resolveAutostartDownBranch({
-      project,
-      cfg: await readProjectConfig(project),
-      branch: opts.branch,
-    });
-    if (explicitBranch !== null || effective.branch === null) {
-      await opts.beforeLock({ branch: effective.branch });
-    }
+  const selection = opts.selectedCopy
+    ? undefined
+    : await resolveAutostartDownBranch({
+        project,
+        cfg: await readProjectConfig(project),
+        branch: opts.branch,
+      });
+  const copy = opts.selectedCopy ?? {
+    branch: selection?.effective.branch ?? null,
+  };
+  if (opts.selectedCopy || selection?.explicitBranch || copy.branch === null) {
+    await opts.beforeLock?.(copy);
   }
   return await withAutostartProjectLock({
     scope: {
       projectId: "",
-      // A checkout lock uses a distinct namespace from valid Compose names.
-      composeProject: `checkout:${await realpath(project.projectDir)}`,
+      // Delimit the branch so a checkout path cannot alias a sibling copy.
+      composeProject: `checkout:${await realpath(project.projectDir)}\0${copy.branch ?? ""}`,
       branch: null,
     },
-    run: opts.run,
+    run: () => opts.run(copy),
   });
 }
 
@@ -149,6 +156,7 @@ export async function withComposeNameLock<T>(
 export async function resolveFinalAutostartDownTarget(
   opts: AutostartCommandSelection & {
     readonly writeNotice?: (notice: DownSafetyNotice) => void;
+    readonly selectedCopy?: ComposeCheckoutCopy;
   },
   deps?: {
     readonly readProjectsRegistry?: typeof readProjectsRegistry;
@@ -169,11 +177,6 @@ export async function resolveFinalAutostartDownTarget(
   }
   const { project, registration } = context;
   const cfg = await readProjectConfig(project);
-  const { explicitBranch, effective } = await resolveAutostartDownBranch({
-    project,
-    cfg,
-    branch: opts.branch,
-  });
   const targetFor = async (
     branch: string | null
   ): Promise<AutostartDownTarget> => {
@@ -184,6 +187,14 @@ export async function resolveFinalAutostartDownTarget(
     });
     return compose ? { branch, compose } : { branch };
   };
+  if (opts.selectedCopy) {
+    return await targetFor(opts.selectedCopy.branch);
+  }
+  const { explicitBranch, effective } = await resolveAutostartDownBranch({
+    project,
+    cfg,
+    branch: opts.branch,
+  });
   if (explicitBranch !== null || effective.branch === null) {
     return await targetFor(effective.branch);
   }

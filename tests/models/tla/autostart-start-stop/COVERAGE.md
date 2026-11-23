@@ -48,8 +48,11 @@ pinned by Desktop Start while delivering its saved overlay.
 Ordinary Down publishes pause for a known copy before reading its overlay or
 waiting for its checkout lock. A pre-publication race regression holds Desktop
 Start before its pin is saved and verifies that Down waits and then stops that
-same stack. This checkout lock and overlay-read failure are implementation
-details outside the finite model.
+same stack. The checkout lock is scoped to the logical copy so a synchronous
+hook can stop a sibling. Reconciliation releases the initial copy lock before
+acquiring the selected copy's lock and rereads the target there. Shared
+runtime state writes use a separate lock and atomic replacement. These locks
+and overlay-read failure are implementation details outside the finite model.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

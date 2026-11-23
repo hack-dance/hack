@@ -8947,64 +8947,109 @@ async function handleDown(
   const flagTimeoutSeconds = isNativeBackend
     ? undefined
     : parseComposeDownTimeoutFlag(input.args.options.timeout);
-  const discoverComposeTarget =
-    !isNativeBackend && input.args.options.expectComposeProject === undefined;
-  const run = () =>
-    runWholeDown({ input, flagTimeoutSeconds, discoverComposeTarget });
   if (isNativeBackend) {
-    return await run();
+    return await runWholeDown({ input, flagTimeoutSeconds });
   }
-  return await withComposeCheckoutLock({
+  const selection = {
     cwd: input.ctx.cwd,
     path: input.args.options.path,
     project: input.args.options.project,
     branch: input.args.options.branch,
-    beforeLock: (resolvedDownTarget) =>
+    beforeLock: (resolvedDownTarget: { readonly branch: string | null }) =>
       updateAutostartIntent({ ...input, action: "down", resolvedDownTarget }),
-    run,
+  };
+  const result = await withComposeCheckoutLock({
+    ...selection,
+    run: async (lockedCopy) => {
+      const resolvedDownTarget =
+        input.args.options.expectComposeProject === undefined
+          ? await resolveDownCopy({ input, lockedCopy })
+          : undefined;
+      if (
+        lockedCopy &&
+        resolvedDownTarget &&
+        resolvedDownTarget.branch !== lockedCopy.branch
+      ) {
+        return { branch: resolvedDownTarget.branch };
+      }
+      return await runWholeDown({
+        input,
+        flagTimeoutSeconds,
+        resolvedDownTarget,
+      });
+    },
   });
+  if (typeof result === "number") {
+    return result;
+  }
+  // Worktree reconciliation selected an older branch or the base. Release
+  // the initial copy lock before taking the final one, then read its pin.
+  return await withComposeCheckoutLock({
+    ...selection,
+    selectedCopy: result,
+    run: async () =>
+      runWholeDown({
+        input,
+        flagTimeoutSeconds,
+        resolvedDownTarget: await resolveDownCopy({
+          input,
+          selectedCopy: result,
+        }),
+      }),
+  });
+}
+
+async function resolveDownCopy({
+  input,
+  lockedCopy,
+  selectedCopy,
+}: {
+  readonly input: Parameters<typeof handleDownUnlocked>[0];
+  readonly lockedCopy?: { readonly branch: string | null };
+  readonly selectedCopy?: { readonly branch: string | null };
+}): Promise<AutostartDownTarget | undefined> {
+  return await resolveFinalAutostartDownTarget(
+    {
+      cwd: input.ctx.cwd,
+      path: input.args.options.path,
+      project: input.args.options.project,
+      branch: input.args.options.branch,
+      selectedCopy,
+      writeNotice: (notice) =>
+        writeDownNotice({ json: input.args.options.json === true, ...notice }),
+    },
+    {
+      resolveComposeTarget: async (target) => {
+        if (lockedCopy && target.branch !== lockedCopy.branch) {
+          return undefined;
+        }
+        return await resolveLocalComposeTarget({
+          ...target,
+          target: input.args.options.target,
+          envOption: input.args.options.env,
+        });
+      },
+      isLocalTarget: async (project) =>
+        (
+          await resolveProjectLifecycleTarget({
+            project,
+            requestedTarget: input.args.options.target,
+          })
+        ).resolvedTarget === "local",
+    }
+  );
 }
 
 async function runWholeDown({
   input,
   flagTimeoutSeconds,
-  discoverComposeTarget,
+  resolvedDownTarget,
 }: {
   readonly input: Parameters<typeof handleDownUnlocked>[0];
   readonly flagTimeoutSeconds?: number;
-  readonly discoverComposeTarget: boolean;
+  readonly resolvedDownTarget?: AutostartDownTarget;
 }): Promise<number> {
   // Publish stop intent before waiting for an earlier start to release its lock.
-  const resolvedDownTarget = discoverComposeTarget
-    ? await resolveFinalAutostartDownTarget(
-        {
-          cwd: input.ctx.cwd,
-          path: input.args.options.path,
-          project: input.args.options.project,
-          branch: input.args.options.branch,
-          writeNotice: (notice) =>
-            writeDownNotice({
-              json: input.args.options.json === true,
-              ...notice,
-            }),
-        },
-        {
-          resolveComposeTarget: (target) =>
-            resolveLocalComposeTarget({
-              ...target,
-              target: input.args.options.target,
-              envOption: input.args.options.env,
-            }),
-          isLocalTarget: async (project) =>
-            (
-              await resolveProjectLifecycleTarget({
-                project,
-                requestedTarget: input.args.options.target,
-              })
-            ).resolvedTarget === "local",
-        }
-      )
-    : undefined;
   const pinned = {
     ...input,
     flagTimeoutSeconds,
@@ -9096,7 +9141,9 @@ async function handleServiceDown({
       projectValue: cfg.compose?.downTimeoutSeconds,
     });
     return await withComposeNameLock(
-      compose.selected?.pin ? compose.expected : undefined,
+      compose.selected
+        ? (compose.composeProjectName ?? compose.base)
+        : undefined,
       () =>
         runServiceStop({
           project,
@@ -11422,7 +11469,7 @@ async function runRestartCommand({
     options: args.options,
   });
   return await withComposeNameLock(
-    compose.selected?.pin ? compose.expected : undefined,
+    compose.selected ? (compose.composeProjectName ?? compose.base) : undefined,
     () =>
       runLocalRestart({
         project,

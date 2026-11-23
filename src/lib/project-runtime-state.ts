@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   buildStaleComposeEnvWarning,
   type ComposeEnvFingerprintRecord,
@@ -7,8 +7,12 @@ import {
   withComposeServiceEnvFingerprints,
   withoutComposeServiceEnvFingerprints,
 } from "./compose-env-fingerprint.ts";
-import { ensureDir, pathExists, readTextFile, writeTextFile } from "./fs.ts";
+import { ensureDir, pathExists, readTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import {
+  withProjectsRegistryLock,
+  writeProjectsRegistryAtomic,
+} from "./projects-registry-lock.ts";
 
 export type ProjectRuntimeStateEntry = {
   readonly composeProject: string;
@@ -96,37 +100,20 @@ export async function upsertProjectRuntimeStateEntry(opts: {
   readonly projectDir: string;
   readonly entry: ProjectRuntimeStateEntry;
 }): Promise<void> {
-  const state = await readProjectRuntimeState({ projectDir: opts.projectDir });
-  const next: ProjectRuntimeStateFile = {
-    entries: [
-      ...state.filter(
-        (entry) => entry.composeProject !== opts.entry.composeProject
-      ),
-      opts.entry,
-    ].sort((a, b) => a.composeProject.localeCompare(b.composeProject)),
-  };
-
-  await writeProjectRuntimeStateFile({
-    projectDir: opts.projectDir,
-    state: next,
-  });
+  await mutateProjectRuntimeState(opts.projectDir, (entries) =>
+    replaceRuntimeEntry(entries, opts.entry)
+  );
 }
 
 export async function removeProjectRuntimeStateEntry(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
 }): Promise<void> {
-  const state = await readProjectRuntimeState({ projectDir: opts.projectDir });
-  const nextEntries = state.filter(
-    (entry) => entry.composeProject !== opts.composeProject
-  );
-  if (nextEntries.length === state.length) {
-    return;
-  }
-
-  await writeProjectRuntimeStateFile({
-    projectDir: opts.projectDir,
-    state: { entries: nextEntries },
+  await mutateProjectRuntimeState(opts.projectDir, (entries) => {
+    const next = entries.filter(
+      (entry) => entry.composeProject !== opts.composeProject
+    );
+    return next.length === entries.length ? null : next;
   });
 }
 
@@ -150,28 +137,29 @@ export async function updateProjectRuntimeServiceEnvFingerprints(opts: {
   >;
   readonly outcome: "applied" | "unknown";
 }): Promise<void> {
-  const entry = await readProjectRuntimeStateEntry({
-    projectDir: opts.projectDir,
-    composeProject: opts.composeProject,
-  });
-  if (!entry) {
-    return;
-  }
-  const envFingerprint =
-    opts.outcome === "applied" && entry.envName === opts.effectiveEnvName
-      ? withComposeServiceEnvFingerprints({
-          existing: entry.envFingerprint,
-          services: opts.services,
-          envByService: opts.envByService,
-        })
-      : withoutComposeServiceEnvFingerprints({
-          existing: entry.envFingerprint,
-          services: opts.services,
-        });
-  const { envFingerprint: _previous, ...rest } = entry;
-  await upsertProjectRuntimeStateEntry({
-    projectDir: opts.projectDir,
-    entry: { ...rest, ...(envFingerprint ? { envFingerprint } : {}) },
+  await mutateProjectRuntimeState(opts.projectDir, (entries) => {
+    const entry = entries.find(
+      (current) => current.composeProject === opts.composeProject
+    );
+    if (!entry) {
+      return null;
+    }
+    const envFingerprint =
+      opts.outcome === "applied" && entry.envName === opts.effectiveEnvName
+        ? withComposeServiceEnvFingerprints({
+            existing: entry.envFingerprint,
+            services: opts.services,
+            envByService: opts.envByService,
+          })
+        : withoutComposeServiceEnvFingerprints({
+            existing: entry.envFingerprint,
+            services: opts.services,
+          });
+    const { envFingerprint: _previous, ...rest } = entry;
+    return replaceRuntimeEntry(entries, {
+      ...rest,
+      ...(envFingerprint ? { envFingerprint } : {}),
+    });
   });
 }
 
@@ -236,11 +224,41 @@ function parseProjectRuntimeStateEntry(
   };
 }
 
-async function writeProjectRuntimeStateFile(opts: {
-  readonly projectDir: string;
-  readonly state: ProjectRuntimeStateFile;
-}): Promise<void> {
-  const path = resolveProjectRuntimeStatePath({ projectDir: opts.projectDir });
-  await ensureDir(resolve(opts.projectDir, ".internal"), 0o700);
-  await writeTextFile(path, `${JSON.stringify(opts.state, null, 2)}\n`, 0o600);
+function replaceRuntimeEntry(
+  entries: readonly ProjectRuntimeStateEntry[],
+  entry: ProjectRuntimeStateEntry
+): readonly ProjectRuntimeStateEntry[] {
+  return [
+    ...entries.filter(
+      (current) => current.composeProject !== entry.composeProject
+    ),
+    entry,
+  ].sort((left, right) =>
+    left.composeProject.localeCompare(right.composeProject)
+  );
+}
+
+/** Sibling copies share a state file even though their runtime locks differ. */
+async function mutateProjectRuntimeState(
+  projectDir: string,
+  update: (
+    entries: readonly ProjectRuntimeStateEntry[]
+  ) => readonly ProjectRuntimeStateEntry[] | null
+): Promise<void> {
+  const path = resolveProjectRuntimeStatePath({ projectDir });
+  await ensureDir(dirname(path), 0o700);
+  await withProjectsRegistryLock({
+    lockPath: `${path}.lock`,
+    label: "Runtime state",
+    run: async () => {
+      const entries = update(await readProjectRuntimeState({ projectDir }));
+      if (entries) {
+        const state: ProjectRuntimeStateFile = { entries };
+        await writeProjectsRegistryAtomic({
+          path,
+          text: `${JSON.stringify(state, null, 2)}\n`,
+        });
+      }
+    },
+  });
 }

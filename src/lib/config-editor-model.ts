@@ -450,11 +450,15 @@ function scrubLegacyProject(
   );
 }
 
-function publicLayer(layer: LayerSnapshot, privateKeys: ReadonlySet<string>) {
+function publicLayer(
+  layer: LayerSnapshot,
+  privateKeys: ReadonlySet<string>,
+  invalid: boolean
+) {
   const { text, ...rest } = layer;
   const legacy = basename(layer.file) === PROJECT_CONFIG_LEGACY_FILENAME;
-  let source = { source: null as string | null, hidden: legacy };
-  if (text !== null && !legacy) {
+  let source = { source: null as string | null, hidden: legacy || invalid };
+  if (text !== null && !(legacy || invalid)) {
     source = layer.file.endsWith(".json")
       ? safeJsonSource(text)
       : safeYamlSource(
@@ -582,7 +586,15 @@ export function showConfigEditor(snapshot: ConfigSnapshot | null) {
     services: result.services,
     env,
     issues,
-    layers: layers.map((layer) => publicLayer(layer, privateKeys)),
+    layers: layers.map((layer) =>
+      publicLayer(
+        layer,
+        privateKeys,
+        issues.some(
+          (issue) => issue.layer === layer.id && issue.code === "E_CONFIG_PARSE"
+        )
+      )
+    ),
     branch: snapshot?.branch ?? null,
     overlay: snapshot?.overlay ?? null,
     overlays: snapshot?.overlays ?? [],

@@ -375,6 +375,7 @@ impl HackApp {
         report.layer(layer).is_some_and(|layer| layer.writable)
             && !self.config.conflict
             && !self.config.saving
+            && !self.config.loading
             && !self
                 .config
                 .draft
@@ -1076,7 +1077,8 @@ impl HackApp {
         let allow_edit = layer.source_writable
             && !changed_in_form
             && !self.config.conflict
-            && !self.config.saving;
+            && !self.config.saving
+            && !self.config.loading;
         let original = layer.source.as_deref().unwrap_or_default();
         let edit_id = format!("source/{}", layer.id);
         let issue = self

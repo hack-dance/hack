@@ -292,8 +292,8 @@ impl HackApp {
         }
         if !keep {
             self.config.report = None;
-            self.config.loading = true;
         }
+        self.config.loading = true;
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         self.config.load_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -302,6 +302,8 @@ impl HackApp {
                 .await;
             let _ = this.update(cx, |app, cx| {
                 app.config.load_task = None;
+                app.config.inputs.clear();
+                app.config.editor = None;
                 app.config.settle_report(result);
                 app.queue_config_validation(cx);
                 cx.notify();
@@ -401,7 +403,7 @@ impl HackApp {
     }
 
     fn stage_config(&mut self, id: String, change: Option<ConfigChange>, cx: &mut Context<Self>) {
-        if self.config.saving || self.config.conflict {
+        if self.config.loading || self.config.saving || self.config.conflict {
             return;
         }
         self.config.stage(id, change);
@@ -472,6 +474,7 @@ impl HackApp {
                         app.config.draft = Draft::default();
                         app.config.validation = None;
                         app.config.saved = Some(saved);
+                        app.config.view = View::Map;
                         app.config.clear_editors();
                         app.load_config(true, cx);
                     }
@@ -604,6 +607,9 @@ impl HackApp {
             bar = bar.child(
                 config_tab(("config-view", index), name, self.config.view == tab, ui).on_click(
                     cx.listener(move |app, _, _, cx| {
+                        if tab == View::Map && app.config.view == View::Map {
+                            app.config.saved = None;
+                        }
                         app.config.view = tab;
                         cx.notify();
                     }),

@@ -4,6 +4,12 @@ Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
 repository, so teammates and agents use the same definition.
 
+In the desktop preview, **Resources** lists observed containers and their
+attached image, named volumes and networks by project and branch. Open a
+project for its normal lifecycle actions, or open **Doctor** for cleanup
+guidance and the native-pool state. Detached resources and disk usage
+require a broader Hack inventory report.
+
 ## Project, instance and branch instance
 
 - A **project** is a repository with a `.hack/` folder. It has a name, which Hack

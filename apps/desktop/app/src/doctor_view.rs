@@ -27,6 +27,7 @@ pub enum Pane {
     #[default]
     Project,
     Doctor,
+    Resources,
     /// Setup checks (`setup_view`).
     Setup,
     /// hackd and always-on (`machine_view`).
@@ -130,7 +131,10 @@ pub fn render(pane: &DoctorPane, ui: &Ui, cx: &mut Context<HackApp>) -> AnyEleme
         .into_any_element()
 }
 
-fn native_pool_card(report: hack_desktop_core::models::NativePoolReport, ui: &Ui) -> gpui_kit::Div {
+pub(crate) fn native_pool_card(
+    report: hack_desktop_core::models::NativePoolReport,
+    ui: &Ui,
+) -> gpui_kit::Div {
     use hack_desktop_core::models::NativePoolState;
     let (status, label) = match report.state {
         NativePoolState::Idle => (Status::Degraded, "Running · idle"),

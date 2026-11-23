@@ -321,6 +321,8 @@ pub struct NativePsItem {
     pub service: String,
     #[serde(deserialize_with = "null_default")]
     pub state: String,
+    #[serde(rename = "container")]
+    pub container_id: Option<String>,
     pub health: Option<String>,
     #[serde(rename = "exitCode")]
     pub exit_code: Option<i32>,
@@ -360,6 +362,11 @@ pub struct RuntimeService {
 pub struct Container {
     pub id: Option<String>,
     pub name: Option<String>,
+    pub image: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub mounts: Vec<ContainerMount>,
+    #[serde(deserialize_with = "null_default")]
+    pub networks: Vec<ContainerNetwork>,
     /// Docker state: `running`, `exited`, `created`, `restarting`, ...
     #[serde(deserialize_with = "null_default")]
     pub state: String,
@@ -371,6 +378,18 @@ pub struct Container {
     pub labels: std::collections::BTreeMap<String, String>,
     /// The container's compose working directory.
     pub working_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ContainerMount {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ContainerNetwork {
+    pub name: String,
 }
 
 impl Container {

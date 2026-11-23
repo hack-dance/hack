@@ -625,6 +625,34 @@ pub(crate) fn render(
     cx: &mut Context<HackApp>,
     on_exit: impl Fn(&mut HackApp, CommandCompletion, &mut Context<HackApp>) + 'static,
 ) -> AnyElement {
+    let on_exit = Rc::new(on_exit);
+    render_with_run(
+        props,
+        caller_busy,
+        app,
+        ui,
+        cx,
+        move |app, props, window, cx| {
+            let on_exit = Rc::clone(&on_exit);
+            app.run_drawer_command(
+                props,
+                move |app, result, cx| on_exit(app, result, cx),
+                window,
+                cx,
+            );
+        },
+    )
+}
+
+/// Use the shared buttons when a caller must admit the operation before launching the drawer.
+pub(crate) fn render_with_run(
+    props: CommandControl,
+    caller_busy: bool,
+    app: &HackApp,
+    ui: &Ui,
+    cx: &mut Context<HackApp>,
+    on_run: impl Fn(&mut HackApp, CommandControl, &mut Window, &mut Context<HackApp>) + 'static,
+) -> AnyElement {
     if let CommandAvailability::Blocked(reason) | CommandAvailability::VersionMismatch(reason) =
         &props.availability
     {
@@ -689,18 +717,9 @@ pub(crate) fn render(
     }
     if can_run {
         let props = props.clone();
-        let on_exit = Rc::new(on_exit);
-        run = run
-            .focusable()
-            .on_click(cx.listener(move |app, _, window, cx| {
-                let on_exit = Rc::clone(&on_exit);
-                app.run_drawer_command(
-                    props.clone(),
-                    move |app, result, cx| on_exit(app, result, cx),
-                    window,
-                    cx,
-                );
-            }));
+        run = run.focusable().on_click(
+            cx.listener(move |app, _, window, cx| on_run(app, props.clone(), window, cx)),
+        );
     }
 
     let compact = props.size == CommandControlSize::Compact;

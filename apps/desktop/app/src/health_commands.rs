@@ -208,13 +208,9 @@ impl HackApp {
     fn health_command_exited(
         &mut self,
         completion: CommandCompletion,
-        repair: Option<Repair>,
         window: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        if let Some(repair) = repair {
-            self.health.queue = RepairQueue::new(vec![repair], false);
-        }
         let Some(queue) = &mut self.health.queue else {
             return;
         };
@@ -380,14 +376,14 @@ mod shared {
         repair: Option<Repair>,
         busy: bool,
         ui: &Ui,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<HackApp>,
     ) -> AnyElement {
-        let window = window.window_handle();
-        command_control::render(command, busy, app, ui, cx, move |app, exit, cx| {
-            if repair.is_some() {
-                app.health_command_exited(exit, repair.clone(), window, cx);
-            }
+        let Some(repair) = repair else {
+            return command_control::render(command, busy, app, ui, cx, |_, _, _| {});
+        };
+        command_control::render_with_run(command, busy, app, ui, cx, move |app, _, window, cx| {
+            app.start_health_repairs(vec![repair.clone()], false, window, cx);
         })
     }
 
@@ -400,7 +396,7 @@ mod shared {
         let handle = window.window_handle();
         app.run_drawer_command(
             command,
-            move |app, exit, cx| app.health_command_exited(exit, None, handle, cx),
+            move |app, exit, cx| app.health_command_exited(exit, handle, cx),
             window,
             cx,
         )
@@ -663,6 +659,7 @@ mod tests {
             "skipped",
             "changed",
             "stopped",
+            "row-stopped",
         ] {
             let home =
                 std::env::temp_dir().join(format!("hack-repair-{}-{case}", std::process::id()));
@@ -677,7 +674,7 @@ printf '%s\n' "$2" >> "$HOME/order"
 case "$2" in
   install)
     [ ! -f "$HOME/failed" ] || exit 9
-    if [ -f "$HOME/stopped" ]; then
+    if [ -f "$HOME/stopped" ] || [ -f "$HOME/row-stopped" ]; then
       trap ': > "$HOME/routing"; exit 0' INT
       : > "$HOME/ready"
       while :; do /bin/sleep 0.05; done
@@ -713,9 +710,13 @@ esac
                                 let mut app = HackApp::new(source.clone(), false, window, cx);
                                 app.show_doctor_now();
                                 app.live = true;
-                                let repairs = crate::doctor_view::repairs(&app);
+                                let mut repairs = crate::doctor_view::repairs(&app);
                                 assert_eq!(repairs.len(), 2);
-                                app.start_health_repairs(repairs, true, window, cx);
+                                let all = case != "row-stopped";
+                                if !all {
+                                    repairs.truncate(1);
+                                }
+                                app.start_health_repairs(repairs, all, window, cx);
                                 app
                             })
                         },
@@ -729,7 +730,10 @@ esac
                 cx.update(|cx| {
                     app.update(cx, |app, cx| {
                         app.settle_command_fixture(cx);
-                        if case == "stopped" && !interrupt_sent && home.join("ready").exists() {
+                        if matches!(case, "stopped" | "row-stopped")
+                            && !interrupt_sent
+                            && home.join("ready").exists()
+                        {
                             app.stop_drawer_command(cx);
                             interrupt_sent = true;
                         }
@@ -770,8 +774,9 @@ esac
                                 .starts_with("A remaining check changed")
                         );
                     }
-                    if case == "stopped" {
+                    if matches!(case, "stopped" | "row-stopped") {
                         assert!(interrupt_sent);
+                        assert!(app.health.confirmed.is_empty());
                         assert!(
                             home.join("checked-routing").exists(),
                             "interrupt trap exits successfully"

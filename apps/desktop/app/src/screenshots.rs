@@ -15,18 +15,24 @@ use hack_desktop_core::logs::fixtures::LogsFixture;
 
 use crate::view::HackApp;
 
-pub fn run(dir: &Path, fixture: Option<Fixture>) {
-    std::fs::create_dir_all(dir).expect("create screenshot dir");
+fn fixture_context() -> HeadlessAppContext {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
         Arc::new(hack_desktop_ui::icons::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(gpui_kit::init);
-    #[cfg(hack_terminal)]
-    if fixture.is_none() {
-        crate::command_control::capture(&dir.join("command-drawer"), &mut cx);
-    }
+    cx
+}
+
+#[cfg(hack_terminal)]
+pub(crate) fn run_command_drawer(dir: &Path) {
+    crate::command_control::capture(dir, &mut fixture_context());
+}
+
+pub fn run(dir: &Path, fixture: Option<Fixture>) {
+    std::fs::create_dir_all(dir).expect("create screenshot dir");
+    let mut cx = fixture_context();
     // Every app fixture, then every Logs tab fixture on its base project state.
     let mut shots: Vec<(&'static str, Fixture, Option<LogsFixture>)> =
         Fixture::ALL.iter().map(|f| (f.name(), *f, None)).collect();

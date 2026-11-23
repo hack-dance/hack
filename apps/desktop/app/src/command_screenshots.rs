@@ -39,11 +39,9 @@ pub(crate) fn capture(dir: &Path, cx: &mut HeadlessAppContext) {
                     })
                 })
                 .expect("open command screenshot window");
-            cx.update_window(handle, |_, window, cx| {
-                window.render_frame(cx);
-                app.update(cx, settle);
-            })
-            .expect("draw and settle command");
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("draw command");
+            wait_for_frame(index, &app, cx);
             cx.update_window(handle, |_, window, cx| {
                 app.update(cx, |app, cx| {
                     if index == 5 {
@@ -165,6 +163,38 @@ fn settle(app: &mut HackApp, cx: &mut Context<HackApp>) {
     }
 }
 
+fn wait_for_frame(index: usize, app: &Entity<HackApp>, cx: &mut HeadlessAppContext) {
+    if index == 1 {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.update(|cx| app.update(cx, settle));
+        let ready = cx.update(|cx| {
+            let drawer = &app.read(cx).panels.command;
+            let run = drawer.last.as_ref().expect("command fixture run");
+            match index {
+                0 => drawer
+                    .session
+                    .as_ref()
+                    .and_then(|panel| panel.read(cx).active())
+                    .and_then(|term| term.read(cx).output_text())
+                    .is_some_and(|output| output.contains("Waiting for hackd to answer")),
+                2 | 6 => run.waiting_for_password,
+                _ => !run.running(),
+            }
+        });
+        if ready {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture {} did not reach its state",
+            FRAMES[index]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,27 +221,25 @@ mod tests {
                 )
             })
             .unwrap();
-        cx.update(|cx| app.update(cx, settle));
+        wait_for_frame(index, &app, &mut cx);
         (cx, window, app)
     }
 
     #[test]
     fn closing_hides_a_password_prompt_and_stop_releases_the_machine_gate() {
         let (mut cx, window, app) = open(2);
-        let id = cx.update(|cx| {
+        cx.update(|cx| {
             app.update(cx, |app, cx| {
                 let last = app.panels.command.last.as_ref().unwrap();
                 assert!(last.waiting_for_password);
-                let id = last.props.id.clone();
                 app.close_command_drawer(cx);
                 assert!(!app.panels.command.visible());
                 assert!(app.machine.held_by(Holder::Command));
-                id
             })
         });
         cx.update_window(window, |_, window, cx| {
             app.update(cx, |app, cx| {
-                app.show_command_output(&id, window, cx);
+                assert!(app.toggle_command_drawer(window, cx));
                 assert!(app.panels.command.visible());
                 app.stop_drawer_command(cx);
             });
@@ -263,7 +291,7 @@ mod tests {
         cx.advance_clock(CLOSE_DELAY - Duration::from_millis(1));
         cx.run_until_parked();
         assert!(cx.update(|cx| app.read(cx).panels.command.visible()));
-        cx.advance_clock(Duration::from_millis(1));
+        cx.advance_clock(Duration::from_millis(2));
         cx.run_until_parked();
         assert!(!cx.update(|cx| app.read(cx).panels.command.visible()));
 

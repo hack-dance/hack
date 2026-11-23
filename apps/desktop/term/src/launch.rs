@@ -36,6 +36,7 @@ pub enum SessionKind {
     Command {
         label: String,
         expects_password: bool,
+        project: bool,
     },
     /// A shell inside a running service container.
     ContainerShell { service: String, shell: String },

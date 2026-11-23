@@ -162,6 +162,7 @@ fn command_core(
             kind: SessionKind::Command {
                 label: props.label.clone(),
                 expects_password: props.expects_password,
+                project: props.cwd.is_some(),
             },
             options: command_options(spec, cwd)?,
         }],
@@ -301,7 +302,7 @@ impl HackApp {
             Some(ExitInfo::Signaled(signal)) => CommandExit::Signal(signal),
             Some(ExitInfo::Unknown) | None => CommandExit::StatusUnavailable,
         };
-        let reason = (exit != CommandExit::Code(0))
+        let reason = exit_failed(&exit)
             .then(|| term.output_text().and_then(|output| diagnosis(&output)))
             .flatten();
         self.finish_drawer_command(id, exit, reason, cx);
@@ -434,6 +435,29 @@ impl HackApp {
         cx.notify();
     }
 
+    /// Close the visible drawer or bring back a running command.
+    pub(crate) fn toggle_command_drawer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.panels.command.visible {
+            self.close_command_drawer(cx);
+            return true;
+        }
+        let Some(run) = self
+            .panels
+            .command
+            .last
+            .as_ref()
+            .filter(|run| run.running())
+        else {
+            return false;
+        };
+        self.show_command_output(&run.props.id.clone(), window, cx);
+        true
+    }
+
     /// Reopen the last drawer run if it belongs to the supplied control ID.
     /// Can also show a command still running behind a closed drawer.
     pub(crate) fn show_command_output(
@@ -552,6 +576,10 @@ fn exit_label(exit: &CommandExit) -> String {
     }
 }
 
+fn exit_failed(exit: &CommandExit) -> bool {
+    !matches!(exit, CommandExit::Code(0) | CommandExit::StatusUnavailable)
+}
+
 fn elapsed_label(at: Instant) -> String {
     let seconds = at.elapsed().as_secs();
     match seconds {
@@ -586,7 +614,7 @@ pub(crate) fn render(
     let running = last.is_some_and(Run::running);
     let retry = last.is_some_and(|r| match &r.phase {
         Phase::Ended { exit, check, .. } => {
-            *exit != CommandExit::Code(0) || matches!(check, Check::NeedsAttention(_))
+            exit_failed(exit) || matches!(check, Check::NeedsAttention(_))
         }
         Phase::Running => false,
     });
@@ -712,14 +740,11 @@ pub(crate) fn render(
                 );
             }
             if !drawer.visible {
-                let summary = if *exit == CommandExit::Code(0) {
-                    if matches!(check, Check::NeedsAttention(_)) {
-                        "needs a fix"
-                    } else {
-                        "finished"
-                    }
-                } else {
-                    "failed"
+                let summary = match (exit, check) {
+                    (CommandExit::StatusUnavailable, _) => "ended",
+                    (CommandExit::Code(0), Check::NeedsAttention(_)) => "needs a fix",
+                    (CommandExit::Code(0), _) => "finished",
+                    _ => "failed",
                 };
                 control = control.child(last_run_line(
                     last,
@@ -816,6 +841,14 @@ impl HackApp {
                     p.states.degraded.dot,
                 ),
             },
+            Phase::Ended {
+                exit: CommandExit::StatusUnavailable,
+                ..
+            } => (
+                Glyph::CircleAlert,
+                "Ended · status unknown".into(),
+                p.text_secondary,
+            ),
             Phase::Ended { exit, .. } => (
                 Glyph::CircleAlert,
                 format!("Failed · {}", exit_label(exit)),

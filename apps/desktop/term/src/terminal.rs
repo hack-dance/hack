@@ -202,8 +202,9 @@ impl TerminalCore {
             options.scrollback_max_bytes = 4 << 20;
         }
         let mut emu = Emulator::new(options).map_err(std::io::Error::other)?;
-        if let SessionKind::Command { label, .. } = &first.kind {
-            emu.feed(format!("\x1b[2m~ $ {label}\x1b[0m\r\n").as_bytes());
+        if let SessionKind::Command { label, project, .. } = &first.kind {
+            let prompt = if *project { "$" } else { "~ $" };
+            emu.feed(format!("\x1b[2m{prompt} {label}\x1b[0m\r\n").as_bytes());
         }
         let pty = Pty::spawn(&first.options)?;
         Ok(Self::with(
@@ -438,7 +439,7 @@ impl TerminalCore {
                             };
                             self.emu.feed(
                                 format!(
-                                    "\r\n\x1b[2m{result} · {:.1} s\x1b[0m\r\n",
+                                    "\r\n\x1b[2m{result} · {:.1} s\x1b[0m\x1b[?25l\r\n",
                                     self.started.elapsed().as_secs_f32()
                                 )
                                 .as_bytes(),

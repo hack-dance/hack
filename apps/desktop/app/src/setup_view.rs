@@ -400,7 +400,7 @@ fn short_command(bound: &str) -> String {
 #[cfg(hack_terminal)]
 fn setup_command(
     card: &Card,
-    args: Vec<String>,
+    mut args: Vec<String>,
     expects_password: bool,
     busy: bool,
     app: &HackApp,
@@ -411,9 +411,14 @@ fn setup_command(
         CommandAvailability, CommandControl, CommandControlSize, CommandExit,
     };
     let id = card.id.clone();
+    let label = format!("hack {}", args.join(" "));
+    if matches!(card.remedy, Remedy::Run(_)) {
+        // Preserve the old safe action's non-interactive CLI mode.
+        args.push("--no-interactive".into());
+    }
     let props = CommandControl {
         id: format!("setup:{id}"),
-        label: format!("hack {}", args.join(" ")),
+        label,
         title: "Terminal".into(),
         availability: match app.setup.report.command(args) {
             Ok(spec) => CommandAvailability::Ready(spec),

@@ -1372,6 +1372,15 @@ impl HackApp {
                 };
                 row = row.child(
                     action_button("recover-hackd", glyph, label, !self.machine.busy(), ui)
+                        .when(self.machine.held_by(Holder::Command), |button| {
+                            button.tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(if cfg!(target_os = "macos") {
+                                    "A terminal command is running. Press ⌘J to show it."
+                                } else {
+                                    "A terminal command is running. Press Ctrl+Shift+J to show it."
+                                }).build(window, cx)
+                            })
+                        })
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
                         ),
@@ -1794,10 +1803,8 @@ impl HackApp {
             gpui_kit::MouseButton::Left,
             cx.listener(|this, _, _, _| this.panels.dragging = false),
         )
-        .on_action(cx.listener(|this, _: &TogglePanel, _, cx| {
-            if this.panels.command.visible() {
-                this.close_command_drawer(cx);
-            } else {
+        .on_action(cx.listener(|this, _: &TogglePanel, window, cx| {
+            if !this.toggle_command_drawer(window, cx) {
                 this.toggle_panel(cx);
             }
         }))

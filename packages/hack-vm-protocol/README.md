@@ -101,3 +101,10 @@ returns the cached status without signalling a PID. Release discards all bytes
 while the incarnation watermark fences the ID. Each pipe keeps its newest advertised retention
 bytes and continues draining. A lagging reader resumes at start_offset plus the
 returned byte count. A 1 GiB writer retains only that finite tail.
+
+The optional runtime guest-agent-client feature exposes Session on an already
+connected Unix stream. Negotiation has its own deadline; each subsequent call
+gets one deadline for its complete write and read. Poll readiness and per-call
+nonblocking I/O preserve the owner's socket settings. A failed exchange retires
+the session. Reconnect to reconcile an uncertain effect.
+The exchange requires a single writer per socket. On Apple platforms each send is bounded by the socket send low-water mark after poll reports writable, so a slow reader cannot hold a large write past the exchange deadline.

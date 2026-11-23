@@ -81,21 +81,55 @@ function validPortHost(value: string): boolean {
   if (!host.includes("*")) {
     return isIP(host) !== 0;
   }
-  if (bracketed || host.includes(":") || !host.includes(".")) {
-    const address = host.split("%", 1)[0] ?? "";
-    const parts = address.split(":");
-    return (
-      IPV6_TEMPLATE.test(host) &&
-      !address.includes(":::") &&
-      address.indexOf("::") === address.lastIndexOf("::") &&
-      parts.every((part, index) =>
-        part.includes(".")
-          ? index === parts.length - 1 && validIpv4Template(part)
-          : part.replaceAll("*", "").length <= 4
-      )
-    );
+  return bracketed || host.includes(":") || !host.includes(".")
+    ? validIpv6Template(host)
+    : validIpv4Template(host);
+}
+
+function validIpv6Template(host: string): boolean {
+  const address = host.split("%", 1)[0] ?? "";
+  const sides = address.split("::");
+  if (
+    !IPV6_TEMPLATE.test(host) ||
+    sides.length > 2 ||
+    (address.startsWith(":") && !address.startsWith("::")) ||
+    (address.endsWith(":") && !address.endsWith("::"))
+  ) {
+    return false;
   }
-  return validIpv4Template(host);
+  const parts = sides.filter(Boolean).flatMap((side) => side.split(":"));
+  let groups = sides.length === 2 ? 1 : 0;
+  for (const [index, part] of parts.entries()) {
+    if (!part.includes(".")) {
+      groups += minimumIpv6Groups(part);
+      continue;
+    }
+    if (index !== parts.length - 1 || !validIpv4Template(part)) {
+      return false;
+    }
+    groups += 2;
+  }
+  return groups <= 8;
+}
+
+/** A substitution can supply a separator between fixed runs of hex digits. */
+function minimumIpv6Groups(part: string): number {
+  if (!part) {
+    return Number.POSITIVE_INFINITY;
+  }
+  let groups = 1;
+  let width = 0;
+  for (const run of part.split("*")) {
+    if (run.length > 4) {
+      return Number.POSITIVE_INFINITY;
+    }
+    if (width + run.length > 4) {
+      groups += 1;
+      width = 0;
+    }
+    width += run.length;
+  }
+  return groups;
 }
 
 function validIpv4Template(host: string): boolean {

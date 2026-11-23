@@ -7171,84 +7171,86 @@ export async function preflightLegacyEnvContract(opts: {
   });
   await assertNoLegacyDotenvLinks({ ...opts, overlayNames });
   await preflightLegacyEnvMigrationPaths({ ...opts, overlayNames });
-  const base = parseDotEnv(
-    (await readLegacyDotenvText({
-      path: resolveEnvFilePath({ ...opts, envName: null }),
-    })) ?? ""
-  );
-  const plain = opts.contract.vars.filter(
-    (entry) => entry.source === "plain_env"
-  );
+  await assertContractComposeOverlaysKeepValues({
+    projectDir: opts.projectDir,
+    overlayNames,
+    contractKeys: new Set(opts.contract.vars.map(({ key }) => key)),
+    composeRepairFollows: false,
+  });
   const outputs = new Map<string, string>();
-  outputs.set(
-    resolveProjectEnvConfigPath({ ...opts, envName: null }),
-    serializeProjectEnvConfig(
-      buildMigratedProjectEnvConfig({ environment: "default", values: {} })
-    )
-  );
   const project = migratedProjectConfigText(opts.projectText, opts.projectRoot);
   if (project !== null) {
     outputs.set(resolve(opts.projectDir, PROJECT_CONFIG_FILENAME), project);
   }
-  const { storePlaintextInBackend } = await readHackEnvRuntimeConfig(opts);
-  for (const envName of [null, ...overlayNames]) {
-    const own =
-      envName === null
-        ? base
-        : parseDotEnv(
-            (await readLegacyDotenvText({
-              path: resolveEnvFilePath({ ...opts, envName }),
-            })) ?? ""
-          );
-    if (storePlaintextInBackend) {
-      continue;
+  const resolved = await resolvePlaintextMigrationLayers({
+    ...opts,
+    overlayNames,
+  });
+  assertContractMigrationLayersAreWritable({
+    baseValues: resolved[0]?.values ?? [],
+    overlays: resolved
+      .slice(1)
+      .map(({ name, values }) => ({ name: name ?? "", values })),
+  });
+  let writesLocalEnv = opts.writesLocalEnv;
+  await prepareContractMigrationLayers(
+    opts,
+    resolved,
+    null,
+    ({ path, config }, local) => {
+      outputs.set(path, serializeProjectEnvConfig(config));
+      writesLocalEnv ||= local;
     }
-    const values = buildMigratedValues({
-      resolvedValues: plain.map((entry) => ({
-        ...entry,
-        source: "plain_env",
-        value: own[entry.key] ?? null,
-      })),
-      baseValues: envName === null ? null : new Map(Object.entries(base)),
-      keyText: null,
-    });
-    const config = buildMigratedProjectEnvConfig({
-      environment: envName ?? "default",
-      values,
-    });
-    const text = serializeProjectEnvConfig(config);
+  );
+  for (const text of outputs.values()) {
     if (Buffer.byteLength(text) > opts.maxLayerBytes) {
       throw new ClosedCliError(
         `A migrated config file exceeds the ${opts.maxLayerBytes / 1024} KiB limit.`
       );
     }
-    if (Object.values(values).some((scope) => Object.keys(scope).length > 0)) {
-      const path = await resolveProjectEnvEffectiveLocalConfigPath({
-        ...opts,
-        envName,
-      });
-      outputs.set(path, text);
-      outputs.set(
-        resolveProjectEnvConfigPath({ ...opts, envName }),
-        serializeProjectEnvConfig(
-          buildMigratedProjectEnvConfig({
-            environment: envName ?? "default",
-            values: {},
-          })
-        )
-      );
-    }
   }
-  if (
-    opts.writesLocalEnv ||
-    [...outputs.keys()].some((path) => path.endsWith(".local.yaml"))
-  ) {
+  if (writesLocalEnv) {
     const ignore = await planLocalEnvMigrationIgnore(opts);
     if (ignore) {
       outputs.set(ignore.path, ignore.text);
     }
   }
   return outputs;
+}
+
+async function resolvePlaintextMigrationLayers(opts: {
+  readonly projectDir: string;
+  readonly contract: HackEnvContract;
+  readonly overlayNames: readonly string[];
+}): Promise<ResolvedMigrationLayers> {
+  if ((await readHackEnvRuntimeConfig(opts)).storePlaintextInBackend) {
+    // The secret store can override either dotenv input. Check sizes on Apply.
+    return [{ name: null, values: [] }];
+  }
+  const read = async (envName: string | null) =>
+    parseDotEnv(
+      (await readLegacyDotenvText({
+        path: resolveEnvFilePath({ ...opts, envName }),
+      })) ?? ""
+    );
+  const base = await read(null);
+  const plain = opts.contract.vars.filter(
+    ({ source }) => source === "plain_env"
+  );
+  return await Promise.all(
+    [null, ...opts.overlayNames].map(async (name) => {
+      const overlay = name === null ? base : await read(name);
+      return {
+        name,
+        values: plain.map((entry) => ({
+          ...entry,
+          source: "plain_env",
+          // Legacy injection skips empty values before falling back to base.
+          value: overlay[entry.key] || base[entry.key] || null,
+        })),
+      };
+    })
+  );
 }
 
 async function planLocalEnvMigrationIgnore(opts: {
@@ -7315,7 +7317,13 @@ type AddPreparedMigrationFile = (
 type AddPreparedMigrationLayer = (
   write: PlannedEnvLayerWrite,
   local: boolean
-) => Promise<void>;
+) => Promise<void> | void;
+type ResolvedMigrationLayers = readonly {
+  readonly name: string | null;
+  readonly values: readonly (ResolvedContractMigrationValue & {
+    readonly source: "plain_env" | "keychain";
+  })[];
+}[];
 type ResolvedMigrationValues = readonly (Awaited<
   ReturnType<typeof resolveHackEnv>
 > & { readonly name: string | null })[];
@@ -7406,8 +7414,8 @@ async function prepareMigrationKeyIgnore(
 }
 
 async function prepareContractMigrationLayers(
-  opts: PreparedMigrationProject,
-  resolved: ResolvedMigrationValues,
+  opts: Pick<PreparedMigrationProject, "projectRoot" | "projectDir">,
+  resolved: ResolvedMigrationLayers,
   keyText: string | null,
   addLayer: AddPreparedMigrationLayer
 ): Promise<void> {

@@ -669,9 +669,28 @@ function layerDestination(layer: LayerSnapshot): string {
   );
 }
 
+async function writesLocalEnvForMigration(
+  snapshot: ConfigSnapshot,
+  files: Map<string, Prepared>
+): Promise<boolean> {
+  const changes = [...files.values()]
+    .filter(({ layer }) => layer.kind === "env" && layer.ownership === "local")
+    .flatMap(({ env }) => env);
+  if (changes.some(({ op }) => op === "set")) {
+    return true;
+  }
+  // An unset in a linked checkout can publish a null entry to mask inheritance.
+  return (
+    changes.length > 0 &&
+    (await prospectiveSnapshot(snapshot, files)).layers.some(
+      ({ inherited }) => inherited
+    )
+  );
+}
+
 async function stageConfigMigration(
   snapshot: ConfigSnapshot,
-  files: ReadonlyMap<string, Prepared>,
+  files: Map<string, Prepared>,
   mode: "validate" | "apply"
 ): Promise<{
   migration: ImplicitEnvMigrationPlan | null;
@@ -697,12 +716,7 @@ async function stageConfigMigration(
         "Fix the legacy env contract before saving env changes."
       );
     }
-    const writesLocalEnv = [...files.values()].some(
-      ({ layer, env }) =>
-        layer.kind === "env" &&
-        layer.ownership === "local" &&
-        env.some(({ op }) => op === "set")
-    );
+    const writesLocalEnv = await writesLocalEnvForMigration(snapshot, files);
     if (mode === "validate") {
       const outputs = await preflightLegacyEnvContract({
         ...project,

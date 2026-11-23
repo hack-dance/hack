@@ -1117,6 +1117,151 @@ test("legacy env validation accepts TOML and reports migration consent before Ap
   }
 });
 
+test("legacy env validation matches empty values, Compose order, and normalized JSON size", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-config-legacy-preflight-"));
+  scratch.push(root);
+  const project = join(root, ".hack");
+  await mkdir(project);
+  const json = join(project, "hack.config.json");
+  const composeFile = join(project, "docker-compose.yml");
+  const ignore = join(project, ".gitignore");
+  const settings = { name: "legacy", dev_host: "legacy.hack" };
+  const simpleCompose = "services:\n  api:\n    image: alpine\n";
+  await Promise.all([
+    writeFile(json, JSON.stringify(settings)),
+    writeFile(composeFile, simpleCompose),
+    writeFile(ignore, "# tracked legacy rules\n"),
+    writeFile(join(project, ".env"), "OPTIONAL=\n"),
+    writeFile(
+      join(project, "hack.env.json"),
+      '{"version":1,"vars":[{"key":"OPTIONAL","source":"plain_env"}]}\n'
+    ),
+  ]);
+  for (const args of [
+    ["init", "-b", "main"],
+    ["add", ".hack/.gitignore"],
+  ]) {
+    expect(
+      Bun.spawnSync(["git", "-C", root, ...args], {
+        env: privateCliEnv({ root }),
+        stdout: "ignore",
+        stderr: "ignore",
+      }).exitCode
+    ).toBe(0);
+  }
+  const change = {
+    layer: "3",
+    kind: "env",
+    scope: "global",
+    key: "NEW",
+    value: "added",
+  };
+  const selection = ["--env", "default"];
+  const validate = async () =>
+    cli({
+      root,
+      cwd: root,
+      args: ["validate", ...selection],
+      patch: {
+        base: bases(await show(root, root, ...selection)),
+        changes: [change],
+      },
+    });
+  expect((await validate()).payload.data.valid).toBe(true);
+
+  const overlaySettings = { ...settings, defaultEnvConfig: "staging" };
+  await Promise.all([
+    writeFile(json, JSON.stringify(overlaySettings)),
+    writeFile(join(project, ".env"), "OPTIONAL=base\n"),
+    writeFile(join(project, ".env.staging"), "OPTIONAL=overlay\n"),
+    writeFile(
+      composeFile,
+      `${simpleCompose}    env_file: [.env.staging, .env]\n`
+    ),
+  ]);
+  const order = await validate();
+  expect(order.payload.data.issues[0]?.message).toContain(
+    "order of Compose env_file"
+  );
+
+  await writeFile(composeFile, simpleCompose);
+  await writeFile(
+    json,
+    JSON.stringify({
+      ...overlaySettings,
+      custom: Array.from({ length: 100_000 }, () => 0),
+    })
+  );
+  const large = await validate();
+  expect(large.payload.data.issues[0]?.message).toContain("512 KiB");
+});
+
+test("a worktree's initial legacy unset journals the ignore repair for a null override", async () => {
+  const f = await fixture();
+  const project = join(f.linked, ".hack");
+  f.git(
+    f.linked,
+    "rm",
+    "--",
+    ".hack/hack.env.default.yaml",
+    ".hack/hack.env.qa.yaml"
+  );
+  await Promise.all([
+    rm(join(f.project, "hack.env.local.yaml")),
+    rm(join(project, "hack.env.local.yaml")),
+    writeFile(join(f.linked, ".gitignore"), ".hack/.internal/\n"),
+    writeFile(join(project, ".env"), "LOG_LEVEL=\n"),
+    writeFile(
+      join(project, "hack.env.json"),
+      '{"version":1,"vars":[{"key":"LOG_LEVEL","source":"plain_env"}]}\n'
+    ),
+  ]);
+  const selection = ["--env", "default"];
+  const before = await show(f.root, f.linked, ...selection);
+  expect(before.layers.some((layer) => layer.id === "4")).toBe(true);
+  const outcome = await cli({
+    root: f.root,
+    cwd: f.linked,
+    args: ["apply", ...selection],
+    patch: {
+      base: bases(before),
+      changes: [
+        {
+          layer: "5",
+          kind: "env",
+          scope: "global",
+          key: "LOG_LEVEL",
+          value: null,
+        },
+      ],
+    },
+  });
+  expect(outcome.payload.ok).toBe(true);
+  expect(
+    await readFile(join(project, "hack.env.local.yaml"), "utf8")
+  ).toContain("LOG_LEVEL: null");
+  const hash = new Bun.CryptoHasher("sha256")
+    .update(await realpath(f.linked))
+    .digest("hex");
+  const journal = JSON.parse(
+    await readFile(
+      join(
+        privateCliHome(f.root),
+        ".hack/env-migrations",
+        hash,
+        "journal.json"
+      ),
+      "utf8"
+    )
+  );
+  expect(journal.writes).toContainEqual(
+    expect.objectContaining({
+      path: join(await realpath(project), ".gitignore"),
+      done: true,
+    })
+  );
+});
+
 test("an identical replacement layer directory invalidates a revision", async () => {
   const f = await fixture();
   const report = await show(f.root, f.main);
@@ -1244,6 +1389,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
         "${PORT:-8080}:80",
         "127.0.0.${OCTET:-1}:8080:80",
         "[::${ADDR:-1}]:8080:80",
+        "[2001${SEP:-:}db8::1]:8080:80",
         "::1:8080:80",
         "127.0.0.1::80",
         "8082:81",
@@ -1283,6 +1429,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     "'${PORT'",
     "'invalid-host.${OCTET:-1}:8080:80'",
     "'[12345::${ADDR:-1}]:8080:80'",
+    "'[1:2:3:4:5:6:7:8:${TAIL:-9}]:8080:80'",
   ];
   const invalid = await check([
     {

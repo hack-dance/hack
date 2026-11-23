@@ -2,7 +2,9 @@
 
 use std::time::Instant;
 
-use gpui_kit::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px};
+use gpui_kit::{
+    AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px,
+};
 use hack_desktop_core::{
     doctor::{Affected, Area, Card, CardAction, DoctorState, DoctorView, Severity},
     setup::{Remedy, Status},
@@ -354,9 +356,9 @@ pub fn repairs(app: &HackApp) -> Vec<Repair> {
     repairs
 }
 
-pub fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
+pub fn render(app: &HackApp, ui: &Ui, window: &Window, cx: &mut Context<HackApp>) -> AnyElement {
     let p = ui.p;
-    let busy = app.health.queue.is_some();
+    let busy = app.health.queue.is_some() || app.machine.busy();
     let checking = app.doctor.is_loading();
     let available = repairs(app);
     let recheck = button(
@@ -454,7 +456,7 @@ pub fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
             empty_pane(Glyph::CircleAlert, "Couldn’t check", why.clone(), None, ui)
                 .into_any_element()
         }
-        DoctorState::Loaded(view) => groups(app, view, ui, cx),
+        DoctorState::Loaded(view) => groups(app, view, ui, window, cx),
     };
     div()
         .flex_1()
@@ -483,7 +485,13 @@ pub fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn groups(app: &HackApp, view: &DoctorView, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
+fn groups(
+    app: &HackApp,
+    view: &DoctorView,
+    ui: &Ui,
+    window: &Window,
+    cx: &mut Context<HackApp>,
+) -> AnyElement {
     let (machine, projects) = rows(app, view);
     let p = ui.p;
     let busy = app.health.queue.is_some()
@@ -535,30 +543,29 @@ fn groups(app: &HackApp, view: &DoctorView, ui: &Ui, cx: &mut Context<HackApp>) 
         if rows.is_empty() {
             continue;
         }
-        body = body.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::S3)
-                .child(
-                    div()
-                        .type_step(text::SMALL_STRONG)
-                        .text_color(p.text_muted)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .rounded(radius::PANEL)
-                        .hairline(p.border)
-                        .children(
-                            rows.iter()
-                                .enumerate()
-                                .map(|(i, row)| render_row(app, row, i != 0, busy, ui, cx)),
-                        ),
-                ),
-        );
+        body =
+            body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::S3)
+                    .child(
+                        div()
+                            .type_step(text::SMALL_STRONG)
+                            .text_color(p.text_muted)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .rounded(radius::PANEL)
+                            .hairline(p.border)
+                            .children(rows.iter().enumerate().map(|(i, row)| {
+                                render_row(app, row, i != 0, busy, ui, window, cx)
+                            })),
+                    ),
+            );
     }
     for (who, why) in &view.failed_runs {
         let id = format!("doctor-failed-{who}");
@@ -648,6 +655,7 @@ fn render_row(
     border: bool,
     busy: bool,
     ui: &Ui,
+    window: &Window,
     cx: &mut Context<HackApp>,
 ) -> AnyElement {
     let p = ui.p;
@@ -684,6 +692,15 @@ fn render_row(
             .any(|target| matches!(target, RepairTarget::Setup(id) if id == &row.id));
     let summary = if recently_confirmed || matches!(progress, Some((Mark::Passed, _))) {
         format!("{} · fixed just now", row.summary)
+    } else if row
+        .repair()
+        .is_some_and(|repair| app.health_waiting_for_password(&repair.control.id))
+    {
+        if cfg!(target_os = "macos") {
+            "Type your Mac password in the terminal".into()
+        } else {
+            "Type your password in the terminal".into()
+        }
     } else {
         row.summary.clone()
     };
@@ -695,7 +712,7 @@ fn render_row(
             .text_color(p.text_muted)
             .child(label)
             .into_any_element(),
-        None => row_action(row, busy, ui, cx),
+        None => row_action(app, row, busy, ui, window, cx),
     };
     div()
         .flex()
@@ -744,18 +761,27 @@ fn render_row(
         .into_any_element()
 }
 
-fn row_action(row: &Row, busy: bool, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
+fn row_action(
+    app: &HackApp,
+    row: &Row,
+    busy: bool,
+    ui: &Ui,
+    window: &Window,
+    cx: &mut Context<HackApp>,
+) -> AnyElement {
     let id = row.id.clone();
     let action = match &row.next {
         Next::Repair(repair) => crate::health_commands::render(
+            app,
             repair.control.clone(),
             Some(repair.clone()),
             busy,
             ui,
+            window,
             cx,
         ),
         Next::Command(command) => {
-            crate::health_commands::render(command.clone(), None, busy, ui, cx)
+            crate::health_commands::render(app, command.clone(), None, busy, ui, window, cx)
         }
         Next::Doc(url) => {
             let url = url.clone();

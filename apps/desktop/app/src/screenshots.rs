@@ -63,6 +63,11 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                                 HackApp::new(crate::source_for(Some(f)), false, window, cx);
                             app.select(fixtures::selected(f));
                             crate::health_fixtures::open(&mut app, f, window, cx);
+                            // No controls are clicked during capture. Show the
+                            // enabled appearance of checked fixture commands.
+                            if crate::health_fixtures::is_health_frame(f) {
+                                app.live = true;
+                            }
                             if fixtures::loads_doctor(f) {
                                 app.show_doctor_now();
                                 if !fixtures::opens_doctor(f) {
@@ -107,7 +112,12 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             // output arrive, then draw again.
             #[cfg(hack_terminal)]
             cx.update_window(handle, |_, window, cx| {
-                _app.update(cx, |app, cx| app.settle_terminals(cx));
+                _app.update(cx, |app, cx| {
+                    app.settle_terminals(cx);
+                    if f == Fixture::DoctorFixAll {
+                        app.settle_command_fixture(cx);
+                    }
+                });
                 window.render_frame(cx);
                 window.render_frame(cx);
             })
@@ -123,8 +133,14 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             let path = dir.join(format!("{name}-{suffix}.png"));
             img.save(&path).expect("write png");
             println!("{}", path.display());
-            cx.update_window(handle, |_, window, _| window.remove_window())
-                .ok();
+            cx.update_window(handle, |_, window, _cx| {
+                #[cfg(hack_terminal)]
+                if f == Fixture::DoctorFixAll {
+                    _app.update(_cx, |app, cx| app.reset_command_drawer(window, cx));
+                }
+                window.remove_window();
+            })
+            .ok();
         }
     }
     if fixture.is_none() {

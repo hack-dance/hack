@@ -361,7 +361,7 @@ struct Example {
     action: ExampleAction,
 }
 
-pub fn errors(ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
+pub fn errors(app: &HackApp, ui: &Ui, window: &Window, cx: &mut Context<HackApp>) -> AnyElement {
     use ExampleAction::{Command, Doc, Switch};
     let command = |id: &str, label: &str, args: &[&str]| Command(fixture_command(id, label, args));
     let dns = fixture_command("errors-dns", "hack global install", &["global", "install"]);
@@ -461,7 +461,7 @@ pub fn errors(ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
                 .flex()
                 .gap(space::S5)
                 .flex_1()
-                .children(row.iter().map(|card| example(card, ui, cx)))
+                .children(row.iter().map(|card| example(app, card, ui, window, cx)))
         }))
         .into_any_element()
 }
@@ -484,12 +484,18 @@ fn sheet(title: &'static str, ui: &Ui) -> gpui_kit::Stateful<gpui_kit::Div> {
         )
 }
 
-fn example(card: &Example, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
+fn example(
+    app: &HackApp,
+    card: &Example,
+    ui: &Ui,
+    window: &Window,
+    cx: &mut Context<HackApp>,
+) -> AnyElement {
     let action = match &card.action {
         ExampleAction::Command(command) => {
             let mut command = command.clone();
             command.size = CommandControlSize::Standard;
-            crate::health_commands::render(command, None, false, ui, cx)
+            crate::health_commands::render(app, command, None, false, ui, window, cx)
         }
         ExampleAction::Doc(label, url) => {
             let url = *url;

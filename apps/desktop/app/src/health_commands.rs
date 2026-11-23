@@ -2,18 +2,28 @@
 
 use std::time::{Duration, Instant};
 
+#[cfg(hack_terminal)]
+use crate::command_control::CommandCompletion;
 use gpui_kit::{AnyElement, ClipboardItem, Context, Window};
+#[cfg(hack_terminal)]
+use gpui_kit::{AnyWindowHandle, AppContext as _};
+#[cfg(hack_terminal)]
+use hack_desktop_core::machine_gate::Holder;
 use hack_desktop_core::{
     doctor::{DoctorRun, Finish},
     setup::Report,
-    terminal::{CommandAvailability, CommandControl, CommandExit},
+    terminal::{CommandAvailability, CommandControl},
 };
 use hack_desktop_ui::components::Ui;
 
+#[cfg(hack_terminal)]
+use crate::health_model::RepairTarget;
 use crate::{
-    health_model::{Repair, RepairQueue, RepairTarget},
+    health_model::{Repair, RepairQueue},
     view::HackApp,
 };
+#[cfg(hack_terminal)]
+use hack_desktop_core::terminal::CommandExit;
 
 impl HackApp {
     pub(crate) fn health_report(&self) -> &Report {
@@ -90,7 +100,7 @@ impl HackApp {
     }
 
     pub(crate) fn load_doctor(&mut self, cx: &mut Context<Self>) {
-        if self.health.queue.is_some() || self.doctor.is_loading() {
+        if self.health.queue.is_some() || self.doctor.is_loading() || self.machine.busy() {
             return;
         }
         self.health.confirmed.clear();
@@ -125,7 +135,8 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.live
+        if !AVAILABLE
+            || !self.live
             || self.machine.busy()
             || self.health.queue.is_some()
             || self.doctor.is_loading()
@@ -156,6 +167,7 @@ impl HackApp {
     pub(crate) fn stop_health_repair(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(queue) = &mut self.health.queue {
             if !self.live {
+                shared::stop(self, window, cx);
                 self.health.queue = None;
                 cx.notify();
                 return;
@@ -168,18 +180,28 @@ impl HackApp {
         }
     }
 
+    pub(crate) fn health_waiting_for_password(&self, id: &str) -> bool {
+        #[cfg(hack_terminal)]
+        {
+            self.panels.command.waiting_for_password(id)
+        }
+        #[cfg(not(hack_terminal))]
+        {
+            let _ = id;
+            false
+        }
+    }
+
     pub(crate) fn show_health_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         shared::show(self, window, cx);
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn health_command_exited(
+    #[cfg(hack_terminal)]
+    fn health_command_exited(
         &mut self,
-        run: u64,
-        exit: CommandExit,
-        diagnosis: Option<String>,
+        completion: CommandCompletion,
         repair: Option<Repair>,
-        window: &mut Window,
+        window: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
         if let Some(repair) = repair {
@@ -189,21 +211,27 @@ impl HackApp {
             return;
         };
         queue.checking = true;
+        // The drawer releases its process ticket before delivering the exit.
+        // Hold the machine during readback so a second fix cannot invalidate it.
+        let ticket = self.machine.try_begin(Holder::Command);
         let targets = self.doctor_targets().unwrap_or_default();
         let generation = self.doctor.begin(self.doctor_target_keys().as_deref());
         let setup_generation = self.setup.begin();
         let source = self.source.clone();
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let (report, runs) = read(cx.background_executor(), source, targets).await;
-            let _ = cx.update(|window, cx| {
+            let _ = cx.update_window(window, |_, window, cx| {
                 let _ = this.update(cx, |this, cx| {
+                    if let Some(ticket) = ticket {
+                        this.machine.finish(ticket);
+                    }
                     if !this.setup.is_current(setup_generation) || this.health.queue.is_none() {
                         return;
                     }
                     this.setup.finish(setup_generation, report.clone());
                     let result = this.accept_health_report(generation, runs, report);
                     if result != Finish::Discarded {
-                        this.finish_health_check(run, exit, diagnosis, result, window, cx);
+                        this.finish_health_check(completion, result, window, cx);
                     }
                 });
             });
@@ -212,11 +240,10 @@ impl HackApp {
         cx.notify();
     }
 
+    #[cfg(hack_terminal)]
     fn finish_health_check(
         &mut self,
-        run: u64,
-        exit: CommandExit,
-        diagnosis: Option<String>,
+        completion: CommandCompletion,
         result: Finish,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -224,9 +251,13 @@ impl HackApp {
         let Some(mut queue) = self.health.queue.take() else {
             return;
         };
+        let CommandCompletion {
+            run,
+            exit,
+            diagnosis,
+        } = completion;
         let target = queue.current().target.clone();
-        let confirmed =
-            result == Finish::Applied && target.confirmed(self.health_report(), &self.health.runs);
+        let confirmed = target.confirmed(self.health_report(), &self.health.runs);
         let passed = exit == CommandExit::Code(0) && confirmed && !queue.stopping;
         if passed {
             self.health.confirmed.push(target.clone());
@@ -249,7 +280,7 @@ impl HackApp {
             None
         };
         self.health.recent_failure = reason.clone();
-        shared::checked(self, run, passed, reason, cx);
+        self.command_checked(run, reason.map_or(Ok(()), Err), cx);
         if queue.advance(&exit, confirmed && result == Finish::Applied) {
             // A repair can make another finding pass or change its action.
             // Only carry forward commands that are still offered by the new read.
@@ -282,6 +313,7 @@ impl HackApp {
     }
 }
 
+#[cfg(hack_terminal)]
 fn sudo_refused(diagnosis: &str) -> bool {
     let line = diagnosis.to_ascii_lowercase();
     line.contains("not in the sudoers file") || line.contains("not allowed to run sudo")
@@ -299,18 +331,97 @@ async fn read(
 }
 
 pub fn copy(command: &CommandControl, cx: &mut Context<HackApp>) {
-    if let CommandAvailability::Ready(spec) | CommandAvailability::CopyOnly(spec) =
-        &command.availability
-        && let Ok(display) = spec.display()
-    {
-        cx.write_to_clipboard(ClipboardItem::new_string(display));
+    #[cfg(hack_terminal)]
+    let text = crate::command_control::copy_text(command);
+    #[cfg(not(hack_terminal))]
+    let text = match &command.availability {
+        CommandAvailability::Ready(spec) | CommandAvailability::CopyOnly(spec) => {
+            spec.display_in(command.cwd.as_deref()).ok()
+        }
+        _ => None,
+    };
+    if let Some(text) = text {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 }
 
-pub use shared::{AVAILABLE, drawer, render, show_fixture};
+pub use shared::{AVAILABLE, render, show_fixture};
 
-// The drawer branch currently publishes the command contract. Until its
-// renderer lands, these controls only copy the checked command.
+#[cfg(hack_terminal)]
+mod shared {
+    use super::*;
+    use crate::command_control;
+    use hack_desktop_core::terminal::CommandSpec;
+
+    pub const AVAILABLE: bool = true;
+
+    pub fn render(
+        app: &HackApp,
+        command: CommandControl,
+        repair: Option<Repair>,
+        busy: bool,
+        ui: &Ui,
+        window: &Window,
+        cx: &mut Context<HackApp>,
+    ) -> AnyElement {
+        let window = window.window_handle();
+        command_control::render(command, busy, app, ui, cx, move |app, exit, cx| {
+            if repair.is_some() {
+                app.health_command_exited(exit, repair.clone(), window, cx);
+            }
+        })
+    }
+
+    pub fn run(
+        app: &mut HackApp,
+        command: CommandControl,
+        window: &mut Window,
+        cx: &mut Context<HackApp>,
+    ) -> bool {
+        let handle = window.window_handle();
+        app.run_drawer_command(
+            command,
+            move |app, exit, cx| app.health_command_exited(exit, None, handle, cx),
+            window,
+            cx,
+        )
+    }
+
+    pub fn stop(app: &mut HackApp, _window: &mut Window, cx: &mut Context<HackApp>) {
+        app.stop_drawer_command(cx);
+    }
+
+    pub fn show(app: &mut HackApp, window: &mut Window, cx: &mut Context<HackApp>) {
+        if let Some(queue) = &app.health.queue {
+            let id = queue.current().control.id.clone();
+            app.show_command_output(&id, window, cx);
+        }
+    }
+
+    pub fn show_fixture(
+        app: &mut HackApp,
+        mut command: CommandControl,
+        window: &mut Window,
+        cx: &mut Context<HackApp>,
+    ) {
+        command.availability = CommandAvailability::Ready(CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), concat!(
+                r"printf '%s\n' 'Fix all · 1 of 4  hack global install' '✓ Local domains ready. exit 0' '' ",
+                "'Fix all · 2 of 4  hack global trust' 'Adding the Hack local CA to the system trust store…'; ",
+                "/bin/stty -echo; printf '%s' '[sudo] password for alex: '; IFS= read -r unused",
+            ).into()],
+        });
+        // The fixture starts only the fixed transcript process above. Its
+        // visible controls never submit fixture commands to the real CLI.
+        let live = std::mem::replace(&mut app.live, true);
+        let started = app.run_drawer_command(command, |_, _, _| {}, window, cx);
+        app.live = live;
+        assert!(started, "start Doctor terminal fixture");
+    }
+}
+
+#[cfg(not(hack_terminal))]
 mod shared {
     use super::*;
     use gpui_kit::{IntoElement, ParentElement, Styled, div, prelude::*, px};
@@ -324,49 +435,41 @@ mod shared {
     pub const AVAILABLE: bool = false;
 
     pub fn render(
+        _app: &HackApp,
         command: CommandControl,
         _repair: Option<Repair>,
         _busy: bool,
         ui: &Ui,
+        _window: &Window,
         cx: &mut Context<HackApp>,
     ) -> AnyElement {
-        let runnable = matches!(command.availability, CommandAvailability::Ready(_));
-        let copyable = runnable || matches!(command.availability, CommandAvailability::CopyOnly(_));
         let label = command.label.clone();
         let size = command.size;
-        let id = command.id.clone();
-        let mut copy_button = action_button(
-            format!("copy-command-{id}"),
+        let copyable = matches!(
+            command.availability,
+            CommandAvailability::Ready(_) | CommandAvailability::CopyOnly(_)
+        );
+        if let CommandAvailability::Blocked(reason) | CommandAvailability::VersionMismatch(reason) =
+            &command.availability
+        {
+            return div()
+                .type_step(text::SMALL)
+                .text_color(ui.p.text_muted)
+                .child(reason.clone())
+                .into_any_element();
+        }
+        let mut button = action_button(
+            format!("copy-command-{}", command.id),
             Glyph::Copy,
             "Copy",
             copyable,
             ui,
-        )
-        .w(px(64.))
-        .h(px(24.))
-        .justify_center();
+        );
         if copyable {
-            copy_button = copy_button.on_click(cx.listener(move |_, _, _, cx| copy(&command, cx)));
+            button = button.on_click(cx.listener(move |_, _, _, cx| copy(&command, cx)));
         }
-        let buttons = div()
-            .flex()
-            .items_center()
-            .gap(space::S2)
-            .child(
-                action_button(
-                    format!("run-unavailable-{id}"),
-                    Glyph::Play,
-                    "Run",
-                    false,
-                    ui,
-                )
-                .w(px(64.))
-                .h(px(24.))
-                .justify_center(),
-            )
-            .child(copy_button);
         if size == CommandControlSize::Compact {
-            return buttons.into_any_element();
+            return button.into_any_element();
         }
         div()
             .flex()
@@ -384,17 +487,8 @@ mod shared {
                     .type_step(text::MONO)
                     .child(format!("$ {label}")),
             )
-            .child(buttons)
+            .child(button)
             .into_any_element()
-    }
-
-    pub fn drawer(
-        _app: &mut HackApp,
-        _ui: &Ui,
-        _window: &mut Window,
-        _cx: &mut Context<HackApp>,
-    ) -> Option<AnyElement> {
-        None
     }
 
     pub fn run(
@@ -408,19 +502,218 @@ mod shared {
 
     pub fn stop(_app: &mut HackApp, _window: &mut Window, _cx: &mut Context<HackApp>) {}
     pub fn show(_app: &mut HackApp, _window: &mut Window, _cx: &mut Context<HackApp>) {}
-    pub fn checked(
-        _app: &mut HackApp,
-        _run: u64,
-        _passed: bool,
-        _reason: Option<String>,
-        _cx: &mut Context<HackApp>,
-    ) {
-    }
     pub fn show_fixture(
         _app: &mut HackApp,
         _command: CommandControl,
         _window: &mut Window,
         _cx: &mut Context<HackApp>,
     ) {
+    }
+}
+
+#[cfg(all(test, hack_terminal, feature = "screenshots"))]
+mod tests {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt as _,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+
+    use gpui_kit::{HeadlessAppContext, WindowOptions};
+    use hack_desktop_core::{
+        execution::ExecutionContext,
+        fixtures::Fixture,
+        models::{DoctorCheck, DoctorReport, LogEntry},
+        setup::{Card, Remedy, Status},
+        source::{
+            ActionOutcome, DoctorTarget, FixtureSource, LogFeed, Snapshot, Source, SourceError,
+        },
+        state::Action,
+    };
+
+    use super::*;
+
+    struct RepairSource {
+        home: PathBuf,
+    }
+
+    impl Drop for RepairSource {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+
+    impl Source for RepairSource {
+        fn snapshot(&self) -> Result<Snapshot, SourceError> {
+            FixtureSource(Fixture::Empty).snapshot()
+        }
+
+        fn act(
+            &self,
+            root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            action: Action,
+        ) -> Result<ActionOutcome, SourceError> {
+            FixtureSource(Fixture::Empty).act(root, native, branch, action)
+        }
+
+        fn log_tail(
+            &self,
+            root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            lines: u32,
+        ) -> Result<Vec<LogEntry>, String> {
+            FixtureSource(Fixture::Empty).log_tail(root, native, branch, lines)
+        }
+
+        fn open_logs(
+            &self,
+            root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            args: &[String],
+        ) -> Result<Box<dyn LogFeed>, String> {
+            FixtureSource(Fixture::Empty).open_logs(root, native, branch, args)
+        }
+
+        fn doctor_runs(&self, _projects: &[DoctorTarget]) -> Vec<DoctorRun> {
+            vec![DoctorRun::machine(Ok(DoctorReport {
+                checks: vec![DoctorCheck {
+                    id: "daemon".into(),
+                    status: "ok".into(),
+                    ..DoctorCheck::default()
+                }],
+                summary: vec![],
+            }))]
+        }
+
+        fn setup(&self) -> Report {
+            let checked = |id: &str, command: &str| {
+                let passed = self.home.join(id).exists();
+                if passed {
+                    fs::write(self.home.join(format!("checked-{id}")), "").unwrap();
+                }
+                Card {
+                    id: id.into(),
+                    title: id.into(),
+                    status: if passed {
+                        Status::Passed
+                    } else {
+                        Status::NeedsAttention
+                    },
+                    detail: String::new(),
+                    remedy: Remedy::Admin(vec!["global".into(), command.into()]),
+                }
+            };
+            Report {
+                cli_program: Some(self.home.join("hack").to_string_lossy().into_owned()),
+                context: ExecutionContext::from_values(&[(
+                    "HOME".into(),
+                    self.home.to_string_lossy().into_owned(),
+                )])
+                .ok(),
+                force_cli_gate: false,
+                cards: vec![
+                    Card {
+                        id: "cli".into(),
+                        title: "Hack CLI".into(),
+                        status: Status::Passed,
+                        detail: "Hack 5".into(),
+                        remedy: Remedy::Doc(String::new()),
+                    },
+                    checked("routing", "install"),
+                    checked("trust", "trust"),
+                ],
+            }
+        }
+    }
+
+    #[test]
+    fn the_shared_drawer_waits_for_confirmation_before_the_next_repair() {
+        for (case, confirmed) in [("repaired", true), ("unchanged", false)] {
+            let home =
+                std::env::temp_dir().join(format!("hack-repair-{}-{case}", std::process::id()));
+            fs::create_dir(&home).unwrap();
+            let source = Arc::new(RepairSource { home: home.clone() });
+            let script = home.join("hack");
+            fs::write(
+                &script,
+                r#"#!/bin/sh
+[ "$1" = global ] || exit 11
+printf '%s\n' "$2" >> "$HOME/order"
+case "$2" in
+  install) if [ ! -f "$HOME/leave-unchanged" ]; then : > "$HOME/routing"; fi ;;
+  trust) [ -f "$HOME/checked-routing" ] || exit 7; : > "$HOME/trust" ;;
+esac
+"#,
+            )
+            .unwrap();
+            fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+            if !confirmed {
+                fs::write(home.join("leave-unchanged"), "").unwrap();
+            }
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(gpui_kit::NoopTextSystem::new()),
+                Arc::new(hack_desktop_ui::icons::Assets),
+                || Ok(None),
+            );
+            cx.update(gpui_kit::init);
+            let (window, app) = cx
+                .update(|cx| {
+                    gpui_kit::open_window(
+                        WindowOptions {
+                            show: false,
+                            focus: false,
+                            ..WindowOptions::default()
+                        },
+                        cx,
+                        |window, cx| {
+                            cx.new(|cx| {
+                                let mut app = HackApp::new(source.clone(), false, window, cx);
+                                app.show_doctor_now();
+                                app.live = true;
+                                let repairs = crate::doctor_view::repairs(&app);
+                                assert_eq!(repairs.len(), 2);
+                                app.start_health_repairs(repairs, true, window, cx);
+                                app
+                            })
+                        },
+                    )
+                })
+                .unwrap();
+
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                cx.update(|cx| app.update(cx, |app, cx| app.settle_command_fixture(cx)));
+                cx.run_until_parked();
+                if cx.update(|cx| app.read(cx).health.queue.is_none()) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "repair fixture did not settle");
+            }
+            let order = fs::read_to_string(home.join("order")).unwrap();
+            cx.update(|cx| {
+                let app = app.read(cx);
+                assert!(!app.machine.busy());
+                if confirmed {
+                    assert_eq!(order, "install\ntrust\n");
+                    assert_eq!(app.health.confirmed.len(), 2);
+                    assert!(app.health.recent_failure.is_none());
+                    assert!(home.join("checked-trust").exists());
+                } else {
+                    assert_eq!(order, "install\n");
+                    assert!(app.health.recent_failure.is_some());
+                    assert!(app.panels.command.visible());
+                }
+            });
+            cx.update_window(window, |_, window, cx| {
+                app.update(cx, |app, cx| app.reset_command_drawer(window, cx));
+                window.remove_window();
+            })
+            .unwrap();
+        }
     }
 }

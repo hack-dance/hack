@@ -1747,7 +1747,9 @@ impl Render for HackApp {
         };
         let main: AnyElement = match &list.phase {
             _ if self.pane == Pane::BannersSheet => crate::health_fixtures::banners(&ui, cx),
-            _ if self.pane == Pane::ErrorsSheet => crate::health_fixtures::errors(self, &ui, window, cx),
+            _ if self.pane == Pane::ErrorsSheet => {
+                crate::health_fixtures::errors(self, &ui, window, cx)
+            }
             // Setup applies whatever the project list shows, a missing CLI
             // included.
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
@@ -1814,8 +1816,15 @@ impl Render for HackApp {
                     .flex()
                     .flex_col()
                     .when(
-                        self.health.fixture.is_some() || self.pane == Pane::Doctor || follow_up.is_some(),
-                        |main| main.mx(space::S4).my(space::S2).rounded(radius::PANEL).hairline(p.border),
+                        self.health.fixture.is_some()
+                            || self.pane == Pane::Doctor
+                            || follow_up.is_some(),
+                        |main| {
+                            main.mx(space::S4)
+                                .my(space::S2)
+                                .rounded(radius::PANEL)
+                                .hairline(p.border)
+                        },
                     )
                     .children(follow_up)
                     .child(main),

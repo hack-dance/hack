@@ -62,6 +62,12 @@ impl Drawer {
     pub(crate) fn visible(&self) -> bool {
         self.visible
     }
+
+    pub(crate) fn waiting_for_password(&self, control_id: &str) -> bool {
+        self.last
+            .as_ref()
+            .is_some_and(|run| run.props.id == control_id && run.waiting_for_password)
+    }
 }
 
 struct Run {
@@ -108,6 +114,17 @@ fn checked_home(spec: &CommandSpec) -> Option<&Path> {
         .iter()
         .take_while(|arg| arg.contains('='))
         .find_map(|arg| arg.strip_prefix("HOME=").map(Path::new))
+}
+
+/// The same checked command and working directory for inline and banner Copy.
+pub(crate) fn copy_text(props: &CommandControl) -> Option<String> {
+    let (CommandAvailability::Ready(spec) | CommandAvailability::CopyOnly(spec)) =
+        &props.availability
+    else {
+        return None;
+    };
+    let cwd = props.cwd.as_deref().or_else(|| checked_home(spec));
+    spec.display_in(cwd).ok()
 }
 
 fn command_directory(
@@ -490,7 +507,7 @@ impl HackApp {
         }
     }
 
-    fn stop_drawer_command(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn stop_drawer_command(&mut self, cx: &mut Context<Self>) {
         let drawer = &mut self.panels.command;
         drawer.menu = false;
         if drawer.last.as_ref().is_some_and(Run::running)
@@ -599,16 +616,15 @@ pub(crate) fn render(
     cx: &mut Context<HackApp>,
     on_exit: impl Fn(&mut HackApp, CommandCompletion, &mut Context<HackApp>) + 'static,
 ) -> AnyElement {
-    let spec = match &props.availability {
-        CommandAvailability::Ready(spec) | CommandAvailability::CopyOnly(spec) => spec,
-        CommandAvailability::Blocked(reason) | CommandAvailability::VersionMismatch(reason) => {
-            return div()
-                .type_step(text::SMALL)
-                .text_color(ui.p.text_secondary)
-                .child(reason.clone())
-                .into_any_element();
-        }
-    };
+    if let CommandAvailability::Blocked(reason) | CommandAvailability::VersionMismatch(reason) =
+        &props.availability
+    {
+        return div()
+            .type_step(text::SMALL)
+            .text_color(ui.p.text_secondary)
+            .child(reason.clone())
+            .into_any_element();
+    }
     let drawer = &app.panels.command;
     let last = drawer.last.as_ref().filter(|r| r.props.id == props.id);
     let running = last.is_some_and(Run::running);
@@ -622,8 +638,7 @@ pub(crate) fn render(
         && !caller_busy
         && !app.machine.busy()
         && matches!(props.availability, CommandAvailability::Ready(_));
-    let cwd = props.cwd.as_deref().or_else(|| checked_home(spec));
-    let copy = spec.display_in(cwd).ok();
+    let copy = copy_text(&props);
     let group = SharedString::from(format!("command-{}", props.id));
     let (width, height) = match props.size {
         CommandControlSize::Standard => (80., 28.),
@@ -826,6 +841,22 @@ pub(crate) fn render_history(
 }
 
 impl HackApp {
+    #[cfg(feature = "screenshots")]
+    pub(crate) fn settle_command_fixture(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self
+            .panels
+            .command
+            .session
+            .as_ref()
+            .and_then(|panel| panel.read(cx).active())
+            .cloned()
+        {
+            view.update(cx, |terminal, cx| {
+                terminal.settle(Duration::from_millis(100), Duration::from_secs(2), cx)
+            });
+        }
+    }
+
     /// Alternate chrome for the window's embedded bottom terminal panel.
     pub(crate) fn render_command_drawer(
         &self,
@@ -960,7 +991,13 @@ impl HackApp {
         } else {
             body = body.children(drawer.session.clone());
         }
-        let height = if drawer.taller { 0.60 } else { 0.35 };
+        let height = if drawer.taller {
+            0.60
+        } else if run.props.size == CommandControlSize::Compact {
+            0.25
+        } else {
+            0.35
+        };
         Some(
             div()
                 .id("command-drawer")

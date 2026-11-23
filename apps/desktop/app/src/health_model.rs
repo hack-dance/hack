@@ -6,8 +6,11 @@ use std::time::Instant;
 use hack_desktop_core::{
     doctor::{DoctorRun, ProjectRef},
     setup::{self, Remedy, SafeAction, Status},
-    terminal::{CommandAvailability, CommandControl, CommandControlSize, CommandExit},
+    terminal::{CommandAvailability, CommandControl, CommandControlSize},
 };
+
+#[cfg(any(test, hack_terminal))]
+use hack_desktop_core::terminal::CommandExit;
 
 const SCOPED_FIX: [&str; 6] = [
     "doctor",
@@ -258,6 +261,7 @@ impl RepairQueue {
     }
 
     /// Only a zero exit followed by positive evidence can advance the queue.
+    #[cfg(any(test, hack_terminal))]
     pub fn advance(&mut self, exit: &CommandExit, confirmed: bool) -> bool {
         if self.stopping
             || *exit != CommandExit::Code(0)

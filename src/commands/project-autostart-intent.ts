@@ -48,7 +48,7 @@ import {
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import {
   type DownSafetyNotice,
-  reconcileImplicitDownBranch,
+  reconcileImplicitDownTarget,
 } from "./project-down-safety.ts";
 
 export interface LocalComposeTarget {
@@ -67,6 +67,7 @@ export interface LocalComposeTarget {
 export interface AutostartDownTarget {
   readonly branch: string | null;
   readonly compose?: LocalComposeTarget;
+  readonly observedComposeProject?: string;
 }
 interface AutostartCommandSelection {
   readonly cwd: string;
@@ -75,8 +76,9 @@ interface AutostartCommandSelection {
   readonly branch?: string;
 }
 
-interface ComposeCheckoutCopy {
+export interface ComposeCheckoutCopy {
   readonly branch: string | null;
+  readonly effective?: Awaited<ReturnType<typeof resolveEffectiveBranch>>;
 }
 
 async function resolveAutostartDownBranch(opts: {
@@ -123,6 +125,7 @@ export async function withComposeCheckoutLock<T>(
       });
   const copy = opts.selectedCopy ?? {
     branch: selection?.effective.branch ?? null,
+    effective: selection?.effective,
   };
   if (opts.selectedCopy || selection?.explicitBranch || copy.branch === null) {
     await opts.beforeLock?.(copy);
@@ -156,7 +159,11 @@ export async function withComposeNameLock<T>(
 export async function resolveFinalAutostartDownTarget(
   opts: AutostartCommandSelection & {
     readonly writeNotice?: (notice: DownSafetyNotice) => void;
-    readonly selectedCopy?: ComposeCheckoutCopy;
+    readonly selectedCopy?: Pick<
+      AutostartDownTarget,
+      "branch" | "observedComposeProject"
+    >;
+    readonly lockedCopy?: ComposeCheckoutCopy;
   },
   deps?: {
     readonly readProjectsRegistry?: typeof readProjectsRegistry;
@@ -166,6 +173,7 @@ export async function resolveFinalAutostartDownTarget(
       readonly project: ProjectContext;
       readonly cfg: ProjectConfig;
       readonly branch: string | null;
+      readonly observedComposeProject?: string;
     }) => Promise<AutostartDownTarget["compose"]>;
     readonly setProjectAutostartPaused?: typeof setProjectAutostartPaused;
   }
@@ -178,23 +186,31 @@ export async function resolveFinalAutostartDownTarget(
   const { project, registration } = context;
   const cfg = await readProjectConfig(project);
   const targetFor = async (
-    branch: string | null
+    branch: string | null,
+    observedComposeProject?: string
   ): Promise<AutostartDownTarget> => {
     const compose = await deps?.resolveComposeTarget?.({
       project,
       cfg,
       branch,
+      observedComposeProject,
     });
-    return compose ? { branch, compose } : { branch };
+    return {
+      branch,
+      ...(compose ? { compose } : {}),
+      ...(observedComposeProject ? { observedComposeProject } : {}),
+    };
   };
   if (opts.selectedCopy) {
-    return await targetFor(opts.selectedCopy.branch);
+    return await targetFor(
+      opts.selectedCopy.branch,
+      opts.selectedCopy.observedComposeProject
+    );
   }
-  const { explicitBranch, effective } = await resolveAutostartDownBranch({
-    project,
-    cfg,
-    branch: opts.branch,
-  });
+  const locked = opts.lockedCopy?.effective;
+  const { explicitBranch, effective } = locked
+    ? { explicitBranch: opts.branch?.trim() || null, effective: locked }
+    : await resolveAutostartDownBranch({ project, cfg, branch: opts.branch });
   if (explicitBranch !== null || effective.branch === null) {
     return await targetFor(effective.branch);
   }
@@ -225,16 +241,22 @@ export async function resolveFinalAutostartDownTarget(
     });
   }
   const current = await targetFor(effective.branch);
-  const reconciled = reconcileImplicitDownBranch({
-    baseProjectName:
-      current.compose?.base ??
-      (await resolveComposeProjectName({ project, cfg })),
+  const baseProjectName =
+    current.compose?.base ??
+    (await resolveComposeProjectName({ project, cfg }));
+  const reconciled = reconcileImplicitDownTarget({
+    baseProjectName,
     branch: effective.branch,
     projectDir: project.projectDir,
     runtime: runtime.runtime,
     writeNotice: opts.writeNotice ?? (() => undefined),
   });
-  return reconciled === current.branch ? current : await targetFor(reconciled);
+  return reconciled.kind === "inferred"
+    ? current
+    : {
+        branch: reconciled.branch,
+        observedComposeProject: reconciled.composeProject,
+      };
 }
 
 /**
@@ -417,7 +439,7 @@ export async function updateNativeAutostartIntent(opts: {
 
 /** Resolve the same registered instance for command serialization without native legacy discovery. */
 export async function withAutostartCommandLock<T>(opts: {
-  readonly action: "up" | "down" | "restart";
+  readonly action: "up" | "down";
   readonly resolvedDownTarget?: AutostartDownTarget;
   readonly cwd: string;
   readonly path?: string;
@@ -438,7 +460,7 @@ export async function withAutostartCommandLock<T>(opts: {
       // Execution revalidates it under this lock before mutating Compose.
       const name = opts.expectComposeProject;
       const run = () => withComposeNameLock(name, opts.run);
-      if (opts.action === "up" || opts.action === "restart") {
+      if (opts.action === "up") {
         return await withComposeCheckoutLock({ ...opts, run });
       }
       return await run();

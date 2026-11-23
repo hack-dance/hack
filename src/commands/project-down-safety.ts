@@ -19,13 +19,13 @@ export type DownSafetyNotice = {
   readonly message: string;
 };
 
-export function reconcileImplicitDownBranch(opts: {
+export function reconcileImplicitDownTarget(opts: {
   readonly baseProjectName: string;
   readonly branch: string;
   readonly projectDir: string;
   readonly runtime: readonly RuntimeProject[];
   readonly writeNotice: (notice: DownSafetyNotice) => void;
-}): string | null {
+}) {
   const resolution = resolveImplicitDownTarget({
     baseComposeProject: opts.baseProjectName,
     currentProjectDir: opts.projectDir,
@@ -33,14 +33,14 @@ export function reconcileImplicitDownBranch(opts: {
     runtime: opts.runtime,
   });
   if (resolution.kind === "inferred") {
-    return resolution.branch;
+    return resolution;
   }
   if (resolution.kind === "retargeted") {
     opts.writeNotice({
       level: "warn",
       message: `The current Git branch resolves to "${opts.baseProjectName}--${opts.branch}", but this worktree owns existing runtime "${resolution.composeProject}" (${resolution.states.join(", ") || "state unknown"}). Targeting the owned runtime; pass --branch <name> to override.`,
     });
-    return resolution.branch;
+    return resolution;
   }
 
   const choices = resolution.targets

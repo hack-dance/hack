@@ -600,6 +600,7 @@ import {
   type AutostartDownTarget,
   assertAutostartEnvironment,
   assertLoginAutostartCurrent,
+  type ComposeCheckoutCopy,
   findAutostartRegistration,
   type LocalComposeTarget,
   resolveFinalAutostartDownTarget,
@@ -611,7 +612,7 @@ import {
 import { enableAutostartForUp } from "./project-autostart-opt-in.ts";
 import {
   prepareDisposableCachePrune,
-  reconcileImplicitDownBranch,
+  reconcileImplicitDownTarget,
 } from "./project-down-safety.ts";
 import { runNativeProjectExec } from "./project-exec-native.ts";
 import { runNativeDownRemoveData } from "./project-native-remove-data.ts";
@@ -1224,6 +1225,7 @@ export async function resolveEffectiveBranchForCommand(opts: {
 export async function resolveEffectiveBranchIdentityForCommand(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branchOption: string | undefined;
+  readonly lockedCopy?: ComposeCheckoutCopy;
   readonly noticeToStderr?: boolean;
   readonly warnOnRetarget?: boolean;
 }): Promise<{ readonly branch: string | null; readonly name: string | null }> {
@@ -1243,11 +1245,13 @@ export async function resolveEffectiveBranchIdentityForCommand(opts: {
   }
 
   const cfg = await readProjectConfig(opts.project);
-  const resolved = await resolveEffectiveBranch({
-    explicitBranch: null,
-    projectRoot: opts.project.projectRoot,
-    autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
-  });
+  const resolved =
+    opts.lockedCopy?.effective ??
+    (await resolveEffectiveBranch({
+      explicitBranch: null,
+      projectRoot: opts.project.projectRoot,
+      autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
+    }));
   if (resolved.source === "detached-worktree") {
     throw new CliUsageError(
       "Detached linked worktree cannot auto-select an isolated instance. Pass --branch <name>, or set worktree.auto_branch=false to target the base instance explicitly."
@@ -7457,19 +7461,22 @@ async function updateAutostartIntent(opts: {
   }
   // Inspect selection without printing the normal up/down worktree notice twice.
   const cfg = await readProjectConfig(project);
-  const resolvedBranch = await resolveEffectiveBranch({
-    explicitBranch: resolveBranchSlug(opts.args.options.branch),
-    projectRoot: project.projectRoot,
-    autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
-  });
-  if (resolvedBranch.source === "detached-worktree") {
+  const resolvedBranch =
+    opts.resolvedDownTarget ??
+    (await resolveEffectiveBranch({
+      explicitBranch: resolveBranchSlug(opts.args.options.branch),
+      projectRoot: project.projectRoot,
+      autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
+    }));
+  if (
+    "source" in resolvedBranch &&
+    resolvedBranch.source === "detached-worktree"
+  ) {
     throw new CliUsageError(
       "Detached linked worktree requires an explicit --branch <name>."
     );
   }
-  const branch = opts.resolvedDownTarget
-    ? opts.resolvedDownTarget.branch
-    : resolvedBranch.branch;
+  const { branch } = resolvedBranch;
   const expected = opts.args.options.expectComposeProject;
   if (expected !== undefined) {
     const base = await requireResolvedComposeBase({
@@ -8084,8 +8091,8 @@ async function runUpCommand({
     args.options.expectComposeProject ??
     (loginComposeBase ? (composeProjectName ?? undefined) : undefined);
   const projectName = sanitizeProjectSlug(baseProjectName);
-  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
-    projectName,
+  const { lifecycleComposeProject } = resolveRestartTarget({
+    baseProjectName,
     branch,
   });
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
@@ -8934,9 +8941,9 @@ async function handleDown(
       path: input.args.options.path,
       project: input.args.options.project,
       branch: input.args.options.branch,
-      run: () =>
+      run: (lockedCopy) =>
         withComposeNameLock(input.args.options.expectComposeProject, () =>
-          handleServiceDown(input)
+          handleServiceDown({ ...input, lockedCopy })
         ),
     });
   }
@@ -8964,13 +8971,13 @@ async function handleDown(
       const resolvedDownTarget =
         input.args.options.expectComposeProject === undefined
           ? await resolveDownCopy({ input, lockedCopy })
-          : undefined;
+          : lockedCopy;
       if (
         lockedCopy &&
         resolvedDownTarget &&
         resolvedDownTarget.branch !== lockedCopy.branch
       ) {
-        return { branch: resolvedDownTarget.branch };
+        return resolvedDownTarget;
       }
       return await runWholeDown({
         input,
@@ -8983,7 +8990,7 @@ async function handleDown(
     return result;
   }
   // Worktree reconciliation selected an older branch or the base. Release
-  // the initial copy lock before taking the final one, then read its pin.
+  // the initial copy lock before reading the observed stack's saved env.
   return await withComposeCheckoutLock({
     ...selection,
     selectedCopy: result,
@@ -9005,8 +9012,8 @@ async function resolveDownCopy({
   selectedCopy,
 }: {
   readonly input: Parameters<typeof handleDownUnlocked>[0];
-  readonly lockedCopy?: { readonly branch: string | null };
-  readonly selectedCopy?: { readonly branch: string | null };
+  readonly lockedCopy?: ComposeCheckoutCopy;
+  readonly selectedCopy?: AutostartDownTarget;
 }): Promise<AutostartDownTarget | undefined> {
   return await resolveFinalAutostartDownTarget(
     {
@@ -9015,6 +9022,7 @@ async function resolveDownCopy({
       project: input.args.options.project,
       branch: input.args.options.branch,
       selectedCopy,
+      lockedCopy,
       writeNotice: (notice) =>
         writeDownNotice({ json: input.args.options.json === true, ...notice }),
     },
@@ -9076,7 +9084,10 @@ async function runWholeDown({
 async function handleServiceDown({
   ctx,
   args,
-}: Parameters<typeof handleDownUnlocked>[0]): Promise<number> {
+  lockedCopy,
+}: Parameters<typeof handleDownUnlocked>[0] & {
+  readonly lockedCopy?: ComposeCheckoutCopy;
+}): Promise<number> {
   const { service, json, timeout } = args.options;
   if (json) {
     setLoggerBackendOverride({ backend: "console" });
@@ -9110,9 +9121,10 @@ async function handleServiceDown({
     if (target.resolvedTarget !== "local") {
       throw new CliUsageError("down --service only supports the local target.");
     }
-    const branch = await resolveEffectiveBranchForCommand({
+    const { branch } = await resolveEffectiveBranchIdentityForCommand({
       project,
       branchOption: args.options.branch,
+      lockedCopy,
       noticeToStderr: json === true,
     });
     const cfg = await readProjectConfig(project);
@@ -9380,6 +9392,7 @@ async function resolveLocalComposeTarget(opts: {
   readonly branch: string | null;
   readonly target?: string;
   readonly envOption?: string;
+  readonly observedComposeProject?: string;
 }): Promise<LocalComposeTarget | undefined> {
   const { project, cfg, branch } = opts;
   const configured = await resolveComposeProjectName({ project, cfg });
@@ -9394,12 +9407,17 @@ async function resolveLocalComposeTarget(opts: {
   ) {
     return undefined;
   }
-  const hinted = await resolveDesktopComposeProjectName({
-    project,
-    cfg,
-    composeName: configured,
-    forBranch,
-  });
+  const observed = opts.observedComposeProject;
+  const observedBase =
+    observed && branch ? observed.slice(0, -(branch.length + 2)) : observed;
+  const hinted =
+    observedBase ??
+    (await resolveDesktopComposeProjectName({
+      project,
+      cfg,
+      composeName: configured,
+      forBranch,
+    }));
   const lifecycle = await resolveStoredComposeLifecycleKey({
     project,
     branch,
@@ -9432,6 +9450,9 @@ async function resolveLocalComposeTarget(opts: {
     lifecycle,
     envName,
   };
+  if (observedBase !== undefined) {
+    return { ...target, base: observedBase, pin: true };
+  }
   // A pinned Start owns its saved name even if Compose would interpret the
   // same launch overlay as an override during an unbound Down.
   const pinnedBase = stored?.pinnedComposeBase;
@@ -9576,34 +9597,69 @@ export async function resolveStoredComposeLifecycleKey(opts: {
   readonly projectName: string;
   readonly lifecycleComposeProject: string;
 }> {
-  const keyFor = (base: string) => {
-    const projectName = sanitizeProjectSlug(base);
-    return {
-      projectName,
-      lifecycleComposeProject: resolveLifecycleComposeProjectName({
-        projectName,
-        branch: opts.branch,
-      }),
-    };
+  const current = {
+    projectName: sanitizeProjectSlug(opts.base),
+    lifecycleComposeProject: resolveRestartTarget({
+      baseProjectName: opts.base,
+      branch: opts.branch,
+    }).lifecycleComposeProject,
   };
-  const current = keyFor(opts.base);
-  const legacy = keyFor(opts.legacyBase);
-  if (current.lifecycleComposeProject === legacy.lifecycleComposeProject) {
+  const legacyProjectName = sanitizeProjectSlug(opts.legacyBase);
+  const legacy = {
+    projectName: legacyProjectName,
+    lifecycleComposeProject: resolveLifecycleComposeProjectName({
+      projectName: legacyProjectName,
+      branch: opts.branch,
+    }),
+  };
+  const location = { projectDir: opts.project.projectDir };
+  const saved = await readProjectRuntimeState(location);
+  const currentRecord = saved.find(
+    (entry) => entry.composeProject === current.lifecycleComposeProject
+  );
+  if (
+    currentRecord?.pinnedComposeBase &&
+    currentRecord.pinnedComposeBase !== opts.base
+  ) {
+    throw new CliUsageError(
+      "Saved runtime state has an ambiguous Compose project name."
+    );
+  }
+  if (
+    currentRecord ||
+    current.lifecycleComposeProject === legacy.lifecycleComposeProject
+  ) {
     return current;
   }
-  const location = { projectDir: opts.project.projectDir };
-  const entries = [
-    ...(await readProjectRuntimeState(location)),
-    ...(await readLifecycleState(location)),
-  ];
-  return entries.some(
-    (entry) => entry.composeProject === current.lifecycleComposeProject
-  ) ||
-    !entries.some(
+  const lifecycle = await readLifecycleState(location);
+  if (
+    lifecycle.some(
+      (entry) => entry.composeProject === current.lifecycleComposeProject
+    )
+  ) {
+    return current;
+  }
+  const legacyRecord = saved.find(
+    (entry) => entry.composeProject === legacy.lifecycleComposeProject
+  );
+  if (legacyRecord?.pinnedComposeBase) {
+    return legacyRecord.pinnedComposeBase === opts.base ? legacy : current;
+  }
+  // A lossy slug for a valid name can identify a different stack. Use the
+  // older unpinned record only when normalization was not lossy for that name
+  // or the old key came from an unresolved Compose expression.
+  if (
+    isComposeProjectName(opts.legacyBase) &&
+    opts.legacyBase !== legacy.projectName
+  ) {
+    return current;
+  }
+  return legacyRecord ||
+    lifecycle.some(
       (entry) => entry.composeProject === legacy.lifecycleComposeProject
     )
-    ? current
-    : legacy;
+    ? legacy
+    : current;
 }
 
 /** Pin the same Compose identity the desktop displayed, before lifecycle env is delivered. */
@@ -9898,7 +9954,7 @@ async function runDownCommand({
     runtime = runtimeResult.runtime;
   }
   if (implicitLinkedWorktreeTarget && branch !== null && runtime) {
-    branch = reconcileImplicitDownBranch({
+    branch = reconcileImplicitDownTarget({
       baseProjectName,
       branch,
       projectDir: project.projectDir,
@@ -9906,7 +9962,7 @@ async function runDownCommand({
       writeNotice: ({ level, message }) => {
         writeDownNotice({ json, level, message });
       },
-    });
+    }).branch;
   }
   // Include an already-pinned autostart target as well as implicit reconciliation.
   noteActivityBranch(branch);
@@ -9915,7 +9971,9 @@ async function runDownCommand({
   const composeProjectName = desktopComposeTarget({
     expected: args.options.expectComposeProject,
     base: baseProjectName,
-    computed: branch ? `${baseProjectName}--${branch}` : pinnedBase,
+    computed:
+      args.resolvedAutostartBranch?.observedComposeProject ??
+      (branch ? `${baseProjectName}--${branch}` : pinnedBase),
   });
   const expectedComposeProject =
     args.options.expectComposeProject ??
@@ -10951,6 +11009,7 @@ async function runTargetedServiceRestart(opts: {
   readonly baseProjectName: string;
   readonly projectName: string;
   readonly composeProjectName: string | null;
+  readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
   readonly envName?: string | null;
@@ -11123,10 +11182,7 @@ async function runTargetedServiceRestart(opts: {
   // services' delivered env is unknown, so their digests are dropped.
   await updateProjectRuntimeServiceEnvFingerprints({
     projectDir: opts.project.projectDir,
-    composeProject: resolveLifecycleComposeProjectName({
-      projectName: opts.projectName,
-      branch: opts.branch,
-    }),
+    composeProject: opts.lifecycleComposeProject,
     effectiveEnvName: envOverrides.effectiveEnvName,
     services: opts.services,
     envByService: envOverrides.preflightEnvByService,
@@ -11333,23 +11389,17 @@ async function handleRestart({
   }
   requireComposeOperationAvailable("restart");
   const json = args.options.json === true;
-  const run = (startedAtMs?: number) => {
-    const selection = {
+  const run = (startedAtMs?: number) =>
+    withComposeCheckoutLock({
       cwd: ctx.cwd,
       path: args.options.path,
       project: args.options.project,
       branch: args.options.branch,
-      run: () => runRestartCommand({ ctx, args, json, startedAtMs }),
-    };
-    const expected = args.options.expectComposeProject;
-    return expected === undefined
-      ? withComposeCheckoutLock(selection)
-      : withAutostartCommandLock({
-          ...selection,
-          action: "restart",
-          expectComposeProject: expected,
-        });
-  };
+      run: (lockedCopy) =>
+        withComposeNameLock(args.options.expectComposeProject, () =>
+          runRestartCommand({ ctx, args, json, startedAtMs, lockedCopy })
+        ),
+    });
   if (!json) {
     return await run();
   }
@@ -11381,11 +11431,13 @@ async function runRestartCommand({
   args,
   json,
   startedAtMs,
+  lockedCopy,
 }: {
   readonly ctx: CliContext;
   readonly args: RestartArgs;
   readonly json: boolean;
   readonly startedAtMs?: number;
+  readonly lockedCopy?: ComposeCheckoutCopy;
 }): Promise<number> {
   const project = await resolveProjectForArgs({
     ctx,
@@ -11414,6 +11466,7 @@ async function runRestartCommand({
   const branchIdentity = await resolveEffectiveBranchIdentityForCommand({
     project,
     branchOption: args.options.branch,
+    lockedCopy,
     noticeToStderr: json,
     warnOnRetarget: true,
   });
@@ -11533,6 +11586,7 @@ async function runLocalRestart({
       baseProjectName,
       projectName,
       composeProjectName,
+      lifecycleComposeProject,
       profiles,
       branch,
       envName: effectiveEnvName,
@@ -11658,6 +11712,10 @@ async function runLocalRestart({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
+  const nextLifecycleKey = resolveRestartTarget({
+    baseProjectName,
+    branch,
+  }).lifecycleComposeProject;
 
   const upOutcome = await runRestartUpPhase({
     expectComposeProject: compose.expected,
@@ -11667,7 +11725,7 @@ async function runLocalRestart({
     baseProjectName,
     projectName,
     composeProjectName,
-    lifecycleComposeProject,
+    lifecycleComposeProject: nextLifecycleKey,
     profiles,
     branch,
     envName: effectiveEnvName,
@@ -11726,12 +11784,12 @@ async function runLocalRestart({
       cfg,
       projectName,
       branch,
-      composeProject: lifecycleComposeProject,
+      composeProject: nextLifecycleKey,
       containers: "unconfirmed",
     });
     await removeProjectRuntimeStateEntry({
       projectDir: project.projectDir,
-      composeProject: lifecycleComposeProject,
+      composeProject: nextLifecycleKey,
     });
   };
   const { states, startup } = await waitForComposeStartupState({
@@ -11832,7 +11890,9 @@ export function resolveRestartTarget(opts: {
       ? `${opts.baseProjectName}--${opts.branch}`
       : null,
     lifecycleComposeProject: resolveLifecycleComposeProjectName({
-      projectName: sanitizeProjectSlug(opts.baseProjectName),
+      projectName: isComposeProjectName(opts.baseProjectName)
+        ? opts.baseProjectName
+        : sanitizeProjectSlug(opts.baseProjectName),
       branch: opts.branch,
     }),
   };
@@ -12604,11 +12664,13 @@ async function handleRun({
   const composeFilesWithInternal = internalOverride
     ? [...composeFiles, internalOverride]
     : composeFiles;
-  const projectName = sanitizeProjectSlug(baseProjectName);
-  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
-    projectName,
-    branch,
-  });
+  const { projectName, lifecycleComposeProject } =
+    await resolveStoredComposeLifecycleKey({
+      project,
+      branch,
+      base: baseProjectName,
+      legacyBase: baseProjectName,
+    });
   // HACK-2280: with no --env, a one-off uses the overlay the instance runs
   // with, so it can reuse the running dependencies instead of starting them
   // under the configured default.

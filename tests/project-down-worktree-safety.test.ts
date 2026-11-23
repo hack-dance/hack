@@ -204,6 +204,37 @@ test("primary checkout down remains on the base Compose project", async () => {
   expect(log).not.toContain(" -p ");
 });
 
+test("implicit worktree Down keeps the observed base name across lock handoff", async () => {
+  const fixture = await createWorktreeFixture();
+  const projectDir = join(fixture.worktreeRoot, ".hack");
+  await writeFile(join(projectDir, ".env"), "COMPOSE_PROJECT_NAME=alternate\n");
+  await writeRuntimeFixtures({
+    fixture,
+    runtime: [
+      {
+        composeProject: "downsafe",
+        id: "base-runtime",
+        state: "running",
+        workingDir: projectDir,
+      },
+    ],
+  });
+  const result = await runCliWithCapturedOutput([
+    "down",
+    "--path",
+    fixture.worktreeRoot,
+    "--json",
+  ]);
+  expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: true,
+    data: { branch: null, composeProject: "downsafe" },
+  });
+  const log = await readFile(fixture.dockerLogPath, "utf8");
+  expect(log).toMatch(/compose -p downsafe .* down\n/);
+  expect(log).not.toContain("-p alternate");
+});
+
 test("down --service stops only the named service in its own branch checkout", async () => {
   const fixture = await createWorktreeFixture();
   const ownDir = join(fixture.worktreeRoot, ".hack");
@@ -815,6 +846,7 @@ async function createWorktreeFixture(): Promise<{
       `  cat "${dockerRowsPath}"`,
       "  exit 0",
       "fi",
+      'if [ "$1" = compose ] && [ -f .env ] && [ "$(cat .env)" = COMPOSE_PROJECT_NAME=alternate ]; then case " $* " in *" -f - config --format json "*) cat >/dev/null; echo \'{"name":"alternate"}\'; exit 0;; esac; fi',
       'if [ "$1" = compose ]; then case " $* " in *" -f - config --format json "*) grep -q HACK_TEST_STACK_NAME || exit 1; echo \'{"name":"demo","services":{"probe":{"labels":{"hack.compose.configured-name":"demo"}}}}\'; exit 0;; esac; fi',
       `if [ "$1" = compose ]; then case " $* " in *" -p demo--feature-current "*" up -d "*) printf '[{"ID":"api-created","Service":"api","State":"running","Labels":"com.docker.compose.project.working_dir=%s"}]\\n' "$PWD" > "${dockerComposeRowsPath}";; esac; fi`,
       `if [ "$1" = compose ] && [ -s "${dockerComposeRowsPath}" ]; then case " $* " in *" ps "*) cat "${dockerComposeRowsPath}"; exit 0;; esac; fi`,

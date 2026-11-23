@@ -49,8 +49,10 @@ Ordinary Down publishes pause for a known copy before reading its overlay or
 waiting for its checkout lock. A pre-publication race regression holds Desktop
 Start before its pin is saved and verifies that Down waits and then stops that
 same stack. The checkout lock is scoped to the logical copy so a synchronous
-hook can stop a sibling. Reconciliation releases the initial copy lock before
-acquiring the selected copy's lock and rereads the target there. Shared
+hook can stop a sibling. Reconciliation carries the observed Compose name across
+the copy-lock handoff, then rechecks ownership under that name's lock. The
+`project-down-worktree-safety.test.ts` dotenv override regression exercises the
+handoff. Shared
 runtime state writes use a separate lock and atomic replacement. These locks
 and overlay-read failure are implementation details outside the finite model.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a

@@ -515,6 +515,80 @@ test("ordinary Down reuses desktop Start's pinned name and saved managed overlay
   expect(await Bun.file(join(root, "down-overlay")).text()).toBe("alternate");
 }, 40_000);
 
+test("desktop pins keep Compose underscores distinct from hyphens", async () => {
+  const project = join(root, "project");
+  const projectDir = join(project, ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "docker-compose.yml"),
+    "name: sample\nservices:\n  app:\n    image: example.invalid/app\n"
+  );
+  await installComposeNameFixture({ startContainers: true });
+  for (const name of ["demo_team", "demo-team"]) {
+    const start = await run(
+      [
+        "up",
+        "-d",
+        "--target",
+        "local",
+        "--expect-compose-project",
+        name,
+        "--json",
+      ],
+      false,
+      project,
+      { COMPOSE_PROJECT_NAME: name }
+    );
+    expect(start.exitCode, start.stderr || start.stdout).toBe(0);
+  }
+  expect(await readProjectRuntimeState({ projectDir })).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        composeProject: "demo_team",
+        pinnedComposeBase: "demo_team",
+      }),
+      expect.objectContaining({
+        composeProject: "demo-team",
+        pinnedComposeBase: "demo-team",
+      }),
+    ])
+  );
+  const down = await run(["down", "--json"], false, project, {
+    COMPOSE_PROJECT_NAME: "demo_team",
+  });
+  expect(down.exitCode, down.stderr || down.stdout).toBe(0);
+  expect(
+    (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+  ).toEqual(["compose", "-p", "demo_team"]);
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "demo-team",
+    })
+  ).toMatchObject({
+    pinnedComposeBase: "demo-team",
+  });
+}, 40_000);
+
+test("Down refuses a normalized saved pin for a different Compose identity", async () => {
+  const project = join(root, "project");
+  await installComposeNameFixture();
+  await upsertProjectRuntimeStateEntry({
+    projectDir: join(project, ".hack"),
+    entry: {
+      composeProject: "demo-team",
+      pinnedComposeBase: "demo_team",
+      envName: null,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  const down = await run(["down", "--json"], false, project, {
+    COMPOSE_PROJECT_NAME: "demo-team",
+  });
+  expect(down.exitCode).toBe(1);
+  expect(down.stderr + down.stdout).toContain("ambiguous Compose project name");
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+});
+
 test("ordinary Down checks ownership of a stack named by a managed override", async () => {
   await configureManagedNameOverlay({ defaultOverlay: true });
   await installComposeNameFixture({
@@ -640,6 +714,86 @@ test("bound service Stop waits for ordinary Restart after it creates the contain
     await Promise.allSettled([restart, stop]);
   }
 }, 40_000);
+
+for (const command of ["down", "restart"]) {
+  test(`${command} keeps the service's worktree copy after waiting for its lock`, async () => {
+    const { git, worktree } = await createLinkedCheckout();
+    await writeOwnedFixture(
+      join(worktree, ".hack", "hack.config.json"),
+      '{"name":"sample","dev_host":"sample.hack"}'
+    );
+    const shim = join(root, "bin", "git");
+    const selectedPath = join(root, "branch-selected");
+    const selected = Bun.file(selectedPath);
+    await rm(shim);
+    await writeFile(
+      shim,
+      `#!/bin/sh
+if [ "$3 $4" = "branch --show-current" ]; then
+  ${quoteShellWord(git)} "$@" || exit $?
+  : > ${quoteShellWord(selectedPath)}
+  exit 0
+fi
+exec ${quoteShellWord(git)} "$@"
+`,
+      { mode: 0o755 }
+    );
+    await installComposeNameFixture({ startContainers: true });
+    await Bun.write(join(root, "compose-running"), "sample--preview");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const holder = withAutostartProjectLock({
+      registryPath: join(root, "home", ".hack", "projects.json"),
+      scope: {
+        projectId: "",
+        composeProject: `checkout:${await realpath(join(worktree, ".hack"))}\0preview`,
+        branch: null,
+      },
+      run: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    await Promise.race([entered.promise, holder]);
+    const services = command === "down" ? ["--service", "app"] : ["app"];
+    const operation = run(
+      [
+        command,
+        ...services,
+        "--target",
+        "local",
+        "--expect-compose-project",
+        "sample--preview",
+        "--json",
+      ],
+      false,
+      worktree
+    );
+    try {
+      await waitForCondition(
+        () => selected.exists(),
+        "The command did not select the worktree branch"
+      );
+      const rename = Bun.spawnSync(
+        [git, "-C", worktree, "branch", "-m", "renamed"],
+        {
+          env: privateCliEnv({ root, home: join(root, "home") }),
+        }
+      );
+      expect(rename.exitCode).toBe(0);
+      release.resolve();
+      const result = await operation;
+      expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: true,
+        data: { composeProject: "sample--preview", branch: "preview" },
+      });
+    } finally {
+      release.resolve();
+      await Promise.allSettled([holder, operation]);
+    }
+  }, 40_000);
+}
 
 test("desktop Start can stop a sibling branch from an attached lifecycle hook", async () => {
   const projectRoot = join(root, "project");
@@ -1100,7 +1254,7 @@ test("up --always registers and marks the selected primary instance before runti
   expect(await marker()).toMatchObject({ branch: "preview", paused: false });
 });
 
-test("linked worktree opt-in refuses without marking the primary checkout", async () => {
+async function createLinkedCheckout() {
   const git = Bun.which("git");
   if (!git) {
     throw new Error("git is required for the worktree regression fixture");
@@ -1134,6 +1288,11 @@ test("linked worktree opt-in refuses without marking the primary checkout", asyn
     const message = await new Response(child.stderr).text();
     expect(await child.exited, message).toBe(0);
   }
+  return { git, worktree };
+}
+
+test("linked worktree opt-in refuses without marking the primary checkout", async () => {
+  const { worktree } = await createLinkedCheckout();
   const before = await marker();
   const up = await run(["up", "-d", "--always", "--json"], false, worktree);
   expect(up.exitCode).not.toBe(0);

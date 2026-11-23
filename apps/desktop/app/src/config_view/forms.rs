@@ -712,7 +712,7 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) -> Div {
         let id = format!("project/{path}");
-        let original = setting(&report.project, path).as_bool().unwrap_or(fallback);
+        let original = project_toggle_value(&report.project, path, fallback);
         let on = self
             .config
             .draft
@@ -1381,6 +1381,38 @@ fn group_title(title: &str, report: &ConfigReport, id: &str, ui: &Ui) -> Div {
                 .layer(id)
                 .map(|layer| mono(layer.name().to_owned(), ui).text_color(ui.p.text_muted)),
         )
+}
+
+fn project_toggle_value(project: &Value, path: &str, fallback: bool) -> bool {
+    let authored = setting(project, path);
+    // The CLI uses nullish precedence before checking the selected value's type.
+    let effective = match (path, authored.is_null()) {
+        ("worktree.auto_branch", true) => setting(project, "worktree.autoBranch"),
+        ("worktree.inherit_local", true) => setting(project, "worktree.inheritLocal"),
+        _ => authored,
+    };
+    effective.as_bool().unwrap_or(fallback)
+}
+
+#[cfg(test)]
+#[test]
+fn worktree_toggles_follow_runtime_alias_precedence() {
+    for (path, snake_case, camel_case) in [
+        ("worktree.auto_branch", "auto_branch", "autoBranch"),
+        ("worktree.inherit_local", "inherit_local", "inheritLocal"),
+    ] {
+        let mut project = serde_json::json!({ "worktree": { (camel_case): false } });
+        assert!(!project_toggle_value(&project, path, true));
+
+        project["worktree"][snake_case] = Value::Null;
+        assert!(!project_toggle_value(&project, path, true));
+
+        project["worktree"][snake_case] = Value::Bool(true);
+        assert!(project_toggle_value(&project, path, true));
+
+        project["worktree"][snake_case] = Value::String("invalid".into());
+        assert!(project_toggle_value(&project, path, true));
+    }
 }
 
 // Older v1 producers expose only authored fields. Follow the CLI's legacy

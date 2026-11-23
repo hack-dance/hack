@@ -816,7 +816,8 @@ and env values resolve. Viewing as and Env select one checkout and overlay.
 Edit, Env layers and Source share a pending patch. Save validates and writes
 the selected files. A file changed by another editor shows Reload in the
 save dock. Route changes offer a restart and env-only changes apply at the
-next start.
+next start. The Worktrees toggles show the effective branch and inheritance
+settings, including camelCase keys in existing project files.
 
 The native screenshot harness uses synthetic projects and values. Build with
 `bash scripts/build.sh --features screenshots`, then run

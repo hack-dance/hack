@@ -65,7 +65,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             crate::health_fixtures::open(&mut app, f, window, cx);
                             // No controls are clicked during capture. Show the
                             // enabled appearance of checked fixture commands.
-                            if crate::health_fixtures::is_health_frame(f) {
+                            if matches!(f, Fixture::DoctorHealth | Fixture::ErrorsSheet) {
                                 app.live = true;
                             }
                             if fixtures::loads_doctor(f) {

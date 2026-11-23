@@ -328,29 +328,29 @@ pub enum FollowUpKind {
 
 #[derive(Default)]
 pub struct FollowUps {
-    dismissed: std::collections::BTreeMap<FollowUpKind, String>,
+    dismissed: std::collections::BTreeSet<(FollowUpKind, String)>,
 }
 
 impl FollowUps {
-    /// Keep a dismissal only while the exact evidence is still present. A
-    /// healthy observation removes it even when the same problem later recurs.
     pub fn has_dismissals(&self) -> bool {
         !self.dismissed.is_empty()
     }
 
+    /// Keep a dismissal only while the exact evidence is still present. A
+    /// healthy observation removes it even when the same problem later recurs.
     pub fn retain(&mut self, present: &[(FollowUpKind, String)]) {
-        self.dismissed
-            .retain(|kind, evidence| present.contains(&(*kind, evidence.clone())));
+        self.dismissed.retain(|entry| present.contains(entry));
     }
 
     pub fn dismiss(&mut self, kind: FollowUpKind, evidence: String) {
-        self.dismissed.insert(kind, evidence);
+        self.dismissed.insert((kind, evidence));
     }
 
     pub fn visible(&self, kind: FollowUpKind, evidence: &str) -> bool {
-        self.dismissed
-            .get(&kind)
-            .is_none_or(|seen| seen != evidence)
+        !self
+            .dismissed
+            .iter()
+            .any(|(seen_kind, seen)| *seen_kind == kind && seen == evidence)
     }
 }
 
@@ -448,6 +448,19 @@ mod tests {
         assert!(notices.visible(FollowUpKind::DaemonDown, "one DNS piece"));
         notices.retain(&[]);
         assert!(notices.visible(FollowUpKind::Routing, "one DNS piece"));
+    }
+
+    #[test]
+    fn notices_of_the_same_kind_keep_independent_dismissals() {
+        let kind = FollowUpKind::CouldNotCheck;
+        let mut notices = FollowUps::default();
+        notices.dismiss(kind, "project read timed out".into());
+        notices.dismiss(kind, "recovery failed".into());
+        assert!(!notices.visible(kind, "project read timed out"));
+        assert!(!notices.visible(kind, "recovery failed"));
+        notices.retain(&[(kind, "recovery failed".into())]);
+        assert!(notices.visible(kind, "project read timed out"));
+        assert!(!notices.visible(kind, "recovery failed"));
     }
 
     #[test]

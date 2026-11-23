@@ -72,6 +72,11 @@ pub fn open(app: &mut HackApp, frame: Fixture, window: &mut Window, cx: &mut Con
     match frame {
         Fixture::BannerDns => {
             app.health.fixture.as_mut().unwrap().banner = Some(dns_notice(&report));
+            #[cfg(hack_terminal)]
+            {
+                app.ensure_panel(window, cx);
+                app.toggle_panel(cx);
+            }
         }
         Fixture::BannersSheet => app.pane = Pane::BannersSheet,
         Fixture::ErrorsSheet => app.pane = Pane::ErrorsSheet,

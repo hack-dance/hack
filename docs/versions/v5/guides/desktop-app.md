@@ -73,7 +73,8 @@ Your choice is saved in the app's settings file
 variable selects the CLI.
 
 When the app cannot check `hackd`, use **Check again** in Setup. The routing
-card shows how many DNS pieces are set up, such as **5 of 8**.
+card shows how many DNS pieces are set up, such as **5 of 8**. Open **DNS
+details** to see each check's result and diagnostic.
 
 ## The Env tab
 

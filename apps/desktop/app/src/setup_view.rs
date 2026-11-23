@@ -492,6 +492,26 @@ fn card(
             );
         }
     }
+    if !c.checks.is_empty() {
+        let label = if pane.dns_details_open {
+            "Hide DNS details"
+        } else {
+            "DNS details"
+        };
+        actions = actions.child(
+            action_button(
+                ("setup-dns-details", i),
+                Glyph::ChevronDown,
+                label,
+                true,
+                ui,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.setup.dns_details_open = !this.setup.dns_details_open;
+                cx.notify();
+            })),
+        );
+    }
     div()
         .id(SharedString::from(format!("setup-card-{}", c.id)))
         .flex()
@@ -541,6 +561,32 @@ fn card(
                 .child(cmd)
         }))
         .child(actions)
+        .when(pane.dns_details_open && !c.checks.is_empty(), |d| {
+            d.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::S3)
+                    .children(c.checks.iter().map(|check| {
+                        let state = match check.status {
+                            Status::Passed => "Passed",
+                            Status::NeedsAttention => "Needs attention",
+                            Status::Unknown => "Couldn't check",
+                            Status::Blocked => "Blocked",
+                        };
+                        div()
+                            .type_step(text::SMALL)
+                            .text_color(p.text_secondary)
+                            .child(
+                                div()
+                                    .type_step(text::SMALL_STRONG)
+                                    .text_color(p.text_primary)
+                                    .child(format!("{} · {state}", check.id)),
+                            )
+                            .child(check.detail.clone())
+                    })),
+            )
+        })
         .into_any_element()
 }
 

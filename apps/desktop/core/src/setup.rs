@@ -120,6 +120,7 @@ pub struct Pane {
     pub refresh_again: bool,
     pub pending_fix: bool,
     pub result: Option<String>,
+    pub dns_details_open: bool,
     pub skipped: std::collections::BTreeSet<String>,
     generation: u64,
     pub checked_at: Option<std::time::Instant>,
@@ -549,7 +550,7 @@ fn routing(
                 && let Some(host) = domain.and_then(|d| unobserved.get(d))
             {
                 detail = format!(
-                    "Doctor does not check this project domain yet (DESIGN.md R23), so routing for {host} is unconfirmed"
+                    "Doctor does not check this project domain yet (DESIGN.md R23). Routing for {host} is unconfirmed. Global install cannot confirm this domain."
                 );
             }
             Check { id, status, detail }

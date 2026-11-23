@@ -63,6 +63,12 @@ a downgrade to a runtime that rejects the new receipt field, build-image
 reclamation skips cleanup when it encounters those receipts. Upgrade to the
 newer runtime to reclaim the images.
 
+### Native build contexts
+
+Native builds exclude machine-local `.hack/` state, including generated Compose
+env overrides, and the checkout's `.hack.secret.key`. Changes to that state no
+longer trigger rebuilds.
+
 ## 2. What you will notice every day
 
 **`hack env list` hides every value.** It shows names, scopes and source files.

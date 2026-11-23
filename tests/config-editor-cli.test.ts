@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { showConfigEditor } from "../src/lib/config-editor-model.ts";
 import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
+import { normalizeEnvConfigName } from "../src/lib/project.ts";
 import { runFixtureGitSync } from "./helpers/fixture-git.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
@@ -1372,6 +1373,27 @@ test("show resolves legacy project defaults independently of the selected overla
     defaultOverlay: "default",
     default_overlay: "qa",
   });
+});
+
+test("show withholds a credential-bearing default overlay and its derived layer names", async () => {
+  const f = await fixture();
+  const marker = "overlay-credential-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const derived = normalizeEnvConfigName(authored) ?? "invalid";
+  await writeFile(
+    join(f.project, "hack.config.json"),
+    JSON.stringify({ env: { default_overlay: authored } })
+  );
+  await writeFile(
+    join(f.project, `hack.env.${derived}.yaml`),
+    env("  global:\n    MODE: unsafe-default", derived)
+  );
+  for (const args of [[], ["--env", "default"], ["--env", derived]]) {
+    const report = await show(f.root, f.main, ...args);
+    expect(JSON.stringify(report).includes(marker)).toBe(false);
+    expect(report.default_overlay).toBe("[redacted]");
+    expect(report.overlay).toBeNull();
+  }
 });
 
 test("validation reads newly selected layers and honors an explicit selection", async () => {

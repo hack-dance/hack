@@ -30,6 +30,7 @@ import {
   parseEnvConfigSelection,
   parseProjectConfigRecord,
   projectNameForConfig,
+  readAuthoredProjectOverlaySettings,
   resolveProjectDefaultEnvOverlay,
   resolveProjectOauthAliasHost,
   resolveProjectRouteBaseHosts,
@@ -324,6 +325,7 @@ async function configLayers(opts: {
   readonly branch: string | null;
   readonly overlay: string | null | undefined;
   readonly defaultOverlay: string | null;
+  readonly privateOverlay: string | null;
   readonly config: ProjectConfig;
 }) {
   const p = opts.project;
@@ -343,7 +345,10 @@ async function configLayers(opts: {
       ...overlays.map((entry) => entry.name),
       ...(overlay ? [overlay] : []),
     ]),
-  ].filter((name) => parseEnvConfigSelection(name) === name);
+  ].filter(
+    (name) =>
+      name !== opts.privateOverlay && parseEnvConfigSelection(name) === name
+  );
   const layers: Layer[] = [
     {
       id: "2",
@@ -503,6 +508,18 @@ export async function captureConfigEditor(opts: {
   }
   const cfg = parseProjectConfigRecord(raw ?? {}, projectLayer.file);
   const defaultOverlay = resolveProjectDefaultEnvOverlay(cfg);
+  const authored = readAuthoredProjectOverlaySettings(raw ?? {});
+  const authoredDefault = cfg.env?.defaultOverlay
+    ? authored.envDefaultOverlayRaw
+    : authored.defaultEnvConfigRaw;
+  // Normalizing a credential-bearing value can strip the syntax that identifies it.
+  const redactDefault = isConfigSecret("", authoredDefault);
+  const privateOverlay = redactDefault ? defaultOverlay : null;
+  const selectedOverlay =
+    requestedOverlay === privateOverlay ? null : requestedOverlay;
+  const publicDefault = redactDefault
+    ? "[redacted]"
+    : (defaultOverlay ?? "default");
   const branch = (
     await resolveEffectiveBranch({
       explicitBranch,
@@ -526,15 +543,16 @@ export async function captureConfigEditor(opts: {
     raw === null
       ? {
           layers: [projectLayer],
-          overlay: requestedOverlay ?? null,
+          overlay: selectedOverlay ?? null,
           overlays: [],
         }
       : await configLayers({
           project,
           projectLayer,
           branch,
-          overlay: requestedOverlay,
-          defaultOverlay,
+          overlay: selectedOverlay,
+          defaultOverlay: redactDefault ? null : defaultOverlay,
+          privateOverlay,
           config: cfg,
         });
   return {
@@ -543,9 +561,9 @@ export async function captureConfigEditor(opts: {
     projectName: projectNameForConfig(cfg, project.projectRoot),
     branch,
     baseHosts,
-    defaultOverlay: raw === null ? null : (defaultOverlay ?? "default"),
+    defaultOverlay: raw === null ? null : publicDefault,
     explicitBranch,
-    requestedOverlay,
+    requestedOverlay: selectedOverlay,
   };
 }
 

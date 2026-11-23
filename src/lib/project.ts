@@ -718,6 +718,21 @@ function parseProjectConfigToml(opts: {
   return parseProjectConfigRecord(parsed, opts.path);
 }
 
+/** Return the authored overlay settings before normalization. */
+export function readAuthoredProjectOverlaySettings(
+  value: Record<string, unknown>
+) {
+  const envConfig = getRecord(value, "env");
+  return {
+    defaultEnvConfigRaw:
+      getString(value, "defaultEnvConfig") ??
+      getString(value, "default_env_config"),
+    envDefaultOverlayRaw:
+      (envConfig ? getString(envConfig, "defaultOverlay") : undefined) ??
+      (envConfig ? getString(envConfig, "default_overlay") : undefined),
+  };
+}
+
 /** Parse an already bounded configuration observation without additional file reads. */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Project config parsing keeps schema migration and legacy compatibility explicit in one parser.
 export function parseProjectConfigRecord(
@@ -743,13 +758,8 @@ export function parseProjectConfigRecord(
     : undefined;
   const name = getString(value, "name");
   const devHost = getString(value, "dev_host");
-  const envConfig = getRecord(value, "env");
-  const defaultEnvConfigRaw =
-    getString(value, "defaultEnvConfig") ??
-    getString(value, "default_env_config");
-  const envDefaultOverlayRaw =
-    (envConfig ? getString(envConfig, "defaultOverlay") : undefined) ??
-    (envConfig ? getString(envConfig, "default_overlay") : undefined);
+  const { defaultEnvConfigRaw, envDefaultOverlayRaw } =
+    readAuthoredProjectOverlaySettings(value);
   const logs = parseLogsConfig(getRecord(value, "logs"));
   const oauth = parseOauthConfig(getRecord(value, "oauth"));
   const parsedOpen = parseOpenConfig(getRecord(value, "open"));

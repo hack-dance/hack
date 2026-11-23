@@ -199,8 +199,9 @@ env values.
 The default overlay uses the same names as `--env`. Use `default` to select
 base layers. `default_overlay` reports the resolved project default, including
 legacy keys, independently of the selected `overlay`. It is `"default"` for
-base layers. A missing checkout or malformed project settings report `null`.
-A failure to read the file returns an `E_PERMISSION` error envelope.
+base layers and `"[redacted]"` when the authored value contains credentials.
+A missing checkout or malformed project settings report `null`. A failure
+to read the file returns an `E_PERMISSION` error envelope.
 Config honors the env migration journal for the selected checkout and any
 inherited layers. On the first env write to a project
 with a legacy contract, apply migrates that contract through the same

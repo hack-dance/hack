@@ -20,7 +20,7 @@ stateDiagram-v2
     Passed --> Passed : Stay
     NeedsAction --> Progress : Skip allowed
     Unchecked --> Progress : Skip allowed
-    Progress --> Checking : Next step
+    Progress --> Checking : Another step needed
     Progress --> Done : Final step
-    Done --> Checking : Reopen step
+    Done --> Checking : Reopen or regress
     Done --> [*] : Open Hack

@@ -109,7 +109,10 @@ fn sidebar(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> Div {
         let state = flow.state(step, &app.setup);
         let current = flow.step() == Some(step);
         let meta = progress_meta(app, step, state);
-        let enabled = !current && !app.setup.action_busy && flow.can_open(step, &app.setup);
+        let enabled = !current
+            && !app.setup.action_busy
+            && !app.setup.loading
+            && flow.can_open(step, &app.setup);
         rows = rows.child(
             div()
                 .id(("setup-progress", step.index()))
@@ -508,7 +511,10 @@ fn screen(app: &HackApp, step: Step, ui: &Ui, cx: &mut Context<HackApp>) -> AnyE
                         )
                         .child(format!(
                             "Next: {}",
-                            step.next().map_or("All done", Step::title)
+                            match app.setup_flow.next_screen(step, &app.setup) {
+                                Screen::Step(next) => next.title(),
+                                _ => "All done",
+                            }
                         )),
                 );
             }
@@ -519,6 +525,13 @@ fn screen(app: &HackApp, step: Step, ui: &Ui, cx: &mut Context<HackApp>) -> AnyE
                     remedy(app, step, state, ui, cx)
                         .map(|action| div().mt(space::S7).child(action)),
                 )
+                .children(app.setup_flow.terminal_notice.as_ref().map(|notice| {
+                    div()
+                        .mt(space::S4)
+                        .type_step(text::BODY)
+                        .text_color(p.text_secondary)
+                        .child(notice.clone())
+                }))
                 .child(div().mt(space::S7).child(details(app, step, ui, cx)));
         }
     }
@@ -532,8 +545,31 @@ fn remedy(
     ui: &Ui,
     cx: &mut Context<HackApp>,
 ) -> Option<AnyElement> {
-    let remedy = match step.remedy(&app.setup.report) {
-        Some(remedy) => remedy,
+    if step == Step::Cli
+        && let Some(other) = setup_alternate_cli(app)
+    {
+        return Some(
+            div()
+                .flex()
+                .child(
+                    button(
+                        "setup-switch-cli",
+                        format!("Use {}", other.name),
+                        None,
+                        true,
+                        ui,
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.use_cli(&other.path, window, cx)
+                        }),
+                    ),
+                )
+                .into_any_element(),
+        );
+    }
+    let card = match step.remedy_card(&app.setup.report) {
+        Some(card) => card,
         None if state == StepState::Unchecked => {
             return Some(
                 div()
@@ -547,6 +583,7 @@ fn remedy(
         }
         None => return None,
     };
+    let remedy = &card.remedy;
     let p = ui.p;
     let password = match step {
         Step::Domains => "May ask for your password to set up local domains.",
@@ -588,44 +625,7 @@ fn remedy(
     let Remedy::Doc(url) = remedy else {
         return None;
     };
-    if step == Step::Cli
-        && state == StepState::VersionMismatch
-        && let Some(other) = app
-            .source
-            .cli_choice()
-            .and_then(|c| c.others().next().cloned())
-    {
-        return Some(
-            div()
-                .flex()
-                .child(
-                    button(
-                        "setup-switch-cli",
-                        format!("Use {}", other.name),
-                        None,
-                        true,
-                        ui,
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.use_cli(&other.path, window, cx)
-                        }),
-                    ),
-                )
-                .into_any_element(),
-        );
-    }
-    let (label, url) = match step {
-        Step::Cli => ("Open install guide", url.clone()),
-        Step::Docker if step.card(&app.setup.report).is_some() && cfg!(target_os = "macos") => (
-            "Get Docker Desktop",
-            "https://docs.docker.com/desktop/setup/install/mac-install/".into(),
-        ),
-        Step::Docker if step.card(&app.setup.report).is_some() => {
-            ("Open Docker guide", url.clone())
-        }
-        _ => ("Open guide", url.clone()),
-    };
+    let (label, url) = setup_guide(card, url, cfg!(target_os = "macos"));
     Some(
         div()
             .flex()
@@ -635,6 +635,29 @@ fn remedy(
             )
             .into_any_element(),
     )
+}
+
+fn setup_alternate_cli(app: &HackApp) -> Option<hack_desktop_core::cli_choice::Install> {
+    app.source
+        .cli_choice()
+        .and_then(|c| c.others().next().cloned())
+}
+
+fn setup_guide(
+    card: &hack_desktop_core::setup::Card,
+    url: &str,
+    macos: bool,
+) -> (&'static str, String) {
+    match card.id.as_str() {
+        "cli" => ("Open install guide", url.into()),
+        "docker" if macos => (
+            "Get Docker Desktop",
+            "https://docs.docker.com/desktop/setup/install/mac-install/".into(),
+        ),
+        "docker" => ("Open Docker guide", url.into()),
+        id if id.starts_with("native:") => ("Open native runtime guide", url.into()),
+        _ => ("Open guide", url.into()),
+    }
 }
 
 fn footer(
@@ -682,7 +705,10 @@ fn footer(
     {
         return None;
     }
-    if step == Step::Cli && state == StepState::VersionMismatch {
+    if step == Step::Cli
+        && (state == StepState::VersionMismatch
+            || (state == StepState::Unchecked && setup_alternate_cli(app).is_some()))
+    {
         row = row.child(
             button("setup-other-ways", "Other ways to install", None, false, ui)
                 .w(px(160.))
@@ -932,7 +958,7 @@ fn status_copy(step: Step, state: StepState, app: &HackApp) -> (String, Option<S
         ),
         StepState::NeedsAction => copy(match step {
             Step::Cli => "Install Hack 5 to continue.",
-            Step::Daemon => match step.remedy(&app.setup.report) {
+            Step::Daemon => match step.remedy_card(&app.setup.report).map(|card| &card.remedy) {
                 Some(Remedy::Run(_)) => "hackd isn’t running.",
                 Some(Remedy::Doc(_)) => "This hackd belongs to another Hack install.",
                 _ => "The Hack service and CLI need compatible versions.",
@@ -943,5 +969,29 @@ fn status_copy(step: Step, state: StepState, app: &HackApp) -> (String, Option<S
             Step::Login => "Not set up. hackd stops when you log out.",
         }),
         StepState::Todo => copy("Ready to check."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passed_docker_does_not_redirect_a_native_problem_to_docker_desktop() {
+        let mut mixed = hack_desktop_core::setup_fixtures::load("ready").unwrap();
+        let native = hack_desktop_core::setup_fixtures::load("native-unknown").unwrap();
+        mixed.cards.extend(
+            native
+                .cards
+                .into_iter()
+                .filter(|card| card.id.starts_with("native:")),
+        );
+        let card = Step::Docker.remedy_card(&mixed).expect("native remedy");
+        let Remedy::Doc(url) = &card.remedy else {
+            panic!("expected a native guide");
+        };
+        let (label, actual_url) = setup_guide(card, url, true);
+        assert_eq!(label, "Open native runtime guide");
+        assert_eq!(actual_url, hack_desktop_core::setup::NATIVE_DOC);
     }
 }

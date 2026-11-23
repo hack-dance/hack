@@ -187,11 +187,13 @@ Setup presents one step at a time, in this order:
 | HTTPS | Machine Doctor’s certificate trust check and each native project’s `native root trust` | `hack global trust` for Compose, guide for native |
 | Start at login | Daemon service state and home ownership | `hack daemon install` if eligible |
 
-Each arrival checks again in the background. Passing evidence starts a
+Each arrival checks the current step and its prerequisites in the background.
+Only a full refresh checks every step. Passing evidence starts a
 two-second advance that the user can pause or complete immediately. A failed
 check can be retried. Passing and skipped steps remain available from the
 progress list. The CLI is required by the other steps and cannot be skipped.
-Other skips are session-only and do not satisfy checks.
+Other skips are session-only and do not satisfy checks. Before completion,
+the wizard returns to the first unresolved step without a session skip.
 
 Terminal hand-off (recommended for both platforms; comparison in [Appendix A](#appendix-a-system-prompt-vs-terminal)):
 

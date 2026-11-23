@@ -429,7 +429,8 @@ not already opened a project, terminal or Doctor, the welcome screen opens.
 Use **Run setup again** in Doctor to start it yourself.
 
 Setup walks through Hack CLI, Hack service, Docker, Local domains, HTTPS, and
-optional Start at login. Each step starts a read-only check. Passing steps show
+optional Start at login. Each step checks its own read-only evidence and
+prerequisites. Passing steps show
 what Hack found and advance after two seconds. **Stay on this step** pauses
 that advance, and **Next** resumes it. The progress list lets you reopen a
 passed or skipped step.

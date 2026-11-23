@@ -2,10 +2,10 @@
 
 use gpui_kit::Context;
 use hack_desktop_core::machine_gate::Holder;
-use hack_desktop_core::setup::{Remedy, Report, SafeAction, Status};
+use hack_desktop_core::setup::{CheckScope, Remedy, Report, SafeAction, Status};
 
 use crate::doctor_view::Pane;
-use crate::setup_flow::{ADVANCE_DELAY, Flow, Screen, Step};
+use crate::setup_flow::{ADVANCE_DELAY, Screen, Step};
 use crate::view::HackApp;
 
 impl HackApp {
@@ -37,11 +37,18 @@ impl HackApp {
         self.user_navigated();
         self.pane = Pane::Setup;
         self.setup_flow.enter(Screen::Welcome);
-        self.load_setup(cx);
+        cx.notify();
     }
 
     pub(crate) fn load_setup(&mut self, cx: &mut Context<Self>) {
-        if self.setup.loading {
+        let scope = if self.pane == Pane::Setup {
+            self.setup_flow
+                .step()
+                .map_or(CheckScope::Full, Step::check_scope)
+        } else {
+            CheckScope::Full
+        };
+        if self.setup.loading && self.setup_flow.checking_scope == Some(scope) {
             self.setup.refresh_again = true;
             return;
         }
@@ -49,9 +56,11 @@ impl HackApp {
             return;
         }
         let generation = self.setup.begin();
+        self.setup_flow.checking_scope = Some(scope);
+        self.setup.refresh_again = false;
         self.setup_flow.advance_at = None;
         if !self.live {
-            let report = self.source.setup();
+            let report = self.source.setup_for(scope);
             self.setup_checked(generation, report, cx);
             return;
         }
@@ -59,7 +68,7 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             let report = cx
                 .background_executor()
-                .spawn(async move { source.setup() })
+                .spawn(async move { source.setup_for(scope) })
                 .await;
             let _ = this.update(cx, |this, cx| this.setup_checked(generation, report, cx));
         })
@@ -76,6 +85,8 @@ impl HackApp {
         if !self.setup.is_current(generation) {
             return;
         }
+        let scope = self.setup_flow.checking_scope.take().unwrap_or_default();
+        let report = report.with_prior(&self.setup.report, scope);
         let needed = report.needed();
         self.setup.finish(generation, report);
         if std::mem::take(&mut self.setup_on_launch) && needed {
@@ -129,7 +140,10 @@ impl HackApp {
     }
 
     pub(super) fn reopen_setup_step(&mut self, step: Step, cx: &mut Context<Self>) {
-        if !self.setup.action_busy && self.setup_flow.can_open(step, &self.setup) {
+        if !self.setup.action_busy
+            && !self.setup.loading
+            && self.setup_flow.can_open(step, &self.setup)
+        {
             self.enter_setup_step(step, cx);
         }
     }
@@ -150,7 +164,8 @@ impl HackApp {
             return;
         }
         if let Some(step) = self.setup_flow.step() {
-            self.setup_flow.enter(Flow::next_screen(step));
+            self.setup_flow
+                .enter(self.setup_flow.next_screen(step, &self.setup));
             self.check_next_setup_step(cx);
         }
     }
@@ -172,12 +187,13 @@ impl HackApp {
     pub(super) fn retry_setup_check(&mut self, cx: &mut Context<Self>) {
         self.setup_flow.outcome = None;
         self.setup_flow.stay = false;
+        self.setup_flow.terminal_notice = None;
         self.load_setup(cx);
     }
 
     pub(super) fn finish_setup(&mut self, cx: &mut Context<Self>) {
         if self.setup_flow.screen == Screen::Done
-            && self.setup.report.cli_ready()
+            && self.setup_flow.first_unresolved(&self.setup).is_none()
             && !self.setup.loading
             && !self.setup.action_busy
         {
@@ -186,14 +202,18 @@ impl HackApp {
         }
     }
 
+    fn setup_offers(&self, remedy: &Remedy) -> bool {
+        self.pane == Pane::Setup
+            && self
+                .setup_flow
+                .step()
+                .and_then(|step| step.remedy_card(&self.setup.report))
+                .is_some_and(|card| card.status == Status::NeedsAttention && &card.remedy == remedy)
+    }
+
     /// One of the fixed daemon actions, only while a card offers it.
     pub(super) fn run_setup_action(&mut self, action: SafeAction, cx: &mut Context<Self>) {
-        let offered = self
-            .setup
-            .report
-            .cards
-            .iter()
-            .any(|c| c.remedy == Remedy::Run(action) && c.status != Status::Passed);
+        let offered = self.setup_offers(&Remedy::Run(action));
         if self.setup.action_busy
             || self.machine.busy()
             || self.setup.loading
@@ -211,6 +231,7 @@ impl HackApp {
             return;
         };
         self.setup.result = None;
+        self.setup_flow.terminal_notice = None;
         self.setup.action_busy = true;
         let epoch = self.setup.source_epoch();
         let source = self.source.clone();
@@ -240,12 +261,7 @@ impl HackApp {
     /// waits for Enter. Launching proves nothing; checks run again after.
     pub(super) fn open_setup_terminal(&mut self, args: Vec<String>, cx: &mut Context<Self>) {
         use hack_desktop_core::terminal::{Platform, Script, SystemLauncher, linux_adapter};
-        let offered = self
-            .setup
-            .report
-            .cards
-            .iter()
-            .any(|c| c.remedy == Remedy::Admin(args.clone()));
+        let offered = self.setup_offers(&Remedy::Admin(args.clone()));
         if self.setup.action_busy
             || self.machine.busy()
             || self.setup.loading
@@ -266,6 +282,7 @@ impl HackApp {
         // for a machine action the app runs itself (checked above), and
         // checks again when the user comes back.
         self.setup.result = None;
+        self.setup_flow.terminal_notice = None;
         self.setup.action_busy = true;
         let epoch = self.setup.source_epoch();
         cx.spawn(async move |this, cx| {
@@ -295,10 +312,15 @@ impl HackApp {
                 }
                 this.setup.action_busy = false;
                 this.setup.pending_fix = result.is_ok();
-                this.setup.result = Some(match result {
-                    Ok(()) => "Opened in your terminal. Press Enter there, then Check again: opening it does not prove setup.".into(),
-                    Err(e) => e,
-                });
+                let notice = match result {
+                    Ok(()) => "Press Enter in your terminal to run the command. Check again when it finishes.".into(),
+                    Err(error) => {
+                        let notice = error.lines().next().unwrap_or("Couldn’t open the terminal. Use Copy.").to_owned();
+                        this.setup.result = Some(error);
+                        notice
+                    }
+                };
+                this.setup_flow.terminal_notice = Some(notice);
                 cx.notify();
             });
         })
@@ -346,26 +368,51 @@ mod tests {
     fn setup_starts_at_welcome_and_open_hack_requires_completion() {
         let (mut cx, app) = app();
         cx.update(|cx| app.update(cx, |a, cx| a.open_setup(cx)));
-        let (pane, cards, ready) = cx.update(|cx| {
-            let a = app.read(cx);
-            (
-                a.pane,
-                a.setup.report.cards.len(),
-                a.setup.report.cli_ready(),
-            )
-        });
-        assert_eq!(pane, Pane::Setup);
-        assert!(cards > 0, "the checks produced cards");
-        assert!(ready, "the fixture has a CLI");
+        assert_eq!(
+            cx.update(|cx| app.read(cx).setup_flow.screen),
+            Screen::Welcome
+        );
+        cx.update(|cx| app.update(cx, |a, cx| a.start_setup(cx)));
+        assert!(cx.update(|cx| app.read(cx).setup.report.cli_ready()));
         cx.update(|cx| app.update(cx, |a, cx| a.finish_setup(cx)));
         assert_eq!(cx.update(|cx| app.read(cx).pane), Pane::Setup);
         cx.update(|cx| {
             app.update(cx, |a, cx| {
+                a.show_setup_now(hack_desktop_core::setup_fixtures::load("ready").unwrap());
                 a.setup_flow.enter(Screen::Done);
                 a.finish_setup(cx);
             })
         });
         assert_eq!(cx.update(|cx| app.read(cx).pane), Pane::Project);
+    }
+
+    #[test]
+    fn starting_setup_does_not_wait_for_an_in_flight_full_check() {
+        let (mut cx, app) = app();
+        let old_generation = cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.open_setup(cx);
+                a.setup_flow.checking_scope = Some(CheckScope::Full);
+                let generation = a.setup.begin();
+                a.start_setup(cx);
+                generation
+            })
+        });
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                assert!(!a.setup.loading, "the scoped CLI check finished");
+                assert!(a.setup.report.cli_ready());
+                a.setup_checked(
+                    old_generation,
+                    hack_desktop_core::setup_fixtures::load("missing-cli").unwrap(),
+                    cx,
+                );
+                assert!(
+                    a.setup.report.cli_ready(),
+                    "the old full check did not overwrite the CLI check"
+                );
+            })
+        });
     }
 
     #[test]
@@ -457,7 +504,12 @@ mod tests {
     #[test]
     fn a_setup_pane_left_open_is_checked_again_after_ten_minutes() {
         let (mut cx, app) = app();
-        cx.update(|cx| app.update(cx, |a, cx| a.open_setup(cx)));
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.open_setup(cx);
+                a.load_setup(cx);
+            })
+        });
         let first = cx
             .update(|cx| app.read(cx).setup.checked_at)
             .expect("checked");
@@ -540,7 +592,12 @@ mod tests {
     #[test]
     fn a_skip_lasts_for_the_session_and_the_cli_cannot_be_skipped() {
         let (mut cx, app) = app();
-        cx.update(|cx| app.update(cx, |a, cx| a.open_setup(cx)));
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.open_setup(cx);
+                a.load_setup(cx);
+            })
+        });
         cx.update(|cx| {
             app.update(cx, |a, cx| {
                 a.setup_flow.enter(Screen::Step(Step::Cli));
@@ -564,6 +621,7 @@ mod tests {
                 a.show_setup_now(
                     hack_desktop_core::setup_fixtures::load("partial").expect("fixture"),
                 );
+                a.setup_flow.enter(Screen::Step(Step::Daemon));
                 a.run_setup_action(SafeAction::StartDaemon, cx);
             })
         });
@@ -571,24 +629,41 @@ mod tests {
             cx.update(|cx| app.read(cx).setup.result.clone()).as_deref(),
             Some("Fixture: no action executed")
         );
-        let admin = cx.update(|cx| {
-            app.read(cx)
-                .setup
-                .report
-                .cards
-                .iter()
-                .find_map(|c| match &c.remedy {
-                    Remedy::Admin(args) => Some(args.clone()),
-                    _ => None,
-                })
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let card = a
+                    .setup
+                    .report
+                    .cards
+                    .iter_mut()
+                    .find(|card| card.id == Step::Domains.id())
+                    .unwrap();
+                card.status = Status::Unknown;
+                let Remedy::Admin(args) = card.remedy.clone() else {
+                    panic!("expected an admin remedy")
+                };
+                a.setup_flow.enter(Screen::Step(Step::Domains));
+                a.setup.result = None;
+                a.open_setup_terminal(args.clone(), cx);
+                assert!(
+                    a.setup.result.is_none(),
+                    "an unchecked card does not open a terminal"
+                );
+                let card = a
+                    .setup
+                    .report
+                    .cards
+                    .iter_mut()
+                    .find(|card| card.id == Step::Domains.id())
+                    .unwrap();
+                card.status = Status::NeedsAttention;
+                a.open_setup_terminal(args, cx);
+                assert_eq!(
+                    a.setup.result.as_deref(),
+                    Some("Fixture: no terminal opened")
+                );
+            })
         });
-        if let Some(args) = admin {
-            cx.update(|cx| app.update(cx, |a, cx| a.open_setup_terminal(args, cx)));
-            assert_eq!(
-                cx.update(|cx| app.read(cx).setup.result.clone()).as_deref(),
-                Some("Fixture: no terminal opened")
-            );
-        }
     }
 }
 
@@ -642,6 +717,11 @@ mod gate_tests {
             .unwrap();
         let result = cx.update(|cx| {
             app.update(cx, |a, cx| {
+                a.pane = Pane::Setup;
+                a.setup_flow.enter(Screen::Step(match action {
+                    SafeAction::StartDaemon => Step::Daemon,
+                    SafeAction::InstallDaemon => Step::Login,
+                }));
                 a.setup.report = report;
                 let recovery = a.machine.try_begin(Holder::Recovery).unwrap();
                 a.run_setup_action(action, cx);

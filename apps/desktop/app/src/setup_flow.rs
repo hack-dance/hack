@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use hack_desktop_core::setup::{Card, Pane, Remedy, Report, Status};
+use hack_desktop_core::setup::{Card, CheckScope, Pane, Remedy, Report, Status};
 use hack_desktop_core::terminal::CommandExit;
 
 pub(crate) const ADVANCE_DELAY: Duration = Duration::from_secs(2);
@@ -68,6 +68,17 @@ impl Step {
         ][self.index()]
     }
 
+    pub(crate) fn check_scope(self) -> CheckScope {
+        [
+            CheckScope::Cli,
+            CheckScope::Daemon,
+            CheckScope::Docker,
+            CheckScope::Domains,
+            CheckScope::Https,
+            CheckScope::Login,
+        ][self.index()]
+    }
+
     pub(crate) fn next(self) -> Option<Self> {
         Self::ALL.get(self.index() + 1).copied()
     }
@@ -90,10 +101,15 @@ impl Step {
         report.cards.iter().filter(move |card| self.related(card))
     }
 
-    pub(crate) fn remedy(self, report: &Report) -> Option<&Remedy> {
-        self.cards(report)
-            .find(|card| card.status != Status::Passed && card.status != Status::Blocked)
-            .map(|card| &card.remedy)
+    pub(crate) fn remedy_card(self, report: &Report) -> Option<&Card> {
+        self.cards(report).find(|card| match card.status {
+            Status::NeedsAttention => true,
+            Status::Unknown | Status::VersionMismatch => {
+                matches!(card.remedy, Remedy::Doc(_))
+                    || (self == Self::Daemon && matches!(card.remedy, Remedy::Copy(_)))
+            }
+            Status::Passed | Status::Blocked => false,
+        })
     }
 
     fn evidence(self, report: &Report) -> StepState {
@@ -158,6 +174,8 @@ pub(crate) struct Flow {
     pub advance_at: Option<Instant>,
     pub stay: bool,
     pub outcome: Option<RunOutcome>,
+    pub checking_scope: Option<CheckScope>,
+    pub terminal_notice: Option<String>,
     #[cfg(feature = "screenshots")]
     pub fixture: Option<crate::setup_frames::Overlay>,
 }
@@ -175,6 +193,7 @@ impl Flow {
         self.details_open = false;
         self.advance_at = None;
         self.stay = false;
+        self.terminal_notice = None;
         if let Screen::Step(step) = screen {
             self.visited[step.index()] = true;
         }
@@ -246,8 +265,17 @@ impl Flow {
             && pane.report.cli_ready()
     }
 
-    pub fn next_screen(step: Step) -> Screen {
-        step.next().map_or(Screen::Done, Screen::Step)
+    pub fn first_unresolved(&self, pane: &Pane) -> Option<Step> {
+        Step::ALL.into_iter().find(|&step| {
+            self.evidence(step, pane) != StepState::Passed
+                && (step == Step::Cli || !pane.skipped.contains(step.id()))
+        })
+    }
+
+    pub fn next_screen(&self, step: Step, pane: &Pane) -> Screen {
+        step.next()
+            .or_else(|| self.first_unresolved(pane))
+            .map_or(Screen::Done, Screen::Step)
     }
 
     pub fn skip(&mut self, step: Step, pane: &mut Pane) {
@@ -258,7 +286,7 @@ impl Flow {
                     pane.skipped.insert(card.id.clone());
                 }
             }
-            self.enter(Self::next_screen(step));
+            self.enter(self.next_screen(step, pane));
         }
     }
 
@@ -269,13 +297,18 @@ impl Flow {
         )
     }
 
-    /// Do not leave later steps or completion on screen if a fresh read
-    /// loses the required CLI.
+    /// Completion is valid while every unskipped check still passes.
     pub fn reconcile(&mut self, pane: &Pane) {
-        if !pane.report.cli_ready()
-            && !matches!(self.screen, Screen::Welcome | Screen::Step(Step::Cli))
-        {
-            self.enter(Screen::Step(Step::Cli));
+        match self.screen {
+            Screen::Done => {
+                if let Some(step) = self.first_unresolved(pane) {
+                    self.enter(Screen::Step(step));
+                }
+            }
+            Screen::Step(step) if step != Step::Cli && !pane.report.cli_ready() => {
+                self.enter(Screen::Step(Step::Cli));
+            }
+            _ => {}
         }
     }
 }
@@ -307,8 +340,14 @@ mod tests {
 
         pane.report.cards[0].status = Status::Passed;
         assert!(flow.can_advance(&pane));
-        assert_eq!(Flow::next_screen(Step::Cli), Screen::Step(Step::Daemon));
-        assert_eq!(Flow::next_screen(Step::Daemon), Screen::Step(Step::Docker));
+        assert_eq!(
+            flow.next_screen(Step::Cli, &pane),
+            Screen::Step(Step::Daemon)
+        );
+        assert_eq!(
+            flow.next_screen(Step::Daemon, &pane),
+            Screen::Step(Step::Docker)
+        );
         assert_eq!(flow.state(Step::Docker, &pane), StepState::Todo);
     }
 
@@ -348,6 +387,59 @@ mod tests {
                 .any(|card| card.id == "trust:sample")
         );
         assert_eq!(Step::ALL.len(), 6);
+    }
+
+    #[test]
+    fn completion_returns_to_the_first_regressed_check_until_the_user_skips_it() {
+        let mut flow = Flow::default();
+        let mut pane = ready();
+        let mut login_refresh = pane.report.clone();
+        login_refresh
+            .cards
+            .retain(|card| CheckScope::Login.includes(&card.id));
+        login_refresh
+            .cards
+            .iter_mut()
+            .find(|card| card.id == Step::Daemon.id())
+            .unwrap()
+            .status = Status::NeedsAttention;
+        pane.report = login_refresh.with_prior(&pane.report, CheckScope::Login);
+
+        assert_eq!(
+            flow.next_screen(Step::Login, &pane),
+            Screen::Step(Step::Daemon)
+        );
+        flow.enter(Screen::Done);
+        flow.reconcile(&pane);
+        assert_eq!(flow.screen, Screen::Step(Step::Daemon));
+
+        pane.skipped.insert(Step::Daemon.id().into());
+        assert_eq!(flow.next_screen(Step::Login, &pane), Screen::Done);
+    }
+
+    #[test]
+    fn a_new_cli_version_discards_previous_steps_outside_the_scope() {
+        let mut pane = ready();
+        let mut cli_refresh = pane.report.clone();
+        cli_refresh.cards.truncate(1);
+        cli_refresh.cards[0].detail = "Hack 5.1.0".into();
+        pane.report = cli_refresh.with_prior(&pane.report, CheckScope::Cli);
+        assert!(pane.report.cli_ready());
+        assert!(Step::Daemon.card(&pane.report).is_none());
+    }
+
+    #[test]
+    fn unknown_dns_evidence_does_not_offer_a_fix() {
+        let mut pane = ready();
+        let card = pane
+            .report
+            .cards
+            .iter_mut()
+            .find(|card| card.id == Step::Domains.id())
+            .unwrap();
+        card.status = Status::Unknown;
+        assert!(matches!(card.remedy, Remedy::Admin(_)));
+        assert!(Step::Domains.remedy_card(&pane.report).is_none());
     }
 
     #[test]

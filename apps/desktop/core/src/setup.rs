@@ -47,6 +47,35 @@ pub struct Card {
     pub detail: String,
     pub remedy: Remedy,
 }
+/// Read scope for an arrival check. The CLI and service evidence are
+/// refreshed whenever a step depends on them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CheckScope {
+    #[default]
+    Full,
+    Cli,
+    Daemon,
+    Docker,
+    Domains,
+    Https,
+    Login,
+}
+
+impl CheckScope {
+    pub fn includes(self, id: &str) -> bool {
+        self == Self::Full
+            || id == "cli"
+            || (id == "daemon" && self != Self::Cli)
+            || match self {
+                Self::Docker => id == "docker" || id.starts_with("native:"),
+                Self::Domains => id == "routing" || id.starts_with("dns:"),
+                Self::Https => id == "trust" || id.starts_with("trust:"),
+                Self::Login => id == "login",
+                _ => false,
+            }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Report {
     pub cards: Vec<Card>,
@@ -58,6 +87,26 @@ impl Report {
     pub fn needed(&self) -> bool {
         self.cards.is_empty() || self.cards.iter().any(|c| c.status != Status::Passed)
     }
+    /// Keep previous observations outside the new check's scope only while
+    /// the selected CLI, version and execution context still match.
+    pub fn with_prior(mut self, prior: &Self, scope: CheckScope) -> Self {
+        if scope != CheckScope::Full
+            && self.cli_ready()
+            && self.cards.first() == prior.cards.first()
+            && self.cli_program == prior.cli_program
+            && self.context == prior.context
+        {
+            self.cards.extend(
+                prior
+                    .cards
+                    .iter()
+                    .filter(|c| !scope.includes(&c.id))
+                    .cloned(),
+            );
+        }
+        self
+    }
+
     /// Bind authored argv to the executable and non-secret context actually checked.
     pub fn command(&self, args: Vec<String>) -> Result<crate::terminal::CommandSpec, String> {
         if !self.cli_ready() {

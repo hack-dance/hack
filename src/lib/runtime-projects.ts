@@ -750,7 +750,7 @@ export async function readContainerLabels(opts: {
 
 // Request only fields used by the runtime model; Docker must not return env values or command arguments.
 const RUNTIME_INSPECT_FORMAT =
-  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}},"Memory":{{json .HostConfig.Memory}},"Mounts":{{json .Mounts}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
+  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}},"Memory":{{json .HostConfig.Memory}},"Mounts":{{json .Mounts}},"Tmpfs":{{json .HostConfig.Tmpfs}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
 
 async function readContainerInspectData(opts: {
   readonly ids: readonly string[];
@@ -793,7 +793,7 @@ async function readContainerInspectData(opts: {
     const config = item.Config;
     const labels = parseInspectLabels(config);
     const image = parseInspectImage(config);
-    const mounts = parseInspectMounts(item.Mounts);
+    const mounts = parseInspectMounts(item.Mounts, item.Tmpfs);
     const networks = parseInspectNetworks(item.NetworkSettings);
 
     const detail: ContainerInspectData = {
@@ -907,24 +907,24 @@ function parseInspectMemoryLimit(value: unknown): number | null {
     : null;
 }
 
-function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-
+function parseInspectMounts(
+  raw: unknown,
+  tmpfs: unknown
+): RuntimeContainerMount[] {
   const mounts: RuntimeContainerMount[] = [];
-  for (const value of raw) {
+  for (const value of Array.isArray(raw) ? raw : []) {
     if (!isRecord(value)) {
       continue;
     }
     const source = getString(value, "Source") ?? "";
     const destination = getString(value, "Destination") ?? "";
-    if (!(source && destination)) {
+    const type = getString(value, "Type") ?? "";
+    if (!destination || (!source && type !== "tmpfs")) {
       continue;
     }
     const rwValue = value.RW;
     mounts.push({
-      type: getString(value, "Type") ?? "",
+      type,
       name: getString(value, "Name") ?? null,
       source,
       destination,
@@ -932,7 +932,23 @@ function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
       rw: typeof rwValue === "boolean" ? rwValue : null,
     });
   }
-  return mounts;
+  return [...mounts, ...inspectTmpfsOnlyMounts(tmpfs, mounts)];
+}
+
+// Compose's tmpfs shorthand can appear only in HostConfig.Tmpfs.
+function inspectTmpfsOnlyMounts(
+  tmpfs: unknown,
+  mounts: readonly RuntimeContainerMount[]
+): RuntimeContainerMount[] {
+  if (!isRecord(tmpfs)) {
+    return [];
+  }
+  const destinations = new Set(mounts.map((mount) => mount.destination));
+  return Object.entries(tmpfs).flatMap(([destination, mode]) =>
+    destination && typeof mode === "string" && !destinations.has(destination)
+      ? [{ type: "tmpfs", source: "", destination, mode, rw: null }]
+      : []
+  );
 }
 
 function parseInspectNetworks(raw: unknown): RuntimeContainerNetwork[] {

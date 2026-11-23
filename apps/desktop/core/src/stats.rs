@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::models::{Container, ProjectRow, ProjectRuntime, ProjectsPayload};
+use crate::models::{Container, ProjectRow, ProjectRuntime, ProjectsPayload, RuntimeService};
 use crate::viewmodel::InstanceKey;
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
@@ -120,6 +120,7 @@ pub struct StatsPoint {
     pub memory_limit: MemoryLimit,
     pub net_in_per_second: Option<f64>,
     pub net_out_per_second: Option<f64>,
+    pub network_per_second: Option<f64>,
     pub disk_per_second: Option<f64>,
     pub disk_written_bytes: Option<u64>,
 }
@@ -163,6 +164,17 @@ fn measurable(container: &Container) -> bool {
             .get("hack.lifecycle.process")
             .map(String::as_str)
             != Some("true")
+}
+
+fn replica_ids(service: &RuntimeService) -> Option<Vec<&str>> {
+    let mut ids: Vec<_> = service
+        .containers
+        .iter()
+        .filter(|container| measurable(container))
+        .map(|container| container.id.as_deref().map(docker_id))
+        .collect::<Option<_>>()?;
+    ids.sort_unstable();
+    Some(ids)
 }
 
 #[must_use]
@@ -236,16 +248,9 @@ impl StatsHistory {
             let Some(rows) = by_service.get(&(compose_project, service.service.as_str())) else {
                 continue;
             };
-            let expected_ids: Option<Vec<_>> = service
-                .containers
-                .iter()
-                .filter(|c| measurable(c))
-                .map(|c| c.id.as_deref().map(docker_id))
-                .collect();
-            let Some(mut expected_ids) = expected_ids else {
+            let Some(expected_ids) = replica_ids(service) else {
                 continue;
             };
-            expected_ids.sort_unstable();
             // The Compose name alone can be reused by a different checkout.
             // Reject partial reads and a set that changed since the listing.
             if !expected_ids.iter().copied().map(Some).eq(rows
@@ -289,13 +294,24 @@ impl StatsHistory {
             .filter(move |p| now.saturating_duration_since(p.at) < HISTORY_WINDOW)
     }
 
-    /// Whether the most recent attempt had a complete sample for this service.
+    /// The latest complete sample, while it still matches current replicas.
     #[must_use]
-    pub fn fresh(&self, key: &ServiceKey, now: Instant) -> bool {
-        self.services
-            .get(key)
-            .and_then(|series| series.last.as_ref())
-            .is_some_and(|sample| now.saturating_duration_since(sample.at) < SAMPLE_INTERVAL * 2)
+    pub fn current(
+        &self,
+        key: &ServiceKey,
+        runtime: &ProjectRuntime,
+        now: Instant,
+    ) -> Option<&StatsPoint> {
+        let series = self.services.get(key)?;
+        let sample = series.last.as_ref()?;
+        let service = runtime.services.iter().find(|s| s.service == key.service)?;
+        let expected = replica_ids(service)?;
+        series.points.back().filter(|_| {
+            now.saturating_duration_since(sample.at) < SAMPLE_INTERVAL * 2
+                && expected
+                    .into_iter()
+                    .eq(sample.containers.iter().map(|c| c.id.as_str()))
+        })
     }
 }
 
@@ -328,10 +344,10 @@ impl Series {
                 })
                 .collect(),
         };
-        let [net_in, net_out, disk_read, disk_written] = self
+        let rates = self
             .last
             .as_ref()
-            .map_or([None; 4], |last| counters.rates_since(last));
+            .map_or_else(IoRates::default, |last| counters.rates_since(last));
         self.last = Some(counters);
 
         let cpu_percent = rows
@@ -357,22 +373,57 @@ impl Series {
             cpu_percent,
             memory_bytes,
             memory_limit,
-            net_in_per_second: net_in,
-            net_out_per_second: net_out,
-            disk_per_second: disk_read.zip(disk_written).map(|(r, w)| r + w),
+            net_in_per_second: rates.net_in,
+            net_out_per_second: rates.net_out,
+            network_per_second: rates.network,
+            disk_per_second: rates.disk,
             disk_written_bytes: sum_bytes(rows.iter().map(|r| r.block_output_bytes)),
         });
     }
 }
 
+#[derive(Default)]
+struct IoRates {
+    net_in: Option<f64>,
+    net_out: Option<f64>,
+    network: Option<f64>,
+    disk: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+struct CounterDelta {
+    bytes: u64,
+    error: u64,
+}
+
+impl CounterDelta {
+    fn combined(self, other: Self) -> Option<Self> {
+        Some(Self {
+            bytes: self.bytes.checked_add(other.bytes)?,
+            error: self.error.checked_add(other.error)?,
+        })
+    }
+
+    fn rate(self, elapsed: Duration) -> Option<f64> {
+        // A bucket crossing at high cumulative totals can look like a
+        // large burst. Render a gap when rounding could account for
+        // at least a quarter of the apparent change.
+        if self.error > 0 && self.bytes <= self.error.saturating_mul(4) {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)] // display estimate
+        Some(self.bytes as f64 / elapsed.as_secs_f64())
+    }
+}
+
 impl CounterSample {
-    fn rates_since(&self, previous: &Self) -> [Option<f64>; 4] {
+    fn rates_since(&self, previous: &Self) -> IoRates {
         let elapsed = self.at.saturating_duration_since(previous.at);
         if elapsed.is_zero()
             || elapsed >= SAMPLE_INTERVAL * 2
             || self.containers.len() != previous.containers.len()
         {
-            return [None; 4];
+            return IoRates::default();
         }
         let pairs = self.containers.iter().zip(&previous.containers);
         if pairs.clone().any(|(now, before)| {
@@ -380,10 +431,10 @@ impl CounterSample {
                 || now.started_at.as_ref().is_none_or(String::is_empty)
                 || now.started_at != before.started_at
         }) {
-            return [None; 4];
+            return IoRates::default();
         }
-        std::array::from_fn(|i| {
-            let delta = sum_bytes(
+        let [net_in, net_out, disk_read, disk_write] = std::array::from_fn(|i| {
+            let bytes = sum_bytes(
                 pairs
                     .clone()
                     .map(|(now, before)| now.totals[i]?.checked_sub(before.totals[i]?)),
@@ -393,15 +444,17 @@ impl CounterSample {
                     .clone()
                     .map(|(now, before)| now.error[i]?.checked_add(before.error[i]?)),
             )?;
-            // A bucket crossing at high cumulative totals can look like a
-            // large burst. Render a gap when rounding could account for
-            // at least a quarter of the apparent change.
-            if error > 0 && delta <= error.saturating_mul(4) {
-                return None;
-            }
-            #[allow(clippy::cast_precision_loss)] // display estimate
-            Some(delta as f64 / elapsed.as_secs_f64())
-        })
+            Some(CounterDelta { bytes, error })
+        });
+        let both = |first: Option<CounterDelta>, second: Option<CounterDelta>| {
+            first?.combined(second?)?.rate(elapsed)
+        };
+        IoRates {
+            network: both(net_in, net_out),
+            disk: both(disk_read, disk_write),
+            net_in: net_in.and_then(|delta| delta.rate(elapsed)),
+            net_out: net_out.and_then(|delta| delta.rate(elapsed)),
+        }
     }
 }
 
@@ -566,7 +619,11 @@ mod tests {
         partial.containers.remove(1);
         let t = t + SAMPLE_INTERVAL;
         history.record(&projects(), &partial, t);
-        assert!(!history.fresh(&main, t));
+        assert!(
+            history
+                .current(&main, projects().projects[0].runtime.as_ref().unwrap(), t)
+                .is_none()
+        );
         assert_eq!(history.points(&main, t).count(), 3);
         let t = t + SAMPLE_INTERVAL;
         history.record(&projects(), &sample, t);
@@ -713,6 +770,42 @@ mod tests {
                 .insert("hack.lifecycle.process".into(), "true".into());
         }
         assert!(!has_running_services(&listing));
+    }
+
+    #[test]
+    fn a_replacement_replica_keeps_history_but_invalidates_current_metrics() {
+        let mut history = StatsHistory::default();
+        let now = Instant::now();
+        let mut listing = projects();
+        let main = key(InstanceKey::project("shop"));
+        history.record(&listing, &report(), now);
+        let t = now + Duration::from_secs(1);
+        let runtime = listing.projects[0].runtime.as_mut().unwrap();
+        assert!(history.current(&main, runtime, t).is_some());
+        runtime.services[0].containers[0].id = Some("333333333333".into());
+        assert!(history.current(&main, runtime, t).is_none());
+        assert_eq!(history.points(&main, t).count(), 1);
+    }
+
+    #[test]
+    fn combined_traffic_and_disk_rates_can_resolve_with_one_idle_rounded_counter() {
+        let mut history = StatsHistory::default();
+        let now = Instant::now();
+        let preview = key(InstanceKey::branch("shop", "preview"));
+        let mut sample = report();
+        sample.containers[2].net_output_bytes = Some(4200);
+        sample.containers[2].io_counter_error_bytes.net_output = Some(50);
+        sample.containers[2].io_counter_error_bytes.block_output = Some(50);
+        history.record(&projects(), &sample, now);
+        sample.containers[2].net_input_bytes = Some(1_000_500);
+        sample.containers[2].block_input_bytes = Some(1_000_500);
+        let t = now + SAMPLE_INTERVAL;
+        history.record(&projects(), &sample, t);
+        let point = history.points(&preview, t).next_back().unwrap();
+        assert_eq!(point.net_in_per_second, Some(200_000.0));
+        assert_eq!(point.net_out_per_second, None);
+        assert_eq!(point.network_per_second, Some(200_000.0));
+        assert_eq!(point.disk_per_second, Some(200_000.0));
     }
 
     #[test]

@@ -67,7 +67,7 @@ test("usage samples only running Docker containers and retains service/mount att
   };
   const index = __testOnlyUsage.buildContainerIndex({ projects: [project] });
   expect(index.containerIds).toEqual(["running"]);
-  const report = __testOnlyUsage.buildUsageReport({
+  const reportInput = {
     projects: [project],
     index,
     samples: [
@@ -84,6 +84,10 @@ test("usage samples only running Docker containers and retains service/mount att
         pids: 4,
       },
     ],
+  };
+  const report = __testOnlyUsage.buildUsageReport({
+    ...reportInput,
+    startsAfterSample: new Map([["running", "2026-01-01T00:00:00Z"]]),
   });
   expect(report.projects[0]?.containers).toBe(1);
   expect(report.containerDetails?.[0]).toMatchObject({
@@ -96,6 +100,11 @@ test("usage samples only running Docker containers and retains service/mount att
     startedAt: "2026-01-01T00:00:00Z",
     mounts: [{ type: "volume", destination: "/app/node_modules" }],
   });
+  const restarted = __testOnlyUsage.buildUsageReport({
+    ...reportInput,
+    startsAfterSample: new Map([["running", "2026-01-01T00:00:10Z"]]),
+  });
+  expect(restarted.containerDetails?.[0]?.startedAt).toBeNull();
 });
 
 test("Docker usage retains the precision of printed network and disk counters", () => {

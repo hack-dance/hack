@@ -119,13 +119,11 @@ impl HackApp {
                 .model
                 .snapshot()
                 .is_some_and(|s| !s.projects.engine_down());
-        let current = (readable
-            && service.running
-            && key
-                .as_ref()
-                .is_some_and(|key| self.stats.history.fresh(key, now)))
-        .then(|| points.last().copied())
-        .flatten();
+        let current = key
+            .as_ref()
+            .filter(|_| readable && service.running)
+            .zip(row.as_ref().and_then(|row| row.runtime.as_ref()))
+            .and_then(|(key, runtime)| self.stats.history.current(key, runtime, now));
         let status = if row.as_ref().is_some_and(ProjectRow::is_native) {
             "Usage is available for Compose services"
         } else if !readable {
@@ -227,9 +225,7 @@ fn cards(
         &network,
         &net_detail,
         bars(
-            bucket(points, now, |p| {
-                Some(p.net_in_per_second? + p.net_out_per_second?)
-            }),
+            bucket(points, now, |p| p.network_per_second),
             1.0,
             2.5,
             true,
@@ -472,6 +468,9 @@ fn service_info(
             .iter()
             .map(|m| {
                 let source = m.name.as_deref().unwrap_or(&m.source);
+                if m.kind == "tmpfs" && source.is_empty() {
+                    return format!("tmpfs → {}", m.destination);
+                }
                 let kind = match (
                     m.kind.as_str(),
                     project.and_then(|p| p.repo_root.as_deref()),
@@ -693,7 +692,6 @@ impl HackApp {
             },
             ContainerMount {
                 kind: "tmpfs".into(),
-                source: "tmp".into(),
                 destination: "/app/tmp".into(),
                 ..ContainerMount::default()
             },

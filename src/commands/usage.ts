@@ -22,6 +22,7 @@ import {
   readHostCommandRecords,
   readObservedProcesses,
 } from "../lib/host-command-observation.ts";
+import { parseJsonLines } from "../lib/json-lines.ts";
 import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import {
@@ -1022,6 +1023,10 @@ async function runUsageOnce(opts: {
     projects: filtered,
     samples: stats.samples,
     index,
+    startsAfterSample:
+      opts.args.options.json === true && opts.args.options.details === true
+        ? await readSampleStartTimes({ samples: stats.samples, index })
+        : undefined,
   });
 
   if (report.projects.length === 0 && hostReport.rows.length === 0) {
@@ -1253,10 +1258,56 @@ async function renderTotalUsagePanels(opts: {
   }
 }
 
+async function readSampleStartTimes(opts: {
+  readonly samples: readonly DockerStatsSample[];
+  readonly index: ContainerIndex;
+}): Promise<ReadonlyMap<string, string>> {
+  const ids = new Set<string>();
+  for (const sample of opts.samples) {
+    const container = sample.containerId
+      ? opts.index.containerById.get(sample.containerId)
+      : undefined;
+    if (container?.observation?.startedAt) {
+      ids.add(container.id);
+    }
+  }
+  const starts = new Map<string, string>();
+  if (ids.size === 0) {
+    return starts;
+  }
+  // Certify the container run around the sample, without asking for full
+  // inspect data again. Failure leaves the point usable without I/O rates.
+  const result = await exec(
+    [
+      "docker",
+      "inspect",
+      "--type",
+      "container",
+      "--format",
+      '{"id":{{json .Id}},"startedAt":{{json .State.StartedAt}}}',
+      ...ids,
+    ],
+    { stdin: "ignore", timeoutMs: 3000 }
+  ).catch(() => null);
+  if (result?.exitCode !== 0) {
+    return starts;
+  }
+  for (const row of parseJsonLines(result.stdout)) {
+    const id = getString(row, "id");
+    const startedAt = getString(row, "startedAt");
+    if (id && startedAt) {
+      starts.set(id, startedAt);
+      starts.set(id.slice(0, 12), startedAt);
+    }
+  }
+  return starts;
+}
+
 function buildUsageReport(opts: {
   readonly projects: readonly RuntimeProject[];
   readonly samples: readonly DockerStatsSample[];
   readonly index: ContainerIndex;
+  readonly startsAfterSample?: ReadonlyMap<string, string>;
 }): UsageReport {
   const projectSamples = new Map<string, DockerStatsSample[]>();
   for (const sample of opts.samples) {
@@ -1301,6 +1352,7 @@ function buildUsageReport(opts: {
     const container = sample.containerId
       ? opts.index.containerById.get(sample.containerId)
       : null;
+    const startedAt = container?.observation?.startedAt;
     return container
       ? [
           {
@@ -1311,7 +1363,11 @@ function buildUsageReport(opts: {
             mounts: container.mounts,
             configuredMemoryLimitBytes:
               container.configuredMemoryLimitBytes ?? null,
-            startedAt: container.observation?.startedAt ?? null,
+            startedAt:
+              startedAt &&
+              opts.startsAfterSample?.get(container.id) === startedAt
+                ? startedAt
+                : null,
           },
         ]
       : [];

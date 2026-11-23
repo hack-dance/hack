@@ -294,7 +294,11 @@ function makeInspectRow(opts: {
         "com.docker.compose.project.working_dir": "/tmp/alpha/.hack",
       },
     },
-    Mounts: [],
+    Mounts: [
+      { Type: "tmpfs", Source: "", Destination: "/app/tmp" },
+      { Type: "bind", Source: "", Destination: "/invalid" },
+    ],
+    Tmpfs: { "/app/tmp": "", "/app/cache": "size=1024" },
     NetworkSettings: {
       Networks: {
         "hack-dev": {
@@ -324,6 +328,19 @@ test("cached static metadata never becomes fresh service health or start evidenc
   const member = (result: typeof first) =>
     [...(result.runtime[0]?.services.values() ?? [])][0]?.containers[0];
   expect(member(first)?.observation?.health).toBe("healthy");
+  expect(member(first)?.mounts).toEqual([
+    expect.objectContaining({
+      type: "tmpfs",
+      source: "",
+      destination: "/app/tmp",
+    }),
+    expect.objectContaining({
+      type: "tmpfs",
+      source: "",
+      destination: "/app/cache",
+      mode: "size=1024",
+    }),
+  ]);
   expect(member(first)?.configuredMemoryLimitBytes).toBe(536_870_912);
   expect(member(first)?.observation?.exitCode).toBeNull();
   expect(member(cached)?.observation).toBeNull();

@@ -1,10 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
 import { resolveEffectiveBranch } from "../src/lib/branches.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+import {
+  mkdirOwnedFixture,
+  ownedFixtureCommand,
+} from "./helpers/owned-fixture.ts";
 
 const tempDirs = new Set<string>();
 
@@ -18,7 +21,7 @@ afterEach(async () => {
 async function runGit(args: readonly string[], cwd: string): Promise<string> {
   const proc = Bun.spawn({
     env: fixtureGitEnv(),
-    cmd: ["git", ...args],
+    cmd: ownedFixtureCommand(["git", ...args]),
     cwd,
     stdout: "pipe",
     stderr: "pipe",
@@ -42,7 +45,7 @@ async function createFixture(opts: { readonly branch: string }): Promise<{
   tempDirs.add(sandbox);
 
   const primaryRoot = resolve(sandbox, "primary");
-  await mkdir(primaryRoot, { recursive: true });
+  await mkdirOwnedFixture(primaryRoot, true);
   await writeFile(resolve(primaryRoot, "README.md"), "# fixture\n");
   await runGit(["init", "-b", "main"], primaryRoot);
   await runGit(["config", "user.name", "Hack Test"], primaryRoot);

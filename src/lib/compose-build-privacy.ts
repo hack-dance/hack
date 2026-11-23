@@ -62,6 +62,22 @@ async function mayExpose(files: readonly string[], base: string) {
   return false;
 }
 
+// Match the known prefix only. The remaining pattern can name a descendant,
+// so the warning does not need to open or enumerate the private directory.
+function exceptionReaches(member: string, rule: string): boolean {
+  const parts = path.posix.resolve("/", rule).slice(1).split("/");
+  for (const name of member.split("/")) {
+    const part = parts.shift();
+    if (!part || part.includes("**")) {
+      return true;
+    }
+    if (!createDockerignore({ ignorecase: false }).add(part).ignores(name)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function exposedComposeBuildPaths(
   build: Record<string, unknown>,
   base: string
@@ -81,21 +97,40 @@ async function exposedComposeBuildPaths(
     build.dockerfile_inline === undefined && (await Bun.file(specific).exists())
       ? specific
       : path.join(context, ".dockerignore");
-  const ignore = createDockerignore({ ignorecase: false }).add(
-    (await readTextFile(ignoreFile)) ?? ""
-  );
+  const rules = (await readTextFile(ignoreFile)) ?? "";
+  const ignore = createDockerignore({ ignorecase: false }).add(rules);
+  const exceptions = rules.split("\n").flatMap((line) => {
+    const rule = line.trim();
+    return rule.startsWith("!") && rule.length > 1
+      ? [rule.slice(1).trim()]
+      : [];
+  });
   const paths = (await readdir(hack))
     .filter((name) => privateNames.ignores(name))
     .map((name) => path.relative(context, path.join(hack, name)));
-  const key = path.join(path.dirname(hack), policy.envKey);
-  if (inside(path.relative(context, key)) && (await Bun.file(key).exists())) {
-    paths.push(path.relative(context, key));
+  const checkout = path.dirname(hack);
+  if (inside(path.relative(context, checkout))) {
+    for (const name of [policy.envKey, policy.privateStagingDir]) {
+      const entry = path.join(checkout, name);
+      if (await stat(entry).catch(() => null)) {
+        paths.push(path.relative(context, entry));
+      }
+    }
   }
+  const reIncluded = paths.filter((member) =>
+    exceptions.some((rule) => exceptionReaches(member, rule))
+  );
   const lines = paths
-    .filter((member) => IGNORE_LITERAL.test(member) && !ignore.ignores(member))
+    .filter(
+      (member) =>
+        IGNORE_LITERAL.test(member) &&
+        (!ignore.ignores(member) || reIncluded.includes(member))
+    )
     .sort()
     .map((path) => `/${path}`);
-  return lines.length ? { ignoreFile, lines } : null;
+  return lines.length
+    ? { ignoreFile, lines, hasExceptions: reIncluded.length > 0 }
+    : null;
 }
 
 type BuildScope = { readonly argv: readonly string[] } & Pick<
@@ -120,8 +155,9 @@ async function buildFindings(opts: BuildScope, base: string) {
     config.exitCode === 0 &&
       JSON.parse(Buffer.from(config.stdout, "latin1").toString())
   );
-  const findings: { service: string; ignoreFile: string; lines: string[] }[] =
-    [];
+  const findings: (NonNullable<
+    Awaited<ReturnType<typeof exposedComposeBuildPaths>>
+  > & { service: string })[] = [];
   for (const [service, value] of entries) {
     if (
       isRecord(value) &&
@@ -148,8 +184,12 @@ export async function warnComposeBuildPrivacy(opts: BuildScope): Promise<void> {
   }
   const json = warningFormat === "json";
   warningFormat = undefined;
+  const exceptions = findings.some(({ hasExceptions }) => hasExceptions)
+    ? " A ! exception can re-include a private path. Remove or narrow it, or add the suggested lines after it."
+    : "";
   const message =
-    "Compose can send Hack's machine-local files to the builder. Add these lines to the effective Docker ignore files.";
+    "Compose can send Hack's machine-local files to the builder. Add these lines to the effective Docker ignore files." +
+    exceptions;
   process.stderr.write(
     json
       ? `${JSON.stringify({ level: "warning", code: "compose_build_private_files", message, findings })}\n`

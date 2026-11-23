@@ -244,7 +244,9 @@ test("up delivers values through the Compose process env and keeps only referenc
     "services: {web: {build: ..}, worker: {image: alpine}}\n"
   );
   await Bun.write(join(projectRoot, ".dockerignore"), "**\n");
-  await Bun.write(specific, "");
+  const ignoreRules = "/.hack/.internal\n!.hack/.internal/x\n";
+  await Bun.write(specific, ignoreRules);
+  await mkdir(join(projectRoot, ".hack-staging"));
   await Bun.write(
     join(capture, "build-config.json"),
     JSON.stringify({ services: { web: { build: { context: projectRoot } } } })
@@ -256,12 +258,15 @@ test("up delivers values through the Compose process env and keeps only referenc
     .split("\n")
     .filter((line) => line.includes("compose_build_private_files"));
   expect(warnings).toHaveLength(1);
-  expect(JSON.parse(warnings[0] ?? "").findings[0]).toEqual({
+  const warning = JSON.parse(warnings[0] ?? "");
+  expect(warning.message).toContain("A ! exception");
+  expect(warning.findings[0]).toEqual({
     service: "web",
     ignoreFile: specific,
-    lines: ["/.hack.secret.key", "/.hack/.internal"],
+    lines: ["/.hack-staging", "/.hack.secret.key", "/.hack/.internal"],
+    hasExceptions: true,
   });
-  expect(await Bun.file(specific).text()).toBe("");
+  expect(await Bun.file(specific).text()).toBe(ignoreRules);
 
   const atUp = await readFile(join(capture, "override-at-up.yml"), "utf8");
   expect(atUp).not.toContain(CANARY);

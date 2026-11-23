@@ -196,13 +196,24 @@ mod tests {
     #[test]
     fn status_reports_a_failure_after_started_without_the_lease() {
         let (_fixture, candidate, mut receipt, root) = fixture();
+        let read = Read {
+            receipt: &receipt,
+            during: &|| {},
+        };
+        let json =
+            serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
+        assert!(json.get("failed_after_started").is_none());
         receipt.set_phase("stopped-data-retained");
-        receipt.failed_after_started = Some(startup_failure::AfterStarted {
-            code: "graph_timeout".into(),
-            service: Some("web".into()),
-            at: 1,
-        });
         state::write(&root.join("state.json"), &receipt).unwrap();
+        state::write(
+            &root.join(startup_failure::AFTER_STARTED),
+            &startup_failure::AfterStarted {
+                code: "graph_timeout".into(),
+                service: Some("web".into()),
+                at: 1,
+            },
+        )
+        .unwrap();
         let _held = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
         let read = Read {
             receipt: &receipt,
@@ -211,8 +222,36 @@ mod tests {
         let json =
             serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
         assert_eq!(
-            json["receipt"]["failed_after_started"],
+            json["failed_after_started"],
             json!({"code":"graph_timeout","service":"web","at":1})
+        );
+        assert!(json["receipt"].get("failed_after_started").is_none());
+        // Invalid content is not reported and never fails the read.
+        fs::write(root.join(startup_failure::AFTER_STARTED), b"{").unwrap();
+        let json =
+            serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
+        assert!(json.get("failed_after_started").is_none());
+        // A record written during the observation is fenced like the journal.
+        let read = Read {
+            receipt: &receipt,
+            during: &|| {
+                state::write(
+                    &root.join(startup_failure::AFTER_STARTED),
+                    &startup_failure::AfterStarted {
+                        code: "graph_timeout".into(),
+                        service: None,
+                        at: 2,
+                    },
+                )
+                .unwrap();
+            },
+        };
+        assert_eq!(
+            inspect_with(&candidate, &receipt.run, &read)
+                .err()
+                .unwrap()
+                .code,
+            "graph_status_changed"
         );
     }
 

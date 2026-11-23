@@ -441,7 +441,6 @@ import {
   createNativeEnvFingerprintEntry,
   createNativeEnvFingerprintSession,
 } from "../lib/native-env-fingerprint-state.ts";
-import { waitForNativeOpenTarget } from "../lib/native-start-wait.ts";
 import { refuseUnsupportedNativeUpOptions } from "../lib/native-up-refusals.ts";
 import { nativeUpWaitsForReady } from "../lib/native-up-wait.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
@@ -7753,22 +7752,6 @@ async function handleUpUnlocked({
           process.stderr.write(`${notice}\n`);
         }
       },
-      // `up --wait` on a warming run waits for it, as a fresh `up --wait` does.
-      ...(nativeUpWaitsForReady({
-        wait: args.options.wait,
-        json: args.options.json,
-        interactive: canPrompt(),
-      })
-        ? {
-            wait: {
-              budgetMs:
-                resolveNativeStartTimeoutSeconds({
-                  env: process.env,
-                  project: undefined,
-                }) * 1000,
-            },
-          }
-        : {}),
     });
     if (alreadyRunning !== null) {
       return alreadyRunning;
@@ -13374,45 +13357,6 @@ async function handleOpen({
     grafanaHost,
     httpsPort: nativeOpen.httpsPort,
   });
-  const native = nativeOpen.native ? resolveNativeRuntimeSelection() : null;
-  if (native) {
-    // `up` may have returned at started: wait for this route's service, so
-    // `hack up && hack open` keeps working (bounded by the start budget).
-    await waitForNativeOpenTarget({
-      target: targetRaw,
-      ps: () =>
-        nativeProjectPs({
-          runtime: native,
-          scope: {
-            projectRoot: project.projectRoot,
-            projectDir: project.projectDir,
-            nativeHome: native.home,
-            branch,
-          },
-          includeReadiness: true,
-        }),
-      budgetMs:
-        resolveNativeStartTimeoutSeconds({
-          env: process.env,
-          project: cfg.native?.startTimeoutSeconds,
-        }) * 1000,
-      // One request to the route itself: any HTTP answer below 500 counts. The
-      // native CA is not checked here; the browser does its own TLS check.
-      probe: async () => {
-        const response = await fetch(url, {
-          redirect: "manual",
-          signal: AbortSignal.timeout(3000),
-          tls: { rejectUnauthorized: false },
-        });
-        return response.status < 500;
-      },
-      onWaiting: (line) => {
-        if (!json) {
-          process.stderr.write(`${line}\n`);
-        }
-      },
-    });
-  }
 
   return await emitOpenOrigin({
     url,

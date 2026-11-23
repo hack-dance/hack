@@ -642,6 +642,10 @@ fn serve_input<'a>(
                 lifecycle.cleanup_attempted = true;
                 match publishers.cleanup(candidate, &mut runtime, remove_data) {
                     Ok(cleaned) => {
+                        // Explicit, unlike this owner's own cleanup after a failure.
+                        if let Ok(root) = super::directory(candidate, &cleaned.run) {
+                            super::explicit_cleanup_done(&root);
+                        }
                         publishers.reap_after_cleanup(
                             &signals,
                             Instant::now() + Duration::from_secs(5),

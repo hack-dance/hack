@@ -1675,7 +1675,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-startup-owner",
     module: "Owner",
-    states: 852,
+    states: 1720,
     invariant: "NoUnownedResources",
     action: "ExitUnconfirmed",
     fields: [
@@ -1686,7 +1686,7 @@ const contracts: readonly ModelContract[] = [
     ],
     additionalControls: [
       // --wait: the mapping is still saved at started; the release is at ready.
-      { name: "wait", negative: false, states: 410 },
+      { name: "wait", negative: false, states: 806 },
       {
         // The launcher is released at started before stop.owe committed.
         name: "detached-before-bookkeeping",
@@ -1743,7 +1743,8 @@ const contracts: readonly ModelContract[] = [
         fields: ['launcher = "notified"', 'mapping = "none"', "readied = TRUE"],
       },
       {
-        // The stop lands half-way through a publication and misses its route.
+        // The owner accepts a stop half-way through a publication, so the stop
+        // misses its staged route.
         name: "stop-mid-publication",
         negative: true,
         invariant: "NoHalfPublicationAfterStop",
@@ -1780,6 +1781,21 @@ const contracts: readonly ModelContract[] = [
           'down = "done"',
           'acceptAt = "none"',
           'wait = "waiting"',
+        ],
+      },
+      {
+        // The owner stops the run before the frontend's own controller is
+        // aborted: the frontend still waits on a stopped owner.
+        name: "stop-before-frontend-cancel",
+        negative: true,
+        invariant: "StoppedFrontendCancelled",
+        action: "DownStop",
+        fields: [
+          'phase = "stopped"',
+          'down = "done"',
+          'acceptAt = "started"',
+          'wait = "cancelled"',
+          'frontend = "live"',
         ],
       },
       {

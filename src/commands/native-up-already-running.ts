@@ -18,10 +18,7 @@ import { getString, isRecord } from "../lib/guards.ts";
 import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { quoteShellWord } from "../lib/logs.ts";
 import { readNativeComposeDocument } from "../lib/native-compose-backend-features.ts";
-import {
-  waitForNativeProjectReady,
-  warmingItem,
-} from "../lib/native-start-wait.ts";
+import { warmingItem } from "../lib/native-start-wait.ts";
 import {
   canPrintStartSelection,
   scopedHackCommand,
@@ -273,37 +270,6 @@ export async function explainUnconfirmedNativeDetachedStart(opts: {
 }
 
 /** Read-only admission adapter; resolving the CLI's project and branch stays injected. */
-type RunningState = Extract<NativeAlreadyRunning, { kind: "running" }>;
-
-/**
- * `up --wait` on a warming run: wait for this run's graph to be ready, bounded by
- * the start budget, then classify it again; otherwise the state as observed.
- */
-async function settleForWait(opts: {
-  readonly state: RunningState;
-  readonly wait: { readonly budgetMs: number } | undefined;
-  readonly json: boolean;
-  readonly ps: () => Promise<NativeProjectPsResult>;
-  readonly restartCommand: string;
-}): Promise<RunningState> {
-  if (!(opts.wait && opts.state.readiness === "warming")) {
-    return opts.state;
-  }
-  await waitForNativeProjectReady({
-    ps: opts.ps,
-    budgetMs: opts.wait.budgetMs,
-    onWaiting: (line) => {
-      if (!opts.json) {
-        process.stderr.write(`${line}\n`);
-      }
-    },
-  });
-  const settled = classifyNativeAlreadyRunning(await opts.ps());
-  if (settled.kind === "partial") {
-    throw nativePartiallyRunningRefusal(settled.down, opts.restartCommand);
-  }
-  return settled.kind === "running" ? settled : opts.state;
-}
 
 /** The last start failed after `up` returned: say so before starting again. */
 function noteFailureAfterStarted(
@@ -335,11 +301,6 @@ export async function answerNativeAlreadyRunning(opts: {
     saved: NativeProjectRun,
     project: ProjectContext
   ) => Promise<void>;
-  /**
-   * `up --wait`: a warming run is waited on (its graph reaching ready, bounded by
-   * the start budget) before it is reported, as a fresh `up --wait` would be.
-   */
-  readonly wait?: { readonly budgetMs: number };
 }): Promise<number | null> {
   const startedAtMs = Date.now();
   let observed: {
@@ -431,18 +392,7 @@ export async function answerNativeAlreadyRunning(opts: {
   }
   if (observed.state.kind === "running") {
     await opts.notifyRunning?.(observed.saved, observed.project);
-    const state = await settleForWait({
-      state: observed.state,
-      wait: opts.wait,
-      json: opts.json,
-      ps: () =>
-        nativeProjectPs({
-          runtime: opts.native,
-          scope: observed.scope,
-          includeReadiness: true,
-        }),
-      restartCommand,
-    });
+    const state = observed.state;
     reportNativeAlreadyRunning({
       json: opts.json,
       project: observed.projectName,

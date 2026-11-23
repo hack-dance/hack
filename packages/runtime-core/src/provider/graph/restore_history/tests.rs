@@ -3,7 +3,6 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 fn receipt(index: usize) -> Receipt {
     Receipt {
         started_from: None,
-        failed_after_started: None,
         normalized_input: None,
         relay_startup: None,
         relay_cleanup: None,

@@ -5,9 +5,9 @@ import { HackCliError } from "./cli-result.ts";
 /**
  * Waits for a native run that `hack up` returned at started (every container
  * started, the owner still waiting for every goal). Commands that need the
- * whole project ready (`exec`, one-off `run`) wait for the run; `hack open`
- * waits for its own service. Each prints one line once, ends at the start
- * budget, and gives up with the run's state named. Ctrl-C ends the wait.
+ * whole project ready (`exec`, one-off `run`) wait for the run. The wait prints
+ * one line once, ends at the start budget, and gives up with the run's state
+ * named. Ctrl-C ends the wait.
  */
 
 type PsItem = NativeProjectPsResult["items"][number];
@@ -53,6 +53,10 @@ async function poll<T>(
     const result = await opts.ps();
     const outcome = step(result);
     if (outcome !== "wait") {
+      // One deadline: an outcome observed after it is a timeout, not success.
+      if (said && now() > deadline) {
+        throw timedOut(result);
+      }
       return outcome;
     }
     if (now() >= deadline) {
@@ -76,6 +80,8 @@ export async function waitForNativeProjectReady(
   opts: WaitOptions
 ): Promise<void> {
   let warmed = false;
+  // The run first seen warming; another run in the window is never its success.
+  let pinned: string | null | undefined;
   await poll(
     {
       ...opts,
@@ -93,7 +99,15 @@ export async function waitForNativeProjectReady(
       },
     },
     (result) => {
+      if (warmed && result.run !== pinned) {
+        throw new HackCliError({
+          code: "E_STARTUP_INCOMPLETE",
+          message:
+            "Native project run changed while waiting for it to become ready; nothing was run. See hack ps.",
+        });
+      }
       if (result.readiness === "warming") {
+        pinned ??= result.run;
         warmed = true;
         return "wait";
       }
@@ -117,118 +131,4 @@ export async function waitForNativeProjectReady(
       });
     }
   );
-}
-
-/** Refuses for a run that `open` cannot wait on any more. */
-function openRefused(message: string): HackCliError {
-  return new HackCliError({
-    code: "E_STARTUP_INCOMPLETE",
-    message: `Native open refused: ${message} Nothing was opened.`,
-  });
-}
-
-type OpenSeen = {
-  what: string;
-  selected: string | null | undefined;
-  /** The run was warming when first observed: only then does `open` wait. */
-  warming: boolean;
-};
-
-/** One observation for `open`: refuse, wait, or go on (`undefined`). */
-function openStep(
-  result: NativeProjectPsResult,
-  target: string,
-  seen: OpenSeen
-): undefined | "wait" {
-  if (seen.selected === undefined) {
-    seen.selected = result.run;
-    seen.warming = result.readiness === "warming";
-    if (!seen.warming) {
-      // Not warming (ready, stopped or not native-started): open as before.
-      return undefined;
-    }
-  } else if (result.run !== seen.selected) {
-    throw openRefused(`the run ${seen.what} belonged to was replaced.`);
-  }
-  if (result.readiness === undefined) {
-    throw openRefused(
-      `the project is not running (phase ${result.phase ?? "none"}).`
-    );
-  }
-  const item = result.items.find((entry) => entry.service === target);
-  if (!item) {
-    seen.what = "the project";
-    return result.readiness === "ready" ? undefined : "wait";
-  }
-  seen.what = item.service;
-  if (
-    item.state === "exited" ||
-    item.state === "dead" ||
-    item.health === "unhealthy"
-  ) {
-    throw openRefused(
-      `${item.service} is ${psServiceState(item)}. See why with hack logs ${item.service}.`
-    );
-  }
-  if (warmingItem(item)) {
-    return "wait";
-  }
-  const published =
-    result.readiness === "ready" ||
-    (result.ports ?? []).some(
-      (port) => port.service === item.service && port.state === "observed"
-    );
-  return published ? undefined : "wait";
-}
-
-/**
- * `hack open` on a run that may still be warming. It waits for the selected run
- * (the one it first observed) until the target service's own goal is met and its
- * port publication is verified, or, for a target that names no service, until the
- * run is ready; then until `probe` (one request to the route) answers. It refuses
- * at once when the target exited, died or became unhealthy, when the run was
- * replaced, or when the run ended. Bounded by the start budget; nothing is opened
- * on a refusal or timeout.
- */
-export async function waitForNativeOpenTarget(
-  opts: WaitOptions & {
-    readonly target: string;
-    /** One route request; true when it answered. */
-    readonly probe?: () => Promise<boolean>;
-  }
-): Promise<void> {
-  const seen: OpenSeen = {
-    what: opts.target,
-    selected: undefined,
-    warming: false,
-  };
-  await poll(
-    opts,
-    (result) => openStep(result, opts.target, seen),
-    `waiting for ${opts.target} to answer…`,
-    (result) => {
-      const item = result.items.find((entry) => entry.service === opts.target);
-      const state = item ? ` (${psServiceState(item)})` : "";
-      return new HackCliError({
-        code: "E_STARTUP_INCOMPLETE",
-        message: `Native open stopped waiting: ${seen.what} is not ready after ${Math.round(opts.budgetMs / 1000)} s${state}. Nothing was opened. See why with hack logs ${item ? item.service : "SERVICE"}.`,
-      });
-    }
-  );
-  if (!(opts.probe && seen.warming)) {
-    return;
-  }
-  // The route itself must answer before anything is opened.
-  const now = opts.now ?? (() => performance.now());
-  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms));
-  const deadline = now() + opts.budgetMs;
-  while (!(await opts.probe().catch(() => false))) {
-    if (now() >= deadline) {
-      throw new HackCliError({
-        code: "E_STARTUP_INCOMPLETE",
-        message: `Native open stopped waiting: the route for ${seen.what} did not answer within ${Math.round(opts.budgetMs / 1000)} s. Nothing was opened.`,
-      });
-    }
-    await sleep(1000);
-  }
 }

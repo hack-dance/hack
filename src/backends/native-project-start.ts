@@ -3651,6 +3651,18 @@ async function startNativeProjectAttempt(
                 }
               },
             });
+            // A failure after a started return ends the foreground as a start
+            // failure does: its log tails and a nonzero exit, not a quiet stop.
+            if (
+              returnAtStarted &&
+              !controller.signal.aborted &&
+              (code !== 0 || nativeExitCode !== undefined)
+            ) {
+              serveFailure = new NativeRuntimeRequestError({
+                message: `Native graph startup failed (${nativeExitCode ?? "graph_failed_after_started"}); inspect owned state before retrying.`,
+                nativeCode: nativeExitCode,
+              });
+            }
           } catch (error) {
             serveFailure = error;
           } finally {

@@ -871,8 +871,8 @@ engine scheduling delays.
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground
 Compose startup fails (HACK-1917) and when native `hack up` returns. The positive
-control explores 852 states; `wait` (`WaitForReady = TRUE`, `hack up --wait`)
-explores 410. The graph reaches `started` (every container started, goals possibly
+control explores 1720 states; `wait` (`WaitForReady = TRUE`, `hack up --wait`)
+explores 806. The graph reaches `started` (every container started, goals possibly
 unmet) before `ready`. In both modes the run mapping is published at started,
 after the authoritative inspection; only the return moves to ready under `--wait`. A failure before
 that lets the graph owner's retaining cleanup either complete or be refused; the
@@ -907,20 +907,25 @@ map that boundary to `stop.owe` before the launcher release. The synthetic
 `native-detached-up.test.ts` process fixtures cover post-launcher control,
 pre-acceptance launcher death, timeout and child failure. They do not execute
 real hooks or a VM.
-A `down` between started and ready only queues a stop (`DownRequest`); the
-owner accepts it at its next cancellation check, between passes of its start
-loop (`AcceptStop`), which aborts its wait. The frontend's `PublishMapping`,
-`Bookkeep` and `Notify` may run between the two. `DownCancelsWait` requires no
-owner left waiting and no `Ready` after acceptance, `StoppedOwnerNotWaiting`
-requires every stop to go through acceptance, and `DownHooksOnce` requires
-`down.before` to run once for committed debt. The `down-leaves-owner-waiting`
-control drops the cancel at `AcceptStop`; `stop-without-accept` lets a queued
-stop take effect without the owner's check. One service's publication under the lease is a
-two-step commit (`BeginPublish`, then `CommitPublish` or `WithdrawPublish`), and
-`DownStop` waits for it to settle: `NoHalfPublicationAfterStop` requires that after
-a stop no service is published but unrecorded or recorded but unpublished. The
-`stop-mid-publication` control lets the stop land half-way and violates it with a
-staged, unrecorded route. These are safety invariants,
+A `down` between started and ready only queues a stop (`DownRequest`), even
+during a publication; the owner accepts it at its next cancellation check,
+between passes of its start loop (`AcceptStop`), which aborts its wait. The
+frontend cancels separately (`FrontendCancel`, its own `controller.abort()` when
+the stop reaches it or the user interrupts), and only that ends its
+`PublishMapping`, `Bookkeep` and `Notify`. `DownStop` needs both.
+`DownCancelsWait` requires no owner left waiting and no `Ready` after acceptance,
+`StoppedOwnerNotWaiting` requires every stop to go through acceptance,
+`StoppedFrontendCancelled` requires no live frontend after a stop, and
+`DownHooksOnce` requires `down.before` to run once for committed debt. The
+`down-leaves-owner-waiting` control drops the cancel at `AcceptStop`;
+`stop-without-accept` lets a queued stop take effect without the owner's check;
+`stop-before-frontend-cancel` lets the stop finish while the frontend is still
+live and violates `StoppedFrontendCancelled`. One service's publication under the
+lease is a two-step commit (`BeginPublish`, then `CommitPublish` or
+`WithdrawPublish`), and `AcceptStop` waits for it to settle:
+`NoHalfPublicationAfterStop` requires that after a stop no service is published
+but unrecorded or recorded but unpublished. The `stop-mid-publication` control
+lets the owner accept half-way and violates it with a staged, unrecorded route. These are safety invariants,
 not liveness: the runner checks invariants only, and the property is the state
 right after acceptance. See `native-startup-owner/COVERAGE.md` for the source
 mapping (`onStarted`, `onReady`, the detached handshake and `down`) and the

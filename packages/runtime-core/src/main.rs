@@ -28,6 +28,7 @@ Usage:
   hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph inspect|status|observe|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
+  hack-local graph clear-failure-after-started --run-id <32-hex> [--json]
   hack-local service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]
       (exit 0 after idle, stop or SIGTERM/SIGINT/SIGHUP; 2 on an error; 3 after a drain that ran out of time)
   hack-local service status|stop

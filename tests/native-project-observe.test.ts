@@ -263,7 +263,7 @@ test("ps reports a failure after started from the receipt, value-free, and drops
   ] as const) {
     const stopped = snapshot(false);
     stopped.receipt.phase = "stopped-data-retained";
-    Object.assign(stopped.receipt, { failed_after_started: record });
+    Object.assign(stopped, { failed_after_started: record });
     const result = await nativeProjectPs({
       ...opts,
       invoke: async () => stopped,

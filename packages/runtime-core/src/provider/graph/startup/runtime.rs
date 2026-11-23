@@ -883,6 +883,8 @@ impl HostRelayRuntime {
         if let Some(startup) = &receipt.relay_startup {
             for (name, service) in &startup.services {
                 if service.phase == Phase::Completed {
+                    // Answer requests between whole inspections, never inside one.
+                    startup_cancelled(self.startup_cancelled, self.startup_requests.as_ref())?;
                     let resource = receipt
                         .resources
                         .get(&format!("container:{name}"))
@@ -914,6 +916,7 @@ impl HostRelayRuntime {
         let requests = cancelled.and(self.startup_requests.as_ref());
         for ((name, _), child) in &mut self.children {
             if child.poll_exit()?.is_some() {
+                startup_cancelled(cancelled, requests)?;
                 let resource = receipt
                     .resources
                     .get(&format!("container:{name}"))
@@ -970,10 +973,11 @@ fn report_all_started(
 /// Requests the foreground owner answers while its start loop runs: the loop calls
 /// [`StartupRequests::serve`] wherever it checks cancellation, between engine
 /// operations and never inside one. Final verification serves them too, between its
-/// listener-exit polls (25 ms) and between deferred-publication settlement rounds
-/// (100 ms). A request waits for at most one in-flight step: one engine request (the
+/// per-service inspections, between its listener-exit polls (25 ms), and between
+/// deferred publications, one whole service at a time, in settlement rounds
+/// (100 ms apart). A request waits for at most one in-flight step: one engine request (the
 /// engine transport's 40 s timeout, after a 3 s connect), or one service's
-/// publication (inside its `ServiceReady` record, or one settlement round), bounded
+/// publication (inside its `ServiceReady` record or in settlement), bounded
 /// by the start's own deadline. A stop never interrupts a publication: it takes
 /// effect after the publication commits or is withdrawn.
 pub(in crate::provider::graph) trait StartupRequests {
@@ -1077,7 +1081,7 @@ impl Driver for HostRelayRuntime {
         )?;
         #[cfg(target_os = "macos")]
         if let Some(publications) = &mut self.early_publications {
-            // Answer requests between settlement rounds, after each round's publications.
+            // Answer requests before each deferred service's publication.
             let (check, requests) = (self.startup_cancelled, self.startup_requests.as_ref());
             publications.settle(engine, receipt, || startup_cancelled(check, requests))?;
         }

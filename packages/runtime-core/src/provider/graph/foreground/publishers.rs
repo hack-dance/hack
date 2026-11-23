@@ -205,8 +205,8 @@ impl EarlyPublications {
         stop: impl Fn() -> Result<(), CandidateError>,
     ) -> Result<(), CandidateError> {
         while !self.deferred.is_empty() {
-            stop()?;
             for (service, id) in std::mem::take(&mut self.deferred) {
+                stop()?;
                 self.publish(engine, receipt, &service, &id)?;
             }
             if !self.deferred.is_empty() {

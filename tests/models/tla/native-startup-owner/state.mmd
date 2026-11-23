@@ -15,9 +15,9 @@ stateDiagram-v2
   warming --> failed : Fail (PR C)
   starting --> failed : Fail
   ready --> failed : Fail (PR C)
-  warming --> stopped : AcceptStop, DownStop
-  ready --> stopped : AcceptStop, DownStop
-  starting --> stopped : AcceptStop, DownStop
+  warming --> stopped : accept + cancel, DownStop
+  ready --> stopped : accept + cancel, DownStop
+  starting --> stopped : accept + cancel, DownStop
   stopped --> serving : restart: a new run
   state "failed (PR C)" as failed
   failed --> [*] : retained or recorded
@@ -29,16 +29,19 @@ stateDiagram-v2
     INV NoPrematureReturn
   end note
   note right of stopped
-    DownRequest queues the stop;
-    started-chain steps may still
-    run. AcceptStop, between passes,
-    cancels the wait. DownStop waits
-    for the service to commit or
-    withdraw.
+    DownRequest queues the stop,
+    even mid-publication. Owner:
+    AcceptStop, between passes and
+    never mid-publication, cancels
+    the wait. Frontend: its own
+    FrontendCancel (abort) ends the
+    started chain. DownStop needs
+    both, in either order.
     INV DownCancelsWait: no Ready
     INV DownHooksOnce: hooks once
     INV NoHalfPublicationAfterStop
     INV StoppedOwnerNotWaiting
+    INV StoppedFrontendCancelled
   end note
   note left of starting
     --wait: mapping saved here too;

@@ -682,12 +682,12 @@ same lines, exit codes and timeout text.
   2 routes warming`. With `--json`, the result has `readiness: "warming"` (or
   `"ready"`) and `services.warming`.
 - **`up.after` runs at started,** as with Compose `up -d`. A hook that calls one of
-  the project's URLs needs `hack up --wait`, or `hack open`, which waits.
+  the project's URLs needs `hack up --wait`.
 - **While warming:**
   - `hack ps` shows a service still waiting on its health check as `warming`;
     `ps --json` has `readiness: "warming"`;
-  - `hack open` waits for its service, at most the start budget, and opens nothing
-    if the budget runs out;
+  - `hack open` opens the route at once, as before; it may not answer until the
+    run is ready;
   - `hack exec` and one-off `hack run` wait for the whole project to be ready
     (one line on stderr), then run, so `hack up -d && hack exec api ...` keeps
     working;

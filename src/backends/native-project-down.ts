@@ -14,6 +14,8 @@ import {
   captureNativeProjectFinalization,
   inspectNativeProjectFinalizationLifetime,
   type NativeProjectFinalizationToken,
+  nativeFinalizationLeaseAdded,
+  orphanNativeProjectLifetime,
   recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
@@ -699,7 +701,12 @@ async function downRun(opts: {
     waitMs: opts.startupWaitMs,
     untilPublished: true,
   });
-  return await loadNativeProjectRun(opts.scope);
+  // A start that crashed after registering its lifetime and before publishing
+  // its mapping is still found, from the lifetime record (same run identity).
+  return (
+    (await loadNativeProjectRun(opts.scope)) ??
+    (await orphanNativeProjectLifetime(opts.scope))
+  );
 }
 
 async function nativeProjectDownOnce(opts: {
@@ -775,7 +782,28 @@ async function nativeProjectDownOnce(opts: {
     invoke,
   });
   verify(initial, run, false);
-  const finalization = opts.deferFinalization
+  // A failure after started is kept beside the receipt until `down` clears it
+  // (the restart coordinator's down leaves it to the next start).
+  const failureRecorded =
+    isRecord(initial) && initial.failed_after_started !== undefined;
+  const clearFailure = async () => {
+    if (failureRecorded && !opts.deferFinalization) {
+      await invoke({
+        runtime: opts.runtime,
+        cwd: opts.scope.projectRoot,
+        args: [
+          "graph",
+          "clear-failure-after-started",
+          "--run-id",
+          run.run,
+          "--json",
+        ],
+      });
+    }
+  };
+  // A start that returned at started may still add its HTTPS lease to this
+  // same lifetime (version 2 to 3, same attempt) before the stop; see below.
+  let finalization = opts.deferFinalization
     ? undefined
     : await captureFinalization({ scope: opts.scope, run });
   const frontendGone =
@@ -807,23 +835,22 @@ async function nativeProjectDownOnce(opts: {
     verify(initial, run, false);
   }
   const wait = async () => {
-    if (finalization === undefined) {
+    // The lifetime as last captured (it may have gained its HTTPS lease).
+    const token = finalization;
+    if (token === undefined) {
       return;
     }
     try {
       await waitNativeProjectFinalization({
         scope: opts.scope,
         run,
-        token: finalization,
+        token,
         timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
       });
     } catch {
       // The wait just saw the frontend gone without completion; one unreadable
       // `ps` row under load must not turn that into "still running" (HACK-2372).
-      if (
-        finalization.version === 1 ||
-        !(await nativeFrontendGoneSettled(finalization))
-      ) {
+      if (token.version === 1 || !(await nativeFrontendGoneSettled(token))) {
         throw finalizationRefused();
       }
       // Exact captured attempt, dead frontend, stopped graph and all frontend
@@ -832,16 +859,15 @@ async function nativeProjectDownOnce(opts: {
       await recoverNativeProjectFinalization({
         scope: opts.scope,
         run,
-        token: finalization,
-        expectAttempt: finalization.attempt,
+        token,
+        expectAttempt: token.attempt,
         verifyEffects: () =>
           verifyNativeFrontendRecovery({
             runtime: opts.runtime,
             scope: opts.scope,
             run,
-            httpsPort: finalization.httpsPort,
-            httpsLease:
-              finalization.version === 3 ? finalization.httpsLease : undefined,
+            httpsPort: token.httpsPort,
+            httpsLease: token.version === 3 ? token.httpsLease : undefined,
             legacy: false,
             invoke,
             cleanupLifecycle: async () => {
@@ -852,7 +878,7 @@ async function nativeProjectDownOnce(opts: {
       await waitNativeProjectFinalization({
         scope: opts.scope,
         run,
-        token: finalization,
+        token,
         timeoutMs: 1,
       });
       return;
@@ -889,6 +915,7 @@ async function nativeProjectDownOnce(opts: {
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();
+    await clearFailure();
     return {
       backend: "native",
       status: "stopped",
@@ -919,6 +946,7 @@ async function nativeProjectDownOnce(opts: {
     await opts.retireHostProcesses?.(run);
     await wait();
     await owedAfterStop();
+    await clearFailure();
     return {
       backend: "native",
       status: "stopped",
@@ -942,14 +970,13 @@ async function nativeProjectDownOnce(opts: {
   }
   // Recheck after hooks, which may run arbitrary user-authorized commands.
   verify(await inspect(), run, false);
-  if (
-    finalization !== undefined &&
-    !isDeepStrictEqual(
-      finalization,
-      await captureFinalization({ scope: opts.scope, run })
-    )
-  ) {
-    throw finalizationRefused();
+  if (finalization !== undefined) {
+    const current = await captureFinalization({ scope: opts.scope, run });
+    if (nativeFinalizationLeaseAdded(finalization, current)) {
+      finalization = current;
+    } else if (!isDeepStrictEqual(finalization, current)) {
+      throw finalizationRefused();
+    }
   }
   await opts.beforeCleanup?.(run);
   await requestOwnedStop({
@@ -969,6 +996,7 @@ async function nativeProjectDownOnce(opts: {
     );
   }
   await wait();
+  await clearFailure();
   return {
     backend: "native",
     status: "stopped",

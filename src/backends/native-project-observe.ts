@@ -171,13 +171,15 @@ function inspected(
     phase: receipt.phase,
     foreground:
       receipt.relay_startup !== null && receipt.relay_startup !== undefined,
-    ...failureAfterStarted(receipt.failed_after_started),
+    // Its own file next to the receipt, reported beside it by `graph status`.
+    ...failureAfterStarted(value.failed_after_started),
   };
 }
 
 /**
  * A run that failed after `up` returned at started (value-free: a closed code,
- * the service when known, and when). It stays on the receipt until the next start.
+ * the service when known, and when). Kept in its own file next to the receipt,
+ * outside the strict receipt, until `hack down` or the next start.
  */
 export type NativeFailureAfterStarted = {
   readonly code: string;

@@ -2427,6 +2427,32 @@ async function filesUnder(path: string): Promise<string[]> {
     .map((entry) => join(entry.parentPath, entry.name));
 }
 
+test("a foreground started return whose owner fails later prints the log tails and fails", async () => {
+  const { opts } = await fixture();
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    await serve(request);
+    // The owner later reports a service failure and exits nonzero.
+    request.onStartupLogs?.([
+      { service: "web", stdout: "", stderr: "crashed", truncated: false },
+    ]);
+    request.onExitDiagnostic?.({
+      exitCode: 1,
+      nativeCode: "graph_service_failed",
+    });
+    return 1;
+  };
+  const failure = await startNativeProject({
+    ...opts,
+    waitForReady: false,
+  }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  const message = (failure as Error).message;
+  expect(message).toContain("(graph_service_failed)");
+  expect(message).toContain("--- web stderr ---");
+  expect(message).toContain("crashed");
+});
+
 test("failed services' output is printed with managed values redacted and never saved", async () => {
   const { opts, events } = await fixture();
   const invoke = opts.dependencies.invoke!;

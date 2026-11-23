@@ -104,7 +104,7 @@ fn host_hint_ignored(field: &str) -> Diagnostic {
 }
 
 /// Volume names with this prefix belong to anonymous mounts and cannot be authored.
-pub(super) const ANONYMOUS_PREFIX: &str = "hack-anonymous-";
+pub(crate) const ANONYMOUS_PREFIX: &str = "hack-anonymous-";
 
 /// The owned volume that stores one service's anonymous mount. The name
 /// depends only on the service and the reviewed target, so every review of an

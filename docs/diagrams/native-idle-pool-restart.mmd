@@ -1,0 +1,49 @@
+---
+title: New project share · idle restart
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> status : root not shared
+    state status <<choice>>
+    status --> add : [pool stopped]
+    status --> first : [running, provider live]
+    status --> refused : [starting or stopping]
+    state first <<choice>>
+    first --> second : [idle, under lease]
+    first --> refused : [in use]
+    state second <<choice>>
+    second --> stop : [still idle]
+    second --> refused : [a start went live]
+    stop --> add : guest stopped
+    add --> boot : share journaled
+    add --> refused : [booted meanwhile]
+    boot --> [*]
+    refused --> [*]
+
+    note right of first
+        Live run, pending recovery,
+        open session or image build:
+        in use. Unreadable: in use.
+    end note
+    note left of second
+        Right before the guest stops,
+        under the provider lease. Host
+        releases follow it.
+    end note
+    note right of boot
+        One line says so; this up
+        then boots the pool.
+    end note
+    note left of refused
+        Names up to three projects:
+        down there, then up again.
+        Nothing was released.
+    end note
+
+    class boot ok
+    class stop wait
+    class refused fail

@@ -830,8 +830,8 @@ export async function installLaunchdService({
     guiSessionOnly: config.guiSessionOnly,
   });
 
-  await ensureDir(dirname(paths.launchdPlistPath));
-  await ensureDir(paths.root);
+  await ensureDir(dirname(paths.launchdPlistPath), 0o755);
+  await ensureDir(paths.root, 0o700);
 
   // The plist file and its directories, before anything is unloaded,
   // written or loaded (HACK-2216).

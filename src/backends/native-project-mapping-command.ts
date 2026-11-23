@@ -208,10 +208,12 @@ function foreignHomeText(
     return (
       `Native run mapping released from another native home: ${head}` +
       `audit=${data.auditPath}\n` +
-      "Its graph and retained data stay in that home. Run hack up to start this instance from this home.\n"
+      (data.owner === "gone"
+        ? "That home is not at its recorded path any more. Run hack up to start this instance from this home. If that home is on a disk that is not mounted, its data is still there; if it was moved and runs from its new path, release again from the moved home.\n"
+        : "Its graph and retained data stay in that home. Run hack up to start this instance from this home.\n")
     );
   }
-  if (data.selectionSha256 !== null) {
+  if (data.selectionSha256 !== null && data.owner !== "gone") {
     return (
       `Native run mapping belongs to another native home: ${head}selection=${data.selectionSha256}\n` +
       `Release it from this home with ${nativeForeignHomeReleaseCommand({ selectionSha256: data.selectionSha256, branch })}\n`

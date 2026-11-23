@@ -159,7 +159,11 @@ fn recoverable_settled(receipt: &Receipt) -> Result<(), CandidateError> {
 fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     let starting = matches!(receipt.phase.as_str(), "preparing" | "restoring");
-    if (!starting && !matches!(receipt.phase.as_str(), "ready-observed" | "failed-retained"))
+    if (!starting
+        && !matches!(
+            receipt.phase.as_str(),
+            "ready-observed" | STARTED_OBSERVED | "failed-retained"
+        ))
         || !startup.valid(receipt)
         || startup.services.values().any(|s| {
             !matches!(
@@ -174,7 +178,12 @@ fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
 }
 fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
     let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    value.as_object_mut().ok_or_else(refused)?.remove("phase");
+    {
+        // `started_from` is part of the phase (`Receipt::set_phase`).
+        let value = value.as_object_mut().ok_or_else(refused)?;
+        value.remove("phase");
+        value.remove("started_from");
+    }
     for group in ["resources", "probes"] {
         if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
             for item in items.values_mut() {
@@ -812,6 +821,29 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"unconfirmed");
     }
 
+    #[test]
+    fn a_started_graph_is_recovered_on_the_same_boot_like_a_ready_one() {
+        // `settled_startup`, then the relay check `recover_live_owner` repeats
+        // before and after its cleanup moves the receipt on.
+        let mut started = receipt();
+        started.phase = "preparing".into();
+        mark_started(&mut started).unwrap();
+        recoverable_settled(&started).unwrap();
+        let fixture = super::super::tests::Fixture::new();
+        state::write(&fixture.0.join("state.json"), &started).unwrap();
+        relay::verify_receipt(&fixture.0, &started).unwrap();
+        let mut moved = started.clone();
+        moved.set_phase("cleanup-intent");
+        let _ = fs::remove_file(fixture.0.join("state.json"));
+        state::write(&fixture.0.join("state.json"), &moved).unwrap();
+        relay::verify_receipt(&fixture.0, &started).unwrap();
+        // A start still in progress stays unrecoverable here.
+        for phase in ["preparing", "restoring", "restarting"] {
+            let mut value = receipt();
+            value.phase = phase.into();
+            assert!(recoverable_settled(&value).is_err(), "{phase}");
+        }
+    }
     #[test]
     fn ready_and_failed_receipts_require_settled_startup_bindings() {
         let fixture = super::super::tests::Fixture::new();

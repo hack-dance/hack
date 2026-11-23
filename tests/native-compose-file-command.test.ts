@@ -336,7 +336,7 @@ test.each([
 test("an encrypted managed file with an unavailable project key refuses before staging, hooks or Docker", async () => {
   const fixture = await fileCommandFixture();
   const cipher = join(fixture.parent, "cipher");
-  await mkdir(join(cipher, ".hack"), { recursive: true });
+  await mkdir(join(cipher, ".hack"), { recursive: true, mode: 0o755 });
   const keyPath = join(cipher, PROJECT_ENV_KEY_FILENAME);
   await writeFile(keyPath, "synthetic-fixture-key-never-a-real-credential", {
     mode: 0o600,
@@ -556,7 +556,7 @@ test("before hooks may create file sources without an earlier material read", as
               exec: [
                 process.execPath,
                 "-e",
-                'await Bun.write("binary",new Uint8Array([8,0,9]))',
+                'await import("node:fs/promises").then(({writeFile}) => writeFile("binary",new Uint8Array([8,0,9]),{mode:0o644}))',
               ],
             },
           },

@@ -36,6 +36,8 @@ const OTHER_MODULES: Readonly<Record<string, string>> = {
     "Route syntax is reviewed in project; dependency binding normalization needs runtime authority.",
   environment:
     "Private wrapper publication and delivery are runtime operations.",
+  image_volumes:
+    "Cadence selection only normalizes mount paths here. Image volume admission needs the verified guest image config.",
   iter: "Standard iterator helper.",
   serde_json: "JSON encoding of already-admitted values.",
   fs: "Filesystem acquisition for verified cache bindings.",

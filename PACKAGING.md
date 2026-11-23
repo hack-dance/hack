@@ -105,7 +105,7 @@ Defaults:
 Environment overrides:
 - `HACK_INSTALL_BIN`: override install bin dir
 - `HACK_INSTALL_ASSETS`: override assets dir
-- `HACK_INSTALL_NONINTERACTIVE=1`: skip prompts (defaults to “no” except for chafa/dnsmasq)
+- `HACK_INSTALL_NONINTERACTIVE=1`: skip prompts. Homebrew packages are reported as manual commands.
 - `HACK_INSTALL_TAG`: override release tag (top-level installer)
 - `HACK_INSTALL_VERSION`: override version (top-level installer)
 - `HACK_RELEASE_BASE_URL`: override download base URL (top-level installer)

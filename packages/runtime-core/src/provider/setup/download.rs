@@ -352,13 +352,54 @@ pub(super) fn acquire(
 ) -> Result<FileResult, CandidateError> {
     client
         .runtime
-        .block_on(acquire_inner(client, directory, pin))
+        .block_on(acquire_inner(client, directory, pin, false))
+}
+
+pub(super) fn acquire_provider_archive(
+    client: &Client,
+    directory: &Path,
+    pin: &FilePin,
+) -> Result<FileResult, CandidateError> {
+    client
+        .runtime
+        .block_on(acquire_inner(client, directory, pin, true))
+}
+
+fn archive_identity(m: &fs::Metadata) -> (u64, u64, i64, i64) {
+    (m.dev(), m.ino(), m.ctime(), m.ctime_nsec())
+}
+
+/// Caller holds both setup and provider locks and has verified the published set.
+pub(super) fn remove_provider_archive(
+    directory: &Path,
+    pin: &FilePin,
+) -> Result<(), CandidateError> {
+    state::check_private_directory(directory)?;
+    let path = directory.join(pin.name()?);
+    match path.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(state::io(e)),
+        Ok(_) => {}
+    }
+    let recorded: (u64, u64, i64, i64) =
+        state::read_bounded(&path.with_extension("setup-owned.json"), 256)?;
+    let file = private_file(&path, pin, false)?;
+    if recorded != archive_identity(&file.metadata().map_err(state::io)?)
+        || recorded != archive_identity(&path.symlink_metadata().map_err(state::io)?)
+    {
+        return Err(error(pin, "setup_file_unsafe", "archive identity changed"));
+    }
+    fs::remove_file(path).map_err(state::io)?;
+    File::open(directory)
+        .and_then(|f| f.sync_all())
+        .map_err(state::io)
 }
 
 async fn acquire_inner(
     client: &Client,
     directory: &Path,
     pin: &FilePin,
+    record_owner: bool,
 ) -> Result<FileResult, CandidateError> {
     // One absolute deadline spans all redirect headers and body reads; successful
     // progress never renews it. Reqwest separately bounds each read to 60 seconds.
@@ -377,7 +418,7 @@ async fn acquire_inner(
     let mut file = private_file(&partial, pin, true)?;
     let offset = file.metadata().map_err(state::io)?.len();
     if offset > 0 && hash(&mut file, pin).is_ok() {
-        commit(file, &partial, &destination, directory, pin)?;
+        commit(file, &partial, &destination, directory, pin, record_owner)?;
         return FileResult::new(pin, Outcome::Reused, 0);
     }
     // A full-size invalid partial cannot be extended safely. Restart in this invocation.
@@ -484,7 +525,7 @@ async fn acquire_inner(
         file.set_len(0).map_err(state::io)?;
         return Err(e);
     }
-    commit(file, &partial, &destination, directory, pin)?;
+    commit(file, &partial, &destination, directory, pin, record_owner)?;
     FileResult::new(
         pin,
         if start > 0 {
@@ -502,13 +543,24 @@ fn commit(
     destination: &Path,
     directory: &Path,
     pin: &FilePin,
+    record_owner: bool,
 ) -> Result<(), CandidateError> {
     file.sync_all().map_err(state::io)?;
     // Caller owns the setup operation lock; no other setup can replace either pathname.
     fs::rename(partial, destination).map_err(|e| error(pin, "setup_file", e))?;
     File::open(directory)
         .and_then(|d| d.sync_all())
-        .map_err(state::io)
+        .map_err(state::io)?;
+    if record_owner {
+        let identity = archive_identity(&file.metadata().map_err(state::io)?);
+        if state::write(&destination.with_extension("setup-owned.json"), &identity).is_err() {
+            eprintln!(
+                "Native setup kept {} because its ownership receipt could not be saved.",
+                pin.name()?
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

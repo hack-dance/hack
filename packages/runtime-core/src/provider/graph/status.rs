@@ -80,7 +80,10 @@ fn inspect_with(
         #[cfg(target_os = "macos")]
         let snapshot = {
             let mut snapshot = snapshot;
-            if matches!(snapshot.receipt.phase.as_str(), "preparing" | "restoring") {
+            if matches!(
+                snapshot.receipt.phase.as_str(),
+                "preparing" | "restoring" | super::STARTED_OBSERVED
+            ) {
                 snapshot.startup_observed_ports = super::super::publication::observed_run_ports(
                     candidate,
                     &snapshot.receipt.owner,

@@ -211,7 +211,7 @@ impl HackApp {
         }
         if self.config.project != key || self.config.project_root != root {
             #[cfg(hack_terminal)]
-            self.collapse_config_terminal(cx);
+            self.collapse_detail_terminal(cx);
             self.stash_config_draft();
             let stashed = std::mem::take(&mut self.config.stashed);
             let branch = key.as_ref().and_then(|key| key.branch.clone());

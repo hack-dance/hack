@@ -208,7 +208,12 @@ test("show resolves the selected linked checkout, route namespaces, env layers a
   expect(
     report.env.find((row) => row.scope === "api" && row.key === "SEARCH_INDEX")
   ).toMatchObject({ winning: "5" });
+  await writeFile(
+    join(f.main, ".hack/hack.env.preview.local.yaml"),
+    env("  global:\n    MODE: preview", "preview")
+  );
   const before = await show(f.root, f.main);
+  expect(before.overlays).toContain("preview");
   expect(before.layers.find((layer) => layer.id === "3:qa")).toMatchObject({
     active: false,
     writable: false,

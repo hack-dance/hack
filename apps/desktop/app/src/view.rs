@@ -930,8 +930,8 @@ impl HackApp {
         }
         self.tab = to;
         #[cfg(hack_terminal)]
-        if to == crate::config_view::TAB {
-            self.collapse_config_terminal(cx);
+        if matches!(to, 1 | crate::config_view::TAB) {
+            self.collapse_detail_terminal(cx);
         }
         self.refresh_copies_if_open(cx);
         self.sync_config_tab(cx);

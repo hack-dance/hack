@@ -32,7 +32,7 @@ import {
   sanitizeBranchSlug,
 } from "./project.ts";
 import {
-  listProjectEnvOverlayNames,
+  listProjectEnvOverlays,
   type ProjectEnvStoredValue,
   parseProjectEnvConfigText,
   resolveProjectEnvEffectiveLocalConfigPath,
@@ -243,11 +243,14 @@ async function configLayers(opts: {
   const [env, inherited, overlays] = await Promise.all([
     resolveProjectEnvSelection({ ...p, envName: opts.overlay }),
     resolvePrimaryLocalProjectDir(p),
-    listProjectEnvOverlayNames(p),
+    listProjectEnvOverlays(p),
   ]);
   const overlay = env.effectiveEnv;
   const names = [
-    ...new Set([...overlays, ...(overlay ? [overlay] : [])]),
+    ...new Set([
+      ...overlays.map((entry) => entry.name),
+      ...(overlay ? [overlay] : []),
+    ]),
   ].filter((name) => normalizeEnvConfigName(name) === name);
   const legacyConfig = resolve(p.projectDir, PROJECT_CONFIG_LEGACY_FILENAME);
   const jsonExists = await lstat(p.configFile).then(

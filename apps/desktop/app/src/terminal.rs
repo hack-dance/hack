@@ -368,7 +368,7 @@ impl HackApp {
             },
         );
         self.open_tab(&d, NewTab::Logs, window, cx);
-        if self.tab == crate::config_view::TAB {
+        if matches!(self.tab, 1 | crate::config_view::TAB) {
             self.set_state(&d.key, PanelState::Collapsed, cx);
         }
     }
@@ -676,7 +676,7 @@ impl HackApp {
         }
     }
 
-    pub(crate) fn collapse_config_terminal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn collapse_detail_terminal(&mut self, cx: &mut Context<Self>) {
         if let Some(key) = self.model.selected_key() {
             self.set_state(&key, PanelState::Collapsed, cx);
         }
@@ -1171,7 +1171,7 @@ impl HackApp {
             return div().into_any_element();
         };
         let state = panel.state;
-        if self.tab == crate::config_view::TAB && state == PanelState::Collapsed {
+        if matches!(self.tab, 1 | crate::config_view::TAB) && state == PanelState::Collapsed {
             return div().into_any_element();
         }
         let sessions = panel.sessions.clone();

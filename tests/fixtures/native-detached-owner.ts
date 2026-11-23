@@ -2,15 +2,11 @@ import { ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { NativeImageBlocker } from "../../src/backends/native-image-policy.ts";
 import {
   batchImageFailure,
   NativeImageBatchError,
+  NativeImageBlocker,
 } from "../../src/backends/native-image-policy.ts";
-import {
-  NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
-  preflightNativeProjectSource,
-} from "../../src/backends/native-project-source-preflight.ts";
 import {
   NativeRuntimeRequestError,
   retainNativeRuntimeFailure,
@@ -29,6 +25,7 @@ import {
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
   reportNativeImageDownloadWait,
+  reportNativeImageWork,
   runNativeDetachedOwner,
   setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
@@ -75,6 +72,12 @@ async function publishFixturePoolRestart(fixtureMode: string): Promise<void> {
   if (fixtureMode !== "pool-restart-notice") {
     return;
   }
+  // This preflight is specific to the idle-pool fixture. Loading it eagerly
+  // makes every owner, including the deadline probes, pay for its imports.
+  const {
+    NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
+    preflightNativeProjectSource,
+  } = await import("../../src/backends/native-project-source-preflight.ts");
   let shared = false;
   await preflightNativeProjectSource({
     runtime: { binary: "/fixture/hack-native", home: "/fixture/home" },
@@ -172,12 +175,16 @@ async function reportFixturePhases(fixtureMode: string): Promise<void> {
   if (fixtureMode === "slow-runtime") {
     return;
   }
+  if (fixtureMode !== "images-wait-ceiling") {
+    reportNativeImageWork(["docker.io/fixture/image:stable"]);
+  }
   nativeDetachedUpProgress("images");
   if (fixtureMode === "images-wait-ceiling") {
     reportNativeImageDownloadWait("docker.io/fixture/image:stable");
   }
   if (fixtureMode === "slow-images") {
     await Bun.sleep(2500);
+    reportNativeImageWork([]);
     nativeDetachedUpProgress("services");
   }
 }

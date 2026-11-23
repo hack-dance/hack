@@ -552,7 +552,7 @@ impl HackApp {
                     .type_step(text::SMALL)
                     .text_color(p.text_muted)
                     .child(div().truncate().child(format!(
-                        "{retained} · Logs are shown as printed, secrets are not hidden"
+                        "{retained} · Logs are shown as printed, including any secrets"
                     )))
                     .child(
                         div()

@@ -67,9 +67,10 @@ pub enum Glyph {
     /// Env tab: edit a value.
     Pencil,
     Copy,
+    Lock,
+    More,
     /// Header: copied.
     Check,
-    More,
     Link,
     Pause,
     Filter,
@@ -77,6 +78,12 @@ pub enum Glyph {
     Braces,
     ListFilter,
     Layers,
+    /// Service file browser.
+    Directory,
+    FileText,
+    Server,
+    Ellipsis,
+    Info,
 }
 
 impl Glyph {
@@ -109,8 +116,9 @@ impl Glyph {
             Self::Upgrade => "icons/circle-arrow-up.svg",
             Self::Branch => "icons/git-branch.svg",
             Self::Copy => "icons/copy.svg",
-            Self::Check => "icons/check.svg",
+            Self::Lock => "icons/lock-keyhole.svg",
             Self::More => "icons/ellipsis.svg",
+            Self::Check => "icons/check.svg",
             Self::Link => "icons/link.svg",
             Self::Pause => "icons/pause.svg",
             Self::Filter => "icons/list-filter.svg",
@@ -122,6 +130,11 @@ impl Glyph {
             Self::EyeOff => "icons/eye-off.svg",
             Self::Key => "icons/key-round.svg",
             Self::Pencil => "icons/pencil.svg",
+            Self::Directory => "icons/folder.svg",
+            Self::FileText => "icons/file-text.svg",
+            Self::Server => "icons/server.svg",
+            Self::Ellipsis => "icons/ellipsis.svg",
+            Self::Info => "icons/info.svg",
         }
     }
 }
@@ -155,8 +168,9 @@ icon_assets!(
         CircleArrowUp,
         GitBranch,
         Copy,
-        Check,
+        LockKeyhole,
         Ellipsis,
+        Check,
         Link,
         Pause,
         TextWrap,
@@ -168,6 +182,10 @@ icon_assets!(
         EyeOff,
         KeyRound,
         Pencil,
+        Folder,
+        FileText,
+        Server,
+        Info,
     ]
 );
 
@@ -223,6 +241,8 @@ mod tests {
             Glyph::Upgrade,
             Glyph::Branch,
             Glyph::Copy,
+            Glyph::Lock,
+            Glyph::More,
             Glyph::Check,
             Glyph::Eye,
             Glyph::EyeOff,

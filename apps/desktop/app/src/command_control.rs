@@ -725,7 +725,7 @@ pub(crate) fn render(
                 .px(px(8.))
                 .rounded(radius::PANEL)
                 .hairline(p.border)
-                .when(running, |r| r.bg(p.surface_1))
+                .when(running, |r| r.bg(p.attention))
                 .child(command)
         })
         .child(run)
@@ -1072,7 +1072,7 @@ fn command_menu(
         .shadow_lg()
         .rounded(radius::PANEL)
         .hairline(p.border)
-        .bg(p.surface_1)
+        .bg(p.raised)
         .type_step(text::SMALL)
         .on_mouse_down_out(cx.listener(|app, _, _, cx| {
             if app.panels.command.menu {
@@ -1118,7 +1118,7 @@ fn command_menu(
 
 #[cfg(feature = "screenshots")]
 #[path = "command_screenshots.rs"]
-mod screenshots;
+pub(crate) mod screenshots;
 #[cfg(feature = "screenshots")]
 pub(crate) use screenshots::capture;
 

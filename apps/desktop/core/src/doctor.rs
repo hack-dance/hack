@@ -911,7 +911,8 @@ pub enum Finish {
 pub struct DoctorPane {
     pub result: DoctorState,
     generation: u64,
-    in_flight: Option<(u64, Option<Vec<TargetKey>>)>,
+    in_flight: Option<(u64, Option<Vec<TargetKey>>, Instant)>,
+    observed_at: Option<Instant>,
     checked_at: Option<Instant>,
     /// The targets the shown result checked (`None`: the project list
     /// could not be read).
@@ -929,6 +930,7 @@ impl DoctorPane {
     pub fn source_changed(&mut self) {
         self.result = DoctorState::NeverRun;
         self.in_flight = None;
+        self.observed_at = None;
         self.checked_at = None;
         self.checked_targets = None;
         self.stale = false;
@@ -939,7 +941,7 @@ impl DoctorPane {
     /// be read, so only machine checks run); returns its generation.
     pub fn begin(&mut self, targets: Option<&[TargetKey]>) -> u64 {
         self.generation += 1;
-        self.in_flight = Some((self.generation, sorted(targets)));
+        self.in_flight = Some((self.generation, sorted(targets), Instant::now()));
         self.generation
     }
 
@@ -969,11 +971,11 @@ impl DoctorPane {
         current: Option<&[TargetKey]>,
         now: Instant,
     ) -> Finish {
-        let Some((g, targets)) = self.in_flight.take() else {
+        let Some((g, targets, started_at)) = self.in_flight.take() else {
             return Finish::Discarded;
         };
         if g != generation {
-            self.in_flight = Some((g, targets));
+            self.in_flight = Some((g, targets, started_at));
             return Finish::Discarded;
         }
         self.result = DoctorState::from_runs(runs);
@@ -981,6 +983,7 @@ impl DoctorPane {
             // Machine checks ran, but no project was: never "all clear".
             v.projects_unread = true;
         }
+        self.observed_at = Some(started_at);
         self.checked_at = Some(now);
         self.stale = sorted(current) != targets;
         self.checked_targets = targets;
@@ -999,6 +1002,17 @@ impl DoctorPane {
                 || self
                     .checked_at
                     .is_none_or(|t| now.saturating_duration_since(t) >= REFRESH_EVERY))
+    }
+
+    /// Start time of the accepted result while it still describes the current targets.
+    #[must_use]
+    pub fn fresh_observation(&self, now: Instant) -> Option<Instant> {
+        self.observed_at.filter(|_| {
+            !self.stale
+                && self
+                    .checked_at
+                    .is_some_and(|t| now.saturating_duration_since(t) < REFRESH_EVERY)
+        })
     }
 
     #[must_use]

@@ -427,6 +427,12 @@ impl HackApp {
             .clone()
     }
 
+    /// Keep the native evidence independent of machine-local Ghostty settings.
+    #[cfg(feature = "screenshots")]
+    pub(crate) fn use_default_terminal_look(&mut self) {
+        self.panels.look = Some(GhosttyLook::default());
+    }
+
     fn core_for(&self, d: &DetailView, tab: &NewTab) -> Result<TerminalCore, String> {
         // `cli_root` validates the checkout a CLI tab runs in; see there.
         let hack = self.source.hack_program();
@@ -928,7 +934,7 @@ impl HackApp {
         ui: &Ui,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let t = TermPalette::fallback();
+        let t = TermPalette::for_mode(ui.p.mode);
         let sessions = panel.sessions.read(cx);
         let active = sessions.active_index();
         let kinds: Vec<TabKind> = sessions.kinds(cx).iter().map(tab_kind).collect();
@@ -1162,7 +1168,7 @@ impl HackApp {
         let surface = div()
             .flex_1()
             .min_h_0()
-            .bg(TermPalette::fallback().bg)
+            .bg(TermPalette::for_mode(ui.p.mode).bg)
             .child(sessions)
             .into_any_element();
         let base = div().flex().flex_col().min_h_0().relative();

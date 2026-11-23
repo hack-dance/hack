@@ -2450,6 +2450,46 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "per-service-publication",
+    module: "PerServicePublication",
+    states: 622,
+    invariant: "Safe",
+    action: "Record",
+    fields: [
+      'recorded = {"first"}',
+      'child = [first |-> "gated", second |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "Record",
+        fields: [
+          'recorded = {"second"}',
+          'child = [first |-> "absent", second |-> "gated"]',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "bind-before-commit",
+        negative: true,
+        action: "Bind",
+        fields: [
+          'child = [first |-> "uncommitted-bind", second |-> "absent"]',
+          "recorded = {}",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Bind",
+            fields: [
+              'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+              "recorded = {}",
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
     // Loopback TCP publication of Compose `ports`: one listener per host
     // port, no forwarding to a replaced container, no recovery of a live
     // owner, no listener after acknowledged stop; see tests/models/tla/README.md.

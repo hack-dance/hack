@@ -2055,7 +2055,7 @@ mod tests {
         use hack_desktop_core::{setup::Report, setup_fixtures};
 
         let empty = Report::default();
-        let label = |list, report| disconnected_status(list, report).unwrap().1;
+        let label = |list: &ListView, report: &Report| disconnected_status(list, report).unwrap().1;
         assert_eq!(
             label(&list(Fixture::CliMissing), &empty),
             "Hack CLI not found"

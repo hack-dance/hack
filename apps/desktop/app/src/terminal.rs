@@ -471,6 +471,15 @@ impl ServiceShellFixture {
         });
         result.expect("observe shell fixture");
     }
+
+    pub(crate) fn exit(shell: &Entity<TerminalView>, cx: &mut App) {
+        Self::wait_for(shell, "/app #", false, cx);
+        shell.update(cx, |shell, cx| shell.type_text("exit", cx));
+        // Observe the PTY echo before Enter can close the process.
+        Self::wait_for(shell, "/app # exit", false, cx);
+        shell.update(cx, |shell, cx| shell.type_text("\n", cx));
+        Self::wait_for(shell, "/app # exit", true, cx);
+    }
 }
 
 #[cfg(feature = "screenshots")]
@@ -2446,14 +2455,12 @@ mod window_tests {
             let key = app.read(cx).model.selected_key().unwrap();
             let sessions = app.read(cx).panels.by_key[&key].sessions.clone();
             let first = sessions.read(cx).tab(1).cloned().unwrap();
-            ServiceShellFixture::wait_for(&first, "/app #", false, cx);
-            first.update(cx, |view, cx| view.type_text("exit\n", cx));
-            ServiceShellFixture::wait_for(&first, "/app # exit", true, cx);
+            ServiceShellFixture::exit(&first, cx);
 
             app.update(cx, |app, cx| app.open_service_shell("api", window, cx));
             let reopened = sessions.read(cx).active().cloned().unwrap();
             assert_ne!(reopened, first);
-            assert_eq!(reopened.read(cx).status(), &TermStatus::Running);
+            ServiceShellFixture::wait_for(&reopened, "/app #", false, cx);
             assert_eq!(sessions.read(cx).tab(1), Some(&first));
 
             app.update(cx, |app, cx| app.open_service_shell("api", window, cx));

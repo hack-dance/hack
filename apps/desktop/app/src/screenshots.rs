@@ -476,10 +476,10 @@ fn capture_service_shell_reopen(
             let key = app.model.selected_key().expect("selected branch");
             let sessions = app.panels.by_key[&key].sessions.clone();
             let shell = sessions.read(cx).tab(active).expect("active shell").clone();
-            ServiceShellFixture::wait_for(&shell, "/app #", false, cx);
             if active == 1 {
-                shell.update(cx, |shell, cx| shell.type_text("exit\n", cx));
-                ServiceShellFixture::wait_for(&shell, "/app # exit", true, cx);
+                ServiceShellFixture::exit(&shell, cx);
+            } else {
+                ServiceShellFixture::wait_for(&shell, "/app #", false, cx);
             }
             window.render_frame(cx);
             let sessions = sessions.read(cx);

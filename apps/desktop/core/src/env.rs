@@ -183,9 +183,15 @@ pub struct EnvReport {
     #[serde(default)]
     pub key_state: KeyState,
     /// Overlay names the CLI selected: requested, default and effective.
-    /// Names only. The list of every overlay is DESIGN.md request R24.
     #[serde(default)]
     pub env_selection: Option<EnvSelection>,
+    #[serde(default)]
+    pub overlays: Vec<EnvOverlay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EnvOverlay {
+    pub name: String,
 }
 
 /// `env_selection` in `hack env list --json`: overlay names, no values.
@@ -208,11 +214,9 @@ pub struct OverlayTab {
 }
 
 impl EnvSelection {
-    /// Overlay tabs: base first, then each overlay the CLI named (the
-    /// configured default, the requested and the effective one), once.
-    /// Every overlay of a project is DESIGN.md request R24.
+    /// Base first, then each CLI-reported overlay once.
     #[must_use]
-    pub fn tabs(&self) -> Vec<OverlayTab> {
+    pub fn tabs(&self, available: &[EnvOverlay]) -> Vec<OverlayTab> {
         let mut out = vec![OverlayTab {
             label: "base".into(),
             env: "default".into(),
@@ -221,8 +225,12 @@ impl EnvSelection {
         for name in [&self.default, &self.requested, &self.effective]
             .into_iter()
             .flatten()
+            .chain(available.iter().map(|overlay| &overlay.name))
         {
-            if name.is_empty() || name == "default" || out.iter().any(|t| &t.env == name) {
+            if name.is_empty()
+                || matches!(name.as_str(), "base" | "default")
+                || out.iter().any(|t| &t.env == name)
+            {
                 continue;
             }
             out.push(OverlayTab {
@@ -264,7 +272,7 @@ pub enum EnvView {
     #[default]
     Loading,
     Unreadable,
-    Report(EnvReport),
+    Report(Box<EnvReport>),
 }
 impl EnvView {
     /// A bare report on exit 1 is valid. Malformed output never becomes empty.
@@ -298,7 +306,7 @@ impl EnvView {
         report
             .vars
             .sort_by(|a, b| b.missing.cmp(&a.missing).then(a.key.cmp(&b.key)));
-        Self::Report(report)
+        Self::Report(Box::new(report))
     }
 }
 
@@ -347,9 +355,6 @@ pub enum ValueState {
         value: Revealed,
         at: std::time::Instant,
     },
-    /// A plaintext value read with the listing; it stays while the listing
-    /// is shown and goes with it.
-    Plain(Revealed),
     /// Could not be read; the message names no value.
     Failed(String),
 }
@@ -478,14 +483,13 @@ impl EnvModel {
         self.reveal_tokens.clear();
         self.values.clear();
     }
-    /// Hide every revealed secret, keeping plaintext values; whether any
-    /// was shown or still being read.
+    /// Hide every revealed value. Returns whether a value was showing or loading.
     pub fn hide_revealed(&mut self) -> bool {
         self.reveal_epoch += 1;
         self.reveal_tokens.clear();
         let before = self.values.len();
         self.values
-            .retain(|_, v| matches!(v, ValueState::Plain(_) | ValueState::Failed(_)));
+            .retain(|_, v| matches!(v, ValueState::Failed(_)));
         before != self.values.len()
     }
     /// Drop values shown longer than [`REVEAL_FOR`]; whether any was.
@@ -509,9 +513,10 @@ pub fn fixture(name: &str) -> EnvView {
         "env-loading" => EnvView::Loading,
         "env-error" => EnvView::Unreadable,
         "env-empty" => EnvView::parse(r#"{"vars":[],"missing_required":[]}"#, Some(0)),
-        // Several overlays, long names and values, a scoped secret, and a
+        // Several overlays, long names, a scoped secret, and a
         // required name that is missing.
-        "env-overlays" | "env-running" | "env-locked" | "env-missing" | "env-long" | "env-edit" => {
+        "env-overlays" | "env-running" | "env-locked" | "env-missing" | "env-long" | "env-edit"
+        | "env-revealed" => {
             let key_state = if name == "env-locked" {
                 "missing"
             } else {
@@ -537,7 +542,7 @@ pub fn fixture(name: &str) -> EnvView {
             }
             EnvView::parse(
                 &format!(
-                    r#"{{"files":["hack.env.default.yaml","hack.env.staging.yaml"],"scopes":["global","api","web"],"selected_scope":"global","key_state":"{key_state}","missing_required":[{missing}],"env_selection":{{"requested":"staging","default":"dev","effective":"staging"}},"vars":[{}]}}"#,
+                    r#"{{"files":["hack.env.default.yaml","hack.env.staging.yaml"],"scopes":["global","api","web"],"selected_scope":"global","key_state":"{key_state}","missing_required":[{missing}],"env_selection":{{"requested":"staging","default":"dev","effective":"staging"}},"overlays":[{{"name":"dev"}},{{"name":"staging"}},{{"name":"qa"}}],"vars":[{}]}}"#,
                     vars.join(",")
                 ),
                 Some(0),
@@ -559,7 +564,7 @@ pub fn fixture(name: &str) -> EnvView {
 #[must_use]
 pub fn fixture_value(key: &str) -> String {
     if key.starts_with("AN_UNUSUALLY_LONG") || key == "DATABASE_URL" {
-        "postgres://fixture-user:fake-password-not-real@db.example.invalid:5432/fixture_database_with_a_long_name".into()
+        "fake-fixture-value-repeated-fake-fixture-value-repeated-fake-fixture-value".into()
     } else {
         format!("fake-{}-value", key.to_ascii_lowercase().replace('_', "-"))
     }
@@ -667,9 +672,9 @@ mod tests {
         let EnvView::Report(r) = fixture("env-overlays") else {
             panic!("report");
         };
-        let tabs = r.env_selection.unwrap().tabs();
+        let tabs = r.env_selection.unwrap().tabs(&r.overlays);
         let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
-        assert_eq!(labels, ["base", "dev", "staging"]);
+        assert_eq!(labels, ["base", "dev", "staging", "qa"]);
         assert_eq!(tabs[0].env, "default", "base is --env default");
         assert!(tabs[1].is_default);
     }

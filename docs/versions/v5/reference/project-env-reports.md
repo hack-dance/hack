@@ -165,7 +165,7 @@ worktrees is null or an array of path:string, branch:string|null and last_seen_a
 
 ## Environment list reports
 
-Raw CLI env reports can contain values. Default secret masking does not make an entire report value-free: plaintext values still appear. Use a value-free inspection interface for agent metadata, and avoid copying raw env reports into logs or messages. These examples describe shapes only and contain no real values.
+The default `hack env list --json` report contains names and metadata. The desktop Env view uses it to list scopes and overlays, then reads a value through `hack env get` when explicitly revealed. The raw CLI can add values with value-output options. These examples contain no real values.
 
 The legacy contract and managed YAML contract are separate variants. Both use vars[] in raw CLI output. MCP env.keys, where available, returns a narrower keys[] projection and withholds raw stdout/stderr.
 
@@ -193,7 +193,7 @@ The legacy contract and managed YAML contract are separate variants. Both use va
 | services | string[] or null | winning non-global scope as one-element array, otherwise null |
 | resolved_from | dotenv/process/keychain/portable_backend or null | project_env_config |
 | storage | HackEnvValueStorageJson | kind/plaintext-or-secret, backend/project_env_config, location:string, mode/yaml, trust_model:string, classification |
-| value | string or null; secret default mask is *** | string; secret default mask is *** |
+| value | Omitted unless requested | Omitted unless requested |
 
 The source field is a compatibility label: keychain on a managed YAML record marks a secret; it does not mean that YAML ciphertext moved to OS keychain storage. Files and scopes are selected by the matching version parser. v4 rejects YAML null; v5 uses it as a removal marker.
 

@@ -20,6 +20,7 @@ import {
 } from "../src/lib/autostart-project-lock.ts";
 import { resolveDesktopComposeProjectName } from "../src/lib/compose-project-name.ts";
 import { readLifecycleState } from "../src/lib/lifecycle-runtime.ts";
+import { sanitizeProjectSlug } from "../src/lib/project.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import {
   mkdirOwnedFixture,
@@ -320,61 +321,72 @@ test("ordinary Down refuses an interpolated branch stack owned by another checko
 });
 
 const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
-test.skipIf(!supervisorBinary)(
-  "ordinary Down stops the host process launched by desktop Start",
-  async () => {
-    const projectRoot = join(root, "project");
-    const projectDir = join(projectRoot, ".hack");
-    await writeOwnedFixture(
-      join(projectDir, "hack.config.json"),
-      JSON.stringify({
-        name: "sample",
-        dev_host: "sample.hack",
-        lifecycle: {
-          runner: "supervisor",
-          processes: [{ name: "sleeper", command: "exec /bin/sleep 120" }],
-        },
-      })
-    );
-    await writeInterpolatedStack(projectRoot, "STACK_A");
-    await installComposeNameFixture({ startContainers: true });
-    const env = {
-      HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
-      PATH: `${join(root, "bin")}:/usr/bin:/bin`,
-    };
-    const bound = [
-      "--target",
-      "local",
-      "--expect-compose-project",
-      "sample",
-      "--json",
-    ];
-    try {
-      const started = await run(
-        ["up", "-d", ...bound],
-        false,
-        projectRoot,
-        env
+for (const desktopStarts of [true, false]) {
+  test.skipIf(!supervisorBinary)(
+    desktopStarts
+      ? "ordinary Down stops the host process launched by desktop Start"
+      : "desktop Stop retires the legacy host process launched by ordinary Start",
+    async () => {
+      const projectRoot = join(root, "project");
+      const projectDir = join(projectRoot, ".hack");
+      await writeOwnedFixture(
+        join(projectDir, "hack.config.json"),
+        JSON.stringify({
+          name: "sample",
+          dev_host: "sample.hack",
+          lifecycle: {
+            runner: "supervisor",
+            processes: [{ name: "sleeper", command: "exec /bin/sleep 120" }],
+          },
+        })
       );
-      expect(started.exitCode, started.stderr || started.stdout).toBe(0);
-      const state = await readLifecycleState({ projectDir });
-      expect(state[0]).toMatchObject({
-        backend: "supervisor",
-        composeProject: "sample",
-      });
-      const pid = state[0]?.processes[0]?.processGroupId ?? 0;
-      expect(pid).toBeGreaterThan(1);
-      expect(() => process.kill(-pid, 0)).not.toThrow();
-      const stopped = await run(["down", "--json"], false, projectRoot, env);
-      expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
-      expect(await readLifecycleState({ projectDir })).toHaveLength(0);
-      expect(() => process.kill(-pid, 0)).toThrow();
-    } finally {
-      await run(["down", ...bound], false, projectRoot, env);
-    }
-  },
-  30_000
-);
+      await writeInterpolatedStack(projectRoot, "STACK_A");
+      await installComposeNameFixture({ startContainers: true });
+      const env = {
+        HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
+        PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+      };
+      const bound = [
+        "--target",
+        "local",
+        "--expect-compose-project",
+        "sample",
+        "--json",
+      ];
+      try {
+        const started = await run(
+          ["up", "-d", ...(desktopStarts ? bound : ["--json"])],
+          false,
+          projectRoot,
+          env
+        );
+        expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+        const state = await readLifecycleState({ projectDir });
+        expect(state[0]).toMatchObject({
+          backend: "supervisor",
+          composeProject: desktopStarts
+            ? "sample"
+            : sanitizeProjectSlug("${STACK_A:-sample}"),
+        });
+        const pid = state[0]?.processes[0]?.processGroupId ?? 0;
+        expect(pid).toBeGreaterThan(1);
+        expect(() => process.kill(-pid, 0)).not.toThrow();
+        const stopped = await run(
+          ["down", ...(desktopStarts ? ["--json"] : bound)],
+          false,
+          projectRoot,
+          env
+        );
+        expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+        expect(await readLifecycleState({ projectDir })).toHaveLength(0);
+        expect(() => process.kill(-pid, 0)).toThrow();
+      } finally {
+        await run(["down", ...bound], false, projectRoot, env);
+      }
+    },
+    30_000
+  );
+}
 
 test("desktop Starts from different expressions lock the same resolved branch stack", async () => {
   const secondRoot = join(root, "second");

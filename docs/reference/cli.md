@@ -643,6 +643,7 @@ hack files ls <service> <container-path> [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -672,6 +673,7 @@ hack files cat <service> <container-path> [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

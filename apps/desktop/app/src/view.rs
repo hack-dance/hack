@@ -510,6 +510,7 @@ impl HackApp {
         if selection_changed {
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
+            self.files = Default::default();
             self.reset_env_selection();
             self.refresh_copies_if_open(cx);
             if self.tab == 2 {

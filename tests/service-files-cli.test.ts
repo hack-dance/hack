@@ -47,6 +47,7 @@ IFS= read -r context < "$fixture/context"
 case "$1" in
   compose)
     case "$*" in
+      *"-f - config --format json") cat >/dev/null; echo '{"name":"files-test"}'; exit ;;
       *"-p files-test--branch "*) [ -z "\${COMPOSE_PROJECT_NAME:-}" ] || exit 1 ;;
       *) [ "\${COMPOSE_PROJECT_NAME:-}" = alternate-project ] || exit 0 ;;
     esac
@@ -79,6 +80,7 @@ esac
   );
   await chmod(docker, 0o755);
   const replica = {
+    project: "files-test--branch",
     workingDir: join(project, ".hack"),
     state: "running",
     service: "api",
@@ -152,6 +154,7 @@ async function run(opts: {
   readonly checkout?: string;
   readonly context?: string;
   readonly endpoint?: string;
+  readonly expectedProject?: string;
 }) {
   await Promise.all([
     writeFile(join(root, "output"), opts.output),
@@ -173,6 +176,9 @@ async function run(opts: {
       "--path",
       opts.checkout ?? project,
       ...(opts.branch === false ? [] : ["--branch", "branch"]),
+      ...(opts.expectedProject
+        ? ["--expect-compose-project", opts.expectedProject]
+        : []),
       "--",
       "api",
       opts.path,
@@ -335,6 +341,41 @@ test("files never falls back to a different Compose instance", async () => {
   });
   expect(result.exitCode).not.toBe(0);
   machineError(result.stdout, "E_SERVICE_NOT_FOUND");
+}, 60_000);
+
+test("desktop Files resolves an interpolated branch and requires the listed stack", async () => {
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    'name: "${STACK_NAME:-files-test}"\nservices:\n  api:\n    image: alpine\n'
+  );
+  const opts = { operation: "ls", path: ".", output: directory } as const;
+  const stale = await run({ ...opts, expectedProject: "stale--branch" });
+  expect(stale.exitCode).toBe(1);
+  machineError(stale.stdout, "E_COMPOSE_FAILED");
+  expect(await Bun.file(join(root, "calls")).exists()).toBe(false);
+
+  const result = await run({ ...opts, expectedProject: "files-test--branch" });
+  expect(result.exitCode, result.stdout).toBe(0);
+  expect(machineData(result.stdout, "hack.files.v1").entry).toMatchObject({
+    path: "/app",
+  });
+
+  const replicas = join(root, "replicas");
+  await writeFile(
+    replicas,
+    (await Bun.file(replicas).text()).replaceAll(
+      "files-test--branch",
+      "wrong-stack"
+    )
+  );
+  await rm(join(root, "calls"));
+  const wrongStack = await run({
+    ...opts,
+    expectedProject: "files-test--branch",
+  });
+  expect(wrongStack.exitCode).toBe(1);
+  machineError(wrongStack.stdout, "E_SERVICE_NOT_FOUND");
+  expect(await Bun.file(join(root, "calls")).exists()).toBe(false);
 }, 60_000);
 
 test("files refuses a checkout when every matching service replica belongs elsewhere", async () => {

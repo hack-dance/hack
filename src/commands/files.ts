@@ -7,10 +7,7 @@ import type {
 import { defineCommand, withHandler } from "../cli/command.ts";
 import { optBranch, optJson, optPath, optProject } from "../cli/options.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
-import {
-  branchComposeProjectName,
-  resolveComposeProjectName,
-} from "../lib/compose-project-name.ts";
+import { branchComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveHackEnv } from "../lib/hack-env.ts";
 import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
@@ -19,12 +16,21 @@ import { resolveProjectEnvConfig } from "../lib/project-env-config.ts";
 import { readServiceFiles } from "../lib/service-files.ts";
 import { TARGET_SERVICE_PATTERN } from "../lib/target-inspect.ts";
 import {
+  desktopComposeTarget,
+  optExpectComposeProject,
+  resolveCommandComposeBase,
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
   resolveStoredRuntimeEnvName,
 } from "./project.ts";
 
-const options = [optBranch, optPath, optProject, optJson] as const;
+const options = [
+  optBranch,
+  optPath,
+  optProject,
+  optExpectComposeProject,
+  optJson,
+] as const;
 const positionals = [
   { name: "service", required: true },
   { name: "container-path", required: true },
@@ -76,11 +82,14 @@ async function runFiles(
     noticeToStderr: args.options.json === true,
   });
   const cfg = await readProjectConfig(project);
-  const base = await resolveComposeProjectName({ project, cfg });
+  const expected = args.options.expectComposeProject;
+  const base = await resolveCommandComposeBase({ project, cfg, expected });
   const projectName = sanitizeProjectSlug(base);
-  const composeProject = branch
-    ? branchComposeProjectName({ base, branch })
-    : null;
+  const composeProject = desktopComposeTarget({
+    expected,
+    base,
+    computed: branch ? branchComposeProjectName({ base, branch }) : null,
+  });
   const envName = await resolveStoredRuntimeEnvName({
     requestedEnvName: undefined,
     projectDir: project.projectDir,
@@ -108,6 +117,7 @@ async function runFiles(
   const result = await readServiceFiles({
     operation,
     project,
+    expectedProject: expected,
     composeArgs: buildComposeArgs({
       composeFiles: [project.composeFile],
       composeProject,

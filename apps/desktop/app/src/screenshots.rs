@@ -237,6 +237,28 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                         assert!(app.model.selected_service().is_none());
                         assert!(app.logs.model.service.is_none());
                     });
+                    window.hover("service-web", cx);
+                    window.within("service-web").click("service-more", cx);
+                    window.click(("service-command", 3_usize), cx);
+                    _app.update(cx, |app, cx| {
+                        let mut snapshot = app.model.snapshot().expect("fixture snapshot").clone();
+                        let project = snapshot
+                            .projects
+                            .projects
+                            .iter_mut()
+                            .find(|project| project.name == "storefront")
+                            .expect("fixture project");
+                        project.defined_services = vec!["api".into(), "web".into()];
+                        project
+                            .branch_runtime
+                            .retain(|row| row.branch != "feature-search");
+                        let refresh = app.model.begin_refresh();
+                        assert!(app.apply_refresh(refresh, Ok(snapshot), cx));
+                        let detail = app.model.detail().expect("primary copy detail");
+                        assert!(detail.key.is_main());
+                        assert!(detail.services.iter().any(|service| service.name == "web"));
+                        assert_eq!(app.files_service(&detail).map(String::as_str), Some("api"));
+                    });
                 })
                 .expect("activate Files and switch to a stopped copy");
             }

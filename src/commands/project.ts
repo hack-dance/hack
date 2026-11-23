@@ -769,7 +769,7 @@ const optImageOffline = defineOption({
     "Native backend: use recorded image resolutions and local archives without contacting a registry.",
 } as const);
 const pullOptions = [optPath, optProject, optEnv, optProfile, optJson] as const;
-const optExpectComposeProject = defineOption({
+export const optExpectComposeProject = defineOption({
   name: "expectComposeProject",
   type: "string",
   long: "--expect-compose-project",
@@ -9177,7 +9177,7 @@ async function requireOwnedServiceContainers(
   return owned;
 }
 
-async function resolveCommandComposeBase(
+export async function resolveCommandComposeBase(
   opts: Parameters<typeof resolveComposeProjectName>[0] & {
     readonly expected?: string;
   }
@@ -9333,7 +9333,7 @@ async function resolveDownLifecycleKey(opts: {
 }
 
 /** Pin the same Compose identity the desktop displayed, before lifecycle env is delivered. */
-function desktopComposeTarget(opts: {
+export function desktopComposeTarget(opts: {
   readonly expected?: string;
   readonly base: string;
   readonly computed: string | null;
@@ -9664,7 +9664,10 @@ async function runDownCommand({
       project,
       branch,
       base: lockedTarget?.base ?? baseProjectName,
-      legacyBase: baseProjectName,
+      legacyBase:
+        args.options.expectComposeProject === undefined
+          ? baseProjectName
+          : await resolveComposeProjectName({ project, cfg }),
     });
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
   const lifecycleEnv =

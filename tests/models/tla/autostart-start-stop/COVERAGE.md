@@ -69,6 +69,10 @@ The overlay regression also runs a failed before hook and checks that it leaves
 the earlier association available to Down. The two-overlay regression checks that
 an explicit selection resolves its own Compose name. Legacy underscore recovery
 requires an owned exact stack and no containers for the competing normalized name.
+The legacy owner proof and the mutation use the same Docker transport settings.
+A fresh Start may replace stale metadata after both names and any legacy owner
+are confirmed absent. Partial Start retains its launch association while any
+runtime may remain, and failure cleanup only removes the publication it created.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

@@ -163,6 +163,8 @@ async function installComposeNameFixture(opts?: {
   readonly startContainers?: boolean;
   readonly savedContextOnly?: boolean;
   readonly trackNamedStacks?: boolean;
+  readonly failPs?: boolean;
+  readonly failAfterCreate?: boolean;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
@@ -216,6 +218,7 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   if (stack !== "sample" || context !== "saved-files-context") process.exit(9);
   process.stdout.write("app-1 | saved-overlay-log\\n");
 } else if (mode === "ps" || mode === "inspect") {
+  if (options.failPs) process.exit(9);
   if (options.holdBeforePin && mode === "ps" && stack === "sample" && !(await Bun.file(fixture + "/release-start").exists())) {
     await Bun.write(fixture + "/before-pin", "entered");
     const deadline = Date.now() + 12000;
@@ -230,10 +233,14 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   const isCreated = await Bun.file(created).exists();
   const directory = (foreign ? options.foreignCheckout : undefined) ?? (inSavedContext && (isRunning || isCreated) ? process.cwd() : null);
   process.stdout.write(JSON.stringify(directory ? [{
-    ID: "fixture-container", Service: "app", State: isCreated ? "created" : "running",
+    ID: "fixture-container", Service: "app", State: isCreated || options.failAfterCreate ? "created" : "running",
     Labels: "com.docker.compose.project.working_dir=" + directory
   }] : []));
 } else if (mode === "up") {
+  if (options.failAfterCreate && args.includes("--no-start")) {
+    await Bun.write(running, stack);
+    process.exit(23);
+  }
   if (args.includes("--force-recreate")) {
     await Bun.write(fixture + "/restart-context", context);
     await Bun.write(fixture + "/restart-stack", stack);
@@ -1086,6 +1093,182 @@ test("ordinary Down refuses an interpolated branch stack owned by another checko
 });
 
 const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
+async function seedUnderscoreLegacyRecord(envName: string | null) {
+  const projectDir = join(root, "project", ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    '{"name":"sample","dev_host":"sample.hack"}'
+  );
+  await writeOwnedFixture(
+    join(projectDir, "docker-compose.yml"),
+    "name: demo_team\nservices:\n  app:\n    image: example.invalid/app\n"
+  );
+  await upsertProjectRuntimeStateEntry({
+    projectDir,
+    entry: {
+      composeProject: "demo-team",
+      envName,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  return projectDir;
+}
+
+test("legacy recovery refuses teardown in a Docker context different from the saved overlay", async () => {
+  const projectDir = await seedUnderscoreLegacyRecord("qa");
+  await writeOwnedFixture(
+    join(projectDir, "hack.env.qa.yaml"),
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n"
+  );
+  await installComposeNameFixture({
+    defaultStack: "demo_team",
+    savedContextOnly: true,
+  });
+  await Bun.write(join(root, "compose-running"), "demo_team");
+  const wrongContext = await run(["down", "--env", "base", "--json"]);
+  expect(wrongContext.exitCode).toBe(1);
+  expect(wrongContext.stdout + wrongContext.stderr).toContain(
+    "different Docker connection settings"
+  );
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "demo-team",
+    })
+  ).toMatchObject({ envName: "qa" });
+  await upsertProjectRuntimeStateEntry({
+    projectDir,
+    entry: {
+      composeProject: "demo-team",
+      launchComposeBase: "demo_team",
+      envName: "qa",
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  const wrongContextAfterRecovery = await run([
+    "down",
+    "--env",
+    "base",
+    "--json",
+  ]);
+  expect(wrongContextAfterRecovery.exitCode).toBe(1);
+  expect(
+    wrongContextAfterRecovery.stdout + wrongContextAfterRecovery.stderr
+  ).toContain("different Docker connection settings");
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+  const savedContext = await run(["down", "--env", "qa", "--json"]);
+  expect(savedContext.exitCode, savedContext.stdout + savedContext.stderr).toBe(
+    0
+  );
+  expect(await Bun.file(join(root, "down-context")).text()).toBe(
+    "saved-files-context"
+  );
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "demo-team",
+    })
+  ).toBeNull();
+}, 40_000);
+
+test("failure cleanup preserves a newer launch record for the same Compose project", async () => {
+  const projectDir = join(root, "project", ".hack");
+  const entry = {
+    composeProject: "sample",
+    envName: null,
+    updatedAt: new Date().toISOString(),
+  };
+  await upsertProjectRuntimeStateEntry({
+    projectDir,
+    entry: { ...entry, launchId: "old" },
+  });
+  await upsertProjectRuntimeStateEntry({
+    projectDir,
+    entry: { ...entry, launchId: "new" },
+  });
+  await removeProjectRuntimeStateEntry({
+    projectDir,
+    composeProject: "sample",
+    launchId: "old",
+  });
+  expect(
+    await readProjectRuntimeStateEntry({ projectDir, composeProject: "sample" })
+  ).toMatchObject({ launchId: "new" });
+});
+
+test("fresh Start replaces a stale normalized record only after confirming absence", async () => {
+  const projectDir = await seedUnderscoreLegacyRecord(null);
+  await installComposeNameFixture({
+    defaultStack: "demo_team",
+    startContainers: true,
+    failPs: true,
+  });
+  const inconclusive = await run(["up", "-d", "--json"]);
+  expect(inconclusive.exitCode).toBe(1);
+  expect(inconclusive.stdout + inconclusive.stderr).toContain(
+    "ambiguous Compose project name"
+  );
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "demo-team",
+    })
+  ).not.toBeNull();
+  await installComposeNameFixture({
+    defaultStack: "demo_team",
+    startContainers: true,
+  });
+  const fresh = await run(["up", "-d", "--json"]);
+  expect(fresh.exitCode, fresh.stdout + fresh.stderr).toBe(0);
+  expect(await Bun.file(join(root, "compose-running")).text()).toBe(
+    "demo_team"
+  );
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "demo_team",
+    })
+  ).toMatchObject({ launchComposeBase: "demo_team" });
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "demo-team",
+    })
+  ).toBeNull();
+}, 40_000);
+
+test("failed Compose preparation with a retained container leaves its launch reachable by bare Down", async () => {
+  const projectDir = join(root, "project", ".hack");
+  await configureManagedNameOverlay({ defaultOverlay: false });
+  await installComposeNameFixture({ failAfterCreate: true });
+  const failed = await run(["up", "-d", "--env", "qa", "--json"]);
+  expect(failed.exitCode).toBe(23);
+  expect(await Bun.file(join(root, "compose-running")).text()).toBe(
+    "alternate"
+  );
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "alternate",
+    })
+  ).toMatchObject({ launchComposeBase: "alternate", envName: "qa" });
+  const down = await run(["down", "--json"]);
+  expect(down.exitCode, down.stdout + down.stderr).toBe(0);
+  expect(
+    (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+  ).toEqual(["compose", "-p", "alternate"]);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "alternate",
+    })
+  ).toBeNull();
+}, 40_000);
+
 test("explicit Down stops only the Compose identity selected by its overlay", async () => {
   const projectDir = join(root, "project", ".hack");
   await writeOwnedFixture(

@@ -18,6 +18,8 @@ export type ProjectRuntimeStateEntry = {
   readonly composeProject: string;
   readonly envName: string | null;
   readonly updatedAt: string;
+  /** Unique publication identity for a launch's failure cleanup. */
+  readonly launchId?: string;
   /** Effective Compose base name when this instance last started. */
   readonly launchComposeBase?: string;
   /** Logical copy in this checkout. Missing on records predating copy association. */
@@ -139,10 +141,13 @@ export async function upsertProjectRuntimeStateEntry(opts: {
 export async function removeProjectRuntimeStateEntry(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
+  readonly launchId?: string;
 }): Promise<void> {
   await mutateProjectRuntimeState(opts.projectDir, (entries) => {
     const next = entries.filter(
-      (entry) => entry.composeProject !== opts.composeProject
+      (entry) =>
+        entry.composeProject !== opts.composeProject ||
+        (opts.launchId !== undefined && entry.launchId !== opts.launchId)
     );
     return next.length === entries.length ? null : next;
   });
@@ -239,6 +244,7 @@ function parseProjectRuntimeStateEntry(
   const envFingerprint = parseComposeEnvFingerprintRecord(value.envFingerprint);
   const pinnedComposeBase = getString(value, "pinnedComposeBase");
   const launchComposeBase = getString(value, "launchComposeBase");
+  const launchId = getString(value, "launchId");
   const launchBranch = value.launchBranch;
   const envProjectName = getString(value, "envProjectName");
   const composeProfiles = Array.isArray(value.composeProfiles)
@@ -252,6 +258,7 @@ function parseProjectRuntimeStateEntry(
     composeProject,
     envName,
     updatedAt,
+    ...(launchId ? { launchId } : {}),
     ...(launchComposeBase ? { launchComposeBase } : {}),
     ...(launchBranch === null || typeof launchBranch === "string"
       ? { launchBranch }

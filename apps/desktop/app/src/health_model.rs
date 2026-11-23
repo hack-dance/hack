@@ -23,6 +23,9 @@ const SCOPED_FIX: [&str; 6] = [
     "--json",
 ];
 
+pub const CLI_UPDATE_GUIDE: &str =
+    "https://github.com/hack-dance/hack/blob/next/docs/reference/update-check.md";
+
 pub const MACHINE_ROWS: [(&str, &str); 5] = [
     ("routing", "Routing and DNS"),
     ("daemon", "hackd"),
@@ -80,6 +83,19 @@ pub fn daemon_repair(action: DaemonRecovery, report: &setup::Report) -> Repair {
             false,
         ),
     }
+}
+
+pub fn cli_update_copy(report: &setup::Report) -> Option<CommandControl> {
+    let spec = report.command(vec!["update".into()]).ok()?;
+    Some(CommandControl {
+        id: "update-cli-for-hackd".into(),
+        label: "hack update".into(),
+        title: "Terminal".into(),
+        availability: CommandAvailability::CopyOnly(spec),
+        size: CommandControlSize::Compact,
+        cwd: None,
+        expects_password: false,
+    })
 }
 
 pub fn machine_repair(card: &setup::Card, report: &setup::Report) -> Option<Repair> {

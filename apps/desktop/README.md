@@ -495,6 +495,9 @@ The probes do not use `hack global status`, which can start Docker. The update
 banner and Doctor's **Upgrade** row open the Upgrade pane for an available
 release. The pane shows the target version and the CLI's install command for
 copying, when available, alongside its readiness check.
+If hackd is newer than the selected CLI, the banner and Doctor's hackd row
+offer a copyable CLI update command or installation guidance. This works
+while release checks are offline.
 The wrong-CLI banner accepts version and replacement evidence as inputs. Its
 examples are fixtures until HACK-2597 supplies that evidence for live checks.
 The fixtures `h17-app-banner-dns`, `h18-banners-sheet`, `h19-doctor`,

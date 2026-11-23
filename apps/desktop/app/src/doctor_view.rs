@@ -20,8 +20,8 @@ use hack_desktop_core::source::DaemonRecovery;
 
 use crate::{
     health_model::{
-        MACHINE_ROWS, Repair, RepairTarget, machine_repair, matches_authored_copy, project_repair,
-        setup_card,
+        CLI_UPDATE_GUIDE, MACHINE_ROWS, Repair, RepairTarget, cli_update_copy, machine_repair,
+        matches_authored_copy, project_repair, setup_card,
     },
     view::HackApp,
 };
@@ -229,9 +229,12 @@ fn machine_action(app: &HackApp, card: &hack_desktop_core::setup::Card) -> Next 
     match &card.remedy {
         Remedy::Doc(url) => Next::Doc(url.clone()),
         Remedy::Copy(cmd)
-            if card.id == "daemon" && matches_authored_copy(report, cmd, &["update"]) =>
+            if card.id == "daemon"
+                && card.status == Status::NeedsAttention
+                && matches_authored_copy(report, cmd, &["update"]) =>
         {
-            Next::Review
+            cli_update_copy(report)
+                .map_or_else(|| Next::Doc(CLI_UPDATE_GUIDE.into()), Next::Command)
         }
         _ => Next::None,
     }

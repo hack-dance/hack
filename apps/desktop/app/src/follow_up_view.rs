@@ -18,7 +18,8 @@ use hack_desktop_ui::{
 use crate::{
     doctor_view::Mark,
     health_model::{
-        FollowUpKind as Kind, Repair, RepairTarget, daemon_repair, machine_repair, setup_card,
+        CLI_UPDATE_GUIDE, FollowUpKind as Kind, Repair, RepairTarget, cli_update_copy,
+        daemon_repair, machine_repair, setup_card,
     },
     view::HackApp,
 };
@@ -30,7 +31,6 @@ pub enum Action {
     Copy(CommandControl),
     Switch(Option<PathBuf>),
     Setup,
-    Review,
     ReviewRelease,
     Doctor,
     Show,
@@ -241,15 +241,24 @@ fn diagnostic(app: &HackApp, list: &ListView, banner: &Banner) -> Option<Notice>
             cli,
             update,
         } => {
-            let action = match update {
-                UpdateSide::Cli => Action::Review,
-                UpdateSide::Daemon => recovery_action(app, DaemonRecovery::Restart),
+            let (summary, action) = match update {
+                UpdateSide::Cli => (
+                    format!(
+                        "hackd {daemon} is newer than CLI {cli}. Update the CLI using its installation method."
+                    ),
+                    cli_update_copy(app.health_report())
+                        .map_or_else(|| Action::Guide(CLI_UPDATE_GUIDE.into()), Action::Copy),
+                ),
+                UpdateSide::Daemon => (
+                    format!("hackd {daemon} and CLI {cli} can’t work together."),
+                    recovery_action(app, DaemonRecovery::Restart),
+                ),
             };
             Some(Notice::new(
                 Kind::DaemonMismatch,
                 Mark::Warning,
                 "Hack versions don’t match",
-                format!("hackd {daemon} and CLI {cli} can’t work together."),
+                summary,
                 action,
             ))
         }
@@ -407,7 +416,7 @@ fn button(
         Action::Copy(_) => (Glyph::Copy, "Copy", true),
         Action::Switch(_) => (Glyph::Restart, "Switch", !busy),
         Action::Setup => (Glyph::Stethoscope, "Finish setup", !busy),
-        Action::Review | Action::ReviewRelease => (Glyph::Upgrade, "Review", true),
+        Action::ReviewRelease => (Glyph::Upgrade, "Review", true),
         Action::Doctor => (Glyph::Stethoscope, "Open Doctor", true),
         Action::Show => (Glyph::Terminal, "Show", true),
         Action::Guide(_) => (Glyph::ExternalLink, "Open guide", true),
@@ -440,10 +449,6 @@ fn button(
                 this.open_doctor(None, cx);
                 this.load_doctor(cx);
             }
-            Action::Review => {
-                this.open_upgrade(cx);
-                this.review_upgrade(cx);
-            }
             Action::ReviewRelease => this.open_upgrade(cx),
             Action::Show => this.show_health_drawer(window, cx),
             Action::Guide(url) => cx.open_url(url),
@@ -461,6 +466,71 @@ mod tests {
     use hack_desktop_core::{fixtures::Fixture, source::FixtureSource};
 
     use super::*;
+
+    #[test]
+    fn a_newer_daemon_offers_an_update_even_when_release_checks_are_offline() {
+        use hack_desktop_core::{source::SourceError, viewmodel::Event};
+
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_kit::NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    show: false,
+                    ..WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    cx.new(|cx| {
+                        let mut app = HackApp::new(
+                            Arc::new(FixtureSource(Fixture::Running)),
+                            false,
+                            window,
+                            cx,
+                        );
+                        let mut setup = hack_desktop_core::setup_fixtures::load("ready").unwrap();
+                        let program = "/opt/hack-dist/bin/hack".to_owned();
+                        setup.cli_program = Some(program.clone());
+                        app.show_setup_now(setup.clone());
+                        app.model.apply(Event::Refreshed(Err(SourceError::DaemonUnavailable {
+                            cli: "5.0.0".into(),
+                            daemon: Some("5.1.0".into()),
+                            message: "hackd is newer than the CLI".into(),
+                            compatible: false,
+                            shared_with: None,
+                        })));
+                        app.health.signals.offline = true;
+                        assert!(app.health.signals.update.is_none());
+
+                        let list = app.model.list();
+                        let notices = observed(&app, &list);
+                        let mismatch = notices.iter().find(|notice| notice.kind == Kind::DaemonMismatch).unwrap();
+                        assert_eq!(mismatch.command.as_deref(), Some("hack update"));
+                        assert!(matches!(
+                            &mismatch.action,
+                            Action::Copy(CommandControl {
+                                availability: CommandAvailability::CopyOnly(spec),
+                                ..
+                            }) if spec.args.ends_with(&[program, "update".into()])
+                        ));
+
+                        setup.cli_program = None;
+                        app.show_setup_now(setup);
+                        assert!(observed(&app, &list).iter().any(|notice|
+                            notice.kind == Kind::DaemonMismatch
+                                && matches!(&notice.action, Action::Guide(url) if url == CLI_UPDATE_GUIDE)
+                        ));
+                        app
+                    })
+                },
+            )
+            .unwrap();
+        });
+    }
 
     #[test]
     fn a_new_daemon_failure_takes_priority_and_recovers_with_a_cached_pass() {

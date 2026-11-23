@@ -1,4 +1,4 @@
-import projectPrivateFiles from "../packages/runtime-core/project-private-files.json";
+import projectPrivateFiles from "./project-private-files.json";
 
 export const HACK_PROJECT_DIR_PRIMARY = ".hack" as const;
 export const HACK_PROJECT_DIR_LEGACY = ".dev" as const;

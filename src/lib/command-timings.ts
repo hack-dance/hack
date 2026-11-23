@@ -1,10 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { closeSync, openSync, writeSync } from "node:fs";
-import type {
-  hostMonotonicUs,
-  timingChannel,
-} from "./native-timing-transport.ts";
 import { holdProcessUntil } from "./process-exit.ts";
 import {
   readTimingLine,
@@ -13,21 +9,11 @@ import {
   type TimingStep,
 } from "./timing-record.ts";
 
-type Transport = {
-  hostMonotonicUs: typeof hostMonotonicUs;
-  timingChannel: typeof timingChannel;
-};
+type Transport = typeof import("./native-timing-transport.ts");
 type RuntimeOptions = Bun.Spawn.SpawnOptions<"ignore" | "pipe", "pipe", "pipe">;
-type Attributes = {
-  service_index?: number;
-  attempt?: number;
-  dropped?: number;
-};
-type Outcome = "ok" | "error" | "cancelled" | "incomplete" | "skipped";
-const context = new AsyncLocalStorage<{
-  trace: CommandTimings;
-  parent: string;
-}>();
+type Outcome = "ok" | "error";
+const MAX_CHILD_RECORDS = 2046;
+const context = new AsyncLocalStorage<CommandTimings>();
 const ZERO_ID = /^0+$/;
 function id(bytes = 8): string {
   let value: string;
@@ -36,284 +22,214 @@ function id(bytes = 8): string {
   } while (ZERO_ID.test(value));
   return value;
 }
-/** One explicitly selected command. No arguments or application values enter records. */
-export class CommandTimings {
-  readonly trace = id(16);
-  private readonly originUnix: number;
-  private readonly originMono: number;
-  private readonly hostClock: boolean;
-  private readonly fallbackStart: number;
-  private readonly prepared = new Set<() => void>();
+
+class CommandTimings {
+  private readonly trace = id(16);
+  private readonly root = id();
+  private readonly originUnix = Date.now() * 1000;
+  private readonly cliSpans = new Set([this.root]);
+  private readonly records: TimingRecord[] = [];
   private readonly children = new Set<Promise<void>>();
-  private failure = false;
-  private closed = false;
+  private dropped = 0;
+
   private readonly fd: number;
   private readonly transport: Transport;
-  constructor(fd: number, transport: Transport) {
+  private readonly originMono: number;
+
+  constructor(fd: number, transport: Transport, originMono: number) {
     this.fd = fd;
     this.transport = transport;
-    this.fallbackStart = performance.now();
-    this.originUnix = Date.now() * 1000;
-    const origin = this.sampleHost();
-    this.hostClock = origin !== undefined;
-    this.originMono = origin ?? 0;
+    this.originMono = originMono;
   }
-  private sampleHost() {
-    try {
-      return this.transport.hostMonotonicUs();
-    } catch {
-      return;
-    }
-  }
+
   private now() {
-    const host = this.hostClock ? this.sampleHost() : undefined;
-    return (
-      host ??
-      this.originMono +
-        Math.round((performance.now() - this.fallbackStart) * 1000)
+    return Math.max(
+      0,
+      (this.transport.hostMonotonicUs() ?? this.originMono) - this.originMono
     );
   }
-  private write(record: TimingRecord) {
-    if (this.closed || this.failure) {
-      return;
-    }
-    try {
-      const line = `${JSON.stringify(record)}\n`;
-      this.failure = writeSync(this.fd, line) !== Buffer.byteLength(line);
-    } catch {
-      this.failure = true;
-    }
-  }
-  begin(step: TimingStep, attrs: Attributes = {}) {
-    const span = id();
-    const current = context.getStore();
-    const parent = current?.trace === this ? current.parent : null;
-    const start_us = Math.max(0, this.now() - this.originMono);
-    let finished = false;
-    return {
-      span,
-      finish: (outcome: Outcome) => {
-        if (finished) {
-          return;
-        }
-        finished = true;
-        this.write({
-          schema: TIMING_SCHEMA,
-          trace: this.trace,
-          span,
-          parent,
-          proc: "cli",
-          clock: this.hostClock ? "host" : "guest",
-          origin_unix_us: this.originUnix,
-          origin_mono_us: this.originMono,
-          step,
-          start_us,
-          dur_us: Math.max(0, this.now() - this.originMono - start_us),
-          outcome,
-          attrs,
-        });
-      },
-    };
-  }
-  async measure<T>(
+
+  private record(
+    span: string,
     step: TimingStep,
-    action: () => Promise<T>,
-    attrs: Attributes = {}
-  ): Promise<T> {
-    const span = this.begin(step, attrs);
-    try {
-      const value = await context.run(
-        { trace: this, parent: span.span },
-        action
-      );
-      span.finish("ok");
-      return value;
-    } catch (error) {
-      span.finish("error");
-      throw error;
+    start_us: number,
+    outcome: Outcome
+  ): TimingRecord {
+    return {
+      schema: TIMING_SCHEMA,
+      trace: this.trace,
+      span,
+      parent: span === this.root ? null : this.root,
+      proc: "cli",
+      clock: "host",
+      origin_unix_us: this.originUnix,
+      origin_mono_us: this.originMono,
+      step,
+      start_us,
+      dur_us: Math.max(0, this.now() - start_us),
+      outcome,
+      attrs: {},
+    };
+  }
+
+  private add(record: TimingRecord) {
+    if (this.records.length < MAX_CHILD_RECORDS) {
+      this.records.push(record);
+    } else {
+      this.dropped++;
     }
   }
-  child(fd = 3) {
-    if (!Number.isSafeInteger(fd) || fd < 3 || fd > 255) {
-      throw new Error("Timing transport requires an extra integer descriptor.");
+
+  /** Only finite subprocesses belong to this collector. The caller owns long-lived children. */
+  spawn(command: string[], options: RuntimeOptions) {
+    const [executable, ...args] = command;
+    const spawn = this.transport.hostMonotonicUs();
+    const span = id();
+    const start = this.now();
+    let channel: ReturnType<Transport["timingChannel"]>;
+    if (
+      spawn === undefined ||
+      !executable ||
+      (options.stdio?.length ?? 0) > 3 ||
+      this.cliSpans.size > MAX_CHILD_RECORDS
+    ) {
+      return Bun.spawn(command, options);
     }
-    if (this.closed) {
-      return;
+    try {
+      channel = this.transport.timingChannel();
+    } catch {
+      this.add(this.record(span, "runtime.request", start, "error"));
+      this.cliSpans.add(span);
+      return Bun.spawn(command, options);
     }
-    const span = this.begin("runtime.request");
-    const channel = this.transport.timingChannel();
-    const spawn =
-      (this.hostClock ? this.sampleHost() : undefined) ??
-      Number.MAX_SAFE_INTEGER + 1;
-    const args = [
-      `--internal-timings=${fd}:${this.trace}:${span.span}:${spawn}:runtime`,
-    ];
-    let pending = true,
-      accepted = 0,
-      dropped = 0;
-    const consume = (line: string) => {
-      const record = readTimingLine(line);
-      if (record?.trace !== this.trace) {
-        return;
-      }
-      if (accepted++ < 2048) {
-        this.write(record);
-      } else {
-        dropped = Math.min(Number.MAX_SAFE_INTEGER, dropped + 1);
-      }
-    };
+    this.cliSpans.add(span);
     const drain = () => {
-      try {
-        channel.drain(consume);
-      } catch {
-        this.failure = true;
-      }
-    };
-    const complete = (outcome: Outcome) => {
-      drain();
-      if (dropped) {
-        context.run({ trace: this, parent: span.span }, () =>
-          this.begin("timings.truncated", { dropped }).finish("ok")
-        );
-      }
-      span.finish(outcome);
-    };
-    const abandon = () => {
-      if (!pending) {
-        return;
-      }
-      pending = false;
-      this.prepared.delete(abandon);
-      try {
-        complete("incomplete");
-      } finally {
-        channel.close();
-      }
-    };
-    this.prepared.add(abandon);
-    return {
-      args,
-      sender: channel.sender,
-      failed: () => {
-        if (!pending) {
+      channel.drain((line) => {
+        if (!line.endsWith("\n")) {
           return;
         }
-        pending = false;
-        this.prepared.delete(abandon);
+        const record = readTimingLine(line);
+        if (
+          record?.trace === this.trace &&
+          record.parent !== null &&
+          record.proc !== "cli" &&
+          !this.cliSpans.has(record.span)
+        ) {
+          this.add(record);
+        }
+      });
+    };
+
+    try {
+      const stdio: NonNullable<RuntimeOptions["stdio"]> = options.stdio
+        ? [...options.stdio]
+        : [options.stdin ?? "ignore", "pipe", "pipe"];
+      stdio[3] = channel.sender;
+      const child = Bun.spawn(
+        [
+          executable,
+          `--internal-timings=3:${this.trace}:${span}:${spawn}:runtime`,
+          ...args,
+        ],
+        {
+          ...options,
+          stdio,
+        }
+      );
+      channel.closeSender();
+      const timer = setInterval(drain, 2);
+      const finish = (outcome: Outcome) => {
+        clearInterval(timer);
         try {
-          complete("error");
+          drain();
+          this.add(this.record(span, "runtime.request", start, outcome));
         } finally {
           channel.close();
         }
-      },
-      started: (exited: Promise<number>) => {
-        if (!pending) {
-          return;
-        }
-        pending = false;
-        this.prepared.delete(abandon);
-        channel.closeSender();
-        const timer = setInterval(drain, 2);
-        const done = exited
-          .then(
-            (code) => complete(code === 0 ? "ok" : "error"),
-            () => complete("error")
-          )
-          .finally(() => {
-            clearInterval(timer);
-            channel.close();
-          })
-          .catch(() => {
-            this.failure = true;
-          });
-        this.children.add(done);
-        const remove = () => {
-          this.children.delete(done);
-        };
-        void done.then(remove, remove);
-        holdProcessUntil(done);
-      },
-    };
-  }
-  async settle() {
-    for (const abandon of this.prepared) {
-      try {
-        abandon();
-      } catch {
-        this.failure = true;
-      }
-    }
-    while (this.children.size) {
-      await Promise.allSettled([...this.children]);
+      };
+      const done = child.exited.then(
+        (code) => finish(code === 0 ? "ok" : "error"),
+        () => finish("error")
+      );
+      this.children.add(done);
+      const remove = () => {
+        this.children.delete(done);
+      };
+      void done.then(remove, remove);
+      holdProcessUntil(done);
+      return child;
+    } catch (error) {
+      channel.close();
+      this.add(this.record(span, "runtime.request", start, "error"));
+      throw error;
     }
   }
-  async finish() {
+
+  async finish(outcome: Outcome) {
+    await Promise.allSettled(this.children);
     try {
-      await this.settle();
-    } finally {
-      if (!this.closed) {
-        this.closed = true;
-        try {
-          closeSync(this.fd);
-        } catch {
-          this.failure = true;
+      for (const record of this.records) {
+        if (record.proc !== "cli" && this.cliSpans.has(record.span)) {
+          continue;
         }
+        writeSync(this.fd, `${JSON.stringify(record)}\n`);
+      }
+      writeSync(
+        this.fd,
+        `${JSON.stringify(this.record(this.root, "command.total", 0, outcome))}\n`
+      );
+      if (this.dropped) {
+        const marker = this.record(id(), "timings.truncated", this.now(), "ok");
+        marker.attrs.dropped = this.dropped;
+        writeSync(this.fd, `${JSON.stringify(marker)}\n`);
+      }
+    } catch {
+      // Timing I/O must preserve the command result.
+    } finally {
+      try {
+        closeSync(this.fd);
+      } catch {
+        // The file is diagnostic only.
       }
     }
   }
 }
-/** Await before returning the command code; child drains additionally register exit holds. */
+
+/** A collector exists only for an explicitly selected command with a host clock. */
 export async function withCommandTimings<T>(
   file: string,
   action: () => Promise<T>
 ): Promise<T> {
-  const transport = await import("./native-timing-transport.ts");
-  const fd = openSync(file, "wx", 0o600);
-  let trace: CommandTimings;
+  let trace: CommandTimings | undefined;
   try {
-    trace = new CommandTimings(fd, transport);
-  } catch (error) {
-    closeSync(fd);
-    throw error;
+    const transport = await import("./native-timing-transport.ts");
+    const origin = transport.hostMonotonicUs();
+    if (origin !== undefined) {
+      trace = new CommandTimings(
+        openSync(file, "wx", 0o600),
+        transport,
+        origin
+      );
+    }
+  } catch {
+    // Unsupported libc, clock, or output file.
   }
+  if (!trace) {
+    return action();
+  }
+  let outcome: Outcome = "error";
   try {
-    return await trace.measure("command.total", async () => {
-      try {
-        return await action();
-      } finally {
-        await trace.settle();
-      }
-    });
+    const result = await context.run(trace, action);
+    outcome = "ok";
+    return result;
   } finally {
-    await trace.finish();
+    await trace.finish(outcome);
   }
 }
-/** Bun calls retain their existing stdin/stdout/stderr contracts. A selected extra fd is added. */
-export function timedNativeSpawn(
-  command: string[],
-  options: RuntimeOptions,
-  fd = 3
-) {
-  const timing = context.getStore()?.trace.child(fd);
-  if (!timing) {
-    return Bun.spawn(command, options);
-  }
-  try {
-    const stdio: NonNullable<RuntimeOptions["stdio"]> = options.stdio
-      ? [...options.stdio]
-      : [options.stdin ?? "ignore", "pipe", "pipe"];
-    stdio[fd] = timing.sender;
-    const child = Bun.spawn(
-      [command[0] ?? "", ...timing.args, ...command.slice(1)],
-      {
-        ...options,
-        stdio,
-      }
-    );
-    timing.started(child.exited);
-    return child;
-  } catch (error) {
-    timing.failed();
-    throw error;
-  }
+
+/** fd 3 must be free. Use this only for a finite child owned by the command. */
+export function timedNativeSpawn(command: string[], options: RuntimeOptions) {
+  return (
+    context.getStore()?.spawn(command, options) ?? Bun.spawn(command, options)
+  );
 }

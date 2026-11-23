@@ -54,6 +54,11 @@ export function readTimingLine(line: string): TimingRecord | undefined {
     !(v.parent === undefined || v.parent === null || id(v.parent, 16)) ||
     v.parent === v.span ||
     !name(v.step) ||
+    typeof v.proc !== "string" ||
+    typeof v.clock !== "string" ||
+    typeof v.outcome !== "string" ||
+    (v.cached !== undefined && (v.cached !== true || v.outcome !== "ok")) ||
+    (v.attrs !== undefined && !isRecord(v.attrs)) ||
     !number(v.origin_unix_us) ||
     !number(v.origin_mono_us) ||
     !number(v.start_us) ||
@@ -95,9 +100,7 @@ export function readTimingLine(line: string): TimingRecord | undefined {
       "incomplete",
       "skipped",
     ]),
-    ...(v.cached === true && v.outcome === "ok"
-      ? { cached: true as const }
-      : {}),
+    ...(v.cached && { cached: v.cached }),
     ...(name(v.code) ? { code: v.code } : {}),
     attrs,
   };

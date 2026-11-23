@@ -1,5 +1,5 @@
 /** Loaded only for explicitly requested timings; no filesystem/socket paths. */
-import { dlopen, ptr, read, FFIType as T } from "bun:ffi";
+import { dlopen, ptr, FFIType as T } from "bun:ffi";
 
 const mac = process.platform === "darwin";
 const HOST_CLOCK = mac ? 8 : 1; // CLOCK_UPTIME_RAW / CLOCK_MONOTONIC
@@ -9,7 +9,10 @@ const F_SETFD = 2,
   FD_CLOEXEC = 1,
   F_GETFL = 3,
   F_SETFL = 4;
+const F_GETFD = 1;
 const O_NONBLOCK = mac ? 4 : 2048;
+const MSG_DONTWAIT = mac ? 0x80 : 0x40;
+const stackVararg = mac && process.arch === "arm64";
 const SOL_SOCKET = mac ? 0xff_ff : 1,
   SO_RCVBUF = mac ? 0x10_02 : 8;
 const { symbols: c } = dlopen(
@@ -17,20 +20,22 @@ const { symbols: c } = dlopen(
   {
     clock_gettime: { args: [T.i32, T.ptr], returns: T.i32 },
     socketpair: { args: [T.i32, T.i32, T.i32, T.ptr], returns: T.i32 },
-    fcntl: { args: [T.i32, T.i32, T.i32], returns: T.i32 },
+    fcntl: {
+      args: new Array<T>(stackVararg ? 9 : 3).fill(T.i32),
+      returns: T.i32,
+    },
     setsockopt: { args: [T.i32, T.i32, T.i32, T.ptr, T.u32], returns: T.i32 },
     getsockopt: { args: [T.i32, T.i32, T.i32, T.ptr, T.ptr], returns: T.i32 },
     recv: { args: [T.i32, T.ptr, T.u64, T.i32], returns: T.i64 },
     close: { args: [T.i32], returns: T.i32 },
   }
 );
-const errnoName = mac ? "__error" : "__errno_location";
-const errno = dlopen(mac ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
-  [errnoName]: { args: [], returns: T.ptr },
-}).symbols[errnoName];
-function interrupted() {
-  const address = errno?.();
-  return address !== null && address !== undefined && read.i32(address) === 4;
+// Apple arm64 passes the variadic argument on the stack. Fill the eight
+// integer registers in the fixed FFI signature to place it there.
+function fcntl(fd: number, command: number, value = 0) {
+  return stackVararg
+    ? c.fcntl(fd, command, 0, 0, 0, 0, 0, 0, value)
+    : c.fcntl(fd, command, value);
 }
 export function hostMonotonicUs(): number | undefined {
   // All supported CLI targets have a 64-bit timespec (two 64-bit longs).
@@ -64,12 +69,17 @@ export function timingChannel() {
     }
   };
   try {
+    const flags = fcntl(receiver, F_GETFL);
     if (
-      c.fcntl(receiver, F_SETFD, FD_CLOEXEC) < 0 ||
-      c.fcntl(sender, F_SETFD, FD_CLOEXEC) < 0 ||
-      c.fcntl(receiver, F_SETFL, c.fcntl(receiver, F_GETFL, 0) | O_NONBLOCK) < 0
+      flags < 0 ||
+      fcntl(receiver, F_SETFD, FD_CLOEXEC) < 0 ||
+      fcntl(sender, F_SETFD, FD_CLOEXEC) < 0 ||
+      fcntl(receiver, F_SETFL, flags | O_NONBLOCK) < 0 ||
+      fcntl(receiver, F_GETFD) !== FD_CLOEXEC ||
+      fcntl(sender, F_GETFD) !== FD_CLOEXEC ||
+      fcntl(receiver, F_GETFL) !== (flags | O_NONBLOCK)
     ) {
-      throw new Error("Timing socket setup failed; values omitted.");
+      throw new Error("Timing socket setup failed.");
     }
     const size = new Int32Array([256 * 1024]);
     if (c.setsockopt(receiver, SOL_SOCKET, SO_RCVBUF, ptr(size), 4) !== 0) {
@@ -97,12 +107,10 @@ export function timingChannel() {
       if (closed) {
         return;
       }
-      // The descriptor itself is O_NONBLOCK; MSG_DONTWAIT alone is insufficient on Mac.
       for (let i = 0; i < 4096; i++) {
-        const count = Number(c.recv(receiver, ptr(bytes), bytes.length, 0));
-        if (count < 0 && interrupted()) {
-          continue;
-        }
+        const count = Number(
+          c.recv(receiver, ptr(bytes), bytes.length, MSG_DONTWAIT)
+        );
         if (count <= 0) {
           break;
         }

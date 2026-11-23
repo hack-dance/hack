@@ -3037,7 +3037,7 @@ const contracts: readonly ModelContract[] = [
       // the owner never retires when its boot ends, the previous-boot archive
       // cannot prove quiescence, or down --recover does not start a stopped pool
       // for a pending finalization. Each strands the recovered run's lease.
-      { name: "https", negative: false, states: 292 },
+      { name: "https", negative: false, states: 608 },
       {
         name: "https-no-retire",
         negative: true,
@@ -3082,6 +3082,10 @@ const contracts: readonly ModelContract[] = [
             fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
           },
           {
+            action: "TimeWaitEnds",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+          {
             action: "OwnerRetire",
             fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
           },
@@ -3098,8 +3102,33 @@ const contracts: readonly ModelContract[] = [
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
           {
+            action: "TimeWaitEnds",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+          {
             action: "PoolRecover",
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+        ],
+      },
+      {
+        // HACK-2550: the archive's port claim binds with address reuse so the
+        // retired Caddy's TIME_WAIT does not block it; binding the wildcard alone,
+        // without the exact claim of every local address, it would archive over
+        // a live specific-address listener.
+        name: "reuse-no-check",
+        negative: true,
+        invariant: "NoArchiveOverListener",
+        action: "Finalize",
+        fields: ['port = "listener"', "overListener = TRUE", 'https = "none"'],
+        alternativeWitnesses: [
+          {
+            action: "FinishCompleted",
+            fields: [
+              'port = "listener"',
+              "overListener = TRUE",
+              'https = "none"',
+            ],
           },
         ],
       },

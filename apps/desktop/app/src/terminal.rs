@@ -339,6 +339,113 @@ fn note_core(text: &str) -> std::io::Result<TerminalCore> {
     TerminalCore::note(text, NOTE_SCROLLBACK)
 }
 
+#[cfg(feature = "screenshots")]
+fn service_fixture_look(dark: bool) -> GhosttyLook {
+    use hack_desktop_term::color::Rgb;
+
+    let mut look = GhosttyLook {
+        background: Rgb::from_hex(if dark { "0d1117" } else { "ffffff" }),
+        foreground: Rgb::from_hex(if dark { "e6edf3" } else { "171717" }),
+        padding_x: Some((12., 12.)),
+        padding_y: Some((10., 10.)),
+        ..Default::default()
+    };
+    look.palette.insert(
+        2,
+        if dark {
+            Rgb::new(63, 185, 80)
+        } else {
+            Rgb::new(0, 119, 0)
+        },
+    );
+    look
+}
+
+/// A private checkout and a fake Hack CLI that exits on the first shell
+/// launch and opens an interactive PTY on the next.
+#[cfg(feature = "screenshots")]
+pub(crate) struct ServiceShellFixture(PathBuf);
+
+#[cfg(feature = "screenshots")]
+impl ServiceShellFixture {
+    pub(crate) fn new() -> Self {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!("hack-service-shell-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .expect("create private shell fixture");
+        let fixture = Self(root);
+        std::fs::create_dir(fixture.0.join(".hack")).unwrap();
+        std::fs::write(fixture.0.join(".hack/docker-compose.yml"), "services: {}\n").unwrap();
+        let cli = fixture.0.join("hack");
+        std::fs::write(
+            &cli,
+            concat!(
+                "#!/bin/sh\n[ \"$1\" = exec ] || exit 0\n",
+                "if [ ! -e .shell-exited ]; then\n",
+                "  : > .shell-exited\n",
+                "  printf '\\033[32m/app\\033[0m # exit\\n'\n",
+                "  exit 0\n",
+                "fi\n",
+                "printf '\\033[32m/app\\033[0m # '\n",
+                "IFS= read -r line\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fixture
+    }
+
+    pub(crate) fn install(
+        &self,
+        app: &mut HackApp,
+        fixture: hack_desktop_core::fixtures::Fixture,
+        cx: &App,
+    ) {
+        use hack_desktop_core::runner::CliRunner;
+        use hack_desktop_core::source::LiveSource;
+        use hack_desktop_core::viewmodel::Event;
+
+        let key = app
+            .model
+            .selected_key()
+            .expect("select the shell fixture first");
+        let mut snapshot = hack_desktop_core::fixtures::snapshot(fixture).unwrap();
+        let row = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|row| row.name == key.project)
+            .unwrap();
+        let root = Some(self.0.to_str().unwrap().to_owned());
+        if let Some(branch) = key.branch {
+            let instance = row
+                .branch_runtime
+                .iter_mut()
+                .find(|b| b.branch == branch)
+                .unwrap();
+            instance.owner = Some(root);
+        } else {
+            row.repo_root = root;
+        }
+        app.model.apply(Event::Refreshed(Ok(snapshot)));
+        app.source =
+            std::sync::Arc::new(LiveSource::new(CliRunner::new(self.0.join("hack")), None));
+        app.panels.look = Some(service_fixture_look(
+            app.ui(cx).p.mode == hack_desktop_ui::tokens::Mode::Dark,
+        ));
+    }
+}
+
+#[cfg(feature = "screenshots")]
+impl Drop for ServiceShellFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn logs_should_follow(detail: &DetailView, scope: Option<&ScopedLogs>) -> bool {
     scope.map_or_else(
         || detail.state.is_active(),
@@ -1406,7 +1513,6 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use hack_desktop_term::color::Rgb;
         self.service_pane.tab = ServiceTab::Terminal;
         self.logs.close();
         self.ensure_panel(window, cx);
@@ -1414,22 +1520,7 @@ impl HackApp {
             return;
         };
         let sessions = self.panels.by_key[&detail.key].sessions.clone();
-        let dark = self.ui(cx).p.mode == hack_desktop_ui::tokens::Mode::Dark;
-        let mut look = GhosttyLook {
-            background: Rgb::from_hex(if dark { "101418" } else { "ffffff" }),
-            foreground: Rgb::from_hex(if dark { "e5ebef" } else { "171717" }),
-            padding_x: Some((12., 12.)),
-            padding_y: Some((10., 10.)),
-            ..Default::default()
-        };
-        look.palette.insert(
-            2,
-            if dark {
-                Rgb::new(63, 190, 80)
-            } else {
-                Rgb::new(0, 119, 0)
-            },
-        );
+        let look = service_fixture_look(self.ui(cx).p.mode == hack_desktop_ui::tokens::Mode::Dark);
         self.panels.error = None;
         for (service, transcript) in [
             (
@@ -2311,43 +2402,11 @@ mod window_tests {
 
     #[test]
     fn reopening_a_service_shell_reuses_the_live_tab_and_leaves_ended_scrollback() {
-        use hack_desktop_core::runner::CliRunner;
-        use hack_desktop_core::source::LiveSource;
-        use hack_desktop_core::viewmodel::Event;
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-
-        let root = std::env::temp_dir().join(format!("hack-service-shell-{}", std::process::id()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&root)
-            .unwrap();
-        std::fs::create_dir(root.join(".hack")).unwrap();
-        std::fs::write(root.join(".hack/docker-compose.yml"), "services: {}\n").unwrap();
-        let cli = root.join("hack");
-        std::fs::write(
-            &cli,
-            concat!(
-                "#!/bin/sh\n[ \"$1\" = exec ] || exit 0\n",
-                "if [ ! -e .shell-exited ]; then : > .shell-exited; exit 0; fi\n",
-                "IFS= read -r line\n",
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
-
+        let fixture = ServiceShellFixture::new();
         let (mut cx, window, app) = open(false);
         cx.update_window(window, |_, window, cx| {
             app.update(cx, |app, cx| {
-                let mut snapshot = fixtures::snapshot(Fixture::Running).unwrap();
-                let row = snapshot
-                    .projects
-                    .projects
-                    .iter_mut()
-                    .find(|row| row.name == fixtures::selected(Fixture::Running))
-                    .unwrap();
-                row.repo_root = Some(root.to_str().unwrap().to_owned());
-                app.model.apply(Event::Refreshed(Ok(snapshot)));
-                app.source = Arc::new(LiveSource::new(CliRunner::new(cli), None));
+                fixture.install(app, Fixture::Running, cx);
                 app.open_service_shell("api", window, cx);
             });
             let key = app.read(cx).model.selected_key().unwrap();
@@ -2374,7 +2433,6 @@ mod window_tests {
             app.update(cx, |app, cx| app.close_all_terminals(window, cx));
         })
         .unwrap();
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

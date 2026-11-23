@@ -2052,7 +2052,7 @@ mod tests {
 
     #[test]
     fn footer_distinguishes_missing_unsupported_and_unreachable() {
-        use hack_desktop_core::setup::{Platform, Report, derive};
+        use hack_desktop_core::{setup::Report, setup_fixtures};
 
         let empty = Report::default();
         let label = |list, report| disconnected_status(list, report).unwrap().1;
@@ -2069,14 +2069,7 @@ mod tests {
 
         let down = list(Fixture::DaemonDown);
         assert_eq!(label(&down, &empty), "Couldn't check hackd");
-        let off = derive(
-            Ok("5.0.0"),
-            None,
-            None,
-            Some(&serde_json::json!({"running":false})),
-            &[],
-            Platform::Mac,
-        );
+        let off = setup_fixtures::load("partial").expect("stopped daemon fixture");
         assert_eq!(label(&down, &off), "hackd not running");
     }
 

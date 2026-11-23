@@ -21,6 +21,7 @@ pub struct ConfigReport {
     pub checkout: Option<String>,
     pub branch: Option<String>,
     pub overlay: Option<String>,
+    pub default_overlay: Option<String>,
     pub overlays: Vec<String>,
     pub writable: bool,
 }

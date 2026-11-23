@@ -289,10 +289,16 @@ impl HackApp {
             EditSection::Services => self.config_services_form(report, ui, window, cx),
             EditSection::Env => {
                 let enabled = self.field_enabled(report, "1");
-                let field = self.project_text(
-                    report,
-                    "env.defaultOverlay",
-                    "default",
+                let path = "env.defaultOverlay";
+                let original = report
+                    .default_overlay
+                    .as_deref()
+                    .or_else(|| setting(&report.project, path).as_str())
+                    .unwrap_or("default")
+                    .to_owned();
+                let field = self.field_control(
+                    Field::Project(path.into()),
+                    original,
                     enabled,
                     ui,
                     window,
@@ -1409,6 +1415,38 @@ mod tests {
 
     #[test]
     fn the_snapshot_backend_defaults_to_loki_and_can_be_changed_to_compose() {
+        assert_project_field_can_stage(
+            ConfigReport::default(),
+            EditSection::Project,
+            "logs.snapshot_backend",
+            "loki",
+            "compose",
+        );
+    }
+
+    #[test]
+    fn the_default_overlay_field_uses_the_resolved_project_default() {
+        assert_project_field_can_stage(
+            ConfigReport {
+                project: serde_json::json!({ "defaultEnvConfig": "qa" }),
+                default_overlay: Some("qa".into()),
+                overlay: Some("staging".into()),
+                ..Default::default()
+            },
+            EditSection::Env,
+            "env.defaultOverlay",
+            "qa",
+            "default",
+        );
+    }
+
+    fn assert_project_field_can_stage(
+        mut report: ConfigReport,
+        section: EditSection,
+        path: &str,
+        initial: &str,
+        edited: &str,
+    ) {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(NoopTextSystem::new()),
             Arc::new(hack_desktop_ui::icons::Assets),
@@ -1424,47 +1462,39 @@ mod tests {
                 })
             })
             .expect("open a headless window");
-        let report = ConfigReport {
-            state: ConfigState::Ready,
-            project: serde_json::json!({ "logs": {} }),
-            layers: vec![ConfigLayer {
-                id: "1".into(),
-                file: ".hack/hack.config.json".into(),
-                kind: "project".into(),
-                ownership: "shared".into(),
-                active: true,
-                writable: true,
-                revision: "fixture".into(),
-                exists: true,
-                source: None,
-                hidden: false,
-                source_writable: true,
-                inherited: None,
-                overlay: None,
-            }],
+        report.state = ConfigState::Ready;
+        report.writable = true;
+        report.layers.push(ConfigLayer {
+            id: "1".into(),
+            file: ".hack/hack.config.json".into(),
+            kind: "project".into(),
+            ownership: "shared".into(),
+            active: true,
             writable: true,
-            ..Default::default()
-        };
-        let field_id = "project/logs.snapshot_backend";
+            revision: "fixture".into(),
+            exists: true,
+            source: None,
+            hidden: false,
+            source_writable: true,
+            inherited: None,
+            overlay: None,
+        });
+        let field_id = format!("project/{path}");
         cx.update_window(window, |_, window, cx| {
             app.update(cx, |app, cx| {
-                app.config_project_form(&report, &app.ui(cx), window, cx);
-                let original = app.config.inputs[field_id].0.read(cx).value();
-                assert_eq!(original.as_ref(), "loki");
-                Field::Project("logs.snapshot_backend".into()).stage(
-                    app,
-                    "compose".into(),
-                    &original,
-                    cx,
-                );
+                app.config.edit_section = section;
+                app.config_form(&report, &app.ui(cx), window, cx);
+                let original = app.config.inputs[&field_id].0.read(cx).value();
+                assert_eq!(original.as_ref(), initial);
+                Field::Project(path.into()).stage(app, edited.into(), &original, cx);
             });
         })
-        .expect("edit the snapshot backend");
+        .expect("edit the project field");
         cx.update(|cx| {
             assert!(matches!(
-                app.read(cx).config.draft.changes.get(field_id),
-                Some(ConfigChange::Project { layer, path, value })
-                    if layer == "1" && path == "logs.snapshot_backend" && value == "compose"
+                app.read(cx).config.draft.changes.get(&field_id),
+                Some(ConfigChange::Project { layer, path: staged_path, value })
+                    if layer == "1" && staged_path == path && value == edited
             ));
         });
     }

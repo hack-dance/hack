@@ -323,10 +323,11 @@ async function configLayers(opts: {
   readonly projectLayer: LayerSnapshot;
   readonly branch: string | null;
   readonly overlay: string | null | undefined;
+  readonly defaultOverlay: string | null;
   readonly config: ProjectConfig;
 }) {
   const p = opts.project;
-  const defaultEnv = resolveProjectDefaultEnvOverlay(opts.config);
+  const defaultEnv = opts.defaultOverlay;
   const inherited = await resolvePrimaryLocalProjectDir({
     ...p,
     inheritLocal: opts.config.worktree?.inheritLocal !== false,
@@ -501,6 +502,7 @@ export async function captureConfigEditor(opts: {
     await assertConfigEnvReadable(project.projectRoot, null);
   }
   const cfg = parseProjectConfigRecord(raw ?? {}, projectLayer.file);
+  const defaultOverlay = resolveProjectDefaultEnvOverlay(cfg);
   const branch = (
     await resolveEffectiveBranch({
       explicitBranch,
@@ -532,6 +534,7 @@ export async function captureConfigEditor(opts: {
           projectLayer,
           branch,
           overlay: requestedOverlay,
+          defaultOverlay,
           config: cfg,
         });
   return {
@@ -540,6 +543,7 @@ export async function captureConfigEditor(opts: {
     projectName: projectNameForConfig(cfg, project.projectRoot),
     branch,
     baseHosts,
+    defaultOverlay: raw === null ? null : (defaultOverlay ?? "default"),
     explicitBranch,
     requestedOverlay,
   };
@@ -787,6 +791,7 @@ export function showConfigEditor(snapshot: ConfigSnapshot | null) {
     ),
     branch: snapshot?.branch ?? null,
     overlay: snapshot?.overlay ?? null,
+    default_overlay: snapshot?.defaultOverlay ?? null,
     overlays: snapshot?.overlays ?? [],
     checkout: snapshot?.project.projectRoot ?? null,
     writable: layers.some((layer) => layer.writable),

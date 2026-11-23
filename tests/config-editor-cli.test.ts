@@ -1332,6 +1332,48 @@ test("an identical replacement layer directory invalidates a revision", async ()
   expect(await readFile(projectPath, "utf8")).toBe(original);
 });
 
+test("show resolves legacy project defaults independently of the selected overlay", async () => {
+  const f = await fixture();
+  const projectPath = join(f.project, "hack.config.json");
+  for (const config of [
+    { defaultEnvConfig: " QA " },
+    { default_env_config: "qa" },
+    { env: { default_overlay: "qa" }, defaultEnvConfig: "staging" },
+  ]) {
+    await writeFile(projectPath, JSON.stringify(config));
+    const preview = await show(f.root, f.main, "--env", "default");
+    expect(preview.default_overlay).toBe("qa");
+    expect(preview.overlay).toBeNull();
+    expect(preview.project).toEqual(config);
+  }
+  const implicit = await show(f.root, f.main);
+  expect(implicit.overlay).toBe("qa");
+  const saved = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["apply"],
+    patch: {
+      base: bases(implicit),
+      changes: [
+        {
+          layer: "1",
+          kind: "project",
+          path: "env.defaultOverlay",
+          value: "default",
+        },
+      ],
+    },
+  });
+  expect(saved.payload.ok).toBe(true);
+  const base = await show(f.root, f.main);
+  expect(base.default_overlay).toBe("default");
+  expect(base.overlay).toBeNull();
+  expect(base.project.env).toEqual({
+    defaultOverlay: "default",
+    default_overlay: "qa",
+  });
+});
+
 test("validation reads newly selected layers and honors an explicit selection", async () => {
   const f = await fixture();
   const checkOverlay = async (value: string, args: string[] = []) =>

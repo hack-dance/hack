@@ -162,6 +162,7 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
         layers: [],
         branch: null,
         overlay: null,
+        default_overlay: null,
         overlays: [],
         checkout: null,
         writable: false,

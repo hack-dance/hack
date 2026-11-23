@@ -197,8 +197,12 @@ or withheld. Use the Env layers grid or the existing env writer to edit
 env values.
 
 The default overlay uses the same names as `--env`. Use `default` to select
-base layers. Config honors the env migration journal for the selected
-checkout and any inherited layers. On the first env write to a project
+base layers. `default_overlay` reports the resolved project default, including
+legacy keys, independently of the selected `overlay`. It is `"default"` for
+base layers and `null` when the checkout has no Hack project or its project
+settings are unreadable.
+Config honors the env migration journal for the selected checkout and any
+inherited layers. On the first env write to a project
 with a legacy contract, apply migrates that contract through the same
 path as `hack env add`. Validation checks the patch against declared legacy
 dotenv inputs and project settings without decrypting the legacy store. Apply

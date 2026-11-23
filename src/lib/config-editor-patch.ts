@@ -1,7 +1,11 @@
-import { dirname } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { applyEdits, findNodeAtLocation, modify } from "jsonc-parser";
 import { z } from "zod";
-import { HackCliError, type HackErrorCode } from "./cli-result.ts";
+import {
+  ClosedCliError,
+  HackCliError,
+  type HackErrorCode,
+} from "./cli-result.ts";
 import {
   type ConfigIssue,
   changeComposeRoute,
@@ -9,7 +13,7 @@ import {
   parseComposeSource,
   parseRouteAddress,
   updateComposeServiceField,
-  validComposeShortPort,
+  validComposePort,
   validHost,
   validPort,
 } from "./config-editor-compose.ts";
@@ -32,6 +36,13 @@ import {
 } from "./config-editor-source.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
+  applyEnvMigration,
+  type ImplicitEnvMigrationPlan,
+  prepareImplicitEnvMigration,
+} from "./env-migration.ts";
+import { migrationDigest } from "./env-migration-files.ts";
+import { envMigrationSnapshots } from "./env-migration-snapshot.ts";
+import {
   AtomicWriteConflictError,
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
@@ -41,13 +52,10 @@ import {
   ENV_CONFIG_NAME_MAX_LENGTH,
   parseEnvConfigSelection,
   parseProjectConfigRecord,
-  resolveEffectiveProjectName,
 } from "./project.ts";
 import {
   discoverComposeServiceNames,
-  finishImplicitLegacyEnvMigration,
   isValidProjectEnvScopeName,
-  migrateLegacyProjectEnv,
   mutateProjectEnvLayer,
   type ProjectEnvLayerChange,
   projectEnvConfigExistsForMutation,
@@ -299,7 +307,7 @@ function prepareService(
       Array.isArray(change.value) &&
       change.value.every((value) =>
         change.field === "ports"
-          ? validComposeShortPort(value)
+          ? validComposePort(value)
           : typeof value === "string" && Object.hasOwn(source.services, value)
       )
     )
@@ -594,29 +602,40 @@ export async function assessConfigPatch(
   snapshot: ConfigSnapshot,
   patch: Patch
 ) {
-  const { files, issues } = preparePatch(snapshot, patch);
+  const initial = preparePatch(snapshot, patch);
+  const { issues } = initial;
+  const invalid = {
+    files: initial.files,
+    previews: {},
+    prospective: snapshot,
+    migration: null,
+  };
   if (issues.some((issue) => issue.code === "E_CONFLICT")) {
-    return { files, issues, previews: {}, prospective: snapshot };
+    return { ...invalid, issues };
   }
   // Bound staged text before deriving a new selection from it.
-  const sizeIssues = layerSizeIssues(snapshot, files, false);
+  const sizeIssues = layerSizeIssues(snapshot, initial.files, false);
   if (sizeIssues.length > 0) {
-    return {
-      files,
-      issues: [...issues, ...sizeIssues],
-      previews: {},
-      prospective: snapshot,
-    };
+    return { ...invalid, issues: [...issues, ...sizeIssues] };
+  }
+  const { migration, issue } =
+    issues.length === 0
+      ? await stageConfigMigration(snapshot, initial.files)
+      : { migration: null, issue: undefined };
+  if (issue) {
+    return { ...invalid, issues: [...issues, issue] };
+  }
+  const files = migration
+    ? prepareAfterMigration({ files: initial.files, migration, patch, issues })
+    : initial.files;
+  const projectSizes = migration ? layerSizeIssues(snapshot, files, false) : [];
+  if (projectSizes.length > 0) {
+    return { ...invalid, issues: [...issues, ...projectSizes] };
   }
   const prospective = await prospectiveSnapshot(snapshot, files);
   const envSizes = layerSizeIssues(prospective, files, true);
   if (envSizes.length > 0) {
-    return {
-      files,
-      issues: [...issues, ...envSizes],
-      previews: {},
-      prospective,
-    };
+    return { ...invalid, issues: [...issues, ...envSizes] };
   }
   const next = showConfigEditor(prospective);
   const previews = Object.fromEntries(
@@ -627,14 +646,144 @@ export async function assessConfigPatch(
   return {
     files,
     prospective,
+    migration,
     previews,
     issues: [...issues, ...sourceIssues(files), ...next.issues],
   };
 }
 
+function layerDestination(layer: LayerSnapshot): string {
+  return resolve(
+    layer.directory?.path ?? dirname(layer.file),
+    basename(layer.file)
+  );
+}
+
+async function stageConfigMigration(
+  snapshot: ConfigSnapshot,
+  files: ReadonlyMap<string, Prepared>
+): Promise<{
+  migration: ImplicitEnvMigrationPlan | null;
+  issue?: ConfigIssue;
+}> {
+  const env = [...files.values()].find(({ layer }) => layer.kind === "env");
+  if (!env) {
+    return { migration: null };
+  }
+  const { project } = snapshot;
+  try {
+    await assertConfigLayerDirectory(env.layer);
+    if (
+      (await projectEnvConfigExistsForMutation(project)) ||
+      !(await readHackEnvContract(project)).exists
+    ) {
+      return { migration: null };
+    }
+    const migration = await prepareImplicitEnvMigration({
+      ...project,
+      projectName: snapshot.projectName,
+      serviceNames: await discoverComposeServiceNames({
+        composeFile: project.composeFile,
+      }),
+    });
+    await assertConfigMigrationInputs(snapshot, migration);
+    return { migration };
+  } catch (error) {
+    const conflict = error instanceof AtomicWriteConflictError;
+    return {
+      migration: null,
+      issue: {
+        layer: env.layer.id,
+        path: [],
+        line: null,
+        code: conflict ? "E_CONFLICT" : "E_CONFIG_INVALID",
+        message: conflict
+          ? "Changed outside Hack. Reload before saving."
+          : configErrorMessage(
+              error,
+              "Could not prepare the legacy env migration."
+            ),
+      },
+    };
+  }
+}
+
+function configErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof ClosedCliError || error instanceof HackCliError
+    ? error.message
+    : fallback;
+}
+
+async function assertConfigMigrationInputs(
+  snapshot: ConfigSnapshot,
+  migration: ImplicitEnvMigrationPlan
+) {
+  // The patch can carry only the env base, but migration also uses the
+  // project identity and the declared services from this snapshot.
+  for (const layer of snapshot.layers.filter(
+    ({ id }) => id === "1" || id === "2"
+  )) {
+    const observed = migration.sources.find(
+      (source) => source.path === layerDestination(layer)
+    );
+    const expected =
+      layer.text === null ? null : migrationDigest(Buffer.from(layer.text));
+    const changed = observed
+      ? observed.sha256 !== expected
+      : (await readConfigLayer(layer.file)) !== layer.text;
+    if (changed) {
+      throw new AtomicWriteConflictError();
+    }
+  }
+  const { prepared } = migration;
+  for (const file of prepared.files) {
+    if (
+      ["layer", "local_layer", "config", "compose"].includes(file.kind) &&
+      Buffer.byteLength(prepared.payload(file.path)) > CONFIG_SOURCE_LIMIT
+    ) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message: "A migrated config file exceeds the 512 KiB limit.",
+      });
+    }
+  }
+}
+
+function prepareAfterMigration(opts: {
+  readonly files: Map<string, Prepared>;
+  readonly migration: ImplicitEnvMigrationPlan;
+  readonly patch: Patch;
+  readonly issues: ConfigIssue[];
+}): Map<string, Prepared> {
+  const { prepared } = opts.migration;
+  const outputs = new Set(prepared.files.map((file) => file.path));
+  for (const file of opts.files.values()) {
+    const destination = layerDestination(file.layer);
+    if (!outputs.has(destination)) {
+      continue;
+    }
+    const baseline = prepared.payload(destination);
+    const migrated = { ...file, layer: { ...file.layer, text: baseline } };
+    opts.files.set(file.layer.id, migrated);
+    if (file.source) {
+      continue;
+    }
+    migrated.text = baseline;
+    for (const change of opts.patch.changes) {
+      if (change.kind === "project" && change.layer === file.layer.id) {
+        const issue = prepareProjectField(change, migrated);
+        if (issue) {
+          opts.issues.push(issue);
+        }
+      }
+    }
+  }
+  return opts.files;
+}
+
 /** Validate a whole patch before effect and publish each affected file once. */
 export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
-  const { files, issues, prospective } = await assessConfigPatch(
+  const { files, issues, prospective, migration } = await assessConfigPatch(
     snapshot,
     patch
   );
@@ -648,17 +797,9 @@ export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
   }
   const changed: string[] = [];
   try {
-    // Preflight every compared file before the first commit. Writers also
-    // recheck the actual bytes inside their per-file lock at commit time.
-    for (const layer of snapshot.layers) {
-      if (patch.base[layer.id] !== undefined) {
-        if (layer.directory && layer.ownership !== "generated") {
-          await assertConfigLayerDirectory(layer);
-        }
-        if ((await readConfigLayer(layer.file)) !== layer.text) {
-          throw new AtomicWriteConflictError();
-        }
-      }
+    await assertConfigBaseUnchanged(snapshot, patch.base);
+    if (migration) {
+      await publishConfigMigration(snapshot, migration, changed);
     }
     await publishPreparedLayers({ snapshot: prospective, files, changed });
   } catch (error) {
@@ -696,6 +837,24 @@ export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
   };
 }
 
+async function assertConfigBaseUnchanged(
+  snapshot: ConfigSnapshot,
+  base: Patch["base"]
+): Promise<void> {
+  // Recheck every supplied dependency before the first commit. The
+  // individual writers recheck again at their locked commit points.
+  for (const layer of snapshot.layers) {
+    if (base[layer.id] === undefined) {
+      continue;
+    }
+    if (layer.directory && layer.ownership !== "generated") {
+      await assertConfigLayerDirectory(layer);
+    }
+    if ((await readConfigLayer(layer.file)) !== layer.text) {
+      throw new AtomicWriteConflictError();
+    }
+  }
+}
 async function publishPreparedLayers(opts: {
   readonly snapshot: ConfigSnapshot;
   readonly files: Map<string, Prepared>;
@@ -703,27 +862,13 @@ async function publishPreparedLayers(opts: {
 }) {
   const { snapshot, files, changed } = opts;
   const ordered = [...files.values()];
-  const env = ordered.filter((file) => file.layer.kind === "env");
-  for (const file of ordered.filter((file) => file.layer.kind !== "env")) {
-    if (await writePreparedLayer(snapshot, file, file.layer.text)) {
-      changed.push(file.layer.id);
-    }
-  }
-  if (env.length === 0) {
-    return;
-  }
-  const migrated = await migrateConfigEnv(snapshot, env[0]?.layer);
-  for (const layer of snapshot.layers) {
-    if (migrated.has(layer.file) && !changed.includes(layer.id)) {
-      changed.push(layer.id);
-    }
-  }
-  for (const file of env) {
-    const expected = migrated.has(file.layer.file)
-      ? await readConfigLayer(file.layer.file)
-      : file.layer.text;
+  // Apply project policy before the env writer evaluates inheritance for unsets.
+  for (const file of [
+    ...ordered.filter((file) => file.layer.kind !== "env"),
+    ...ordered.filter((file) => file.layer.kind === "env"),
+  ]) {
     if (
-      (await writePreparedLayer(snapshot, file, expected)) &&
+      (await writePreparedLayer(snapshot, file)) &&
       !changed.includes(file.layer.id)
     ) {
       changed.push(file.layer.id);
@@ -736,35 +881,33 @@ function inheritedEnvDir(snapshot: ConfigSnapshot): string | null {
   return inherited ? dirname(inherited.file) : null;
 }
 
-async function migrateConfigEnv(
+async function publishConfigMigration(
   snapshot: ConfigSnapshot,
-  layer?: LayerSnapshot
+  migration: ImplicitEnvMigrationPlan,
+  changed: string[]
 ) {
-  const { project } = snapshot;
-  await assertConfigEnvReadable(project.projectRoot, inheritedEnvDir(snapshot));
-  if (layer) {
-    await assertConfigLayerDirectory(layer);
+  const projectLayer = snapshot.layers.find((layer) => layer.id === "1");
+  if (!projectLayer) {
+    throw new AtomicWriteConflictError();
   }
-  if (
-    (await projectEnvConfigExistsForMutation(project)) ||
-    !(await readHackEnvContract(project)).exists
-  ) {
-    return new Set<string>();
-  }
-  const migrated = await migrateLegacyProjectEnv({
-    ...project,
-    projectName: await resolveEffectiveProjectName(project),
-    serviceNames: await discoverComposeServiceNames({
-      composeFile: project.composeFile,
-    }),
-    materialize: false,
+  const layerIds = new Map(
+    snapshot.layers.map((layer) => [layerDestination(layer), layer.id])
+  );
+  await applyEnvMigration({
+    project: migration.project,
+    plan: migration,
+    acceptTrackedChanges: false,
+    snapshots: envMigrationSnapshots(),
+    repairCompose: false,
+    validateDestination: async () =>
+      await assertConfigLayerDirectory(projectLayer),
+    onPublished: ({ path }) => {
+      const id = layerIds.get(path);
+      if (id && !changed.includes(id)) {
+        changed.push(id);
+      }
+    },
   });
-  await finishImplicitLegacyEnvMigration({ ...project, migrated });
-  const paths = new Set(migrated.wroteFiles);
-  if (migrated.updatedProjectConfig) {
-    paths.add(project.configFile);
-  }
-  return paths;
 }
 
 function patchIssueCode(issues: readonly ConfigIssue[]): HackErrorCode | null {
@@ -781,8 +924,7 @@ function patchIssueCode(issues: readonly ConfigIssue[]): HackErrorCode | null {
 
 async function writePreparedLayer(
   snapshot: ConfigSnapshot,
-  file: Prepared,
-  expected: string | null
+  file: Prepared
 ): Promise<boolean> {
   const { layer, text } = file;
   const validate = async () => {
@@ -804,7 +946,7 @@ async function writePreparedLayer(
         envName: layer.overlay ?? null,
         local: layer.ownership === "local",
         changes: file.env,
-        expected: { file: layer.file, text: expected, validate },
+        expected: { file: layer.file, text: layer.text, validate },
         maxBytes: CONFIG_SOURCE_LIMIT,
       })
     ).changed;

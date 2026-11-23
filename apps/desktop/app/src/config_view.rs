@@ -54,6 +54,7 @@ enum EditSection {
 
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
 struct Selection {
+    cli: Option<PathBuf>,
     root: PathBuf,
     target: ConfigTarget,
 }
@@ -106,6 +107,19 @@ pub(crate) struct ConfigPane {
 }
 
 impl ConfigPane {
+    pub(crate) fn switch_cli(&mut self, cli: Option<PathBuf>) {
+        self.stash_draft();
+        *self = Self {
+            selection: Selection {
+                cli,
+                ..Selection::default()
+            },
+            stashed: std::mem::take(&mut self.stashed),
+            save_generation: self.save_generation,
+            ..Self::default()
+        };
+    }
+
     fn report(&self) -> Option<&ConfigReport> {
         self.report.as_ref()?.as_ref().ok()
     }
@@ -292,22 +306,34 @@ impl HackApp {
             return;
         };
         let key = self.model.selected_key();
+        let cli = self
+            .source
+            .cli_choice()
+            .and_then(|choice| choice.selected.map(|install| install.path));
         if native {
             self.config.stash_draft();
             self.config = ConfigPane {
                 project: key,
+                selection: Selection {
+                    cli,
+                    ..Selection::default()
+                },
                 stashed: std::mem::take(&mut self.config.stashed),
                 save_generation: self.config.save_generation,
                 ..ConfigPane::default()
             };
             return;
         }
-        if self.config.project != key || self.config.project_root != root {
+        if self.config.project != key
+            || self.config.project_root != root
+            || self.config.selection.cli != cli
+        {
             #[cfg(hack_terminal)]
             self.collapse_detail_terminal(cx);
             self.config.stash_draft();
             let branch = key.as_ref().and_then(|key| key.branch.clone());
             let selection = Selection {
+                cli,
                 root: root.clone(),
                 target: ConfigTarget {
                     branch,
@@ -333,6 +359,7 @@ impl HackApp {
 
     fn load_config_copies(&mut self, cx: &mut Context<Self>) {
         let root = self.config.project_root.clone();
+        let cli = self.config.selection.cli.clone();
         let epoch = self.model.source_epoch();
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         self.config.copies_task = Some(cx.spawn(async move |this, cx| {
@@ -354,6 +381,7 @@ impl HackApp {
                             (
                                 label,
                                 Selection {
+                                    cli: cli.clone(),
                                     root: PathBuf::from(copy.checkout.root),
                                     target: ConfigTarget {
                                         branch: copy.instance,
@@ -564,9 +592,7 @@ impl HackApp {
                 })
                 .await;
             let _ = this.update(cx, |app, cx| {
-                if app.model.source_epoch() != epoch
-                    || !app.config.finish_save(&selection, operation, result)
-                {
+                if !app.config.finish_save(&selection, operation, result) {
                     return;
                 }
                 if app.config.present_save() {
@@ -1218,17 +1244,33 @@ mod tests {
 
     #[test]
     fn the_previous_cli_cannot_complete_a_new_installations_save() {
-        let mut first = ConfigPane::default();
-        stage_name(&mut first);
-        let expired = first.begin_save(1);
+        let mut pane = ConfigPane::default();
+        let first = Selection {
+            cli: Some("/cli/first/hack".into()),
+            ..Selection::default()
+        };
+        let second = Selection {
+            cli: Some("/cli/second/hack".into()),
+            ..Selection::default()
+        };
+        select(&mut pane, &first);
+        stage_name(&mut pane);
+        let first_save = pane.begin_save(1);
 
-        let mut second = ConfigPane::default();
-        stage_name(&mut second);
-        second.begin_save(2);
-        let selection = second.selection.clone();
-        assert!(!second.finish_save(&selection, expired, Err(ConfigError::unavailable())));
-        assert!(second.saving());
-        assert!(second.draft.save_result.is_none());
+        pane.switch_cli(second.cli.clone());
+        select(&mut pane, &second);
+        stage_name(&mut pane);
+        let second_save = pane.begin_save(2);
+        assert!(!pane.finish_save(&first, first_save, Err(ConfigError::unavailable())));
+        assert!(pane.saving());
+        assert!(pane.draft.save_result.is_none());
+
+        pane.switch_cli(first.cli.clone());
+        select(&mut pane, &first);
+        assert!(!pane.saving());
+        assert!(pane.draft.changes.contains_key("name"));
+        assert!(pane.error.is_some());
+        assert!(!pane.finish_save(&second, second_save, Err(ConfigError::unavailable())));
     }
 
     #[test]

@@ -3362,13 +3362,24 @@ async function readProjectEnvLayerForMutation(opts: {
   readonly projectRoot: string;
   readonly path: string;
   readonly environment: string;
+  readonly noFollow?: boolean;
+  readonly maxBytes?: number;
 }): Promise<{
   readonly read: ProjectEnvConfigReadResult;
   /** The exact bytes read (null when absent), for the compare-and-swap. */
   readonly text: string | null;
 }> {
   await assertProjectEnvLayerPath(opts);
-  const text = await readAtomicWriteTargetText(opts.path);
+  const text = opts.noFollow
+    ? ((
+        await readReplaceablePrivateFile({
+          path: opts.path,
+          directories: [dirname(opts.path)],
+          maxBytes: opts.maxBytes,
+          refusal: () => new AtomicWriteConflictError(),
+        })
+      )?.text ?? null)
+    : await readAtomicWriteTargetText(opts.path);
   const read = parseProjectEnvConfigText({
     path: opts.path,
     environment: opts.environment,
@@ -3782,6 +3793,8 @@ async function mutateLockedProjectEnvLayer(
     projectRoot: opts.projectRoot,
     path: filePath,
     environment: opts.envName ?? "default",
+    noFollow: opts.expected !== undefined,
+    maxBytes: opts.maxBytes,
   });
   if (opts.expected && opts.expected.text !== text) {
     throw new AtomicWriteConflictError();
@@ -3811,6 +3824,7 @@ async function mutateLockedProjectEnvLayer(
       config: next.config,
       maxBytes: opts.maxBytes,
       validate: opts.expected?.validate,
+      noFollow: opts.expected !== undefined,
       expectedExisting: text,
       machineLocal: opts.local === true,
     });
@@ -4933,6 +4947,7 @@ async function writeProjectEnvConfigFile(opts: {
   readonly expectedExisting?: string | null;
   readonly maxBytes?: number;
   readonly validate?: () => Promise<void>;
+  readonly noFollow?: boolean;
   /**
    * A machine-local layer, which may hold plaintext values: when this write
    * creates it, it is private (0600) from creation, and an existing layer
@@ -4964,10 +4979,17 @@ async function writeProjectEnvConfigFile(opts: {
         ? {}
         : { expectedExisting: opts.expectedExisting }),
       ...(opts.machineLocal === true
-        ? { createMode: 0o600, noFollowTarget: true, tightenExisting: true }
+        ? { createMode: 0o600, tightenExisting: true }
         : {}),
+      noFollowTarget: opts.machineLocal === true || opts.noFollow === true,
       validatePath: async (path) => {
         await opts.validate?.();
+        if (
+          opts.noFollow &&
+          (await lstat(path).catch(() => null))?.isSymbolicLink()
+        ) {
+          throw new AtomicWriteConflictError();
+        }
         await assertProjectEnvLayerPath({
           projectRoot: opts.projectRoot,
           path,

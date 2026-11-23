@@ -512,6 +512,31 @@ test("show and validation previews omit authorization headers and commands", asy
   expect(result.payload.data.valid).toBe(true);
   expect(result.payload.data.previews["1"]).toContain('"[redacted:');
   expect(result.payload.data.previews["2"]).toContain('"[redacted:');
+  await writeFile(
+    composePath,
+    `${compose}# Connection example redis://:fixture-ciphertext-marker@redis.example.test\n`
+  );
+  const privateComment = await show(f.root, f.main);
+  expect(privateComment.layers[1]?.source).toBeNull();
+  const commentPreview = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["validate"],
+    patch: {
+      base: bases(privateComment),
+      changes: [
+        {
+          layer: "2",
+          kind: "service",
+          service: "web",
+          field: "image",
+          value: "test:latest",
+        },
+      ],
+    },
+  });
+  expect(commentPreview.payload.data.valid).toBe(true);
+  expect(commentPreview.payload.data.previews["2"]).toBeNull();
 });
 
 test("minimal revisions cannot redirect a stale worktree patch to the main checkout", async () => {
@@ -795,10 +820,20 @@ test("the first Config env write migrates an existing legacy contract before pub
   const cwd = join(root, "legacy");
   const project = join(cwd, ".hack");
   await mkdir(project, { recursive: true });
+  const storePath = join(cwd, "legacy-secrets.enc.json");
   await Promise.all([
     writeFile(
       join(project, "hack.config.json"),
-      '{"name":"legacy","dev_host":"legacy.hack"}\n'
+      JSON.stringify({
+        name: "legacy",
+        dev_host: "legacy.hack",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: { path: storePath },
+          },
+        },
+      })
     ),
     writeFile(
       join(project, "docker-compose.yml"),
@@ -811,11 +846,26 @@ test("the first Config env write migrates an existing legacy contract before pub
         vars: [
           { key: "EXISTING", source: "plain_env", services: ["api"] },
           { key: "ANOTHER", source: "plain_env" },
+          { key: "SECRET_TOKEN", source: "keychain", services: ["api"] },
         ],
       })
     ),
     writeFile(join(project, ".env"), "EXISTING=kept\nANOTHER=also-kept\n"),
   ]);
+  const storeModule = resolve(import.meta.dir, "../src/lib/secret-store.ts");
+  const store = Bun.spawn([process.execPath, "--no-env-file", "-"], {
+    cwd,
+    env: privateCliEnv({ root }),
+    stdin: new Blob([
+      "import { resolveSecretStore } from ",
+      JSON.stringify(storeModule),
+      ';\nconst store = await resolveSecretStore({ projectDir: ".hack", projectName: "legacy" });\n',
+      'await store.set({ key: "SECRET_TOKEN", value: "fixture-ciphertext-marker" });\n',
+    ]),
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  expect(await store.exited).toBe(0);
   const before = await show(root, cwd);
   const applied = await cli({
     root,
@@ -824,13 +874,19 @@ test("the first Config env write migrates an existing legacy contract before pub
     patch: {
       base: bases(before),
       changes: [
+        { layer: "1", kind: "project", path: "name", value: "renamed" },
         { layer: "5", kind: "env", scope: "api", key: "NEW", value: "added" },
       ],
     },
   });
   expect(applied.payload.ok).toBe(true);
-  expect(applied.payload.data.restart_offered).toBe(false);
+  expect(applied.payload.data.restart_offered).toBe(true);
   const after = await show(root, cwd);
+  expect(after.project.name).toBe("renamed");
+  expect(after.env.find((row) => row.key === "SECRET_TOKEN")).toMatchObject({
+    scope: "api",
+    values: [expect.objectContaining({ secret: true })],
+  });
   expect(
     after.env.map((row) => [row.key, row.scope, row.values[0]?.value])
   ).toEqual(
@@ -840,6 +896,49 @@ test("the first Config env write migrates an existing legacy contract before pub
       ["NEW", "api", "added"],
     ])
   );
+});
+
+test("Config preflights malformed and oversized legacy migration data before applying a mixed patch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-config-legacy-preflight-"));
+  scratch.push(root);
+  const project = join(root, ".hack");
+  await mkdir(project);
+  const original = '{"name":"legacy","dev_host":"legacy.hack"}\n';
+  const projectFile = join(project, "hack.config.json");
+  const contract = join(project, "hack.env.json");
+  const oversizedValue = "é".repeat(270_000);
+  await Promise.all([
+    writeFile(projectFile, original),
+    writeFile(
+      join(project, "docker-compose.yml"),
+      "services:\n  api:\n    image: test:dev\n"
+    ),
+    writeFile(contract, "{"),
+    writeFile(
+      join(project, ".env"),
+      ["EXISTING=", oversizedValue, "\n"].join("")
+    ),
+  ]);
+  const before = await show(root, root);
+  const patch = {
+    base: bases(before),
+    changes: [
+      { layer: "1", kind: "project", path: "name", value: "renamed" },
+      { layer: "5", kind: "env", scope: "api", key: "NEW", value: "added" },
+    ],
+  };
+  const malformed = await cli({ root, cwd: root, args: ["validate"], patch });
+  expect(malformed.payload.data.issues[0]?.message).toContain("env contract");
+  await writeFile(
+    contract,
+    '{"version":1,"vars":[{"key":"EXISTING","source":"plain_env"}]}\n'
+  );
+  const oversized = await cli({ root, cwd: root, args: ["apply"], patch });
+  expect(oversized.payload.error.detail.issues[0]?.message).toContain(
+    "512 KiB"
+  );
+  expect(await readFile(projectFile, "utf8")).toBe(original);
+  expect(bases(await show(root, root))).toEqual(bases(before));
 });
 
 test("an identical replacement layer directory invalidates a revision", async () => {
@@ -940,7 +1039,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     compose
       .replace(
         "    depends_on: [api]",
-        "    ports:\n      - '127.0.0.1::80' # loopback target\n      - '8081:81' # published target\n    depends_on:\n      - api # API dependency"
+        "    ports:\n      - '127.0.0.1::80' # loopback target\n      - '8081:81' # published target\n      - 80 # http\n      - 443 # https\n      - '${PORT:-8080}:80'\n    depends_on:\n      - api # API dependency"
       )
       .replace("      - unrelated=kept", "      - caddy=last.storefront.hack")
   );
@@ -963,7 +1062,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
       kind: "service",
       service: "web",
       field: "ports",
-      value: ["127.0.0.1::80", "8082:81"],
+      value: ["443", "80", "${PORT:-8080}:80", "127.0.0.1::80", "8082:81"],
     },
     {
       layer: "2",
@@ -978,6 +1077,8 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     "# loopback target",
     "# published target",
     "# API dependency",
+    "443 # https",
+    "80 # http",
   ]) {
     expect(valid.payload.data.previews["2"]).toContain(comment);
   }
@@ -1006,6 +1107,34 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     },
   ]);
   expect(self.payload.data.valid).toBe(false);
+  const cycles = await check([
+    {
+      layer: "2",
+      kind: "service",
+      service: "api",
+      field: "depends_on",
+      value: ["web"],
+    },
+  ]);
+  expect(cycles.payload.data.issues[0]?.message).toContain("dependency cycle");
+  const scalar = await check([
+    {
+      layer: "2",
+      kind: "source",
+      text: "services:\n  api:\n    depends_on: web\n  web: {}\n",
+    },
+  ]);
+  expect(scalar.payload.data.valid).toBe(false);
+  const unequal = await check([
+    {
+      layer: "2",
+      kind: "service",
+      service: "web",
+      field: "ports",
+      value: ["8000-8002:80-81"],
+    },
+  ]);
+  expect(unequal.payload.data.valid).toBe(false);
 });
 
 test("an authored dev_host avoids opening a legacy dotenv input", async () => {

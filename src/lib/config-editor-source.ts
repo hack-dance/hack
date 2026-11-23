@@ -17,7 +17,7 @@ const PRIVATE_COMPOSE_FIELDS = /^(?:command|entrypoint|args|secrets|test)$/;
 const CADDY_HEADER =
   /^caddy(?:[._].*)?[._](?:header_up|header_down|header|request_header)(?:[._]|$)/i;
 const PRIVATE_COMMENT =
-  /(?:#|\/\/).*?(?:(?:authorization|credential|password|secret|token|api[_-]?key)\s*[:=]|\bauthorization\s+(?:bearer|basic)\s+\S)/i;
+  /(?:authorization|credential|password|secret|token|api[_-]?key)\s*[:=]/i;
 
 export function isConfigSecret(key: string, value: unknown): boolean {
   return (
@@ -153,18 +153,28 @@ function yamlSecretRanges(
   privateKeys: ReadonlySet<string>
 ): Range[] | null {
   const doc = parseDocument(text, { prettyErrors: false });
-  if (doc.errors.length > 0) {
+  if (doc.errors.length > 0 || privateYamlComment(doc)) {
     return null;
   }
   const ranges: Range[] = [];
   let aliases = false;
+  let hiddenComment = false;
   // Check even nodes underneath a private parent which the masking pass skips.
-  visit(doc, {
-    Alias() {
+  visit(doc, (_, node) => {
+    if (isAlias(node)) {
       aliases = true;
+    }
+    if (
+      (isAlias(node) || isMap(node) || isScalar(node) || isSeq(node)) &&
+      privateYamlComment(node)
+    ) {
+      hiddenComment = true;
       return visit.BREAK;
-    },
+    }
   });
+  if (hiddenComment) {
+    return null;
+  }
   visit(doc, {
     Pair(index, pair, parents) {
       const key =
@@ -223,10 +233,21 @@ export function safeYamlSource(
   privateKeys: ReadonlySet<string> = new Set()
 ) {
   const ranges = yamlSecretRanges(text, compose, privateKeys);
-  if (!ranges || PRIVATE_COMMENT.test(text)) {
+  if (!ranges) {
     return { source: null, hidden: true };
   }
   return { source: redact(text, ranges), hidden: ranges.length > 0 };
+}
+
+function privateYamlComment(node: {
+  readonly comment?: string | null;
+  readonly commentBefore?: string | null;
+}): boolean {
+  return [node.comment, node.commentBefore].some(
+    (comment) =>
+      typeof comment === "string" &&
+      (PRIVATE_COMMENT.test(comment) || isConfigSecret("", comment))
+  );
 }
 
 /**
@@ -245,10 +266,7 @@ export function restoreConfigSource(opts: {
   const rangesFor =
     opts.format === "json"
       ? jsonRanges
-      : (text: string) =>
-          PRIVATE_COMMENT.test(text)
-            ? null
-            : yamlSecretRanges(text, true, new Set());
+      : (text: string) => yamlSecretRanges(text, true, new Set());
   const ranges = rangesFor(opts.original);
   if (!ranges) {
     return null;

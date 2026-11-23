@@ -37,9 +37,12 @@ export const validPort = (port: unknown): port is number =>
   port >= 1 &&
   port <= 65_535;
 
-export function validComposeShortPort(value: unknown): boolean {
+export function validComposePort(value: unknown): boolean {
   if (typeof value !== "string") {
     return validPort(value);
+  }
+  if (hasInterpolation(value)) {
+    return true;
   }
   const match = SHORT_PORT.exec(value);
   if (!match) {
@@ -50,8 +53,16 @@ export function validComposeShortPort(value: unknown): boolean {
     (host === undefined || isIP(host.replace(/^\[|\]$/g, "")) !== 0) &&
     (!published || validPortRange(published, true)) &&
     target !== undefined &&
-    validPortRange(target)
+    validPortRange(target) &&
+    (!published ||
+      portRangeSpan(target) === 0 ||
+      portRangeSpan(target) === portRangeSpan(published))
   );
+}
+
+function portRangeSpan(value: string): number {
+  const [first, last = first] = value.split("-");
+  return Number(last) - Number(first);
 }
 
 function validPortRange(value: string, dynamic = false): boolean {
@@ -73,7 +84,7 @@ function hasInterpolation(value: unknown): boolean {
 
 function validSourcePort(port: unknown): boolean {
   if (!isRecord(port)) {
-    return hasInterpolation(port) || validComposeShortPort(port);
+    return validComposePort(port);
   }
   const { target, published, host_ip } = port;
   return (
@@ -318,6 +329,20 @@ function serviceNames(value: unknown): string[] {
   return isRecord(value) ? Object.keys(value) : [];
 }
 
+function validDependencies(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.every(
+        (entry) => typeof entry === "string" && SERVICE_NAME.test(entry)
+      )) ||
+    (isRecord(value) &&
+      Object.entries(value).every(
+        ([name, options]) => SERVICE_NAME.test(name) && isRecord(options)
+      ))
+  );
+}
+
 function composeDependencyIssue(
   source: ComposeSource,
   service: string,
@@ -347,6 +372,58 @@ function composeDependencyIssue(
       ? `depends_on names a service that is not defined: ${missing}`
       : "depends_on names a service that is not defined."
   );
+}
+
+function composeDependencyCycle(source: ComposeSource): ConfigIssue | null {
+  if (!source.checksDependencies) {
+    return null;
+  }
+  const pending = new Map<string, number>();
+  const dependents = new Map<string, string[]>();
+  for (const [name, service] of Object.entries(source.services)) {
+    if (!isRecord(service)) {
+      continue;
+    }
+    const dependencies = new Set(serviceNames(service.depends_on));
+    dependencies.delete(name);
+    let count = 0;
+    for (const dependency of dependencies) {
+      if (
+        !(
+          Object.hasOwn(source.services, dependency) &&
+          isRecord(source.services[dependency])
+        )
+      ) {
+        continue;
+      }
+      const downstream = dependents.get(dependency) ?? [];
+      downstream.push(name);
+      dependents.set(dependency, downstream);
+      count += 1;
+    }
+    pending.set(name, count);
+  }
+  const ready = [...pending]
+    .filter(([, count]) => count === 0)
+    .map(([name]) => name);
+  for (const name of ready) {
+    pending.delete(name);
+    for (const downstream of dependents.get(name) ?? []) {
+      const count = (pending.get(downstream) ?? 0) - 1;
+      pending.set(downstream, count);
+      if (count === 0) {
+        ready.push(downstream);
+      }
+    }
+  }
+  const unresolved = pending.keys().next().value;
+  return unresolved === undefined
+    ? null
+    : composeFieldIssue(
+        source,
+        ["services", unresolved, "depends_on"],
+        "The service graph has a dependency cycle."
+      );
 }
 
 export function composeModel(opts: {
@@ -379,23 +456,8 @@ export function composeModel(opts: {
       );
       return [];
     }
-    if (
-      service.ports != null &&
-      !(Array.isArray(service.ports) && service.ports.every(validSourcePort))
-    ) {
-      issues.push(
-        composeFieldIssue(
-          source,
-          ["services", name, "ports"],
-          "Use valid port mappings with a target port between 1 and 65535."
-        )
-      );
-    }
     const depends_on = serviceNames(service.depends_on);
-    const missingDependency = composeDependencyIssue(source, name, depends_on);
-    if (missingDependency) {
-      issues.push(missingDependency);
-    }
+    issues.push(...composeServiceIssues(source, name, service, depends_on));
     const labels = composeLabels(service);
     const { routes, droppedAll } = resolveRoutes
       ? serviceRoutes({
@@ -441,9 +503,44 @@ export function composeModel(opts: {
       },
     ];
   });
+  const cycle = composeDependencyCycle(source);
+  if (cycle) {
+    issues.push(cycle);
+  }
   return { services: rows, issues };
 }
 
+function composeServiceIssues(
+  source: ComposeSource,
+  name: string,
+  service: Record<string, unknown>,
+  dependencies: readonly string[]
+): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  if (
+    service.ports != null &&
+    !(Array.isArray(service.ports) && service.ports.every(validSourcePort))
+  ) {
+    issues.push(
+      composeFieldIssue(
+        source,
+        ["services", name, "ports"],
+        "Use valid port mappings with a target port between 1 and 65535."
+      )
+    );
+  }
+  const dependencyIssue = validDependencies(service.depends_on)
+    ? composeDependencyIssue(source, name, dependencies)
+    : composeFieldIssue(
+        source,
+        ["services", name, "depends_on"],
+        "Use a list or map of service dependencies."
+      );
+  if (dependencyIssue) {
+    issues.push(dependencyIssue);
+  }
+  return issues;
+}
 /** Reuse surviving scalar nodes, including each node's comments and style. */
 export function updateComposeServiceField(opts: {
   readonly source: ComposeSource;
@@ -461,7 +558,13 @@ export function updateComposeServiceField(opts: {
   const retained = new Set<(typeof previous)[number]>();
   const matching = value.map((entry) => {
     const item = previous.find(
-      (old) => old.value === entry && !retained.has(old)
+      (old) =>
+        !retained.has(old) &&
+        (old.value === entry ||
+          (path[2] === "ports" &&
+            typeof old.value === "number" &&
+            typeof entry === "string" &&
+            String(old.value) === entry))
     );
     if (item) {
       retained.add(item);
@@ -470,7 +573,11 @@ export function updateComposeServiceField(opts: {
   });
   const remaining = previous.filter((item) => !retained.has(item));
   node.items = value.map((entry, index) => {
-    const item = matching[index] ?? remaining.shift();
+    const retainedItem = matching[index];
+    if (retainedItem) {
+      return retainedItem;
+    }
+    const item = remaining.shift();
     if (!item) {
       return doc.createNode(entry);
     }

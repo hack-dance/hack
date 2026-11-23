@@ -28,6 +28,7 @@ import {
   type ProjectContext,
   parseEnvConfigSelection,
   parseProjectConfigRecord,
+  projectNameForConfig,
   resolveProjectDefaultEnvOverlay,
   resolveProjectOauthAliasHost,
   resolveProjectRouteBaseHosts,
@@ -535,6 +536,7 @@ export async function captureConfigEditor(opts: {
   return {
     ...layers,
     project,
+    projectName: projectNameForConfig(cfg, project.projectRoot),
     branch,
     baseHosts,
     explicitBranch,

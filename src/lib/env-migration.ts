@@ -23,6 +23,7 @@ import {
   migrationJournalPath,
   withEnvMigrationVerification,
 } from "./env-migration-state.ts";
+import { AtomicWriteConflictError } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
   ensurePrivateDirectory,
@@ -372,6 +373,33 @@ type Preparation = {
   readonly prepared: PreparedLegacyEnvMigration;
   readonly sources: readonly EnvMigrationFileState[];
 };
+
+export type ImplicitEnvMigrationPlan = Preparation & {
+  readonly project: EnvMigrationProject;
+};
+
+/** Preflight immutable migration payloads as part of a larger validated edit. */
+export async function prepareImplicitEnvMigration(
+  input: EnvMigrationProject
+): Promise<ImplicitEnvMigrationPlan> {
+  const project = await canonicalProject(input);
+  assertFreshMigration(
+    await readJournal(envMigrationJournalPath(project.projectRoot), project)
+  );
+  const plan = await prepareConsistent({ ...project, repairCompose: false });
+  await assertConsent(
+    project,
+    plan.prepared.files.map((file) => file.path),
+    false
+  );
+  return { ...plan, project };
+}
+
+function assertFreshMigration(journal: Journal | null): void {
+  if (journal && journal.state !== "rolled_back") {
+    throw new AtomicWriteConflictError();
+  }
+}
 
 async function prepareConsistent(
   project: EnvMigrationProject & { readonly repairCompose?: boolean }
@@ -796,9 +824,15 @@ async function publishStagingGuard(
 
 async function publishEntry(
   project: EnvMigrationProject,
-  entry: Publication
+  entry: Publication,
+  publication?: {
+    readonly validateDestination?: () => Promise<void>;
+    readonly onPublished?: (file: EnvMigrationFileState) => void;
+  }
 ): Promise<void> {
+  await publication?.validateDestination?.();
   const run = async () => {
+    await publication?.validateDestination?.();
     if (entry.kind === "key") {
       await assertMigrationProjectEnvKeyPrivate({
         ...project,
@@ -835,6 +869,7 @@ async function publishEntry(
     }
     if (entry.kind === "staging_guard") {
       await publishStagingGuard(entry, payload.text);
+      publication?.onPublished?.(entry);
       return;
     }
     await replacePrivateFileAtomic({
@@ -853,7 +888,9 @@ async function publishEntry(
         if (!same((await readState(entry.path)).state, entry.before)) {
           throw refuse();
         }
+        await publication?.validateDestination?.();
       },
+      afterRename: () => publication?.onPublished?.(entry),
     });
     if (!same((await readState(entry.path)).state, entry)) {
       throw refuse();
@@ -904,11 +941,26 @@ export async function applyEnvMigration(input: {
   readonly snapshots: EnvMigrationSnapshots;
   readonly hooks?: EnvMigrationHooks;
   readonly repairCompose?: boolean;
+  readonly plan?: ImplicitEnvMigrationPlan;
+  readonly validateDestination?: () => Promise<void>;
+  readonly onPublished?: (file: EnvMigrationFileState) => void;
 }) {
+  await input.validateDestination?.();
   const project = await canonicalProject(input.project);
+  if (
+    input.plan &&
+    (input.plan.project.projectRoot !== project.projectRoot ||
+      input.plan.project.projectDir !== project.projectDir ||
+      input.plan.project.projectName !== project.projectName)
+  ) {
+    throw new AtomicWriteConflictError();
+  }
   const path = envMigrationJournalPath(project.projectRoot);
   await assertOutsideWorkingTrees(path, project);
   const existing = await readJournal(path, project);
+  if (input.plan) {
+    assertFreshMigration(existing);
+  }
   assertApplyJournalState(existing);
   await input.hooks?.beforeLock?.();
   if (
@@ -945,10 +997,10 @@ export async function applyEnvMigration(input: {
       },
     });
   }
-  let preparation: Preparation | null = null;
-  if (needsComposeRepair(existing, input.repairCompose)) {
+  let preparation: Preparation | null = input.plan ?? null;
+  if (!preparation && needsComposeRepair(existing, input.repairCompose)) {
     preparation = await prepareDeferredComposeRepair(project, existing);
-  } else if (!existing || existing.state === "rolled_back") {
+  } else if (!preparation && (!existing || existing.state === "rolled_back")) {
     preparation = await prepareConsistent({
       ...project,
       repairCompose: input.repairCompose,
@@ -978,7 +1030,11 @@ export async function applyEnvMigration(input: {
     lockPath: `${path}.lock`,
     label: "env migration",
     run: async () => {
+      await input.validateDestination?.();
       const retained = await readJournal(path, project);
+      if (input.plan) {
+        assertFreshMigration(retained);
+      }
       assertApplyJournalState(retained);
       const retain = retainedPayloads(retained);
       await purgeMigrationPayloads({
@@ -1023,6 +1079,7 @@ export async function applyEnvMigration(input: {
         };
       }
       await input.hooks?.boundary?.({ phase: "prepared", index: -1 });
+      await input.validateDestination?.();
       await assertSources(journal);
       // A retained journal is not proof that its original rollback bytes
       // survived the interruption. Admit them before any further publication.
@@ -1048,7 +1105,7 @@ export async function applyEnvMigration(input: {
         if (journal.composeRepairSources) {
           await assertSources(journal);
         }
-        await publishEntry(project, entry);
+        await publishEntry(project, entry, input);
         await input.hooks?.boundary?.({ phase: "published", index });
         await input.snapshots.recordAfter({
           manifestPath: journal.manifestPath,

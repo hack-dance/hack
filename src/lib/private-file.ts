@@ -465,6 +465,8 @@ export async function replacePrivateFileAtomic(
      * make its last compare-and-swap check here.
      */
     readonly beforeRename?: () => Promise<void>;
+    /** Reports the commit even if a subsequent verification fails. */
+    readonly afterRename?: () => void;
   }
 ): Promise<void> {
   const mode = (opts.mode ?? 0o600) & 0o777;
@@ -485,6 +487,7 @@ export async function replacePrivateFileAtomic(
     await opts.beforeRename?.();
     await rename(staging, opts.path);
     committed = true;
+    opts.afterRename?.();
   } catch (error: unknown) {
     throw closedFileWriteError({ error, path: opts.path, operation: "write" });
   } finally {

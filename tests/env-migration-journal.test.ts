@@ -20,6 +20,7 @@ import {
   type EnvMigrationProject,
   envMigrationJournalPath,
   migrateLegacyEnvForCommand,
+  prepareImplicitEnvMigration,
   previewEnvCleanup,
   previewEnvMigration,
   recordEnvMigrationProjectRun,
@@ -28,6 +29,8 @@ import {
 import { migrationDigest } from "../src/lib/env-migration-files.ts";
 import { stageMigrationPayloads } from "../src/lib/env-migration-payloads.ts";
 import { envMigrationSnapshots } from "../src/lib/env-migration-snapshot.ts";
+import { assertEnvMigrationReadable } from "../src/lib/env-migration-state.ts";
+import { AtomicWriteConflictError } from "../src/lib/fs.ts";
 import {
   LegacyEnvCleanupError,
   resolveProjectEnvConfig,
@@ -711,6 +714,56 @@ test("later Compose repair accepts layer additions and tighter modes, invalidate
     acceptTrackedChanges: true,
   });
   expect(await Bun.file(join(project.projectDir, ".env")).exists()).toBe(false);
+});
+
+test("a prepared implicit migration reports committed bytes and keeps an interrupted publication recoverable", async () => {
+  const plan = await prepareImplicitEnvMigration(project);
+  const receipts: { path: string; sha256: string | null }[] = [];
+  const snapshots = fixtureEnvSnapshots(root);
+  await expect(
+    applyEnvMigration({
+      project: plan.project,
+      plan,
+      snapshots,
+      acceptTrackedChanges: false,
+      repairCompose: false,
+      onPublished: (file) => {
+        if (file.path.endsWith(".yaml")) {
+          receipts.push(file);
+        }
+      },
+      hooks: {
+        boundary: async ({ phase }) => {
+          if (phase === "published" && receipts.length > 0) {
+            throw new Error(
+              "synthetic interruption before recording the write"
+            );
+          }
+        },
+      },
+    })
+  ).rejects.toThrow("synthetic interruption");
+  const committed = receipts[0];
+  if (!committed) {
+    throw new Error("Expected one committed env layer.");
+  }
+  expect(committed.sha256).toBe(
+    migrationDigest(await readFile(committed.path))
+  );
+  await expect(assertEnvMigrationReadable(project)).rejects.toThrow(
+    "unfinished"
+  );
+  await expect(prepareImplicitEnvMigration(project)).rejects.toBeInstanceOf(
+    AtomicWriteConflictError
+  );
+  const resumed = await applyEnvMigration({
+    project,
+    snapshots,
+    acceptTrackedChanges: false,
+    repairCompose: false,
+  });
+  expect(resumed.status).toBe("applied");
+  await expect(assertEnvMigrationReadable(project)).resolves.toBeUndefined();
 });
 
 test("later Compose repair refuses damaged originals before changing the completed journal", async () => {

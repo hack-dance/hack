@@ -1012,7 +1012,7 @@ impl HackApp {
         }
         if before != after {
             self.model.source_changed();
-            self.config = Default::default();
+            self.config.switch_cli(after.map(|install| install.path));
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
             // previous installation: it must not block this one.

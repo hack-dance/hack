@@ -216,7 +216,14 @@ export async function resolveEffectiveProjectName(
   ctx: ProjectContext
 ): Promise<string> {
   const cfg = await readProjectConfig(ctx);
-  const derived = defaultProjectSlugFromPath(ctx.projectRoot);
+  return projectNameForConfig(cfg, ctx.projectRoot);
+}
+
+export function projectNameForConfig(
+  cfg: ProjectConfig,
+  projectRoot: string
+): string {
+  const derived = defaultProjectSlugFromPath(projectRoot);
   const raw = (cfg.name ?? derived).trim();
   return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
 }

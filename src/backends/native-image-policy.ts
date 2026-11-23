@@ -50,6 +50,7 @@ const DISPLAY_REFERENCE = /^[A-Za-z0-9._:/@-]{1,512}$/;
 export type NativeImageBlockerDetail = {
   readonly missing: string;
   readonly downloading?: true;
+  readonly buildBase?: true;
   readonly reason?: string;
   readonly present: readonly string[] | null;
 };
@@ -66,6 +67,7 @@ export function nativeImageBlockerDetail(
   }
   return (
     (!("downloading" in value) || value.downloading === true) &&
+    (!("buildBase" in value) || value.buildBase === true) &&
     (!("reason" in value) ||
       nativeImageRegistryReason(value.reason) !== undefined) &&
     typeof value.missing === "string" &&
@@ -80,6 +82,135 @@ export function nativeImageBlockerDetail(
   );
 }
 
+export type ImageFailure = {
+  reference: string;
+  code: string;
+  reason: string;
+  recovery: string;
+  services: readonly string[];
+};
+
+const IMAGE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const IMAGE_FAILURE_TEXT = /^[ -~]{1,400}$/;
+const IMAGE_FAILURE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
+
+export function imageBatchFailures(value: unknown): value is ImageFailure[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 3 &&
+    value.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        typeof entry.reference === "string" &&
+        DISPLAY_REFERENCE.test(entry.reference) &&
+        typeof entry.code === "string" &&
+        IMAGE_FAILURE_CODE.test(entry.code) &&
+        typeof entry.reason === "string" &&
+        IMAGE_FAILURE_TEXT.test(entry.reason) &&
+        typeof entry.recovery === "string" &&
+        IMAGE_FAILURE_TEXT.test(entry.recovery) &&
+        Array.isArray(entry.services) &&
+        entry.services.length <= 64 &&
+        entry.services.every(
+          (service: unknown) =>
+            typeof service === "string" && IMAGE_FAILURE_SERVICE.test(service)
+        )
+    )
+  );
+}
+
+export class NativeImageBatchError extends HackCliError {
+  readonly failures: readonly ImageFailure[];
+
+  constructor(failures: readonly ImageFailure[]) {
+    super({
+      code: "E_LIFECYCLE_FAILED",
+      detail: { images: failures },
+      message: [
+        "Image preparation failed.",
+        ...failures.map((image) => {
+          const services = image.services.length
+            ? ` for service${image.services.length > 1 ? "s" : ""} ${image.services.join(", ")} field image`
+            : "";
+          return `- ${image.reference}${services} (${image.code}): ${image.reason}. ${image.recovery}`;
+        }),
+      ].join("\n"),
+    });
+    this.failures = failures;
+  }
+}
+
+const PENDING_PROOF_PATH = /^artifacts\/image-proofs\/[a-f0-9]{64}\.pending$/;
+
+export function pendingImageProofReason(
+  value: Record<string, unknown>
+): string | undefined {
+  const component = value.state_component;
+  if (
+    !(
+      value.code === "image_proof_pending" &&
+      component &&
+      typeof component === "object" &&
+      "path" in component &&
+      typeof component.path === "string" &&
+      PENDING_PROOF_PATH.test(component.path)
+    )
+  ) {
+    return;
+  }
+  return `Unsafe pending image proof at ${component.path} was left in place`;
+}
+
+export function batchImageFailure(
+  reference: string,
+  value: unknown,
+  services: readonly string[]
+): ImageFailure {
+  const error =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const code =
+    typeof error.code === "string" && IMAGE_FAILURE_CODE.test(error.code)
+      ? error.code
+      : "image_reply_invalid";
+  let reason =
+    nativeImageRegistryReason(error.cause_code) ??
+    pendingImageProofReason(error);
+  if (
+    !reason &&
+    error.message_fixed === true &&
+    typeof error.message === "string" &&
+    IMAGE_FAILURE_TEXT.test(error.message)
+  ) {
+    reason = error.message.endsWith(".")
+      ? error.message.slice(0, -1)
+      : error.message;
+  }
+  reason ??=
+    code === "registry_image_not_found"
+      ? "tag no longer exists in the registry (404)"
+      : code.replaceAll("_", " ");
+  let recovery = "Inspect hack doctor, then retry hack up.";
+  if (code === "image_tag_download_busy" || code === "provider_busy") {
+    recovery = "Run hack up again after the current image work finishes.";
+  } else if (code === "image_disk_space") {
+    recovery = "Free disk space and run hack up again.";
+  } else if (code.startsWith("registry_") || code.includes("offline_missing")) {
+    recovery =
+      "Run hack pull when the registry is reachable, then retry hack up.";
+  }
+  return {
+    reference,
+    code,
+    reason,
+    recovery,
+    services: services.filter((name) => IMAGE_FAILURE_SERVICE.test(name)),
+  };
+}
+
 export class NativeImageBlocker extends ClosedCliError {
   readonly observation: NativeImageBlockerDetail;
 
@@ -90,16 +221,19 @@ export class NativeImageBlocker extends ClosedCliError {
       present === null
         ? "could not verify"
         : present.join(", ") || "none confirmed";
+    const reason = registryReason ? ` (${registryReason})` : "";
+    let problem = `${missing} has no usable recorded resolution in the running guest${reason}`;
+    let recovery =
+      "Run hack pull when the registry is reachable, then retry hack up.";
+    if (observation.downloading) {
+      problem = `another start is downloading ${missing}`;
+      recovery = "Run hack up again after the download finishes.";
+    } else if (observation.buildBase) {
+      problem = `could not resolve build base ${missing}${reason}`;
+      recovery = "Retry hack up when the registry is reachable.";
+    }
     super(
-      [
-        observation.downloading
-          ? `Image unavailable: another start is downloading ${missing}.`
-          : `Image unavailable: ${missing} has no usable recorded resolution in the running guest${registryReason ? ` (${registryReason})` : ""}.`,
-        `Already present: ${known}.`,
-        observation.downloading
-          ? "Run hack up again after the download finishes."
-          : "Run hack pull when the registry is reachable, then retry hack up.",
-      ].join("\n")
+      `Image unavailable: ${problem}.\nAlready present: ${known}.\n${recovery}`
     );
     this.observation = observation;
   }

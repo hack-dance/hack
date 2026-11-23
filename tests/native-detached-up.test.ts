@@ -112,6 +112,7 @@ for (const mode of [
   "unsafe-prestart-refusal",
   "fail",
   "builder-missing",
+  "build-registry-limit",
   "provider-pin",
   "wrapped-provider-pin",
   "timeout",
@@ -210,6 +211,11 @@ for (const mode of [
           ok: false,
           error: { code: "E_CANCELLED" },
         });
+      } else if (mode === "build-registry-limit") {
+        expect(code).toBe(1);
+        expect(JSON.parse(stdout).error.message).toBe(
+          "Image unavailable: could not resolve build base docker.io/library/python:3.12-alpine (registry rate limit reached).\nAlready present: docker.io/library/alpine:3.22.\nRetry hack up when the registry is reachable."
+        );
       } else if (mode === "builder-missing") {
         // A detached owner reports the code only; the launcher must still tell the
         // user what is wrong and the one command that fixes it.
@@ -247,6 +253,7 @@ for (const mode of [
         ![
           "fail",
           "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -681,6 +688,32 @@ test("HACK-2339: a failed hook's lines reach only a terminal stderr; otherwise o
     "a",
   ]);
 }, 60_000);
+
+test("detached JSON retains every image refusal and recovery action", async () => {
+  const result = await prestartRun("image-batch-errors");
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_LIFECYCLE_FAILED",
+      detail: {
+        images: [
+          {
+            reference: "fixture/image:a",
+            code: "provider_busy",
+            recovery:
+              "Run hack up again after the current image work finishes.",
+          },
+          {
+            reference: "fixture/image:b",
+            code: "image_disk_space",
+            recovery: "Free disk space and run hack up again.",
+          },
+        ],
+      },
+    },
+  });
+}, 30_000);
 
 test("HACK-2351: image work longer than the budget, with heartbeats, still completes", async () => {
   const started = performance.now();

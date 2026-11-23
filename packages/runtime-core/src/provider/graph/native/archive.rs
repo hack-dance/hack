@@ -1,5 +1,6 @@
 //! Bounded, confirmation-only history for retired native graph attempts.
 use super::*;
+use crate::provider::native_environment;
 use std::path::Path;
 
 const LIMIT: usize = 256;
@@ -84,6 +85,7 @@ pub(super) fn make_room(
     runs: &[String],
 ) -> Result<(), CandidateError> {
     let active = candidate.state_root.join("run/native-graphs");
+    let environment_runs = native_environment::retained_runs(candidate)?;
     let source = oldest(runs.iter().map(|run| active.join(run)), |path| {
         let run = path
             .file_name()
@@ -91,7 +93,13 @@ pub(super) fn make_room(
             .ok_or_else(refused)?;
         let (receipt, root) = journal::load_owned(candidate, run, owner)?;
         persistent_data::tool::require_idle(&root)?;
-        Ok(eligible(&receipt))
+        #[cfg(target_os = "macos")]
+        if super::foreground::require_unpublished(candidate, run).is_err()
+            || super::foreground::recovery::requires_active(&root)?
+        {
+            return Ok(false);
+        }
+        Ok(eligible(&receipt) && !environment_runs.contains(run))
     })?
     .ok_or_else(refused)?;
     let run = source

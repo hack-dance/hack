@@ -77,9 +77,14 @@ fn guest_ready_before_all_bridge_binds_waits_for_complete_private_identity() {
     // The one-shot audit reproduces the old ordering failure: the provider
     // control channel is ready while its expose threads have not yet run.
     assert_eq!(
-        verify_sockets(&fixture.root, intent, &mut Vec::new())
-            .unwrap_err()
-            .code,
+        verify_sockets(
+            crate::provider::PoolLayout::Legacy,
+            &fixture.root,
+            intent,
+            &mut Vec::new()
+        )
+        .unwrap_err()
+        .code,
         "bridge_socket_identity"
     );
     // The second socket is bound world-accessible, as the provider does once its file
@@ -89,13 +94,27 @@ fn guest_ready_before_all_bridge_binds_waits_for_complete_private_identity() {
         100 => fixture.bind(1, 0o777),
         _ => panic!("unexpected wait"),
     });
-    wait_for_sockets_with(&fixture.root, intent, || Ok(()), &clock, BUDGET).unwrap();
+    wait_for_sockets_with(
+        crate::provider::PoolLayout::Legacy,
+        &fixture.root,
+        intent,
+        || Ok(()),
+        &clock,
+        BUDGET,
+    )
+    .unwrap();
     assert_eq!(clock.now(), Duration::from_millis(100));
     assert_eq!(
         fs::symlink_metadata(fixture.path(1)).unwrap().mode() & 0o777,
         0o700
     );
-    verify_sockets(&fixture.root, intent, &mut Vec::new()).unwrap();
+    verify_sockets(
+        crate::provider::PoolLayout::Legacy,
+        &fixture.root,
+        intent,
+        &mut Vec::new(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -105,6 +124,7 @@ fn private_sockets_ready_first_need_no_wait_but_still_verify_the_provider_twice(
     let clock = Scheduled::new(|_: Duration| panic!("already ready"));
     let checks = Cell::new(0);
     wait_for_sockets_with(
+        crate::provider::PoolLayout::Legacy,
         &fixture.root,
         BridgeIntent::new(1).unwrap(),
         || {
@@ -125,6 +145,7 @@ fn missing_sockets_expire_and_name_recovery() {
         let fixture = Fixture::new();
         let clock = Scheduled::new(|_: Duration| {});
         let failure = wait_for_sockets_with(
+            crate::provider::PoolLayout::Legacy,
             &fixture.root,
             BridgeIntent::new(1).unwrap(),
             || Ok(()),
@@ -157,6 +178,7 @@ fn unsafe_type_alias_and_link_count_refuse_even_when_an_earlier_slot_is_missing(
         let before = fs::symlink_metadata(fixture.path(1)).unwrap();
         let clock = Scheduled::new(|_: Duration| panic!("unsafe identity must not be retried"));
         let failure = wait_for_sockets_with(
+            crate::provider::PoolLayout::Legacy,
             &fixture.root,
             BridgeIntent::new(2).unwrap(),
             || Ok(()),
@@ -269,6 +291,7 @@ fn world_accessible_owned_sockets_in_a_private_directory_are_repaired_to_private
         .map(|slot| fs::symlink_metadata(fixture.path(slot)).unwrap().ino())
         .collect();
     verify_sockets(
+        crate::provider::PoolLayout::Legacy,
         &fixture.root,
         BridgeIntent::new(4).unwrap(),
         &mut Vec::new(),
@@ -293,7 +316,9 @@ fn lease_free_observation_refuses_a_world_accessible_socket_and_changes_nothing(
     fixture.bind(1, 0o777);
     let intent = BridgeIntent::new(2).unwrap();
     assert_eq!(
-        observe_sockets(&fixture.root, intent).unwrap_err().code,
+        observe_sockets(crate::provider::PoolLayout::Legacy, &fixture.root, intent)
+            .unwrap_err()
+            .code,
         "bridge_socket_identity"
     );
     assert_eq!(
@@ -301,8 +326,14 @@ fn lease_free_observation_refuses_a_world_accessible_socket_and_changes_nothing(
         0o777
     );
     // A leased audit repairs it, after which observation passes.
-    verify_sockets(&fixture.root, intent, &mut Vec::new()).unwrap();
-    observe_sockets(&fixture.root, intent).unwrap();
+    verify_sockets(
+        crate::provider::PoolLayout::Legacy,
+        &fixture.root,
+        intent,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    observe_sockets(crate::provider::PoolLayout::Legacy, &fixture.root, intent).unwrap();
 }
 
 #[test]
@@ -322,9 +353,14 @@ fn a_socket_directory_that_is_not_private_and_owned_refuses_without_repair() {
             }
         };
         assert_eq!(
-            verify_sockets(&directory, BridgeIntent::new(1).unwrap(), &mut Vec::new())
-                .unwrap_err()
-                .code,
+            verify_sockets(
+                crate::provider::PoolLayout::Legacy,
+                &directory,
+                BridgeIntent::new(1).unwrap(),
+                &mut Vec::new()
+            )
+            .unwrap_err()
+            .code,
             "bridge_socket_directory",
             "{kind}"
         );
@@ -404,10 +440,22 @@ fn verification_and_the_boot_wait_report_the_bridge_sockets_they_repaired() {
     fixture.bind(1, 0o777);
     fixture.bind(2, 0o770);
     let mut repaired = Vec::new();
-    verify_sockets(&fixture.root, intent, &mut repaired).unwrap();
+    verify_sockets(
+        crate::provider::PoolLayout::Legacy,
+        &fixture.root,
+        intent,
+        &mut repaired,
+    )
+    .unwrap();
     assert_eq!(repaired, ["bridge-01.sock", "bridge-02.sock"]);
     let mut again = Vec::new();
-    verify_sockets(&fixture.root, intent, &mut again).unwrap();
+    verify_sockets(
+        crate::provider::PoolLayout::Legacy,
+        &fixture.root,
+        intent,
+        &mut again,
+    )
+    .unwrap();
     assert!(again.is_empty());
     // A repair is kept when a later socket of the same observation refuses.
     let fixture = Fixture::new();
@@ -415,9 +463,14 @@ fn verification_and_the_boot_wait_report_the_bridge_sockets_they_repaired() {
     fs::write(fixture.path(1), b"not a socket").unwrap();
     let mut repaired = Vec::new();
     assert_eq!(
-        verify_sockets(&fixture.root, BridgeIntent::new(2).unwrap(), &mut repaired)
-            .unwrap_err()
-            .code,
+        verify_sockets(
+            crate::provider::PoolLayout::Legacy,
+            &fixture.root,
+            BridgeIntent::new(2).unwrap(),
+            &mut repaired
+        )
+        .unwrap_err()
+        .code,
         "bridge_socket_identity"
     );
     assert_eq!(repaired, ["bridge-00.sock"]);
@@ -437,6 +490,7 @@ fn verification_and_the_boot_wait_report_the_bridge_sockets_they_repaired() {
     let clock = Scheduled::new(|_: Duration| panic!("all sockets are present"));
     assert_eq!(
         wait_for_sockets_with(
+            crate::provider::PoolLayout::Legacy,
             &fixture.root,
             BridgeIntent::new(1).unwrap(),
             || Ok(()),
@@ -456,6 +510,7 @@ fn provider_loss_before_or_after_observation_is_not_readiness_or_retry_authority
         let checks = Cell::new(0);
         let clock = Scheduled::new(|_: Duration| panic!("provider loss must not be retried"));
         let failure = wait_for_sockets_with(
+            crate::provider::PoolLayout::Legacy,
             &fixture.root,
             BridgeIntent::new(1).unwrap(),
             || {
@@ -490,6 +545,7 @@ fn readiness_observed_after_the_deadline_never_counts_as_success() {
     let clock = Scheduled::new(|_: Duration| panic!("no sleep needed"));
     let checks = Cell::new(0);
     let failure = wait_for_sockets_with(
+        crate::provider::PoolLayout::Legacy,
         &fixture.root,
         BridgeIntent::new(1).unwrap(),
         || {
@@ -532,6 +588,7 @@ fn a_timeout_reports_how_many_sockets_were_missing_or_not_private() {
     fixture.bind(1, 0o777);
     let clock = Scheduled::new(|_: Duration| {});
     let failure = wait_for_sockets_with(
+        crate::provider::PoolLayout::Legacy,
         &fixture.root,
         BridgeIntent::new(3).unwrap(),
         || Ok(()),
@@ -552,6 +609,7 @@ fn a_timeout_reports_how_many_sockets_were_missing_or_not_private() {
     let late = Scheduled::new(|_: Duration| {});
     late.elapsed.set(Duration::from_secs(1));
     let none = wait_for_sockets_with(
+        crate::provider::PoolLayout::Legacy,
         &fixture.root,
         BridgeIntent::new(3).unwrap(),
         || {
@@ -568,4 +626,29 @@ fn a_timeout_reports_how_many_sockets_were_missing_or_not_private() {
             .get("bridge_sockets")
             .is_none()
     );
+}
+
+#[test]
+fn compact_bridge_observation_does_not_fall_back_to_the_legacy_socket() {
+    let fixture = Fixture::new();
+    let intent = BridgeIntent::new(1).unwrap();
+    let mut repaired = Vec::new();
+    fixture.bind(0, 0o700);
+    assert!(
+        verify_sockets(
+            crate::provider::PoolLayout::CompactV1,
+            &fixture.root,
+            intent,
+            &mut repaired
+        )
+        .is_err()
+    );
+    let _compact = std::os::unix::net::UnixListener::bind(fixture.root.join("00")).unwrap();
+    verify_sockets(
+        crate::provider::PoolLayout::CompactV1,
+        &fixture.root,
+        intent,
+        &mut repaired,
+    )
+    .unwrap();
 }

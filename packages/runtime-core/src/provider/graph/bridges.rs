@@ -1150,10 +1150,11 @@ pub fn publish_bridge(
             validate_route_publication(resource.routing.as_ref(), upstream_port, port, hostnames)?
         }
     }
-    let upstream = engine
-        .guest()
-        .engine_socket()?
-        .with_file_name(format!("bridge-{slot:02}.sock"));
+    let upstream = engine.guest().engine_socket()?.with_file_name(
+        std::path::Path::new(&engine.guest().socket_layout().bridge(slot))
+            .file_name()
+            .expect("fixed bridge basename"),
+    );
     super::super::publication::launch(
         candidate,
         super::super::publication::Launch {

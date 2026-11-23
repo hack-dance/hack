@@ -136,15 +136,26 @@ Do not copy these documents into source control or attach them to diagnostics.
 
 ## Native pool socket capacity
 
-Native projects and branch instances share the application's bridge sockets
-and the host-dependency sockets in their native home. If a start needs slots
-another project holds, run `hack down` in that project to release them.
+A fresh development pool started with a project share reserves space for 16
+application bridge sockets and eight host-dependency sockets by default. The
+combined limit is 32, subject to the pinned provider’s boot command-line
+budget. Project shares also consume that budget. Project minimums take precedence over spare capacity,
+and explicit exact counts are honored. Projects and branches share the available
+slots in each direction. A new start can be refused if the live pool has too
+few free slots. The default applies at pool creation; existing pool capacities
+stay in effect.
 
-If the pool was created with fewer sockets than a single project requires,
-stopping other projects cannot increase the pool's configured capacity.
-Choose a new private directory for `HACK_NATIVE_HOME` and use that setting
-for the project's subsequent native commands. Existing data stays in the
-original native home. The new home starts with separate runtime state and data.
+If another project holds the slots you need, run `hack down` in that
+project to release them. If the pool was created with too few sockets for
+one project, choose a separate private directory for `HACK_NATIVE_HOME`.
+The new home starts with separate runtime state and data. Existing data
+stays in the original home.
+
+Fresh pools use compact guest paths for project shares and sockets. Pools
+created with the previous layout keep their recorded paths across stop,
+restart, and recovery. An older runtime refuses a compact pool. Keep the
+original home when its data is needed, or select a separate native home for
+a fresh pool.
 
 ## Owned project networks
 

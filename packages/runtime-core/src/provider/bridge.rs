@@ -1,4 +1,5 @@
 //! Explicit pool-level socket capacity. This does not authorize a graph destination.
+use super::PoolLayout;
 use crate::CandidateError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -18,15 +19,13 @@ impl BridgeIntent {
         }
         Ok(Self { slots })
     }
-    pub(super) fn guest_paths(self) -> Vec<String> {
-        (0..self.slots)
-            .map(|slot| format!("/run/hack-local/bridge-{slot:02}.sock"))
-            .collect()
+    pub(super) fn guest_paths(self, layout: PoolLayout) -> Vec<String> {
+        (0..self.slots).map(|slot| layout.bridge(slot)).collect()
     }
-    pub(super) fn mappings(intent: Option<Self>) -> Value {
+    pub(super) fn mappings(layout: PoolLayout, intent: Option<Self>) -> Value {
         json!(
             intent
-                .map(|intent| intent.guest_paths())
+                .map(|intent| intent.guest_paths(layout))
                 .unwrap_or_default()
                 .into_iter()
                 .map(|path| json!({"direction":"expose", "guest_path":path}))
@@ -90,10 +89,11 @@ impl Request {
 /// The lease-free form of [`verify_sockets`]: the same checks, and a world-accessible socket is
 /// refused instead of repaired, so read-only observation changes nothing.
 pub(super) fn observe_sockets(
+    layout: PoolLayout,
     directory: &std::path::Path,
     intent: BridgeIntent,
 ) -> Result<(), CandidateError> {
-    if socket_states_with(directory, intent, false)?.ready() {
+    if socket_states_with(layout, directory, intent, false)?.ready() {
         Ok(())
     } else {
         Err(socket_identity())
@@ -105,13 +105,14 @@ pub(super) fn observe_sockets(
 ///
 /// Adds the file names of the sockets it repaired to `repaired`, also when it then refuses.
 pub(super) fn verify_sockets(
+    layout: PoolLayout,
     directory: &std::path::Path,
     intent: BridgeIntent,
     repaired: &mut Vec<String>,
 ) -> Result<(), CandidateError> {
     let mut slots = 0;
-    let states = socket_states_into(directory, intent, true, &mut slots);
-    repaired.extend(names_of(intent, slots));
+    let states = socket_states_into(layout, directory, intent, true, &mut slots);
+    repaired.extend(names_of(layout, intent, slots));
     if states?.ready() {
         Ok(())
     } else {
@@ -281,9 +282,9 @@ impl SocketStates {
     }
 }
 
-fn names_of(intent: BridgeIntent, slots: u32) -> Vec<String> {
+fn names_of(layout: PoolLayout, intent: BridgeIntent, slots: u32) -> Vec<String> {
     intent
-        .guest_paths()
+        .guest_paths(layout)
         .into_iter()
         .enumerate()
         .filter(|(slot, _)| slots & (1 << slot) != 0)
@@ -301,19 +302,21 @@ fn names_of(intent: BridgeIntent, slots: u32) -> Vec<String> {
 /// repaired (see [`private_socket`]). A different type, owner, link count, unreadable
 /// identity or a socket directory that is not private and owned is never pending.
 fn socket_states(
+    layout: PoolLayout,
     directory: &std::path::Path,
     intent: BridgeIntent,
 ) -> Result<SocketStates, CandidateError> {
-    socket_states_with(directory, intent, true)
+    socket_states_with(layout, directory, intent, true)
 }
 
 fn socket_states_with(
+    layout: PoolLayout,
     directory: &std::path::Path,
     intent: BridgeIntent,
     repair: bool,
 ) -> Result<SocketStates, CandidateError> {
     let mut slots = 0;
-    let mut states = socket_states_into(directory, intent, repair, &mut slots)?;
+    let mut states = socket_states_into(layout, directory, intent, repair, &mut slots)?;
     states.repaired = slots;
     Ok(states)
 }
@@ -321,6 +324,7 @@ fn socket_states_with(
 /// [`socket_states_with`], setting each repaired slot's bit in `repaired` as soon as it is
 /// repaired, so a later refusal in the same observation does not lose it.
 fn socket_states_into(
+    layout: PoolLayout,
     directory: &std::path::Path,
     intent: BridgeIntent,
     repair: bool,
@@ -328,7 +332,7 @@ fn socket_states_into(
 ) -> Result<SocketStates, CandidateError> {
     let directory = private_directory(directory)?;
     let mut states = SocketStates::default();
-    for (slot, path) in intent.guest_paths().into_iter().enumerate() {
+    for (slot, path) in intent.guest_paths(layout).into_iter().enumerate() {
         let name = std::path::Path::new(&path)
             .file_name()
             .expect("fixed socket name");
@@ -456,12 +460,14 @@ fn startup_socket_timeout(
 /// Socket freshness also relies on the pinned launcher's removal of old expose
 /// paths before guest-ready; see the upgrade contract at `artifact::VERSION`.
 pub(super) fn wait_for_sockets(
+    layout: PoolLayout,
     directory: &std::path::Path,
     intent: BridgeIntent,
     verify_provider: impl FnMut() -> Result<(), CandidateError>,
     clock: &impl super::process::Clock,
 ) -> Result<Vec<String>, CandidateError> {
     wait_for_sockets_with(
+        layout,
         directory,
         intent,
         verify_provider,
@@ -471,6 +477,7 @@ pub(super) fn wait_for_sockets(
 }
 
 fn wait_for_sockets_with(
+    layout: PoolLayout,
     directory: &std::path::Path,
     intent: BridgeIntent,
     mut verify_provider: impl FnMut() -> Result<(), CandidateError>,
@@ -485,7 +492,7 @@ fn wait_for_sockets_with(
             return Err(startup_socket_timeout(intent, last, budget));
         }
         verify_provider().map_err(startup_provider_failure)?;
-        let states = socket_states(directory, intent).map_err(|_| {
+        let states = socket_states(layout, directory, intent).map_err(|_| {
             CandidateError::new(
                 "bridge_socket_identity",
                 "Bridge socket identity is unsafe; startup was refused. Run hack native recover before retrying (with an executor selected by hand: the same executor and --candidate-root as the failed start, then runtime recover --json).",
@@ -499,7 +506,7 @@ fn wait_for_sockets_with(
             return Err(startup_socket_timeout(intent, last, budget));
         }
         if states.ready() {
-            return Ok(names_of(intent, repaired));
+            return Ok(names_of(layout, intent, repaired));
         }
         clock.sleep(remaining.min(BOOT_SOCKET_POLL));
     }
@@ -560,20 +567,20 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let intent = BridgeIntent::new(1).unwrap();
-        verify_sockets(&root, intent, &mut Vec::new()).unwrap();
+        verify_sockets(PoolLayout::Legacy, &root, intent, &mut Vec::new()).unwrap();
         // An owned socket's group and other bits are repaired, not refused (HACK-2375).
         fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
-        verify_sockets(&root, intent, &mut Vec::new()).unwrap();
+        verify_sockets(PoolLayout::Legacy, &root, intent, &mut Vec::new()).unwrap();
         assert_eq!(
             fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
             0o700
         );
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"foreign").unwrap();
-        assert!(verify_sockets(&root, intent, &mut Vec::new()).is_err());
+        assert!(verify_sockets(PoolLayout::Legacy, &root, intent, &mut Vec::new()).is_err());
         fs::remove_file(&path).unwrap();
         symlink(root.join("other"), &path).unwrap();
-        assert!(verify_sockets(&root, intent, &mut Vec::new()).is_err());
+        assert!(verify_sockets(PoolLayout::Legacy, &root, intent, &mut Vec::new()).is_err());
         drop(listener);
         fs::remove_dir_all(root).unwrap();
     }
@@ -586,9 +593,12 @@ mod tests {
         check_request(one, one).unwrap();
         assert!(check_request(None, one).is_err());
         assert!(check_request(one, Some(BridgeIntent::new(2).unwrap())).is_err());
-        assert_eq!(BridgeIntent::mappings(None), json!([]));
+        assert_eq!(BridgeIntent::mappings(PoolLayout::Legacy, None), json!([]));
         let max = BridgeIntent::new(32).unwrap();
-        assert_eq!(max.guest_paths().len(), 32);
-        assert_eq!(max.guest_paths()[31], "/run/hack-local/bridge-31.sock");
+        assert_eq!(max.guest_paths(PoolLayout::Legacy).len(), 32);
+        assert_eq!(
+            max.guest_paths(PoolLayout::Legacy)[31],
+            "/run/hack-local/bridge-31.sock"
+        );
     }
 }

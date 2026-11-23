@@ -93,6 +93,40 @@ fn record_mounts(record: &Value, owner: &Owner) -> Result<Value, CandidateError>
     Ok(Value::Array(mounts))
 }
 
+fn refuse_guest_path_collision(
+    existing: &[&ProjectShareIntent],
+    requested: &ProjectShareIntent,
+) -> Result<(), CandidateError> {
+    if let Some(other) = existing.iter().find(|other| {
+        other.project != requested.project && other.guest_path == requested.guest_path
+    }) {
+        let label = |path: &Path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unnamed")
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || "._-".contains(ch) {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .take(64)
+                .collect::<String>()
+        };
+        return Err(CandidateError::new(
+            "project_share_collision",
+            format!(
+                "Project share names collide for {} and {}.",
+                label(&other.project),
+                label(&requested.project)
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Pure plan: the exact owner and record after one add or remove. Only the share set
 /// and the record's mount list change; every other owner and record field is kept.
 fn plan(
@@ -103,7 +137,11 @@ fn plan(
     database_identity: (u64, u64),
 ) -> Result<Journal, CandidateError> {
     let primary = owner.project_share.as_ref().ok_or_else(refused)?;
-    project_share::validate_set(Some(primary), &owner.additional_project_shares)?;
+    project_share::validate_layout(
+        owner.socket_layout,
+        Some(primary),
+        &owner.additional_project_shares,
+    )?;
     share.validate_receipt()?;
     if record_mounts(&record, owner)? != record["mounts"] {
         return Err(refused());
@@ -111,10 +149,11 @@ fn plan(
     let mut after = owner.clone();
     match operation {
         Operation::Add => {
+            refuse_guest_path_collision(&owner.project_shares(), share)?;
             if owner
                 .project_shares()
                 .iter()
-                .any(|s| s.project == share.project || s.guest_path == share.guest_path)
+                .any(|s| s.project == share.project)
                 || owner.project_shares().len() >= MAX_PROJECT_SHARES
             {
                 return Err(refused());
@@ -131,10 +170,14 @@ fn plan(
             after.additional_project_shares.remove(index);
         }
     }
-    project_share::validate_set(
+    project_share::validate_layout(
+        after.socket_layout,
         after.project_share.as_ref(),
         &after.additional_project_shares,
     )?;
+    if operation == Operation::Add {
+        super::boot_budget::check_owner(&after)?;
+    }
     let mut record_after = record.clone();
     record_after["mounts"] = record_mounts(&record, &after)?;
     Ok(Journal {
@@ -370,6 +413,11 @@ fn update(
         Ok(_) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => return Err(refused()),
+    };
+    let share = if operation == Operation::Add && !journal_present {
+        share.with_layout(owner.socket_layout)?
+    } else {
+        share
     };
     if !journal_present {
         let present = owner.project_shares().contains(&&share);

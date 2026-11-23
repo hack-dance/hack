@@ -63,7 +63,11 @@ impl StartRequest<'_> {
     /// `alive` is whether the recorded provider still runs (see `emulation_pool_alive`).
     pub(super) fn check(&self, owner: &Owner, alive: bool) -> Result<(), CandidateError> {
         check_amd64_emulation_request(owner, self.amd64_emulation, alive)?;
-        super::super::project_share::check_request(&owner.project_shares(), self.project_share)?;
+        super::super::project_share::check_request(
+            owner.socket_layout,
+            &owner.project_shares(),
+            self.project_share,
+        )?;
         self.bridges.check(owner.application_bridge)?;
         super::super::network_intent::check_request(&owner.network, self.network)?;
         self.dependencies.check(owner.dependency_sockets)

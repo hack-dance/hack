@@ -1,5 +1,5 @@
 set -efu
-allocation=$1; slot=$2; serial=$3
+allocation=$1; slot=$2; serial=$3; socket=$4
 case "$allocation" in *[!0-9a-f]*|'') exit 1;; esac
 test "${#allocation}" = 32
 case "$slot" in *[!0-9]*|'') exit 1;; esac
@@ -23,7 +23,6 @@ private_file() {
 private_dir "$base"
 private_dir "$base/graph-relays"
 root="$base/graph-relays/$allocation"
-socket=$(printf '%s/bridge-%02d.sock' "$base" "$slot")
 test ! -L "$root"
 if test -e "$root"; then
  test -d "$root"

@@ -1,4 +1,5 @@
 //! Explicit unfiltered writable development tree. Snapshot exclusions do not apply.
+use super::PoolLayout;
 mod worktree;
 
 use crate::{CandidateError, reject_aliased_state};
@@ -86,12 +87,22 @@ impl ProjectShareIntent {
                 .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
             || text.contains(':')
             || text.chars().any(char::is_control)
-            || self.guest_path != format!("/mnt/hack-projects/{digest}")
+            || (self.guest_path != PoolLayout::Legacy.project(&digest)
+                && self.guest_path != PoolLayout::CompactV1.project(&digest))
         {
             return Err(refused());
         }
         Ok(())
     }
+    pub(super) fn with_layout(mut self, layout: PoolLayout) -> Result<Self, CandidateError> {
+        self.validate_receipt()?;
+        self.guest_path = layout.project(&format!(
+            "{:x}",
+            crate::Hex(Sha256::digest(self.project.as_os_str().as_encoded_bytes()))
+        ));
+        Ok(self)
+    }
+
     /// Bind only ordinary descendants of the approved directory. Reject aliases
     /// at every existing path component before passing the path to the guest.
     pub(super) fn bind_path(&self, source: &str) -> Result<String, CandidateError> {
@@ -175,6 +186,20 @@ pub(super) fn validate_set(
     Ok(())
 }
 
+pub(super) fn validate_layout(
+    layout: PoolLayout,
+    primary: Option<&ProjectShareIntent>,
+    additional: &[ProjectShareIntent],
+) -> Result<(), CandidateError> {
+    validate_set(primary, additional)?;
+    for share in primary.into_iter().chain(additional) {
+        if share.clone().with_layout(layout)? != *share {
+            return Err(refused());
+        }
+    }
+    Ok(())
+}
+
 /// Admit a requested share only when it is already an exact member of the pool's
 /// share set. A root outside the set is refused with a distinct code: the set changes
 /// only through the explicit stopped-pool extension, never as a side effect of `up`.
@@ -183,6 +208,7 @@ pub(super) fn validate_set(
 /// neighbor root cannot block an unrelated project on a running pool. Boot checks
 /// every share live before the provider starts.
 pub(super) fn check_request(
+    layout: PoolLayout,
     existing: &[&ProjectShareIntent],
     requested: Option<&ProjectShareIntent>,
 ) -> Result<(), CandidateError> {
@@ -191,7 +217,7 @@ pub(super) fn check_request(
     }
     if let Some(requested) = requested {
         requested.validate()?;
-        if !existing.contains(&requested) {
+        if !existing.contains(&&requested.clone().with_layout(layout)?) {
             return Err(if existing.is_empty() {
                 refused()
             } else {
@@ -557,21 +583,25 @@ mod tests {
         let second = Fixture::new();
         let a = ProjectShareIntent::approve(&first.0, true).unwrap();
         let b = ProjectShareIntent::approve(&second.0, true).unwrap();
-        assert!(check_request(&[&a], Some(&a)).is_ok());
-        assert!(check_request(&[&a], None).is_ok());
+        assert!(check_request(PoolLayout::Legacy, &[&a], Some(&a)).is_ok());
+        assert!(check_request(PoolLayout::Legacy, &[&a], None).is_ok());
         assert_eq!(
-            check_request(&[&a], Some(&b)).unwrap_err().code,
+            check_request(PoolLayout::Legacy, &[&a], Some(&b))
+                .unwrap_err()
+                .code,
             "project_share_extension_required"
         );
         assert_eq!(
-            check_request(&[], Some(&a)).unwrap_err().code,
+            check_request(PoolLayout::Legacy, &[], Some(&a))
+                .unwrap_err()
+                .code,
             "project_share"
         );
         // Membership is exact: a forged receipt for the same root is not a member.
         let mut forged = b.clone();
         forged.inode += 1;
-        assert!(check_request(&[&a, &b], Some(&forged)).is_err());
-        assert!(check_request(&[&a, &b], Some(&b)).is_ok());
+        assert!(check_request(PoolLayout::Legacy, &[&a, &b], Some(&forged)).is_err());
+        assert!(check_request(PoolLayout::Legacy, &[&a, &b], Some(&b)).is_ok());
     }
 
     #[test]
@@ -602,9 +632,9 @@ mod tests {
         let b = ProjectShareIntent::approve(&second.0, true).unwrap();
         let moved = Fixture::new();
         fs::rename(&second.0, moved.0.join("gone")).unwrap();
-        assert!(check_request(&[&a, &b], Some(&a)).is_ok());
-        assert!(check_request(&[&a, &b], Some(&b)).is_err());
-        assert!(check_request(&[&a, &b], None).is_err());
+        assert!(check_request(PoolLayout::Legacy, &[&a, &b], Some(&a)).is_ok());
+        assert!(check_request(PoolLayout::Legacy, &[&a, &b], Some(&b)).is_err());
+        assert!(check_request(PoolLayout::Legacy, &[&a, &b], None).is_err());
         assert_eq!(
             check_boot(&[&a, &b]).unwrap_err().code,
             "project_share_stale"

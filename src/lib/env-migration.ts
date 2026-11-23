@@ -1,7 +1,10 @@
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
-import { privateProjectOverlayNames } from "./config-editor-source.ts";
+import {
+  hasPrivateOverlayValue,
+  privateProjectOverlayNames,
+} from "./config-editor-source.ts";
 import { privateOverlayFilesExist } from "./config-overlay-files.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
@@ -513,7 +516,7 @@ async function prepareConsistent(
       }))
     ) {
       throw new ClosedCliError(
-        "Move or rename the env layer with a private filename before migrating the project settings. No migration files were changed."
+        "Migration would expose a private overlay name. Resolve the conflicting project setting or legacy env input before retrying. No migration files were changed."
       );
     }
   }
@@ -965,6 +968,9 @@ async function migrationExposesPrivateOverlay(opts: {
   );
   if (removed.length === 0) {
     return false;
+  }
+  if (hasPrivateOverlayValue(after, new Set(removed))) {
+    return true;
   }
   const inheritLocal = [before, after].some(
     (record) =>

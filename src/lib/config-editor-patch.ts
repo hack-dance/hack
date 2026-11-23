@@ -32,8 +32,8 @@ import {
 } from "./config-editor-model.ts";
 import {
   configLine,
+  hasPrivateOverlayValue,
   isConfigSecret,
-  isPrivateOverlayValue,
   jsonConfigDiagnostic,
   jsonConfigTree,
   privateProjectOverlayNames,
@@ -583,25 +583,6 @@ function removedPrivateOverlays(
   remaining: ReadonlySet<string>
 ): string[] {
   return [...before.privateOverlays].filter((name) => !remaining.has(name));
-}
-
-function hasPrivateOverlayValue(
-  project: Record<string, unknown>,
-  names: ReadonlySet<string>
-): boolean {
-  const pending = Object.values(project);
-  while (pending.length > 0) {
-    const value = pending.pop();
-    if (isPrivateOverlayValue(value, names)) {
-      return true;
-    }
-    if (isRecord(value) || Array.isArray(value)) {
-      for (const child of Object.values(value)) {
-        pending.push(child);
-      }
-    }
-  }
-  return false;
 }
 
 /** An existing legacy store may have undiscovered overlays. Inspect metadata only. */

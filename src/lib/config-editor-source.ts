@@ -57,6 +57,26 @@ export function isPrivateOverlayValue(
   return name !== null && names.has(name);
 }
 
+/** A project must retain the redaction source for any surviving private value. */
+export function hasPrivateOverlayValue(
+  project: Record<string, unknown>,
+  names: ReadonlySet<string>
+): boolean {
+  const pending = Object.values(project);
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (isPrivateOverlayValue(value, names)) {
+      return true;
+    }
+    if (isRecord(value) || Array.isArray(value)) {
+      for (const child of Object.values(value)) {
+        pending.push(child);
+      }
+    }
+  }
+  return false;
+}
+
 function secretProperty(key: string): boolean {
   // OAuth routing configuration is an object of public settings.
   return (

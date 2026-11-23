@@ -1067,14 +1067,29 @@ test("resumed migration checks private overlay filenames under the project lock"
     acceptTrackedChanges: false,
     repairCompose: false,
   };
+  const expectRefusalBeforePublication = async () => {
+    const before = await projectFiles();
+    await expect(apply(options)).rejects.toThrow(
+      "Migration would expose a private overlay name"
+    );
+    expect(await projectFiles()).toEqual(before);
+    expect(
+      await Bun.file(envMigrationJournalPath(project.projectRoot)).exists()
+    ).toBe(false);
+  };
+  await writeFile(
+    path,
+    JSON.stringify({
+      name: "journal",
+      env: { defaultOverlay: authored },
+      defaultEnvConfig: name,
+    })
+  );
+  await expectRefusalBeforePublication();
+  await writeFile(path, original);
   const legacy = join(project.projectDir, `.env.${name}`);
   await writeFile(legacy, "TOKEN=present\n");
-  const before = await projectFiles();
-  await expect(apply(options)).rejects.toThrow("private filename");
-  expect(await projectFiles()).toEqual(before);
-  expect(
-    await Bun.file(envMigrationJournalPath(project.projectRoot)).exists()
-  ).toBe(false);
+  await expectRefusalBeforePublication();
   await rm(legacy);
   await expect(
     apply({

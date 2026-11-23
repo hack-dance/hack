@@ -1,0 +1,39 @@
+---
+title: DownStoppedPool · proposal
+---
+stateDiagram-v2
+    direction TB
+    classDef wait stroke-width:1.6px
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> inspect : hack down
+    inspect --> existing : [pool running]
+    inspect --> receipt : runtime_not_running
+    receipt --> classify : read host-side receipt
+    state classify <<choice>>
+    classify --> stopped : [retained, no owner, none owed]
+    classify --> owed : [owner alive or work owed]
+    classify --> stale : [receipt not retained]
+    classify --> refused : [unreadable]
+    stopped --> [*] : exit 0
+    owed --> [*] : refuse, name recover
+    stale --> [*] : refuse, name hack up
+    refused --> [*] : refuse as today
+
+    note right of stopped
+        INV StoppedIsTrue:
+        reported stopped only if
+        retained, owner dead,
+        nothing owed.
+    end note
+    note left of receipt
+        INV NoEffectWithoutPool:
+        only lock-free host reads;
+        no runtime effect.
+    end note
+
+    class stopped ok
+    class owed wait
+    class stale wait
+    class refused fail

@@ -53,9 +53,35 @@ prefix, and a killed process leaves only complete lines already emitted.
 checks, engine readiness and any existing failed-boot cleanup. A provider start
 failure therefore records an error span. Warm starts use `vm.reattach`.
 
+`vm.ensure` carries `attrs.admission_reused` when a Development pool start's host
+sample under the startup lease was accepted: `true` when a recorded earlier sample
+replaced the admission wait, `false` when the start waited out its window. A start
+that fails later still carries it. It is absent when no such sample was accepted:
+a pool that was already running, a Research pool, or a start refused before or at
+that sample.
+
 This slice implements the Rust contract and transport only. The TypeScript reader,
 public `--timings`/`--json` integration, long-lived child transport wiring and measured
 command coverage follow separately. No CLI join or performance acceptance is claimed.
+
+For image acquisition, `image.engine.preflight` measures the initial guest
+check and `image.tag.resolve` measures mutable tag resolution.
+`image.cache.inventory` measures receipt and archive metadata checks across
+the local cache.
+`image.pin.verify` measures digest-bound registry metadata verification. With
+stored metadata it hashes the small manifest, selected child and config. If the
+metadata is missing it includes the registry lookup.
+`image.import.connect` includes provider lease wait and engine authentication.
+`image.inspect` measures exact image readback, including guest ownership checks.
+`image.archive.digest` measures the standalone archive SHA-256 pass and is absent
+when a completed load receipt and live readback satisfy `ensure-image`.
+
+`image.ensure` and `image.cache` report `attrs.registry_requests`, the count
+of attempted HTTP sends in that runtime command, including registry
+authentication, retries and redirects. A fresh loaded selection reports zero.
+`image.tag.record` covers the local receipt read without network transfer.
+A batch ensure also includes `attrs.image_index`, the zero-based position in
+the batch request, so overlapping spans can be attributed to each image.
 
 ## Growing the vocabulary
 
@@ -76,7 +102,7 @@ created/recreated services use `ok` without `cached`. Dependency-blocked work us
 
 Numeric keys include `service_index`, `attempt`, `engine_requests`, `dropped`,
 `services`, `wave`, `syncs`, `waited_on_index`, and `generation`. Boolean keys include
-`blocked`, `waited_on_cap`, `reason_spec`, `reason_unhealthy`, `reason_exited`,
+`blocked`, `waited_on_cap`, `admission_reused`, `reason_spec`, `reason_unhealthy`, `reason_exited`,
 `reason_dead`, `reason_missing`, `reason_forced`, `reason_migrated`,
 `reason_managed_env`, and the changed-field keys `changed_image`, `changed_command`,
 `changed_env`, `changed_managed_env`, `changed_mounts`, `changed_networks`,

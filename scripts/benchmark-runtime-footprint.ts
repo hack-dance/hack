@@ -10,7 +10,7 @@
  *          [--docker-vm-pattern REGEX]
  *          [--phases LIST] [--idle-seconds S] [--warm-runs N] [--max-load L]
  *          [--env KEY=VALUE]... [--hack-arg ARG]... [--keep-running]
- *          [--attached]
+ *          [--attached] [--legacy-readiness]
  *
  *   --lane        which backend this run measures. One lane per invocation: the
  *                 caller alternates lanes and owns any host lock between runs.
@@ -28,11 +28,26 @@
  *   --attached    measure a project that is already running (no cold phase).
  *                 The warm, restart and stop phases, when listed, stop that
  *                 project; the native VM is never stopped in this mode.
+ *   --legacy-readiness
+ *                 poll readiness the way results before Nov 2026 did: routes
+ *                 one after the other, 500 ms apart. Only for comparing with
+ *                 those results; see the fixture README for its Compose file.
  *
  * Measurement boundary. Readiness is the descriptor's routed HTTP checks
  * returning the expected status through the backend's own proxy, never a
- * process start. Timings are wall time of the CLI command plus the wait for
- * readiness, with the 1-minute load recorded before and after.
+ * process start. All routes are checked at once, 20 ms apart. A sample can be
+ * late by the rest of a round already under way when the routes became ready
+ * (up to the slowest request), plus 20 ms, plus one more round. Timings are
+ * wall time of the CLI command plus the wait for readiness, with the 1-minute
+ * load recorded before and after.
+ *
+ * `result.json` records the method under `method`: the readiness mode, the
+ * SHA-256 of the project's Compose file, and the health check each service
+ * runs on this lane (Compose runs command checks in the engine; native runs
+ * non-routed command checks in its engine and probes routed services itself).
+ * A command check on a routed service runs on Compose only, so the report
+ * lists it under `unevenHealthChecks`. A service with no test uses its
+ * image's own check, which is not inspected: `unknownHealthChecks` lists it.
  *
  * Memory is reported per quantity and never summed across kinds:
  *   - per container: cgroup `memory.current` and `memory.stat` (anon, file),
@@ -82,6 +97,15 @@ import {
   parseJobPoll,
   parsePhysFootprintBytes,
 } from "./lib/runtime-bench-job.ts";
+import {
+  allPass,
+  EXACT_READINESS,
+  LEGACY_READINESS,
+  laneHealthChecks,
+  pollUntil,
+  unevenHealthChecks,
+  unknownHealthChecks,
+} from "./lib/runtime-bench-method.ts";
 
 type Env = Record<string, string>;
 
@@ -149,6 +173,8 @@ type Timing = {
   readonly loadAfter: number;
   readonly seconds: number;
   readonly commandSeconds?: number;
+  /** Wait from the command's exit until every route answered. */
+  readonly readySeconds?: number;
   readonly cliCpuSeconds?: number | null;
   readonly ok: boolean;
   /** Load exceeded `--max-load`: kept, and left out of the `summary` medians. */
@@ -208,6 +234,7 @@ const { values } = parseArgs({
     "hack-arg": { type: "string", multiple: true, default: [] },
     "keep-running": { type: "boolean", default: false },
     attached: { type: "boolean", default: false },
+    "legacy-readiness": { type: "boolean", default: false },
   },
 });
 
@@ -266,6 +293,9 @@ const warmRuns = positive("warm-runs");
 const maxLoad = positive("max-load");
 const startTimeout = positive("start-timeout");
 const hackArgs = values["hack-arg"] ?? [];
+const readiness = values["legacy-readiness"]
+  ? LEGACY_READINESS
+  : EXACT_READINESS;
 
 if (lane === "native" && !(nativeTool && nativeHome)) {
   fail("--lane native needs --native-tool and --native-home");
@@ -443,24 +473,22 @@ async function fetchRoute(
 }
 
 async function ready(): Promise<boolean> {
-  for (const route of workload.routes) {
-    const answer = await fetchRoute(route);
-    if (!accepts(route, answer.status)) {
-      return false;
-    }
-  }
-  return true;
+  return await allPass(
+    workload.routes.map(
+      (route) => async () => accepts(route, (await fetchRoute(route)).status)
+    ),
+    readiness
+  );
 }
 
-async function waitReady(timeoutSeconds: number): Promise<boolean> {
-  const deadline = performance.now() + timeoutSeconds * 1000;
-  while (performance.now() < deadline) {
-    if (await ready()) {
-      return true;
-    }
-    await Bun.sleep(500);
-  }
-  return false;
+/** Seconds from the call until every route answered, or null on timeout. */
+async function waitReady(timeoutSeconds: number): Promise<number | null> {
+  const ms = await pollUntil({
+    isReady: ready,
+    mode: readiness,
+    timeoutMs: timeoutSeconds * 1000,
+  });
+  return ms === null ? null : ms / 1000;
 }
 
 /** Times one CLI command plus the wait until every route answers. */
@@ -478,8 +506,10 @@ async function timed(opts: {
   const started = performance.now();
   const result = await cli(opts.args, opts.timeoutSeconds ?? startTimeout);
   let ok = result.exitCode === 0;
+  let readySeconds: number | null = null;
   if (ok && opts.expectReady) {
-    ok = await waitReady(120);
+    readySeconds = await waitReady(120);
+    ok = readySeconds !== null;
   }
   const seconds = (performance.now() - started) / 1000;
   const loadAfter = load1();
@@ -496,6 +526,9 @@ async function timed(opts: {
     loadAfter,
     seconds: Math.round(seconds * 100) / 100,
     commandSeconds: Math.round(result.seconds * 100) / 100,
+    ...(readySeconds === null
+      ? {}
+      : { readySeconds: Math.round(readySeconds * 1000) / 1000 }),
     cliCpuSeconds: result.cpuSeconds,
     ok,
     flagged: Math.max(loadBefore, loadAfter) > maxLoad,
@@ -1371,8 +1404,12 @@ async function phaseStop(): Promise<void> {
     ok: result.exitCode === 0,
     flagged: Math.max(loadBefore, load1()) > maxLoad,
   });
-  await Bun.sleep(3000);
-  const left = laneProcesses().vm.length;
+  // Give the provider's processes up to 10 s to exit; most go at once.
+  let left = laneProcesses().vm.length;
+  for (let waited = 0; left > 0 && waited < 10_000; waited += 100) {
+    await Bun.sleep(100);
+    left = laneProcesses().vm.length;
+  }
   report.providerVmProcessesAfterStop = left;
   if (left > 0) {
     notes.push(
@@ -1400,6 +1437,47 @@ function summarizeTimings(): Record<string, unknown> {
     };
   }
   return summary;
+}
+
+/** What this lane ran: readiness polling and each service's health check. */
+function methodRecord(): Record<string, unknown> {
+  const composePath = join(project, ".hack/docker-compose.yml");
+  const composeText = existsSync(composePath)
+    ? readFileSync(composePath, "utf8")
+    : null;
+  let compose: unknown = null;
+  try {
+    compose = composeText === null ? null : Bun.YAML.parse(composeText);
+  } catch {
+    notes.push(
+      "the project's Compose file did not parse; health checks unknown"
+    );
+  }
+  const uneven = unevenHealthChecks(compose);
+  if (uneven.length > 0) {
+    notes.push(
+      `not like for like: ${uneven.join(", ")} run a different health check on each lane (a command check native replaces with a route probe, or start settings native fills in and Compose does not); see method.healthChecks`
+    );
+  }
+  const unknown = unknownHealthChecks(compose);
+  return {
+    readiness: {
+      ...readiness,
+      legacy: values["legacy-readiness"] === true,
+      routes: workload.routes.map((route) => `${route.host}${route.path}`),
+    },
+    composeFile: composeText === null ? null : ".hack/docker-compose.yml",
+    composeSha256:
+      composeText === null
+        ? null
+        : new Bun.CryptoHasher("sha256").update(composeText).digest("hex"),
+    healthChecks: laneHealthChecks({
+      compose,
+      lane: lane === "native" ? "native" : "compose",
+    }),
+    unevenHealthChecks: uneven,
+    unknownHealthChecks: unknown,
+  };
 }
 
 /** True once this run performed the first start, so the runtime is its own to stop. */
@@ -1439,6 +1517,7 @@ async function main(): Promise<void> {
   report.cli = { version: version.stdout.trim().split("\n")[0] ?? null };
   report.maxLoad = maxLoad;
   report.phases = [...phases];
+  report.method = methodRecord();
   save();
 
   let running = false;

@@ -86,6 +86,21 @@ pub enum Event<'a> {
         service: &'a str,
         observation: Observation,
     },
+    /// A started service's own readiness goal held on one observation. Emitted at
+    /// most once per service per attempt, never before `Started` and never after a
+    /// failure; no order among siblings. It is a wake-up for publication, not a
+    /// durable state: a later exit is not reported here.
+    ServiceReady {
+        service: &'a str,
+    },
+    /// Every service has `Started` recorded and its latest observation satisfies
+    /// `Condition::Started` (running, or exited 0), Compose's "started": dependency
+    /// edges kept their own conditions, since a dependent starts only once its edge
+    /// holds; health and route goals are not part of it. Emitted exactly once per
+    /// attempt, behind the same post-observation deadline and cancellation checks
+    /// as `ServiceReady`, never after a failure and always before `Ready` (also when
+    /// both hold on the same pass). Only for a driver that `reports_started`.
+    AllStarted,
     Ready,
 }
 /// `record(StartIntent)` must durably reserve the service before `start`, rejecting any prior
@@ -99,6 +114,12 @@ pub trait Driver {
     }
 
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError>;
+    /// Whether this attempt records `AllStarted` (`--report-started`). When false the
+    /// loop neither checks the deadline for it nor records it, exactly as before the
+    /// event existed. The default is no.
+    fn reports_started(&self) -> bool {
+        false
+    }
     fn start(&mut self, service: &str) -> Result<(), CandidateError>;
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError>;
 
@@ -257,22 +278,53 @@ impl Graph {
         Ok(order)
     }
 }
+/// Per-attempt observation memory: the last state recorded for each service and
+/// the services already reported ready.
+#[derive(Default)]
+struct Seen {
+    observations: BTreeMap<String, Observation>,
+    ready: BTreeSet<String>,
+    all_started: bool,
+}
 fn inspect(
     driver: &mut impl Driver,
     name: &str,
-    observations: &mut BTreeMap<String, Observation>,
+    seen: &mut Seen,
 ) -> Result<Observation, CandidateError> {
     driver.check_cancelled()?;
     let state = driver.observe(name)?;
-    if observations.get(name) != Some(&state) {
+    if seen.observations.get(name) != Some(&state) {
         driver.record(Event::Observed {
             service: name,
             observation: state,
         })?;
-        observations.insert(name.into(), state);
+        seen.observations.insert(name.into(), state);
     }
     if state.failed() {
         return Err(driver.service_failure(name, state));
+    }
+    Ok(state)
+}
+/// Observe a started service, then check the deadline and cancellation. Only an
+/// observation that passed both can report the service's own goal: its first one
+/// records `ServiceReady`, so a failed, late or cancelled attempt reports nothing more.
+/// The cancellation check can wait (a driver may verify guest state there), so the
+/// deadline is checked again before the event.
+fn observe_started(
+    driver: &mut impl Driver,
+    name: &str,
+    goal: Condition,
+    seen: &mut Seen,
+    deadline: Instant,
+    now: &mut impl FnMut() -> Instant,
+) -> Result<Observation, CandidateError> {
+    let state = inspect(driver, name, seen)?;
+    before_deadline(deadline, now())?;
+    driver.check_cancelled()?;
+    if state.satisfies(goal) && !seen.ready.contains(name) {
+        before_deadline(deadline, now())?;
+        driver.record(Event::ServiceReady { service: name })?;
+        seen.ready.insert(name.into());
     }
     Ok(state)
 }
@@ -343,14 +395,15 @@ fn run_with_clock(
     }
     let deadline = now() + timeout;
     let mut started = BTreeSet::<String>::new();
-    let mut observations = BTreeMap::new();
+    let mut seen = Seen::default();
     loop {
         before_deadline(deadline, now())?;
         driver.check_cancelled()?;
+        // Every started service is observed on every pass, so its own goal is
+        // reported while siblings are still starting.
         for name in &started {
-            inspect(driver, name, &mut observations)?;
-            before_deadline(deadline, now())?;
-            driver.check_cancelled()?;
+            let goal = graph.services[name].ready;
+            observe_started(driver, name, goal, &mut seen, deadline, &mut now)?;
         }
         for name in &order {
             let name = *name;
@@ -364,9 +417,9 @@ fn run_with_clock(
                     ready = false;
                     break;
                 }
-                let state = inspect(driver, dependency, &mut observations)?;
-                before_deadline(deadline, now())?;
-                driver.check_cancelled()?;
+                let goal = graph.services[dependency].ready;
+                let state =
+                    observe_started(driver, dependency, goal, &mut seen, deadline, &mut now)?;
                 if !state.satisfies(*condition) {
                     ready = false;
                     break;
@@ -386,17 +439,24 @@ fn run_with_clock(
             }
             driver.record(Event::Started { service: name })?;
             started.insert(name.clone());
-            inspect(driver, name, &mut observations)?;
-            before_deadline(deadline, now())?;
-            driver.check_cancelled()?;
+            observe_started(driver, name, service.ready, &mut seen, deadline, &mut now)?;
         }
         if started.len() == graph.services.len() {
             let mut ready = true;
+            let mut all_started = true;
             for (name, service) in &graph.services {
-                let state = inspect(driver, name, &mut observations)?;
-                before_deadline(deadline, now())?;
-                driver.check_cancelled()?;
+                let state =
+                    observe_started(driver, name, service.ready, &mut seen, deadline, &mut now)?;
                 ready &= state.satisfies(service.ready);
+                all_started &= state.satisfies(Condition::Started);
+            }
+            // Every observation above passed the deadline and cancellation checks;
+            // the deadline is checked once more right before the event, as for
+            // `ServiceReady`.
+            if all_started && !seen.all_started && driver.reports_started() {
+                before_deadline(deadline, now())?;
+                driver.record(Event::AllStarted)?;
+                seen.all_started = true;
             }
             if ready {
                 driver.record(Event::Ready)?;
@@ -421,8 +481,13 @@ mod tests {
         states: BTreeMap<String, Observation>,
         fail_journal: bool,
         ambiguous_start: bool,
+        /// `--report-started`.
+        reports: bool,
     }
     impl Driver for Fake {
+        fn reports_started(&self) -> bool {
+            self.reports
+        }
         fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
             self.events.push(serde_json::to_string(&event).unwrap());
             if self.fail_journal {
@@ -447,6 +512,9 @@ mod tests {
         cancel_on_observe: bool,
     }
     impl Driver for CancelledDriver<'_> {
+        fn reports_started(&self) -> bool {
+            self.inner.reports
+        }
         fn check_cancelled(&self) -> Result<(), CandidateError> {
             if self.pending.get() {
                 Err(error("graph_cancelled", "fixture"))
@@ -587,6 +655,386 @@ mod tests {
         .unwrap();
         assert_eq!(driver.starts, ["init", "web", "check"]);
         assert_eq!(driver.events.last().unwrap(), "{\"event\":\"ready\"}");
+    }
+    /// Two independent services: `fast` is ready once running, `slow` waits on its
+    /// health check, which `wait` turns to `later`.
+    struct Siblings {
+        inner: Fake,
+        slow: std::rc::Rc<std::cell::Cell<Observation>>,
+    }
+    impl Driver for Siblings {
+        fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+            self.inner.record(event)
+        }
+        fn start(&mut self, service: &str) -> Result<(), CandidateError> {
+            self.inner.start(service)
+        }
+        fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
+            if service == "slow" {
+                Ok(self.slow.get())
+            } else {
+                self.inner.observe(service)
+            }
+        }
+    }
+    fn siblings(later: Observation) -> (Result<(), CandidateError>, Vec<String>) {
+        let graph = Graph {
+            services: BTreeMap::from([
+                (
+                    "fast".into(),
+                    Service {
+                        dependencies: BTreeMap::new(),
+                        ready: Condition::Started,
+                    },
+                ),
+                (
+                    "slow".into(),
+                    Service {
+                        dependencies: BTreeMap::new(),
+                        ready: Condition::Healthy,
+                    },
+                ),
+            ]),
+        };
+        let slow = std::rc::Rc::new(std::cell::Cell::new(Observation::Running {
+            health: Health::Starting,
+        }));
+        let mut driver = Siblings {
+            inner: Fake {
+                states: BTreeMap::from([(
+                    "fast".into(),
+                    Observation::Running {
+                        health: Health::None,
+                    },
+                )]),
+                ..Fake::default()
+            },
+            slow: slow.clone(),
+        };
+        let mut waits = 0;
+        let outcome = run_with_wait(&graph, &mut driver, Duration::from_secs(1), |_| {
+            waits += 1;
+            if waits == 3 {
+                slow.set(later);
+            }
+        });
+        (outcome, driver.inner.events)
+    }
+    fn position(events: &[String], wanted: &str) -> Option<usize> {
+        events.iter().position(|event| event == wanted)
+    }
+    #[test]
+    fn a_fast_service_is_reported_ready_once_while_a_sibling_still_starts() {
+        let (outcome, events) = siblings(Observation::Running {
+            health: Health::Healthy,
+        });
+        outcome.unwrap();
+        let fast = r#"{"event":"service_ready","service":"fast"}"#;
+        let slow = r#"{"event":"service_ready","service":"slow"}"#;
+        assert_eq!(events.iter().filter(|event| *event == fast).count(), 1);
+        assert_eq!(events.iter().filter(|event| *event == slow).count(), 1);
+        let healthy = position(
+            &events,
+            r#"{"event":"observed","service":"slow","observation":{"state":"running","health":"healthy"}}"#,
+        )
+        .unwrap();
+        // Reported before the sibling became healthy, and only after it started.
+        assert!(position(&events, fast).unwrap() < healthy);
+        assert!(
+            position(&events, r#"{"event":"started","service":"fast"}"#).unwrap()
+                < position(&events, fast).unwrap()
+        );
+        assert!(position(&events, slow).unwrap() > healthy);
+        assert_eq!(events.last().unwrap(), r#"{"event":"ready"}"#);
+    }
+    #[test]
+    fn no_service_is_reported_ready_after_a_failure() {
+        let (outcome, events) = siblings(Observation::Running {
+            health: Health::Unhealthy,
+        });
+        assert_eq!(outcome.unwrap_err().code, "graph_service_failed");
+        assert_eq!(
+            events.last().unwrap(),
+            r#"{"event":"observed","service":"slow","observation":{"state":"running","health":"unhealthy"}}"#
+        );
+        let reported: Vec<_> = events
+            .iter()
+            .filter(|event| event.contains("service_ready"))
+            .collect();
+        assert_eq!(reported, [r#"{"event":"service_ready","service":"fast"}"#]);
+        assert!(!events.iter().any(|event| event == r#"{"event":"ready"}"#));
+    }
+    #[test]
+    fn an_observation_that_crosses_the_deadline_reports_nothing_ready() {
+        use std::{cell::Cell, rc::Rc};
+        /// The healthy answer, or the cancellation check after it, returns after
+        /// the deadline.
+        struct Late {
+            inner: Fake,
+            late: Rc<Cell<bool>>,
+            in_cancel_check: bool,
+            observed: Cell<bool>,
+        }
+        impl Driver for Late {
+            fn reports_started(&self) -> bool {
+                self.inner.reports
+            }
+            fn check_cancelled(&self) -> Result<(), CandidateError> {
+                if self.in_cancel_check && self.observed.get() {
+                    self.late.set(true);
+                }
+                Ok(())
+            }
+            fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+                self.inner.record(event)
+            }
+            fn start(&mut self, service: &str) -> Result<(), CandidateError> {
+                self.inner.start(service)
+            }
+            fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
+                if !self.in_cancel_check {
+                    self.late.set(true);
+                }
+                self.observed.set(true);
+                self.inner.observe(service)
+            }
+        }
+        let graph = Graph {
+            services: BTreeMap::from([(
+                "web".into(),
+                Service {
+                    dependencies: BTreeMap::new(),
+                    ready: Condition::Healthy,
+                },
+            )]),
+        };
+        for in_cancel_check in [false, true] {
+            let late = Rc::new(Cell::new(false));
+            let mut driver = Late {
+                inner: Fake {
+                    states: BTreeMap::from([(
+                        "web".into(),
+                        Observation::Running {
+                            health: Health::Healthy,
+                        },
+                    )]),
+                    reports: true,
+                    ..Fake::default()
+                },
+                late: late.clone(),
+                in_cancel_check,
+                observed: Cell::new(false),
+            };
+            let start = Instant::now();
+            let outcome = run_with_clock(
+                &graph,
+                &mut driver,
+                Duration::from_secs(1),
+                |_| panic!("no wait before the deadline"),
+                || {
+                    if late.get() {
+                        start + Duration::from_secs(2)
+                    } else {
+                        start
+                    }
+                },
+            );
+            assert_eq!(
+                outcome.unwrap_err().code,
+                "graph_timeout",
+                "{in_cancel_check}"
+            );
+            assert_eq!(driver.inner.starts, ["web"]);
+            let events = &driver.inner.events;
+            assert!(
+                !events.iter().any(|event| event.contains("ready")),
+                "{in_cancel_check}: {events:?}"
+            );
+            assert!(
+                !events.iter().any(|event| event.contains("all_started")),
+                "{in_cancel_check}: a late observation reported every service started"
+            );
+        }
+    }
+    const ALL_STARTED: &str = r#"{"event":"all_started"}"#;
+    /// `db` answers healthy only after `slow` observations; `web` is ready once
+    /// running. Neither depends on the other.
+    struct SlowHealth {
+        inner: Fake,
+        observations: usize,
+        slow: usize,
+    }
+    impl Driver for SlowHealth {
+        fn reports_started(&self) -> bool {
+            self.inner.reports
+        }
+        fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+            self.inner.record(event)
+        }
+        fn start(&mut self, service: &str) -> Result<(), CandidateError> {
+            self.inner.start(service)
+        }
+        fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
+            if service == "db" {
+                self.observations += 1;
+                let health = if self.observations > self.slow {
+                    Health::Healthy
+                } else {
+                    Health::Starting
+                };
+                return Ok(Observation::Running { health });
+            }
+            self.inner.observe(service)
+        }
+    }
+    fn healthy_and_started_siblings() -> Graph {
+        Graph {
+            services: BTreeMap::from([
+                (
+                    "db".into(),
+                    Service {
+                        dependencies: BTreeMap::new(),
+                        ready: Condition::Healthy,
+                    },
+                ),
+                (
+                    "web".into(),
+                    Service {
+                        dependencies: BTreeMap::new(),
+                        ready: Condition::Started,
+                    },
+                ),
+            ]),
+        }
+    }
+    fn web_running() -> Fake {
+        Fake {
+            states: BTreeMap::from([(
+                "web".into(),
+                Observation::Running {
+                    health: Health::None,
+                },
+            )]),
+            ..Fake::default()
+        }
+    }
+    #[test]
+    fn every_service_started_is_reported_before_a_slow_health_goal_and_ready() {
+        let mut driver = SlowHealth {
+            inner: Fake {
+                reports: true,
+                ..web_running()
+            },
+            observations: 0,
+            slow: 6,
+        };
+        let mut waits = 0;
+        run_with_wait(
+            &healthy_and_started_siblings(),
+            &mut driver,
+            Duration::from_secs(5),
+            |_| {
+                waits += 1;
+            },
+        )
+        .unwrap();
+        assert!(waits > 0, "the health goal never held anything back");
+        let events = &driver.inner.events;
+        let position = |wanted: &str| {
+            events
+                .iter()
+                .position(|event| event == wanted)
+                .unwrap_or_else(|| panic!("{wanted} missing from {events:?}"))
+        };
+        let started = position(ALL_STARTED);
+        let db_ready = position(r#"{"event":"service_ready","service":"db"}"#);
+        let ready = position(r#"{"event":"ready"}"#);
+        assert!(started < db_ready && db_ready < ready, "{events:?}");
+        // After both services started, before db's health passed.
+        assert!(started > position(r#"{"event":"started","service":"web"}"#));
+        assert_eq!(events.iter().filter(|e| *e == ALL_STARTED).count(), 1);
+    }
+    #[test]
+    fn every_service_started_is_reported_once_and_before_ready_on_the_same_pass() {
+        // Every goal already holds on the first full pass: both events, in order.
+        let mut driver = reporting();
+        run(&graph(), &mut driver, Duration::from_secs(1)).unwrap();
+        let events = &driver.events;
+        let started = events.iter().position(|e| e == ALL_STARTED).unwrap();
+        assert_eq!(started + 1, events.len() - 1, "{events:?}");
+        assert_eq!(events.last().unwrap(), r#"{"event":"ready"}"#);
+        assert_eq!(events.iter().filter(|e| *e == ALL_STARTED).count(), 1);
+    }
+    #[test]
+    fn a_failure_before_every_service_started_reports_nothing_started() {
+        // `check` waits on `web`'s health, which fails first.
+        let mut driver = reporting();
+        driver.states.insert(
+            "web".into(),
+            Observation::Running {
+                health: Health::Unhealthy,
+            },
+        );
+        let error = run(&graph(), &mut driver, Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.code, "graph_service_failed");
+        assert!(!driver.events.iter().any(|e| e == ALL_STARTED));
+        // And a start that never got going: nothing either.
+        let mut driver = driver_with_ambiguous_start();
+        assert!(run(&graph(), &mut driver, Duration::from_secs(1)).is_err());
+        assert!(!driver.events.iter().any(|e| e == ALL_STARTED));
+    }
+    fn driver_with_ambiguous_start() -> Fake {
+        Fake {
+            ambiguous_start: true,
+            ..reporting()
+        }
+    }
+    fn reporting() -> Fake {
+        Fake {
+            reports: true,
+            ..driver()
+        }
+    }
+    #[test]
+    fn a_dependency_edge_keeps_its_condition_for_every_service_started() {
+        // `check` may start only once `web` is healthy, so "every service started"
+        // waits for that edge even though web's own start already counts.
+        let mut driver = reporting();
+        driver.states.insert(
+            "web".into(),
+            Observation::Running {
+                health: Health::Starting,
+            },
+        );
+        let error = run_with_wait(&graph(), &mut driver, Duration::from_millis(300), |_| {
+            std::thread::sleep(Duration::from_millis(50))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "graph_timeout");
+        assert!(!driver.starts.contains(&"check".to_owned()));
+        assert!(!driver.events.iter().any(|e| e == ALL_STARTED));
+    }
+    #[test]
+    fn a_dependency_is_reported_ready_before_its_dependent_starts() {
+        let mut driver = driver();
+        run(&graph(), &mut driver, Duration::from_secs(1)).unwrap();
+        let ready = position(
+            &driver.events,
+            r#"{"event":"service_ready","service":"init"}"#,
+        )
+        .unwrap();
+        assert!(
+            ready
+                < position(
+                    &driver.events,
+                    r#"{"event":"start_intent","service":"web"}"#
+                )
+                .unwrap()
+        );
+        for service in ["init", "web", "check"] {
+            let wanted = format!(r#"{{"event":"service_ready","service":"{service}"}}"#);
+            assert_eq!(driver.events.iter().filter(|e| **e == wanted).count(), 1);
+        }
     }
     #[test]
     fn stalled_dependencies_back_off_and_are_reobserved_before_start() {
@@ -747,5 +1195,97 @@ mod tests {
             "graph_timeout"
         );
         assert_eq!(driver.starts, ["init"]);
+    }
+}
+
+#[cfg(test)]
+mod started_deadline_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    /// One service, running: ready on its first observation. The clock passes the
+    /// deadline at the cancellation check that follows the last observation of the
+    /// final pass, after every check `Ready` needs and before `AllStarted`'s own.
+    struct EdgeOfDeadline {
+        reports: bool,
+        checks: Cell<u32>,
+        late: Rc<Cell<bool>>,
+        events: Vec<String>,
+    }
+    impl Driver for EdgeOfDeadline {
+        fn check_cancelled(&self) -> Result<(), CandidateError> {
+            self.checks.set(self.checks.get() + 1);
+            // 1 loop top, 2-3 before the intent and the start, 4-5 around the first
+            // observation, 6-7 around the final pass's observation.
+            if self.checks.get() == 7 {
+                self.late.set(true);
+            }
+            Ok(())
+        }
+        fn reports_started(&self) -> bool {
+            self.reports
+        }
+        fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+            self.events.push(serde_json::to_string(&event).unwrap());
+            Ok(())
+        }
+        fn start(&mut self, _: &str) -> Result<(), CandidateError> {
+            Ok(())
+        }
+        fn observe(&mut self, _: &str) -> Result<Observation, CandidateError> {
+            Ok(Observation::Running {
+                health: Health::None,
+            })
+        }
+    }
+    fn attempt(reports: bool) -> (Result<(), CandidateError>, Vec<String>) {
+        let graph = Graph {
+            services: BTreeMap::from([(
+                "web".into(),
+                Service {
+                    dependencies: BTreeMap::new(),
+                    ready: Condition::Started,
+                },
+            )]),
+        };
+        let late = Rc::new(Cell::new(false));
+        let mut driver = EdgeOfDeadline {
+            reports,
+            checks: Cell::new(0),
+            late: Rc::clone(&late),
+            events: Vec::new(),
+        };
+        let start = Instant::now();
+        let clock = move || {
+            if late.get() {
+                start + Duration::from_secs(2)
+            } else {
+                start
+            }
+        };
+        let outcome = run_with_clock(
+            &graph,
+            &mut driver,
+            Duration::from_secs(1),
+            |_| panic!("no wait: ready on the first pass"),
+            clock,
+        );
+        (outcome, driver.events)
+    }
+    #[test]
+    fn a_ready_at_the_deadline_still_succeeds_without_report_started() {
+        let (outcome, events) = attempt(false);
+        outcome.unwrap();
+        assert_eq!(events.last().unwrap(), r#"{"event":"ready"}"#);
+        assert!(!events.iter().any(|e| e.contains("all_started")));
+    }
+    #[test]
+    fn with_report_started_the_same_edge_refuses_before_recording_it() {
+        let (outcome, events) = attempt(true);
+        assert_eq!(outcome.unwrap_err().code, "graph_timeout");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.contains("all_started") || e.contains(r#""ready""#))
+        );
     }
 }

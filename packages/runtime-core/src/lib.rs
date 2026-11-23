@@ -38,6 +38,25 @@ pub(crate) use test_budget::TEST_RUN_BUDGET;
 #[cfg(test)]
 pub(crate) use test_scratch::next_test_scratch;
 
+/// Raise this process's soft descriptor limit once before dispatch. Keep a higher
+/// inherited limit and leave the hard limit alone.
+pub fn raise_open_file_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: limit is writable storage for getrlimit and initialized for setrlimit.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+            let target = limit.rlim_max.min(10_240);
+            if limit.rlim_cur < target {
+                limit.rlim_cur = target;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Candidate {
     pub protocol_version: u32,
@@ -389,3 +408,7 @@ mod state_component_tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 }
+
+/// Experimental guest transport. Lifecycle callers still use the provider.
+#[cfg(all(unix, feature = "guest-agent-client"))]
+pub use hack_vm_protocol as guest_agent;

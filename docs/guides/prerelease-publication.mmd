@@ -1,0 +1,37 @@
+---
+title: Prerelease publication · where the release set is checked
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Planned
+  Planned --> LinuxBuilt : CI and Linux jobs pass
+  LinuxBuilt --> NativeBuilt : native bundle built
+  NativeBuilt --> packageCheck : package
+  state packageCheck <<choice>>
+  packageCheck --> Packaged : [set matches metadata]
+  packageCheck --> Refused : [mismatch]
+  Packaged --> Approved : approval and head recheck
+  Packaged --> Refused : upgrade gate fails
+  Packaged --> [*] : prepare only
+  Approved --> Refused : publish gate fails
+  Approved --> publishCheck : verify assets
+  state publishCheck <<choice>>
+  publishCheck --> Tagged : [set matches metadata]
+  publishCheck --> Refused : [mismatch]
+  Tagged --> Published : twelve assets uploaded
+  Tagged --> Refused : upload failed (tag kept)
+  Published --> [*]
+  Refused --> [*]
+  note right of Packaged
+    INV a packaged set lists exactly
+    the platforms whose files it holds.
+  end note
+  note right of Tagged
+    INV publish creates no tag for a set whose
+    platform list differs from its files.
+  end note
+  class Planned idle
+  class LinuxBuilt,NativeBuilt,Packaged live
+  class Approved wait
+  class Tagged,Published ok
+  class Refused fail

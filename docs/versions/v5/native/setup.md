@@ -1,10 +1,10 @@
 # Prepare the native runtime
 
-Use the candidate frontend's `native setup` command. Setup success does not
+Use the prerelease frontend's `native setup` command. Setup success does not
 establish real-VM or application acceptance. Use an Apple Silicon Mac, a
 disposable project and synthetic data. Read [the limits](limits.md) first.
 
-After [installing the candidate](../install.md), use the same frontend for setup
+After [installing the prerelease](../install.md), use the same frontend for setup
 and project commands. Its launcher selects the version's private native home:
 
 ```sh
@@ -15,9 +15,11 @@ unset HACK_RUNTIME_BACKEND HACK_NATIVE_HOME
 
 Setup lists the pinned files, exact compressed sizes, source hosts, hashes and
 destinations before asking once for consent. It downloads and verifies the
-provider, engine and guest network tools, prepares them in staging, and ends
-with the development-profile probe. Noninteractive `up` refuses until setup is
-complete. Interactive `up` can offer the same consent and continue after success.
+provider, engine, guest network tools and [image builder](#the-image-builder).
+It prepares the first three in staging and publishes them together, then adds
+the image builder, and ends with the development-profile probe. Noninteractive
+`up` refuses until setup is complete. Interactive `up` can offer the same
+consent and continue after success.
 Setup needs no administrator password or keychain access and ignores proxy
 settings; use the offline form below on networks that require a proxy.
 
@@ -33,6 +35,42 @@ Interrupted downloads can be resumed or restarted by rerunning setup. A
 exact offline inputs or a reviewed newer release. Setup does not upgrade a
 home's provider pin in place.
 
+## The image builder
+
+Native `up` builds a Compose `build:` service with a pinned build client, the
+image builder. Setup installs it with the rest of the runtime. It is in the list
+you consent to, and the JSON result reports it in `builder`: `installed`,
+`reused`, `not_prepared` or `changed`.
+
+A home that an earlier build set up is complete without the image builder, so
+setup leaves it as it is. Plain `native setup` still succeeds there, downloads
+nothing and prints one line saying that the image builder is not installed. To
+add it, give the download consent:
+
+```sh
+"$CANDIDATE" native setup --accept-downloads
+```
+
+On such a home this downloads the image builder only. The provider, engine and
+network tools are verified and left in place, so a running native runtime is not
+disturbed. Offline, use `--builder` as shown below.
+
+Until the image builder is there, everything except image builds works. A
+project that builds an image is refused with "the image builder is not installed
+in this native home" and the command above. `hack doctor` on the native backend
+reports the same thing first, as a `native image builder` warning, for a project
+with a `build:` service. Doctor only reports it: `doctor --fix` downloads
+nothing.
+
+If the image builder in a home no longer matches the pinned release, setup still
+succeeds and reports `builder: "changed"`. It prints one warning and leaves the
+builder exactly as it is, with or without `--accept-downloads` or `--builder`:
+setup never deletes or overwrites it. Image builds are refused until you replace
+it. The warning names the two paths to remove, relative to the native home (the
+builder's directory `.hack-local/providers/buildx-<version>-darwin-arm64` and its
+record `.hack-local/providers/buildx.json`). Remove them, then run
+`native setup --accept-downloads`.
+
 ## Offline inputs
 
 Supply all three inputs from the matching pinned release:
@@ -43,6 +81,22 @@ Supply all three inputs from the matching pinned release:
   --engine-archive /absolute/docker.tgz \
   --network-tools-directory /absolute/network-tools
 ```
+
+To prepare the image builder too, add the pinned `buildx` release file that
+`provider-pins.json` names:
+
+```sh
+"$CANDIDATE" native setup \
+  --archive /absolute/smolvm.tar.gz \
+  --engine-archive /absolute/docker.tgz \
+  --network-tools-directory /absolute/network-tools \
+  --builder /absolute/docker-buildx
+```
+
+Without `--builder`, offline setup works as before and reports
+`builder: "not_prepared"`. To add the image builder to a home that is already set
+up, run the command with `--builder`; the three other inputs are not read again.
+`--builder` is accepted only together with them.
 
 Do not combine offline inputs with `--accept-downloads`. The network-tools
 directory must contain the four pinned Alpine packages. Setup verifies the same

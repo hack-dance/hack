@@ -1,6 +1,12 @@
 import { ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { NativeImageBlocker } from "../../src/backends/native-image-policy.ts";
+import {
+  batchImageFailure,
+  NativeImageBatchError,
+} from "../../src/backends/native-image-policy.ts";
 import {
   NativeRuntimeRequestError,
   retainNativeRuntimeFailure,
@@ -18,6 +24,7 @@ import {
   nativeDetachedUpProgress,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
+  reportNativeImageDownloadWait,
   runNativeDetachedOwner,
   setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
@@ -76,11 +83,19 @@ function publishFixtureHotReload(fixtureMode: string): void {
 }
 
 /** HACK-2351 modes: phase reports against short launcher limits. */
-const DEADLINE_MODES = ["slow-images", "slow-runtime", "images-ceiling"];
+const DEADLINE_MODES = [
+  "slow-images",
+  "slow-runtime",
+  "images-ceiling",
+  "images-wait-ceiling",
+];
 
 /** The launcher's limits for a fixture mode. */
 function fixtureLimits(fixtureMode: string) {
-  if (fixtureMode === "images-ceiling") {
+  if (
+    fixtureMode === "images-ceiling" ||
+    fixtureMode === "images-wait-ceiling"
+  ) {
     return { budgetMs: 1000, ceilingMs: 2000 };
   }
   if (["timeout", "late-ready", ...DEADLINE_MODES].includes(fixtureMode)) {
@@ -111,6 +126,9 @@ async function reportFixturePhases(fixtureMode: string): Promise<void> {
     return;
   }
   nativeDetachedUpProgress("images");
+  if (fixtureMode === "images-wait-ceiling") {
+    reportNativeImageDownloadWait("docker.io/fixture/image:stable");
+  }
   if (fixtureMode === "slow-images") {
     await Bun.sleep(2500);
     nativeDetachedUpProgress("services");
@@ -246,6 +264,14 @@ if (!(root && mode)) {
   process.exit(2);
 }
 
+const rootPoll = setInterval(() => {
+  if (!existsSync(root)) {
+    process.exit(0);
+  }
+}, 100);
+rootPoll.unref();
+await publish(join(root, `${role}.fixture-pid`), String(process.pid));
+
 /** Exercise the valid exit-before-buffered-IPC order in this isolated launcher. */
 function deliverExitBeforeMessages(): () => void {
   const emit = ChildProcess.prototype.emit;
@@ -371,7 +397,7 @@ if (role === "channel-holder") {
     process.exitCode = await startNativeDetachedUp({
       cwd: root,
       args: [],
-      json: true,
+      json: !process.env.FIXTURE_TEXT_OUTPUT,
       ...(mode === "restart-action" ? { action: "restart" as const } : {}),
       invocation: [
         process.execPath,
@@ -388,11 +414,14 @@ if (role === "channel-holder") {
     process.exitCode = [
       "wrapped-failure",
       "wrapped-static-failure",
+      "builder-missing",
+      "build-registry-limit",
       "provider-pin",
       "wrapped-provider-pin",
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
+      "image-batch-errors",
       "prestart-refusal",
       "prestart-after-runtime",
       "prestart-plain-error",
@@ -401,6 +430,7 @@ if (role === "channel-holder") {
       "prestart-persistent-hook",
       "slow-runtime",
       "images-ceiling",
+      "images-wait-ceiling",
     ].includes(mode)
       ? await handleRunCliError({ error, jsonRequested: true })
       : 1;
@@ -457,6 +487,24 @@ if (role === "channel-holder") {
         nativeDetachedUpShellVariables([], true);
         nativeDetachedUpShellVariables([], true);
       }
+      if (mode === "build-registry-limit") {
+        await nativeDetachedUpFailure(
+          new NativeImageBlocker({
+            missing: "docker.io/library/python:3.12-alpine",
+            buildBase: true,
+            reason: "registry_http_429",
+            present: ["docker.io/library/alpine:3.22"],
+          })
+        );
+      }
+      if (mode === "builder-missing") {
+        await nativeDetachedUpFailure(
+          new NativeRuntimeRequestError({
+            nativeCode: "builder_not_prepared",
+            message: "synthetic-private-value",
+          })
+        );
+      }
       if (["provider-pin", "wrapped-provider-pin"].includes(mode)) {
         await nativeDetachedUpFailure(new Error("synthetic-private-value"));
         const failure = new NativeRuntimeRequestError({
@@ -477,6 +525,8 @@ if (role === "channel-holder") {
         [
           ...PRESTART_MODES,
           "fail",
+          "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -514,6 +564,19 @@ if (role === "channel-holder") {
         if (["immediate-failure", "exit-first-failure"].includes(mode)) {
           process.exit(1);
         }
+        return 1;
+      }
+      if (mode === "image-batch-errors") {
+        await nativeDetachedUpFailure(
+          new NativeImageBatchError([
+            batchImageFailure("fixture/image:a", { code: "provider_busy" }, [
+              "web",
+            ]),
+            batchImageFailure("fixture/image:b", { code: "image_disk_space" }, [
+              "db",
+            ]),
+          ])
+        );
         return 1;
       }
       if (mode === "failed-services") {
@@ -586,6 +649,7 @@ if (role === "channel-holder") {
           project: "fixture",
           branch: null,
           composeProject: "fixture",
+          address: process.env.FIXTURE_READY_ADDRESS,
           started: ["web"],
           completed: ["seed"],
         });

@@ -498,7 +498,7 @@ no project discovery or origin resolution. It cannot be combined with `--path`,
 `--env` or `--domain`.
 
 Image references are backend-neutral: a registry tag or `repository@sha256:` digest
-is valid authored configuration, and the default Compose backend runs it. With an
+is valid authored configuration, and the Compose backend runs it. With an
 explicit `HACK_RUNTIME_BACKEND=native`, both modes also refuse a selected service or
 job image that is not a `sha256:` image content ID. The refusal is the native
 consumer's own closed `native_graph_admission` code and message, so validation

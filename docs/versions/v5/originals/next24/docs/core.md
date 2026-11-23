@@ -1,0 +1,122 @@
+# Core concepts
+
+Hack keeps the parts needed to run a project together: services, environment,
+secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
+repository, so teammates and agents can use the same definition.
+
+Three words come up on every page:
+
+- A **project** is a repository with a `.hack/` folder. It has a name, which Hack
+  uses for its instances, logs and helpers. By default its address starts with
+  that name too.
+- An **instance** is one running copy of a project: its containers, its
+  addresses, its logs.
+- A **branch instance** is a second instance of the same project, named after a
+  branch. `hack up` in a linked git worktree starts one, named after its branch.
+
+Developers and agents use the local CLI to run projects on their own machine.
+Nothing is hosted.
+
+```mermaid
+---
+title: Who runs what
+---
+C4Context
+  Person(developer, "Developer")
+  System_Ext(agent, "Agent harness", "Optional CLI client")
+  System(hack, "Hack CLI", "Local project commands")
+  System_Ext(backend, "Backend", "Compose by default")
+  Rel(developer, hack, "Runs commands")
+  Rel(agent, hack, "Runs commands")
+  Rel(hack, backend, "Runs services")
+  UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
+```
+
+## Project, service and instance
+
+A **service** is one part of a project, such as a web app, API or database. Each
+instance runs its own copy of every service. Branch instances let you run
+different versions of one project side by side.
+
+A **backend** is what actually runs the containers. Compose is the default; it
+runs services with Docker Compose behind shared local routing for HTTPS. Native
+is an opt-in beta on Apple Silicon macOS. New projects use `.hack.local` names. Existing `.hack` names and custom
+domains keep working. Use `hack open` to find the URL for your instance rather than
+guessing a port or hostname.
+
+## Start, inspect and stop
+
+Follow [Getting started](guides/getting-started.md) for installation and routing,
+then [Project setup](guides/init-project.md) to configure a repository.
+From a configured project:
+
+```sh
+hack up --detach
+hack open
+hack ps
+hack logs --pretty
+```
+
+`hack up` starts the declared services and project lifecycle. Use `hack ps` to
+inspect them and `hack logs` to read their output. On the Compose backend,
+`hack ps` includes stopped containers in the selected project or branch, with
+state and exit-code columns. An exited one-shot with code `0` completed
+successfully; a nonzero code indicates failure. `hack ps --json` reads Compose
+directly and retains each item's `State` and `ExitCode`, including immediately
+after a failed startup. An item whose image architecture differs from the
+Docker engine's also carries `emulated: true` (the field is absent otherwise); see
+[Check an existing project](guides/development-runtime-safety.md#check-an-existing-project).
+Removed containers are not retained as run history.
+When Compose cannot list containers, `hack ps --json` prints the
+`{ok: false, error}` envelope with a stable code: `E_DOCKER_UNAVAILABLE` when the
+Docker engine is not reachable or does not answer in time, `E_PERMISSION` when the Docker
+socket (or a Compose input) refuses your user, `E_COMPOSE_OUTPUT_INVALID` when the
+output is not JSON, otherwise `E_COMPOSE_FAILED`. Only the Docker client's
+connection error is quoted, with secret-looking values redacted; other Compose
+output is left out because Compose can expand project values into it. Without
+`--json`, the Docker engine and permission cases print the same coded line; for the
+other two, `hack ps` runs plain `docker compose ps` and shows its output.
+When finished:
+
+```sh
+hack down
+```
+
+If startup fails, read the reported error and run `hack doctor`. Apply a repair
+only after checking which resources or settings it affects.
+
+## Keep configuration with the project
+
+[Environment and secrets](env.md) explains committed configuration and encrypted
+values. Keep the decryption key separate from git. [Lifecycle](lifecycle.md)
+explains how to declare startup hooks and host helpers, such as tunnels, so they
+start with the project instead of relying on an extra terminal tab.
+
+## Work on more than one branch
+
+In a linked git worktree, `hack up` defaults to a branch instance named after the
+git branch. The secret key is inherited from the primary checkout through the
+shared git directory. A detached worktree needs an explicit `--branch <name>`.
+The worktree also reads the primary checkout's local env overlays live, below its
+own local overrides; see [Environment and secrets](env.md#merge-rules).
+See [Worktrees and watchers](guides/development-runtime-safety.md) for shared files,
+watchers and dependency caches, and [Sessions](sessions.md) for persistent project
+workspaces.
+
+## Use Hack from an agent or script
+
+Agents can use the same CLI. `--json` returns structured results and
+`--no-interactive` prevents a command from waiting for terminal input. Optional
+[agent setup](guides/agent-first-setup.md) helps configure a project; no agent plugin
+or hosted account is required for the core workflow.
+
+Use the [CLI overview](cli.md) to choose a command and the
+[command reference](reference/cli.md) to find its flags.
+
+## Backends
+
+Docker Compose is the default backend and the one every example on this page uses.
+v5 adds a native backend (beta) for Apple Silicon macOS, available through the
+`hack-next` channel, whose launcher selects native unless you set `HACK_RUNTIME_BACKEND=compose`, that runs explicitly prepared projects without Docker Desktop or OrbStack
+and supports a bounded command subset. See [Upgrade to v5](guides/upgrade-to-v5.md)
+and [the native backend overview](native/README.md).

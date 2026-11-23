@@ -1,14 +1,33 @@
 /**
- * Homepage copy and the install command it shows.
+ * Homepage copy, the version eyebrow and the install commands it shows.
  *
  * The headline and description are shared with the site metadata in
  * `app/layout.tsx`, so the page and its `<title>`/description cannot drift.
  */
 
-export const tagline = "Run every project, branch and worktree at once";
+/** The headline as the page sets it: one line per entry. */
+export const taglineLines = [
+  "Hack on your project,",
+  "not your setup",
+] as const;
 
-export const description =
-  "Run your whole project locally. Every project, branch and git worktree runs side by side at its own HTTPS address.";
+export const tagline = taglineLines.join(" ");
+
+/**
+ * The description in the three parts the page sets apart: the middle sentence
+ * is emphasised. The metadata uses them joined.
+ */
+export const descriptionParts = {
+  lead: "One command starts your API, your database and the tunnel to staging, and catches the sign-in you forgot.",
+  emphasis: "Every branch gets its own running copy.",
+  tail: "One config, any machine. Docker optional.",
+} as const;
+
+export const description = [
+  descriptionParts.lead,
+  descriptionParts.emphasis,
+  descriptionParts.tail,
+].join(" ");
 
 const prereleaseLabel = /\(next\.(\d+)\)$/;
 
@@ -43,4 +62,25 @@ export function installCommand(tag: string): string {
     "less hack-next-install.sh",
     "sh hack-next-install.sh",
   ].join("\n");
+}
+
+/** The stable install command, as the root README and the v4 install page give it. */
+export const stableInstallCommand = "brew install hack-dance/tap/hack";
+
+const stableVersion = /^\d+\.\d+\.\d+$/;
+
+/**
+ * The stable release tag from the root `package.json` version (`4.3.1` gives
+ * `v4.3.1`). The root package carries the stable line until 5.0.0 ships.
+ *
+ * A version with a prerelease or build suffix is not a stable release, so it
+ * gives `undefined` and the page shows only the prerelease.
+ */
+export function stableTag(version: string): string | undefined {
+  return stableVersion.test(version) ? `v${version}` : undefined;
+}
+
+/** The GitHub release page for a tag. */
+export function releaseUrl(tag: string): string {
+  return `https://github.com/hack-dance/hack/releases/tag/${tag}`;
 }

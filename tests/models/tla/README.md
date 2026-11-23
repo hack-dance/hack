@@ -62,6 +62,8 @@ signal cleanup, then run three pairs of complete gates. The other checkout must
 contain the same runner revision; omit it to run both gates in this checkout.
 The check verifies separate Java temp roots, marker isolation, and removal of
 each run's scratch. It uses the same Java and pinned jar as `test:models`.
+This check runs on demand, outside `bun test` and CI; each TLC invocation retains
+the 120-second timeout.
 
 ## Native foreground recovery lease takeover
 
@@ -684,6 +686,118 @@ not prove the kqueue exit delivery, timer accuracy, provider lease acquisition
 or that a replacement listener appears; it abstracts the listener as live, gone
 or replaced, and the retry delays as an ordered bound.
 
+## Native pool stop under a live run
+
+`native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down`)
+or dies (VM or provider crash, host reboot) while a project's graph is ready. It
+models:
+
+- the pool: running, stopped or crashed, with a boot counter;
+- the run receipt: none, ready or retained, and the boot its containers belong to;
+- the foreground owner (live or dead) and its publication.
+
+The user commands are the ones the CLI names: `hack up`, `hack down` /
+`hack down --recover` and `hack native recover`. Faults are bounded to three:
+`runtime down`, a crash, an owner crash, and a boot by something else (another
+project's `hack up`, or `runtime up` by hand). A live owner notices when its guest
+is gone (the pool stopped, or a later boot replaced it) and exits without retiring its
+publication.
+
+`NoDeadEnd` says that from every reachable state some named command can act, or
+the owner is still noticing its guest is gone. `Recovers` (`[]<>Settled` under weak
+fairness of the user commands) says the project keeps reaching up or down. Up means
+ready in the current boot with a live owner; down means nothing running and no
+publication left. `BootBoundUnreached` shows the boot bound (8) never limits a command.
+
+| Control | Switches | Result |
+| --- | --- | --- |
+| `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 210 states; `NoDeadEnd`, `BootBoundUnreached` and `Recovers` hold |
+| `negative` | `next` before HACK-2456 | `NoDeadEnd` fails in an `OwnerCrash` or `OwnerNotices` state: stopped pool, ready run, dead owner, publication left |
+| `by-hand` | `next`, counting an unnamed `runtime up` | fails in a `RuntimeUp` state with `boot = 3`, `runBoot = 1` |
+| `strict` | stopped-pool recovery with the old predecessor-only rule, while something else boots the pool | fails in `RecoverStopped` (or `RuntimeUp`) with `boot = 3`, `runBoot = 1` |
+| `crash-in-recovery` | the old predecessor-only rule; the pool stops between the recovery's boot and its graph recovery | fails in `RecoverStopped` with `boot = 3`, `runBoot = 1`, `recovering = TRUE` |
+| `https` | recovery from any earlier boot with every fault, for a project with HTTPS routes (`Https`) | 608 states; all hold, including `NoArchiveOverListener` |
+| `https-no-retire` | `https` controls: the shared HTTPS owner keeps running after its boot ended | fails in `RecoverRunning` (or `RecoverStopped`): pool running, `https = "live"` bound to the old boot, `fin = TRUE` |
+| `https-archive` | the previous-boot archive cannot prove the owner quiescent | fails with `https = "records"`, `fin = TRUE`, pool running |
+| `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | fails with the pool stopped, `run = "retained"`, `fin = TRUE` |
+| `https-finish-bound` | `https`, but a completed recovery's archive may run only in the boot the recovery ran in (`FinishAnyBoot = FALSE`) | fails once that boot ends with the archive still owed: `https = "records"`, `fin = TRUE`, pool running |
+| `reuse-no-check` | `https`, with the archive's port claim binding with address reuse but of the wildcard alone, without the exact claim of every local address (`ListenerCheck = FALSE`) | `NoArchiveOverListener` fails: the archive runs while another process listens on the port |
+
+`Recovers` also fails on `next` (TLC exit 13: the behavior stutters in the dead end).
+That is checked by hand, because the runner's controls are invariant violations only.
+
+`strict` and `crash-in-recovery` document the old rule: recovery of a dead owner's
+ready run accepted only the immediate predecessor boot, because it needs that boot's
+raw id to find its host-side relays, and `owner.json` keeps only the current and
+previous ids. Each boot now first records the ids it supersedes in a bounded
+boot history (`provider/boot_history.rs`, 16 boots, bound to the pool's owner
+token), and `graph/boot_match.rs` selects the one earlier boot the run's receipt
+names (relay cleanup marker, control root, or one-off job boot); zero or several
+matches, or the current boot, refuse. The model does not bound the history: a run
+whose boot was evicted after 16 later boots is refused with its data kept. Two paths
+stay predecessor-only and are not modeled: a stopped-pool `graph recover-cleanup`
+selection (`prepare`; boots in between may have restarted the run's containers),
+and absent-publication cleanup after a host reboot.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `RuntimeDown` | `provider/lifecycle.rs::down`, which reports `interrupted_runs` (`lifecycle/pool_users.rs::live_graph_runs`) |
+| `RecoverStopped` | `inspectOrStartStoppedPool` / `StoppedPoolStarted` in `native-project-down.ts`; `selectNativeStartupRecoveringStoppedPool` in `native-project-start.ts` |
+| `RecoverRunning` | `resumeSelectedOwner` → `recover-cleanup` → `retire-recovered-publisher`; `CanRecover` without `Strict` is `graph/dead_owner_cleanup.rs` `recovery_selection` / `execute` with `graph/boot_match.rs` over `provider/boot_history.rs` |
+| `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |
+| `PoolRecover` | `hack native recover` (`lifecycle::recover`) |
+| `OwnerRetire` | `native-https-owner-server.ts` pool-boot check (`native-https-pool-boot.ts`), which retires through `failOwner` and keeps the configuration and lease |
+| `TimeWaitEnds`, `Listen`, `ListenerExits`, `PortClaimable` | the shared HTTPS port after the owner's Caddy stops: TIME_WAIT expires on its own, or another process listens and later stops. The archive claims the port through `https_recovery::port_absent`: with `ReuseBind` (HACK-2550) it binds with `SO_REUSEADDR` (never `SO_REUSEPORT`), so TIME_WAIT does not block it, and it binds the wildcard, the loopback and every interface address from `getifaddrs` exactly, so another listener on any of them refuses it; the addresses are listed again after binding and must match. Otherwise it falls back to the strict claim, which waits for TIME_WAIT to end |
+| `FinishCompleted` | the same archive after the recovery's boot ended (HACK-2550, z338, z282): `HttpsArchiveGuard` admits the completed intent from any boot, and `host_relay::inspect_cleanup_completed` with `bridges::cleanup::read_completed_recovery` admit its bridge selection by the run's own evidence; everything else is observed in the current boot |
+| `Finalize` | the frontend finalization's `recoverNativeHttpsLease`: release through a live owner of this boot, or `runtime archive-previous-boot-shared-https` (`provider/shared_https_recovery.rs`), whose quiescence proof is `prove_quiescence` plus `await_owner_exit` |
+| `RecoverStopped` (finalization) | `deadOwnerOfLiveRun` in `native-project-down.ts`: a retained stop with no owner and an interrupted frontend lifetime |
+
+The model does not represent bridges. On a real VM, the run that recovery met had been
+stopped in one boot and restored in a later one. The first boot's bridge sidecar was still in
+its directory, two boots back. Recovery accepts a completed earlier generation with routes
+from any boot but the live one, because what proves it complete does not depend on its boot.
+That proof is the restore history's stopped receipt, plus every current route having
+launched after it (`graph/bridges/cleanup.rs` `prior_generation`). An empty sidecar keeps
+the previous boot.
+
+The shared HTTPS owner (HACK-2456, seen on a real VM) is a host process bound to one
+pool boot that holds the run's lease. `runtime down` does not stop it. Before this change it
+kept running after its boot ended, its lease could not be released (release requires the
+same boot), and the previous-boot archive could never succeed, because it required the
+frontend and runtime executables to run nowhere while the CLI asking for it ran them. A
+recovery then stopped the graph and retired the publication, failed at the lease, and
+left a retained run that `up` refused and `down --recover` could not reach once the pool
+stopped again. The three `https-*` controls each restore one of those parts. The model
+abstracts the owner's 5-second boot check and the archive's 20-second wait for a retiring
+owner as one `OwnerRetire` step; it does not represent several projects sharing one owner.
+
+The CLI tests in `tests/native-project-down.test.ts`, `tests/native-project-start.test.ts`
+and `tests/native-refusal-cli.test.ts` walk these transitions against a fake runtime.
+`tests/native-https-owner.test.ts` runs the real owner process through its boot check;
+`provider/shared_https_recovery/tests.rs` (macOS) runs the archive with the same bundle's
+CLI and runtime processes present and with a live or retiring owner invocation.
+The model does not represent concurrent starts of the same instance, the startup
+marker, or image and admission work. A real VM must qualify `runtime up` booting a
+stopped pool as it was recorded.
+
+## Native run mapping release after the home is gone
+
+`native-run-mapping-release/MappingRelease.tla` checks HACK-2524. A checkout's run mapping names the native home that owns its run. When that home is deleted, its records (the proof of a clean stop) go with it. The model covers the home at its recorded path (present, deleted, moved, or replaced by another identity), whether a process of the home is alive and whether it names the recorded path, and the mapping (held or released).
+
+`NoStrandedMapping` says a held mapping whose home is gone, with no process of it alive, can always be released. `NeverReleaseLive` says no release happens while a process of the home that names the recorded path is alive.
+
+| Control | Switches | Result |
+| --- | --- | --- |
+| `positive` | the gone-home release: the path no longer holds the home and the process scan finds no process naming it | 21 states; both invariants hold |
+| `negative` | today: only the clean-stop release from the home's own records | `NoStrandedMapping` fails right after `Delete` (or `Move`) |
+| `path-only` | the gone-home release without the process scan | `NeverReleaseLive` fails: released while a process of the home lives |
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `CleanRelease` | `releaseNativeProjectRunForeignHome` (the home's frontend records show a completed lifetime) |
+| `GoneHomeRelease` | the gone-home release in `native-project-run.ts`: the recorded path is absent, not a directory, or another identity, and the runtime's process scan finds no process naming the home |
+| `StartMoved` | the residual: a moved home started from its new path has processes that do not name the recorded path, so a release then leaves that home's run without a checkout mapping (its data and its own recovery stay in that home) |
+
 ## Pool amd64 emulation
 
 `pool-emulation/Emulation.tla` checks the Rosetta 2 translation intent of one shared
@@ -884,13 +998,15 @@ claim, and a model pass is not native startup qualification.
 
 `pool-start-admission/PoolStart.tla` checks the host admission of one `runtime up`
 of a pool that is not running. A Development start takes one sample before the
-startup lease and one under it, at least the admission window after the first; a
-Research start keeps three samples before the lease. The positive control explores
-58,022 states for both profiles, with the provider and engine trees rechecked and
-the root files proven under the lease.
+startup lease and one under it, at least the admission window after the first, or
+at least the window after a recorded earlier sample of the same home; a Research
+start keeps three samples before the lease. The positive control explores
+220,686 states for both profiles, with the provider and engine trees rechecked and
+the root files proven under the lease: a start without an early root files proof,
+such as the first boot of a new home.
 The clock, a host that fails and passes again once, the swapout count, another
-lease holder, a concurrent start, a changed tree or root file, a squatted HOME
-alias and a crash interleave with every step. See its
+lease holder that may record a host sample, a concurrent start, a changed tree or
+root file, a squatted HOME alias and a crash interleave with every step. See its
 [coverage](pool-start-admission/COVERAGE.md) and
 [statechart](../../../docs/pool-start-admission-statechart.md).
 
@@ -902,16 +1018,17 @@ samples: it was taken on a passing host (`BootSampleOnPassingHost`) and showed
 the count it was compared against (`BootSampleMatchesBaseline`). No VM starts from a provider or
 engine tree that changed after its content proof (`NoStartFromChangedTree`). A
 refusal, a crash or a pool that a concurrent start already booted leaves no VM
-started and the lease returned. The `root-before-lease` control (73,754 states)
-checks the same invariants for the follow-up ordering, in which the root files
-are proven before the lease and their metadata is rechecked under it.
+started and the lease returned. The `root-before-lease` control (277,194 states)
+checks the same invariants for the other path of the implementation, a cleanly
+stopped pool's start, in which the root files are proven before the lease and
+rechecked under it.
 
 Twelve controls remove one mechanism each and must fail the named invariant: the
 second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
 (`window-not-enforced`), no swapout comparison at the second sample
 (`unchained-recheck`) or at the pre-boot check (`unchained-boot`), two Research
-samples (`research-two-samples`), no root recheck in the follow-up ordering
-(`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
+samples (`research-two-samples`), no root files recheck after a proof before the
+lease (`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
 `NoStartFromChangedTree`), no predicate check of the first sample
 (`first-sample-unchecked`), of Development's sample under the lease
 (`second-sample-unchecked`) or of Research's later samples
@@ -929,6 +1046,23 @@ host between observations except the cumulative swapout count, so such a dip
 passes; with two Development samples instead of seven it has fewer samples to
 miss. The model shows that the gap exists, not how wide it is.
 
+A home's record of an earlier passing sample (`admission/opening.rs`) may replace
+the wait between a Development start's two samples, never a sample. A start that
+skipped the wait had a record from this OS boot, at least one window and at most
+one bound old, whose swapout count equals its sample's under the lease
+(`ReusedRecordSameBoot`, `WindowRespected`, `ReusedRecordWithinBound`,
+`ReusedRecordSameSwapouts`); every record written came from a passing host
+(`RecordsFromPassingSamples`); Research reuses nothing (`ResearchNeverReuses`).
+Five more controls remove one of these each: `reuse-other-boot`,
+`reuse-too-young`, `reuse-too-old`, `reuse-changed-count` and `record-unchecked`.
+Three reachability controls require a start on a reused record
+(`reuse-start-reachable`), a start that found an unusable record and waited out
+its own window (`reuse-miss-start-reachable`), and the weakening of reuse: a host
+that failed and passed again between the recorded sample and the sample under the
+lease is admitted (`reuse-dip-start-reachable`). The record's file checks, its
+parsing and its clock are not modelled; their tests are in
+`provider/admission/opening/tests.rs`.
+
 The provider and engine trees are proven by content before the lease, inside the
 admission window, and rechecked first under it (`lifecycle/leased_trees.rs`): a
 tree whose metadata digest and content anchor equal its proof's keeps the proof,
@@ -936,7 +1070,10 @@ any other tree is proven by content again, and a changed tree refuses the start.
 `changed-tree-start` is the start without that recheck: a tree that changes
 between its proof and the lease is booted once, and only the next command's
 witness check refuses it. The model keeps one bit for the trees, so the metadata
-comparison and the second proof are one guard in it. A sample is one atomic
+comparison and the second proof are one guard in it. A cleanly stopped pool's
+root files are held to the same rule (`lifecycle/rootfs_proof.rs`): proven in the
+window, rechecked as the step after the tree recheck and compared once more where
+their digest is used, with one bit and one recheck action in the model. A sample is one atomic
 observation, pressure that comes and goes between samples is invisible, tree and
 root changes are assumed absent while the lease is held, and nothing after
 `machine start` is modelled. There is no fairness or eventual-start claim, and a
@@ -1705,3 +1842,52 @@ idle-exit race between closing the listener and a queued connection (atomic
 here); socket path attacks, uid checks and frame parsing; the version order
 (any skewed client may retire any service); and durability of the intent write
 itself.
+
+## Global logging opt-in
+
+`global-logging-optin/LoggingOptIn.tla` checks when Hack runs the global
+logging stack (Loki, Alloy, Grafana): `src/lib/global-logging.ts` and
+`hack global install` / `up` / `down` in `src/commands/global.ts`.
+`logging.enabled` decides when set; unset is on only for a home that has the
+stack's directory (`~/.hack/logging/`), which every install before opt-in
+wrote, and the first manual install or up in such a home saves `on`.
+Any save may fail (`SaveMayFail`): the run then uses its choice anyway, so
+routing is not blocked, and warns that it was not saved; `unsaved` records
+that warning until a later save.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `On` | `resolveGlobalLogging`: the config value, else whether `logging/` exists. |
+| `Saved` | `resolveAndSaveGlobalLogging` (via `settleGlobalLoggingSetting`): an existing home's first manual install or up writes `logging.enabled: true`; login only reads. |
+| `SaveOrReport` | The same save, and the `--logging`/`--no-logging` save in the `global up` handler: a failure keeps the setting, warns "was not saved", and the run follows the choice (`saveError`, `loggingOverride`). |
+| `Install` | `globalInstall`: `materializeGlobalInstallFiles` writes the logging files only when on, then `runGlobalUp`. |
+| `Up` / `UpWith` | `runGlobalUp`: on writes missing files (`materializeGlobalLoggingFiles`) and starts the stack; off stops its containers found by their Compose project label (`stopDisabledLoggingStack`), with or without its files. |
+| `UpFlag` | `hack global up --logging` / `--no-logging`: saves `logging.enabled`, then `runGlobalUp`. |
+| `Set` | `hack config set|unset --global logging.enabled` (no Docker effect). |
+| `MoveFiles` / `MoveDir` | The compose file, or the whole directory after a first start, moved aside by hand. |
+| `Down` / `Reset` | `hack global down` (`compose down`, volumes kept) and `hack global logs-reset` (`down -v`). |
+
+Invariants:
+- `FreshNeverStartsUnasked`: a new home runs the stack only after someone turned it on.
+- `ExistingHomeKept`: after a start, a home that had the stack still has it unless someone turned it off or cleared the setting, even with its files moved aside.
+- `OffMeansStopped` and `NoOrphanedStack`: after any start, a running stack is one the setting says is on.
+- These three hold unless Hack warned that this home's choice was not saved (`unsaved`): then the run followed a choice the setting does not hold yet.
+- `NoSurpriseDataLoss`: logs disappear only in a `logs-reset` step. `prevData` is `data` before the step, so this step property is an invariant.
+
+Bounds: one home that is either from before opt-in (directory, compose file, logs, running or not) or new; every command, setting change and move, in any order. Every save may fail. The positive configuration exhausts 1,014 distinct states at depth 7.
+
+Controls:
+- `negative` (install writes the logging files whatever the setting) fails `FreshNeverStartsUnasked` at a new home's first `Install`.
+- `legacy-unset-off` (unset means off) fails `ExistingHomeKept` at `Install` or `Up`.
+- `off-removes-volumes` (off is `down -v`) fails `NoSurpriseDataLoss` at `UpFlag`.
+- `decision-not-saved` (the first start does not save `on`) fails `ExistingHomeKept` once the logging directory is moved aside.
+- `unsaved-silent` (a failed save is not reported) fails `OffMeansStopped` at `UpFlag`: `--logging` ran the stack while the setting stayed off, and nothing said so.
+
+Writing the model found two code gaps, fixed with it: stopping only when the compose file existed, and keying the decision on that file rather than on the directory.
+
+Tied to the code: `tests/global-command.test.ts` ("the opt-in logging stack") walks the same paths with a stub Docker, and `tests/global-logging.test.ts` the resolution and save rules.
+
+Not covered:
+- readiness (healthchecks, their bounds and the end-to-end route probe are in `tests/global-stack-state.test.ts` and `tests/global-readiness.test.ts`);
+- the login path, which only reads the setting and starts routing;
+- a home whose whole logging directory is removed before its first manual start, which then counts as new.

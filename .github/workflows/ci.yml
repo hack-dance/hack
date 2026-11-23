@@ -8,7 +8,9 @@ on:
     tags-ignore:
       - "v*"
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       full:
@@ -23,13 +25,13 @@ on:
         default: "1"
 
 concurrency:
-  # Let the active next run finish, including jobs waiting for macOS capacity.
-  # New next pushes replace only the pending run. PRs still cancel stale runs;
-  # main pushes and explicit release qualification keep unique groups.
+  # A new PR head cancels the active run. Same-head events and next pushes
+  # can replace a pending run. Main pushes, merge groups and dispatches use
+  # independent groups.
   # The lead waits for a completed next run between batches unless its batch
   # verifier ran the same checks: pending revisions may still be replaced.
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
   changes:
@@ -59,6 +61,7 @@ jobs:
       selection_mode: ${{ steps.scope.outputs.selection_mode }}
       ci_evidence: ${{ steps.scope.outputs.ci_evidence }}
       docker_suite: ${{ steps.scope.outputs.docker_suite }}
+      guest_hosts: ${{ steps.scope.outputs.defer_macos == 'true' && '[{"os":"ubuntu-latest"}]' || '[{"os":"ubuntu-latest"},{"os":"macos-latest"}]' }}
       defer_macos: ${{ steps.scope.outputs.defer_macos }}
       build_smoke: ${{ steps.scope.outputs.build_smoke }}
     steps:
@@ -91,6 +94,7 @@ jobs:
           unset CI_READ_TOKEN
           # This guard is independent of the selector and its fallback list.
           full=false
+          docker_exempt=false
           linux_rust=false
           relocated_cli=false
           base=""
@@ -115,15 +119,23 @@ jobs:
             if ! git diff --name-only --no-renames -z "$base" HEAD > "$RUNNER_TEMP/ci-paths"; then
               full=true
             else
-              if [ ! -s "$RUNNER_TEMP/ci-paths" ]; then full=true; fi
+              if [ ! -s "$RUNNER_TEMP/ci-paths" ]; then
+                full=true
+              elif [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_BASE_REF" = "next" ]; then
+                docker_exempt=true
+              fi
               while IFS= read -r -d '' path; do
+                case "$path" in
+                  scripts/lib/tla-runtime-models.ts|tests/models/*|packages/runtime-core/*|docs/*) ;;
+                  *) docker_exempt=false ;;
+                esac
                 case "$path" in
                   src/*|index.ts|packages/cli/*|scripts/check-*-cli.ts|scripts/check-native-plan-clis.ts)
                     relocated_cli=true ;;
                 esac
                 case "$path" in
-                  packages/runtime-core/*.md|packages/config-compiler/*.md) ;;
-                  packages/runtime-core/*|packages/config-compiler/*|packages/relay-guest/*)
+                  packages/runtime-core/*.md|packages/config-compiler/*.md|packages/hack-vm-agent/*.md|packages/hack-vm-protocol/*.md) ;;
+                  packages/runtime-core/*|packages/config-compiler/*|packages/relay-guest/*|packages/hack-vm-agent/*|packages/hack-vm-protocol/*|tests/models/tla/guest-execution/*)
                     linux_rust=true ;;
                 esac
                 case "$path" in
@@ -160,6 +172,13 @@ jobs:
             native=true
             shards='[1,2,3,4,5,6,7,8]'
             draft=false
+            defer_macos=false
+            # Qualify the exact queue tree with the full Linux tiers.
+            if [ "$EVENT_NAME" = "merge_group" ]; then
+              compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}]'
+              shards='[4,5,6,7,8]'
+              defer_macos=true
+            fi
             if [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_DRAFT" = "true" ]; then
               draft=true; compiler='[]'; native=false; shards='[4,5,6,7,8]'
             fi
@@ -178,7 +197,7 @@ jobs:
           selection_mode=full
           ci_evidence=$evidence
           docker_suite=true
-          defer_macos=false
+          defer_macos=$defer_macos
           build_smoke=true
           EOF
             echo 'Full selection: main, explicit dispatch, protected input, unavailable diff, or policy bootstrap. Intel runs for main and explicit dispatch.' >> "$GITHUB_STEP_SUMMARY"
@@ -198,7 +217,7 @@ jobs:
             mac=false; e2e=false; builds=false
             if [ "$PR_DRAFT" != "true" ]; then
               if [ "$PR_BASE_REF" = "main" ] || [ "$PR_FULL" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
-              if [ "$full" = "true" ] || [ "$PR_E2E" = "true" ]; then e2e=true; fi
+              if [ "$PR_E2E" = "true" ] || { [ "$full" = "true" ] && [ "$docker_exempt" != "true" ]; }; then e2e=true; fi
               if [ "$full" = "true" ]; then builds=true; fi
             fi
             if [ "$mac" != "true" ]; then
@@ -226,7 +245,7 @@ jobs:
             if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
             echo 'Ready PRs defer macOS to integration unless targeting main or labeled ci:mac or ci:full. Protected inputs and unavailable policy/diff retain full Linux, Docker and build tiers. Light PRs retain selected Linux checks; labels opt into heavy tiers. Drafts stay light.' >> "$GITHUB_STEP_SUMMARY"
-          else
+          elif [ "$EVENT_NAME" != "merge_group" ]; then
             printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
           fi
 
@@ -406,32 +425,42 @@ jobs:
     # defer both hosts; Rust light PRs keep Linux, heavy tiers allow both hosts.
     if: ${{ needs.changes.outputs.runtime_core == 'true' }}
     strategy:
+      fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.changes.outputs.defer_macos == 'true' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_repetitions == '20' && 300 || 45 }}
     env:
       HACK_RUST_TEST_RUNNER: nextest
+      HACK_RUST_TEST_KEEP_GOING: "1"
       HACK_RUST_TEST_REPETITIONS: ${{ matrix.os == 'macos-latest' && github.event_name == 'workflow_dispatch' && inputs.rust_repetitions || '1' }}
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - id: checkout
+        uses: actions/checkout@v4
+      - id: rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        if: ${{ !cancelled() }}
         with:
           components: rustfmt, clippy
-      - uses: ./.github/actions/ci-dependency-cache
+      - id: dependency-cache
+        uses: ./.github/actions/ci-dependency-cache
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' }}
         with:
           mode: rust
           kind: candidate
           target: .hack-local/target
       - name: Cache pinned Zig toolchain
         id: zig-cache
+        if: ${{ !cancelled() }}
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/candidate-zig
           key: ci-zig-0.15.2-${{ runner.os }}-${{ runner.arch }}
       - name: Install pinned Zig for guest helpers
+        id: zig
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -462,11 +491,14 @@ jobs:
           tar -xf "$destination/$archive" -C "$destination"
           echo "$destination/zig-${platform}-0.15.2" >> "$GITHUB_PATH"
       - name: Build and verify bundle guest
+        id: bundle-guest
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' }}
         run: |
           rustup target add aarch64-unknown-linux-musl
           sh scripts/check-native-guest.sh
       - name: Test interactive guest launcher on a real Linux PTY
-        if: runner.os == 'Linux'
+        id: linux-pty
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.checkout.outcome == 'success' && steps.zig.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -476,36 +508,53 @@ jobs:
           zig build-exe packages/runtime-core/guest/environment-launcher.zig -target x86_64-linux-musl -O ReleaseSmall -femit-bin="$RUNNER_TEMP/interactive-environment-launcher"
           python3 tests/fixtures/environment-launcher-tty.py "$RUNNER_TEMP/interactive-environment-launcher"
       - name: Check candidate formatting
+        id: format
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' }}
         run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
       - name: Install pinned process-per-test runner
+        id: nextest
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         shell: bash
         run: |
           bash scripts/install-cargo-nextest.sh "$RUNNER_TEMP/candidate-nextest"
           echo "$RUNNER_TEMP/candidate-nextest" >> "$GITHUB_PATH"
       - name: Lint candidate core
+        id: lint-default
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' }}
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings
       - name: Test candidate isolation contracts
+        id: test-default
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.nextest.outcome == 'success' }}
         env:
           HACK_RUST_TEST_REPORT_DIR: ${{ runner.temp }}/candidate-rust-results
         run: bash scripts/test-runtime-core.sh
       - name: Lint candidate optional features
+        id: lint-all-features
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' }}
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
       - name: Test candidate optional feature contracts
+        id: test-all-features
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' && steps.nextest.outcome == 'success' }}
         env:
           HACK_RUST_TEST_REPORT_DIR: ${{ runner.temp }}/candidate-rust-results
         run: bash scripts/test-runtime-core.sh --all-features
       - name: Preserve per-pass Rust counts and timings
-        if: always()
+        id: rust-results
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: candidate-rust-results-${{ matrix.os }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/candidate-rust-results/
           if-no-files-found: ignore
       - name: Build and inspect local candidate
+        id: release-build
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' }}
         run: |
           ./scripts/build-hack-local.sh
           ./hack-local info --json
       - name: Check release candidate carries no kill harness
+        id: kill-harness
+        if: ${{ !cancelled() && steps.test-all-features.outcome == 'success' && steps.release-build.outcome == 'success' }}
         # The all-features test step built the debug candidate with node-kill-harness,
         # so its marker proves this grep can see the harness when it is compiled in.
         run: |
@@ -515,6 +564,25 @@ jobs:
             echo "release hack-runtime-candidate contains the test-only kill harness" >&2
             exit 1
           fi
+      - name: Summarize Candidate core failures
+        if: ${{ !cancelled() }}
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          python3 - <<'PYTHON' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+
+          failed = [
+              name for name, result in json.loads(os.environ["STEP_RESULTS"]).items()
+              if result["outcome"] == "failure"
+          ]
+          print("### Candidate core failed steps")
+          for name in failed:
+              print(f"- `{name}`")
+          if not failed:
+              print("None.")
+          PYTHON
 
   docs-site:
     # The documentation corpus checks, the site build Vercel runs, and an HTTP
@@ -891,7 +959,26 @@ jobs:
           HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
           HACK_TEST_DRAFT: ${{ needs.changes.outputs.draft }}
           HACK_TEST_DEFER_MACOS: ${{ needs.changes.outputs.defer_macos }}
-        run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+        # Only a scheduled Linux shard 8 can take over this fixed list. Its
+        # result is required by the test fan-in as part of the shard matrix.
+        run: >-
+          bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD"
+          --layout="$HACK_TEST_LAYOUT"
+          --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+          ${{ runner.os == 'Linux' && contains(fromJSON(needs.changes.outputs.test_shards), 8) && '--route-symlink-temp=true' || '' }}
+      - name: Tests (symlinked TMPDIR)
+        if: matrix.shard == 8 && runner.os == 'Linux'
+        shell: bash
+        run: |
+          root=$(mktemp -d "$RUNNER_TEMP/symlink-tmp.XXXXXX")
+          trap 'rm -rf -- "$root"' EXIT
+          mkdir "$root/physical"
+          ln -s "$root/physical" "$root/linked"
+          export TMPDIR="$root/linked"
+          HACK_TEST_SELECTION=$(cat scripts/test-shard-symlink-temp-files.json)
+          : "${HACK_TEST_SELECTION:?Missing symlinked TMPDIR test list}"
+          export HACK_TEST_SELECTION
+          bun scripts/test-shard.ts run --shard=1/1 --layout=full
       - name: Preserve measured file durations
         # Per-file seconds only; refresh scripts/test-shard-durations.json with
         # `bun scripts/test-shard.ts update-durations`.
@@ -951,13 +1038,45 @@ jobs:
           TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
         run: bun scripts/test-shard.ts run --focus="$TEST_FOCUS"
 
+  guest-protocol:
+    needs: changes
+    if: ${{ needs.changes.outputs.runtime_core == 'true' }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.guest_hosts) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Model execution recovery
+        if: runner.os == 'Linux'
+        working-directory: tests/models/tla/guest-execution
+        run: |
+          curl --fail --location --retry 2 --max-time 60 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o "$RUNNER_TEMP/tlc.jar"
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tlc.jar" | sha256sum --check
+          java -cp "$RUNNER_TEMP/tlc.jar" tlc2.TLC -workers 1 -config positive.cfg GuestAgent
+      - name: Test bounded guest protocol
+        run: |
+          cargo fmt --check --manifest-path packages/hack-vm-protocol/Cargo.toml
+          cargo clippy --locked --all-targets --manifest-path packages/hack-vm-protocol/Cargo.toml -- -D warnings
+          cargo test --locked --manifest-path packages/hack-vm-protocol/Cargo.toml
+
   test:
     # The required `test` check (repository ruleset) for `next` and `main`. It
     # always runs. When the change scope runs the suite, every bun shard must
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler]
+    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler, guest-protocol]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -972,6 +1091,8 @@ jobs:
           TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
           SHARD_RESULT: ${{ needs.test-shard.result }}
           FOCUS_RESULT: ${{ needs.test-focus.result }}
+          GUEST_ENABLED: ${{ needs.changes.outputs.runtime_core }}
+          GUEST_RESULT: ${{ needs.guest-protocol.result }}
           COMPILER_ENABLED: ${{ needs.changes.outputs.compiler_hosts != '[]' }}
           COMPILER_RESULT: ${{ needs.config-compiler.result }}
           LIFETIME_ENABLED: ${{ needs.changes.outputs.docker_suite }}
@@ -989,6 +1110,10 @@ jobs:
             echo "change scope did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
+          case "$GUEST_ENABLED:$GUEST_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Guest protocol evidence missing or failed"; exit 1 ;;
+          esac
           case "$COMPILER_ENABLED:$COMPILER_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Compiler acceptance evidence did not match its plan (enabled: $COMPILER_ENABLED, result: $COMPILER_RESULT)" >&2; exit 1 ;;

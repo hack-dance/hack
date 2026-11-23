@@ -84,6 +84,35 @@ const CONFIG_TYPES: [&str; 2] = [
     "application/vnd.docker.container.image.v1+json",
 ];
 
+thread_local! {
+    static REQUESTS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// One command's actual HTTP send attempts, including auth, redirects and
+/// retries. The scope restores any outer count even if dispatch unwinds.
+pub(super) fn count_requests<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REQUESTS.with(|count| count.set(self.0));
+        }
+    }
+    let previous = REQUESTS.with(|count| count.replace(Some(0)));
+    let restore = Restore(previous);
+    let result = operation();
+    let requests = REQUESTS.with(|count| count.get().unwrap_or_default());
+    drop(restore);
+    (result, requests)
+}
+
+#[cfg(test)]
+pub(super) fn permits_recorded_fallback(failure: &CandidateError) -> bool {
+    matches!(
+        failure.cause_code.as_deref(),
+        Some("registry_unreachable" | "registry_http_429")
+    )
+}
+
 fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("registry_image", message)
 }
@@ -200,6 +229,18 @@ fn system_lookup(host: &str) -> std::io::Result<Vec<IpAddr>> {
         .collect())
 }
 
+/// A lookup could not obtain addresses for a registry host.
+#[derive(Debug)]
+struct RegistryDnsUnavailable;
+
+impl std::fmt::Display for RegistryDnsUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("registry host lookup failed")
+    }
+}
+
+impl std::error::Error for RegistryDnsUnavailable {}
+
 /// A resolution refused because the name resolved to a local or private address.
 #[derive(Debug)]
 struct LocalAddressRefused;
@@ -235,9 +276,11 @@ impl Resolve for GuardedResolver {
         let allowed = self.allowed_host.as_deref() == Some(host.as_str());
         let lookup = self.lookup.clone();
         Box::pin(async move {
-            let addresses = tokio::task::spawn_blocking(move || lookup(&host)).await??;
+            let addresses = tokio::task::spawn_blocking(move || lookup(&host))
+                .await?
+                .map_err(|_| RegistryDnsUnavailable)?;
             if addresses.is_empty() {
-                return Err("registry host has no addresses".into());
+                return Err(Box::new(RegistryDnsUnavailable) as _);
             }
             if !allowed && !addresses.iter().all(|ip| public_ip(*ip)) {
                 return Err(Box::new(LocalAddressRefused) as _);
@@ -264,6 +307,52 @@ fn transport_error(failure: &reqwest::Error, message: &'static str) -> Candidate
         source = cause.source();
     }
     error(message)
+}
+
+/// Failure to establish a route to the registry is distinct from authentication,
+/// TLS verification and an authoritative rejection by the registry.
+fn tls_failure(failure: &reqwest::Error) -> Option<(&'static str, &'static str)> {
+    let mut source = std::error::Error::source(failure);
+    while let Some(error) = source {
+        let text = error.to_string().to_ascii_lowercase();
+        if text.contains("certificate") {
+            return Some((
+                "registry_certificate",
+                "Registry certificate was not trusted.",
+            ));
+        }
+        if text.contains("alert") {
+            return Some(("registry_tls_handshake", "Registry TLS handshake failed."));
+        }
+        source = error.source();
+    }
+    None
+}
+
+fn registry_unreachable(failure: &reqwest::Error) -> bool {
+    if !failure.is_connect() {
+        return false;
+    }
+    let mut source = std::error::Error::source(failure);
+    while let Some(cause) = source {
+        if cause.is::<RegistryDnsUnavailable>() {
+            return true;
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+            )
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    failure.is_timeout()
 }
 
 /// The reference grammar's `host[:port]` syntax, for local registry opt-ins.
@@ -487,7 +576,8 @@ fn canonical_manifest(bytes: &[u8]) -> Result<(), CandidateError> {
 
 fn parse_manifest(bytes: &[u8], expected: &str) -> Result<Manifest, CandidateError> {
     if bytes.len() > MAX_METADATA || digest(bytes) != expected {
-        return Err(error("Registry manifest digest or size mismatch."));
+        return Err(error("Registry manifest digest or size mismatch.")
+            .with_cause_code("registry_digest_mismatch".into()));
     }
     canonical_manifest(bytes)?;
     let m: Manifest =
@@ -560,7 +650,13 @@ fn bounded(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, CandidateErro
         .by_ref()
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| error("Registry transfer failed or timed out."))?;
+        .map_err(|failure| {
+            let cause = match read_failure(&failure) {
+                NetworkFailureReason::Timeout => "registry_body_stalled",
+                _ => "registry_transfer_failed",
+            };
+            error("Registry transfer failed or timed out.").with_cause_code(cause.into())
+        })?;
     if bytes.len() > limit {
         return Err(error("Registry response exceeds its byte limit."));
     }
@@ -802,7 +898,12 @@ impl<'a> Fetch<'a> {
             policy,
             authorization: None,
             stage: Stage::Anonymous,
-            deadline: Instant::now() + ACQUISITION_DEADLINE,
+            deadline: Instant::now()
+                + if policy.short_tag_refresh {
+                    Duration::from_secs(3)
+                } else {
+                    ACQUISITION_DEADLINE
+                },
             request_timeout: REQUEST_TIMEOUT,
         })
     }
@@ -848,7 +949,14 @@ impl<'a> Fetch<'a> {
         timeout: Duration,
         retry: bool,
     ) -> Result<Response, CandidateError> {
-        for attempt in 1..=ATTEMPTS {
+        let attempts = if self.policy.short_tag_refresh
+            || self.policy.tag_mode == super::image_policy::ImageTagMode::Refresh
+        {
+            1
+        } else {
+            ATTEMPTS
+        };
+        for attempt in 1..=attempts {
             let remaining =
                 match self.remaining() {
                     Ok(remaining) => remaining,
@@ -865,6 +973,11 @@ impl<'a> Fetch<'a> {
             let request = request
                 .try_clone()
                 .ok_or_else(|| error("Cannot replay registry request."))?;
+            REQUESTS.with(|count| {
+                if let Some(requests) = count.get() {
+                    count.set(Some(requests.saturating_add(1)));
+                }
+            });
             match request.timeout(remaining.min(timeout)).send() {
                 Ok(response) => return Ok(response),
                 Err(failure) => {
@@ -873,18 +986,32 @@ impl<'a> Fetch<'a> {
                     if !retry
                         || !transient(&failure)
                         || classified.code != "registry_image"
-                        || attempt == ATTEMPTS
+                        || attempt == attempts
                         || self.remaining().unwrap_or_default() <= delay
                     {
-                        return Err(CandidateError::new(
+                        if let Some((cause, message)) = tls_failure(&failure) {
+                            return Err(CandidateError::new("registry_image", message)
+                                .with_network_request(url.host_str().unwrap_or("unknown"), attempt)
+                                .with_cause_code(cause.into()));
+                        }
+                        let error = CandidateError::new(
                             classified.code,
                             format!(
                                 "{} Host {} after {attempt} attempt(s).",
                                 classified.message,
-                                url.host_str().unwrap_or("unknown")
+                                url.host_str().unwrap_or("unknown"),
                             ),
                         )
-                        .with_network_request(url.host_str().unwrap_or("unknown"), attempt));
+                        .with_network_request(url.host_str().unwrap_or("unknown"), attempt);
+                        return Err(if failure.is_timeout() {
+                            error.with_cause_code("registry_headers_stalled".into())
+                        } else if classified.code == "registry_image"
+                            && registry_unreachable(&failure)
+                        {
+                            error.with_cause_code("registry_unreachable".into())
+                        } else {
+                            error
+                        });
                     }
                     std::thread::sleep(delay);
                 }
@@ -982,7 +1109,10 @@ impl<'a> Fetch<'a> {
                     .headers()
                     .get(WWW_AUTHENTICATE)
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| error("Registry requires authentication without a challenge."))
+                    .ok_or_else(|| {
+                        error("Registry requires authentication without a challenge.")
+                            .with_cause_code("registry_http_401".into())
+                    })
                     .and_then(parse_challenge)?;
                 self.authorize(&challenge)?;
                 continue;
@@ -1113,10 +1243,12 @@ impl<'a> Fetch<'a> {
                     "registry_token_refused"
                 },
                 "The registry token endpoint refused the Docker credentials configured for it.",
-            ));
+            )
+            .with_cause_code(format!("registry_http_{}", response.status().as_u16())));
         }
         if !response.status().is_success() {
-            return Err(error("The registry token endpoint refused the request."));
+            return Err(error("The registry token endpoint refused the request.")
+                .with_cause_code(format!("registry_http_{}", response.status().as_u16())));
         }
         #[derive(Deserialize)]
         struct Token {
@@ -1387,10 +1519,22 @@ fn layer_failure(
             "the 360-second image deadline was reached".to_owned()
         }
     };
-    error(format!(
+    let failure = error(format!(
         "A registry layer transfer failed: {why}. Host {host} after {attempts} attempt(s)."
     ))
-    .with_network_failure(host, attempts, reason, status)
+    .with_network_failure(host, attempts, reason, status);
+    match (reason, status) {
+        (NetworkFailureReason::DigestMismatch, _) => {
+            failure.with_cause_code("registry_digest_mismatch".into())
+        }
+        (NetworkFailureReason::Timeout | NetworkFailureReason::Deadline, _) => {
+            failure.with_cause_code("registry_body_stalled".into())
+        }
+        (NetworkFailureReason::HttpStatus, Some(code)) => {
+            failure.with_cause_code(format!("registry_http_{code}"))
+        }
+        _ => failure,
+    }
 }
 
 /// One layer's private temporary file next to the archive being assembled. Created
@@ -1436,25 +1580,30 @@ impl Drop for LayerFile {
 
 /// A successful response, or the refusal its status means.
 fn refusal(response: Response) -> Result<Response, CandidateError> {
-    match response.status() {
-        s if s.is_success() => Ok(response),
-        StatusCode::NOT_FOUND => Err(CandidateError::new(
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let failure = match status {
+        StatusCode::NOT_FOUND => CandidateError::new(
             "registry_image_not_found",
             "The registry image or requested tag was not found.",
-        )),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(error(
-            "The registry refused access with the Docker credentials configured for it.",
-        )),
-        StatusCode::TOO_MANY_REQUESTS => Err(error(
-            "The registry rate-limited this request; retry later or configure credentials.",
-        )),
-        _ => Err(error("The registry request was refused.")),
-    }
+        ),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            error("The registry refused access with the Docker credentials configured for it.")
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            error("The registry rate-limited this request; retry later or configure credentials.")
+        }
+        _ => error("The registry request was refused."),
+    };
+    Err(failure.with_cause_code(format!("registry_http_{}", status.as_u16())))
 }
 
 fn verify_object(descriptor: &Descriptor, bytes: &[u8]) -> Result<(), CandidateError> {
     if bytes.len() as u64 != descriptor.size || digest(bytes) != descriptor.digest {
-        return Err(error("Registry object digest or size mismatch."));
+        return Err(error("Registry object digest or size mismatch.")
+            .with_cause_code("registry_digest_mismatch".into()));
     }
     Ok(())
 }
@@ -1527,6 +1676,8 @@ fn member_bytes(size: u64) -> u64 {
 
 #[derive(Debug, Serialize)]
 pub struct AcquiredImage {
+    #[serde(skip)]
+    pub(super) proof: Option<ManifestProof>,
     pub source_digest: String,
     pub manifest_digest: String,
     pub image_id: String,
@@ -1574,12 +1725,113 @@ pub fn admit(value: &str, policy: &ImagePolicy) -> Result<AdmittedImage, Candida
 
 #[derive(Debug, Serialize)]
 pub struct ResolvedImage {
+    #[serde(skip)]
+    pub(super) proof: ManifestProof,
     pub pinned_reference: String,
     pub source_digest: String,
     pub manifest_digest: String,
     pub image_id: String,
     pub platform: &'static str,
 }
+
+/// The original bytes that bind a registry digest to one selected config.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ManifestProof {
+    initial: String,
+    child: Option<String>,
+    config: String,
+}
+
+/// JSON escaping can expand any one of the three bounded metadata objects.
+pub(super) const MANIFEST_PROOF_LIMIT: u64 = (3 * MAX_METADATA * 6 + 1024) as u64;
+
+impl ManifestProof {
+    fn new(
+        initial: Vec<u8>,
+        child: Option<Vec<u8>>,
+        config: Vec<u8>,
+    ) -> Result<Self, CandidateError> {
+        fn utf8(bytes: Vec<u8>) -> Result<String, CandidateError> {
+            String::from_utf8(bytes).map_err(|_| error("Registry image metadata is not UTF-8."))
+        }
+        Ok(Self {
+            initial: utf8(initial)?,
+            child: child.map(utf8).transpose()?,
+            config: utf8(config)?,
+        })
+    }
+
+    pub(super) fn verified_config(
+        &self,
+        pin: &str,
+        policy: PlatformPolicy,
+    ) -> Result<(ImagePlatform, String), CandidateError> {
+        let (_, expected) = pinned_syntax(pin)?;
+        let initial = parse_manifest(self.initial.as_bytes(), &expected)?;
+        let (manifest, indexed) = if initial.manifests.is_empty() {
+            if self.child.is_some() {
+                return Err(error(
+                    "Stored image proof has an unexpected child manifest.",
+                ));
+            }
+            (initial, None)
+        } else {
+            let (descriptor, selected) = select_platform(&initial, policy)?;
+            Fetch::checked(descriptor, MAX_METADATA as u64)?;
+            let child = self
+                .child
+                .as_ref()
+                .ok_or_else(|| error("Stored image proof lacks the selected child manifest."))?;
+            verify_object(descriptor, child.as_bytes())?;
+            (
+                parse_manifest(child.as_bytes(), &descriptor.digest)?,
+                Some(selected),
+            )
+        };
+        check_selected_manifest(&manifest)?;
+        let config = manifest
+            .config
+            .ok_or_else(|| error("Image config descriptor is missing."))?;
+        Fetch::checked(&config, MAX_METADATA as u64)?;
+        verify_object(&config, self.config.as_bytes())?;
+        let selected = config_platform(self.config.as_bytes(), policy, indexed)?;
+        Ok((selected, config.digest))
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_manifest_resolution() -> ResolvedImage {
+    let config = br#"{"architecture":"arm64","os":"linux"}"#;
+    let image_id = digest(config);
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": image_id,
+            "size": config.len(),
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar",
+            "digest": format!("sha256:{}", "d".repeat(64)),
+            "size": 1,
+        }],
+    })
+    .to_string()
+    .into_bytes();
+    let source = digest(&manifest);
+    ResolvedImage {
+        source_digest: source.clone(),
+        manifest_digest: source.clone(),
+        pinned_reference: format!("docker.io/fixture/image@{source}"),
+        platform: "linux/arm64",
+        image_id,
+        proof: ManifestProof::new(manifest, None, config.to_vec()).unwrap(),
+    }
+}
+
+type SelectedManifest = (Manifest, String, Option<ImagePlatform>, Option<Vec<u8>>);
 
 /// The selected single-image manifest, its digest and, for an index, the platform the
 /// index selection chose under `platform`.
@@ -1588,10 +1840,11 @@ fn select(
     initial: &[u8],
     source_digest: &str,
     platform: PlatformPolicy,
-) -> Result<(Manifest, String, Option<ImagePlatform>), CandidateError> {
+) -> Result<SelectedManifest, CandidateError> {
     let mut manifest = parse_manifest(initial, source_digest)?;
     let mut manifest_digest = source_digest.to_owned();
     let mut indexed = None;
+    let mut child = None;
     if !manifest.manifests.is_empty() {
         let (selected, selected_platform) = select_platform(&manifest, platform)?;
         let selected = selected.clone();
@@ -1599,7 +1852,13 @@ fn select(
         manifest_digest = selected.digest.clone();
         let bytes = fetch.object("manifests", &selected)?;
         manifest = parse_manifest(&bytes, &manifest_digest)?;
+        child = Some(bytes);
     }
+    check_selected_manifest(&manifest)?;
+    Ok((manifest, manifest_digest, indexed, child))
+}
+
+fn check_selected_manifest(manifest: &Manifest) -> Result<(), CandidateError> {
     if !manifest.manifests.is_empty()
         || manifest.layers.is_empty()
         || manifest.layers.len() > MAX_LAYERS
@@ -1613,7 +1872,7 @@ fn select(
     if !config.media_type.is_empty() && !CONFIG_TYPES.contains(&config.media_type.as_str()) {
         return Err(error("The manifest does not describe a container image."));
     }
-    Ok((manifest, manifest_digest, indexed))
+    Ok(())
 }
 
 /// Resolve mutable metadata once and return an explicit immutable identity. No image
@@ -1637,14 +1896,51 @@ pub fn resolve_with(
     let mut fetch = Fetch::new(&registry, &path, policy)?;
     let initial = fetch.manifest(&tag)?;
     let source_digest = digest(&initial);
-    let (manifest, manifest_digest, indexed) =
-        select(&mut fetch, &initial, &source_digest, platform)?;
+    resolve_metadata(
+        &mut fetch,
+        &registry,
+        &path,
+        initial,
+        source_digest,
+        platform,
+    )
+}
+
+pub(super) fn resolve_pinned(
+    reference_text: &str,
+    policy: &ImagePolicy,
+    platform: PlatformPolicy,
+) -> Result<ResolvedImage, CandidateError> {
+    let pin = pinned(reference_text, policy)?;
+    let mut fetch = Fetch::new(&pin.registry, &pin.path, policy)?;
+    let initial = fetch.manifest(&pin.digest)?;
+    resolve_metadata(
+        &mut fetch,
+        &pin.registry,
+        &pin.path,
+        initial,
+        pin.digest,
+        platform,
+    )
+}
+
+fn resolve_metadata(
+    fetch: &mut Fetch<'_>,
+    registry: &Registry,
+    path: &str,
+    initial: Vec<u8>,
+    source_digest: String,
+    platform: PlatformPolicy,
+) -> Result<ResolvedImage, CandidateError> {
+    let (manifest, manifest_digest, indexed, child) =
+        select(fetch, &initial, &source_digest, platform)?;
     let config = manifest
         .config
         .ok_or_else(|| error("Image config descriptor is missing."))?;
     let config_bytes = fetch.object("blobs", &config)?;
     let selected = config_platform(&config_bytes, platform, indexed)?;
     Ok(ResolvedImage {
+        proof: ManifestProof::new(initial, child, config_bytes)?,
         pinned_reference: format!("{}/{path}@{source_digest}", registry.domain),
         source_digest,
         manifest_digest,
@@ -1742,9 +2038,10 @@ pub fn resolve_build_base(
     let initial = fetch.manifest(reference)?;
     let source_digest = digest(&initial);
     if expected.is_some_and(|expected| expected != source_digest) {
-        return Err(error("Registry manifest digest or size mismatch."));
+        return Err(error("Registry manifest digest or size mismatch.")
+            .with_cause_code("registry_digest_mismatch".into()));
     }
-    let (manifest, _, indexed) =
+    let (manifest, _, indexed, _) =
         select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;
     let pinned_reference = format!("{}/{}@{source_digest}", registry.domain, named.path);
     // BuildKit pulls the base itself, outside acquisition's archive budget, so the sizes
@@ -1929,6 +2226,17 @@ pub fn acquire_with(
     limit: u64,
     platform: PlatformPolicy,
 ) -> Result<AcquiredImage, CandidateError> {
+    acquire_with_disk_admission(reference_text, output, policy, limit, platform, |_| Ok(()))
+}
+
+pub(super) fn acquire_with_disk_admission<T>(
+    reference_text: &str,
+    output: &Path,
+    policy: &ImagePolicy,
+    limit: u64,
+    platform: PlatformPolicy,
+    reserve: impl FnOnce(u64) -> Result<T, CandidateError>,
+) -> Result<AcquiredImage, CandidateError> {
     let pinned = pinned(reference_text, policy)?;
     let limit = limit.min(policy.archive_limit);
     if output.exists() {
@@ -1936,7 +2244,7 @@ pub fn acquire_with(
     }
     let mut fetch = Fetch::new(&pinned.registry, &pinned.path, policy)?;
     let initial = fetch.manifest(&pinned.digest)?;
-    let (manifest, manifest_digest, indexed) =
+    let (manifest, manifest_digest, indexed, child) =
         select(&mut fetch, &initial, &pinned.digest, platform)?;
     let config = manifest
         .config
@@ -1958,6 +2266,14 @@ pub fn acquire_with(
             "The image exceeds the configured image budget or the remaining image cache budget.",
         ));
     }
+    // The current layer coexists with the growing archive until it is appended.
+    let largest_layer = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.size)
+        .max()
+        .unwrap_or(0);
+    let _disk = reserve(planned.saturating_add(largest_layer))?;
     let config_name = format!("{}.json", config.digest.trim_start_matches("sha256:"));
     let deadline = fetch.deadline;
     let manifest_bytes = serde_json::to_vec(
@@ -2024,6 +2340,7 @@ pub fn acquire_with(
         },
     )?;
     Ok(AcquiredImage {
+        proof: Some(ManifestProof::new(initial, child, config_bytes)?),
         source_digest: pinned.digest,
         manifest_digest,
         image_id: config.digest,

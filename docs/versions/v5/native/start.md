@@ -50,7 +50,10 @@ its [older setup procedure](setup.md#older-setup-only-homes).
 ```
 
 Setup shows file sizes, download hosts, hashes and locations, then asks once for
-consent. Read the list. A matching install is checked and reused. Noninteractive
+consent. Read the list. It includes the image builder that `build:` services
+need; a home that an earlier build set up gains it with
+`native setup --accept-downloads` ([the image builder](setup.md#the-image-builder)).
+A matching install is checked and reused. Noninteractive
 `up` refuses until setup is complete; interactive `up` can offer setup with the
 same consent and continue after success. For offline inputs or an interrupted
 download, use [setup and recovery details](setup.md).
@@ -109,6 +112,13 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+**Build base registry refusal (`registry_image`).** Foreground and detached
+starts can report `Image unavailable: could not resolve build base` when the
+registry cannot resolve a Dockerfile base. Check the reported reason, restore
+registry access, then retry `hack up`. `Already present` lists images Hack
+confirmed in the running guest. It does not confirm that the named build base
+can be resolved offline.
+
 Since next.17, use
 `"$CANDIDATE" exec api -- /bin/sh` from a foreground terminal for a live shell.
 Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`
@@ -118,18 +128,12 @@ launchers if requested. After an uncertain outcome, inspect
 `"$CANDIDATE" exec-sessions` and follow the
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
-A detached start (`up --detach`, and `up --json`, which is always detached on
-native) waits for the background start to report ready. Image builds and loads
-do not count against its 15-minute budget while they are in progress, because
-their length depends on the project and host load; everything else does, and a
-60-minute ceiling bounds the whole start. Raise them with
-`HACK_NATIVE_DETACHED_START_TIMEOUT_MS` and `HACK_NATIVE_DETACHED_START_CEILING_MS`
-(milliseconds, at least 1000). When one runs out, `up` fails with
-`E_STARTUP_TIMEOUT`, names the phase it reached, asks the start to stop and waits
-up to two minutes for it. Run `down` next: while that start is still alive and has
-published nothing, `down` waits for it (up to two minutes) and stops what it
-published, or fails with `E_DOWN_INCOMPLETE` ("nothing was stopped") instead of
-reporting success. Then run `up --detach` again.
+Native `up --detach` and `up --json` wait for the background owner to report ready.
+See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
+separate detached and graph readiness limits. If detached startup times out,
+run `down` next. It waits up to two minutes for a pending owner and stops what
+the owner published, or reports `E_DOWN_INCOMPLETE` if it cannot prove the stop.
+Retry after the stop is confirmed.
 
 Stop with the **same version and native home**:
 
@@ -150,9 +154,20 @@ message names the exact command that releases the old mapping
 run it, then `hack up` again. The project's data stays in the old home. If the old
 run is still live or its stop cannot be proven, stop it with the old version first.
 
+If the old home is no longer at its path (deleted, or on a disk that is not
+mounted), its records cannot be read there. The same refusal then names the same
+release command: it releases the mapping once no process of this user still names
+the old home's path or works inside it, and keeps the mapping in an audit file
+beside it. If the home is on a disk that is not mounted (the message names a missing
+directory under `/Volumes`, `/mnt` or `/media` when it can tell), mount it and stop
+the run there instead; its data is still on that disk. A home that was moved rather
+than deleted, and started again from its new path, has processes that name only the
+new path, so this check cannot see it; in that case release again from the moved
+home afterwards.
+
 ## Back to Compose
 
-Once the native stop is confirmed, use the same candidate on Compose:
+Once the native stop is confirmed, use the same prerelease on Compose:
 
 ```sh
 HACK_RUNTIME_BACKEND=compose "$CANDIDATE" up --detach --path /absolute/project

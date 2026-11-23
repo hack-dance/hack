@@ -16,7 +16,7 @@ const workflow = Bun.YAML.parse(
   await Bun.file(join(repository, ".github/workflows/ci.yml")).text()
 ) as {
   concurrency: { group: string; "cancel-in-progress": string };
-  on: { pull_request: { types: string[] } };
+  on: { pull_request: { types: string[] }; merge_group: { types: string[] } };
   jobs: Record<
     string,
     { steps: { id?: string; name?: string; run?: string }[] }
@@ -30,6 +30,8 @@ if (!script) {
 
 async function scope(opts: {
   path?: string;
+  also?: string;
+  renameTo?: string;
   draft?: boolean;
   event?: string;
   full?: boolean;
@@ -98,6 +100,9 @@ async function scope(opts: {
     const path = opts.path ?? "src/value.ts";
     await put(path, path.endsWith(".json") ? "{}" : "# base");
     await put("src/value.ts", "base");
+    if (opts.also) {
+      await put(opts.also, "base");
+    }
     await put("package.json", '{"type":"module"}');
     if (!opts.bootstrap) {
       await put("scripts/ci-change-scope.ts", policy);
@@ -122,6 +127,13 @@ async function scope(opts: {
             ? '{"topic":true}'
             : "topic"
       );
+    }
+    if (opts.also) {
+      await put(opts.also, "changed");
+    }
+    if (opts.renameTo) {
+      await mkdir(dirname(join(root, opts.renameTo)), { recursive: true });
+      git("mv", path, opts.renameTo);
     }
     git("add", ".");
     git("commit", "--quiet", "--allow-empty", "-m", "topic");
@@ -212,7 +224,6 @@ for (const path of [
   "src/lib/cli-result.ts",
   "packages/config-compiler/Cargo.toml",
   "packages/config-compiler/rust-toolchain.toml",
-  "packages/runtime-core/Cargo.lock",
 ]) {
   test(`protected input ${path} retains full Linux/Docker/build tiers and defers macOS`, async () => {
     const outputs = await scope({ path });
@@ -297,6 +308,8 @@ test("protected PR deferral passes the required fan-in only with successful sele
         TEST_FOCUS: outputs.test_focus,
         SHARD_RESULT: result,
         FOCUS_RESULT: "success",
+        GUEST_ENABLED: outputs.runtime_core,
+        GUEST_RESULT: "success",
         COMPILER_ENABLED: String(outputs.compiler_hosts !== "[]"),
         COMPILER_RESULT: "success",
         LIFETIME_ENABLED: outputs.docker_suite,
@@ -415,16 +428,45 @@ test("the inline boundary keeps HOME-write acceptance deferred for drafts", asyn
     compiler_hosts: "[]",
   });
 });
-test("retargeting reclassifies through the ordinary pull_request event", () => {
-  expect(workflow.on.pull_request.types).toContain("edited");
+test("PR metadata edits do not restart CI, but readiness and pushes still qualify", () => {
+  expect(workflow.on.pull_request.types).not.toContain("edited");
+  expect(workflow.on.pull_request.types).toContain("ready_for_review");
+  expect(workflow.on.pull_request.types).toContain("synchronize");
 });
 
-test("next pushes serialize without cancelling active runs; only PRs cancel", () => {
+test("merge queue trees receive full Linux qualification without a predecessor", async () => {
+  expect(workflow.on.merge_group.types).toEqual(["checks_requested"]);
+  expect(
+    await scope({
+      event: "merge_group",
+      ref: "refs/heads/gh-readonly-queue/next/pr-1",
+      before: "",
+      noMerge: true,
+      legacy: true,
+    })
+  ).toMatchObject({
+    scope: "full",
+    selection_mode: "full",
+    ci_evidence: "scoped",
+    compiler_hosts: linuxCompilerHosts,
+    compiler_rust: "true",
+    suite: "true",
+    runtime_core: "true",
+    test_shards: "[4,5,6,7,8]",
+    defer_macos: "true",
+    docker_suite: "true",
+    draft: "false",
+    docs_site: "true",
+    build_smoke: "true",
+  });
+});
+
+test("only a new PR head cancels active CI", () => {
   expect(workflow.concurrency.group).toBe(
     "${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}"
   );
   expect(workflow.concurrency["cancel-in-progress"]).toBe(
-    "${{ github.event_name == 'pull_request' }}"
+    "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}"
   );
 });
 
@@ -542,4 +584,42 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     defer_macos: "true",
     build_smoke: "false",
   });
+});
+
+const modelRegistry = "scripts/lib/tla-runtime-models.ts";
+test.each([
+  undefined,
+  "tests/models/sample.tla",
+  "packages/runtime-core/src/sample.rs",
+  "packages/runtime-core/Cargo.lock",
+  "docs/sample.md",
+])("skips just Docker for allowlisted next diffs paired with %s", async (also) => {
+  const outputs = await scope({
+    path: modelRegistry,
+    ...(also ? { also } : {}),
+  });
+  expect(outputs).toMatchObject({
+    docker_suite: "false",
+    build_smoke: "true",
+    runtime_core: "true",
+    compiler_hosts: linuxCompilerHosts,
+  });
+});
+
+test.each([
+  { also: "src/value.ts" },
+  { also: "tests/docker-context.test.ts" },
+  { also: ".github/workflows/other.yml" },
+  { full: true },
+  { e2e: true },
+  { baseRef: "main" },
+  {
+    path: "scripts/example.sh",
+    renameTo: "docs/example.sh",
+    also: modelRegistry,
+  },
+])("keeps Docker when the next exception does not apply: %o", async (extra) => {
+  expect((await scope({ path: modelRegistry, ...extra })).docker_suite).toBe(
+    "true"
+  );
 });

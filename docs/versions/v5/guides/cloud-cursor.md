@@ -2,9 +2,15 @@
 
 > **Not run yet.** This page follows the provider's documentation as read on
 > 2026-11-18 ([setup](https://cursor.com/docs/cloud-agent/setup),
-> [builds](https://cursor.com/docs/cloud-agent/builds)). v5 has no Linux release
-> yet, so the install line needs a `hack` binary you supply; see
-> [Any Linux machine with Docker](cloud-linux-docker.md#steps).
+> [builds](https://cursor.com/docs/cloud-agent/builds)). The recipe below was
+> written before v5 published a Linux archive, so its install line uses a
+> `hack` binary you supply. `5.0.0-next.24` publishes Linux x86_64 and arm64
+> archives with the Compose backend: you can install the prerelease as
+> described in [Install](../install.md) instead. Neither way has been run here.
+> The installer puts the launcher at `$HOME/.hack-next/bin/hack-next` and
+> does not change `PATH`, so a new shell has no `hack` command. If you install
+> the prerelease, call the launcher by that path in the `install` and `start` lines below.
+> See [Any Linux machine with Docker](cloud-linux-docker.md#steps).
 
 Cloud agents run in Ubuntu VMs. Cursor documents a Docker setup in a
 `.cursor/environment.json` Dockerfile. A Build keeps the disk, including
@@ -59,7 +65,7 @@ file above. Builds use the file from the default branch.
 Ask the agent to run (with your project's host):
 
 ```sh
-curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack.local --resolve hello.hack.local:443:127.0.0.1 -k https://hello.hack.local/
 ```
 
 ## Expected differences

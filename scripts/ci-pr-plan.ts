@@ -72,7 +72,7 @@ export function fullPushPlan(
 
 /** Inputs copied/compiled by the candidate job, including its qualification scripts. */
 export function touchesCandidate(path: string): boolean {
-  return /^(?:packages\/(?:runtime-core|config-compiler|relay-guest)\/|hack-local$|scripts\/(?:build-hack-local|native-|.*candidate|.*provider)|mise\.toml$|\.github\/|(?:.*\/)?(?:Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?)$)/.test(
+  return /^(?:tests\/models\/tla\/guest-execution\/|packages\/(?:runtime-core|hack-vm-(?:agent|protocol)|config-compiler|relay-guest)\/|hack-local$|scripts\/(?:build-hack-local|native-|.*candidate|.*provider)|mise\.toml$|\.github\/|(?:.*\/)?(?:Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?)$)/.test(
     path
   );
 }
@@ -87,8 +87,11 @@ export function touchesCompilerHost(path: string): boolean {
 /** Rust crate inputs retain Linux checks even when the PR defers macOS. */
 export function touchesRustInput(path: string): boolean {
   return (
+    /^tests\/models\/tla\/guest-execution\//.test(path) ||
     /^packages\/relay-guest\//.test(path) ||
-    (/^packages\/(?:runtime-core|config-compiler)\//.test(path) &&
+    (/^packages\/(?:runtime-core|config-compiler|hack-vm-(?:agent|protocol))\//.test(
+      path
+    ) &&
       !path.endsWith(".md"))
   );
 }
@@ -102,6 +105,19 @@ function shouldRunCandidate(opts: {
   return (
     opts.linuxRust ||
     (opts.mac && (opts.full || (opts.changed?.some(touchesCandidate) ?? true)))
+  );
+}
+
+/** Mirror the workflow’s exception for a complete, unlabeled diff into next. */
+export function isDockerExemptDiff(paths: readonly string[] | null): boolean {
+  return (
+    Boolean(paths?.length) &&
+    (paths?.every(
+      (path) =>
+        path === "scripts/lib/tla-runtime-models.ts" ||
+        /^(?:tests\/models|packages\/runtime-core|docs)\//.test(path)
+    ) ??
+      false)
   );
 }
 
@@ -140,7 +156,13 @@ export async function planPullRequest(opts: {
     !opts.draft && (full || opts.changed?.some(touchesRustInput) === true);
   const mac =
     !opts.draft && (integration || stablePr || opts.full || opts.mac === true);
-  const e2e = !opts.draft && (integration || full || opts.e2e === true);
+  const dockerExempt =
+    !(opts.full || integration) &&
+    opts.baseRef === "next" &&
+    isDockerExemptDiff(opts.changed);
+  const e2e =
+    !opts.draft &&
+    (integration || (full && !dockerExempt) || opts.e2e === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
   const allJobs = full;

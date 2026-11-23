@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::graph::native::publication_wait::{publication_wait, wait_until_published};
 use hack_config_compiler::environment::EnvMetadata;
 use std::{
     fs::OpenOptions,
@@ -8,7 +9,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
-
 const RUN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const OWNER: &str = "cccccccccccccccccccccccccccccccc";
 const PUBLISHER: &str = "provider::graph::native::foreground::recovery::tests::publisher_fixture";
@@ -110,29 +110,41 @@ impl Fixture {
         receipt
     }
     fn publisher(&self, live: bool) -> Child {
+        let stderr = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.root.join("publisher.stderr"))
+            .unwrap();
         Command::new(std::env::current_exe().unwrap())
             .args(["--exact", PUBLISHER, "--nocapture"])
             .env("HACK_NATIVE_SELECTOR_ROOT", &self.root)
             .env("HACK_NATIVE_SELECTOR_LIVE", if live { "1" } else { "0" })
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .unwrap()
     }
-    fn published(&self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !self.root.join("published").exists() {
-            assert!(
-                Instant::now() < deadline,
-                "fixture publication did not settle"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+    fn publisher_stderr(&self) -> String {
+        fs::read_to_string(self.root.join("publisher.stderr")).unwrap_or_default()
+    }
+    fn published(&self, child: &mut Child) {
+        wait_until_published(
+            &self.root.join("published"),
+            child,
+            publication_wait(),
+            || self.publisher_stderr(),
+        );
     }
     fn dead(&self) {
         let mut child = self.publisher(false);
-        assert!(child.wait().unwrap().success());
-        self.published();
+        self.published(&mut child);
+        let status = child.wait().unwrap();
+        assert!(
+            status.success(),
+            "publisher exited {status} after writing the publication marker\n{}",
+            self.publisher_stderr()
+        );
     }
     fn owner_root(&self) -> PathBuf {
         owner::root(&self.candidate, RUN).unwrap()
@@ -359,7 +371,7 @@ fn selection_json_excludes_real_compiler_argv_environment_keys_values_and_owner_
 fn live_exact_publisher_never_yields_dead_recovery_authority() {
     let fixture = Fixture::new();
     let mut child = RetainedChild(fixture.publisher(true));
-    fixture.published();
+    fixture.published(&mut child.0);
     assert!(child.0.try_wait().unwrap().is_none());
     fixture.assert_refused_unchanged();
     assert!(child.0.try_wait().unwrap().is_none());

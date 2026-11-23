@@ -11,6 +11,7 @@ import {
 } from "../lib/native-process-wrappers.ts";
 import { stepStoreRuntimeArgs } from "../lib/step-store/location.ts";
 import type { SubprocessSignal } from "../lib/subprocess-signal.ts";
+import { nativeAdmissionReuseEnvironment } from "./native-admission-reuse.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
 import {
@@ -18,6 +19,10 @@ import {
   readNativeConfigurationRefusals,
 } from "./native-configuration-refusals.ts";
 import { nativeHotReloadEnvironment } from "./native-hot-reload-notice.ts";
+import {
+  nativeImageRegistryReason,
+  pendingImageProofReason,
+} from "./native-image-policy.ts";
 import {
   type NativePlanChange,
   nativePlanChangeGuidance,
@@ -497,6 +502,7 @@ export function nativeFailureDetail(value: Record<string, unknown>): {
   const message =
     networkRequestFailureMessage(value) ??
     stateComponentFailureMessage(value) ??
+    pendingImageProofReason(value) ??
     bridgeSocketsFailureMessage(value) ??
     execStageFailureMessage(value) ??
     routeProbeFailureMessage(value, service) ??
@@ -776,6 +782,11 @@ export async function invokeNativeRuntime(opts: {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly onImageWait?: (
+    waiting: boolean,
+    reference?: string,
+    working?: boolean
+  ) => void;
   readonly privateInput?: Uint8Array;
   /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
@@ -831,10 +842,12 @@ export async function invokeNativeRuntime(opts: {
     // Internal invariant: callers build these argv shapes; no user input selects them.
     throw new Error(REQUEST_BUDGET_REFUSAL);
   }
+  const imageBatch =
+    opts.args[0] === "runtime" && opts.args[1] === "ensure-images";
   if (
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
-    timeoutMs > 600_000 ||
+    timeoutMs > (imageBatch ? 3_600_000 : 600_000) ||
     (opts.privateInput?.byteLength ?? 0) > MAX_PRIVATE_INPUT_BYTES
   ) {
     // A selected startup timeout or the managed environment size can exceed these bounds.
@@ -850,9 +863,14 @@ export async function invokeNativeRuntime(opts: {
       env[key] = value;
     }
   }
-  // The one user setting a runtime request carries in its environment; an
-  // invalid value throws here, before the subprocess exists.
+  // The two user settings a runtime request carries in its environment, both
+  // for `runtime up` only; an invalid value throws here, before the
+  // subprocess exists.
   Object.assign(env, nativeHotReloadEnvironment(opts.args));
+  Object.assign(env, nativeAdmissionReuseEnvironment(opts.args));
+  if (opts.onImageWait) {
+    env.HACK_INTERNAL_REPORT_IMAGE_WAIT = imageBatch ? "batch" : "1";
+  }
   const child = Bun.spawn(
     [
       opts.runtime.binary,
@@ -882,7 +900,13 @@ export async function invokeNativeRuntime(opts: {
       drainTimer = setTimeout(() => drain.abort(), exitDrainBoundMs);
     });
   }
-  const failureDetails = readNativeFailure(child.stderr, drain?.signal);
+  const failureDetails = readNativeFailure(
+    child.stderr,
+    drain?.signal,
+    undefined,
+    false,
+    opts.onImageWait
+  );
   let timedOut = false;
   let canceled = false;
   const cancel = () => {
@@ -1266,6 +1290,13 @@ function nativeFailureCause(input: {
   if (typeof input.cause !== "string" || !ERROR_CODE.test(input.cause)) {
     return undefined;
   }
+  if (
+    (input.code.startsWith("registry_") ||
+      input.code === "image_tag_offline_missing") &&
+    nativeImageRegistryReason(input.cause)
+  ) {
+    return input.cause;
+  }
   return ["graph_one_off_failed", "graph_owner_recovery"].includes(
     input.code
   ) ||
@@ -1332,7 +1363,12 @@ async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
   limit = MAX_NATIVE_FAILURE_BYTES,
-  startupLogs = false
+  startupLogs = false,
+  onImageWait?: (
+    waiting: boolean,
+    reference?: string,
+    working?: boolean
+  ) => void
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -1342,6 +1378,7 @@ async function readNativeFailure(
   if (signal?.aborted) {
     cancel();
   }
+  const waiting = new Set<string | undefined>();
   let bytes = 0;
   let text = "";
   const decoder = new TextDecoder();
@@ -1354,6 +1391,38 @@ async function readNativeFailure(
       bytes += result.value.byteLength;
       if (bytes <= limit) {
         text += decoder.decode(result.value, { stream: true });
+        if (onImageWait) {
+          while (text.startsWith("hack.image-wait:")) {
+            const newline = text.indexOf("\n");
+            if (newline === -1) {
+              break;
+            }
+            const [state, reference] = text.slice(0, newline).split(" ", 2);
+            if (
+              state === "hack.image-wait:working" ||
+              state === "hack.image-wait:finished"
+            ) {
+              onImageWait(state === "hack.image-wait:working", reference, true);
+              text = text.slice(newline + 1);
+              continue;
+            }
+            if (
+              state === "hack.image-wait:begin" ||
+              state === "hack.image-wait:end"
+            ) {
+              const active = state.endsWith(":begin");
+              if (active) {
+                waiting.add(reference);
+              } else {
+                waiting.delete(reference);
+              }
+              onImageWait(active, reference);
+            } else {
+              break;
+            }
+            text = text.slice(newline + 1);
+          }
+        }
       }
     }
     if (bytes > limit) {
@@ -1366,6 +1435,9 @@ async function readNativeFailure(
   } catch {
     return;
   } finally {
+    for (const reference of waiting) {
+      onImageWait?.(false, reference);
+    }
     signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }

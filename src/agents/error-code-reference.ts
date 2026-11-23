@@ -35,6 +35,21 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning: "Shared global infrastructure the command needs is offline.",
     readFirst: "`hack global status`",
   },
+  E_GLOBAL_NOT_READY: {
+    meaning:
+      "A global proxy or logging container did not become ready, or routes did not answer, within its bound.",
+    readFirst: "`hack doctor`",
+  },
+  E_GLOBAL_STOPPED: {
+    meaning:
+      "A global proxy or logging container stopped right after it started.",
+    readFirst: "`docker logs --tail 50 <container>`",
+  },
+  E_LOGGING_OFF: {
+    meaning:
+      "The command needs the opt-in global logging stack (Loki, Grafana), which is off.",
+    readFirst: "`hack global up --logging`",
+  },
   E_CONFIG_PARSE: {
     meaning: "A Hack configuration file could not be parsed.",
     readFirst: "`hack doctor --json`",
@@ -42,6 +57,54 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
   E_CONFIG_INVALID: {
     meaning:
       "Project configuration or saved runtime input did not pass validation.",
+    readFirst: "`hack doctor --json`",
+  },
+  E_MIN_CLI_VERSION_REQUIRED: {
+    meaning: "The Compose remote configuration needs a minimum CLI version.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_INVALID_MIN_CLI_VERSION: {
+    meaning: "The minimum CLI version is malformed.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_CLI_VERSION_TOO_OLD: {
+    meaning: "The running CLI is older than the project minimum.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_INVALID_PREREQUISITE: {
+    meaning: "A sign-in prerequisite declaration is invalid.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_UNKNOWN_PREREQUISITE: {
+    meaning: "A remote target refers to an undeclared prerequisite.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_INVALID_HOST_TOOL: {
+    meaning: "A host tool declaration or reference list is invalid.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_UNKNOWN_HOST_TOOL: {
+    meaning: "A prerequisite or tunnel names an undeclared host tool.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_INVALID_REMOTE: {
+    meaning: "A remote declaration is invalid.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_UNKNOWN_REMOTE_TARGET: {
+    meaning: "A remote names a default target that does not exist.",
+    readFirst: "`hack config validate --json`",
+  },
+  E_PREREQUISITE_TOOL_MISSING: {
+    meaning: "A binary needed for the prerequisite is missing.",
+    readFirst: "`hack doctor --json`",
+  },
+  E_PREREQUISITE_CHECK_TIMEOUT: {
+    meaning: "A sign-in prerequisite check exceeded its deadline.",
+    readFirst: "`hack doctor --json`",
+  },
+  E_PREREQUISITE_CHECK_FAILED: {
+    meaning: "A sign-in prerequisite check exited unsuccessfully.",
     readFirst: "`hack doctor --json`",
   },
   E_PROJECT_NOT_FOUND: {
@@ -96,6 +159,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning:
       "After start or restart, a service is neither running nor a successful one-shot.",
     readFirst: "`hack ps --json`",
+  },
+  E_RECOVERY_REQUIRED: {
+    meaning:
+      "The last native run of this instance has no confirmed shutdown (its owner exited before finishing it, or another start replaced it), so `up` started nothing. `hack down --recover` finishes that cleanup with data kept, starting the native runtime if it needs to.",
+    readFirst: "`hack down --recover`",
   },
   E_DOWN_INCOMPLETE: {
     meaning:

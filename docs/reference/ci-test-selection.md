@@ -24,6 +24,20 @@ shard lists selected macOS
 files in its summary as **deferred to the integration run**, before typecheck or
 tests can fail. A green test check qualifies only the tests actually run.
 
+| Ready PR into `next` | Docker qualification |
+| --- | --- |
+| Nonempty diff limited to the model registry, `tests/models/**`, `packages/runtime-core/**` and `docs/**` | Skip Docker E2E, runtime images and Linux process lifetime |
+| Any other changed path | Follow the existing scope policy |
+| `ci:e2e` or `ci:full` | Follow the label's existing qualification policy |
+
+The exception leaves the compiler, candidate, state-model, build and docs
+selections under the existing policy. The workflow checks both sides of
+renames. Integration pushes continue to qualify Docker under the existing
+push policy. The static guard tests stay selected in the Linux pool for
+ordinary PRs, including when the selector classifies them as platform-sensitive.
+The task-catalog guard checks recipe provenance digests in `.hack/tasks.json`
+against the checkout.
+
 Both required names, test and docs site, always report. The named Docker fan-in
 passes an expected out-of-scope skip. Adding ci:mac enables the selected macOS
 unit pool and native host jobs under their usual input gates; ci:e2e enables the
@@ -94,8 +108,20 @@ models and build smoke. macOS requires a main base or ci:mac/ci:full label;
 draft fan-ins fail and keep heavy tiers disabled.
 No PR install script executes while computing scope. The base archive supplies
 the working directory, Bun configuration and dependency lockfile for the policy.
-Retargeting (`edited`) recomputes scope; other PR metadata edits also cancel
-any in-progress PR run and start a new run.
+PR metadata edits do not start CI. After retargeting, push a new revision or
+close and reopen the PR to qualify it against the new base. Readiness and
+push events still start runs. A new PR head cancels the active run. Same-head
+events queue behind it, and GitHub keeps at most one pending run per PR.
+
+Merge queue requests qualify GitHub’s combined commit with the full Linux
+unit pool, compiler hosts, candidate, Docker, build smoke, models and docs.
+macOS coverage stays with the PR and integration policies. Linux unit shard
+8 runs the fixed list in `scripts/test-shard-symlink-temp-files.json` with a
+symlinked `TMPDIR`. When Linux shard 8 is scheduled, Linux unit shards leave
+those files to that step. Otherwise Linux runs its regular assignment.
+macOS keeps its regular assignment in either case. Each shard prints one
+result per executed file, and the required `test` check requires the shard
+matrix to succeed. Duration updates affect only the normal assignment.
 
 Config, lockfiles, manifests, workflows, scripts, fixtures, scenario/model data,
 Rust/guest inputs, unknown paths and deleted modules select the full unit set.
@@ -162,9 +188,7 @@ could leave acceptance without matching platform evidence.
 Integration retains all selected macOS coverage. Deferring unlabeled PR macOS
 jobs reduces competition for the same hosted runner pool; it does not reserve
 macOS slots or guarantee a queue wait bound.
-PRs still cancel stale runs for the same PR. `main` pushes retain unique,
-non-cancelling groups. Manual full runs have unique groups and cannot be cancelled
-by a later `next` push.
+`main` pushes, manual runs and merge queue requests each use a unique group.
 
 ## Historical replay
 

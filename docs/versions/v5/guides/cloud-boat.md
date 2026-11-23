@@ -2,9 +2,15 @@
 
 > **Not run yet.** This page follows the provider's documentation as read on
 > 2026-11-18 ([tools](https://docs.boat.dev/machines/tools.md),
-> [setup](https://docs.boat.dev/setup.md)). v5 has no Linux release yet, so the
-> install line needs a `hack` binary you supply; see
-> [Any Linux machine with Docker](cloud-linux-docker.md#steps).
+> [setup](https://docs.boat.dev/setup.md)). The recipe below was
+> written before v5 published a Linux archive, so its install line uses a
+> `hack` binary you supply. `5.0.0-next.24` publishes Linux x86_64 and arm64
+> archives with the Compose backend: you can install the prerelease as
+> described in [Install](../install.md) instead. Neither way has been run here.
+> The installer puts the launcher at `$HOME/.hack-next/bin/hack-next` and
+> does not change `PATH`, so a new shell has no `hack` command. If you install
+> the prerelease, call the launcher by that path wherever the recipe below writes `hack`.
+> See [Any Linux machine with Docker](cloud-linux-docker.md#steps).
 
 boat.dev sandboxes are Ubuntu 24.04 x86_64 VMs with passwordless sudo, systemd,
 and Docker with Compose installed. Environment secrets arrive as ordinary
@@ -37,7 +43,7 @@ From your machine, `boat exec <sandbox> --cwd <repo> '<command>'` runs a command
 in the sandbox (the default timeout is 30 seconds):
 
 ```sh
-curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack.local --resolve hello.hack.local:443:127.0.0.1 -k https://hello.hack.local/
 ```
 
 A VM with systemd-resolved may also resolve Hack's names after

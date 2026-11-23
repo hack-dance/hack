@@ -182,6 +182,11 @@ const shellMock = await registerScopedModuleMock({
       if (custom) {
         return custom;
       }
+      // The route probe's HTTPS request through the proxy: any status
+      // means the route answered (src/lib/global-route-probe.ts).
+      if (cmd.includes("--resolve")) {
+        return { exitCode: 0, stdout: "404", stderr: "" };
+      }
       if (cmd[0] === "docker" && cmd[1] === "info") {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
@@ -490,6 +495,65 @@ test("global install plan keeps JSON stdout pure when helper ownership refuses r
   expect(runCalls).toEqual([]);
   expect(confirmCalls).toBe(0);
 });
+
+bunTest.each([
+  ["optional tools only", false, false, 0],
+  ["dnsmasq needed", true, false, 1],
+  ["dnsmasq unnecessary", true, true, 0],
+] as const)(
+  "headless global install: %s",
+  async (_case, dnsmasqMissing, hasResolvers, expectedCode) => {
+    process.env.HACK_NO_INTERACTIVE = "1";
+    await prepareManagedTools(tempDir!);
+    for (const domain of ["hack", "hack.local", "hack.gy"]) {
+      pathExistsOverrides.set(`/etc/resolver/${domain}`, hasResolvers);
+    }
+    execMockResponder = (argv) =>
+      argv[0] === "brew" && argv[1] === "list"
+        ? {
+            exitCode: argv[2] === "dnsmasq" && !dnsmasqMissing ? 0 : 1,
+            stdout: "",
+            stderr: "",
+          }
+        : null;
+    const { runCli } = await import("../src/cli/run.ts");
+
+    const { logger } = await import("../src/ui/logger.ts");
+    const warnings = spyOn(logger, "warn");
+    const errors = spyOn(logger, "error");
+    try {
+      expect(await runCli(["global", "install"])).toBe(expectedCode);
+      const brewCommands = warnings.mock.calls
+        .map(([input]) => input.message)
+        .filter((message) => message.includes("Run: brew install"));
+      expect(brewCommands).toEqual(
+        expectedCode === 0
+          ? [
+              "Skipping chafa install. Run: brew install chafa",
+              "Skipping mkcert install. Run: brew install mkcert",
+            ]
+          : []
+      );
+      if (expectedCode === 1) {
+        expect(errors).toHaveBeenCalledWith({
+          message:
+            "E_INTERACTIVE_REQUIRED: Homebrew install requires consent. Run: brew install dnsmasq",
+        });
+      }
+    } finally {
+      warnings.mockRestore();
+      errors.mockRestore();
+    }
+    expect(
+      runCalls.some(([bin, action]) => bin === "brew" && action === "install")
+    ).toBe(false);
+    if (expectedCode === 1) {
+      expect(runCalls).toEqual([]);
+    } else {
+      expect(runCalls.some(([bin]) => bin === "docker")).toBe(true);
+    }
+  }
+);
 
 test("global install keeps container ip host dns when bridge ip is reachable", async () => {
   await prepareManagedTools(tempDir!);

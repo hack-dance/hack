@@ -1,7 +1,12 @@
 # Share environment and secrets
 
-Read [Environment and secrets](../../env.md) before choosing a backend. Commit
-shareable configuration; keep decryption keys and local overrides separate.
+This page shows how to keep a project's settings and secrets in the repository
+so teammates, worktrees and other machines get the same values: list them, add
+an overlay such as `qa`, set a value and use it.
+
+[Environment and secrets](../../env.md) has the full model; read it before
+choosing a backend. Commit shareable configuration; keep decryption keys and
+local overrides separate.
 
 ```sh
 hack env list

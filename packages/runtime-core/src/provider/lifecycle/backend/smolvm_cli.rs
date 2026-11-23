@@ -230,13 +230,14 @@ pub(in crate::provider::lifecycle) fn spawn_exec(
     arguments: &[&str],
 ) -> std::io::Result<std::process::Child> {
     use std::process::Stdio;
-    command(candidate, owner)
-        .args(["machine", "exec", "--name", &owner.machine, "--"])
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    process::spawn_child(
+        command(candidate, owner)
+            .args(["machine", "exec", "--name", &owner.machine, "--"])
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
 }
 
 #[cfg(test)]

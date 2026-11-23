@@ -3,9 +3,11 @@ import { relative, resolve } from "node:path";
 import { COMPILER_HOSTS } from "../scripts/ci-change-scope.ts";
 import {
   fullPushPlan,
+  isDockerExemptDiff,
   planPullRequest,
   touchesCandidate,
   touchesCompilerHost,
+  touchesRustInput,
 } from "../scripts/ci-pr-plan.ts";
 import {
   buildSelectionGraph,
@@ -17,6 +19,7 @@ import {
   buildVerifiedPlan,
   classifyTestPools,
   discoverTestFiles,
+  STATIC_GUARD_TESTS,
 } from "../scripts/test-shard-plan.ts";
 import { isRecord } from "../src/lib/guards.ts";
 
@@ -703,6 +706,10 @@ describe("PR matrix policy", () => {
     expect(plan.docker_suite).toBe(true);
   });
   test("candidate inputs include the compiler consumer dependency", () => {
+    expect(touchesRustInput("packages/hack-vm-protocol/src/client.rs")).toBe(
+      true
+    );
+    expect(touchesRustInput("packages/hack-vm-agent/src/jobs.rs")).toBe(true);
     expect(touchesCandidate("packages/config-compiler/src/lib.rs")).toBe(true);
     expect(touchesCandidate("packages/runtime-core/src/main.rs")).toBe(true);
     expect(touchesCompilerHost("packages/config-compiler/src/lib.rs")).toBe(
@@ -829,4 +836,34 @@ test("draft fan-ins fail explicitly even when the light set passes or scope is c
       expect(result.stdout.toString()).toContain("skipped: draft");
     }
   }
+});
+
+test("Docker exception requires a nonempty diff entirely inside the four allowed inputs", () => {
+  const paths = [
+    "scripts/lib/tla-runtime-models.ts",
+    "tests/models/example.tla",
+    "packages/runtime-core/src/lib.rs",
+    "docs/example.md",
+  ];
+  expect(isDockerExemptDiff(paths)).toBe(true);
+  expect(isDockerExemptDiff([...paths, "tests/docker-context.test.ts"])).toBe(
+    false
+  );
+  expect(isDockerExemptDiff([])).toBe(false);
+  expect(isDockerExemptDiff(null)).toBe(false);
+});
+
+test("static guards stay in the selected Linux pool for an ordinary test diff", async () => {
+  const result = selectTests({
+    repoRoot,
+    changed: ["tests/step-store.test.ts"],
+    graph: repoGraph,
+  });
+  expect(result.mode).toBe("selected");
+  const catalogGuard = "tests/project-task-catalog.test.ts";
+  expect(Object.hasOwn(STATIC_GUARD_TESTS, catalogGuard)).toBe(true);
+  const guards = Object.keys(STATIC_GUARD_TESTS);
+  expect(result.files).toEqual(expect.arrayContaining(guards));
+  const pools = await classifyTestPools({ repoRoot, files: guards });
+  expect(pools.linux).toEqual(expect.arrayContaining(guards));
 });

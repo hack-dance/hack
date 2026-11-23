@@ -5,8 +5,9 @@ use crate::test_root::private_test_root;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::ffi::CString;
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::sync::Barrier;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -20,12 +21,16 @@ impl Fixture {
         ))
     }
 
-    fn root(&self) -> PathBuf {
+    fn base(&self) -> PathBuf {
         self.0.join("store")
     }
 
+    fn root(&self) -> PathBuf {
+        self.base().join(disk::FORMAT_DIRECTORY)
+    }
+
     fn open(&self) -> Store {
-        Store::open(&self.root()).unwrap()
+        Store::open(&self.base()).unwrap()
     }
 }
 
@@ -40,10 +45,23 @@ fn mode(path: &Path) -> u32 {
 }
 
 #[test]
+fn format_directory_and_version_file_use_the_same_number() {
+    let directory_number = disk::FORMAT_DIRECTORY.strip_prefix("hack.store-").unwrap();
+    let version_number = std::str::from_utf8(disk::VERSION)
+        .unwrap()
+        .strip_prefix("hack.store/")
+        .unwrap()
+        .strip_suffix('\n')
+        .unwrap();
+    assert_eq!(directory_number, version_number);
+}
+
+#[test]
 fn open_creates_private_layout_and_holds_shared_lock_until_drop() {
     let fixture = Fixture::new();
     let first = fixture.open();
     let second = fixture.open();
+    assert_eq!(mode(&fixture.base()), 0o700);
     assert_eq!(mode(&fixture.root()), 0o700);
     for name in ["records", "cas", "files", "tags", "tmp"] {
         let path = fixture.root().join(name);
@@ -87,14 +105,14 @@ fn open_creates_private_layout_and_holds_shared_lock_until_drop() {
 #[test]
 fn concurrent_first_opens_share_one_generation_and_key() {
     let fixture = Fixture::new();
-    let root = fixture.root();
+    let base = fixture.base();
     let start = std::sync::Arc::new(Barrier::new(8));
     let (sender, results) = std::sync::mpsc::channel();
     for _ in 0..8 {
-        let (root, start, sender) = (root.clone(), start.clone(), sender.clone());
+        let (base, start, sender) = (base.clone(), start.clone(), sender.clone());
         std::thread::spawn(move || {
             start.wait();
-            let store = Store::open(&root);
+            let store = Store::open(&base);
             let digest = store
                 .as_ref()
                 .map(|store| store.keyed_digest(STEP, &json!(42)).unwrap());
@@ -126,7 +144,7 @@ fn an_open_behind_a_held_lock_fails_busy_at_its_deadline() {
     let holder = File::open(fixture.root().join("lock")).unwrap();
     flock(&holder, libc::LOCK_EX).unwrap();
     let started = Instant::now();
-    let error = match disk::open_until(&fixture.root(), started + Duration::from_millis(300)) {
+    let error = match disk::open_until(&fixture.base(), started + Duration::from_millis(300)) {
         Ok(_) => panic!("open succeeded behind an exclusive lock"),
         Err(error) => error,
     };
@@ -149,7 +167,11 @@ fn a_slow_initialization_is_waited_for_until_the_time_deadline() {
     let fixture = Fixture::new();
     let root = fixture.root();
     // The state an initializer is in: the directory and lock exist, nothing else.
-    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -163,7 +185,7 @@ fn a_slow_initialization_is_waited_for_until_the_time_deadline() {
         drop(lock);
     });
     let started = Instant::now();
-    let store = disk::open_until(&root, started + Duration::from_secs(3));
+    let store = disk::open_until(&fixture.base(), started + Duration::from_secs(3));
     let elapsed = started.elapsed();
     releaser.join().unwrap();
     assert!(store.is_ok(), "{:?}", store.err());
@@ -207,7 +229,7 @@ fn processes_open_the_same_store(holds_ms: &[u64], holder_first: bool) {
                 "--nocapture",
                 "--test-threads=1",
             ])
-            .env("HACK_STORE_TEST_ROOT", fixture.root())
+            .env("HACK_STORE_TEST_ROOT", fixture.base())
             .env("HACK_STORE_TEST_HOLD_MS", hold_ms.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -279,34 +301,51 @@ fn reopening_reuses_key_and_other_stores_use_distinct_keys() {
 #[test]
 fn incompatible_version_sets_aside_entire_store_and_starts_fresh() {
     let fixture = Fixture::new();
+    drop(fixture.open());
+    let previous_archive = set_aside_at(&fixture, disk::unix_millis().unwrap() - 1000);
     let old = fixture.open();
+    assert!(previous_archive.is_dir());
     let key = example_key(StepClass::Slot);
     old.record(&key, output(None), "run-1").unwrap();
     let old_digest = old.keyed_digest(STEP, &json!(42)).unwrap();
     drop(old);
     fs::write(fixture.root().join("VERSION"), b"hack.store/2\n").unwrap();
     let fresh = fixture.open();
+    assert!(!previous_archive.exists());
     assert_ne!(fresh.keyed_digest(STEP, &json!(42)).unwrap(), old_digest);
     assert_eq!(
         fs::read(fixture.root().join("VERSION")).unwrap(),
         b"hack.store/1\n"
     );
     assert_eq!(
-        fresh
-            .lookup(&key, |_| panic!("unexpected observation"))
-            .unwrap(),
+        fresh.lookup(&key, |_| panic!("unexpected observation")),
         Lookup::Miss(MissReason::NoRecord)
     );
-    let archive = fs::read_dir(&fixture.0)
+    let archive = fs::read_dir(fixture.base())
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .find(|path| {
             path.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("store.old-")
+                .starts_with("hack.store-1.old-")
         })
         .unwrap();
+    let millis = archive
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .rsplit_once('-')
+        .unwrap()
+        .1;
+    let marker = archive.join("SET_ASIDE");
+    assert!(fs::symlink_metadata(&marker).unwrap().is_file());
+    assert_eq!(mode(&marker), 0o600);
+    assert_eq!(
+        fs::read(&marker).unwrap(),
+        archive_marker(&fixture.base(), millis)
+    );
     assert_eq!(
         fs::read(archive.join("VERSION")).unwrap(),
         b"hack.store/2\n"
@@ -322,6 +361,56 @@ fn incompatible_version_sets_aside_entire_store_and_starts_fresh() {
     );
 }
 
+#[test]
+fn a_damaged_version_or_key_cannot_rotate_a_store_with_a_live_handle() {
+    for name in ["VERSION", "key"] {
+        let fixture = Fixture::new();
+        let live = fixture.open();
+        let value = json!(42);
+        let digest = live.keyed_digest(STEP, &value).unwrap();
+        let key = example_key(StepClass::Slot);
+        let record = live.record(&key, output(None), "run-1").unwrap();
+        let root = fixture.root();
+        let before = fs::metadata(&root).unwrap();
+        let damaged = root.join(name);
+        fs::write(&damaged, b"damaged").unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let Err(error) = disk::open_until(&fixture.base(), deadline) else {
+            panic!("open succeeded with a damaged {name} and a live handle");
+        };
+        assert_eq!(error.code, "step_store_busy", "{name}");
+        let after = fs::metadata(&root).unwrap();
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert_eq!(fs::read(damaged).unwrap(), b"damaged");
+        let entries: Vec<_> = fs::read_dir(fixture.base())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(entries, [root]);
+        assert_eq!(live.keyed_digest(STEP, &value).unwrap(), digest);
+        assert_eq!(live.lookup(&key, |_| true), Lookup::Hit(record));
+    }
+}
+
+#[test]
+fn other_format_directories_are_left_in_place() {
+    let fixture = Fixture::new();
+    let future = fixture.base().join("hack.store-2");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&future)
+        .unwrap();
+    fs::write(future.join("VERSION"), b"hack.store/2\n").unwrap();
+    let expected = fixture.open().keyed_digest(STEP, &json!(42)).unwrap();
+    assert_eq!(fs::read(future.join("VERSION")).unwrap(), b"hack.store/2\n");
+    assert_eq!(
+        fixture.open().keyed_digest(STEP, &json!(42)).unwrap(),
+        expected
+    );
+}
+
 /// A damaged key in a store that has VERSION sets the whole store aside: keyed
 /// digests made with the lost key can never be reproduced, so its records are
 /// useless, and a cache rebuilds rather than refusing every later open.
@@ -329,9 +418,7 @@ fn incompatible_version_sets_aside_entire_store_and_starts_fresh() {
 fn a_damaged_key_in_a_versioned_store_sets_the_store_aside() {
     type Damage = fn(&Path, &Path);
     let cases: [(&str, Damage); 6] = [
-        ("mode 0644", |key, _| {
-            fs::set_permissions(key, fs::Permissions::from_mode(0o644)).unwrap()
-        }),
+        ("missing", |key, _| fs::remove_file(key).unwrap()),
         ("empty", |key, _| fs::write(key, []).unwrap()),
         ("31 bytes", |key, _| fs::write(key, [0; 31]).unwrap()),
         ("33 bytes", |key, _| fs::write(key, [0; 33]).unwrap()),
@@ -354,7 +441,7 @@ fn a_damaged_key_in_a_versioned_store_sets_the_store_aside() {
         };
         let key = fixture.root().join("key");
         damage(&key, &other.root().join("key"));
-        let store = Store::open(&fixture.root()).unwrap_or_else(|_| panic!("{name}: open"));
+        let store = Store::open(&fixture.base()).unwrap_or_else(|_| panic!("{name}: open"));
         assert_eq!(fs::metadata(&key).unwrap().len(), 32, "{name}");
         assert_eq!(mode(&key), 0o600, "{name}");
         assert_ne!(
@@ -362,13 +449,488 @@ fn a_damaged_key_in_a_versioned_store_sets_the_store_aside() {
             original,
             "{name}"
         );
-        let archived: Vec<_> = fs::read_dir(&fixture.0)
+        let archived: Vec<_> = fs::read_dir(fixture.base())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .filter(|entry| entry.starts_with("store.old-"))
+            .filter(|entry| entry.starts_with("hack.store-1.old-"))
             .collect();
         assert_eq!(archived.len(), 1, "{name}: {archived:?}");
     }
+}
+
+#[test]
+fn a_key_with_the_wrong_mode_is_repaired_without_losing_records() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let expected = store.keyed_digest(STEP, &json!(42)).unwrap();
+    let key = example_key(StepClass::Slot);
+    let record = store.record(&key, output(None), "run-1").unwrap();
+    drop(store);
+
+    let key_file = fixture.root().join("key");
+    for old_mode in [0o644, 0o000] {
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(old_mode)).unwrap();
+        let store = fixture.open();
+        assert_eq!(mode(&key_file), 0o600);
+        assert_eq!(store.keyed_digest(STEP, &json!(42)).unwrap(), expected);
+        assert_eq!(store.lookup(&key, |_| true), Lookup::Hit(record.clone()));
+    }
+    assert_eq!(fs::read_dir(fixture.base()).unwrap().count(), 1);
+}
+
+#[test]
+fn a_transient_key_read_error_leaves_the_store_available_for_retry() {
+    let fixture = Fixture::new();
+    let expected = fixture.open().keyed_digest(STEP, &json!(42)).unwrap();
+    disk::FAIL_KEY_READ.set(true);
+    let result = Store::open(&fixture.base());
+    disk::FAIL_KEY_READ.set(false);
+    let Err(error) = result else {
+        panic!("the key read should fail");
+    };
+    assert_eq!(error.code, "step_store_unavailable");
+    assert_eq!(fs::read_dir(fixture.base()).unwrap().count(), 1);
+    assert_eq!(
+        fixture.open().keyed_digest(STEP, &json!(42)).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn a_hard_linked_key_is_refused_without_repair_or_set_aside() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let key = fixture.root().join("key");
+    let other_name = fixture.0.join("other-key");
+    fs::hard_link(&key, &other_name).unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_open_refused(&fixture.base());
+    assert_eq!(mode(&other_name), 0o644);
+    assert_eq!(fs::read_dir(fixture.base()).unwrap().count(), 1);
+    assert!(key.is_file());
+}
+
+#[test]
+fn an_existing_key_is_synced_again_before_publishing_a_missing_version() {
+    let fixture = Fixture::new();
+    let expected = fixture.open().keyed_digest(STEP, &json!(42)).unwrap();
+    let version = fixture.root().join("VERSION");
+    fs::remove_file(&version).unwrap();
+    disk::FAIL_KEY_DIR_SYNC.set(true);
+    let result = Store::open(&fixture.base());
+    disk::FAIL_KEY_DIR_SYNC.set(false);
+    let Err(error) = result else {
+        panic!("the key directory sync should fail");
+    };
+    assert_eq!(error.code, "step_store_unavailable");
+    assert!(!version.exists());
+    assert_eq!(
+        fixture.open().keyed_digest(STEP, &json!(42)).unwrap(),
+        expected
+    );
+    assert_eq!(fs::read(version).unwrap(), b"hack.store/1\n");
+}
+
+fn archive_path(fixture: &Fixture, time: u64) -> PathBuf {
+    fixture.base().join(format!("hack.store-1.old-{time}"))
+}
+
+fn archive_marker(base: &Path, millis: &str) -> Vec<u8> {
+    format!(
+        "hack.store-set-aside/1\nbase={}\nat={millis}\n",
+        base.display()
+    )
+    .into_bytes()
+}
+
+fn make_archive(fixture: &Fixture, time: u64) -> PathBuf {
+    let path = archive_path(fixture, time);
+    fs::create_dir(&path).unwrap();
+    fs::write(
+        path.join("SET_ASIDE"),
+        archive_marker(&fixture.base(), &time.to_string()),
+    )
+    .unwrap();
+    File::create(path.join("lock")).unwrap();
+    path
+}
+
+fn set_aside_at(fixture: &Fixture, time: u64) -> PathBuf {
+    let lock = File::open(fixture.root().join("lock")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while let Err(error) = flock(&lock, libc::LOCK_EX | libc::LOCK_NB) {
+        // A child spawned by another test can briefly inherit the old shared lock.
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(Instant::now() < deadline, "shared lock outlived its handle");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    disk::set_aside(&fixture.base(), &fixture.root(), time).unwrap();
+    archive_path(fixture, time)
+}
+
+#[test]
+fn open_keeps_only_the_newest_marked_archive_and_preserves_other_entries() {
+    let fixture = Fixture::new();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(fixture.base())
+        .unwrap();
+    let now = disk::unix_millis().unwrap();
+    let older = make_archive(&fixture, now - 2);
+    let newest = make_archive(&fixture, now - 1);
+    let file = archive_path(&fixture, now);
+    let alias = archive_path(&fixture, now + 1);
+    let outside = fixture.0.join("outside");
+    let invalid_name = fixture.base().join("hack.store-1.old-1-extra");
+    let other_format = fixture.base().join("hack.store-2.old-1");
+    for directory in [&outside, &invalid_name, &other_format] {
+        fs::create_dir(directory).unwrap();
+    }
+    let sentinel = outside.join("sentinel");
+    fs::write(&sentinel, b"fixture").unwrap();
+    fs::write(&file, b"fixture").unwrap();
+    symlink(&outside, &alias).unwrap();
+    symlink(&outside, older.join("outside")).unwrap();
+
+    drop(fixture.open());
+    assert!(!older.exists());
+    assert!(newest.is_dir());
+    assert!(invalid_name.is_dir());
+    assert!(other_format.is_dir());
+    assert!(file.is_file());
+    assert!(fs::symlink_metadata(alias).unwrap().is_symlink());
+    assert_eq!(fs::read(sentinel).unwrap(), b"fixture");
+}
+
+#[test]
+fn open_removes_even_the_newest_archive_after_seven_days() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let eight_days = Duration::from_secs(8 * 24 * 60 * 60);
+    let then = disk::unix_millis().unwrap() - u64::try_from(eight_days.as_millis()).unwrap();
+    let archive = set_aside_at(&fixture, then);
+    let uid = fs::metadata(&archive).unwrap().uid();
+    disk::cleanup_archives(&fixture.base(), uid ^ 1);
+    assert!(archive.is_dir());
+    drop(fixture.open());
+    assert!(!archive.exists());
+}
+
+#[test]
+fn opening_a_healthy_store_removes_old_archives_and_keeps_the_newest_young_one() {
+    let fixture = Fixture::new();
+    let live = fixture.open();
+    let expected = live.keyed_digest(STEP, &json!(42)).unwrap();
+    let now = disk::unix_millis().unwrap();
+    let old = make_archive(&fixture, now - 8 * 24 * 60 * 60 * 1_000);
+    let young = make_archive(&fixture, now - 1_000);
+
+    let reopened = fixture.open();
+    assert_eq!(reopened.keyed_digest(STEP, &json!(42)).unwrap(), expected);
+    assert!(!old.exists());
+    assert!(young.is_dir());
+}
+
+#[test]
+fn a_live_store_at_an_archive_pattern_path_survives_a_healthy_reopen() {
+    let fixture = Fixture::new();
+    let _live = fixture.open();
+    let then = disk::unix_millis().unwrap() - 8 * 24 * 60 * 60 * 1_000;
+    let other_base = archive_path(&fixture, then);
+    let other = Store::open(&other_base).unwrap();
+    let key = example_key(StepClass::Slot);
+    let record = other.record(&key, output(None), "run-1").unwrap();
+
+    drop(fixture.open());
+    assert!(other_base.is_dir());
+    assert_eq!(
+        Store::open(&other_base).unwrap().lookup(&key, |_| true),
+        Lookup::Hit(record)
+    );
+}
+
+#[test]
+fn archive_cleanup_leaves_unverified_or_busy_archives_in_place() {
+    let fixture = Fixture::new();
+    let _live = fixture.open();
+    let then = disk::unix_millis().unwrap() - 8 * 24 * 60 * 60 * 1_000;
+    let wrong_base = make_archive(&fixture, then);
+    fs::write(
+        wrong_base.join("SET_ASIDE"),
+        archive_marker(&fixture.0, &then.to_string()),
+    )
+    .unwrap();
+    let wrong_time = make_archive(&fixture, then + 1);
+    fs::write(
+        wrong_time.join("SET_ASIDE"),
+        archive_marker(&fixture.base(), &then.to_string()),
+    )
+    .unwrap();
+    let missing_lock = make_archive(&fixture, then + 2);
+    fs::remove_file(missing_lock.join("lock")).unwrap();
+    let busy = make_archive(&fixture, then + 3);
+    let lock = File::open(busy.join("lock")).unwrap();
+    flock(&lock, libc::LOCK_SH | libc::LOCK_NB).unwrap();
+    let linked_marker = make_archive(&fixture, then + 4);
+    let marker = fixture.0.join("marker");
+    fs::rename(linked_marker.join("SET_ASIDE"), &marker).unwrap();
+    symlink(marker, linked_marker.join("SET_ASIDE")).unwrap();
+    let linked_lock = make_archive(&fixture, then + 5);
+    fs::remove_file(linked_lock.join("lock")).unwrap();
+    symlink(fixture.root().join("lock"), linked_lock.join("lock")).unwrap();
+
+    drop(fixture.open());
+    for path in [
+        &wrong_base,
+        &wrong_time,
+        &missing_lock,
+        &busy,
+        &linked_marker,
+        &linked_lock,
+    ] {
+        assert!(path.is_dir(), "removed {path:?}");
+    }
+    drop(lock);
+    drop(fixture.open());
+    assert!(!busy.exists());
+}
+
+#[test]
+fn reopening_clears_a_marker_left_before_the_archive_rename() {
+    for needs_initialization in [false, true] {
+        let fixture = Fixture::new();
+        let live = fixture.open();
+        let expected = live.keyed_digest(STEP, &json!(42)).unwrap();
+        let before = fs::metadata(fixture.root()).unwrap();
+        drop(live);
+        let marker = fixture.root().join("SET_ASIDE");
+        let millis = disk::unix_millis().unwrap().to_string();
+        disk::publish(
+            &fixture.root(),
+            &marker,
+            &archive_marker(&fixture.base(), &millis),
+        )
+        .unwrap();
+        if needs_initialization {
+            fs::remove_file(fixture.root().join("VERSION")).unwrap();
+        }
+
+        let reopened = fixture.open();
+        assert!(!marker.exists());
+        assert_eq!(fs::metadata(fixture.root()).unwrap().ino(), before.ino());
+        assert_eq!(reopened.keyed_digest(STEP, &json!(42)).unwrap(), expected);
+        assert_eq!(fs::read_dir(fixture.base()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn cleanup_runs_outside_the_live_stores_exclusive_lock() {
+    let fixture = Fixture::new();
+    disk::CHECK_CLEANUP_LOCK.set(true);
+    let result = Store::open(&fixture.base());
+    disk::CHECK_CLEANUP_LOCK.set(false);
+    drop(result.unwrap());
+}
+
+fn write_legacy_markers(path: &Path) {
+    fs::write(path.join("VERSION"), b"hack.store/1\n").unwrap();
+    File::create(path.join("lock")).unwrap();
+}
+
+#[test]
+fn open_removes_the_legacy_flat_layout_and_its_sibling_archives() {
+    let fixture = Fixture::new();
+    let live = fixture.open();
+    let key = example_key(StepClass::Slot);
+    let record = live.record(&key, output(None), "run-1").unwrap();
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    fs::write(base.join("key"), b"legacy").unwrap();
+    for name in ["records", "cas", "files", "tags", "tmp"] {
+        fs::create_dir(base.join(name)).unwrap();
+        fs::write(base.join(name).join("legacy"), b"legacy").unwrap();
+    }
+    let archive = fixture.0.join("store.old-123");
+    let colocated = base.join("store.old-123");
+    let unrelated = fixture.0.join("store.old-123-extra");
+    let empty_suffix = fixture.0.join("store.old-");
+    for directory in [&archive, &colocated, &unrelated, &empty_suffix] {
+        fs::create_dir(directory).unwrap();
+    }
+    write_legacy_markers(&archive);
+
+    let reopened = fixture.open();
+    let mut entries: Vec<_> = fs::read_dir(&base)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, [fixture.root(), colocated]);
+    assert!(!archive.exists());
+    assert!(unrelated.is_dir());
+    assert!(empty_suffix.is_dir());
+    assert_eq!(reopened.lookup(&key, |_| true), Lookup::Hit(record));
+
+    // A P1 rotation leaves an archive even when no flat store remains: it is
+    // removed when its VERSION holds the P1 format, and a directory that only has
+    // the name (no P1 VERSION inside) is left alone.
+    fs::create_dir(&archive).unwrap();
+    write_legacy_markers(&archive);
+    drop(fixture.open());
+    assert!(!archive.exists());
+    fs::create_dir(&archive).unwrap();
+    drop(fixture.open());
+    assert!(archive.is_dir());
+}
+
+#[test]
+fn legacy_cleanup_leaves_the_flat_layout_untouched_while_its_lock_is_held() {
+    let fixture = Fixture::new();
+    let _live = fixture.open();
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    fs::write(base.join("key"), b"legacy").unwrap();
+    let records = base.join("records");
+    fs::create_dir(&records).unwrap();
+    fs::write(records.join("entry"), b"legacy").unwrap();
+    let lock = File::open(base.join("lock")).unwrap();
+    flock(&lock, libc::LOCK_SH | libc::LOCK_NB).unwrap();
+
+    drop(fixture.open());
+    assert_eq!(fs::read(base.join("VERSION")).unwrap(), disk::VERSION);
+    assert_eq!(
+        fs::metadata(base.join("lock")).unwrap().ino(),
+        lock.metadata().unwrap().ino()
+    );
+    assert_eq!(fs::read(base.join("key")).unwrap(), b"legacy");
+    assert_eq!(fs::read(records.join("entry")).unwrap(), b"legacy");
+    drop(lock);
+    drop(fixture.open());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+}
+
+#[test]
+fn legacy_cleanup_retries_after_a_flat_entry_cannot_be_removed() {
+    let fixture = Fixture::new();
+    let _live = fixture.open();
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    // remove_file cannot unlink a directory, regardless of the test user's privileges.
+    let key = base.join("key");
+    fs::create_dir(&key).unwrap();
+    fs::create_dir(base.join("records")).unwrap();
+
+    drop(fixture.open());
+    assert!(key.is_dir());
+    assert!(base.join("lock").is_file());
+    assert_eq!(fs::read(base.join("VERSION")).unwrap(), disk::VERSION);
+    assert!(!base.join("records").exists());
+
+    fs::remove_dir(&key).unwrap();
+    fs::write(&key, b"legacy").unwrap();
+    drop(fixture.open());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+}
+
+#[test]
+fn legacy_cleanup_skips_sibling_archives_with_a_busy_or_missing_lock() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let busy = fixture.0.join("store.old-1");
+    let missing = fixture.0.join("store.old-2");
+    for path in [&busy, &missing] {
+        fs::create_dir(path).unwrap();
+        write_legacy_markers(path);
+    }
+    fs::remove_file(missing.join("lock")).unwrap();
+    let lock = File::open(busy.join("lock")).unwrap();
+    flock(&lock, libc::LOCK_EX | libc::LOCK_NB).unwrap();
+
+    drop(fixture.open());
+    assert!(busy.is_dir());
+    assert!(missing.is_dir());
+    drop(lock);
+    drop(fixture.open());
+    assert!(!busy.exists());
+    assert!(missing.is_dir());
+}
+
+#[test]
+fn a_different_or_symlinked_legacy_version_leaves_flat_entries_in_place() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let base = fixture.base();
+    let version = base.join("VERSION");
+    let records = base.join("records");
+    write_legacy_markers(&base);
+    fs::create_dir(&records).unwrap();
+    fs::write(base.join("key"), b"keep").unwrap();
+    fs::write(&version, b"hack.store/1\nextra").unwrap();
+    drop(fixture.open());
+    assert_eq!(fs::read(&version).unwrap(), b"hack.store/1\nextra");
+
+    fs::remove_file(&version).unwrap();
+    symlink(fixture.root().join("VERSION"), &version).unwrap();
+    drop(fixture.open());
+    assert!(fs::symlink_metadata(version).unwrap().is_symlink());
+    assert!(records.is_dir());
+    assert_eq!(fs::read(base.join("key")).unwrap(), b"keep");
+}
+
+#[test]
+fn legacy_cleanup_does_not_follow_symlinks() {
+    let fixture = Fixture::new();
+    let live = fixture.open();
+    let value = json!(42);
+    let expected = live.keyed_digest(STEP, &value).unwrap();
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    symlink(fixture.root().join("key"), base.join("key")).unwrap();
+    let directory_link = base.join("records");
+    symlink(fixture.root().join("records"), &directory_link).unwrap();
+    let archive_link = fixture.0.join("store.old-123");
+    symlink(fixture.root(), &archive_link).unwrap();
+
+    let reopened = fixture.open();
+    // The symlinked `records` cannot be removed, so the flat key, VERSION and lock
+    // all stay together; nothing is followed, and the live key is untouched.
+    assert!(fs::symlink_metadata(base.join("key")).unwrap().is_symlink());
+    assert!(fixture.root().join("key").is_file());
+    assert!(fs::symlink_metadata(directory_link).unwrap().is_symlink());
+    assert!(fs::symlink_metadata(archive_link).unwrap().is_symlink());
+    assert_eq!(fs::read(base.join("VERSION")).unwrap(), disk::VERSION);
+    assert!(base.join("lock").is_file());
+    assert_eq!(reopened.keyed_digest(STEP, &value).unwrap(), expected);
+}
+
+#[test]
+fn legacy_cleanup_never_probes_version_through_a_sibling_symlink() {
+    let fixture = Fixture::new();
+    let target = fixture.0.join("legacy-target");
+    fs::create_dir(&target).unwrap();
+    write_legacy_markers(&target);
+    let alias = fixture.0.join("store.old-123");
+    symlink(&target, &alias).unwrap();
+
+    let probes = disk::LEGACY_VERSION_PROBES.get();
+    drop(fixture.open());
+    assert_eq!(disk::LEGACY_VERSION_PROBES.get(), probes);
+    assert!(fs::symlink_metadata(&alias).unwrap().is_symlink());
+    assert_eq!(fs::read(target.join("VERSION")).unwrap(), disk::VERSION);
+
+    fs::remove_file(&alias).unwrap();
+    fs::rename(&target, &alias).unwrap();
+    drop(fixture.open());
+    assert_eq!(disk::LEGACY_VERSION_PROBES.get(), probes + 1);
+    assert!(!alias.exists());
+}
+
+#[test]
+fn legacy_cleanup_leaves_a_live_base_named_like_a_legacy_archive() {
+    let fixture = Fixture::new();
+    let base = fixture.0.join("store.old-123");
+    let live = Store::open(&base).unwrap();
+    assert_eq!(fs::read(live.root.join("VERSION")).unwrap(), disk::VERSION);
 }
 
 #[test]
@@ -397,8 +959,12 @@ fn inputs() -> BTreeMap<String, InputDigest> {
     BTreeMap::from([("first".into(), input(1)), ("second".into(), input(2))])
 }
 
+fn baseline_build() -> Build {
+    Build::named("build-1").unwrap()
+}
+
 fn example_key(class: StepClass) -> StepKey {
-    StepKey::new("example-step", 1, class, &inputs(), None, "build-1").unwrap()
+    StepKey::new("example-step", 1, class, &inputs(), None, &baseline_build()).unwrap()
 }
 
 fn baseline_key() -> Digest {
@@ -414,7 +980,7 @@ fn equal_inputs_produce_equal_keys() {
         StepClass::Slot,
         &reordered,
         None,
-        "build-1",
+        &baseline_build(),
     )
     .unwrap();
     assert_eq!(key.digest(), baseline_key());
@@ -422,7 +988,15 @@ fn equal_inputs_produce_equal_keys() {
 
 #[test]
 fn step_name_changes_key() {
-    let key = StepKey::new("other", 1, StepClass::Slot, &inputs(), None, "build-1").unwrap();
+    let key = StepKey::new(
+        "other",
+        1,
+        StepClass::Slot,
+        &inputs(),
+        None,
+        &baseline_build(),
+    )
+    .unwrap();
     assert_ne!(key.digest(), baseline_key());
 }
 
@@ -434,7 +1008,7 @@ fn step_version_changes_key() {
         StepClass::Slot,
         &inputs(),
         None,
-        "build-1",
+        &baseline_build(),
     )
     .unwrap();
     assert_ne!(key.digest(), baseline_key());
@@ -459,7 +1033,7 @@ fn any_input_name_changes_key() {
             StepClass::Slot,
             &renamed,
             None,
-            "build-1",
+            &baseline_build(),
         )
         .unwrap();
         assert_ne!(key.digest(), baseline_key());
@@ -477,7 +1051,7 @@ fn any_input_digest_changes_key() {
             StepClass::Slot,
             &changed,
             None,
-            "build-1",
+            &baseline_build(),
         )
         .unwrap();
         assert_ne!(key.digest(), baseline_key());
@@ -492,7 +1066,7 @@ fn epoch_changes_key() {
         StepClass::Slot,
         &inputs(),
         Some("boot-1"),
-        "build-1",
+        &baseline_build(),
     )
     .unwrap();
     let other = StepKey::new(
@@ -501,7 +1075,7 @@ fn epoch_changes_key() {
         StepClass::Slot,
         &inputs(),
         Some("boot-2"),
-        "build-1",
+        &baseline_build(),
     )
     .unwrap();
     assert_ne!(key.digest(), baseline_key());
@@ -516,7 +1090,7 @@ fn build_changes_key() {
         StepClass::Slot,
         &inputs(),
         None,
-        "build-2",
+        &Build::named("build-2").unwrap(),
     )
     .unwrap();
     assert_ne!(key.digest(), baseline_key());
@@ -529,15 +1103,16 @@ fn names_allow_only_lowercase_ascii_identifiers() {
     for name in [
         "", ".", "-a", "..", "../a", "a/b", "Upper", "a b", "a_b", "é", &too_long,
     ] {
-        let step = StepKey::new(name, 1, class, &inputs(), None, "build-1").unwrap_err();
+        let step = StepKey::new(name, 1, class, &inputs(), None, &baseline_build()).unwrap_err();
         let input_name = BTreeMap::from([(name.into(), input(1))]);
-        let input = StepKey::new("valid", 1, class, &input_name, None, "build-1").unwrap_err();
+        let input =
+            StepKey::new("valid", 1, class, &input_name, None, &baseline_build()).unwrap_err();
         assert_eq!(step.code, "step_store_invalid");
         assert_eq!(input.code, "step_store_invalid");
     }
     let bound = format!("0{}", ".-a".repeat(21));
     let named = BTreeMap::from([(bound.clone(), input(1))]);
-    assert!(StepKey::new(&bound, 1, class, &named, None, "build-1").is_ok());
+    assert!(StepKey::new(&bound, 1, class, &named, None, &baseline_build()).is_ok());
 }
 
 fn output(reference: Option<OutputRef>) -> Output {
@@ -591,7 +1166,7 @@ fn record_round_trips_as_canonical_json() {
 
     let reopened = fixture.open();
     assert_eq!(
-        reopened.lookup(&key, |found| found == &record).unwrap(),
+        reopened.lookup(&key, |found| found == &record),
         Lookup::Hit(record)
     );
 }
@@ -628,11 +1203,19 @@ fn record_at_a_wrong_key_or_step_path_is_removed_as_torn() {
     store.record(&key, output(None), "run-1").unwrap();
     let bytes = fs::read(record_path(&fixture.root(), &key)).unwrap();
     for (step, version) in [("example-step", 2), ("other", 1)] {
-        let other =
-            StepKey::new(step, version, StepClass::Slot, &inputs(), None, "build-1").unwrap();
+        let other = StepKey::new(
+            step,
+            version,
+            StepClass::Slot,
+            &inputs(),
+            None,
+            &baseline_build(),
+        )
+        .unwrap();
         let path = record_path(&fixture.root(), &other);
         disk::create_directory(path.parent().unwrap()).unwrap();
-        fs::write(path, &bytes).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_removed(&fixture, &store, &other, MissReason::TornRecord);
     }
 }
@@ -655,11 +1238,122 @@ fn edit_record(fixture: &Fixture, key: &StepKey, edit: impl FnOnce(&mut Value)) 
 }
 
 fn assert_removed(fixture: &Fixture, store: &Store, key: &StepKey, reason: MissReason) {
-    let miss = store
-        .lookup(key, |_| panic!("unexpected observation"))
-        .unwrap();
+    let miss = store.lookup(key, |_| panic!("unexpected observation"));
     assert_eq!(miss, Lookup::Miss(reason));
-    assert!(!record_path(&fixture.root(), key).exists());
+    assert!(matches!(
+        fs::symlink_metadata(record_path(&fixture.root(), key)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    ));
+}
+
+fn record_fixture() -> (Fixture, Store, StepKey, PathBuf) {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let key = example_key(StepClass::Slot);
+    store.record(&key, output(None), "run-1").unwrap();
+    let path = record_path(&fixture.root(), &key);
+    (fixture, store, key, path)
+}
+
+#[test]
+fn a_directory_at_the_record_path_is_torn_and_left_in_place() {
+    let (_fixture, store, key, path) = record_fixture();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert_eq!(
+        store.lookup(&key, |_| panic!("unexpected observation")),
+        Lookup::Miss(MissReason::TornRecord)
+    );
+    assert!(path.is_dir());
+}
+
+#[test]
+fn a_fifo_at_the_record_path_is_torn_and_unlinked() {
+    let (fixture, store, key, path) = record_fixture();
+    fs::remove_file(&path).unwrap();
+    let name = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: name is a NUL-terminated path in this test's own store.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert_removed(&fixture, &store, &key, MissReason::TornRecord);
+}
+
+#[test]
+fn a_symlink_at_the_record_path_is_torn_and_only_the_link_is_unlinked() {
+    let (fixture, store, key, path) = record_fixture();
+    let target = fixture.0.join("target");
+    fs::rename(&path, &target).unwrap();
+    symlink(&target, &path).unwrap();
+    assert_removed(&fixture, &store, &key, MissReason::TornRecord);
+    assert!(Record::decode(&fs::read(target).unwrap(), &key).is_ok());
+}
+
+#[test]
+fn a_hard_link_at_the_record_path_is_torn_and_only_its_name_is_unlinked() {
+    let (fixture, store, key, path) = record_fixture();
+    let target = fixture.0.join("target");
+    fs::hard_link(&path, &target).unwrap();
+    assert_removed(&fixture, &store, &key, MissReason::TornRecord);
+    assert!(Record::decode(&fs::read(target).unwrap(), &key).is_ok());
+}
+
+#[test]
+fn a_record_with_the_wrong_mode_is_torn_and_unlinked() {
+    for wrong_mode in [0o644, 0o000] {
+        let (fixture, store, key, path) = record_fixture();
+        fs::set_permissions(&path, fs::Permissions::from_mode(wrong_mode)).unwrap();
+        assert_removed(&fixture, &store, &key, MissReason::TornRecord);
+    }
+}
+
+#[test]
+fn a_record_in_a_wrong_mode_shard_is_torn_and_left_in_place() {
+    let (_fixture, store, key, path) = record_fixture();
+    let shard = path.parent().unwrap();
+    fs::set_permissions(shard, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        store.lookup(&key, |_| panic!("unexpected observation")),
+        Lookup::Miss(MissReason::TornRecord)
+    );
+    assert_eq!(mode(shard), 0o755);
+    assert!(path.is_file());
+}
+
+#[test]
+fn a_symlinked_shard_is_unlinked_without_reading_its_target() {
+    let (fixture, store, key, path) = record_fixture();
+    let shard = path.parent().unwrap();
+    let target = fixture.0.join("target");
+    fs::rename(shard, &target).unwrap();
+    symlink(&target, shard).unwrap();
+    assert_eq!(
+        store.lookup(&key, |_| panic!("unexpected observation")),
+        Lookup::Miss(MissReason::TornRecord)
+    );
+    assert_eq!(
+        fs::symlink_metadata(shard).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    assert!(target.join(path.file_name().unwrap()).is_file());
+}
+
+#[test]
+fn cache_read_errors_are_misses_and_the_files_can_be_read_on_retry() {
+    let (_fixture, store, key, _) = record_fixture();
+    let digest = store
+        .put_cas(&CasFixture {
+            count: 2,
+            identity: input(1),
+        })
+        .unwrap();
+    disk::FAIL_CACHE_READ.set(true);
+    let record = store.lookup(&key, |_| panic!("unexpected observation"));
+    let object = store.get_cas(&digest);
+    disk::FAIL_CACHE_READ.set(false);
+
+    assert_eq!(record, Lookup::Miss(MissReason::TornRecord));
+    assert_eq!(object, None);
+    assert!(matches!(store.lookup(&key, |_| true), Lookup::Hit(_)));
+    assert!(store.get_cas(&digest).is_some());
 }
 
 #[derive(Serialize)]
@@ -692,16 +1386,12 @@ fn cas_hit_needs_object_and_never_calls_observe() {
         )
         .unwrap();
     assert_eq!(
-        store
-            .lookup(&key, |_| panic!("unexpected observation"))
-            .unwrap(),
+        store.lookup(&key, |_| panic!("unexpected observation")),
         Lookup::Hit(record)
     );
     fs::remove_file(cas_path(&fixture.root(), digest)).unwrap();
     assert_eq!(
-        store
-            .lookup(&key, |_| panic!("unexpected observation"))
-            .unwrap(),
+        store.lookup(&key, |_| panic!("unexpected observation")),
         Lookup::Miss(MissReason::NoRecord)
     );
 }
@@ -714,10 +1404,10 @@ fn observation_is_required_for_slot_boot_and_file_identity() {
         let key = example_key(class);
         let record = store.record(&key, output(None), "run-1").unwrap();
         assert_eq!(
-            store.lookup(&key, |_| false).unwrap(),
+            store.lookup(&key, |_| false),
             Lookup::Miss(MissReason::ObservationFailed)
         );
-        assert_eq!(store.lookup(&key, |_| true).unwrap(), Lookup::Hit(record));
+        assert_eq!(store.lookup(&key, |_| true), Lookup::Hit(record));
     }
 }
 
@@ -732,11 +1422,51 @@ fn altered_cas_bytes_are_removed_and_reported_absent() {
     let digest = store.put_cas(&value).unwrap();
     let expected =
         canonical_digest::canonical_json(&serde_json::to_value(&value).unwrap()).unwrap();
-    assert_eq!(store.get_cas(&digest).unwrap(), Some(expected));
+    assert_eq!(store.get_cas(&digest), Some(expected));
     let path = cas_path(&fixture.root(), digest);
     fs::write(&path, b"{}").unwrap();
-    assert!(store.get_cas(&digest).unwrap().is_none());
+    assert!(store.get_cas(&digest).is_none());
     assert!(!path.exists());
+}
+
+#[test]
+fn a_directory_at_the_cas_path_is_absent_and_left_in_place() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let digest = store
+        .put_cas(&CasFixture {
+            count: 2,
+            identity: input(1),
+        })
+        .unwrap();
+    let path = cas_path(&fixture.root(), digest);
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert_eq!(store.get_cas(&digest), None);
+    assert!(path.is_dir());
+}
+
+#[test]
+fn a_symlink_at_the_cas_path_is_absent_and_only_the_link_is_unlinked() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let digest = store
+        .put_cas(&CasFixture {
+            count: 2,
+            identity: input(1),
+        })
+        .unwrap();
+    let expected = store.get_cas(&digest).unwrap();
+    let path = cas_path(&fixture.root(), digest);
+    let target = fixture.0.join("target");
+    fs::rename(&path, &target).unwrap();
+    symlink(&target, &path).unwrap();
+    assert_eq!(store.get_cas(&digest), None);
+    assert_eq!(
+        fs::symlink_metadata(path).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    assert_eq!(fs::read(target).unwrap(), expected);
 }
 
 #[test]
@@ -767,14 +1497,12 @@ fn lookup_checks_large_cas_objects() {
         )
         .unwrap();
     let path = cas_path(&fixture.root(), digest);
-    let mut bytes = store.get_cas(&digest).unwrap().unwrap();
+    let mut bytes = store.get_cas(&digest).unwrap();
     assert!(bytes.len() > 1024 * 1024);
     bytes[1] = b' ';
     fs::write(&path, bytes).unwrap();
     assert_eq!(
-        store
-            .lookup(&key, |_| panic!("unexpected observation"))
-            .unwrap(),
+        store.lookup(&key, |_| panic!("unexpected observation")),
         Lookup::Miss(MissReason::NoRecord)
     );
     assert!(!path.exists());
@@ -792,20 +1520,14 @@ fn only_a_hit_touches_an_hour_old_record() {
     file.set_modified(aged).unwrap();
     let mtime = || file.metadata().unwrap().modified().unwrap();
     assert_eq!(
-        store.lookup(&key, |_| false).unwrap(),
+        store.lookup(&key, |_| false),
         Lookup::Miss(MissReason::ObservationFailed)
     );
     assert_eq!(mtime(), aged);
-    assert!(matches!(
-        store.lookup(&key, |_| true).unwrap(),
-        Lookup::Hit(_)
-    ));
+    assert!(matches!(store.lookup(&key, |_| true), Lookup::Hit(_)));
     let touched = mtime();
     assert!(touched > aged);
-    assert!(matches!(
-        store.lookup(&key, |_| true).unwrap(),
-        Lookup::Hit(_)
-    ));
+    assert!(matches!(store.lookup(&key, |_| true), Lookup::Hit(_)));
     assert_eq!(mtime(), touched);
 }
 
@@ -856,7 +1578,15 @@ fn keys_records_and_keyed_digests_never_carry_the_raw_input() {
     let sentinel = "synthetic-sentinel-for-step-store-non-persistence";
     let identity = InputDigest(store.keyed_digest(STEP, &json!(sentinel)).unwrap());
     let inputs = BTreeMap::from([("identity".into(), identity)]);
-    let key = StepKey::new("example", 1, StepClass::Cas, &inputs, None, "build-1").unwrap();
+    let key = StepKey::new(
+        "example",
+        1,
+        StepClass::Cas,
+        &inputs,
+        None,
+        &baseline_build(),
+    )
+    .unwrap();
     let digest = store.put_cas(&CasFixture { count: 2, identity }).unwrap();
     let output = Output {
         digest,
@@ -877,7 +1607,7 @@ fn an_oversized_record_is_torn_and_an_oversized_cas_object_is_absent() {
     fs::write(&path, vec![b' '; limit + 1]).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(
-        store.lookup(&key, |_| true).unwrap(),
+        store.lookup(&key, |_| true),
         Lookup::Miss(MissReason::TornRecord)
     );
     assert!(!path.exists());
@@ -889,7 +1619,7 @@ fn an_oversized_record_is_torn_and_an_oversized_cas_object_is_absent() {
     let file = File::create(&object).unwrap();
     file.set_len(cas::MAX_CAS_BYTES + 1).unwrap();
     fs::set_permissions(&object, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(store.get_cas(&digest).unwrap().is_none());
+    assert!(store.get_cas(&digest).is_none());
     assert!(!object.exists());
 }
 
@@ -912,7 +1642,7 @@ fn get_cas_verifies_objects_of_any_size() {
     assert!(bytes.len() > 1024 * 1024);
     bytes[1] = b' ';
     fs::write(&path, bytes).unwrap();
-    assert!(store.get_cas(&digest).unwrap().is_none());
+    assert!(store.get_cas(&digest).is_none());
     assert!(!path.exists());
 }
 
@@ -929,7 +1659,7 @@ fn vector_key(vector: &serde_json::Value) -> StepKey {
         class,
         &inputs,
         vector["epoch"].as_str(),
-        vector["build"].as_str().unwrap(),
+        &Build::named(vector["build"].as_str().unwrap()).unwrap(),
     )
     .unwrap()
 }
@@ -1052,7 +1782,7 @@ fn non_canonical_records_and_missing_fields_are_torn() {
         fs::write(&path, &torn).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            store.lookup(&key, |_| true).unwrap(),
+            store.lookup(&key, |_| true),
             Lookup::Miss(MissReason::TornRecord)
         );
         assert!(!path.exists());
@@ -1061,27 +1791,24 @@ fn non_canonical_records_and_missing_fields_are_torn() {
 
 #[test]
 fn build_epoch_and_run_are_bounded_identifiers() {
-    for (epoch, build) in [
-        (Some(""), "build-1"),
-        (Some("has space"), "build-1"),
-        (None, ""),
-        (None, "/path/to/build"),
-        (None, "value=secret"),
-    ] {
-        assert!(StepKey::new("example-step", 1, StepClass::Boot, &inputs(), epoch, build).is_err());
-    }
     let long = "a".repeat(129);
-    assert!(
-        StepKey::new(
-            "example-step",
-            1,
-            StepClass::Boot,
-            &inputs(),
-            Some(&long),
-            "b"
-        )
-        .is_err()
-    );
+    for build in ["", "/path/to/build", "value=secret", &long] {
+        assert_eq!(Build::named(build).unwrap_err().code, "step_store_invalid");
+    }
+    let build = Build::named("5.0.0+g1").unwrap();
+    for epoch in ["", "has space", &long] {
+        assert!(
+            StepKey::new(
+                "example-step",
+                1,
+                StepClass::Boot,
+                &inputs(),
+                Some(epoch),
+                &build
+            )
+            .is_err()
+        );
+    }
     assert!(
         StepKey::new(
             "example-step",
@@ -1089,7 +1816,7 @@ fn build_epoch_and_run_are_bounded_identifiers() {
             StepClass::Boot,
             &inputs(),
             Some("boot:1_a+b.c-d"),
-            "5.0.0+g1"
+            &build
         )
         .is_ok()
     );
@@ -1138,7 +1865,7 @@ fn a_rechecked_record_with_an_invalid_run_or_unsafe_time_is_torn() {
         .unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            store.lookup(&key, |_| true).unwrap(),
+            store.lookup(&key, |_| true),
             Lookup::Miss(MissReason::TornRecord)
         );
     }
@@ -1166,15 +1893,207 @@ fn shared_refused_record_vectors_are_refused_with_their_reason() {
     }
 }
 
+fn many_inputs(count: usize) -> BTreeMap<String, InputDigest> {
+    (0..count)
+        .map(|index| (format!("input-{index:058}"), input(1)))
+        .collect()
+}
+
+#[test]
+fn a_key_with_maximum_inputs_and_identifiers_fits_in_a_record() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let key = StepKey::new(
+        &"s".repeat(64),
+        u32::MAX,
+        StepClass::FileIdentity,
+        &many_inputs(256),
+        Some(&"e".repeat(128)),
+        &Build::named(&"b".repeat(128)).unwrap(),
+    )
+    .unwrap();
+    let mut written = store
+        .record(&key, output(Some(OutputRef::Cas)), &"r".repeat(128))
+        .unwrap();
+    written.observed_at = 9_007_199_254_740_991;
+    let encoded = written.encode().unwrap();
+    assert!(encoded.len() <= 64 * 1024);
+    assert_eq!(Record::decode(&encoded, &key), Ok(written));
+}
+
+#[test]
+fn a_key_with_more_than_256_inputs_is_refused() {
+    let error = StepKey::new(
+        "example-step",
+        1,
+        StepClass::Slot,
+        &many_inputs(257),
+        None,
+        &baseline_build(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "step_store_invalid");
+}
+
 #[test]
 fn a_record_too_large_to_read_back_is_refused_before_it_is_written() {
     let fixture = Fixture::new();
     let store = fixture.open();
-    // 64-character names and digests: about 140 bytes per input.
-    let inputs: BTreeMap<String, InputDigest> = (0..600_u32)
-        .map(|index| (format!("input-{index:058}"), input(1)))
-        .collect();
-    let key = StepKey::new("example-step", 1, StepClass::Slot, &inputs, None, "build-1").unwrap();
+    let mut key = example_key(StepClass::Slot);
+    key.inputs = many_inputs(600);
     assert!(store.record(&key, output(None), "run-1").is_err());
     assert!(!record_path(&fixture.root(), &key).exists());
+}
+
+#[test]
+fn the_current_build_uses_the_running_images_embedded_identity() {
+    let key = StepKey::new(
+        "example-step",
+        1,
+        StepClass::Slot,
+        &inputs(),
+        None,
+        &Build::current().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        key.build,
+        format!(
+            "{}+{}:{}",
+            crate::CANDIDATE_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            env!("HACK_RUNTIME_BUILD_ID"),
+        )
+    );
+}
+
+/// The flat migration renames VERSION to its migrating marker, removes the key and
+/// the lock, and removes the marker last.
+#[test]
+fn flat_migration_removes_its_marker_last() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    fs::write(base.join("key"), b"legacy").unwrap();
+    disk::FLAT_FINAL_REMOVALS.with_borrow_mut(Vec::clear);
+    drop(fixture.open());
+    assert_eq!(
+        disk::FLAT_FINAL_REMOVALS.with_borrow(Clone::clone),
+        ["VERSION.migrating", "key", "lock", "marker"]
+    );
+    for name in ["VERSION", "VERSION.migrating", "key", "lock"] {
+        assert!(!base.join(name).exists(), "{name} left behind");
+    }
+}
+
+/// A migration interrupted after any step is finished by the next open, and at
+/// no point does a P1 opener see a published VERSION without its key and lock.
+#[test]
+fn an_interrupted_flat_migration_is_finished_by_a_later_open() {
+    for stop in ["VERSION.migrating", "key", "lock"] {
+        let fixture = Fixture::new();
+        drop(fixture.open());
+        let base = fixture.base();
+        write_legacy_markers(&base);
+        fs::write(base.join("key"), b"legacy").unwrap();
+        fs::create_dir(base.join("records")).unwrap();
+        disk::STOP_FLAT_AFTER.set(Some(stop));
+        drop(fixture.open());
+        disk::STOP_FLAT_AFTER.set(None);
+        if base.join("VERSION").exists() {
+            assert!(
+                base.join("key").exists() && base.join("lock").exists(),
+                "after {stop}"
+            );
+        }
+        assert!(
+            base.join("VERSION.migrating").exists(),
+            "marker missing after {stop}"
+        );
+        drop(fixture.open());
+        for name in ["VERSION", "VERSION.migrating", "key", "lock", "records"] {
+            assert!(!base.join(name).exists(), "{name} left after {stop}");
+        }
+    }
+}
+
+/// A genuine archive opened as another store's base, in another process that holds
+/// that store's lock (`hack.store-1/lock` inside the archive), is kept by cleanup.
+#[test]
+fn an_archive_opened_as_another_stores_base_is_kept() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    // Make a genuine archive of the first store, then open a second store inside it.
+    let archived_at = disk::unix_millis().unwrap();
+    disk::set_aside(&fixture.base(), &fixture.root(), archived_at).unwrap();
+    let archive = fixture
+        .base()
+        .join(format!("{}.old-{archived_at}", disk::FORMAT_DIRECTORY));
+    assert!(archive.join("SET_ASIDE").is_file());
+    // Age it past seven days so cleanup would otherwise remove it.
+    let aged = archive.with_file_name(format!("{}.old-1", disk::FORMAT_DIRECTORY));
+    fs::rename(&archive, &aged).unwrap();
+    let marker = fs::read_to_string(aged.join("SET_ASIDE")).unwrap();
+    fs::write(
+        aged.join("SET_ASIDE"),
+        marker.replace(&format!("at={archived_at}"), "at=1"),
+    )
+    .unwrap();
+    fs::set_permissions(aged.join("SET_ASIDE"), fs::Permissions::from_mode(0o600)).unwrap();
+    // Another process opens a store with the archive as its base and keeps it
+    // open: it holds `hack.store-1/lock` inside the archive.
+    let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "store::tests::child_store_opener",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("HACK_STORE_TEST_ROOT", &aged)
+        .env("HACK_STORE_TEST_HOLD_MS", "4000")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Wait until the child has opened its store (it prints its digest then).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !aged.join(disk::FORMAT_DIRECTORY).join("VERSION").is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "the holder did not open its store"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    drop(fixture.open());
+    let kept = aged.join(disk::FORMAT_DIRECTORY).is_dir();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(kept, "cleanup removed an archive holding a live store");
+}
+
+/// A flat directory that cannot be removed (here a symlinked `records`) keeps
+/// VERSION, the key and the lock together: a P1 process opening the base later
+/// must never see VERSION without its key, which would make it set the whole
+/// base aside, live `hack.store-1` included.
+#[test]
+fn a_flat_entry_that_cannot_be_removed_keeps_version_key_and_lock_together() {
+    let fixture = Fixture::new();
+    let live = fixture.open();
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    fs::write(base.join("key"), [7; 32]).unwrap();
+    let elsewhere = fixture.0.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, base.join("records")).unwrap();
+    disk::FLAT_FINAL_REMOVALS.with_borrow_mut(Vec::clear);
+    drop(fixture.open());
+    assert!(disk::FLAT_FINAL_REMOVALS.with_borrow(Vec::is_empty));
+    for name in ["VERSION", "key", "lock"] {
+        assert!(base.join(name).exists(), "{name} was removed");
+    }
+    assert!(elsewhere.is_dir());
+    assert!(live.keyed_digest(STEP, &json!(1)).is_ok());
 }

@@ -7,6 +7,7 @@ publish = false
 description = "Private Hack v5 candidate runtime contracts and local planning"
 
 [features]
+guest-agent-client = ["dep:hack-vm-protocol"]
 native-config-plan = ["dep:hack-config-compiler"]
 installed-candidate = []
 environment-launcher = []
@@ -17,6 +18,9 @@ shared-mcp = []
 # Test-only supervisor pause points for the real SIGKILL harness. Refused in
 # optimized builds; never listed by a release build script.
 node-kill-harness = []
+# Test-only service operations (`test.hold`, `test.env`) for the real-process
+# drain, signal and environment tests. Refused in optimized builds.
+service-test-hooks = []
 
 # `sha2` 0.11.1 raised the declared minimum from Rust 1.85 to 1.88. From 1.87 Clippy asks
 # for let-chains and `is_multiple_of` in about fifty places that the upgrade does not touch.
@@ -80,6 +84,10 @@ strip = true
 name = "node_kill_harness"
 required-features = ["node-kill-harness"]
 
+[[test]]
+name = "runtime_service_hooks"
+required-features = ["installed-candidate", "service-test-hooks"]
+
 [[bin]]
 name = "hack-mcp-owner"
 path = "src/bin/hack-mcp-owner.rs"
@@ -89,3 +97,7 @@ required-features = ["shared-mcp"]
 name = "hack-storage-root-witness"
 path = "src/bin/hack-storage-root-witness.rs"
 required-features = ["storage-root-witness-tool"]
+
+[dependencies.hack-vm-protocol]
+path = "../hack-vm-protocol"
+optional = true

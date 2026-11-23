@@ -1,3 +1,5 @@
+import type { StartBlocker } from "../ui/start-refusal-output.ts";
+
 /**
  * Machine-readable CLI result envelope.
  *
@@ -19,8 +21,25 @@
 export const HACK_ERROR_CODES = [
   "E_DOCKER_UNAVAILABLE",
   "E_GLOBAL_INFRA_DOWN",
+  // The opt-in global logging stack is off (HACK-2468).
+  "E_LOGGING_OFF",
+  // `hack global up`: a global container did not become ready, or stopped.
+  "E_GLOBAL_NOT_READY",
+  "E_GLOBAL_STOPPED",
   "E_CONFIG_PARSE",
   "E_CONFIG_INVALID",
+  "E_MIN_CLI_VERSION_REQUIRED",
+  "E_INVALID_MIN_CLI_VERSION",
+  "E_CLI_VERSION_TOO_OLD",
+  "E_INVALID_PREREQUISITE",
+  "E_UNKNOWN_PREREQUISITE",
+  "E_INVALID_HOST_TOOL",
+  "E_UNKNOWN_HOST_TOOL",
+  "E_INVALID_REMOTE",
+  "E_UNKNOWN_REMOTE_TARGET",
+  "E_PREREQUISITE_TOOL_MISSING",
+  "E_PREREQUISITE_CHECK_TIMEOUT",
+  "E_PREREQUISITE_CHECK_FAILED",
   "E_PROJECT_NOT_FOUND",
   "E_NATIVE_PROJECT_CONFLICT",
   "E_NATIVE_PROJECT_UNSUPPORTED",
@@ -31,6 +50,7 @@ export const HACK_ERROR_CODES = [
   "E_COMPOSE_OUTPUT_INVALID",
   "E_STARTUP_INCOMPLETE",
   "E_DOWN_INCOMPLETE",
+  "E_RECOVERY_REQUIRED",
   "E_PLAN_REFUSED",
   "E_PLAN_INCOMPLETE",
   "E_NATIVE_SETUP_REQUIRED",
@@ -143,16 +163,19 @@ export function exitCodeForResult(opts: {
 export class HackCliError extends Error {
   readonly code: HackErrorCode;
   readonly detail?: unknown;
+  readonly startBlocker?: StartBlocker;
 
   constructor(opts: {
     readonly code: HackErrorCode;
     readonly message: string;
     readonly detail?: unknown;
+    readonly startBlocker?: StartBlocker;
   }) {
     super(opts.message);
     this.name = "HackCliError";
     this.code = opts.code;
     this.detail = opts.detail;
+    this.startBlocker = opts.startBlocker;
   }
 }
 

@@ -167,7 +167,7 @@ impl Publishers {
             candidate,
             &receipt.run,
             &mut self.probe_generations,
-            true,
+            Some(deadline),
             &BTreeSet::new(),
             &|| check_deadline(signals, deadline),
         )?;
@@ -176,7 +176,15 @@ impl Publishers {
         // `started` readiness can finish while an image healthcheck is still
         // starting; wait for those endpoints within the same startup deadline.
         let reserved = retry_pending_endpoint(
-            || super::super::bridges::reserve_publications(candidate, receipt, slots),
+            || {
+                super::super::bridges::reserve_publications(
+                    candidate,
+                    receipt,
+                    slots,
+                    deadline,
+                    &|| check_deadline(signals, deadline),
+                )
+            },
             || {
                 std::thread::sleep(PENDING_ENDPOINT_POLL);
                 check_deadline(signals, deadline)
@@ -202,7 +210,9 @@ impl Publishers {
             .iter()
             .map(|(selected, _)| (selected.slot, selected.assignment.reservation.as_str()))
             .collect::<Vec<_>>();
-        super::super::bridges::start_bridges(candidate, &receipt.run, &batch)?;
+        super::super::bridges::start_bridges(candidate, &receipt.run, &batch, deadline, &|| {
+            check_deadline(signals, deadline)
+        })?;
         // Every child is owned (and watched) as soon as it exists; they take the
         // provider lease in turn while this owner observes all of them together.
         let first = self.children.len();
@@ -213,15 +223,14 @@ impl Publishers {
                 Frontend::Hostnames(names) => (names.to_vec(), None),
                 Frontend::Port(port) => (Vec::new(), Some(*port)),
             };
-            let child = command(
+            let child = crate::provider::process::spawn_child(&mut command(
                 &executable,
                 &candidate.checkout,
                 &receipt.run,
                 selected.slot,
                 &assignment.reservation,
                 frontend,
-            )
-            .spawn()
+            ))
             .map_err(|_| refused())?;
             self.children.push(Owned {
                 child,
@@ -432,7 +441,7 @@ impl Publishers {
             candidate,
             run,
             &mut self.probe_generations,
-            false,
+            None,
             &excluded,
             &check,
         )?;
@@ -469,7 +478,7 @@ impl Publishers {
             let executable = std::env::current_exe().map_err(|_| refused())?;
             let frontend = self.frontend_for(candidate, run, &assignment)?;
             let reservation = assignment.reservation.clone();
-            let child = command(
+            let child = crate::provider::process::spawn_child(&mut command(
                 &executable,
                 &candidate.checkout,
                 run,
@@ -479,8 +488,7 @@ impl Publishers {
                     Some(port) => Frontend::Port(port),
                     None => Frontend::Hostnames(&frontend.1),
                 },
-            )
-            .spawn()
+            ))
             .map_err(|_| refused())?;
             let replacement = self.children.len();
             self.children.push(Owned {

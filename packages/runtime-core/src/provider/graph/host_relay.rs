@@ -659,6 +659,27 @@ pub(super) fn inspect_cleanup_recovery(
         SelectedCleanupProof::Existing(host_pin),
     )
 }
+/// The cleanup observation of a completed dead-owner recovery whose boot has since
+/// ended (HACK-2550). Everything is re-observed in the current boot as for
+/// [`inspect_cleanup_recovery`]; only the recorded bridge selection is admitted from
+/// the boot the recovery ran in (`bridges::cleanup::read_completed_recovery`).
+pub(super) fn inspect_cleanup_completed(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    expected: &Receipt,
+    environment: &super::super::environment_recovery::GraphInventory,
+    bridge_selection: &bridges::cleanup::Selection,
+) -> Result<[u8; 32], CandidateError> {
+    inspect_cleanup_selected(
+        candidate,
+        engine,
+        expected,
+        false,
+        environment,
+        bridge_selection,
+        SelectedCleanupProof::Completed,
+    )
+}
 pub(super) fn inspect_cleanup_absence(
     candidate: &Candidate,
     engine: &Engine<'_>,
@@ -680,6 +701,9 @@ pub(super) fn inspect_cleanup_absence(
 enum SelectedCleanupProof<'a> {
     Existing(Option<&'a super::host_pin_recovery::Witness>),
     Absence(&'a super::absent_publication_cleanup::Selection),
+    /// A completed dead-owner recovery from an earlier boot: its bridge selection is
+    /// checked against the run and the current registry, not the current boot.
+    Completed,
 }
 fn inspect_cleanup_selected(
     candidate: &Candidate,
@@ -740,6 +764,9 @@ fn inspect_cleanup_selected(
         SelectedCleanupProof::Existing(host_pin) => {
             bridges::cleanup::read_recovery(engine, &receipt, &root, host_pin)?
         }
+        SelectedCleanupProof::Completed => {
+            bridges::cleanup::read_completed_recovery(engine, &receipt, &root)?
+        }
     };
     if &recorded != bridge_selection {
         return Err(refused());
@@ -759,6 +786,9 @@ fn inspect_cleanup_selected(
             bridge_selection,
             host_pin,
         )?,
+        SelectedCleanupProof::Completed => {
+            bridges::cleanup::verify_completed_recovery(candidate, engine, &receipt)?
+        }
     }
     environment::verify_cleanup(candidate, engine, &receipt, &root, environment)?;
     probes::verify_cleanup(engine, &receipt)?;

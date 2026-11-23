@@ -9,7 +9,7 @@ import {
   createSecureContext,
   createServer as createTlsServer,
 } from "node:tls";
-import { LEGACY_SCHEMAS_HOST } from "../src/constants.ts";
+import { DEFAULT_SCHEMAS_HOST, LEGACY_SCHEMAS_HOST } from "../src/constants.ts";
 import {
   type ProxyBindScope,
   readProxyBindScope,
@@ -20,6 +20,7 @@ import {
   openProxyLoopbackWarning,
   openUnresolvedHostWarning,
   probeProxyLoopback,
+  probeProxyRoute,
   proxyConnectAddress,
   resolveProxyLoopbackAddresses,
 } from "../src/lib/proxy-loopback.ts";
@@ -74,6 +75,74 @@ test("IPv4 timeout and foreign IPv6 TLS warn despite healthy port 80; visible li
   expect(report.message).toContain("container runtime's own HTTPS setting");
   expect(report.message).not.toContain("sudo");
   expect(report.message).not.toContain("--fix");
+});
+
+test("HACK-2552: a served name resolving straight to the proxy container skips loopback, so a foreign loopback listener is not a warning", async () => {
+  // macOS with OrbStack: schemas.hack resolves to the container; loopback 443
+  // times out (IPv4) and another process answers TLS alerts (IPv6).
+  const calls: string[] = [];
+  const asked: string[] = [];
+  const report = await inspectProxyLoopback({
+    loadCa,
+    probe: async ({ address, port }) => {
+      calls.push(`${address}/${port}`);
+      return address === "127.0.0.1" ? "timeout" : "tls-error";
+    },
+    listListeners: noListeners,
+    servedName: {
+      name: "schemas.hack",
+      resolve: async (hostname) => {
+        asked.push(hostname);
+        return ["172.30.0.2"];
+      },
+    },
+  });
+  expect(asked).toEqual(["schemas.hack"]);
+  expect(calls).toEqual([]);
+  expect(report).toMatchObject({ status: "ok", verified: false });
+  expect(report.message).toContain(
+    "schemas.hack resolves to 172.30.0.2 on this machine, not to loopback"
+  );
+});
+
+test("HACK-2552: a served name resolving to loopback is checked there, under that name, and a failure there warns", async () => {
+  const calls: string[] = [];
+  const report = await inspectProxyLoopback({
+    loadCa,
+    probe: async ({ address, port, servername }) => {
+      calls.push(`${address}/${port}/${servername}`);
+      return port === 443 ? "tls-error" : "ok";
+    },
+    listListeners: noListeners,
+    servedName: {
+      name: "schemas.hack.local",
+      resolve: async () => ["127.0.0.1"],
+    },
+  });
+  // Only the loopback address the name resolves to, and the served name as
+  // the TLS name instead of the fixed legacy one.
+  expect(calls.sort()).toEqual([
+    "127.0.0.1/443/schemas.hack.local",
+    "127.0.0.1/80/schemas.hack.local",
+  ]);
+  expect(report.status).toBe("warn");
+  expect(report.message).toContain(
+    "127.0.0.1:443: certificate or TLS verification failed"
+  );
+
+  // No answer for the name: the published loopback endpoints, as before.
+  const unresolved: string[] = [];
+  const fallback = await inspectProxyLoopback({
+    loadCa,
+    probe: async ({ address, port }) => {
+      unresolved.push(`${address}/${port}`);
+      return "ok";
+    },
+    listListeners: noListeners,
+    servedName: { name: "schemas.hack.local", resolve: async () => [] },
+  });
+  expect(unresolved).toHaveLength(4);
+  expect(fallback.status).toBe("ok");
 });
 
 test("neither address family can mask the other, and port 80 has a separate result", async () => {
@@ -424,6 +493,7 @@ let root: string;
 let key: string;
 let certificate: string;
 let wrongHostname: string;
+let localCertificate: string;
 let rootPem: string;
 let opensslVersion = "unknown";
 const sockets = new Set<Socket>();
@@ -510,6 +580,7 @@ beforeAll(async () => {
   for (const [name, host] of [
     ["leaf", LEGACY_SCHEMAS_HOST],
     ["wrong", "foreign.example.test"],
+    ["local", DEFAULT_SCHEMAS_HOST],
   ]) {
     await Bun.write(
       join(root, `${name}.ext`),
@@ -534,12 +605,14 @@ beforeAll(async () => {
       `${name}.ext`,
     ]);
   }
-  [key, certificate, wrongHostname, rootPem] = await Promise.all([
-    Bun.file(join(root, "leaf.key")).text(),
-    Bun.file(join(root, "leaf.pem")).text(),
-    Bun.file(join(root, "wrong.pem")).text(),
-    Bun.file(join(root, "ca.pem")).text(),
-  ]);
+  [key, certificate, wrongHostname, localCertificate, rootPem] =
+    await Promise.all([
+      Bun.file(join(root, "leaf.key")).text(),
+      Bun.file(join(root, "leaf.pem")).text(),
+      Bun.file(join(root, "wrong.pem")).text(),
+      Bun.file(join(root, "local.pem")).text(),
+      Bun.file(join(root, "ca.pem")).text(),
+    ]);
 });
 
 afterEach(async () => {
@@ -922,4 +995,71 @@ test("the no-DNS hint names the same normalized host in --noproxy, --resolve and
       `curl --noproxy '${host}' --resolve '${host}:443:127.0.0.1' 'https://${host}/'`
     );
   }
+});
+
+/**
+ * A proxy like Caddy: TLS only for the names it serves (no certificate, so
+ * no handshake, for any other), then HTTP on the verified connection.
+ */
+async function routeServer(served: Readonly<Record<string, string>>) {
+  const hosts: string[] = [];
+  const server = createTlsServer({
+    SNICallback: (name, callback) => {
+      const cert = served[name];
+      if (cert === undefined) {
+        callback(new Error(`no certificate for ${name}`));
+        return;
+      }
+      callback(null, createSecureContext({ key, cert }));
+    },
+  });
+  server.on("secureConnection", (socket) => {
+    socket.setEncoding("utf8");
+    socket.once("data", (request: string) => {
+      hosts.push(/\r\nHost: ([^\r]+)/.exec(request)?.[1] ?? "");
+      socket.end("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    });
+  });
+  return { port: await listen(server, "127.0.0.1"), hosts };
+}
+
+test("the route probe sends the selected name as TLS name and Host: served, it answers; not served, it does not", async () => {
+  // A proxy serving only the selected name (schemas.hack.local).
+  const local = await routeServer({ [DEFAULT_SCHEMAS_HOST]: localCertificate });
+  const probe = (port: number, servername: string) =>
+    probeProxyRoute({ address: "127.0.0.1", port, servername, caPem: rootPem });
+  expect(await probe(local.port, DEFAULT_SCHEMAS_HOST)).toBe("ok");
+  expect(local.hosts).toEqual([DEFAULT_SCHEMAS_HOST]);
+  // The legacy name is not served there: no answer for it.
+  expect(await probe(local.port, LEGACY_SCHEMAS_HOST)).not.toBe("ok");
+
+  // A proxy serving only the legacy name: the selected name is not answered,
+  // even though a request to the legacy name would be.
+  const legacy = await routeServer({ [LEGACY_SCHEMAS_HOST]: certificate });
+  expect(await probe(legacy.port, DEFAULT_SCHEMAS_HOST)).not.toBe("ok");
+  expect(await probe(legacy.port, LEGACY_SCHEMAS_HOST)).toBe("ok");
+  expect(legacy.hosts).toEqual([LEGACY_SCHEMAS_HOST]);
+});
+
+test("the route probe reads another CA's certificate as untrusted, and a TLS server that never answers HTTP as a timeout", async () => {
+  const other = await routeServer({ [DEFAULT_SCHEMAS_HOST]: localCertificate });
+  expect(
+    await probeProxyRoute({
+      address: "127.0.0.1",
+      port: other.port,
+      servername: DEFAULT_SCHEMAS_HOST,
+      caPem: CURRENT_CA_PEM,
+    })
+  ).toBe("untrusted");
+  const silent = createTlsServer({ key, cert: localCertificate });
+  const port = await listen(silent, "127.0.0.1");
+  expect(
+    await probeProxyRoute({
+      address: "127.0.0.1",
+      port,
+      servername: DEFAULT_SCHEMAS_HOST,
+      caPem: rootPem,
+      timeoutMs: 300,
+    })
+  ).toBe("timeout");
 });

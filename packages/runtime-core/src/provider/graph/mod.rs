@@ -20,6 +20,8 @@ pub use normalized::{
 #[cfg(target_os = "macos")]
 mod absent_publication_cleanup;
 mod admission;
+#[cfg(any(target_os = "macos", test))]
+mod boot_match;
 mod cache_provenance;
 mod dependency_hosts;
 #[cfg(target_os = "macos")]
@@ -139,6 +141,7 @@ mod environment_crash_test;
 mod launcher;
 mod probes;
 mod process_refusals;
+mod spec;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod startup_test;
 pub use environment::stage_environment;
@@ -288,9 +291,71 @@ pub struct Resource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amd64_emulation: Option<crate::project::Amd64Emulation>,
 }
+/// The phases of a start in progress, before every service has started: fresh,
+/// restore and restart.
+pub(super) const START_PHASES: [&str; 3] = ["preparing", "restoring", "restarting"];
+/// A start in progress whose services have all started (Compose's "started"); the
+/// start it belongs to is in [`Receipt::started_from`]. `Ready` moves it on to
+/// `ready-observed`, a failure to `failed-retained`.
+pub(super) const STARTED_OBSERVED: &str = "started-observed";
+
+impl Receipt {
+    /// Set the receipt's phase. `started_from` belongs to `started-observed` only, so
+    /// every phase change clears it; [`mark_started`] is its only writer.
+    pub(super) fn set_phase(&mut self, phase: &str) {
+        self.phase = phase.into();
+        self.started_from = None;
+    }
+}
+
+/// `Session::record(AllStarted)`. Only a start whose driver reports it (`--report-
+/// started`) records the phase; any other start leaves the receipt untouched and saves
+/// nothing. Otherwise the phase is saved first, then the driver is told. A failed save
+/// fails the start; its caller then retains the attempt as `failed-retained`.
+fn record_all_started(
+    receipt: &mut Receipt,
+    root: &std::path::Path,
+    startup: Option<&mut (dyn startup::Driver + '_)>,
+) -> Result<(), CandidateError> {
+    let Some(startup) = startup.filter(|startup| startup.reports_started()) else {
+        return Ok(());
+    };
+    mark_started(receipt)?;
+    state::write(&root.join("state.json"), receipt)?;
+    let run = receipt.run.clone();
+    startup.all_started(&run)
+}
+
+/// Move a start in progress (`preparing`, `restoring` or `restarting`) to
+/// `started-observed`, remembering which start it is. Any other phase refuses.
+pub(super) fn mark_started(receipt: &mut Receipt) -> Result<(), CandidateError> {
+    if !START_PHASES.contains(&receipt.phase.as_str()) {
+        return Err(error(
+            "graph_replay_refused",
+            "Only a start in progress can observe every service started.",
+        ));
+    }
+    let from = std::mem::replace(&mut receipt.phase, STARTED_OBSERVED.into());
+    receipt.started_from = Some(from);
+    Ok(())
+}
+
+/// The start phase a receipt is in, seeing through `started-observed` to the start
+/// it belongs to, so checks of a start in progress keep their meaning.
+pub(super) fn start_phase(receipt: &Receipt) -> &str {
+    match (receipt.phase.as_str(), receipt.started_from.as_deref()) {
+        (STARTED_OBSERVED, Some(from)) => from,
+        (phase, _) => phase,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
+    /// With phase `started-observed`: the start phase it came from (`preparing`,
+    /// `restoring` or `restarting`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_from: Option<String>,
     /// Most recent observed startup failure; retained after cleanup and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_failure: Option<startup_failure::Failure>,
@@ -670,8 +735,16 @@ fn load_at(
             "restarting",
             "restoring",
             "reconciled-cleanup-only",
+            STARTED_OBSERVED,
         ]
         .contains(&receipt.phase.as_str())
+        // A started graph records which start it is, and only a started graph does:
+        // every other phase change clears it (`Receipt::set_phase`).
+        || (receipt.phase == STARTED_OBSERVED) != receipt.started_from.is_some()
+        || receipt
+            .started_from
+            .as_deref()
+            .is_some_and(|from| !START_PHASES.contains(&from))
     {
         return Err(error(
             "graph_receipt",
@@ -765,6 +838,7 @@ struct Session<'a, 's> {
     root: PathBuf,
     receipt: Receipt,
     configs: BTreeMap<String, Value>,
+    default_health_cadence: BTreeMap<String, config::DefaultHealthCadence>,
     expected_environment: BTreeMap<String, image_environment::Expected>,
     restarting: bool,
     fresh_cache_completion: bool,
@@ -919,6 +993,7 @@ impl Session<'_, '_> {
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
         // Restore reattaches every settled volume. A volume still `reserved` never
         // received a create intent; it is created exclusively, never adopted.
+        let mut created_volumes = BTreeSet::new();
         let keys: Vec<_> = self
             .receipt
             .resources
@@ -1005,10 +1080,39 @@ impl Session<'_, '_> {
             volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, true)?;
             self.capture_cache_provenance(&key, true)?;
             self.reserve(&key, "created")?;
+            if resource.kind == Kind::Volume {
+                created_volumes.insert(resource.name);
+            }
+        }
+        if !created_volumes.is_empty() {
+            for (service, cadence) in &self.default_health_cadence {
+                cadence.apply(
+                    self.configs.get_mut(service).expect("compiled service"),
+                    &created_volumes,
+                );
+            }
         }
         Ok(())
     }
 }
+
+fn restart_health_cadence(
+    context: &spec::Context<'_>,
+    config: &mut Value,
+    default_period: bool,
+    inspected: &Value,
+) -> Result<(), CandidateError> {
+    let mut authored = config.clone();
+    config::use_authored_health_cadence(&mut authored, default_period);
+    let authored_spec = spec::of(&authored, context)?;
+    // Only the exact create spec can select omitted timing fields; an
+    // inherited image value alone cannot distinguish a cold create.
+    if spec::verify_label(inspected, &authored_spec).is_ok() {
+        *config = authored;
+    }
+    Ok(())
+}
+
 impl Driver for Session<'_, '_> {
     fn service_failure(&self, name: &str, observation: Observation) -> CandidateError {
         probes::service_failure_finding(
@@ -1025,6 +1129,11 @@ impl Driver for Session<'_, '_> {
             startup.check_cancelled()?;
         }
         Ok(())
+    }
+    fn reports_started(&self) -> bool {
+        self.startup
+            .as_ref()
+            .is_some_and(|startup| startup.reports_started())
     }
 
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
@@ -1069,11 +1178,29 @@ impl Driver for Session<'_, '_> {
                 self.save()
             }
             Event::Observed { .. } => Ok(()),
+            Event::ServiceReady { service } => {
+                let Some(startup) = self.startup.as_mut() else {
+                    return Ok(());
+                };
+                let id = self.receipt.resources[&format!("container:{service}")]
+                    .id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        error(
+                            "graph_resource_identity",
+                            "A ready service has no confirmed container ID.",
+                        )
+                    })?;
+                startup.service_ready(service, id)
+            }
+            Event::AllStarted => {
+                record_all_started(&mut self.receipt, &self.root, self.startup.as_deref_mut())
+            }
             Event::Ready => {
                 if let Some(startup) = self.startup.as_mut() {
                     startup.verify(&self.engine, &mut self.receipt, &self.root)?;
                 }
-                self.receipt.phase = "ready-observed".into();
+                self.receipt.set_phase("ready-observed");
                 self.save()
             }
         }
@@ -1121,6 +1248,28 @@ impl Driver for Session<'_, '_> {
                 "Fresh graph cannot adopt an existing container.",
             ));
         }
+        // Identity of the compiled config before any per-run attachment.
+        let span = crate::timings::start(crate::timings::Step::SpecDigest, None);
+        let spec = spec::of(
+            &self.configs[service],
+            &spec::Context {
+                resources: &self.receipt.resources,
+                probe: self.receipt.probes.get(service),
+                managed: self.environments.contains_key(service),
+                relay: self
+                    .receipt
+                    .relay_startup
+                    .as_ref()
+                    .and_then(|startup| startup.services.get(service))
+                    .map(|selected| selected.bindings.keys().cloned().collect())
+                    .unwrap_or_default(),
+                amd64_emulation: resource.amd64_emulation,
+            },
+        );
+        if let Some(span) = span {
+            spec::finish_span(span, &spec, &resource.name);
+        }
+        let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
             self.receipt.environment_attached = true;
@@ -1160,11 +1309,11 @@ impl Driver for Session<'_, '_> {
             }
         }
         self.check_cancelled()?;
-        let config = &self.configs[service];
+        let body = spec::stamped(&self.configs[service], &spec);
         let value = self.engine.request(
             Method::POST,
             &format!("/v1.53/containers/create?name={}", resource.name),
-            Some(config),
+            Some(&body),
         )?;
         #[cfg(test)]
         self.fault_pause("after-create")?;
@@ -1183,6 +1332,7 @@ impl Driver for Session<'_, '_> {
         let inspected =
             inspect_resource(&self.engine, &self.receipt, &self.receipt.resources[&key])?
                 .ok_or_else(|| error("graph_resource_missing", "Created container is missing."))?;
+        spec::verify_label(&inspected, &spec)?;
         Self::verify_config(
             &self.receipt,
             service,
@@ -1620,6 +1770,7 @@ fn run_inputs(
         &mut prepared.configs,
         &wrapped,
         &file_owners,
+        Some(&mut prepared.default_health_cadence),
     )?;
     validate_private_delivery(&prepared.configs, &environments)?;
     validate_dependency_processes(&prepared.configs, &dependency_processes)?;
@@ -1641,6 +1792,7 @@ fn run_inputs(
         .map_err(state::io)?;
     let probe_states = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     let receipt = Receipt {
+        started_from: None,
         startup_failure: None,
         normalized_input,
         relay_startup: None,
@@ -1668,6 +1820,7 @@ fn run_inputs(
         root,
         receipt,
         configs: prepared.configs,
+        default_health_cadence: prepared.default_health_cadence,
         expected_environment,
         probe_findings: BTreeMap::new(),
         restarting: false,
@@ -1697,7 +1850,7 @@ fn run_inputs(
         )
     })();
     if let Err(failure) = result {
-        session.receipt.phase = "failed-retained".into();
+        session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);
     }
@@ -1815,6 +1968,15 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
 /// (for example a foreground start refused before admission). Every other journal
 /// state keeps the ordinary receipt validation.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    inspect_with_startup_wait(candidate, run, false)
+}
+
+/// Inspect for a startup caller using the existing provider lease budget.
+pub fn inspect_with_startup_wait(
+    candidate: &Candidate,
+    run: &str,
+    startup_wait: bool,
+) -> Result<Snapshot, CandidateError> {
     #[cfg(target_os = "macos")]
     if unreserved(candidate, run)? {
         return Err(error(
@@ -1822,7 +1984,11 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
             "No runtime state was reserved for this graph attempt: no journal exists and no foreground owner is published. Nothing was created, repaired or adopted.",
         ));
     }
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = if startup_wait {
+        Engine::connect_cleanup_for_start(candidate)
+    } else {
+        Engine::connect_cleanup(candidate)
+    }?;
     inspect_using(candidate, &engine, run)
 }
 
@@ -1931,7 +2097,7 @@ pub fn source_compatibility(
     {
         return Err(refused());
     }
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = Engine::connect_cleanup_for_start(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     #[cfg(target_os = "macos")]
     let source_rebind = source_device_rebind::select(&engine, &receipt, &root)?;
@@ -2193,7 +2359,7 @@ fn cleanup_owned_fenced(
     // durable intent even when an early external effect already completed.
     let environment_slots = if early_intent {
         let slots = environment::cleanup_slots(candidate, engine, &receipt)?;
-        receipt.phase = "cleanup-intent".into();
+        receipt.set_phase("cleanup-intent");
         state::write(&root.join("state.json"), &receipt)?;
         fence()?;
         slots
@@ -2213,7 +2379,7 @@ fn cleanup_owned_fenced(
         environment_slots
     } else {
         let slots = environment::cleanup_slots(candidate, engine, &receipt)?;
-        receipt.phase = "cleanup-intent".into();
+        receipt.set_phase("cleanup-intent");
         state::write(&root.join("state.json"), &receipt)?;
         slots
     };
@@ -2288,12 +2454,11 @@ fn cleanup_owned_fenced(
         super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
     }
     fence()?;
-    receipt.phase = if remove_data {
+    receipt.set_phase(if remove_data {
         "removed"
     } else {
         "stopped-data-retained"
-    }
-    .into();
+    });
     state::write(&root.join("state.json"), &receipt)?;
     fence()?;
     #[cfg(target_os = "macos")]
@@ -2354,7 +2519,13 @@ fn contains_request(expected: &Value, actual: &Value) -> bool {
     mismatch(expected, actual, "request").is_none()
 }
 
-/// Explicit restart of a previously ready graph after all containers have stopped. IDs are
+/// A receipt phase an explicit restart may start from: ready, or every service started.
+fn restartable(receipt: &Receipt) -> bool {
+    matches!(receipt.phase.as_str(), "ready-observed" | STARTED_OBSERVED)
+}
+
+/// Explicit restart of a previously ready (or, with `--report-started`, started) graph
+/// after all containers have stopped. IDs are
 /// retained; no create is issued. Any incomplete prior transition requires inspection/cleanup.
 pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, CandidateError> {
     if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
@@ -2381,12 +2552,12 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     environment::require_replay_supported(&receipt)?;
     if root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
-        || receipt.phase != "ready-observed"
+        || !restartable(&receipt)
         || receipt.readiness != *options.readiness
     {
         return Err(error(
             "graph_replay_refused",
-            "Only a completely acknowledged ready graph with an unchanged plan can explicitly restart.",
+            "Only a completely acknowledged ready or started graph with an unchanged plan can explicitly restart.",
         ));
     }
     super::source_job::check_reservations(&engine)?;
@@ -2426,6 +2597,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         &mut prepared.configs,
         &BTreeSet::new(),
         &BTreeSet::new(),
+        Some(&mut prepared.default_health_cadence),
     )?;
     probes::unchanged(&prepared.configs, &prepared.probes, &receipt)?;
     for resource in receipt.resources.values() {
@@ -2438,6 +2610,30 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         cache_provenance::verify(&engine, &receipt, resource)?;
         if resource.kind == Kind::Container {
             admission::unchanged(&value, &prepared.configs[&resource.key])?;
+            if let Some(cadence) = prepared.default_health_cadence.get(&resource.key)
+                && !cadence.data_volumes.is_empty()
+            {
+                restart_health_cadence(
+                    &spec::Context {
+                        resources: &receipt.resources,
+                        probe: receipt.probes.get(&resource.key),
+                        managed: false,
+                        relay: receipt
+                            .relay_startup
+                            .as_ref()
+                            .and_then(|startup| startup.services.get(&resource.key))
+                            .map(|selected| selected.bindings.keys().cloned().collect())
+                            .unwrap_or_default(),
+                        amd64_emulation: resource.amd64_emulation,
+                    },
+                    prepared
+                        .configs
+                        .get_mut(&resource.key)
+                        .expect("compiled service"),
+                    cadence.period,
+                    &value,
+                )?;
+            }
         }
         if resource.kind == Kind::Container
             && (resource.phase != "started"
@@ -2453,7 +2649,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     source::verify_cache_scope(source.as_ref(), project_path)?;
     #[cfg(target_os = "macos")]
     source_device_rebind::verify_cache_scope_origin(candidate, &receipt)?;
-    receipt.phase = "restarting".into();
+    receipt.set_phase("restarting");
     for resource in receipt
         .resources
         .values_mut()
@@ -2467,6 +2663,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         root,
         receipt,
         configs: prepared.configs,
+        default_health_cadence: BTreeMap::new(),
         expected_environment,
         probe_findings: BTreeMap::new(),
         restarting: true,
@@ -2478,7 +2675,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     };
     session.save()?;
     if let Err(failure) = execution::run(&prepared.graph, &mut session, options.timeout) {
-        session.receipt.phase = "failed-retained".into();
+        session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);
     }
@@ -2502,7 +2699,7 @@ pub fn reconcile(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateE
         // Enrollment already fences ordinary mutations. Preserve committed
         // terminal evidence so explicit confirmation can independently recover.
         if receipt.relay_cleanup.is_none() {
-            receipt.phase = "reconciled-cleanup-only".into();
+            receipt.set_phase("reconciled-cleanup-only");
             state::write(&root.join("state.json"), &receipt)?;
         }
     }
@@ -2797,6 +2994,7 @@ fn verify_images(
     configs: &mut BTreeMap<String, Value>,
     private_services: &BTreeSet<String>,
     file_owners: &BTreeSet<String>,
+    mut cadence: Option<&mut BTreeMap<String, config::DefaultHealthCadence>>,
 ) -> Result<BTreeMap<String, image_environment::Expected>, CandidateError> {
     let mut expected = BTreeMap::new();
     let mut refusals = process_refusals::Collector::default();
@@ -2833,6 +3031,16 @@ fn verify_images(
             &configs[&resource.key],
             resources,
         )?;
+        if let Some(cadence) = cadence
+            .as_deref_mut()
+            .and_then(|map| map.get_mut(&resource.key))
+        {
+            cadence.data_volumes = config::data_health_volumes(
+                &configs[&resource.key],
+                resources,
+                &image["Config"]["Volumes"],
+            );
+        }
         if private_services.contains(&resource.key) || file_owners.contains(&resource.key) {
             resolve_named_user(engine, &image, configs, &resource.key)?;
         }

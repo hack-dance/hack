@@ -130,6 +130,28 @@ fn initialize_registry(
     state::write(&directory.join("state.json"), &store)
 }
 
+/// The guest boot ids this run's slots record, from the pool's validated registry
+/// (none without a bridge intent). Selection evidence only: dead-owner recovery still
+/// matches each against the run's own receipt evidence (`boot_match::receipt_boot`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(in crate::provider) fn run_boots(
+    candidate: &Candidate,
+    owner: &state::Owner,
+    run: &str,
+) -> Result<Vec<String>, CandidateError> {
+    let Some(intent) = owner.application_bridge else {
+        return Ok(Vec::new());
+    };
+    let store = read_owner_registry(candidate, &owner.token, intent.slots, false)?;
+    let mut boots: Vec<String> = Vec::new();
+    for assignment in store.slots.values().filter(|a| a.run == run) {
+        if !boots.contains(&assignment.boot_id) {
+            boots.push(assignment.boot_id.clone());
+        }
+    }
+    Ok(boots)
+}
+
 pub(in crate::provider) fn verify_owner_registry(
     candidate: &Candidate,
     owner: &state::Owner,
@@ -503,11 +525,18 @@ pub(in crate::provider::graph) fn reserve_publications(
     candidate: &Candidate,
     receipt: &Receipt,
     requested: &BTreeMap<String, RouteSlot>,
+    deadline: std::time::Instant,
+    check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<Reserved, CandidateError> {
     if requested.len() > 32 {
         return Err(invalid());
     }
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = Engine::connect_for_start(
+        candidate,
+        super::super::engine::ConnectionMode::Cleanup,
+        deadline,
+        check,
+    )?;
     let capacity = engine
         .guest()
         .bridge_intent()
@@ -597,7 +626,14 @@ pub(in crate::provider::graph) fn reserve_loopback_ports(
     candidate: &Candidate,
     receipt: &Receipt,
 ) -> Result<BTreeMap<u16, ReservedRoute>, CandidateError> {
-    reserve_publications(candidate, receipt, &BTreeMap::new()).map(|reserved| reserved.ports)
+    reserve_publications(
+        candidate,
+        receipt,
+        &BTreeMap::new(),
+        std::time::Instant::now() + super::super::lifecycle::STARTUP_LEASE_WAIT,
+        &|| Ok(()),
+    )
+    .map(|reserved| reserved.ports)
 }
 
 /// A container whose own healthcheck is still `starting` has no committed port
@@ -791,7 +827,13 @@ pub fn start_bridge(
     slot: u8,
     reservation: &str,
 ) -> Result<Assignment, CandidateError> {
-    let mut started = start_bridges(candidate, run, &[(slot, reservation)])?;
+    let mut started = start_bridges(
+        candidate,
+        run,
+        &[(slot, reservation)],
+        std::time::Instant::now() + super::super::lifecycle::STARTUP_LEASE_WAIT,
+        &|| Ok(()),
+    )?;
     started.pop().map(|(_, a)| a).ok_or_else(invalid)
 }
 
@@ -801,6 +843,8 @@ pub(in crate::provider::graph) fn start_bridges(
     candidate: &Candidate,
     run: &str,
     selected: &[(u8, &str)],
+    deadline: std::time::Instant,
+    check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<Vec<(u8, Assignment)>, CandidateError> {
     if selected.is_empty()
         || selected.len() > 32
@@ -811,7 +855,12 @@ pub(in crate::provider::graph) fn start_bridges(
         return Err(invalid());
     }
     let (digest, input) = relay::payload()?;
-    let engine = Engine::connect(candidate)?;
+    let engine = Engine::connect_for_start(
+        candidate,
+        super::super::engine::ConnectionMode::Allocation,
+        deadline,
+        check,
+    )?;
     let mut store = load_store(candidate, &engine, false)?;
     start_selected(
         candidate,
@@ -1074,7 +1123,33 @@ pub fn publish_bridge(
     hostnames: &[String],
 ) -> Result<(), CandidateError> {
     let engine = connect_waiting(candidate)?;
-    let store = load_store(candidate, &engine, false)?;
+    let upstream =
+        publication_upstream(candidate, &engine, run, slot, reservation, port, hostnames)?;
+    super::super::publication::launch(
+        candidate,
+        super::super::publication::Launch {
+            owner: engine.guest().incarnation(),
+            run,
+            reservation,
+            slot,
+            port,
+            hostnames,
+            upstream: &upstream,
+        },
+    )
+}
+
+/// Revalidate the exact frontend and relay under the caller's provider lease.
+fn publication_upstream(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    run: &str,
+    slot: u8,
+    reservation: &str,
+    port: Option<u16>,
+    hostnames: &[String],
+) -> Result<std::path::PathBuf, CandidateError> {
+    let store = load_store(candidate, engine, false)?;
     let a = store
         .slots
         .get(&slot)
@@ -1089,12 +1164,12 @@ pub fn publish_bridge(
         .ok_or_else(invalid)?;
     let targets = inspect_targets(
         candidate,
-        &engine,
+        engine,
         run,
         &std::collections::BTreeSet::from([a.service.as_str()]),
     )?;
     if !targets.current(a, engine.guest().boot_id())
-        || relay::operate(&engine, slot, a, "inspect", None)? != "running"
+        || relay::operate(engine, slot, a, "inspect", None)? != "running"
     {
         return Err(invalid());
     }
@@ -1114,23 +1189,12 @@ pub fn publish_bridge(
             validate_route_publication(resource.routing.as_ref(), upstream_port, port, hostnames)?
         }
     }
-    let upstream = engine
+    Ok(engine
         .guest()
         .engine_socket()?
-        .with_file_name(format!("bridge-{slot:02}.sock"));
-    super::super::publication::launch(
-        candidate,
-        super::super::publication::Launch {
-            owner: engine.guest().incarnation(),
-            run,
-            reservation,
-            slot,
-            port,
-            hostnames,
-            upstream: &upstream,
-        },
-    )
+        .with_file_name(format!("bridge-{slot:02}.sock")))
 }
+
 fn stop_slot(
     candidate: &Candidate,
     engine: &Engine<'_>,

@@ -52,6 +52,10 @@ import {
   type ProjectObservation,
   projectObservation,
 } from "./project-observation.ts";
+import {
+  type ProjectRemoteStatus,
+  projectRemoteStatuses,
+} from "./project-remote-status.ts";
 import type { ServiceReadiness } from "./project-state.ts";
 import type {
   RegisteredProject,
@@ -124,6 +128,7 @@ export type ProjectLifecycleView = {
 };
 
 export type ProjectView = {
+  readonly remotes?: readonly ProjectRemoteStatus[];
   readonly observation?: ProjectObservation;
   readonly serviceActivation?: ComposeServiceActivation;
   readonly serviceReadiness?: Readonly<Record<string, ServiceReadiness>>;
@@ -400,6 +405,9 @@ async function buildRegisteredProjectView(opts: {
       })
     : null;
   const lifecycle = resolveProjectLifecycleView({ config });
+  const remotes = projectRemoteStatuses(
+    config?.prerequisites?.config?.selected
+  );
 
   return {
     projectId: opts.registration.id,
@@ -409,6 +417,7 @@ async function buildRegisteredProjectView(opts: {
     repoRoot: opts.registration.repoRoot,
     projectDir: opts.registration.projectDir,
     ownership: config && !config.parseError ? config.ownership : null,
+    ...(remotes.length > 0 ? { remotes } : {}),
     definedServices,
     serviceReadiness: composeDefinition?.readiness,
     serviceActivation: composeDefinition?.activation,
@@ -782,6 +791,7 @@ export function serializeProjectView(
     extensions_enabled: view.extensionsEnabled ?? null,
     features: view.features ?? null,
     service_hosts: view.serviceHosts ?? null,
+    ...(view.remotes ? { remotes: view.remotes } : {}),
     runtime_configured: view.runtimeConfigured ?? null,
     runtime_status: view.runtimeStatus,
     ...(view.inputDiagnostic ? { input_diagnostic: view.inputDiagnostic } : {}),

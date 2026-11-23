@@ -14,11 +14,9 @@ import { privateCliEnv } from "./private-cli-env.ts";
 
 const roots: string[] = [];
 const cleanupGuards = new Map<string, () => boolean>();
-const requestLoggers: Bun.Server<undefined>[] = [];
+const stopDockerServers: (() => Promise<void>)[] = [];
 afterEach(async () => {
-  for (const server of requestLoggers.splice(0)) {
-    server.stop(true);
-  }
+  await Promise.all(stopDockerServers.splice(0).map((stop) => stop()));
   await Promise.all(
     roots.splice(0).map((root) => {
       if (cleanupGuards.get(root)?.() === false) {
@@ -174,29 +172,7 @@ else {
 `
   );
   const docker = join(root, "docker");
-  // Storage commands inherit a per-file capture quota. Their cumulative test
-  // log is instrumentation, so write it in the parent rather than consuming
-  // that quota in the synthetic Docker child. Await the acknowledgement so
-  // request order and observations after invoke() remain exact.
-  const requestLogger = opts.storage
-    ? Bun.serve({
-        hostname: "127.0.0.1",
-        port: 0,
-        async fetch(request) {
-          await appendFile(join(root, "requests"), await request.text());
-          return new Response(null, { status: 204 });
-        },
-      })
-    : null;
-  if (requestLogger) {
-    requestLoggers.push(requestLogger);
-  }
-  await Bun.write(
-    docker,
-    `#!${process.execPath}
-import {appendFile,rm} from "node:fs/promises";
-const root=${JSON.stringify(root)};const args=process.argv.slice(2);
-${requestLogger ? `const logged=await fetch(${JSON.stringify(requestLogger.url.href)},{method:"POST",body:JSON.stringify(args)+"\\n"});if(!logged.ok)throw new Error("fixture request log failed");` : 'await appendFile(root+"/requests",JSON.stringify(args)+"\\n");'}
+  const dockerBody = `
 const engine=root+"/engine";
 const volumes=root+"/volumes";
 ${opts.storage ? nativeComposeStorageDockerFixtureScript(root) : ""}
@@ -263,11 +239,102 @@ if(args[0]==="network" && args[1]==="inspect" && await Bun.file(engine).exists()
  console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],driver:removed&&await Bun.file(root+"/trace-post-remove-refusal").exists()?"foreign":"bridge",internal:false,containers:removed?{}:pendingMember?{["ep-"+"9".repeat(64)]:{Name:doc.name+"-web-1"}}:transitional&&count<2||finalGap&&count>=2?{}:{["c".repeat(64)]:{}}}));process.exit(0);
 }
 process.exit(99);
+`;
+  const rootSource = `const root=${JSON.stringify(root)};`;
+  if (opts.storage) {
+    const handler = join(root, "docker.mjs");
+    await Bun.write(
+      handler,
+      `import {appendFile,rm} from "node:fs/promises";
+export async function run(args, stdin) {
+${rootSource}
+const output=[];
+const console={log:line=>output.push(line+"\\n")};
+const result=code=>({code, stdout:output.join("")});
+${dockerBody
+  .replaceAll("process.exit(", "return result(")
+  .replace("process.argv.slice(2)", "args")
+  .replace("await Bun.stdin.text()", "stdin")}
+}
 `
-  );
+    );
+    const pending = new Set<Promise<Response>>();
+    const respond = async (request: Request) => {
+      const form = new URLSearchParams(await request.text());
+      const args = form.getAll("arg");
+      // Append from the parent so the log never consumes the child's file quota.
+      await appendFile(join(root, "requests"), `${JSON.stringify(args)}\n`);
+      const { run } = await import(handler);
+      const { code, stdout } = await run(args, form.get("stdin") ?? "");
+      return new Response(stdout, { status: 400 + code });
+    };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const response = respond(request);
+        pending.add(response);
+        try {
+          return await response;
+        } finally {
+          pending.delete(response);
+        }
+      },
+    });
+    stopDockerServers.push(async () => {
+      await server.stop(true);
+      // Closing the connection does not cancel handler file operations.
+      await Promise.allSettled(pending);
+    });
+    await Bun.write(docker, dockerClientScript(server.url.href));
+  } else {
+    await Bun.write(
+      docker,
+      `#!${process.execPath}
+import {appendFile,rm} from "node:fs/promises";
+${rootSource}const args=process.argv.slice(2);
+await appendFile(root+"/requests",JSON.stringify(args)+"\\n");
+${dockerBody}`
+    );
+  }
   await chmod(compiler, 0o700);
   await chmod(docker, 0o700);
   return root;
+}
+
+/**
+ * Keep a real executable and its inherited file descriptors at the CLI boundary.
+ * The server replies with HTTP status 400 + the fake Docker exit code. Curl
+ * appends the three status digits to the body, preserving trailing newlines
+ * in the shell capture. Strip those digits before writing the original body.
+ */
+function dockerClientScript(url: string): string {
+  return `#!/bin/sh
+read_stdin=
+if [ "$1" = start ]; then
+  read_stdin=1
+fi
+count=$#
+while [ "$count" -gt 0 ]; do
+  arg=$1
+  shift
+  set -- "$@" --data-urlencode "arg=$arg"
+  count=$((count - 1))
+done
+if [ -n "$read_stdin" ]; then
+  set -- "$@" --data-urlencode 'stdin@-'
+fi
+response=$(/usr/bin/curl -q --noproxy '*' --silent --show-error \
+  --write-out '%{http_code}' --request POST "$@" ${url}) || exit 98
+body=\${response%???}
+status=\${response#"$body"}
+case "$status" in
+  4[0-9][0-9]) ;;
+  *) exit 98 ;;
+esac
+printf '%s' "$body" || exit 98
+exit "$((status - 400))"
+`;
 }
 
 export async function invoke(

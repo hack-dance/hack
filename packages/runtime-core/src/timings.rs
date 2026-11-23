@@ -4,7 +4,7 @@ mod transport;
 pub use collector::{Collector, Config, Parent, Sink, Span, TimeSource, observe};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-pub use transport::{REQUEST_PREFIX, enable_argument, exit, shutdown};
+pub use transport::{REQUEST_PREFIX, enable_argument, exit, requested_fd, shutdown};
 
 pub const SCHEMA: &str = "hack.timings/1";
 pub const RECORD_LIMIT: usize = 2048;
@@ -28,6 +28,12 @@ steps! {
     ContainerReady => "container.ready", ContainerPublish => "container.publish", SpecDigest => "spec.digest",
     ContainerStart => "container.start", ContainerStop => "container.stop",
     ContainerExec => "container.exec", ContainerRun => "container.run", ContainerInspect => "container.inspect",
+    ImageEnsure => "image.ensure", ImageCache => "image.cache", ImageTagRecord => "image.tag.record",
+    ImageEnginePreflight => "image.engine.preflight", ImageTagResolve => "image.tag.resolve",
+    ImagePinVerify => "image.pin.verify",
+    ImageCacheInventory => "image.cache.inventory",
+    ImageArchiveDigest => "image.archive.digest", ImageImportConnect => "image.import.connect",
+    ImageInspect => "image.inspect",
     Truncated => "timings.truncated",
 }
 
@@ -105,9 +111,10 @@ macro_rules! attributes {
     };
 }
 attributes! {
-    service_index:u64, attempt:u64, engine_requests:u64, dropped:u64,
+    service_index:u64, image_index:u64, attempt:u64, registry_requests:u64, engine_requests:u64, dropped:u64,
     services:u64, wave:u64, syncs:u64, waited_on_index:u64, generation:u64,
     waited_on_cap:bool, blocked:bool, service_index_stable:bool, anchor_fresh:bool,
+    admission_reused:bool,
     reason_spec:bool, reason_unhealthy:bool, reason_exited:bool, reason_dead:bool,
     reason_missing:bool, reason_forced:bool, reason_migrated:bool, reason_managed_env:bool,
     changed_image:bool, changed_command:bool, changed_env:bool, changed_managed_env:bool,
@@ -293,6 +300,21 @@ pub fn measure<T, E>(
         .map(|p| p.collector.clone())
         .or_else(|| transport::installed().cloned());
     observe(collector.as_ref(), step, parent, action)
+}
+
+/// As [`measure`], for work that reports reviewed attributes on its own span. Disabled
+/// observation hands the work attributes that nothing reads.
+pub fn measure_attributed<T, E>(
+    step: Step,
+    parent: Option<Parent>,
+    action: impl FnOnce(Option<Parent>, &mut Attrs) -> Result<T, E>,
+) -> Result<T, E> {
+    let context = parent.clone().or_else(collector::current);
+    let collector = context
+        .as_ref()
+        .map(|p| p.collector.clone())
+        .or_else(|| transport::installed().cloned());
+    collector::observe_attributed(collector.as_ref(), step, parent, action, |_| None)
 }
 
 /// Dispatch observation includes the runtime's existing fixed error code.

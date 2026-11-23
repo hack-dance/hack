@@ -1,10 +1,26 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  posix,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  NATIVE_BUILDER_MISSING,
+  NATIVE_BUILDER_NOT_PREPARED,
+  type NativeBuilderCommandOptions,
+  nativeBuilderRemedy,
+} from "../lib/native-image-builder.ts";
+import { nativeImageRegistryReason } from "./native-image-policy.ts";
+import {
+  type invokeNativeRuntime,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -18,13 +34,16 @@ import {
  * closed, coded refusal. After the runtime is up, each distinct build runs once
  * through `runtime build-image`; the service is then pinned to the returned content
  * ID, so review, graph admission, receipts and restore treat it as an image
- * service. Restore and restart never build: they use the retained content ID or
- * refuse before any graph effect.
+ * service. Every `up`, including one that restores a stopped run, asks the runtime
+ * for each build: an unchanged build key reuses its image without building, a changed
+ * one builds (HACK-2533). Restart resolves its builds the same way before it stops the
+ * old graph, and its replacement start runs the resolved images.
  */
 
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const BUILD_KEY = /^[a-f0-9]{64}$/;
 const ARGUMENT = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const TRAILING_SLASH = /\/$/;
 const TARGET = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 /**
  * The Compose `build` fields native builds implement. The Compose-backend feature
@@ -38,6 +57,57 @@ export const NATIVE_BUILD_FIELDS = [
   "args",
 ] as const;
 const BUILD_KEYS: ReadonlySet<string> = new Set(NATIVE_BUILD_FIELDS);
+
+/**
+ * Compose build fields native builds do not implement, in the order a refusal
+ * names them: the three users meet most, with what to change, then the rest of
+ * the Compose specification's build fields. A refusal names a field only from
+ * this list; any other key is authored text and is never printed.
+ */
+export const UNSUPPORTED_NATIVE_BUILD_FIELDS: ReadonlyMap<
+  string,
+  string | undefined
+> = new Map([
+  ["additional_contexts", "native builds read one context directory"],
+  ["ssh", "SSH agent forwarding into a native build is not supported"],
+  [
+    "dockerfile_inline",
+    "put the Dockerfile in a file inside the context and set build.dockerfile",
+  ],
+  ...[
+    "cache_from",
+    "cache_to",
+    "entitlements",
+    "extra_hosts",
+    "isolation",
+    "labels",
+    "network",
+    "no_cache",
+    "platforms",
+    "privileged",
+    "pull",
+    "secrets",
+    "shm_size",
+    "tags",
+    "ulimits",
+  ].map((field) => [field, undefined] as const),
+]);
+
+/**
+ * The first field of a build mapping that native builds do not implement, as
+ * `build.<field>` from {@link UNSUPPORTED_NATIVE_BUILD_FIELDS}, with its reason;
+ * `undefined` when every key is implemented or only unknown keys remain.
+ */
+export function unsupportedNativeBuildField(
+  build: Readonly<Record<string, unknown>>
+): { readonly field: string; readonly reason?: string } | undefined {
+  for (const [field, reason] of UNSUPPORTED_NATIVE_BUILD_FIELDS) {
+    if (Object.hasOwn(build, field)) {
+      return { field: `build.${field}`, ...(reason ? { reason } : {}) };
+    }
+  }
+  return undefined;
+}
 const MAX_ARGS = 64;
 /** The runtime's own budget is 30 minutes; the client waits a little longer. */
 const BUILD_TIMEOUT_SECONDS = 30 * 60;
@@ -164,9 +234,12 @@ function buildFields(service: string, build: unknown): NativeBuildRequest {
     throw refused(service, "build must be a context path or a mapping.");
   }
   if (Object.keys(build).some((key) => !BUILD_KEYS.has(key))) {
+    const named = unsupportedNativeBuildField(build);
     throw refused(
       service,
-      "only build context, dockerfile, target and literal args are supported."
+      named
+        ? `${named.field} is not supported by native builds${named.reason ? ` (${named.reason})` : ""}; only build context, dockerfile, target and literal args are supported.`
+        : "only build context, dockerfile, target and literal args are supported."
     );
   }
   const target =
@@ -331,31 +404,55 @@ async function forwardBuildOutput(
   return held;
 }
 
-function failureCode(line: string | undefined): string | undefined {
-  if (line === undefined) {
-    return;
-  }
-  try {
-    const value: unknown = JSON.parse(line);
-    return isRecord(value) &&
-      typeof value.code === "string" &&
-      ERROR_CODE.test(value.code)
-      ? value.code
-      : undefined;
-  } catch {
-    return;
+const BUILD_BASE_REFERENCE = /^[A-Za-z0-9._:/@-]{1,512}$/;
+
+export class NativeBuildRegistryError extends NativeRuntimeRequestError {
+  readonly reference: string;
+
+  constructor(reference: string, causeCode: string, code = "registry_image") {
+    super({
+      message: `Build base ${reference} is unavailable (${nativeImageRegistryReason(causeCode)}). Retry hack up when the registry is reachable.`,
+      nativeCode: code,
+      nativeCauseCode: causeCode,
+    });
+    this.reference = reference;
   }
 }
 
-function failureMessage(line: string | undefined): string | undefined {
-  try {
-    const value: unknown = line === undefined ? undefined : JSON.parse(line);
-    return isRecord(value) && typeof value.message === "string"
-      ? value.message.slice(0, 512)
-      : undefined;
-  } catch {
-    return;
+function buildFailure(line: string | undefined): NativeRuntimeRequestError {
+  let value: unknown;
+  if (line !== undefined) {
+    try {
+      value = JSON.parse(line);
+    } catch {
+      value = undefined;
+    }
   }
+  const detail = isRecord(value) ? value : {};
+  const code =
+    typeof detail.code === "string" && ERROR_CODE.test(detail.code)
+      ? detail.code
+      : undefined;
+  if (
+    code?.startsWith("registry_") &&
+    typeof detail.cause_code === "string" &&
+    nativeImageRegistryReason(detail.cause_code) &&
+    typeof detail.build_base_reference === "string" &&
+    BUILD_BASE_REFERENCE.test(detail.build_base_reference)
+  ) {
+    return new NativeBuildRegistryError(
+      detail.build_base_reference,
+      detail.cause_code,
+      code
+    );
+  }
+  return new NativeRuntimeRequestError({
+    message:
+      typeof detail.message === "string"
+        ? detail.message.slice(0, 512)
+        : "Native image build failed; its output is shown above.",
+    nativeCode: code,
+  });
 }
 
 /**
@@ -419,13 +516,7 @@ export async function invokeNativeBuild(opts: {
       );
     }
     if (code !== 0) {
-      const nativeCode = failureCode(held);
-      throw new NativeRuntimeRequestError({
-        message:
-          failureMessage(held) ??
-          "Native image build failed; its output is shown above.",
-        nativeCode,
-      });
+      throw buildFailure(held);
     }
     if (stdout.byteLength > MAX_STDOUT) {
       throw new ClosedCliError(
@@ -522,20 +613,22 @@ export function refuseManagedSecretBuildArguments(opts: {
   }
 }
 
-/** A refusal when a retained run's built image is gone: restore never builds. */
-function retainedMissing(service: string): ClosedCliError {
-  return new ClosedCliError(
-    `The retained built image for ${service} was removed; start fresh instead of restoring. Nothing was built.`
-  );
-}
+/** Leave a CPU for other guest work on the four-CPU development pool. */
+const MAX_CONCURRENT_PROJECT_BUILDS = 3;
+
+export type NativeBuildSettlement = {
+  readonly services: readonly string[];
+  readonly durationMs: number;
+  readonly outcome: "built" | "reused" | "failed" | "cancelled";
+};
 
 /**
  * Build (or reuse) every admitted build service in the selected profiles and pin it to
- * its content ID. As with Compose `up`, a build service outside the selected profiles
- * is neither built nor pinned: it keeps its `build` declaration, which review accepts
- * for inactive services, so restore and restart never need an image for it. Identical
- * declarations build once. Retained content IDs always win, and a restore with a
- * missing retained image refuses instead of building.
+ * its content ID; returns the pinned services. As with Compose `up`, a build service
+ * outside the selected profiles is neither built nor pinned: it keeps its `build`
+ * declaration, which review accepts for inactive services. Identical declarations build
+ * once. A retained run's image never stands in for a build: the runtime reuses it only
+ * while its build key is unchanged, so an edited Dockerfile is built after `down` too.
  */
 export async function buildNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -544,28 +637,148 @@ export async function buildNativeProjectImages(opts: {
   readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
-  readonly retainedImages: ReadonlyMap<string, string>;
-  readonly restore: boolean;
+  readonly rebuild: boolean;
+  readonly signal: AbortSignal;
+  readonly guestCpus?: number;
+  readonly onBuildSettled?: (settlement: NativeBuildSettlement) => void;
+  readonly invoke?: typeof invokeNativeBuild;
+  /** Called once for each build the runtime actually ran (not a reused image). */
+  readonly onBuilt?: () => void;
+}): Promise<ReadonlySet<string>> {
+  const pending = pendingBuilds(opts);
+  if (pending.size > 0) {
+    await runPendingBuilds({ ...opts, pending });
+  }
+  return new Set([...pending.values()].flatMap((entry) => entry.services));
+}
+
+/**
+ * Resolve a restart's builds before anything is stopped: refuse a build argument equal
+ * to a managed secret (as startup does), then ask the runtime for each active build of
+ * a running service (an unchanged build key reuses its image without building; a
+ * changed one builds, so a failed build refuses while the old graph still runs).
+ * Returns the resolved images; the replacement start pins exactly these, so nothing is
+ * built after the old graph stopped and a rebuilt image is what the new graph runs.
+ */
+export async function resolveNativeRestartBuilds(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly branch: string | null | undefined;
+  readonly profiles: readonly string[];
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly images: ReadonlyMap<string, string>;
+  readonly managedSecretValues: readonly string[];
+  /** `HACK_NATIVE_REBUILD=1`: every build runs again, as on `up`. */
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
-}): Promise<void> {
-  const pending = pendingBuilds(opts);
-  if (pending.size === 0) {
-    return;
+}): Promise<ReadonlyMap<string, NativeVerifiedBuild>> {
+  refuseManagedSecretBuildArguments({
+    builds: opts.builds,
+    managedSecretValues: opts.managedSecretValues,
+  });
+  const copies: Record<string, Record<string, unknown>> = {};
+  for (const service of opts.builds.keys()) {
+    const spec = opts.specs[service];
+    if (spec && opts.images.has(service)) {
+      copies[service] = { ...spec };
+    }
   }
-  await runPendingBuilds({ ...opts, pending });
+  const builds = new Map(
+    [...opts.builds].filter(([service]) => service in copies)
+  );
+  const pinned = await buildNativeProjectImages({
+    ...opts,
+    builds,
+    specs: copies,
+  });
+  const resolved = new Map<string, NativeVerifiedBuild>();
+  for (const service of pinned) {
+    const image = copies[service]?.image;
+    const request = builds.get(service);
+    if (typeof image !== "string" || !IMAGE_ID.test(image) || !request) {
+      throw new ClosedCliError(
+        "Native restart build selection is invalid; nothing was stopped."
+      );
+    }
+    resolved.set(service, {
+      imageId: image,
+      identity: nativeBuildIdentity(request),
+    });
+  }
+  return resolved;
+}
+
+/**
+ * Pin build services to the images a restart preflight resolved, so the replacement
+ * start runs exactly those images and builds nothing after the old graph stopped.
+ * Every active build service must be covered by an image resolved for the same
+ * declaration; a build service added or changed between preflight and start refuses
+ * instead of building. Returns the builds that still need the runtime: the inactive
+ * ones (never built), or all of them when there is no restart selection.
+ */
+export function pinVerifiedNativeBuilds(opts: {
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly profiles: readonly string[];
+  readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
+}): ReadonlyMap<string, NativeBuildRequest> {
+  if (opts.verified === undefined) {
+    return opts.builds;
+  }
+  const remaining = new Map<string, NativeBuildRequest>();
+  for (const [service, request] of opts.builds) {
+    const spec = opts.specs[service];
+    if (!(spec && nativeServiceActive(spec, opts.profiles))) {
+      remaining.set(service, request);
+      continue;
+    }
+    const verified = opts.verified.get(service);
+    if (verified?.identity !== nativeBuildIdentity(request)) {
+      throw new ClosedCliError(
+        `The build declaration of ${service} changed during the restart; nothing was built after the old graph stopped. Run hack up to start it.`
+      );
+    }
+    pin(spec, verified.imageId);
+  }
+  return remaining;
 }
 
 type PendingBuild = { request: NativeBuildRequest; services: string[] };
 
-/** Pin retained images, refuse a restore without one, and group identical builds. */
+/** The declaration a build request stands for: identical ones build once. */
+export function nativeBuildIdentity(request: NativeBuildRequest): string {
+  const { context, dockerfile } = request;
+  // Match the runtime's lexical source resolution for valid relative paths.
+  // Keep the authored path in the request so the runtime still validates it.
+  const keyPath =
+    dockerfile.length > 0 &&
+    !posix.isAbsolute(dockerfile) &&
+    !dockerfile.includes("$") &&
+    !dockerfile.includes("~") &&
+    !dockerfile.includes("\0")
+      ? [posix.join(context, dockerfile).replace(TRAILING_SLASH, "")]
+      : [dockerfile, "invalid"];
+  return JSON.stringify([
+    context,
+    keyPath,
+    request.target,
+    Object.entries(request.args).sort(([a], [b]) => (a < b ? -1 : 1)),
+  ]);
+}
+
+/** A restart's resolved build image, bound to the declaration it was resolved for. */
+export interface NativeVerifiedBuild {
+  readonly imageId: string;
+  readonly identity: string;
+}
+
+/** Group identical builds of the active build services. */
 function pendingBuilds(opts: {
   readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
-  readonly retainedImages: ReadonlyMap<string, string>;
-  readonly restore: boolean;
 }): Map<string, PendingBuild> {
   const pending = new Map<string, PendingBuild>();
   for (const [service, request] of opts.builds) {
@@ -578,27 +791,41 @@ function pendingBuilds(opts: {
     if (!nativeServiceActive(spec, opts.profiles)) {
       continue;
     }
-    const retained = opts.retainedImages.get(service);
-    if (retained !== undefined) {
-      pin(spec, retained);
-      continue;
-    }
-    // A retained run selects retained images only while its configuration is
-    // unchanged; then a build service without one refuses instead of building.
-    if (opts.restore && opts.retainedImages.size > 0) {
-      throw retainedMissing(service);
-    }
-    const identity = JSON.stringify([
-      request.context,
-      request.dockerfile,
-      request.target,
-      Object.entries(request.args).sort(([a], [b]) => (a < b ? -1 : 1)),
-    ]);
+    const identity = nativeBuildIdentity(request);
     const entry = pending.get(identity) ?? { request, services: [] };
     entry.services.push(service);
     pending.set(identity, entry);
   }
   return pending;
+}
+
+/** Bound on the reclamation an `up` runs after a rebuild. */
+const RECLAIM_TIMEOUT_MS = 60_000;
+/**
+ * After a start that built at least one image is ready, remove the build images no
+ * longer kept (`runtime reclaim-build-images --best-effort`: per build declaration
+ * the current and one previous image, plus every image a container or retained run
+ * references). Bounded, and it never fails or delays the start: the runtime reports
+ * a refusal instead of failing, and any other error is dropped. Nothing is printed.
+ */
+export async function reclaimNativeBuildImagesAfterRebuild(opts: {
+  /** Whether this start built an image; without one nothing is reclaimed. */
+  readonly rebuilt: boolean;
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  if (!opts.rebuilt) {
+    return;
+  }
+  await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "reclaim-build-images", "--best-effort", "--json"],
+      timeoutMs: RECLAIM_TIMEOUT_MS,
+    })
+    .catch(() => undefined);
 }
 
 async function runPendingBuilds(opts: {
@@ -609,22 +836,89 @@ async function runPendingBuilds(opts: {
   readonly specs: Record<string, Record<string, unknown>>;
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
+  readonly guestCpus?: number;
+  readonly onBuildSettled?: (settlement: NativeBuildSettlement) => void;
   readonly invoke?: typeof invokeNativeBuild;
+  readonly onBuilt?: () => void;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeBuild;
   // The runtime requires the exact canonical root; it also derives the namespace.
   const projectRoot = await realpath(opts.projectRoot);
   const directory = await mkdtemp(join(tmpdir(), "hack-native-build-"));
+  const cpus = opts.guestCpus ?? 1;
+  const cap =
+    Number.isSafeInteger(cpus) && cpus > 0
+      ? Math.min(MAX_CONCURRENT_PROJECT_BUILDS, cpus)
+      : 1;
+  const parallel = cap > 1 && opts.pending.size > 1;
+  const onBuildSettled = parallel ? opts.onBuildSettled : undefined;
+  const controller = new AbortController();
+  const running = new Set<Promise<void>>();
+  const interrupt = () =>
+    controller.abort(
+      new ClosedCliError("Native foreground up was canceled; values omitted.")
+    );
+  opts.signal.addEventListener("abort", interrupt, { once: true });
+  if (opts.signal.aborted) {
+    interrupt();
+  }
+
+  const runBuild = async (requestFile: string, services: readonly string[]) => {
+    const started = performance.now();
+    let outcome: NativeBuildSettlement["outcome"] = "failed";
+    try {
+      const built = await invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        requestFile,
+        signal: controller.signal,
+        ...(parallel
+          ? {
+              write: (line: string) =>
+                process.stderr.write(`[${services.join(", ")}] ${line}`),
+            }
+          : {}),
+      });
+      if (controller.signal.aborted) {
+        outcome = "cancelled";
+        return;
+      }
+      outcome = built.reused ? "reused" : "built";
+      if (!built.reused) {
+        opts.onBuilt?.();
+      }
+      for (const service of services) {
+        const spec = opts.specs[service];
+        if (spec) {
+          pin(spec, built.imageId);
+        }
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        outcome = "cancelled";
+      } else {
+        controller.abort(nameBuildFailure(services, error, parallel));
+      }
+    } finally {
+      onBuildSettled?.({
+        services,
+        outcome,
+        durationMs: performance.now() - started,
+      });
+      await rm(requestFile, { force: true });
+    }
+  };
+
   try {
     let index = 0;
     for (const { request, services } of opts.pending.values()) {
-      if (opts.signal.aborted) {
-        throw new ClosedCliError(
-          "Native foreground up was canceled; values omitted."
-        );
+      if (running.size >= cap) {
+        await Promise.race(running);
       }
-      const requestFile = join(directory, `request-${index}.json`);
-      index += 1;
+      if (controller.signal.aborted) {
+        break;
+      }
+      const requestFile = join(directory, `request-${index++}.json`);
       await writeFile(
         requestFile,
         JSON.stringify({
@@ -640,26 +934,27 @@ async function runPendingBuilds(opts: {
         }),
         { mode: 0o600, flag: "wx" }
       );
-      const built = await invoke({
-        runtime: opts.runtime,
-        cwd: opts.projectRoot,
-        requestFile,
-        signal: opts.signal,
-      }).catch((error: unknown) => {
-        throw nameBuildFailure(services, error);
-      });
-      // The request carries argument values; remove it as soon as it is consumed.
-      await rm(requestFile, { force: true });
-      for (const service of services) {
-        const spec = opts.specs[service];
-        if (spec) {
-          pin(spec, built.imageId);
-        }
+      // Stage sequentially so the runtime calls start in authored order.
+      if (controller.signal.aborted) {
+        break;
       }
+      const task = runBuild(requestFile, services)
+        .catch((error: unknown) => controller.abort(error))
+        .finally(() => {
+          running.delete(task);
+        });
+      running.add(task);
     }
+  } catch (error) {
+    controller.abort(error);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await Promise.all(running);
+    opts.signal.removeEventListener("abort", interrupt);
+    await rm(directory, { recursive: true, force: true }).catch(
+      (error: unknown) => controller.abort(error)
+    );
   }
+  controller.signal.throwIfAborted();
 }
 
 /**
@@ -684,34 +979,58 @@ const BUILD_SOURCE_POLICY: Readonly<Record<string, string>> = {
 
 /**
  * Name the services of a failed `runtime build-image`. A refusal from the build
- * source policy says so and what to change; any other runtime failure keeps its
- * message. The native code is kept for callers that classify failures.
- * Cancellation and closed client errors carry no service-specific cause and pass
- * through unchanged.
+ * source policy says so and what to change; a home without the image builder
+ * says so and how to add it, naming this install's own command; any other
+ * runtime failure keeps its message. The native code is kept for callers that
+ * classify failures. Cancellation and closed client errors carry no
+ * service-specific cause and pass through unchanged.
  */
 function nameBuildFailure(
   services: readonly string[],
-  error: unknown
+  error: unknown,
+  parallel: boolean
 ): unknown {
-  if (!(error instanceof NativeRuntimeRequestError)) {
+  if (error instanceof NativeBuildRegistryError) {
     return error;
   }
   const which = serviceList(services);
+  if (!(error instanceof NativeRuntimeRequestError)) {
+    return parallel
+      ? new ClosedCliError(
+          `Native foreground up could not build ${which}. ${error instanceof ClosedCliError ? error.message : "Build result unavailable; values omitted."}`
+        )
+      : error;
+  }
   const code = error.nativeCode;
   const change =
     code !== undefined && Object.hasOwn(BUILD_SOURCE_POLICY, code)
       ? BUILD_SOURCE_POLICY[code]
       : undefined;
-  const message =
-    change === undefined
-      ? `Native foreground up could not build ${which}: ${error.message}`
-      : `Native foreground up cannot build ${which}: the native build source policy refused it. ${error.message} ${change} No image was adopted.`;
+  let message: string;
+  if (code === NATIVE_BUILDER_NOT_PREPARED) {
+    message = nativeBuilderMissingRefusal({ services });
+  } else if (change === undefined) {
+    message = `Native foreground up could not build ${which}: ${error.message}`;
+  } else {
+    message = `Native foreground up cannot build ${which}: the native build source policy refused it. ${error.message} ${change} No image was adopted.`;
+  }
   return new NativeRuntimeRequestError({
     message,
     nativeCode: error.nativeCode,
     nativeCauseCode: error.nativeCauseCode,
     nativeStopFailures: error.nativeStopFailures,
   });
+}
+
+/**
+ * The `hack up` refusal for a native home that has no image builder: what is
+ * wrong and the one setup command that adds it, as every builder message
+ * names it.
+ */
+export function nativeBuilderMissingRefusal(
+  opts: NativeBuilderCommandOptions & { readonly services: readonly string[] }
+): string {
+  return `Native foreground up cannot build ${serviceList(opts.services)}: ${NATIVE_BUILDER_MISSING}. ${nativeBuilderRemedy(opts)} No image was built.`;
 }
 
 function pin(spec: Record<string, unknown>, image: string): void {

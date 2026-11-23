@@ -128,3 +128,12 @@ test("a refused local registry names the opt-in setting without echoing the refe
   expect(String(failure)).toContain("HACK_NATIVE_LOCAL_REGISTRIES");
   expect(String(failure)).not.toContain("private-canary");
 });
+
+test("a zero-second tag lifetime explicitly refreshes on ordinary starts", () => {
+  expect(
+    nativeImagePolicyArgs({ HACK_NATIVE_IMAGE_TAG_TTL_SECONDS: "0" })
+  ).toEqual(["--image-tag-ttl-seconds", "0"]);
+  expect(() =>
+    nativeImagePolicyArgs({ HACK_NATIVE_IMAGE_TAG_TTL_SECONDS: "24h" })
+  ).toThrow(HackCliError);
+});

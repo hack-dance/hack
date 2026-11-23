@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub fn io(error: std::io::Error) -> CandidateError {
     CandidateError::new("provider_state", error.to_string())
@@ -20,6 +21,17 @@ fn missing_alias() -> CandidateError {
 
 fn replaced_alias() -> CandidateError {
     CandidateError::new("foreign_state", "Short provider HOME alias was replaced.")
+}
+
+fn alias_creation_error(error: std::io::Error, message: &'static str) -> CandidateError {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        CandidateError::new(
+            "temp_alias_sweep_busy",
+            "Timed out waiting for the temporary HOME alias sweep to release its lease.",
+        )
+    } else {
+        CandidateError::new("socket_alias_collision", message)
+    }
 }
 
 pub fn private_directory(path: &Path) -> Result<(), CandidateError> {
@@ -47,10 +59,10 @@ pub fn check_private_directory(path: &Path) -> Result<(), CandidateError> {
 
 pub struct Lock(File, bool);
 impl Lock {
-    /// Advisory diagnostics only, on the provider pool's lock inode. Never
+    /// Advisory diagnostics on provider and image cache locks. Never
     /// interpreted as ownership or recovery authority; crashes may leave it stale.
     fn describe_holder(mut self, root: &Path) -> Result<Self, CandidateError> {
-        if provider_lock(root) {
+        if labelled_lock(root) {
             // A diagnostic must never turn an acquired stop/start lease into a
             // refusal. Partial or stale bytes are ignored by the closed reader.
             let label = operation_label();
@@ -123,37 +135,32 @@ impl Lock {
         check_private_directory(root)?;
         let file = OpenOptions::new()
             .read(true)
-            .write(provider_lock(root))
+            .write(labelled_lock(root))
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(root.join("operation.lock"))
             .map_err(io)?;
         Self::from_file(file)?.describe_holder(root)
     }
 
-    #[cfg(target_os = "macos")]
-    /// [`Self::acquire_existing`], waiting up to `wait` for another holder, such as the
-    /// short read-only inspection behind `hack ps`, to release the lock. Only acquisition
-    /// is retried: nothing is created or admitted while waiting, and on expiry the
-    /// ordinary `provider_busy` refusal is returned.
-    pub fn acquire_existing_waiting(
-        root: &Path,
-        wait: std::time::Duration,
-    ) -> Result<Self, CandidateError> {
-        let deadline = std::time::Instant::now() + wait;
-        loop {
-            match Self::acquire_existing(root) {
-                Err(error)
-                    if error.code == "provider_busy" && std::time::Instant::now() < deadline =>
-                {
-                    std::thread::sleep(
-                        deadline
-                            .saturating_duration_since(std::time::Instant::now())
-                            .min(std::time::Duration::from_millis(50)),
-                    );
-                }
-                result => return result,
-            }
-        }
+    /// Wait only to acquire the lock, then let callers verify state and perform
+    /// effects once under the held lease.
+    pub fn acquire_until(root: &Path, deadline: Instant) -> Result<Self, CandidateError> {
+        wait_for_acquisition(
+            deadline,
+            || Ok(()),
+            || Self::acquire(root),
+            acquisition_expired,
+        )
+    }
+
+    /// Retry acquisition without creating the lock file.
+    pub fn acquire_existing_waiting(root: &Path, wait: Duration) -> Result<Self, CandidateError> {
+        wait_for_acquisition(
+            Instant::now() + wait,
+            || Ok(()),
+            || Self::acquire_existing(root),
+            acquisition_expired,
+        )
     }
 
     /// Adopt an exclusively created private lock file before publishing its
@@ -170,10 +177,52 @@ impl Lock {
                 "Unsafe operation lock.",
             ));
         }
-        if flock(&file, libc::LOCK_EX | libc::LOCK_NB).is_err() {
-            return Err(CandidateError::new("provider_busy", holder_message(&file)));
+        if let Err(error) = flock(&file, libc::LOCK_EX | libc::LOCK_NB) {
+            return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+                CandidateError::new("provider_busy", holder_message(&file))
+            } else {
+                io(error)
+            });
         }
         Ok(Self(file, false))
+    }
+}
+
+pub(super) fn acquisition_expired() -> CandidateError {
+    CandidateError::new(
+        "provider_busy",
+        "Provider lease acquisition deadline expired; no operation was admitted.",
+    )
+}
+
+/// Retry confirmed contention with a monotonic deadline and capped backoff.
+/// Each attempt opens and validates the current lock. The caller supplies only
+/// acquisition; an admitted effect, or any other refusal, returns immediately.
+pub(super) fn wait_for_acquisition<T>(
+    deadline: Instant,
+    mut before_attempt: impl FnMut() -> Result<(), CandidateError>,
+    mut acquire: impl FnMut() -> Result<T, CandidateError>,
+    expired: impl FnOnce() -> CandidateError,
+) -> Result<T, CandidateError> {
+    let mut delay = Duration::from_millis(5);
+    let mut busy = None;
+    loop {
+        before_attempt()?;
+        if Instant::now() >= deadline {
+            return Err(busy.unwrap_or_else(expired));
+        }
+        match acquire() {
+            Err(error) if error.code == "provider_busy" => {
+                busy = Some(error);
+                std::thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+                delay = (delay * 2).min(Duration::from_millis(50));
+            }
+            Ok(lock) if Instant::now() >= deadline => {
+                drop(lock);
+                return Err(busy.unwrap_or_else(expired));
+            }
+            result => return result,
+        }
     }
 }
 
@@ -198,8 +247,8 @@ impl Drop for Lock {
     }
 }
 
-fn provider_lock(root: &Path) -> bool {
-    root.ends_with("run/smolvm")
+fn labelled_lock(root: &Path) -> bool {
+    root.ends_with("run/smolvm") || root.ends_with("artifacts/images")
 }
 
 fn operation_label() -> &'static str {
@@ -208,8 +257,11 @@ fn operation_label() -> &'static str {
         match argument.to_str() {
             Some("cleanup" | "down" | "stop") => return "cleanup",
             Some("recover" | "recover-live-owner" | "recover-cleanup") => return "recovery",
-            Some("run" | "serve" | "start" | "restore" | "restart") => return "start",
+            Some("up" | "run" | "serve" | "start" | "restore" | "restart") => return "start",
             Some("inspect" | "status") => return "inspection",
+            Some("retained-preflight") => return "retained_startup",
+            Some("ensure-image") => return "image_acquisition",
+            Some("project-share") => return "project_share_update",
             _ => {}
         }
     }
@@ -245,6 +297,15 @@ fn holder_message(file: &File) -> &'static str {
         }
         Some("inspection") => {
             "Provider lease acquisition refused; recorded holder: inspection; no operation was admitted."
+        }
+        Some("retained_startup") => {
+            "Provider lease acquisition refused; recorded holder: retained startup check; no operation was admitted."
+        }
+        Some("image_acquisition") => {
+            "Provider lease acquisition refused; recorded holder: image acquisition; no operation was admitted."
+        }
+        Some("project_share_update") => {
+            "Provider lease acquisition refused; recorded holder: project share update; no operation was admitted."
         }
         Some("operation") => {
             "Provider lease acquisition refused; recorded holder: native operation; no operation was admitted."
@@ -614,7 +675,7 @@ impl Owner {
             ));
         }
         if alias == Alias::Missing {
-            match std::os::unix::fs::symlink(self.home(candidate), &self.short_home) {
+            match super::temp_aliases::create_link(&self.home(candidate), &self.short_home) {
                 Ok(()) => return self.check_short_home(candidate, false),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     // Another entry took the path between the check and the creation.
@@ -622,9 +683,9 @@ impl Owner {
                         return Ok(());
                     }
                 }
-                Err(_) => {
-                    return Err(CandidateError::new(
-                        "socket_alias_collision",
+                Err(error) => {
+                    return Err(alias_creation_error(
+                        error,
                         "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
                     ));
                 }
@@ -650,10 +711,15 @@ impl Owner {
             }
             next.save(candidate)?;
             *self = next;
-            match std::os::unix::fs::symlink(self.home(candidate), &self.short_home) {
+            match super::temp_aliases::create_link(&self.home(candidate), &self.short_home) {
                 Ok(()) => return self.check_short_home(candidate, false),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(io(error)),
+                Err(error) => {
+                    return Err(alias_creation_error(
+                        error,
+                        "Cannot exclusively create a fresh provider HOME alias; receipt retained.",
+                    ));
+                }
             }
         }
         Err(CandidateError::new(
@@ -676,13 +742,14 @@ impl Owner {
             Err(error) => return Err(io(error)),
         };
         // SAFETY: geteuid has no preconditions.
-        if alias.file_type().is_symlink()
-            && alias.uid() == unsafe { libc::geteuid() }
-            && fs::read_link(&self.short_home).map_err(io)? == self.home(candidate)
-        {
-            Ok(Alias::Owned)
-        } else {
-            Ok(Alias::Foreign)
+        if !alias.file_type().is_symlink() || alias.uid() != unsafe { libc::geteuid() } {
+            return Ok(Alias::Foreign);
+        }
+        match fs::read_link(&self.short_home) {
+            Ok(target) if target == self.home(candidate) => Ok(Alias::Owned),
+            Ok(_) => Ok(Alias::Foreign),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Alias::Missing),
+            Err(error) => Err(io(error)),
         }
     }
 
@@ -713,12 +780,10 @@ impl Owner {
                 "Provider owner changed during HOME recovery; no alias was restored.",
             ));
         }
-        std::os::unix::fs::symlink(self.home(candidate), &self.short_home).map_err(|_| {
-            CandidateError::new(
-                "socket_alias_collision",
-                "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
-            )
-        })?;
+        super::temp_aliases::create_link(&self.home(candidate), &self.short_home).map_err(|error| alias_creation_error(
+            error,
+            "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
+        ))?;
         self.check_short_home(candidate, false)
     }
 
@@ -817,12 +882,10 @@ impl Owner {
         };
         // Persist the intended alias before its first external effect. Collisions are never adopted.
         owner.save(candidate)?;
-        std::os::unix::fs::symlink(root.join("home"), &owner.short_home).map_err(|_| {
-            CandidateError::new(
-                "socket_alias_collision",
-                "Cannot exclusively create short provider alias; receipt retained for inspection.",
-            )
-        })?;
+        super::temp_aliases::create_link(&root.join("home"), &owner.short_home).map_err(|error| alias_creation_error(
+            error,
+            "Cannot exclusively create short provider alias; receipt retained for inspection.",
+        ))?;
         if owner
             .data_dir()
             .join("agent.sock")
@@ -886,6 +949,107 @@ impl Owner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_start_waiter_reacquires_after_release_or_gives_up_with_the_holder() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        let first = super::Lock::acquire(&root).unwrap();
+        let mut attempts = 0;
+        let refused = super::wait_for_acquisition(
+            Instant::now() + Duration::from_millis(50),
+            || {
+                attempts += 1;
+                assert!(attempts < 12, "acquisition continued beyond its deadline");
+                Ok(())
+            },
+            || super::Lock::acquire(&root),
+            super::acquisition_expired,
+        );
+        assert!(
+            matches!(refused, Err(error) if error.code == "provider_busy" && error.message.contains("recorded holder:"))
+        );
+        let (observed, busy) = mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                super::wait_for_acquisition(
+                    Instant::now() + Duration::from_secs(2),
+                    || Ok(()),
+                    || {
+                        let result = super::Lock::acquire(&root);
+                        if matches!(&result, Err(error) if error.code == "provider_busy") {
+                            let _ = observed.try_send(());
+                        }
+                        result
+                    },
+                    super::acquisition_expired,
+                )
+            });
+            busy.recv_timeout(Duration::from_secs(1)).unwrap();
+            drop(first);
+            drop(second.join().unwrap().unwrap());
+        });
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn a_start_waiter_cancels_after_confirmed_contention() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        let holder = super::Lock::acquire(&root).unwrap();
+        let contended = Cell::new(false);
+        let refused = super::wait_for_acquisition(
+            Instant::now() + Duration::from_secs(2),
+            || {
+                if contended.get() {
+                    return Err(crate::CandidateError::new(
+                        "provider_acquisition_cancelled",
+                        "cancelled",
+                    ));
+                }
+                Ok(())
+            },
+            || {
+                let result = super::Lock::acquire(&root);
+                assert!(matches!(&result, Err(error) if error.code == "provider_busy"));
+                contended.set(true);
+                result
+            },
+            super::acquisition_expired,
+        );
+        assert!(contended.get());
+        assert!(matches!(refused, Err(error) if error.code == "provider_acquisition_cancelled"));
+        drop(holder);
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn acquisition_after_the_deadline_releases_the_lock() {
+        use std::time::{Duration, Instant};
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut acquired = false;
+        let refused = super::wait_for_acquisition(
+            deadline,
+            || Ok(()),
+            || {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                let lease = super::Lock::acquire(&root)?;
+                acquired = true;
+                Ok(lease)
+            },
+            super::acquisition_expired,
+        );
+        assert!(acquired);
+        assert!(matches!(refused, Err(error) if error.code == "provider_busy"));
+        drop(super::Lock::acquire(&root).unwrap());
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
     #[test]
     fn advisory_write_failure_does_not_refuse_the_acquired_provider_lease() {
         let fixture = fixture();

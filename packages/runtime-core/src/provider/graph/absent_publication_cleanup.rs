@@ -306,6 +306,9 @@ fn current_owner(
     host_pin_recovery::verify_guest_identity(engine)?;
     let pool =
         fs::symlink_metadata(candidate.state_root.join("run/smolvm")).map_err(|_| refused())?;
+    // Strict on purpose: unlike dead-owner recovery, which may select any earlier boot
+    // from the pool's boot history, this procedure trusts a user-supplied old owner.json
+    // as the immediate predecessor; widening it to older boots needs its own proof.
     if old.phase != "running"
         || owner.phase != "running"
         || old.token != owner.token

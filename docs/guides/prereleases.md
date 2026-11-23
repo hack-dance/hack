@@ -23,9 +23,9 @@ timeline
 These are adoption phases, not release dates or a promised schedule; each native
 trial still needs the platform, provider and project prerequisites below.
 
-The first supported package is for Apple Silicon macOS. Starting with the first
-release that ships Linux assets (none has yet), a release also carries a
-Compose-only package for Linux on x86_64 and arm64; it has no native backend. Provider installation,
+The first supported package is for Apple Silicon macOS. Since `5.0.0-next.23`,
+a release also carries a Compose-only package for Linux on x86_64 and arm64; it
+has no native backend. Provider installation,
 native project adaptations and host routing remain explicit prerequisites in the
 [native candidate guide](native-candidate.md). A packaged candidate is not a claim
 of full Compose parity, lower resource use, or compatibility with every project.
@@ -40,13 +40,13 @@ candidate can run.
 
 - `darwin-arm64`: the native candidate archive for Apple Silicon macOS. It also
   runs the Compose backend. This is the platform the release's `prerelease.json`
-  records.
+  records; there it means the native bundle's platform, not the only platform in
+  the release (see [release metadata files](#release-metadata-files)).
 
 ### Compose-only Linux platforms
 
-Starting with the first release that ships Linux assets (`SHA256SUMS-linux` is in
-its asset list; `5.0.0-next.22` and earlier have none), a release also carries
-these. Each archive records its own
+Since `5.0.0-next.23`, a release also carries these (`SHA256SUMS-linux` is in
+its asset list; `5.0.0-next.22` and earlier have none). Each archive records its own
 platform in the `prerelease.json` inside it.
 
 - `linux-x86_64`: the Compose candidate archive for Linux on x86_64 with glibc.
@@ -138,6 +138,88 @@ platform: it carries the digest of each platform's manager and picks by `uname`.
 `scripts/build-compose-candidate.sh` builds a Linux bundle on its own
 architecture, and packaging accepts exactly the files and order it checksums.
 
+### Release metadata files
+
+A release with Linux assets has twelve assets, including two release metadata
+files. Each archive also contains its own metadata file.
+
+| Asset | What it says | Who reads it |
+| --- | --- | --- |
+| `prerelease.json` | The version, tag and source revision, and `"platform": "darwin-arm64"`. That field is the native bundle's platform, kept for published managers. It does not mean the release holds only that platform. | Every manager, macOS and Linux, when it installs or upgrades from the release. It checks the tag against the source revision. |
+| `prerelease-platforms.json` (releases after `5.0.0-next.24`) | Every platform in the release: for each, the backends it runs and the names of its archive, its manager and the checksum file that lists the archive. | People and tools that want to know what a release holds. No manager reads it. |
+| The `prerelease.json` inside each archive | That archive's own platform, with the same version, tag and source revision. | The manager, after it has verified the archive, and packaging. |
+
+The release's `prerelease.json` cannot list the platforms itself. Every published
+manager requires exactly its five keys and exactly `darwin-arm64` as the platform,
+and refuses the release otherwise, which would stop `hack-next --manager upgrade`
+on every existing install. Managers fetch the assets they ask for by name and
+skip the rest, so a separate file is safe.
+
+`prerelease-platforms.json` looks like this:
+
+```json
+{
+  "schema": "hack.prerelease-platforms/v1",
+  "version": "5.0.0-next.25",
+  "tag": "v5.0.0-next.25",
+  "source_revision": "<40-character commit>",
+  "platforms": [
+    {
+      "platform": "darwin-arm64",
+      "backends": [
+        "native",
+        "compose"
+      ],
+      "archive": "hack-5.0.0-next.25-darwin-arm64-native.tar.gz",
+      "manager": "hack-next-manager-darwin-arm64",
+      "checksums": "SHA256SUMS"
+    },
+    {
+      "platform": "linux-x86_64",
+      "backends": [
+        "compose"
+      ],
+      "archive": "hack-5.0.0-next.25-linux-x86_64-compose.tar.gz",
+      "manager": "hack-next-manager-linux-x86_64",
+      "checksums": "SHA256SUMS-linux"
+    },
+    {
+      "platform": "linux-arm64",
+      "backends": [
+        "compose"
+      ],
+      "archive": "hack-5.0.0-next.25-linux-arm64-compose.tar.gz",
+      "manager": "hack-next-manager-linux-arm64",
+      "checksums": "SHA256SUMS-linux"
+    }
+  ]
+}
+```
+
+The set is checked against this file twice on the way to a release: when the
+macOS job packages it, and again after approval, before the tag is created.
+The chart shows the other gates only as exits. A run that only prepares stops
+once the set is packaged, and a failed upload keeps its tag, which is never
+replaced.
+
+After upload, the workflow lists the release assets and compares their names,
+sizes, and SHA-256 digests with the local release set. If an asset is missing,
+still uploading, or has a null digest, the workflow checks again up to five
+times, five seconds apart. A size or digest mismatch fails immediately. If
+verification fails, inspect the existing release and do not re-dispatch the
+same version.
+
+![Prerelease publication: where the release set is checked](prerelease-publication.svg)
+
+Diagram [source](prerelease-publication.mmd); rendered with Pele 1.9.0.
+
+Packaging writes it, and both packaging and publication refuse a set it does not
+describe: it must list exactly the platforms that have an archive or a manager in
+the set, with those asset names, each present; and each archive's own
+`prerelease.json` must name its platform, the planned version and the planned
+source revision. It carries no digests; the checksum files stay the one place for
+those.
+
 Packaging accepts exactly the files and order that `scripts/build-native-candidate.sh`
 checksums for a versioned build, with fixed modes for the storage witness (`0500`),
 its manifest and schemas (`0600`), and the config compiler (`0755`). The witness
@@ -175,6 +257,13 @@ succeeds; only successful scoped runs can be ignored in favor of older full evid
 Manual full runs have a
 separate concurrency group, so a new `next` push cannot cancel one; moving the
 head still invalidates its release eligibility.
+
+Review the **Linux first-run advisory** at the release SHA. It runs on `next`
+pushes and changes to the covered PR paths. Once the workflow is on the default
+branch, GitHub also starts it after a successful full `CI` dispatch on `next`,
+using that dispatch's SHA. Its report is separate from required CI and
+prerelease verification. Use `bun scripts/list-release-only-scripts.ts` to
+list literal release script entry points that no other workflow invokes.
 
 After full CI succeeds, dispatch the existing `Release`
 workflow on that branch with an explicit version and its full commit SHA:

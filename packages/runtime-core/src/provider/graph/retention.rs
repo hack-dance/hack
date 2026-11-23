@@ -335,9 +335,7 @@ pub(super) fn make_archive_room(
     // A removed archived run, or one whose prune was interrupted after its tombstone
     // was written (its receipt may already be gone): `prune` resumes that one.
     let (mut count, oldest) = oldest_runs(&parent, ARCHIVE_LIMIT, |run, path| {
-        state::read::<Receipt>(&path.join("state.json"))
-            .is_ok_and(|receipt| receipt.phase == "removed" && receipt.run == run)
-            || consumed(candidate, run).is_ok_and(|tombstone| tombstone.join("state.json").exists())
+        prunable(candidate, run, path)
     })?;
     if count < ARCHIVE_LIMIT {
         return Ok(());
@@ -368,6 +366,14 @@ pub(super) fn make_archive_room(
     }
     let _ = trim_exports(candidate);
     Ok(())
+}
+
+/// An archived run the archive may export and prune: removed, or with an interrupted
+/// prune (its tombstone written, its receipt possibly gone already).
+fn prunable(candidate: &Candidate, run: &str, path: &Path) -> bool {
+    state::read::<Receipt>(&path.join("state.json"))
+        .is_ok_and(|receipt| receipt.phase == "removed" && receipt.run == run)
+        || consumed(candidate, run).is_ok_and(|tombstone| tombstone.join("state.json").exists())
 }
 
 /// Room for one more tombstone: at the bound the oldest tombstones of fully pruned
@@ -516,6 +522,49 @@ mod chain_tests {
                 .unwrap()
                 .exists()
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_full_archive_offers_removed_and_interrupted_runs_oldest_first() {
+        let (candidate, root) = candidate();
+        let parent = candidate.state_root.join("run/graph-archive");
+        for path in [candidate.state_root.join("run"), parent.clone()] {
+            state::private_directory(&path).unwrap();
+        }
+        let archived = |index: usize, phase: Option<&str>, age: u64| {
+            let run = format!("{index:032x}");
+            let path = parent.join(&run);
+            state::private_directory(&path).unwrap();
+            if let Some(phase) = phase {
+                state::write(
+                    &path.join("state.json"),
+                    &json!({"version":1,"run":run,"owner":"b".repeat(32),"namespace":"c".repeat(64),
+                        "plan_id":"d".repeat(64),"phase":phase,"readiness":{},"resources":{}}),
+                )
+                .unwrap();
+                aged(&path.join("state.json"), age);
+            }
+            run
+        };
+        for index in 0..ARCHIVE_LIMIT - 3 {
+            archived(index, Some("removed"), 100);
+        }
+        let oldest = archived(1000, Some("removed"), 10_000);
+        // Not removed: never offered.
+        archived(1001, Some("stopped-data-retained"), 20_000);
+        // An interrupted prune: its receipt is gone, its tombstone is written.
+        let interrupted = archived(1002, None, 0);
+        tombstone(&candidate, &interrupted, 0);
+        let (count, offered) = oldest_runs(&parent, ARCHIVE_LIMIT, |run, path| {
+            prunable(&candidate, run, path)
+        })
+        .unwrap();
+        assert_eq!(count, ARCHIVE_LIMIT);
+        assert_eq!(offered.first(), Some(&oldest));
+        assert!(offered.contains(&interrupted));
+        assert!(!offered.contains(&format!("{:032x}", 1001)));
+        assert_eq!(offered.len(), ARCHIVE_LIMIT - 1);
         let _ = fs::remove_dir_all(&root);
     }
 

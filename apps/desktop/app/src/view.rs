@@ -630,10 +630,17 @@ impl HackApp {
         if !self.model.can_start(&key) {
             return;
         }
-        self.model.apply(Event::ActionStarted {
-            key: key.clone(),
-            action,
-        });
+        let scoped = service.is_some();
+        if let Some(target) = &service {
+            if !self.model.start_service_action(&key, &target.name) {
+                return;
+            }
+        } else {
+            self.model.apply(Event::ActionStarted {
+                key: key.clone(),
+                action,
+            });
+        }
         self.action_started.insert(key.clone(), Instant::now());
         cx.notify();
         if !self.live {
@@ -661,19 +668,22 @@ impl HackApp {
                 // Started under a CLI the app no longer runs: its result
                 // belongs to that installation, not to what is shown now.
                 if this.model.source_epoch() != epoch {
-                    this.action_started.remove(&key);
-                    cx.notify();
                     return;
                 }
                 if let Ok(ActionOutcome::Opened(o)) = &result {
                     cx.open_url(&o.url);
                 }
                 this.action_started.remove(&key);
-                if this.model.apply(Event::ActionFinished {
-                    key,
-                    action,
-                    result,
-                }) {
+                let refresh = if scoped {
+                    this.model.finish_service_action(key, action, result)
+                } else {
+                    this.model.apply(Event::ActionFinished {
+                        key,
+                        action,
+                        result,
+                    })
+                };
+                if refresh {
                     this.refresh_now_async(cx);
                 }
                 cx.notify();
@@ -1027,6 +1037,7 @@ impl HackApp {
         if before != after {
             self.clear_selected_service();
             self.model.source_changed();
+            self.action_started.clear();
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
             // previous installation: it must not block this one.

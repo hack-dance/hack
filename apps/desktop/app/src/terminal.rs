@@ -61,6 +61,7 @@ pub struct ProjectPanel {
     pub sessions: Entity<TerminalPanel>,
     pub state: PanelState,
     pub menu: Menu,
+    menu_anchor: MenuAnchor,
     /// The checkout and backend the tabs were started in. When the
     /// instance's checkout changes (a branch recreated from another
     /// worktree), its sessions are ended and the panel starts again.
@@ -73,7 +74,20 @@ pub struct ProjectPanel {
     /// restarted in a loop. Stopping the instance clears it, so the next
     /// start follows again.
     logs_follow: bool,
-    logs_service: Option<String>,
+    logs_scope: Option<ScopedLogs>,
+}
+
+struct ScopedLogs {
+    /// The service route where the user requested the terminal view.
+    route: Option<String>,
+    /// The filter can name a different service in that same instance.
+    service: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuAnchor {
+    Plus,
+    More,
 }
 
 /// The new-tab menu.
@@ -325,6 +339,18 @@ fn note_core(text: &str) -> std::io::Result<TerminalCore> {
     TerminalCore::note(text, NOTE_SCROLLBACK)
 }
 
+fn logs_should_follow(detail: &DetailView, scope: Option<&ScopedLogs>) -> bool {
+    scope.map_or_else(
+        || detail.state.is_active(),
+        |scope| {
+            detail
+                .services
+                .iter()
+                .any(|row| row.name == scope.service && row.running)
+        },
+    )
+}
+
 impl HackApp {
     fn instance_root(&self) -> Option<(PathBuf, bool, Option<String>)> {
         let row = self.model.selected_row()?;
@@ -378,10 +404,11 @@ impl HackApp {
                 sessions,
                 state: PanelState::half(),
                 menu: Menu::Closed,
+                menu_anchor: MenuAnchor::Plus,
                 origin: self.instance_root().map(|(root, native, _)| (root, native)),
                 was_active: d.state.is_active(),
                 logs_follow: false,
-                logs_service: None,
+                logs_scope: None,
             },
         );
         self.open_tab(&d, NewTab::Logs, window, cx);
@@ -393,11 +420,21 @@ impl HackApp {
     /// stream that keeps failing is not restarted on every frame).
     fn reconcile_panel(&mut self, d: &DetailView, window: &mut Window, cx: &mut Context<Self>) {
         let origin = self.instance_root().map(|(root, native, _)| (root, native));
-        let active = self.panel_logs_follow(d);
+        let route = self.selected_service().map(str::to_owned);
         let Some(panel) = self.panels.by_key.get_mut(&d.key) else {
             return;
         };
         let moved = panel.origin != origin;
+        let reset_scope = panel.logs_scope.as_ref().is_some_and(|scope| {
+            moved
+                || scope.route.is_none()
+                || scope.route != route
+                || !d.services.iter().any(|row| row.name == scope.service)
+        });
+        if reset_scope {
+            panel.logs_scope = None;
+        }
+        let active = logs_should_follow(d, panel.logs_scope.as_ref());
         if panel.was_active && !active {
             // Stopped: whatever stream it had is over; follow on next start.
             panel.logs_follow = false;
@@ -413,7 +450,7 @@ impl HackApp {
                 }
             });
             self.open_tab(d, NewTab::Logs, window, cx);
-        } else if follow_now {
+        } else if reset_scope || follow_now {
             // A finite read (started while stopped), running or ended:
             // replace it with a following stream, in the background.
             self.start_tab(d, NewTab::Logs, true, window, cx);
@@ -431,19 +468,23 @@ impl HackApp {
     }
 
     fn panel_logs_follow(&self, detail: &DetailView) -> bool {
-        self.panels
-            .by_key
-            .get(&detail.key)
-            .and_then(|panel| panel.logs_service.as_ref())
-            .map_or_else(
-                || detail.state.is_active(),
-                |service| {
-                    detail
-                        .services
-                        .iter()
-                        .any(|row| &row.name == service && row.running)
-                },
-            )
+        logs_should_follow(
+            detail,
+            self.panels
+                .by_key
+                .get(&detail.key)
+                .and_then(|panel| panel.logs_scope.as_ref()),
+        )
+    }
+
+    /// Mark scoped Logs for replacement even if their instance is hidden
+    /// while navigating away. The next draw restores the instance stream.
+    pub(crate) fn leave_terminal_log_scope(&mut self) {
+        for panel in self.panels.by_key.values_mut() {
+            if let Some(scope) = &mut panel.logs_scope {
+                scope.route = None;
+            }
+        }
     }
 
     pub(crate) fn reconcile_selected_service_panel(
@@ -493,6 +534,9 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(route) = self.selected_service().map(str::to_owned) else {
+            return;
+        };
         let Some(detail) = self.model.detail() else {
             return;
         };
@@ -504,16 +548,11 @@ impl HackApp {
         let Some(panel) = self.panels.by_key.get_mut(&detail.key) else {
             return;
         };
-        panel.logs_service.clone_from(&self.logs.model.service);
-        panel.was_active = self.logs.model.service.as_ref().map_or_else(
-            || detail.state.is_active(),
-            |service| {
-                detail
-                    .services
-                    .iter()
-                    .any(|row| row.name == *service && row.running)
-            },
-        );
+        panel.logs_scope = self.logs.model.service.clone().map(|service| ScopedLogs {
+            route: Some(route),
+            service,
+        });
+        panel.was_active = logs_should_follow(&detail, panel.logs_scope.as_ref());
         self.open_tab(&detail, NewTab::Logs, window, cx);
     }
 
@@ -544,10 +583,12 @@ impl HackApp {
                         &cli_root(root)?,
                         branch.as_deref(),
                         self.panel_logs_follow(d),
-                        self.panels
-                            .by_key
-                            .get(&d.key)
-                            .and_then(|panel| panel.logs_service.as_deref()),
+                        self.panels.by_key.get(&d.key).and_then(|panel| {
+                            panel
+                                .logs_scope
+                                .as_ref()
+                                .map(|scope| scope.service.as_str())
+                        }),
                     )?,
                     false,
                     std::env::var_os("PATH").as_deref(),
@@ -808,6 +849,10 @@ impl HackApp {
     }
 
     pub(crate) fn open_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+        self.open_menu_at(menu, MenuAnchor::Plus, cx);
+    }
+
+    fn open_menu_at(&mut self, menu: Menu, anchor: MenuAnchor, cx: &mut Context<Self>) {
         // The user chose to open a tab. Automatic tabs (the Logs tab a new
         // panel starts with) go through `open_tab` too and must not count.
         self.user_navigated();
@@ -819,7 +864,17 @@ impl HackApp {
             self.read_env(cx);
         }
         if let Some(p) = self.panels.by_key.get_mut(&key) {
-            p.menu = if p.menu == menu { Menu::Closed } else { menu };
+            let anchor = if menu == Menu::Env {
+                p.menu_anchor
+            } else {
+                anchor
+            };
+            p.menu = if p.menu == menu && p.menu_anchor == anchor {
+                Menu::Closed
+            } else {
+                menu
+            };
+            p.menu_anchor = anchor;
             if p.state == PanelState::Collapsed {
                 p.state = PanelState::half();
             }
@@ -1036,7 +1091,7 @@ impl HackApp {
                 }
             },
         }
-        m.into_any_element()
+        m.test_support().into_any_element()
     }
 
     fn strip(
@@ -1101,10 +1156,11 @@ impl HackApp {
                     size::ICON,
                     fg,
                 ))
-                .child(if i == 0 && (docked || panel.logs_service.is_some()) {
+                .child(if i == 0 && (docked || panel.logs_scope.is_some()) {
                     let copy = panel
-                        .logs_service
-                        .as_deref()
+                        .logs_scope
+                        .as_ref()
+                        .map(|scope| scope.service.as_str())
                         .or(d.branch.as_deref())
                         .unwrap_or("main");
                     format!("Logs · {copy}")
@@ -1160,20 +1216,24 @@ impl HackApp {
             .child(icon(Glyph::Plus, size::ICON, t.tab_fg))
             .child(icon(Glyph::ChevronDown, px(12.), t.tab_fg))
             .on_click(cx.listener(|this, _, _, cx| this.open_menu(Menu::Main, cx)))
-            .when(!docked && panel.menu != Menu::Closed, |d0| {
-                // Toward the larger space: above when docked, below when
-                // maximized (the strip is then near the top).
-                let anchor = div().absolute().left(px(0.));
-                let anchor = if panel.state == PanelState::Maximized {
-                    anchor.top(tok::STRIP + px(4.))
-                } else {
-                    anchor.bottom(tok::STRIP + px(4.))
-                };
-                d0.child(
-                    gpui_kit::deferred(anchor.child(self.menu(d, panel.menu, ui, cx)))
-                        .with_priority(1),
-                )
-            });
+            .when(
+                panel.menu != Menu::Closed && (!docked || panel.menu_anchor == MenuAnchor::Plus),
+                |d0| {
+                    // Toward the larger space: above when docked, below when
+                    // maximized (the strip is then near the top).
+                    let anchor = div().absolute().left(px(0.));
+                    let anchor = if docked || panel.state == PanelState::Maximized {
+                        anchor.top(tok::STRIP + px(4.))
+                    } else {
+                        anchor.bottom(tok::STRIP + px(4.))
+                    };
+                    d0.child(
+                        gpui_kit::deferred(anchor.child(self.menu(d, panel.menu, ui, cx)))
+                            .with_priority(1),
+                    )
+                },
+            )
+            .test_support();
         let (size_glyph, find) = match panel.state {
             PanelState::Collapsed => (Glyph::ChevronUp, false),
             PanelState::Open { .. } => (Glyph::Maximize, true),
@@ -1261,23 +1321,26 @@ impl HackApp {
                                     .relative()
                                     .cursor_pointer()
                                     .child(icon(Glyph::More, size::ICON, t.tab_fg))
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.open_menu(Menu::Main, cx)
-                                        }),
-                                    )
-                                    .when(panel.menu != Menu::Closed, |trigger| {
-                                        trigger.child(
-                                            gpui_kit::deferred(
-                                                div()
-                                                    .absolute()
-                                                    .top(px(24.))
-                                                    .right_0()
-                                                    .child(self.menu(d, panel.menu, ui, cx)),
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open_menu_at(Menu::Main, MenuAnchor::More, cx)
+                                    }))
+                                    .when(
+                                        panel.menu != Menu::Closed
+                                            && panel.menu_anchor == MenuAnchor::More,
+                                        |trigger| {
+                                            trigger.child(
+                                                gpui_kit::deferred(
+                                                    div()
+                                                        .absolute()
+                                                        .top(px(24.))
+                                                        .right_0()
+                                                        .child(self.menu(d, panel.menu, ui, cx)),
+                                                )
+                                                .with_priority(1),
                                             )
-                                            .with_priority(1),
-                                        )
-                                    }),
+                                        },
+                                    )
+                                    .test_support(),
                             )
                             .child(
                                 div()
@@ -2216,6 +2279,29 @@ mod window_tests {
         let (mut cx, window, app) = open(false);
         draw(&mut cx, window, &app);
         assert!(logs_text(&mut cx, &app).contains("checkpoint complete"));
+    }
+
+    #[test]
+    fn leaving_a_service_restores_the_instance_logs_without_replacing_the_drawer() {
+        let (mut cx, window, app) = open(false);
+        draw(&mut cx, window, &app);
+        let drawer = panel(&mut cx, &app);
+        cx.update_window(window, |_, window, cx| {
+            let key = app.read(cx).model.selected_key().unwrap();
+            app.update(cx, |app, cx| {
+                app.select_service(key.clone(), "api".into(), window, cx);
+                app.open_service_logs_in_terminal(window, cx);
+            });
+            assert!(app.read(cx).panels.by_key[&key].logs_scope.is_some());
+            let scoped = drawer.read(cx).tab(0).cloned().unwrap();
+            app.update(cx, |app, cx| app.select_instance(key.clone(), cx));
+            window.render_frame(cx);
+            let restored = &app.read(cx).panels.by_key[&key];
+            assert!(restored.logs_scope.is_none());
+            assert_eq!(restored.sessions, drawer);
+            assert_ne!(drawer.read(cx).tab(0), Some(&scoped));
+        })
+        .unwrap();
     }
 
     #[test]

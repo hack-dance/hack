@@ -122,6 +122,8 @@ impl HackApp {
 
     pub(crate) fn clear_selected_service(&mut self) {
         if self.service_pane.name.is_some() {
+            #[cfg(hack_terminal)]
+            self.leave_terminal_log_scope();
             self.logs.close();
             self.logs.model.set_service(None);
             self.logs.model.set_paused(false);
@@ -155,10 +157,9 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self.selected_service().map(str::to_owned) else {
+        if self.selected_service().is_none() {
             return;
-        };
-        let _ = (&name, &window);
+        }
         self.service_pane.menu = None;
         if self.service_pane.tab != to {
             self.service_pane.tab = to;
@@ -166,7 +167,9 @@ impl HackApp {
             self.service_focus.focus(window, cx);
         }
         #[cfg(hack_terminal)]
-        if to == ServiceTab::Terminal {
+        if to == ServiceTab::Terminal
+            && let Some(name) = self.selected_service().map(str::to_owned)
+        {
             self.open_service_shell(&name, window, cx);
         }
         cx.notify();
@@ -334,7 +337,7 @@ impl HackApp {
             .unwrap_or_default();
         let facts = ServiceFacts::new(row.as_ref(), service, containers);
         let body = match self.service_pane.tab {
-            ServiceTab::Info => render_info(&facts, ui),
+            ServiceTab::Info => render_info(&facts, self.live, ui),
             ServiceTab::Stats => render_service_stats(ui),
             ServiceTab::Logs => self.render_service_logs(detail, ui, cx),
             ServiceTab::Terminal => self.render_service_terminal(detail, ui, window, cx),
@@ -437,7 +440,7 @@ impl HackApp {
                             .child(label),
                     )
                     .child(div().flex_1())
-                    .child(route_open_button(facts.route.clone(), ui))
+                    .child(route_open_button(facts.route.clone(), self.live, ui))
                     .child(service_action_button(
                         Action::Restart,
                         Glyph::Restart,
@@ -715,7 +718,7 @@ fn service_action_button(
     })
 }
 
-fn route_open_button(route: Option<String>, ui: &Ui) -> Stateful<Div> {
+fn route_open_button(route: Option<String>, live: bool, ui: &Ui) -> Stateful<Div> {
     action_button(
         "service-open",
         Glyph::ExternalLink,
@@ -726,7 +729,11 @@ fn route_open_button(route: Option<String>, ui: &Ui) -> Stateful<Div> {
     .min_w(px(84.))
     .justify_center()
     .when_some(route, |button, url| {
-        button.on_click(move |_, _, cx| cx.open_url(&url))
+        button.on_click(move |_, _, cx| {
+            if live {
+                cx.open_url(&url);
+            }
+        })
     })
 }
 
@@ -855,7 +862,7 @@ fn service_url(route: &str) -> Option<String> {
     })
 }
 
-fn render_info(facts: &ServiceFacts, ui: &Ui) -> AnyElement {
+fn render_info(facts: &ServiceFacts, live: bool, ui: &Ui) -> AnyElement {
     let rows = [
         (
             "Route",
@@ -932,8 +939,13 @@ fn render_info(facts: &ServiceFacts, ui: &Ui) -> AnyElement {
                         }))
                         .when_some(value.as_ref().filter(|_| i == 0).cloned(), |d, route| {
                             d.child(
-                                icon_button("service-info-open", Glyph::ExternalLink, ui)
-                                    .on_click(move |_, _, cx| cx.open_url(&route)),
+                                icon_button("service-info-open", Glyph::ExternalLink, ui).on_click(
+                                    move |_, _, cx| {
+                                        if live {
+                                            cx.open_url(&route);
+                                        }
+                                    },
+                                ),
                             )
                         })
                 }),

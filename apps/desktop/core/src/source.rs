@@ -826,8 +826,34 @@ pub(crate) fn read_daemon_status(
 }
 
 pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
+    trusted_tool_path_with(path, uid, directory, |_, _| false)
+}
+
+/// Docker Desktop and OrbStack expose their CLI through an app in the
+/// system Applications directory. The administrator group can manage that
+/// directory. This allowance is for Docker's direct service action only.
+pub(crate) fn trusted_docker_path(path: &Path, uid: u32) -> Option<PathBuf> {
+    trusted_tool_path_with(path, uid, false, system_applications_dir)
+}
+
+fn system_applications_dir(path: &Path, meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
-    if !crate::doctor_plugins::guarded_names(path, uid, &mut 64, false) {
+    cfg!(target_os = "macos")
+        && path == Path::new("/Applications")
+        && meta.is_dir()
+        && meta.uid() == 0
+        && meta.gid() == 80 // macOS's local administrators group
+        && meta.mode() & 0o002 == 0
+}
+
+fn trusted_tool_path_with(
+    path: &Path,
+    uid: u32,
+    directory: bool,
+    writable_dir: fn(&Path, &std::fs::Metadata) -> bool,
+) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    if !crate::doctor_plugins::guarded_names_with(path, uid, &mut 64, false, writable_dir) {
         return None;
     }
     let real = std::fs::canonicalize(path).ok()?;
@@ -838,7 +864,9 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
             || (index > 0 || directory) && !meta.is_dir()
             || (index == 0 && !directory && (!meta.is_file() || meta.mode() & 0o111 == 0))
             || (meta.uid() != uid && meta.uid() != 0)
-            || (meta.mode() & 0o022 != 0 && !sticky_root)
+            || (meta.mode() & 0o022 != 0
+                && !sticky_root
+                && !(index > 0 && writable_dir(component, &meta)))
         {
             return None;
         }
@@ -2189,9 +2217,11 @@ impl Source for LiveSource {
                 let docker = CliRunner::on_path("docker")
                     .program_path()
                     .ok_or_else(|| service_action_error("Docker CLI was not found"))?;
-                let runner = CliRunner::verified(docker).with_cwd(root);
+                let runner = CliRunner::verified_docker(docker).with_cwd(root);
                 let inspect = service_inspect_args(target)?;
-                let (out, _, status) = runner.run_raw(&inspect, None, Self::READ)?;
+                let (out, _, status) = runner
+                    .run_raw(&inspect, None, Self::READ)
+                    .map_err(|err| service_action_error(&err.to_string()))?;
                 if status != Some(0) {
                     return Err(service_target_changed());
                 }
@@ -2200,7 +2230,9 @@ impl Source for LiveSource {
                     .into_iter()
                     .chain(ids.iter().map(String::as_str))
                     .collect();
-                let (_, _, status) = runner.run_raw(&args, None, Self::OPEN)?;
+                let (_, _, status) = runner
+                    .run_raw(&args, None, Self::OPEN)
+                    .map_err(|err| service_action_error(&err.to_string()))?;
                 if status != Some(0) {
                     return Err(service_action_error(
                         "Docker could not stop all selected containers. Check their current state.",

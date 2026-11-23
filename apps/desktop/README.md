@@ -843,7 +843,10 @@ Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
   appearance.
 - **Restart** calls Hack for the selected service. **Stop** targets its
   observed running Compose containers and confirms their identity with Docker
-  before stopping by full ID. The project’s **Stop** still runs instance-wide
+  before stopping by full ID. On macOS, the explicit service action accepts
+  Docker CLI installs under the standard system Applications directory when
+  that directory is writable only by root and the local administrators group.
+  The project’s **Stop** still runs instance-wide
   `hack down`.
 
 With the screenshots feature enabled, run `hack-desktop --service-screenshots

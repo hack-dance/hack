@@ -60,7 +60,13 @@ impl LogsPane {
         cx.subscribe(&search, |this: &mut HackApp, state, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
                 this.logs.model.search = state.read(cx).value().to_string();
-                this.refresh_log_rows();
+                if this.selected_service().is_some() && !this.logs.only_matching {
+                    // Highlighting changes styling only. Leave the paused
+                    // viewport and its row measurements in place.
+                    this.logs.matching = this.logs.model.visible_indices().len();
+                } else {
+                    this.refresh_log_rows();
+                }
                 if this.logs.should_autoscroll() {
                     this.logs.scroll_end();
                 }

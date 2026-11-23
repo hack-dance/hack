@@ -417,6 +417,15 @@ pub fn service_pane(dir: &Path) {
                 #[cfg(hack_terminal)]
                 if shot == "m04-service-terminal" {
                     assert_eq!(app.read(cx).drive_tab_count(cx), Some(3));
+                    let plus = window.find("term-new").bounds().origin.x;
+                    window.click("term-new", cx);
+                    window.render_frame(cx);
+                    let plus_menu = window.find("term-menu").bounds().origin.x;
+                    assert_eq!(plus_menu, plus);
+                    window.click("term-dock-menu", cx);
+                    window.render_frame(cx);
+                    let more_menu = window.find("term-menu").bounds().origin.x;
+                    assert!(more_menu > plus_menu);
                     window.click("term-dock-close", cx);
                     let drawer_key = if cfg!(target_os = "macos") {
                         "cmd-j"

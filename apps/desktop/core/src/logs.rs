@@ -439,16 +439,14 @@ impl LogsModel {
     }
 }
 
-/// Match a normalized query against displayed content.
+/// Match a normalized query against the log message or its service name.
 #[must_use]
 pub fn line_matches(line: &LogLine, query: &str) -> bool {
     line.message.to_lowercase().contains(query)
-        || line.level().contains(query)
         || line
             .service
             .as_ref()
             .is_some_and(|s| s.to_lowercase().contains(query))
-        || line.timestamp.as_ref().is_some_and(|s| s.contains(query))
 }
 
 fn log_severity(level: Option<&str>, message: &str) -> (bool, bool) {

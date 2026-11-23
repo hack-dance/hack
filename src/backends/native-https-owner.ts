@@ -608,7 +608,9 @@ async function archivePreviousBootSharedHttps(opts: {
         opts.identity.planId,
         "--json",
       ],
-      timeoutMs: 60_000,
+      // The archive waits up to 20 s for a retiring owner and up to 35 s for the
+      // HTTPS port to leave TIME_WAIT (shared_https_recovery.rs).
+      timeoutMs: 90_000,
     });
     if (
       !isRecord(archived) ||

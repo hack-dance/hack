@@ -149,6 +149,7 @@ Runtime commands affect only the candidate pool. Graph commands support a bounde
 The installed hack and its state are never used as a fallback.";
 
 fn main() {
+    hack_runtime_core::raise_open_file_limit();
     if let Some(argument) = std::env::args_os()
         .nth(1)
         .and_then(|value| value.into_string().ok())
@@ -1260,6 +1261,32 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(archive),
             )?)?;
         }
+        ["runtime", "ensure-images", "--json", flags @ ..] => {
+            use std::io::Read;
+            let mut input = Vec::new();
+            std::io::stdin()
+                .take(65_537)
+                .read_to_end(&mut input)
+                .map_err(|_| {
+                    CandidateError::new("invalid_arguments", "Cannot read the image batch.")
+                })?;
+            let jobs: Vec<(
+                String,
+                hack_runtime_core::provider::image_platform::PlatformPolicy,
+            )> = serde_json::from_slice(&input)
+                .map_err(|_| CandidateError::new("invalid_arguments", "Invalid image batch."))?;
+            if input.len() > 65_536 || jobs.len() > 64 {
+                return Err(CandidateError::new(
+                    "invalid_arguments",
+                    "Image batch exceeds its input bound.",
+                ));
+            }
+            print_json(&hack_runtime_core::provider::image_ensure::ensure_batch(
+                &discover_candidate(&requested)?,
+                &jobs,
+                &image_policy(flags)?,
+            ))?;
+        }
         [
             "runtime",
             command @ ("ensure-image" | "cache-image"),
@@ -1425,6 +1452,21 @@ fn run() -> Result<(), CandidateError> {
                 "recover" => hack_runtime_core::provider::recover(&candidate),
                 _ => return Err(CandidateError::new("unsupported_command", HELP)),
             }?;
+            // Typed by hand: say what stopped with the pool and what brings it back (HACK-2456).
+            if let Some(runs) = result
+                .interrupted_runs
+                .as_ref()
+                .filter(|runs| !runs.is_empty())
+            {
+                eprintln!(
+                    "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. Run hack up in each project to start the runtime again and recover its run.",
+                    runs.len()
+                );
+            } else if result.interrupted_runs_unknown {
+                eprintln!(
+                    "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a project recovers its run."
+                );
+            }
             if *action == "up" {
                 sweep_running_pool(&result.phase, result.process_alive);
             }

@@ -130,6 +130,28 @@ fn initialize_registry(
     state::write(&directory.join("state.json"), &store)
 }
 
+/// The guest boot ids this run's slots record, from the pool's validated registry
+/// (none without a bridge intent). Selection evidence only: dead-owner recovery still
+/// matches each against the run's own receipt evidence (`boot_match::receipt_boot`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(in crate::provider) fn run_boots(
+    candidate: &Candidate,
+    owner: &state::Owner,
+    run: &str,
+) -> Result<Vec<String>, CandidateError> {
+    let Some(intent) = owner.application_bridge else {
+        return Ok(Vec::new());
+    };
+    let store = read_owner_registry(candidate, &owner.token, intent.slots, false)?;
+    let mut boots: Vec<String> = Vec::new();
+    for assignment in store.slots.values().filter(|a| a.run == run) {
+        if !boots.contains(&assignment.boot_id) {
+            boots.push(assignment.boot_id.clone());
+        }
+    }
+    Ok(boots)
+}
+
 pub(in crate::provider) fn verify_owner_registry(
     candidate: &Candidate,
     owner: &state::Owner,

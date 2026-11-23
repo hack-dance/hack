@@ -112,6 +112,7 @@ for (const mode of [
   "unsafe-prestart-refusal",
   "fail",
   "builder-missing",
+  "build-registry-limit",
   "provider-pin",
   "wrapped-provider-pin",
   "timeout",
@@ -126,7 +127,10 @@ for (const mode of [
     const launcher = Bun.spawn(
       [process.execPath, fixture, "launcher", root, mode],
       {
-        env: fixtureEnv(root),
+        env: {
+          ...fixtureEnv(root),
+          FIXTURE_READY_ADDRESS: "https://sample.hack.local",
+        },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -207,6 +211,11 @@ for (const mode of [
           ok: false,
           error: { code: "E_CANCELLED" },
         });
+      } else if (mode === "build-registry-limit") {
+        expect(code).toBe(1);
+        expect(JSON.parse(stdout).error.message).toBe(
+          "Image unavailable: could not resolve build base docker.io/library/python:3.12-alpine (registry rate limit reached).\nAlready present: docker.io/library/alpine:3.22.\nRetry hack up when the registry is reachable."
+        );
       } else if (mode === "builder-missing") {
         // A detached owner reports the code only; the launcher must still tell the
         // user what is wrong and the one command that fixes it.
@@ -244,6 +253,7 @@ for (const mode of [
         ![
           "fail",
           "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -534,6 +544,39 @@ test("HACK-2339: a refusal before VM work reaches the launcher as the foreground
   }
 }, 30_000);
 
+test("detached native up closes with its served address or no address", async () => {
+  for (const address of ["https://sample.hack.local:8443", ""]) {
+    const root = await fixtureRoot(join(tmpdir(), "native-detached-closing-"));
+    const launcher = Bun.spawn(
+      [process.execPath, fixture, "launcher", root, "ready"],
+      {
+        env: {
+          ...fixtureEnv(root),
+          FIXTURE_TEXT_OUTPUT: "1",
+          FIXTURE_READY_ADDRESS: address,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 8000,
+      }
+    );
+    try {
+      const [code, stdout, stderr] = await Promise.all([
+        launcher.exited,
+        new Response(launcher.stdout).text(),
+        new Response(launcher.stderr).text(),
+      ]);
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).toStartWith(`${address || "no address"}  up in `);
+      expect(stdout).toMatch(/\d+\.\ds · native\n$/);
+      await stop(root);
+    } finally {
+      await removeFixture(root);
+    }
+  }
+}, 20_000);
+
 test("a detached fixture owner exits when its root disappears", async () => {
   const root = await fixtureRoot(join(tmpdir(), "native-detached-root-"));
   const launcher = Bun.spawn(
@@ -645,6 +688,32 @@ test("HACK-2339: a failed hook's lines reach only a terminal stderr; otherwise o
     "a",
   ]);
 }, 60_000);
+
+test("detached JSON retains every image refusal and recovery action", async () => {
+  const result = await prestartRun("image-batch-errors");
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_LIFECYCLE_FAILED",
+      detail: {
+        images: [
+          {
+            reference: "fixture/image:a",
+            code: "provider_busy",
+            recovery:
+              "Run hack up again after the current image work finishes.",
+          },
+          {
+            reference: "fixture/image:b",
+            code: "image_disk_space",
+            recovery: "Free disk space and run hack up again.",
+          },
+        ],
+      },
+    },
+  });
+}, 30_000);
 
 test("HACK-2351: image work longer than the budget, with heartbeats, still completes", async () => {
   const started = performance.now();

@@ -1,0 +1,55 @@
+import { isRecord } from "../lib/guards.ts";
+import type {
+  invokeNativeRuntime,
+  NativeRuntimeSelection,
+} from "./native-runtime-client.ts";
+
+/**
+ * The `runtime up` arguments every native project start sends: the
+ * Development profile with this project's direct share. A start appends its
+ * retained, capacity, network and platform flags, then `--json`.
+ *
+ * Sent alone (as a stopped-pool recovery does, HACK-2456) they boot a stopped
+ * pool exactly as its record describes. The runtime checks every flag that is
+ * present against an existing pool and fixes nothing that is absent, so this
+ * request cannot conflict with or change the network, socket or translation
+ * intent the project's earlier start recorded.
+ */
+export function nativeProjectRuntimeUpArgs(projectRoot: string): string[] {
+  return [
+    "runtime",
+    "up",
+    "--profile",
+    "development",
+    "--project-share",
+    projectRoot,
+    "--unfiltered-source",
+  ];
+}
+
+/**
+ * True only when `runtime status` reports the pool neither running nor with a
+ * live provider process. An unreadable status is not proof of a stopped pool.
+ */
+export async function nativeRuntimePoolStopped(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<boolean> {
+  try {
+    const status = await opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "status", "--json"],
+      timeoutMs: 30_000,
+    });
+    return (
+      isRecord(status) &&
+      typeof status.phase === "string" &&
+      status.phase !== "running" &&
+      status.process_alive !== true
+    );
+  } catch {
+    return false;
+  }
+}

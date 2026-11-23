@@ -2,6 +2,11 @@ import { ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { NativeImageBlocker } from "../../src/backends/native-image-policy.ts";
+import {
+  batchImageFailure,
+  NativeImageBatchError,
+} from "../../src/backends/native-image-policy.ts";
 import {
   NativeRuntimeRequestError,
   retainNativeRuntimeFailure,
@@ -392,7 +397,7 @@ if (role === "channel-holder") {
     process.exitCode = await startNativeDetachedUp({
       cwd: root,
       args: [],
-      json: true,
+      json: !process.env.FIXTURE_TEXT_OUTPUT,
       ...(mode === "restart-action" ? { action: "restart" as const } : {}),
       invocation: [
         process.execPath,
@@ -410,11 +415,13 @@ if (role === "channel-holder") {
       "wrapped-failure",
       "wrapped-static-failure",
       "builder-missing",
+      "build-registry-limit",
       "provider-pin",
       "wrapped-provider-pin",
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
+      "image-batch-errors",
       "prestart-refusal",
       "prestart-after-runtime",
       "prestart-plain-error",
@@ -480,6 +487,16 @@ if (role === "channel-holder") {
         nativeDetachedUpShellVariables([], true);
         nativeDetachedUpShellVariables([], true);
       }
+      if (mode === "build-registry-limit") {
+        await nativeDetachedUpFailure(
+          new NativeImageBlocker({
+            missing: "docker.io/library/python:3.12-alpine",
+            buildBase: true,
+            reason: "registry_http_429",
+            present: ["docker.io/library/alpine:3.22"],
+          })
+        );
+      }
       if (mode === "builder-missing") {
         await nativeDetachedUpFailure(
           new NativeRuntimeRequestError({
@@ -509,6 +526,7 @@ if (role === "channel-holder") {
           ...PRESTART_MODES,
           "fail",
           "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -546,6 +564,19 @@ if (role === "channel-holder") {
         if (["immediate-failure", "exit-first-failure"].includes(mode)) {
           process.exit(1);
         }
+        return 1;
+      }
+      if (mode === "image-batch-errors") {
+        await nativeDetachedUpFailure(
+          new NativeImageBatchError([
+            batchImageFailure("fixture/image:a", { code: "provider_busy" }, [
+              "web",
+            ]),
+            batchImageFailure("fixture/image:b", { code: "image_disk_space" }, [
+              "db",
+            ]),
+          ])
+        );
         return 1;
       }
       if (mode === "failed-services") {
@@ -618,6 +649,7 @@ if (role === "channel-holder") {
           project: "fixture",
           branch: null,
           composeProject: "fixture",
+          address: process.env.FIXTURE_READY_ADDRESS,
           started: ["web"],
           completed: ["seed"],
         });

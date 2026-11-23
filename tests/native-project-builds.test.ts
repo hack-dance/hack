@@ -153,6 +153,29 @@ test.each([
   expect(message).not.toContain("HACK_RUNTIME_BACKEND");
 });
 
+test("admission names a known unsupported build field, never an unknown key", () => {
+  const message = (build: Record<string, unknown>) => {
+    try {
+      admit({ build: { context: "..", ...build } });
+    } catch (error) {
+      return (error as Error).message;
+    }
+    throw new Error("expected a refusal");
+  };
+  expect(message({ additional_contexts: { extra: "synthetic-canary" } })).toBe(
+    "Native foreground up cannot build service app: build.additional_contexts is not supported by native builds (native builds read one context directory); only build context, dockerfile, target and literal args are supported. Values were omitted; no hook, VM or build was started."
+  );
+  expect(message({ secrets: ["synthetic-canary"] })).toContain(
+    "build.secrets is not supported by native builds; only build context"
+  );
+  const unknown = message({ "private-key-name": "synthetic-canary" });
+  expect(unknown).toContain(
+    "cannot build service app: only build context, dockerfile, target and literal args are supported."
+  );
+  expect(unknown).not.toContain("private-key-name");
+  expect(unknown).not.toContain("synthetic-canary");
+});
+
 test("builds refuse unless explicitly enabled, and projects without builds are unaffected", () => {
   const services = { web: { build: "." }, db: { image: "postgres:17" } };
   expect(() =>
@@ -633,6 +656,26 @@ test("build output streams through while the runtime's closed error is returned"
   });
 });
 
+test("a build base registry refusal keeps the normalized reference and closed cause", async () => {
+  const reference = "docker.io/library/python:3.12-alpine";
+  const fake = await fakeRuntime(
+    `printf '{"code":"registry_image","message":"discarded private detail","build_base_reference":"${reference}","cause_code":"registry_http_429"}\\n' >&2\nexit 1`
+  );
+  const error = await invokeNativeBuild({
+    runtime: fake as never,
+    cwd: fake.home,
+    requestFile: join(fake.home, "request.json"),
+    write: () => undefined,
+  }).catch((caught: unknown) => caught);
+  expect(error).toMatchObject({
+    reference,
+    nativeCode: "registry_image",
+    nativeCauseCode: "registry_http_429",
+    message: expect.stringContaining("registry rate limit reached"),
+  });
+  expect(String(error)).not.toContain("discarded private detail");
+});
+
 test("cancellation sends SIGTERM so the runtime can stop its build client", async () => {
   const fake = await fakeRuntime(
     `trap 'printf terminated > "$0.signal"; exit 143' TERM\nprintf 'started\\n' >&2\nwhile :; do sleep 0.05; done`
@@ -750,4 +793,133 @@ test("a native home without the image builder says so and how to add it", async 
   expect(message).not.toContain("could not build");
   expect(message).not.toContain(VALUE);
   expect(written.join("")).toBe("resolving base images\n");
+});
+
+test.each([
+  { cpus: 4, cap: 3, outcome: "success" },
+  { cpus: 2, cap: 2, outcome: "success" },
+  { cpus: 1, cap: 1, outcome: "success" },
+  { cpus: 4, cap: 3, outcome: "failure" },
+  { cpus: 4, cap: 3, outcome: "interrupt" },
+] as const)("build batch $outcome with $cpus guest CPUs", async ({
+  cpus,
+  cap,
+  outcome,
+}) => {
+  const project = await root();
+  const controller = new AbortController();
+  const names = ["web", "worker", "tools", "jobs"];
+  const builds = new Map(
+    names.map((target) => [target, { ...request(), target }])
+  );
+  builds.set("duplicate", {
+    ...request(),
+    dockerfile: "./Dockerfile",
+    target: "web",
+  });
+  const specs: Record<string, Record<string, unknown>> = Object.fromEntries(
+    [...builds.keys()].map((name) => [name, { build: "app" }])
+  );
+  const started: string[] = [];
+  const releases = new Map<
+    string,
+    ReturnType<typeof Promise.withResolvers<boolean>>
+  >();
+  const cancelled = new Set<string>();
+  const completed: string[] = [];
+  const settlements: string[] = [];
+  let returned = false;
+  const result = buildNativeProjectImages({
+    runtime: { binary: "/test/runtime", home: project } as never,
+    projectRoot: project,
+    branch: null,
+    profiles: [],
+    builds,
+    specs,
+    rebuild: false,
+    guestCpus: cpus,
+    signal: controller.signal,
+    onBuildSettled: ({ outcome: decision, services }) => {
+      settlements.push(`${services.join(",")}: ${decision}`);
+    },
+    invoke: async ({ requestFile, signal }) => {
+      const target =
+        names[Number(/request-(\d+)\.json$/.exec(requestFile)?.[1])];
+      if (target === undefined) {
+        throw new Error("Unexpected request index");
+      }
+      expect(releases.size).toBeLessThan(cap);
+      started.push(target);
+      const release = Promise.withResolvers<boolean>();
+      releases.set(target, release);
+      signal?.addEventListener("abort", () => cancelled.add(target), {
+        once: true,
+      });
+      const fail = await release.promise;
+      releases.delete(target);
+      completed.push(target);
+      if (fail || cancelled.has(target)) {
+        throw new NativeRuntimeRequestError({
+          message: `fixture ${target}`,
+          nativeCode: "native_build_failed",
+        });
+      }
+      return { imageId: IMAGE, buildKey: KEY, reused: false };
+    },
+  })
+    .catch((error: unknown) => error)
+    .finally(() => {
+      returned = true;
+    });
+
+  const waitFor = async (condition: () => boolean) => {
+    const end = performance.now() + 2000;
+    while (!(condition() || returned) && performance.now() < end) {
+      await Bun.sleep(2);
+    }
+    expect(condition()).toBe(true);
+  };
+  try {
+    await waitFor(() => started.length === cap);
+    expect(started).toEqual(names.slice(0, cap));
+    if (outcome === "success") {
+      for (let index = 0; index < names.length; index++) {
+        const name = names[index] ?? "";
+        await waitFor(() => releases.has(name));
+        releases.get(name)?.resolve(false);
+      }
+      expect(await result).toEqual(new Set([...builds.keys()]));
+      expect(started).toEqual(names);
+      expect(specs.duplicate).toEqual({ image: IMAGE });
+      expect(settlements).toHaveLength(cap > 1 ? names.length : 0);
+    } else {
+      if (outcome === "failure") {
+        releases.get("worker")?.resolve(true);
+        await waitFor(() => cancelled.has("web"));
+      } else {
+        controller.abort();
+        await waitFor(() => cancelled.size === cap);
+      }
+      expect(returned).toBe(false);
+      for (const release of releases.values()) {
+        release.resolve(false);
+      }
+      const error = await result;
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).toContain(
+        outcome === "failure"
+          ? "service worker: fixture worker"
+          : "was canceled"
+      );
+      expect(started).toEqual(names.slice(0, cap));
+      expect(completed.toSorted()).toEqual(names.slice(0, cap).toSorted());
+      expect(releases.size).toBe(0);
+    }
+  } finally {
+    controller.abort();
+    for (const release of releases.values()) {
+      release.resolve(false);
+    }
+    await result;
+  }
 });

@@ -26,9 +26,9 @@ export async function retainedSourceBindFixture() {
     await mkdtemp(join(tmpdir(), "retained-source-bind-model-"))
   );
   const root = join(outer, "checkout");
-  await mkdir(join(root, ".hack"), { recursive: true });
-  await mkdir(join(root, ".git"));
-  await mkdir(join(root, "source"));
+  await mkdir(join(root, ".hack"), { recursive: true, mode: 0o755 });
+  await mkdir(join(root, ".git"), { mode: 0o755 });
+  await mkdir(join(root, "source"), { mode: 0o755 });
   await writeFile(join(root, "source/marker"), SOURCE_BIND_CANARY);
   const config = '{"name":"fixture"}';
   const compose = JSON.stringify({

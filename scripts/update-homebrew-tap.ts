@@ -50,6 +50,8 @@ type MutableArgs = {
   archiveDir: string | null;
 };
 
+const STABLE_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
+
 const HELP_TEXT = [
   "Render the Homebrew formula for a published or local hack release.",
   "",
@@ -61,16 +63,6 @@ const HELP_TEXT = [
   "  --repo <owner/name>   GitHub repo to query (default: hack-dance/hack)",
   "  --archive-dir <path>  Read and hash local archives without querying GitHub",
 ].join("\n");
-
-if (import.meta.main) {
-  const parsed = parseArgs({ argv: Bun.argv.slice(2) });
-  if (parsed.ok) {
-    process.exitCode = await main({ args: parsed.args });
-  } else {
-    process.stderr.write(`${parsed.message}\n`);
-    process.exitCode = 1;
-  }
-}
 
 async function main({ args }: { readonly args: Args }): Promise<number> {
   const tag = args.tag?.trim() ?? "";
@@ -98,9 +90,12 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
       `hack-${version}-linux-x86_64.tar.gz`,
     ] as const;
     const archiveDir = args.archiveDir;
+    if (archiveDir && !STABLE_VERSION.test(version)) {
+      throw new Error("Local archives require a stable X.Y.Z version.");
+    }
     const assets = archiveDir
       ? await Promise.all(
-          fileNames.map((name) => localAsset({ archiveDir, version, name }))
+          fileNames.map((name) => localAsset({ archiveDir, name }))
         )
       : await publishedAssets({ repo: args.repo, tag });
     const [armName, intelName, linuxName] = fileNames;
@@ -125,20 +120,13 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
   return 0;
 }
 
-const STABLE_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
-
 async function localAsset({
   archiveDir,
-  version,
   name,
 }: {
   readonly archiveDir: string;
-  readonly version: string;
   readonly name: string;
 }): Promise<ReleaseAssetInfo> {
-  if (!STABLE_VERSION.test(version)) {
-    throw new Error("Local archives require a stable X.Y.Z version.");
-  }
   const path = resolve(archiveDir, name);
   const file = Bun.file(path);
   if (!(await file.exists())) {
@@ -570,4 +558,14 @@ function buildOptionResult({
       apply(args, value);
     },
   };
+}
+
+if (import.meta.main) {
+  const parsed = parseArgs({ argv: Bun.argv.slice(2) });
+  if (parsed.ok) {
+    process.exitCode = await main({ args: parsed.args });
+  } else {
+    process.stderr.write(`${parsed.message}\n`);
+    process.exitCode = 1;
+  }
 }

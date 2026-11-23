@@ -54,7 +54,7 @@ beforeEach(async () => {
   );
   await writeOwnedFixture(
     join(root, "project", ".hack", "docker-compose.yml"),
-    "services:\n  app:\n    image: example.invalid/app\n"
+    "name: sample\nservices:\n  app:\n    image: example.invalid/app\n"
   );
   await writeRegistry(true);
 });
@@ -1267,6 +1267,129 @@ test("failed Compose preparation with a retained container leaves its launch rea
       composeProject: "alternate",
     })
   ).toBeNull();
+}, 40_000);
+
+test("bare Down recovers Compose's directory-derived name after a named overlay Start", async () => {
+  const projectDir = join(root, "project", ".hack");
+  const composeFile = join(projectDir, "docker-compose.yml");
+  const overlay = join(projectDir, "hack.env.qa.yaml");
+  await writeOwnedFixture(
+    composeFile,
+    "services:\n  app:\n    image: example.invalid/app\n"
+  );
+  await writeOwnedFixture(
+    overlay,
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n"
+  );
+  if (process.env.HACK_TEST_COMPOSE_CONFIG === "1") {
+    const realCompose = Bun.spawnSync(
+      [
+        "docker",
+        "compose",
+        "--env-file",
+        "/dev/null",
+        "-f",
+        composeFile,
+        "config",
+        "--format",
+        "json",
+      ],
+      {
+        cwd: projectDir,
+        env: { ...process.env, COMPOSE_PROJECT_NAME: undefined },
+      }
+    );
+    expect(realCompose.exitCode).toBe(0);
+    expect(JSON.parse(realCompose.stdout.toString()).name).toBe("hack");
+  }
+  await installComposeNameFixture({
+    defaultStack: "hack",
+    startContainers: true,
+    savedContextOnly: true,
+    trackNamedStacks: true,
+  });
+  const started = await run(["up", "-d", "--env", "qa", "--json"]);
+  expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+  expect(
+    await readProjectRuntimeStateEntry({ projectDir, composeProject: "hack" })
+  ).toMatchObject({ launchComposeBase: "hack", envName: "qa" });
+  const stopped = await run(["down", "--json"]);
+  expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+  expect(await Bun.file(join(root, "down-context")).text()).toBe(
+    "saved-files-context"
+  );
+  expect(await Bun.file(join(root, "compose-running-hack")).exists()).toBe(
+    false
+  );
+}, 40_000);
+
+test("Restart uses the verified Docker context after a down hook edits the overlay", async () => {
+  const projectDir = join(root, "project", ".hack");
+  const overlay = join(projectDir, "hack.env.qa.yaml");
+  const saved =
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n";
+  const changed = saved.replace("saved-files-context", "changed-context");
+  await writeOwnedFixture(overlay, saved);
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        down: {
+          before: [
+            `printf %s ${quoteShellWord(changed)} > ${quoteShellWord(overlay)}`,
+          ],
+        },
+      },
+    })
+  );
+  await installComposeNameFixture({
+    startContainers: true,
+    savedContextOnly: true,
+  });
+  const started = await run(["up", "-d", "--env", "qa", "--json"]);
+  expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+  const env = { PATH: `${join(root, "bin")}:/usr/bin:/bin` };
+  const restarted = await run(["restart", "--json"], false, undefined, env);
+  expect(restarted.exitCode, restarted.stderr + restarted.stdout).toBe(0);
+  expect(await Bun.file(overlay).text()).toBe(changed);
+  expect(await Bun.file(join(root, "restart-context")).text()).toBe(
+    "saved-files-context"
+  );
+  await writeOwnedFixture(overlay, saved);
+  const stopped = await run(["down", "--json"], false, undefined, env);
+  expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+}, 40_000);
+
+test("a failed Restart and repair preserve an overlay launch for bare Down", async () => {
+  const projectDir = join(root, "project", ".hack");
+  await configureManagedNameOverlay({ defaultOverlay: false });
+  await installComposeNameFixture({ startContainers: true });
+  const started = await run(["up", "-d", "--env", "qa", "--json"]);
+  expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+  const before = await readProjectRuntimeStateEntry({
+    projectDir,
+    composeProject: "alternate",
+  });
+  await installComposeNameFixture({ failAfterCreate: true });
+  const restarted = await run(["restart", "--json"]);
+  expect(restarted.exitCode).toBe(23);
+  const launch = await readProjectRuntimeStateEntry({
+    projectDir,
+    composeProject: "alternate",
+  });
+  expect(launch).toMatchObject({
+    launchComposeBase: "alternate",
+    envName: "qa",
+    launchId: expect.any(String),
+  });
+  expect(launch?.launchId).not.toBe(before?.launchId);
+  const stopped = await run(["down", "--json"]);
+  expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+  expect(
+    (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+  ).toEqual(["compose", "-p", "alternate"]);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
 }, 40_000);
 
 test("explicit Down stops only the Compose identity selected by its overlay", async () => {

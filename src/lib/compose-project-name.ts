@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { YAML } from "bun";
 import { childEnvironment } from "./child-environment.ts";
 import { readTextFile } from "./fs.ts";
@@ -99,10 +99,9 @@ export async function shouldResolveComposeProjectName(
 }
 
 /**
- * Resolve an interpolated or overridden name before pinning it with `-p`.
- * Compose evaluates the name in the checkout's normal dotenv and shell
- * environment. Only the name and a dummy service are parsed, so unrelated
- * service configuration, env files and Docker availability do not affect it.
+ * Resolve the base name Compose would use, or the base for a pinned branch.
+ * Compose evaluates dynamic names in the checkout's dotenv and shell
+ * environment. For an unnamed base, Compose uses the containing directory.
  */
 export async function resolveDesktopComposeProjectName(
   opts: ComposeProjectNameOptions & ComposeNameEnvironment
@@ -115,6 +114,7 @@ export async function resolveDesktopComposeProjectName(
     ...opts,
     composeName,
   });
+  const cwd = dirname(opts.project.composeFile);
   if (
     !(await shouldResolveComposeProjectName({
       ...opts,
@@ -122,15 +122,17 @@ export async function resolveDesktopComposeProjectName(
       configuredName,
     }))
   ) {
-    return configuredName;
+    const name = opts.forBranch
+      ? configuredName
+      : normalizeComposeProjectName(composeName ?? basename(cwd));
+    return isComposeProjectName(name) ? name : null;
   }
-  const cwd = dirname(opts.project.composeFile);
   const sentinel =
     opts.forBranch && PROJECT_NAME_REFERENCE.test(configuredName)
       ? `hack-name-${randomUUID()}`
       : undefined;
   const config = JSON.stringify({
-    name: sentinel ?? configuredName,
+    name: sentinel ?? composeName ?? undefined,
     services: {
       probe: {
         image: "scratch",
@@ -200,12 +202,14 @@ function configuredBranchBase(
       ? getString(probe.labels, PROJECT_NAME_LABEL)
       : null;
   // Compose normalizes an interpolated YAML name before assigning it.
-  return (
-    value
-      ?.toLowerCase()
-      .replace(INVALID_COMPOSE_NAME_CHARS, "")
-      .replace(COMPOSE_NAME_LEADING_SEPARATORS, "") ?? null
-  );
+  return value ? normalizeComposeProjectName(value) : null;
+}
+
+function normalizeComposeProjectName(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(INVALID_COMPOSE_NAME_CHARS, "")
+    .replace(COMPOSE_NAME_LEADING_SEPARATORS, "");
 }
 
 /** Compose project name of a branch instance: `<base>--<branch slug>`. */

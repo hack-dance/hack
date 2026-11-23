@@ -1,7 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import { repairFailedRestart } from "../src/commands/project.ts";
 import {
@@ -17,13 +14,8 @@ import { setLoggerBackendOverride } from "../src/ui/logger.ts";
  * released the helpers stops the repair before any container starts.
  */
 
-const roots: string[] = [];
-
-afterEach(async () => {
+afterEach(() => {
   setLoggerBackendOverride({ backend: null });
-  for (const root of roots.splice(0)) {
-    await rm(root, { recursive: true, force: true });
-  }
 });
 
 const budgets = {
@@ -31,14 +23,7 @@ const budgets = {
   imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
 };
 
-async function scratch(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "hack-restart-repair-"));
-  roots.push(root);
-  return root;
-}
-
 test("a superseded restart repair cleans up and starts no container", async () => {
-  const projectDir = await scratch();
   const events: string[] = [];
   const result = await repairFailedRestart({
     budgets,
@@ -49,8 +34,9 @@ test("a superseded restart repair cleans up and starts no container", async () =
       events.push("cleanup");
       return Promise.resolve();
     },
-    projectDir,
-    lifecycleComposeProject: "demo--branch-a",
+    discardAbsentLaunch: async () => {
+      events.push("discard-if-absent");
+    },
     up: async (beforeStart) => {
       events.push(beforeStart ? "up-guarded" : "up-unguarded");
       // The backend awaits beforeStart right before containers start.
@@ -60,11 +46,10 @@ test("a superseded restart repair cleans up and starts no container", async () =
     },
   });
   expect(result).toEqual({ code: 1, phase: "lifecycle" });
-  expect(events).toEqual(["up-guarded", "cleanup"]);
+  expect(events).toEqual(["up-guarded", "cleanup", "discard-if-absent"]);
 });
 
 test("a current restart repair runs guarded and reports the original failure", async () => {
-  const projectDir = await scratch();
   const checks: unknown[] = [];
   const result = await repairFailedRestart({
     budgets,
@@ -75,8 +60,8 @@ test("a current restart repair runs guarded and reports the original failure", a
       return Promise.resolve();
     },
     cleanup: () => Promise.reject(new Error("must not clean up a repair")),
-    projectDir,
-    lifecycleComposeProject: "demo--branch-a",
+    discardAbsentLaunch: () =>
+      Promise.reject(new Error("must not discard a repaired launch")),
     up: async (beforeStart) => {
       await beforeStart?.();
       return 0;
@@ -87,7 +72,6 @@ test("a current restart repair runs guarded and reports the original failure", a
 });
 
 test("a failed repair keeps the shared helpers when containers may run, before cleanup", async () => {
-  const projectDir = await scratch();
   const events: string[] = [];
   const result = await repairFailedRestart({
     budgets,
@@ -102,10 +86,11 @@ test("a failed repair keeps the shared helpers when containers may run, before c
       events.push("retain-check");
       return Promise.resolve();
     },
-    projectDir,
-    lifecycleComposeProject: "demo--branch-a",
+    discardAbsentLaunch: async () => {
+      events.push("discard-if-absent");
+    },
     up: () => Promise.resolve(124),
   });
   expect(result.code).toBe(1);
-  expect(events).toEqual(["retain-check", "cleanup"]);
+  expect(events).toEqual(["retain-check", "cleanup", "discard-if-absent"]);
 });

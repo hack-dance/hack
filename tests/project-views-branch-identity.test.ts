@@ -363,7 +363,7 @@ test("lists configured and previously used copies even with no containers", asyn
     runtime: [
       {
         ...branchRuntime({ slug: "feature", workingDir: worktreeDir }),
-        project: "alpha",
+        project: "hack",
       },
     ],
   });
@@ -375,8 +375,8 @@ test("lists configured and previously used copies even with no containers", asyn
       branch: null,
       branch_name: "feature/search",
       url: "https://checkout.hack",
-      compose_project: "alpha",
-      runtime: { project: "alpha" },
+      compose_project: "hack",
+      runtime: { project: "hack" },
     },
   ]);
   await writeFile(join(worktreeDir, "hack.project.json"), "{}\n");

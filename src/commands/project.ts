@@ -8084,7 +8084,6 @@ async function runUpCommand({
     (await resolveCommandComposeBase({
       project,
       cfg,
-      composeName: rawComposeBase,
       forBranch: branch !== null,
       expected: args.options.expectComposeProject,
     }));
@@ -8151,7 +8150,9 @@ async function runUpCommand({
   const { lifecycleComposeProject: savedLifecycleKey } = savedLifecycle;
   const pinnedBase =
     loginComposeBase ??
-    (savedLifecycle.verifiedLegacy || savedLifecycle.staleLegacyKey
+    (baseProjectName !== rawComposeBase ||
+    savedLifecycle.verifiedLegacy ||
+    savedLifecycle.staleLegacyKey
       ? baseProjectName
       : null);
   const composeProjectName = desktopComposeTarget({
@@ -8224,45 +8225,14 @@ async function runUpCommand({
       }),
     });
   };
-  const discardPublishedRuntimeSelection = async () => {
-    if (!publishedLaunchId) {
-      return;
-    }
-    const identity = composeProjectName ?? baseProjectName;
-    const cwd = dirname(project.composeFile);
-    const absent = await Promise.all([
-      listInstanceContainers({
-        project,
-        composeProjectName: identity,
-        profiles: ["*"],
-        env: envOverrides.env,
-      }),
-      listInstanceNetworks({
-        composeProject: identity,
-        env: envOverrides.env,
-        cwd,
-      }),
-      readLifecycleState(project),
-    ])
-      .then(
-        ([containers, networks, owners]) =>
-          containers.ok &&
-          containers.containers.length === 0 &&
-          networks.ok &&
-          networks.networks.length === 0 &&
-          !owners.some(
-            (entry) => entry.composeProject === lifecycleComposeProject
-          )
-      )
-      .catch(() => false);
-    if (absent) {
-      await removeProjectRuntimeStateEntry({
-        projectDir: project.projectDir,
-        composeProject: lifecycleComposeProject,
-        launchId: publishedLaunchId,
-      });
-    }
-  };
+  const discardPublishedRuntimeSelection = () =>
+    discardAbsentRuntimeLaunch({
+      project,
+      composeProject: composeProjectName ?? baseProjectName,
+      lifecycleComposeProject,
+      env: envOverrides.env,
+      launchId: publishedLaunchId,
+    });
 
   const progress =
     detach && !json
@@ -9432,20 +9402,9 @@ async function resolveUpComposeBase(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly alreadyResolved: boolean;
 }): Promise<string> {
-  if (
-    opts.alreadyResolved ||
-    !(await shouldResolveComposeProjectName({
-      ...opts,
-      composeFile: opts.project.composeFile,
-      configuredName: opts.configured,
-    }))
-  ) {
-    return opts.configured;
-  }
-  return await requireResolvedComposeBase({
-    ...opts,
-    composeName: opts.configured,
-  });
+  return opts.alreadyResolved
+    ? opts.configured
+    : await requireResolvedComposeBase(opts);
 }
 
 async function resolveLoginComposeBase(opts: {
@@ -9470,25 +9429,22 @@ async function resolveLoginComposeBase(opts: {
     envName: resolveRequestedEnvName({ envOption: opts.envOption }),
     persist: false,
   });
-  if (
-    !(await shouldResolveComposeProjectName({
-      composeFile: project.composeFile,
-      configuredName: configured,
-      env: env.env,
-      disableEnvFile: true,
-      forBranch,
-    }))
-  ) {
-    return undefined;
-  }
-  return await requireResolvedComposeBase({
+  const input = {
     project,
     cfg,
-    composeName: configured,
     env: env.env,
     disableEnvFile: true,
     forBranch,
-  });
+  };
+  const base = await requireResolvedComposeBase(input);
+  return base !== configured ||
+    (await shouldResolveComposeProjectName({
+      ...input,
+      composeFile: project.composeFile,
+      configuredName: configured,
+    }))
+    ? base
+    : undefined;
 }
 
 async function resolveLocalComposeTarget(opts: {
@@ -9574,7 +9530,6 @@ async function resolveLocalComposeTarget(opts: {
   const nameSelection = {
     project,
     cfg,
-    composeName: configured,
     forBranch,
     env: requestedExecution?.env,
   };
@@ -9632,16 +9587,17 @@ async function resolveLocalComposeTarget(opts: {
   const nameInput = {
     project,
     cfg,
-    composeName: configured,
     env: execution.env,
     forBranch,
   };
-  const pin = await shouldResolveComposeProjectName({
-    ...nameInput,
-    composeFile: project.composeFile,
-    configuredName: configured,
-  });
-  const base = pin ? await requireResolvedComposeBase(nameInput) : configured;
+  const base = await requireResolvedComposeBase(nameInput);
+  const pin =
+    base !== configured ||
+    (await shouldResolveComposeProjectName({
+      ...nameInput,
+      composeFile: project.composeFile,
+      configuredName: configured,
+    }));
   if (base === (hinted ?? configured)) {
     return { ...target, base, pin: pin || lifecycle.verifiedLegacy === true };
   }
@@ -9723,7 +9679,6 @@ export async function resolveComposeCommandTarget(opts: {
       : await requireResolvedComposeBase({
           project,
           cfg,
-          composeName: configured,
           forBranch: branch !== null,
         });
   const { composeProjectName: branchName } = resolveRestartTarget({
@@ -10830,8 +10785,7 @@ export async function repairFailedRestart(opts: {
    * when the failed starts may have left containers running.
    */
   readonly retainHelpersIfContainersMayRun?: () => Promise<void>;
-  readonly projectDir: string;
-  readonly lifecycleComposeProject: string;
+  readonly discardAbsentLaunch: () => Promise<void>;
   readonly up: (beforeStart?: () => Promise<void>) => Promise<number>;
 }): Promise<{
   readonly code: number;
@@ -10852,8 +10806,7 @@ export async function repairFailedRestart(opts: {
     return await abandonSupersededRestart({
       error: repair.superseded,
       cleanup: opts.cleanup,
-      projectDir: opts.projectDir,
-      composeProject: opts.lifecycleComposeProject,
+      discardAbsentLaunch: opts.discardAbsentLaunch,
     });
   }
   if (repair.code === 0) {
@@ -10867,10 +10820,7 @@ export async function repairFailedRestart(opts: {
     });
     await opts.retainHelpersIfContainersMayRun?.();
     await opts.cleanup?.();
-    await removeProjectRuntimeStateEntry({
-      projectDir: opts.projectDir,
-      composeProject: opts.lifecycleComposeProject,
-    });
+    await opts.discardAbsentLaunch();
   }
   return {
     code: opts.upCode,
@@ -11011,14 +10961,10 @@ function reviewRunConfig(opts: {
 async function abandonSupersededRestart(opts: {
   readonly error: SharedHelperSupersededError;
   readonly cleanup: LifecycleOperationCleanup | null;
-  readonly projectDir: string;
-  readonly composeProject: string;
+  readonly discardAbsentLaunch: () => Promise<void>;
 }): Promise<{ readonly code: number; readonly phase: "lifecycle" }> {
   await opts.cleanup?.();
-  await removeProjectRuntimeStateEntry({
-    projectDir: opts.projectDir,
-    composeProject: opts.composeProject,
-  });
+  await opts.discardAbsentLaunch();
   logger.error({ message: opts.error.message });
   return { code: 1, phase: "lifecycle" };
 }
@@ -11038,11 +10984,13 @@ async function runRestartUpPhase(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
   readonly projectName: string;
-  readonly composeProjectName: string | null;
+  readonly composeProjectName: string;
   readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
-  readonly envName?: string | null;
+  readonly envOverrides: Awaited<ReturnType<typeof resolveComposeEnvOverrides>>;
+  readonly publishLaunch: () => Promise<void>;
+  readonly discardAbsentLaunch: () => Promise<void>;
   readonly detach?: boolean;
   readonly routeStdoutToStderr?: boolean;
 }): Promise<{
@@ -11060,40 +11008,7 @@ async function runRestartUpPhase(opts: {
   });
   const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
 
-  const targetServices = await readComposeServiceNames(
-    opts.project.composeFile
-  );
-  const envOverrides = await resolveComposeEnvOverrides({
-    project: opts.project,
-    projectName: opts.projectName,
-    targetServices,
-    allServiceNames: targetServices,
-    envName: opts.envName,
-  });
-  await assertRegistryCredentialsAvailable({
-    projectRoot: opts.project.projectRoot,
-    composeFile: opts.project.composeFile,
-    targetServices,
-    envByService: envOverrides.preflightEnvByService,
-  });
-
-  await persistProjectRuntimeEnvSelection({
-    projectDir: opts.project.projectDir,
-    composeProject: opts.lifecycleComposeProject,
-    launchComposeBase: opts.baseProjectName,
-    launchBranch: opts.branch,
-    envProjectName: opts.projectName,
-    pinnedComposeBase: opts.expectComposeProject
-      ? opts.baseProjectName
-      : undefined,
-    envName: envOverrides.effectiveEnvName,
-    services: targetServices,
-    envByService: envOverrides.preflightEnvByService,
-    composeProfiles: resolveEffectiveComposeProfiles({
-      cliProfiles: opts.profiles,
-      composeEnv: envOverrides.env,
-    }),
-  });
+  const { envOverrides } = opts;
 
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
@@ -11194,7 +11109,7 @@ async function runRestartUpPhase(opts: {
       branch: opts.branch,
       devHost,
       aliasHost,
-      composeProject: opts.composeProjectName ?? opts.baseProjectName,
+      composeProject: opts.composeProjectName,
     });
     const composeFilesWithEnv = [
       ...composeFilesWithRuntimeOverrides,
@@ -11221,7 +11136,10 @@ async function runRestartUpPhase(opts: {
       assertCurrent: assertHelpersCurrent,
       up: (beforeStart) =>
         composeRuntimeBackend.up({
-          beforeCreate: verifyOwnership,
+          beforeCreate: async () => {
+            await verifyOwnership();
+            await opts.publishLaunch();
+          },
           beforeStart: async () => {
             await verifyOwnership();
             await beforeStart?.();
@@ -11251,8 +11169,7 @@ async function runRestartUpPhase(opts: {
       return await abandonSupersededRestart({
         error: guarded.superseded,
         cleanup: lifecycleCleanup,
-        projectDir: opts.project.projectDir,
-        composeProject: opts.lifecycleComposeProject,
+        discardAbsentLaunch: opts.discardAbsentLaunch,
       });
     }
     const upCode = guarded.code;
@@ -11265,11 +11182,13 @@ async function runRestartUpPhase(opts: {
         assertCurrent: assertHelpersCurrent,
         cleanup: lifecycleCleanup,
         retainHelpersIfContainersMayRun,
-        projectDir: opts.project.projectDir,
-        lifecycleComposeProject: opts.lifecycleComposeProject,
+        discardAbsentLaunch: opts.discardAbsentLaunch,
         up: (beforeStart) =>
           composeRuntimeBackend.up({
-            beforeCreate: verifyOwnership,
+            beforeCreate: async () => {
+              await verifyOwnership();
+              await opts.publishLaunch();
+            },
             beforeStart: async () => {
               await verifyOwnership();
               await beforeStart?.();
@@ -11312,6 +11231,7 @@ async function runRestartUpPhase(opts: {
     });
     if (upAfter !== 0) {
       await lifecycleCleanup?.();
+      await opts.discardAbsentLaunch();
     }
     return {
       code: upAfter,
@@ -11321,10 +11241,7 @@ async function runRestartUpPhase(opts: {
   } catch (error: unknown) {
     await retainHelpersIfContainersMayRun();
     await lifecycleCleanup?.();
-    await removeProjectRuntimeStateEntry({
-      projectDir: opts.project.projectDir,
-      composeProject: opts.lifecycleComposeProject,
-    });
+    await opts.discardAbsentLaunch();
     throw error;
   } finally {
     signalCleanup.dispose();
@@ -11921,7 +11838,7 @@ async function runLocalRestart({
 }): Promise<number> {
   const {
     base: baseProjectName,
-    composeProjectName,
+    composeProjectName: selectedComposeProjectName,
     lifecycle,
     envName: effectiveEnvName,
   } = compose;
@@ -11931,7 +11848,8 @@ async function runLocalRestart({
   ) {
     await preflightLifecycleSupervisor();
   }
-  beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
+  const composeProjectName = selectedComposeProjectName ?? baseProjectName;
+  beginLifecycleProgress({ project: composeProjectName });
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
     requested: args.positionals.services,
@@ -11944,7 +11862,7 @@ async function runLocalRestart({
       cfg,
       baseProjectName,
       projectName,
-      composeProjectName,
+      composeProjectName: selectedComposeProjectName,
       lifecycleComposeProject,
       profiles,
       branch,
@@ -11976,7 +11894,7 @@ async function runLocalRestart({
           action: "restart",
           project: baseProjectName,
           branch,
-          composeProject: composeProjectName ?? baseProjectName,
+          composeProject: composeProjectName,
           started: result.running,
           completed: result.completed,
           interruption: result.interruption,
@@ -12025,7 +11943,7 @@ async function runLocalRestart({
     cfg,
     projectName,
     composeProjectName,
-    composeProjectLabel: composeProjectName ?? baseProjectName,
+    composeProjectLabel: composeProjectName,
     lifecycleComposeProject,
     profiles,
     branch,
@@ -12067,14 +11985,41 @@ async function runLocalRestart({
   }
 
   reportLifecycleProgress({ service: null, phase: "stopped" });
-  await removeProjectRuntimeStateEntry({
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
-  });
   const nextLifecycleKey = resolveRestartTarget({
     baseProjectName,
     branch,
   }).lifecycleComposeProject;
+  const effectiveProfiles = resolveEffectiveComposeProfiles({
+    cliProfiles: profiles,
+    composeEnv: preflightEnv.env,
+  });
+  let launchId: string | undefined;
+  const publishLaunch = async () => {
+    launchId ??= await persistProjectRuntimeEnvSelection({
+      projectDir: project.projectDir,
+      composeProject: nextLifecycleKey,
+      replaceComposeProject:
+        lifecycleComposeProject === nextLifecycleKey
+          ? undefined
+          : lifecycleComposeProject,
+      launchComposeBase: baseProjectName,
+      launchBranch: branch,
+      envProjectName: projectName,
+      pinnedComposeBase: baseProjectName,
+      envName: preflightEnv.effectiveEnvName,
+      services: allServiceNames,
+      envByService: preflightEnv.preflightEnvByService,
+      composeProfiles: effectiveProfiles,
+    });
+  };
+  const discardAbsentLaunch = () =>
+    discardAbsentRuntimeLaunch({
+      project,
+      composeProject: composeProjectName,
+      lifecycleComposeProject: nextLifecycleKey,
+      env: preflightEnv.env,
+      launchId,
+    });
 
   const upOutcome = await runRestartUpPhase({
     expectComposeProject: compose.expected,
@@ -12087,7 +12032,9 @@ async function runLocalRestart({
     lifecycleComposeProject: nextLifecycleKey,
     profiles,
     branch,
-    envName: effectiveEnvName,
+    envOverrides: preflightEnv,
+    publishLaunch,
+    discardAbsentLaunch,
     detach: true,
     routeStdoutToStderr: json,
   });
@@ -12126,10 +12073,6 @@ async function runLocalRestart({
     });
   }
 
-  const effectiveProfiles = resolveEffectiveComposeProfiles({
-    cliProfiles: profiles,
-    composeEnv: preflightEnv.env,
-  });
   const successfulCompletionServices = new Set(
     await discoverSuccessfulCompletionServices({
       composeFile: project.composeFile,
@@ -12146,10 +12089,7 @@ async function runLocalRestart({
       composeProject: nextLifecycleKey,
       containers: "unconfirmed",
     });
-    await removeProjectRuntimeStateEntry({
-      projectDir: project.projectDir,
-      composeProject: nextLifecycleKey,
-    });
+    await discardAbsentLaunch();
   };
   const { states, startup } = await waitForComposeStartupState({
     successfulCompletionServices,
@@ -12169,7 +12109,7 @@ async function runLocalRestart({
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
     await cleanupIncompleteStartup();
     const message = composeStartupIncompleteMessage({
-      composeProject: composeProjectName ?? baseProjectName,
+      composeProject: composeProjectName,
       failed: startup.failed,
     });
     if (!json) {
@@ -12201,7 +12141,7 @@ async function runLocalRestart({
         action: "restart",
         project: baseProjectName,
         branch,
-        composeProject: composeProjectName ?? baseProjectName,
+        composeProject: composeProjectName,
         started: startup.running,
         completed: startup.completed,
         interruption: interruptionCheck.interruption,
@@ -12313,6 +12253,53 @@ async function persistProjectRuntimeEnvSelection(opts: {
     },
   });
   return launchId;
+}
+
+/** A failed launch remains selectable until all runtime owners are absent. */
+async function discardAbsentRuntimeLaunch(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly composeProject: string;
+  readonly lifecycleComposeProject: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly launchId: string | undefined;
+}): Promise<void> {
+  const { project, composeProject, lifecycleComposeProject, env, launchId } =
+    opts;
+  if (!launchId) {
+    return;
+  }
+  const absent = await Promise.all([
+    listInstanceContainers({
+      project,
+      composeProjectName: composeProject,
+      profiles: ["*"],
+      env,
+    }),
+    listInstanceNetworks({
+      composeProject,
+      env,
+      cwd: dirname(project.composeFile),
+    }),
+    readLifecycleState(project),
+  ])
+    .then(
+      ([containers, networks, owners]) =>
+        containers.ok &&
+        containers.containers.length === 0 &&
+        networks.ok &&
+        networks.networks.length === 0 &&
+        !owners.some(
+          (entry) => entry.composeProject === lifecycleComposeProject
+        )
+    )
+    .catch(() => false);
+  if (absent) {
+    await removeProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+      launchId,
+    });
+  }
 }
 
 /** Bound on one docker ps/rm call while finishing a stop. */

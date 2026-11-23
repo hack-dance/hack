@@ -1145,6 +1145,39 @@ fn code(fixture: &Fixture, request: BuildRequest) -> &'static str {
 }
 
 #[test]
+fn shared_batch_checks_request_parent_before_admitting_the_build() {
+    let fixture = Fixture::new();
+    let physical = fixture.root.join("physical");
+    let batch = physical.join("batch");
+    state::private_directory(&batch).unwrap();
+    let alias = fixture.root.join("alias");
+    std::os::unix::fs::symlink(&physical, &alias).unwrap();
+    let request = batch.join("request.json");
+    // An invalid version keeps this test inside admission, before any pool work.
+    state::write(
+        &request,
+        &serde_json::json!({
+            "version": 0,
+            "project_root": fixture.project,
+            "context": "app",
+            "policy": "missing",
+            "share_command_base_pins": true,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        build_image(&fixture.candidate, &alias.join("batch/request.json"))
+            .unwrap_err()
+            .code,
+        "aliased_state"
+    );
+    assert_eq!(
+        build_image(&fixture.candidate, &request).unwrap_err().code,
+        "native_build_request"
+    );
+}
+
+#[test]
 fn requests_refuse_unsafe_paths_arguments_and_bounds() {
     let fixture = Fixture::new();
     let base = || fixture.request(Policy::Missing);

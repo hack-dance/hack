@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { noteActivityFailedServices } from "../lib/activity-log.ts";
 import type { BranchDroppedSites } from "../lib/branch-hosts.ts";
@@ -27,6 +26,7 @@ import {
   type NativeProcessRefusal,
   requireWrappableNativeProcesses,
 } from "../lib/native-process-wrappers.ts";
+import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
@@ -3205,7 +3205,8 @@ async function startNativeProjectAttempt(
           restoreRevision: runSelection.sourceRevision,
           invoke: deps.invoke,
         });
-        const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
+        const directory =
+          await nativeRuntimeTempDirectory("hack-native-start-");
         const run = runSelection.run;
         const stop = hooks?.stop
           ? createNativeForegroundStop({

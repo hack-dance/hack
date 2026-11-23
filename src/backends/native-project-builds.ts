@@ -1,5 +1,4 @@
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { realpath, rm, writeFile } from "node:fs/promises";
 import {
   dirname,
   isAbsolute,
@@ -18,6 +17,7 @@ import {
   type NativeBuilderCommandOptions,
   nativeBuilderRemedy,
 } from "../lib/native-image-builder.ts";
+import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
 import {
   nativeImagePolicyArgs,
   nativeImageRegistryReason,
@@ -925,7 +925,7 @@ async function runPendingBuilds(opts: {
   const imagePolicyArgs = nativeImagePolicyArgs();
   // The runtime requires the exact canonical root; it also derives the namespace.
   const projectRoot = await realpath(opts.projectRoot);
-  const directory = await mkdtemp(join(tmpdir(), "hack-native-build-"));
+  const directory = await nativeRuntimeTempDirectory("hack-native-build-");
   const cpus = opts.guestCpus ?? 1;
   const cap =
     Number.isSafeInteger(cpus) && cpus > 0
@@ -1106,7 +1106,7 @@ export async function nativeBuildBases(opts: {
     return [];
   }
   const projectRoot = await realpath(opts.projectRoot);
-  const directory = await mkdtemp(join(tmpdir(), "hack-native-build-scan-"));
+  const directory = await nativeRuntimeTempDirectory("hack-native-build-scan-");
   const file = join(directory, "request.json");
   const bases = new Set<string>();
   try {

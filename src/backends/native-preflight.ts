@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { DEFAULT_CADDY_IP } from "../constants.ts";
 import { HackCliError } from "../lib/cli-result.ts";
@@ -11,6 +10,7 @@ import {
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
 } from "../lib/native-compose-backend-features.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../lib/native-environment-notices.ts";
+import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
 import {
   probeProxyLoopback,
   resolveProxyLoopbackAddresses,
@@ -1526,7 +1526,7 @@ async function collectNativeRuntimeFindings(opts: {
   let directory: string | undefined;
   let reply: unknown;
   try {
-    directory = await mkdtemp(join(tmpdir(), "hack-native-preflight-"));
+    directory = await nativeRuntimeTempDirectory("hack-native-preflight-");
     const original = await invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,

@@ -4,12 +4,15 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   admitNativeProjectBuild,
   admitNativeProjectBuilds,
@@ -1022,7 +1025,7 @@ test.each([
   }
 });
 
-test("concurrent builds share a command pin directory and deduplicate notices", async () => {
+test("concurrent builds share a physical command pin directory and deduplicate notices", async () => {
   const projectRoot = await root();
   const arrived = Promise.withResolvers<void>();
   const directories: string[] = [];
@@ -1030,40 +1033,74 @@ test("concurrent builds share a command pin directory and deduplicate notices", 
   const base = "docker.io/library/alpine:latest";
   const pin = `docker.io/library/alpine@${IMAGE}`;
   const notice = "Using a previously verified base.";
-  await buildNativeProjectImages({
-    runtime,
-    projectRoot,
-    branch: null,
-    profiles: [],
-    builds: new Map([
-      ["one", request()],
-      ["two", request({})],
-    ]),
-    specs: { one: { build: "app" }, two: { build: "app" } },
-    rebuild: false,
-    guestCpus: 2,
-    imageTagMode: "refresh",
-    signal: new AbortController().signal,
-    onNotice: (line) => notices.push(line),
-    invoke: async ({ requestFile }) => {
-      const body = JSON.parse(await readFile(requestFile, "utf8"));
-      expect(body.share_command_base_pins).toBe(true);
-      expect(body.image_tag_mode).toBe("refresh");
-      directories.push(dirname(requestFile));
-      if (directories.length === 2) {
-        arrived.resolve();
-      }
-      await arrived.promise;
-      return {
-        imageId: IMAGE,
-        buildKey: KEY,
-        reused: false,
-        baseSelections: { [base]: pin },
-        baseFallbacks: [notice],
-      };
-    },
-  });
+  const physical = join(await realpath(projectRoot), "physical");
+  const alias = join(projectRoot, "alias");
+  const previous = process.env.TMPDIR;
+  await mkdir(join(physical, "tmp"), { recursive: true });
+  await symlink(physical, alias);
+  process.env.TMPDIR = join(alias, "tmp");
+  try {
+    await buildNativeProjectImages({
+      runtime,
+      projectRoot,
+      branch: null,
+      profiles: [],
+      builds: new Map([
+        ["one", request()],
+        ["two", request({})],
+      ]),
+      specs: { one: { build: "app" }, two: { build: "app" } },
+      rebuild: false,
+      guestCpus: 2,
+      imageTagMode: "refresh",
+      signal: new AbortController().signal,
+      onNotice: (line) => notices.push(line),
+      invoke: async ({ requestFile }) => {
+        const body = JSON.parse(await readFile(requestFile, "utf8"));
+        expect(body.share_command_base_pins).toBe(true);
+        expect(body.image_tag_mode).toBe("refresh");
+        directories.push(dirname(requestFile));
+        if (directories.length === 2) {
+          arrived.resolve();
+        }
+        await arrived.promise;
+        return {
+          imageId: IMAGE,
+          buildKey: KEY,
+          reused: false,
+          baseSelections: { [base]: pin },
+          baseFallbacks: [notice],
+        };
+      },
+    });
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "TMPDIR");
+    } else {
+      process.env.TMPDIR = previous;
+    }
+  }
   expect(directories).toHaveLength(2);
+  expect(new Set(directories.map(dirname))).toEqual(
+    new Set([join(physical, "tmp")])
+  );
   expect(new Set(directories).size).toBe(1);
   expect(notices).toEqual([notice]);
+});
+
+test("native runtime requests centralize temporary paths", async () => {
+  const backends = fileURLToPath(new URL("../src/backends/", import.meta.url));
+  const unresolved: string[] = [];
+  for await (const file of new Bun.Glob("*.ts").scan(backends)) {
+    const source = await Bun.file(join(backends, file)).text();
+    // The HTTPS FIFO is consumed by the shell before exec, not by the runtime.
+    const requests = source.replace(
+      'mkdtempSync(join(tmpdir(), "hk-https-pipe-"))',
+      ""
+    );
+    if (requests.replaceAll("realpath(tmpdir())", "").includes("tmpdir()")) {
+      unresolved.push(file);
+    }
+  }
+  expect(unresolved).toEqual([]);
 });

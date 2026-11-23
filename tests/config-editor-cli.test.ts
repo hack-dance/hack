@@ -1487,6 +1487,120 @@ test("replacing a private canonical default cannot expose a derived layer filena
   const next = await show(f.root, f.main);
   expect(next.default_overlay).toBe("default");
   expect(JSON.stringify(next).includes(marker)).toBe(false);
+
+  await writeFile(
+    projectPath,
+    JSON.stringify({
+      env: { defaultOverlay: authored },
+      defaultEnvConfig: name,
+    })
+  );
+  patch.base = bases(await show(f.root, f.main));
+  for (const command of ["validate", "apply"]) {
+    const result = await cli({
+      root: f.root,
+      cwd: f.main,
+      args: [command],
+      patch,
+    });
+    const issues =
+      result.payload.data?.issues ?? result.payload.error?.detail.issues;
+    expect(issues[0]?.message).toContain("remaining private overlay reference");
+    expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+  }
+});
+
+test("a linked checkout checks inherited private overlay filenames without listing them", async () => {
+  const f = await fixture();
+  const marker = "inherited-private-overlay-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const projectPath = join(f.linked, ".hack/hack.config.json");
+  const original = JSON.stringify({
+    dev_host: "storefront.hack",
+    env: { defaultOverlay: authored },
+  });
+  await writeFile(projectPath, original);
+  await writeFile(
+    join(f.project, `hack.env.${name}.local.yaml`),
+    env("  global:\n    MODE: inherited", name)
+  );
+  const report = await show(f.root, f.linked);
+  expect(report.layers.some((layer) => layer.inherited)).toBe(true);
+  await chmod(f.project, 0o111);
+  try {
+    const result = await cli({
+      root: f.root,
+      cwd: f.linked,
+      args: ["apply"],
+      patch: {
+        base: { "1": bases(report)["1"] },
+        changes: [
+          {
+            layer: "1",
+            kind: "project",
+            path: "env.defaultOverlay",
+            value: "default",
+          },
+        ],
+      },
+    });
+    expect(result.payload.error?.code).toBe("E_CONFIG_INVALID");
+    expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+    expect((await readFile(projectPath, "utf8")) === original).toBe(true);
+  } finally {
+    await chmod(f.project, 0o755);
+  }
+});
+
+test("implicit migration receipts withhold private overlay names", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-config-private-migration-"));
+  scratch.push(root);
+  const cwd = join(root, "legacy");
+  const project = join(cwd, ".hack");
+  await mkdir(project, { recursive: true });
+  const marker = "private-overlay-migration-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  await Promise.all([
+    writeFile(
+      join(project, "hack.config.json"),
+      JSON.stringify({ env: { defaultOverlay: authored } })
+    ),
+    writeFile(
+      join(project, "docker-compose.yml"),
+      "services:\n  api:\n    image: alpine\n"
+    ),
+    writeFile(
+      join(project, "hack.env.json"),
+      '{"version":1,"vars":[{"key":"MODE","source":"plain_env"}]}\n'
+    ),
+    writeFile(join(project, ".env"), "MODE=base\n"),
+    writeFile(join(project, `.env.${name}`), "MODE=private-layer\n"),
+  ]);
+  const report = await show(root, cwd);
+  const result = await cli({
+    root,
+    cwd,
+    args: ["apply"],
+    patch: {
+      base: bases(report),
+      changes: [
+        {
+          layer: "5",
+          kind: "env",
+          scope: "global",
+          key: "NEW",
+          value: "added",
+        },
+      ],
+    },
+  });
+  expect(result.payload.ok).toBe(true);
+  expect(
+    result.payload.data.changed.some((id: string) => id.endsWith(":[redacted]"))
+  ).toBe(true);
+  expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
 });
 
 test("validation reads newly selected layers and honors an explicit selection", async () => {

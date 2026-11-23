@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { applyEdits, findNodeAtLocation, modify } from "jsonc-parser";
@@ -32,8 +33,10 @@ import {
 import {
   configLine,
   isConfigSecret,
+  isPrivateOverlayValue,
   jsonConfigDiagnostic,
   jsonConfigTree,
+  privateProjectOverlayNames,
   restoreConfigSource,
 } from "./config-editor-source.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
@@ -63,12 +66,13 @@ import {
   discoverComposeServiceNames,
   isGitIgnoredProjectEnvPath,
   isValidProjectEnvScopeName,
-  listProjectEnvOverlays,
   mutateProjectEnvLayer,
   type ProjectEnvLayerChange,
   preflightLegacyEnvContract,
   projectEnvConfigExistsForMutation,
   projectEnvLayerFits,
+  resolveProjectEnvConfigPath,
+  resolveProjectEnvLocalConfigPath,
 } from "./project-env-config.ts";
 import { assertLegacyProjectDirectory } from "./project-input-selection.ts";
 
@@ -576,11 +580,114 @@ function sourceIssues(files: Map<string, Prepared>): ConfigIssue[] {
 
 function removedPrivateOverlays(
   before: ConfigSnapshot,
-  after: ConfigSnapshot
+  remaining: ReadonlySet<string>
 ): string[] {
-  return [...before.privateOverlays].filter(
-    (name) => !after.privateOverlays.has(name)
-  );
+  return [...before.privateOverlays].filter((name) => !remaining.has(name));
+}
+
+function hasPrivateOverlayValue(
+  project: Record<string, unknown>,
+  names: ReadonlySet<string>
+): boolean {
+  const pending = Object.values(project);
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (isPrivateOverlayValue(value, names)) {
+      return true;
+    }
+    if (isRecord(value) || Array.isArray(value)) {
+      for (const child of Object.values(value)) {
+        pending.push(child);
+      }
+    }
+  }
+  return false;
+}
+
+/** Probe known private filenames directly, including when a directory cannot be listed. */
+async function privateOverlayFilesExist(opts: {
+  readonly projectDir: string;
+  readonly inheritedDirs: readonly (string | null)[];
+  readonly names: readonly string[];
+  readonly planned?: ReadonlyMap<string, string> | null;
+}): Promise<boolean> {
+  const dirs = new Set([
+    opts.projectDir,
+    ...opts.inheritedDirs.filter((dir) => dir !== null),
+  ]);
+  for (const envName of opts.names) {
+    const paths = [
+      resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName }),
+    ];
+    for (const projectDir of dirs) {
+      paths.push(resolveProjectEnvLocalConfigPath({ projectDir, envName }));
+    }
+    for (const path of paths) {
+      if (
+        opts.planned?.has(path) ||
+        (await lstat(path).then(
+          () => true,
+          (error: unknown) => {
+            if (isRecord(error) && error.code === "ENOENT") {
+              return false;
+            }
+            throw error;
+          }
+        ))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function privateOverlayReplacementMessage(opts: {
+  readonly before: ConfigSnapshot;
+  readonly after: ConfigSnapshot;
+  readonly projectText: string | null | undefined;
+  readonly outputs: ReadonlyMap<string, string> | null;
+}): Promise<string | null> {
+  const { before, after, projectText, outputs } = opts;
+  if (before.privateOverlays.size === 0) {
+    return null;
+  }
+  const layer = before.layers.find(({ id }) => id === "1");
+  const migrationText = layer && outputs?.get(layerDestination(layer));
+  for (const text of [migrationText, projectText]) {
+    if (!(text && jsonConfigTree(text).ok)) {
+      continue;
+    }
+    const project: unknown = JSON.parse(text);
+    if (!isRecord(project)) {
+      continue;
+    }
+    const removed = removedPrivateOverlays(
+      before,
+      privateProjectOverlayNames(project)
+    );
+    if (removed.length === 0) {
+      continue;
+    }
+    if (hasPrivateOverlayValue(project, new Set(removed))) {
+      return "Remove the remaining private overlay reference before replacing this setting.";
+    }
+    try {
+      if (
+        await privateOverlayFilesExist({
+          projectDir: before.project.projectDir,
+          inheritedDirs: [inheritedEnvDir(before), inheritedEnvDir(after)],
+          names: removed,
+          planned: outputs,
+        })
+      ) {
+        return "Move or rename the env layer with a private filename before replacing this setting.";
+      }
+    } catch {
+      return "Could not verify the private env layer filenames before replacing this setting.";
+    }
+  }
+  return null;
 }
 
 function layerSizeIssues(
@@ -654,13 +761,13 @@ export async function assessConfigPatch(
     return { ...invalid, issues: [...issues, ...projectSizes] };
   }
   const prospective = await prospectiveSnapshot(snapshot, files);
-  if (
-    removedPrivateOverlays(snapshot, prospective).some(
-      (name) =>
-        snapshot.existingOverlays.has(name) ||
-        prospective.existingOverlays.has(name)
-    )
-  ) {
+  const privateOverlayIssue = await privateOverlayReplacementMessage({
+    before: snapshot,
+    after: prospective,
+    projectText: files.get("1")?.text,
+    outputs,
+  });
+  if (privateOverlayIssue) {
     return {
       ...invalid,
       issues: [
@@ -670,8 +777,7 @@ export async function assessConfigPatch(
           path: ["env", "defaultOverlay"],
           line: null,
           code: "E_CONFIG_INVALID",
-          message:
-            "Move or rename the env layer with a private filename before replacing this setting.",
+          message: privateOverlayIssue,
         } satisfies ConfigIssue,
       ],
     };
@@ -1008,7 +1114,11 @@ export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
       snapshot: prospective,
       files,
       changed,
-      removedPrivateOverlays: removedPrivateOverlays(snapshot, prospective),
+      removedPrivateOverlays: removedPrivateOverlays(
+        snapshot,
+        prospective.privateOverlays
+      ),
+      originalInheritedDir: inheritedEnvDir(snapshot),
     };
     if (migration && manifestPath) {
       await withEnvMigrationConfigEdits({
@@ -1078,6 +1188,7 @@ async function publishPreparedLayers(
     readonly files: Map<string, Prepared>;
     readonly changed: string[];
     readonly removedPrivateOverlays: readonly string[];
+    readonly originalInheritedDir: string | null;
   },
   edits?: {
     readonly prepare: (write: MigrationConfigWrite) => Promise<void>;
@@ -1101,7 +1212,8 @@ async function publishPreparedLayers(
         snapshot,
         file,
         beforePublish,
-        opts.removedPrivateOverlays
+        opts.removedPrivateOverlays,
+        opts.originalInheritedDir
       ))
     ) {
       continue;
@@ -1167,7 +1279,9 @@ function migrationLayerIds(
     const id = local ? "5" : "3";
     layers.set(
       file.path,
-      ["local", "default"].includes(overlay) ? id : `${id}:${overlay}`
+      ["local", "default"].includes(overlay)
+        ? id
+        : `${id}:${snapshot.privateOverlays.has(overlay) ? "[redacted]" : overlay}`
     );
   }
   return layers;
@@ -1188,7 +1302,8 @@ async function writePreparedLayer(
   snapshot: ConfigSnapshot,
   file: Prepared,
   beforePublish: ((text: string, mode: number) => Promise<void>) | undefined,
-  removedOverlayNames: readonly string[]
+  removedOverlayNames: readonly string[],
+  originalInheritedDir: string | null
 ): Promise<boolean> {
   const { layer, text } = file;
   const validate = async () => {
@@ -1202,15 +1317,16 @@ async function writePreparedLayer(
         inheritedEnvDir(snapshot)
       );
     }
-    if (layer.kind === "project" && removedOverlayNames.length > 0) {
-      const overlays = await listProjectEnvOverlays({
-        ...snapshot.project,
-        primaryDir: inheritedEnvDir(snapshot),
-        defaultEnv: null,
-      });
-      if (overlays.some((entry) => removedOverlayNames.includes(entry.name))) {
-        throw new AtomicWriteConflictError();
-      }
+    if (
+      layer.kind === "project" &&
+      removedOverlayNames.length > 0 &&
+      (await privateOverlayFilesExist({
+        projectDir: snapshot.project.projectDir,
+        inheritedDirs: [originalInheritedDir, inheritedEnvDir(snapshot)],
+        names: removedOverlayNames,
+      }))
+    ) {
+      throw new AtomicWriteConflictError();
     }
   };
   if (layer.kind === "env") {

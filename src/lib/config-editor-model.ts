@@ -456,14 +456,6 @@ async function configLayers(opts: {
     ],
     overlay,
     overlays: names,
-    existingOverlays: new Set(
-      overlays
-        .filter(
-          (entry) =>
-            entry.exists || entry.localExists || entry.inheritedLocalExists
-        )
-        .map((entry) => entry.name)
-    ),
   };
 }
 
@@ -573,7 +565,6 @@ export async function captureConfigEditor(opts: {
           layers: [projectLayer],
           overlay: selection.requested ?? null,
           overlays: [],
-          existingOverlays: new Set<string>(),
         }
       : await configLayers({
           project,

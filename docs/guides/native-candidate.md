@@ -1152,10 +1152,25 @@ that names the owning home and what to do. The refusal has its own code,
 - **Live.** The owning frontend's PID still exists. The refusal names the home and
   PID. Stop it with Ctrl-C in that `hack up`, or run `hack down` with the version
   that owns that home, then retry. Release refuses.
+- **Gone (HACK-2524).** The recorded path no longer holds that home: it is absent,
+  not a directory, or another directory, so its records cannot be read there. An
+  absent path may be a disk that is not mounted: when the missing directory sits
+  directly under `/Volumes`, `/mnt`, `/media` or `/run/media/<user>`, inspection adds
+  `missingVolume` and the refusal says so. Mount it and stop the run there instead;
+  its data is still on that disk.
+  Inspection reports `owner: "gone"` with a `selectionSha256`, and the refusal names
+  the same release command. The release first lists this user's processes. It
+  refuses, naming each PID, while any process names the old home's path in its
+  command line or works inside it. Otherwise it keeps the mapping, its restart intent
+  and its down-hook journal in an audit file (`<scope>.gone-home-release-<sha>.json`;
+  owed hooks are skipped, because their services went with the home) and removes
+  them. A home that was moved rather than deleted, and started again from its new
+  path, has processes that name only the new path, so this check cannot see it;
+  release again from the moved home afterwards.
 - **Interrupted or unproven.** The frontend exited without acknowledging cleanup, or
-  the home has no readable record for the run (for example a legacy mapping, or a
-  home that was moved or replaced). Use the owning version's
-  `hack doctor --native-cleanup inspect` and `hack down`. Release refuses.
+  the home has no readable record for the run (for example a legacy mapping). Use
+  the owning version's `hack doctor --native-cleanup inspect` and `hack down`.
+  Release refuses.
 
 Release proves ownership; it never just overwrites. The stored scope must differ
 from this checkout in its native home only, that home must still be the recorded
@@ -3519,6 +3534,12 @@ Failures inside the startup period don't count toward `retries`, as the engine
 defines it. Declared values are kept, and a disabled check gets neither. Authored
 native readiness (`readiness.exec`) gets the same cadence. A container started by an
 earlier build, without these fields, is still accepted as the same container.
+
+For a Compose service that mounts a data volume created during this start, native
+uses the authored timing when `start_interval` is omitted. Restoring with the
+retained volume uses the fast defaults again. For Postgres, use
+`pg_isready -h 127.0.0.1` so a temporary socket-only server during initialization
+cannot release dependents before the final server starts.
 
 The 250 ms cadence applies only inside the startup period that follows a container
 start. After a pause and resume the container's startup period is not restarted, so

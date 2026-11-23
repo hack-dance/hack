@@ -31,6 +31,16 @@ for (const model of contracts) {
     expect(
       model.verify({ negative: false, exitCode: 0, output: positive })
     ).toBe(true);
+    expect(
+      model.verify({
+        negative: false,
+        exitCode: 0,
+        output: positive.replace(
+          String(model.states),
+          model.states.toLocaleString("en-US")
+        ),
+      })
+    ).toBe(true);
     for (const output of [
       "",
       positive.replace(`${model.states} distinct`, "999 distinct"),
@@ -51,6 +61,7 @@ for (const model of contracts) {
       "Parse error",
       output.replace(`Invariant ${model.invariant}`, "Invariant Wrong"),
       output.replace(`<${model.action} `, "<Other "),
+      `${output}\nState 3: <Other line 2>\n${fields.join("\n")}`,
       `${header}\n${fields[0]}\nState 3: <Other line 2>\n${fields[1]}`,
     ]) {
       expect(

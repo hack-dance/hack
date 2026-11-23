@@ -181,6 +181,30 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "guest-execution",
+    module: "GuestAgent",
+    states: 3900,
+    invariant: "ResultBeforeRelease",
+    action: "Release",
+    fields: ['job = "released"', 'saved = "none"'],
+    additionalControls: [
+      {
+        name: "duplicate",
+        negative: true,
+        invariant: "StartedOnce",
+        action: "Next",
+        fields: ["starts = <<2, 0>>", "id = 1"],
+      },
+      {
+        name: "record-running",
+        negative: true,
+        invariant: "SavedOutcome",
+        action: "Record",
+        fields: ['belief = "running"', 'saved = "running"'],
+      },
+    ],
+  },
+  {
     name: "project-prerequisites",
     module: "ProjectPrerequisites",
     states: 13,
@@ -3042,6 +3066,34 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2524: release a checkout's run mapping whose native home is gone. The
+    // positive control releases when the path no longer holds the home and no
+    // process names it; `negative` is today (the clean-stop release from the
+    // home's own records), which strands a deleted home; `path-only` ignores the
+    // process scan and releases while the home's run is still alive.
+    name: "native-run-mapping-release",
+    module: "MappingRelease",
+    states: 21,
+    invariant: "NoStrandedMapping",
+    action: "Delete",
+    fields: ['home = "deleted"', 'mapping = "held"', "procs = FALSE"],
+    alternativeWitnesses: [
+      {
+        action: "Move",
+        fields: ['home = "moved"', 'mapping = "held"', "procs = FALSE"],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "path-only",
+        negative: true,
+        invariant: "NeverReleaseLive",
+        action: "GoneHomeRelease",
+        fields: ['mapping = "released"', "procs = TRUE", "unsafe = TRUE"],
+      },
+    ],
+  },
+  {
     // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
     // doubtful reading, and a host-side bound on "starting". Slow, refusing and
     // hanging apps; `legacy` runs the steady cadence before the first success.
@@ -3330,6 +3382,17 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverHits",
         ...statKeyedHits({ withCtime: true, stale: false }),
       },
+    ],
+  },
+  {
+    name: "native-image-batch",
+    module: "ImageBatch",
+    states: 3233,
+    invariant: "Safe",
+    action: "Import",
+    fields: [
+      'phase = <<"import", "import", "queued", "queued">>',
+      "verified = {1, 2}",
     ],
   },
   {

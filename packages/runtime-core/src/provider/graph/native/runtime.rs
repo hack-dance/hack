@@ -877,7 +877,9 @@ impl<B: Backend> Driver for Session<'_, B> {
                 self.receipt.failed(service, observation);
                 self.save()
             }
-            Event::Observed { .. } | Event::ServiceReady { .. } => Ok(()),
+            // Native-authored graphs keep their own phases; "all started" has no
+            // reader here.
+            Event::Observed { .. } | Event::ServiceReady { .. } | Event::AllStarted => Ok(()),
             Event::Ready => {
                 self.check_cancelled()?;
                 self.receipt.phase = Phase::ReadyObserved;

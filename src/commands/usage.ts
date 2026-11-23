@@ -203,6 +203,8 @@ type ContainerUsageRow = DockerStatsSample & {
   readonly service: string;
   readonly name: string;
   readonly mounts: RuntimeContainer["mounts"];
+  readonly configuredMemoryLimitBytes: number | null;
+  readonly startedAt: string | null;
 };
 
 type UsageReport = {
@@ -1295,6 +1297,9 @@ function buildUsageReport(opts: {
             service: container.service,
             name: container.name,
             mounts: container.mounts,
+            configuredMemoryLimitBytes:
+              container.configuredMemoryLimitBytes ?? null,
+            startedAt: container.observation?.startedAt ?? null,
           },
         ]
       : [];

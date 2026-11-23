@@ -36,6 +36,8 @@ export type RuntimeContainer = {
   readonly ports: string;
   readonly workingDir: string | null;
   readonly image: string | null;
+  /** Applied Docker hard limit. Zero is unlimited, null is unknown. */
+  readonly configuredMemoryLimitBytes?: number | null;
   readonly labels: Readonly<Record<string, string>> | null;
   readonly mounts: readonly RuntimeContainerMount[];
   readonly networks: readonly RuntimeContainerNetwork[];
@@ -88,6 +90,7 @@ export type ContainerInspectData = {
   readonly observation?: ServiceMemberEvidence | null;
   readonly labels: Record<string, string>;
   readonly image: string | null;
+  readonly configuredMemoryLimitBytes?: number | null;
   readonly mounts: readonly RuntimeContainerMount[];
   readonly networks: readonly RuntimeContainerNetwork[];
 };
@@ -286,6 +289,7 @@ export async function readRuntimeProjects(opts: {
       ports,
       workingDir,
       image: inspect?.image ?? null,
+      configuredMemoryLimitBytes: inspect?.configuredMemoryLimitBytes ?? null,
       labels: Object.keys(labels).length > 0 ? labels : null,
       mounts: inspect?.mounts ?? [],
       networks: inspect?.networks ?? [],
@@ -746,7 +750,7 @@ export async function readContainerLabels(opts: {
 
 // Request only fields used by the runtime model; Docker must not return env values or command arguments.
 const RUNTIME_INSPECT_FORMAT =
-  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}},"Mounts":{{json .Mounts}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
+  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}},"Memory":{{json .HostConfig.Memory}},"Mounts":{{json .Mounts}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
 
 async function readContainerInspectData(opts: {
   readonly ids: readonly string[];
@@ -796,6 +800,7 @@ async function readContainerInspectData(opts: {
       observation: readContainerState(item.State),
       labels,
       image,
+      configuredMemoryLimitBytes: parseInspectMemoryLimit(item.Memory),
       mounts,
       networks,
     };
@@ -894,6 +899,12 @@ function parseInspectImage(config: unknown): string | null {
     return null;
   }
   return getString(config, "Image") ?? null;
+}
+
+function parseInspectMemoryLimit(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
 }
 
 function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {

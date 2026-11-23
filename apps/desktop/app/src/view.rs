@@ -163,6 +163,9 @@ pub struct HackApp {
     /// Resource use of the shown instance (Services tab).
     pub(crate) usage: Option<crate::usage_view::UsageState>,
     pub(crate) usage_loading: bool,
+    pub(crate) stats: crate::stats_view::ServiceStats,
+    /// Entry from the copy's Services table until the service pane owns it.
+    pub(crate) stats_service: Option<String>,
     /// [`Self::hackd_evidence_key`] when hackd was last read: a project read
     /// that changes it makes the stored read stale.
     pub(crate) hackd_evidence_seen: String,
@@ -222,6 +225,8 @@ impl HackApp {
             upgrade: crate::upgrade_view::UpgradePane::default(),
             usage: None,
             usage_loading: false,
+            stats: Default::default(),
+            stats_service: None,
             hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
@@ -474,6 +479,7 @@ impl HackApp {
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
             self.logs.model.set_service(None);
+            self.stats_service = None;
             self.reset_env_selection();
             self.refresh_copies_if_open(cx);
             if self.tab == 2 {
@@ -900,6 +906,7 @@ impl HackApp {
     pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Project;
         self.user_navigated();
+        self.stats_service = None;
         self.copied = None;
         self.reset_env_selection();
         if self.tab == 2 {
@@ -925,6 +932,7 @@ impl HackApp {
             return;
         }
         self.tab = to;
+        self.stats_service = None;
         self.refresh_copies_if_open(cx);
         self.env_edit = None;
         self.env.begin();
@@ -1018,6 +1026,8 @@ impl HackApp {
             // The upgrade and usage reads were the previous CLI's.
             self.upgrade = crate::upgrade_view::UpgradePane::default();
             self.usage = None;
+            self.stats_service = None;
+            self.reset_stats_source();
             if self.pane == Pane::Upgrade {
                 self.load_upgrade(cx);
             }
@@ -1636,6 +1646,10 @@ impl HackApp {
                     .on_click(cx.listener(move |this, _, _, cx| this.set_tab(i, cx))),
             );
         }
+        let stats_service = self
+            .stats_service
+            .as_ref()
+            .and_then(|name| d.services.iter().find(|service| &service.name == name));
         let body: AnyElement = match self.tab {
             3 => self.copies_view(ui, cx).into_any_element(),
             1 if cfg!(not(hack_terminal)) => {
@@ -1652,6 +1666,9 @@ impl HackApp {
                 .pb(space::S5)
                 .child(self.env_tab(ui, cx))
                 .into_any_element(),
+            0 if let Some(service) = stats_service => self
+                .stats_from_services(d, service, ui, cx)
+                .into_any_element(),
             _ => div()
                 .id("detail-body")
                 .flex_1()
@@ -1666,15 +1683,19 @@ impl HackApp {
                         .text_color(ui.p.text_muted)
                         .child("No services reported for this project")
                 } else {
-                    services_table(&rows, ui)
+                    services_table(&rows, ui, |name| self.stats_service_link(name, cx))
                 })
                 .into_any_element(),
         };
         #[cfg(hack_terminal)]
-        let (maximized, panel) = (
-            self.panels.maximized(&d.key),
-            Some(self.terminal_area(d, ui, window, cx)),
-        );
+        let (maximized, panel) = if stats_service.is_some() {
+            (false, None)
+        } else {
+            (
+                self.panels.maximized(&d.key),
+                Some(self.terminal_area(d, ui, window, cx)),
+            )
+        };
         #[cfg(not(hack_terminal))]
         let (maximized, panel): (bool, Option<AnyElement>) = (false, None);
         div()

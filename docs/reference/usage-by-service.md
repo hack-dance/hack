@@ -70,3 +70,13 @@ Only containers that Compose labels are measured (`backend: "compose"`).
 Native runtime projects are not measured yet. Host processes started with
 `hack run` on the host are not included; plain `hack usage --json` reports
 them.
+
+For a machine-wide sample, `hack usage --json --details --no-host` includes
+`containers` with per-container CPU, memory, network and disk counters.
+`configuredMemoryLimitBytes` is the hard memory limit applied to the Compose
+container. `0` means unlimited, and `null` means it could not be read.
+`memLimitBytes` remains the limit shown by Docker stats, which can be the
+engine's capacity. `startedAt` is the current container start time, when
+available. Network and disk byte counters are cumulative. Use successive
+samples and the actual elapsed time to compute rates for the same container
+run.

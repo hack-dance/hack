@@ -24,6 +24,13 @@ function container(
     ports: "",
     workingDir: "/fixture/.hack",
     image: "fixture",
+    configuredMemoryLimitBytes: 8192,
+    observation: {
+      state,
+      health: null,
+      exitCode: null,
+      startedAt: "2026-01-01T00:00:00Z",
+    },
     labels: lifecycle ? { "hack.lifecycle.process": "true" } : {},
     mounts: [
       {
@@ -84,6 +91,9 @@ test("usage samples only running Docker containers and retains service/mount att
     service: "web",
     name: "running",
     memUsedBytes: 1024,
+    memLimitBytes: 4096,
+    configuredMemoryLimitBytes: 8192,
+    startedAt: "2026-01-01T00:00:00Z",
     mounts: [{ type: "volume", destination: "/app/node_modules" }],
   });
 });

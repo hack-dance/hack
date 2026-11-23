@@ -71,7 +71,11 @@ impl HackApp {
     /// `visible`: also require a visible window (live reads); fixtures
     /// render offscreen.
     fn target(&self, visible: bool) -> Option<UsageTarget> {
-        if self.pane != Pane::Project || self.tab != 0 || (visible && !self.window_visible) {
+        if self.pane != Pane::Project
+            || self.tab != 0
+            || self.stats_service.is_some()
+            || (visible && !self.window_visible)
+        {
             return None;
         }
         let key = self.model.selected_key()?;
@@ -107,7 +111,10 @@ impl HackApp {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 if this
-                    .update(cx, |this, cx| this.read_usage_if_due(cx))
+                    .update(cx, |this, cx| {
+                        this.read_usage_if_due(cx);
+                        this.read_stats_if_due(cx);
+                    })
                     .is_err()
                 {
                     return;
@@ -336,6 +343,10 @@ mod tests {
             }
             F.service_usage(root)
         }
+        fn stats_sample(&self) -> Result<hack_desktop_core::stats::StatsReport, String> {
+            self.log("stats sample".into());
+            Ok(hack_desktop_core::stats::StatsReport::default())
+        }
         fn emulated_services(
             &self,
             root: &Path,
@@ -383,6 +394,27 @@ mod tests {
     fn tick(cx: &mut HeadlessAppContext, app: &Entity<HackApp>) {
         cx.update(|cx| app.update(cx, |a, cx| a.read_usage_if_due(cx)));
         cx.run_until_parked();
+    }
+
+    #[test]
+    fn stats_samples_running_services_while_another_pane_is_hidden() {
+        let (mut cx, app, source) = window();
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.window_visible = false;
+                a.pane = Pane::Doctor;
+                a.read_stats_if_due(cx);
+                a.read_stats_if_due(cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(source.take(), ["stats sample"]);
+        cx.update(|cx| app.update(cx, |a, cx| a.read_stats_if_due(cx)));
+        cx.run_until_parked();
+        assert!(
+            source.take().is_empty(),
+            "wait for the next sample interval"
+        );
     }
 
     #[test]

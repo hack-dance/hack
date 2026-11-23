@@ -509,7 +509,11 @@ const COL_NUM: f32 = 64.;
 
 /// Services table: Service, State, CPU, Memory, Route. Hairline row
 /// separators, no outer box, numbers right-aligned.
-pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
+pub fn services_table<E: IntoElement>(
+    rows: &[ServiceRow],
+    ui: &Ui,
+    mut service_name: impl FnMut(&str) -> E,
+) -> Div {
     let p = ui.p;
     let num =
         |id: (&'static str, usize), v: Option<String>, note: SharedString, width: f32, ui: &Ui| {
@@ -593,7 +597,7 @@ pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
                         .items_center()
                         .gap(space::S4)
                         .child(dot(r.status, ui))
-                        .child(div().truncate().child(r.name.clone()))
+                        .child(service_name(&r.name))
                         .when(r.emulated, |d| {
                             d.child(
                                 div()

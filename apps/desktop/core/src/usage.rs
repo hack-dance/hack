@@ -35,7 +35,7 @@ pub struct ServiceUsage {
 /// A byte count as the CLI reports it: `docker stats` units parsed to a
 /// number that can be fractional (`212.3MiB` → `222612684.8`). Rounded to
 /// whole bytes; a negative or non-finite value is unknown, never 0.
-fn byte_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+pub(crate) fn byte_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     let n: Option<f64> = Option::deserialize(d)?;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // checked range
     Ok(

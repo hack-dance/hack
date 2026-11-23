@@ -66,6 +66,7 @@ const shellMock = await registerScopedModuleMock({
         expect(command[3]).not.toContain(".Log");
         expect(command[3]).not.toContain(".Error");
         expect(command[3]).toContain(".State.StartedAt");
+        expect(command[3]).toContain(".HostConfig.Memory");
         const ids = [...command.slice(4)];
         inspectCalls.push(ids);
         const returnedIds = inspectExitCode === 0 ? ids : ids.slice(0, 1);
@@ -277,6 +278,7 @@ function makeInspectRow(opts: {
   readonly id: string;
 }): Record<string, unknown> {
   return {
+    Memory: opts.id === "aaaaaaaaaaaa" ? 536_870_912 : 0,
     Id: `${opts.id}${"0".repeat(52)}`,
     State: {
       Status: memberStates.get(opts.id) ?? "running",
@@ -322,6 +324,7 @@ test("cached static metadata never becomes fresh service health or start evidenc
   const member = (result: typeof first) =>
     [...(result.runtime[0]?.services.values() ?? [])][0]?.containers[0];
   expect(member(first)?.observation?.health).toBe("healthy");
+  expect(member(first)?.configuredMemoryLimitBytes).toBe(536_870_912);
   expect(member(first)?.observation?.exitCode).toBeNull();
   expect(member(cached)?.observation).toBeNull();
   expect(inspectCalls).toHaveLength(1);

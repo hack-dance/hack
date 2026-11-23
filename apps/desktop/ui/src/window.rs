@@ -516,7 +516,9 @@ impl MainWindow {
                         .overflow_y_scroll()
                         .px(space::S8)
                         .pb(space::S5)
-                        .child(services_table(&rows, ui)),
+                        .child(services_table(&rows, ui, |name| {
+                            div().truncate().child(name.to_owned())
+                        })),
                 )
             })
             .child(terminal_panel(&panel, ui))

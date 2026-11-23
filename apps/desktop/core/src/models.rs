@@ -360,6 +360,11 @@ pub struct RuntimeService {
 pub struct Container {
     pub id: Option<String>,
     pub name: Option<String>,
+    pub image: Option<String>,
+    #[serde(deserialize_with = "port_text")]
+    pub ports: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub mounts: Vec<ContainerMount>,
     /// Docker state: `running`, `exited`, `created`, `restarting`, ...
     #[serde(deserialize_with = "null_default")]
     pub state: String,
@@ -371,6 +376,25 @@ pub struct Container {
     pub labels: std::collections::BTreeMap<String, String>,
     /// The container's compose working directory.
     pub working_dir: Option<String>,
+}
+
+// Older branch payloads used an array here. An unrecognized port shape
+// leaves the Info row unknown and must not discard the whole project read.
+fn port_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(ports) => Some(ports),
+        _ => None,
+    })
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ContainerMount {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: Option<String>,
+    pub source: String,
+    pub destination: String,
 }
 
 impl Container {

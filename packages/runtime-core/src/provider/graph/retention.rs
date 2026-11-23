@@ -310,7 +310,9 @@ fn oldest_runs(
         {
             continue;
         }
-        let Ok(modified) = fs::symlink_metadata(path.join("state.json")).and_then(|m| m.modified())
+        let Ok(modified) = fs::symlink_metadata(path.join("state.json"))
+            .or_else(|_| fs::symlink_metadata(&path))
+            .and_then(|m| m.modified())
         else {
             continue;
         };
@@ -330,24 +332,42 @@ pub(super) fn make_archive_room(
     engine: &Engine<'_>,
 ) -> Result<(), CandidateError> {
     let parent = candidate.state_root.join("run/graph-archive");
+    // A removed archived run, or one whose prune was interrupted after its tombstone
+    // was written (its receipt may already be gone): `prune` resumes that one.
     let (mut count, oldest) = oldest_runs(&parent, ARCHIVE_LIMIT, |run, path| {
         state::read::<Receipt>(&path.join("state.json"))
             .is_ok_and(|receipt| receipt.phase == "removed" && receipt.run == run)
+            || consumed(candidate, run).is_ok_and(|tombstone| tombstone.join("state.json").exists())
     })?;
+    if count < ARCHIVE_LIMIT {
+        return Ok(());
+    }
     let exports = candidate.state_root.join("exports/graphs");
     for run in oldest {
         if count < ARCHIVE_LIMIT {
             break;
         }
-        make_consumed_room(candidate)?;
+        // Housekeeping is best-effort: it never makes the caller refuse by itself.
+        let _ = make_consumed_room(candidate);
         let exported = exports.join(format!("{run}.tar"));
+        // An export interrupted before its rename leaves `{run}.pending`; it is kept
+        // aside as recovery evidence, as `graph reconcile-export` does, and redone.
+        if !exported.exists() && exports.join(format!("{run}.pending")).exists() {
+            let _ = journal::retain_file(
+                &exports,
+                &format!("{run}.pending"),
+                &format!("{run}-recovery"),
+                EXPORT_LIMIT,
+            );
+        }
         let proven = (exported.exists() || export::export_with(candidate, engine, &run).is_ok())
             && prune_with(candidate, engine, &run).is_ok();
         if proven {
             count -= 1;
         }
     }
-    trim_exports(candidate)
+    let _ = trim_exports(candidate);
+    Ok(())
 }
 
 /// Room for one more tombstone: at the bound the oldest tombstones of fully pruned
@@ -358,7 +378,10 @@ pub(super) fn make_archive_room(
 /// that start, and nothing reuses an id for a fresh start; a restore needs the run's
 /// receipt, which pruning already removed. The oldest tombstone belongs to a run that
 /// was removed, archived and pruned before 4096 others: no start that could still
-/// carry its id is alive. So removing it re-admits nothing anyone can name.
+/// carry its id is alive. One thing does change: inspecting that id afterwards reports
+/// `graph_unreserved` (nothing reserved) instead of a missing receipt, and a stale
+/// startup record of the CLI for it is then retired as never reserved. Nothing of the
+/// run is left either way, so that answer is accurate in substance.
 fn make_consumed_room(candidate: &Candidate) -> Result<(), CandidateError> {
     let parent = candidate.state_root.join("run/graph-consumed");
     let (mut count, oldest) = oldest_runs(&parent, CONSUMED_LIMIT, |run, _| {

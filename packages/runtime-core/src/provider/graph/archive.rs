@@ -147,7 +147,7 @@ fn archive_with(
     if fs::read_dir(parent).map_err(state::io)?.take(256).count() >= retention::ARCHIVE_LIMIT {
         return Err(error(
             "graph_archive_budget",
-            "Archive retains 256 attempts; explicit export/retention work is required.",
+            "Archive retains 256 attempts that cannot be pruned automatically (for example archived under an earlier guest incarnation); export and prune them with graph export and graph prune.",
         ));
     }
     fs::rename(&root, &target).map_err(state::io)?;

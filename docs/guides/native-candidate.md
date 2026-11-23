@@ -1812,7 +1812,10 @@ pruned runs go. That is safe because a tombstone only refuses a fresh start with
 that ID, the CLI makes every fresh run ID from 128 random bits at the start, and a
 restore needs the run's receipt, which pruning already removed. The export of a
 fully pruned run is diagnostics: it is kept seven days, and at most 256 of them,
-oldest first. No step of this chain ends in a refusal for lack of room. A project whose removed
+oldest first. An interrupted export or prune is resumed the next time. Only archived
+runs that cannot be proven (one archived under an earlier guest incarnation, whose
+owner no longer matches) keep their place; if 256 of those fill the archive,
+`graph_archive_budget` still refuses and names `graph export` and `graph prune`. A project whose removed
 run was archived this way before its `hack down --remove-data` confirmed the removal
 still confirms it: inspection reads a removed run from the archive.
 For a shared-source graph that reconciliation does not select (live source, a

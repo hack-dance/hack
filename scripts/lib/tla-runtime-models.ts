@@ -1675,7 +1675,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-startup-owner",
     module: "Owner",
-    states: 812,
+    states: 852,
     invariant: "NoUnownedResources",
     action: "ExitUnconfirmed",
     fields: [
@@ -1686,7 +1686,7 @@ const contracts: readonly ModelContract[] = [
     ],
     additionalControls: [
       // --wait: the mapping is still saved at started; the release is at ready.
-      { name: "wait", negative: false, states: 394 },
+      { name: "wait", negative: false, states: 410 },
       {
         // The launcher is released at started before stop.owe committed.
         name: "detached-before-bookkeeping",
@@ -1756,15 +1756,29 @@ const contracts: readonly ModelContract[] = [
         ],
       },
       {
-        // A down between started and ready does not cancel the owner's wait.
+        // The owner accepts a stop between started and ready without
+        // cancelling its wait.
         name: "down-leaves-owner-waiting",
         negative: true,
         invariant: "DownCancelsWait",
-        action: "DownRequest",
+        action: "AcceptStop",
         fields: [
           'phase = "started"',
-          'down = "requested"',
-          'downAt = "started"',
+          'down = "accepted"',
+          'acceptAt = "started"',
+          'wait = "waiting"',
+        ],
+      },
+      {
+        // A queued stop takes effect without the owner's acceptance.
+        name: "stop-without-accept",
+        negative: true,
+        invariant: "StoppedOwnerNotWaiting",
+        action: "DownStop",
+        fields: [
+          'phase = "stopped"',
+          'down = "done"',
+          'acceptAt = "none"',
           'wait = "waiting"',
         ],
       },

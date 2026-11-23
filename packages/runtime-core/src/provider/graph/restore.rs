@@ -705,6 +705,7 @@ fn restore_inputs(
         execution::run(&prepared.graph, &mut session, options.timeout)
     })();
     if let Err(failure) = result {
+        super::startup_failure::record_after_started(&mut session.receipt, &failure);
         retain_restore_failure(
             &session.root,
             &mut session.receipt,

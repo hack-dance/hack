@@ -766,7 +766,14 @@ const optWait = defineOption({
   type: "boolean",
   long: "--wait",
   description:
-    "Return once every service is ready and every route answers (default: once every container has started, routes warming)",
+    "Native: return once every service is ready and every route answers (default: once every container has started). Compose: passed to docker compose up --wait (needs -d)",
+} as const);
+const optRestartWait = defineOption({
+  name: "wait",
+  type: "boolean",
+  long: "--wait",
+  description:
+    "Native only: return once every service is ready and every route answers (default: once every container has started)",
 } as const);
 const pullOptions = [optPath, optProject, optEnv, optProfile, optJson] as const;
 const upOptions = [
@@ -832,7 +839,7 @@ const restartOptions = [
   optTarget,
   optJson,
   optProgress,
-  optWait,
+  optRestartWait,
   optRecoverFrontend,
   optExpectFinalizationAttempt,
   optExpectFrontendPid,
@@ -7746,6 +7753,22 @@ async function handleUpUnlocked({
           process.stderr.write(`${notice}\n`);
         }
       },
+      // `up --wait` on a warming run waits for it, as a fresh `up --wait` does.
+      ...(nativeUpWaitsForReady({
+        wait: args.options.wait,
+        json: args.options.json,
+        interactive: canPrompt(),
+      })
+        ? {
+            wait: {
+              budgetMs:
+                resolveNativeStartTimeoutSeconds({
+                  env: process.env,
+                  project: undefined,
+                }) * 1000,
+            },
+          }
+        : {}),
     });
     if (alreadyRunning !== null) {
       return alreadyRunning;
@@ -12911,21 +12934,6 @@ async function handleNativeLogs({
       json,
     });
   }
-  // A warming run's owner still holds the lease the snapshot read needs: read
-  // what exists through the lock-free follow path instead, and stop there.
-  const live = await nativeProjectPs({ runtime: native, scope });
-  if (live.readiness === "warming") {
-    return await followNativeProjectLogs({
-      runtime: native,
-      scope,
-      service,
-      tail,
-      timestamps: args.options.timestamps,
-      json,
-      project: args.options.project,
-      noFollow: true,
-    });
-  }
   const result = await nativeProjectLogs({
     runtime: native,
     scope,
@@ -13360,6 +13368,12 @@ async function handleOpen({
       : rawHost;
   const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
   const nativeOpen = await resolveNativeOpenPort({ targetRaw, project, cfg });
+  const url = resolveOpenUrl({
+    targetRaw,
+    resolvedHost,
+    grafanaHost,
+    httpsPort: nativeOpen.httpsPort,
+  });
   const native = nativeOpen.native ? resolveNativeRuntimeSelection() : null;
   if (native) {
     // `up` may have returned at started: wait for this route's service, so
@@ -13382,6 +13396,16 @@ async function handleOpen({
           env: process.env,
           project: cfg.native?.startTimeoutSeconds,
         }) * 1000,
+      // One request to the route itself: any HTTP answer below 500 counts. The
+      // native CA is not checked here; the browser does its own TLS check.
+      probe: async () => {
+        const response = await fetch(url, {
+          redirect: "manual",
+          signal: AbortSignal.timeout(3000),
+          tls: { rejectUnauthorized: false },
+        });
+        return response.status < 500;
+      },
       onWaiting: (line) => {
         if (!json) {
           process.stderr.write(`${line}\n`);
@@ -13389,12 +13413,6 @@ async function handleOpen({
       },
     });
   }
-  const url = resolveOpenUrl({
-    targetRaw,
-    resolvedHost,
-    grafanaHost,
-    httpsPort: nativeOpen.httpsPort,
-  });
 
   return await emitOpenOrigin({
     url,

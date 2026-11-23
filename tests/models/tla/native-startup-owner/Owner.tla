@@ -9,20 +9,22 @@
 \* The owner keeps waiting for every goal (`ready`) in the background. With
 \* `--wait` (WaitForReady) the mapping is still saved at started (the CLI passes
 \* --report-started in both modes); bookkeeping and the return wait for ready.
-\* A `down` in the window between started and ready cancels the owner's wait;
-\* the owner accepts the stop between passes of its start loop. The one service's
+\* A `down` in the window between started and ready only queues a stop; the
+\* owner accepts it at its next cancellation check, between passes of its start
+\* loop, and that cancels its wait. The frontend's started-chain steps (mapping,
+\* bookkeeping, launcher release) may interleave between the two. The one service's
 \* publication under the lease is a two-step commit, and a stop takes effect
 \* only once it has committed or been withdrawn.
 EXTENDS TLC, Naturals
 CONSTANTS RecordFailedOwner, EnforceDetachedStarted, EnforceBookkeeping,
           MappingBeforeNotify, CancelWaitOnDown, WaitForReady,
-          StopWaitsForPublication
+          StopWaitsForPublication, StopNeedsAccept
 VARIABLES phase, resources, mapping, receipt, cleaned, readied, startedSeen,
-          wait, down, downAt, hooks, pub, route, recorded,
+          wait, down, acceptAt, hooks, pub, route, recorded,
           launcher, accepted, bookkept
 launch == <<launcher, accepted, bookkept>>
 publication == <<pub, route, recorded>>
-stopping == <<wait, down, downAt, hooks, publication>>
+stopping == <<wait, down, acceptAt, hooks, publication>>
 core == <<phase, resources, mapping, receipt, cleaned, readied, startedSeen>>
 vars == <<core, stopping, launch>>
 TypeOK ==
@@ -38,9 +40,10 @@ TypeOK ==
     /\ startedSeen \in BOOLEAN
     \* The owner's wait for every service goal after started.
     /\ wait \in {"none", "waiting", "cancelled", "done"}
-    /\ down \in {"none", "requested", "done"}
-    \* The phase a down request arrived in.
-    /\ downAt \in {"none", "started", "ready"}
+    \* queued: `hack down` sent the stop; accepted: the owner's check took it.
+    /\ down \in {"none", "queued", "accepted", "done"}
+    \* The phase in which the owner accepted the stop.
+    /\ acceptAt \in {"none", "started", "ready"}
     /\ hooks \in 0..2
     \* One service's publication under the lease: staged, then one atomic commit
     \* (route plus record) or a withdraw. route is the bound port/HTTPS route;
@@ -52,12 +55,15 @@ TypeOK ==
 \* default, ready under --wait. The mapping is saved at started in both modes.
 WorkPhase == IF WaitForReady THEN {"ready"} ELSE {"started", "ready"}
 MappingPhase == {"started", "ready"}
+\* The frontend's started chain runs until the owner accepts a stop; a queued,
+\* not yet accepted stop does not hold it back.
+FrontendLive == down \in {"none", "queued"}
 \* The release point the launcher waits for: started, or ready under --wait.
 Released == IF WaitForReady THEN readied ELSE startedSeen
 CoreInit == /\ phase = "idle" /\ resources = "none" /\ mapping = "none"
         /\ receipt = "unknown" /\ cleaned = FALSE /\ readied = FALSE
         /\ startedSeen = FALSE
-StopInit == /\ wait = "none" /\ down = "none" /\ downAt = "none" /\ hooks = 0
+StopInit == /\ wait = "none" /\ down = "none" /\ acceptAt = "none" /\ hooks = 0
             /\ pub = "idle" /\ route = "none" /\ recorded = FALSE
 Serve == /\ phase = "idle" /\ phase' = "serving"
          /\ UNCHANGED <<resources, mapping, receipt, cleaned, readied, startedSeen>>
@@ -72,36 +78,36 @@ StartResources == /\ phase = "serving" /\ resources = "none"
 Started == /\ phase = "serving" /\ resources = "present"
            /\ phase' = "started" /\ startedSeen' = TRUE /\ wait' = "waiting"
            /\ UNCHANGED <<resources, mapping, receipt, cleaned, readied>>
-           /\ UNCHANGED <<down, downAt, hooks, publication, launch>>
+           /\ UNCHANGED <<down, acceptAt, hooks, publication, launch>>
 \* Save the run mapping (onStarted step 2), before anything acts on the line.
 \* Both modes: a --wait start killed between started and ready has a mapping.
 PublishMapping == /\ phase \in MappingPhase
-                  /\ mapping = "none" /\ down = "none"
+                  /\ mapping = "none" /\ FrontendLive
                   /\ mapping' = "published"
                   /\ UNCHANGED <<phase, resources, receipt, cleaned, readied, startedSeen>>
                   /\ UNCHANGED <<stopping, launch>>
 \* The service became ready: the owner stages its publication under the lease.
-BeginPublish == /\ phase = "started" /\ wait = "waiting" /\ down = "none"
+BeginPublish == /\ phase = "started" /\ wait = "waiting" /\ FrontendLive
                 /\ pub = "idle" /\ pub' = "publishing" /\ route' = "bound"
-                /\ UNCHANGED <<core, wait, down, downAt, hooks, recorded, launch>>
+                /\ UNCHANGED <<core, wait, down, acceptAt, hooks, recorded, launch>>
 \* One atomic commit: the route stays bound and the record is written together.
 CommitPublish == /\ pub = "publishing" /\ pub' = "committed" /\ recorded' = TRUE
-                 /\ UNCHANGED <<core, wait, down, downAt, hooks, route, launch>>
+                 /\ UNCHANGED <<core, wait, down, acceptAt, hooks, route, launch>>
 \* Or the staged publication is withdrawn: nothing bound, nothing recorded.
 WithdrawPublish == /\ pub = "publishing" /\ pub' = "withdrawn" /\ route' = "none"
-                   /\ UNCHANGED <<core, wait, down, downAt, hooks, recorded, launch>>
+                   /\ UNCHANGED <<core, wait, down, acceptAt, hooks, recorded, launch>>
 \* graph_foreground_ready: every goal met and the service published. Only a
 \* live wait can reach it.
 Ready == /\ phase = "started" /\ resources = "present" /\ wait = "waiting"
          /\ pub = "committed"
          /\ phase' = "ready" /\ readied' = TRUE /\ wait' = "done"
          /\ UNCHANGED <<resources, mapping, receipt, cleaned, startedSeen>>
-         /\ UNCHANGED <<down, downAt, hooks, publication, launch>>
+         /\ UNCHANGED <<down, acceptAt, hooks, publication, launch>>
 Fail == /\ phase \in {"serving", "started", "ready"} /\ down = "none"
         /\ phase' = "failed"
         /\ wait' = IF wait = "waiting" THEN "cancelled" ELSE wait
         /\ UNCHANGED <<resources, mapping, receipt, cleaned, readied, startedSeen>>
-        /\ UNCHANGED <<down, downAt, hooks, publication, launch>>
+        /\ UNCHANGED <<down, acceptAt, hooks, publication, launch>>
 \* The graph owner's retaining cleanup either completes or is refused (for
 \* example when the provider cannot be audited); refusal leaves resources.
 OwnerCleanup == /\ phase = "failed" /\ receipt = "unknown"
@@ -131,42 +137,50 @@ ExitUnconfirmed ==
                   THEN "published" ELSE mapping
     /\ UNCHANGED <<resources, receipt, cleaned, readied, startedSeen>>
     /\ UNCHANGED <<stopping, launch>>
-\* `hack down` finds the run through its mapping and asks the owner to stop.
-\* The stop request aborts the owner's controller, which cancels its wait.
-\* CancelWaitOnDown = FALSE drops that cancel.
+\* `hack down` finds the run through its mapping and sends the stop through the
+\* owner. This only queues it: the owner has not seen it yet.
 DownRequest ==
     /\ down = "none" /\ phase \in {"started", "ready"} /\ mapping = "published"
-    /\ down' = "requested" /\ downAt' = phase
+    /\ down' = "queued"
+    /\ UNCHANGED <<core, wait, acceptAt, hooks, publication, launch>>
+\* The owner's next cancellation check, between passes, accepts the stop and
+\* aborts its controller, which cancels its wait for ready.
+\* CancelWaitOnDown = FALSE drops that cancel.
+AcceptStop ==
+    /\ down = "queued" /\ down' = "accepted" /\ acceptAt' = phase
     /\ wait' = IF CancelWaitOnDown /\ wait = "waiting" THEN "cancelled" ELSE wait
     /\ UNCHANGED <<core, hooks, publication, launch>>
-\* The owner accepts the stop between passes and stops the graph, withdrawing
-\* every recorded publication. down.before runs once when the debt was
-\* committed. StopWaitsForPublication = FALSE lets the stop land half-way
-\* through a publication, so it misses the staged, unrecorded route.
+\* The owner stops the graph, withdrawing every recorded publication.
+\* down.before runs once when the debt was committed. StopNeedsAccept = FALSE
+\* lets a queued stop take effect without the owner's check, so the owner is
+\* never told and keeps waiting. StopWaitsForPublication = FALSE lets the stop
+\* land half-way through a publication, so it misses the staged route.
 DownStop ==
-    /\ down = "requested" /\ down' = "done"
+    /\ IF StopNeedsAccept THEN down = "accepted" ELSE down \in {"queued", "accepted"}
+    /\ down' = "done"
     /\ StopWaitsForPublication => pub # "publishing"
     /\ phase' = "stopped" /\ resources' = "absent"
     /\ hooks' = IF bookkept THEN hooks + 1 ELSE hooks
     /\ route' = IF recorded THEN "none" ELSE route
     /\ recorded' = FALSE
     /\ UNCHANGED <<mapping, receipt, cleaned, readied, startedSeen>>
-    /\ UNCHANGED <<wait, downAt, pub, launch>>
+    /\ UNCHANGED <<wait, acceptAt, pub, launch>>
 CoreNext == Serve \/ StartResources \/ Started \/ PublishMapping \/ Ready \/ Fail
         \/ OwnerCleanup \/ Inspect \/ Confirm \/ ExitConfirmed \/ ExitUnconfirmed
         \/ BeginPublish \/ CommitPublish \/ WithdrawPublish
-        \/ DownRequest \/ DownStop
+        \/ DownRequest \/ AcceptStop \/ DownStop
 \* The IPC launcher has no graph authority. A lost channel before acceptance
 \* requests ordinary stop; failure/cleanup retains the original mapping rules.
 Init == CoreInit /\ StopInit
         /\ launcher = "waiting" /\ accepted = FALSE /\ bookkept = FALSE
 \* Successful completion of the durable down-hook obligation (stop.owe),
-\* including its cancellation fence: no debt is committed after a down request.
-Bookkeep == /\ phase \in WorkPhase /\ ~bookkept /\ down = "none"
+\* including its cancellation fence: no debt is committed once the owner has
+\* accepted a stop (its controller is aborted). A queued stop does not fence it.
+Bookkeep == /\ phase \in WorkPhase /\ ~bookkept /\ FrontendLive
             /\ bookkept' = TRUE
             /\ UNCHANGED <<core, stopping, launcher, accepted>>
 \* Release the detached launcher: a `started` message (or `ready` under --wait).
-Notify == /\ launcher = "waiting" /\ down = "none"
+Notify == /\ launcher = "waiting" /\ FrontendLive
           /\ (EnforceDetachedStarted => (Released /\ phase \in WorkPhase))
           /\ (EnforceBookkeeping => bookkept)
           \* MappingBeforeNotify = FALSE is finding B: the line can be acted on
@@ -198,8 +212,12 @@ NoReturnWithoutMapping ==
     launcher \in {"notified", "accepting", "handed", "returned"}
         => mapping = "published"
 NoLostHandoff == launcher = "lost" => ~accepted
-\* A down in the started window leaves no owner waiting and no later ready.
-DownCancelsWait == downAt = "started" => (wait # "waiting" /\ ~readied)
+\* A stop the owner accepted in the started window leaves it not waiting, and
+\* no Ready follows.
+DownCancelsWait == acceptAt = "started" => (wait # "waiting" /\ ~readied)
+\* A stopped run has no owner still waiting for ready: every stop went through
+\* the owner's acceptance.
+StoppedOwnerNotWaiting == phase = "stopped" => wait # "waiting"
 \* After a stop, no service is published but unrecorded, or recorded but
 \* unpublished: the publication either committed and was withdrawn by the stop,
 \* or was withdrawn before it.

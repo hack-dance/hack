@@ -202,8 +202,10 @@ impl EarlyPublications {
         &mut self,
         engine: &graph::Engine<'_>,
         receipt: &Receipt,
+        stop: impl Fn() -> Result<(), CandidateError>,
     ) -> Result<(), CandidateError> {
         while !self.deferred.is_empty() {
+            stop()?;
             for (service, id) in std::mem::take(&mut self.deferred) {
                 self.publish(engine, receipt, &service, &id)?;
             }

@@ -346,6 +346,9 @@ function matches(
 }
 /** Register a fresh frontend lifetime before publishing its graph mapping. An old
  * incomplete lifetime refuses replacement, even when restoring the same graph run.
+ * One exception: this same frontend (pid and birth) may add its HTTPS lease to the
+ * lifetime it registered for this run, keeping its attempt (version 2 to 3), so the
+ * lifetime can exist before the mapping and the lease is recorded on it later.
  */
 export async function beginNativeProjectFinalization(opts: {
   readonly scope: NativeProjectRunScope;
@@ -402,6 +405,22 @@ export async function beginNativeProjectFinalization(opts: {
     const prior = await read(join(root, "active.json"));
     const completed = await read(join(root, "completed.json"));
     const recovered = await read(join(root, "recovered.json"));
+    const leaseAdded =
+      prior !== null &&
+      prior !== undefined &&
+      matches(prior, hash, opts.run) &&
+      prior.version === 2 &&
+      token.version === 3 &&
+      prior.attempt === token.attempt &&
+      prior.pid === token.pid &&
+      JSON.stringify(prior.birth ?? null) ===
+        JSON.stringify(token.birth ?? null) &&
+      !(completed && same(prior, completed)) &&
+      !(recovered && same(prior, recovered));
+    if (leaseAdded) {
+      await write(root, "active.json", token);
+      return;
+    }
     if (
       (prior &&
         !(

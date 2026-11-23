@@ -583,6 +583,7 @@ mod tests {
         }
         Receipt {
             started_from: None,
+            failed_after_started: None,
             startup_failure: None,
             normalized_input: Some(identity.clone()),
             relay_startup: None,

@@ -95,6 +95,8 @@ export type NativeProjectPsResult = {
   readonly readiness?: "warming" | "ready";
   readonly items: Item[];
   readonly ports?: NativePublishedPort[];
+  /** The last start failed after `up` returned; see {@link NativeFailureAfterStarted}. */
+  readonly failure?: NativeFailureAfterStarted;
 };
 function inspected(
   value: unknown,
@@ -105,6 +107,7 @@ function inspected(
   phase: string;
   foreground: boolean;
   ports: NativePublishedPort[];
+  failure?: NativeFailureAfterStarted;
 } {
   if (
     !(
@@ -168,6 +171,43 @@ function inspected(
     phase: receipt.phase,
     foreground:
       receipt.relay_startup !== null && receipt.relay_startup !== undefined,
+    ...failureAfterStarted(receipt.failed_after_started),
+  };
+}
+
+/**
+ * A run that failed after `up` returned at started (value-free: a closed code,
+ * the service when known, and when). It stays on the receipt until the next start.
+ */
+export type NativeFailureAfterStarted = {
+  readonly code: string;
+  readonly service?: string;
+  /** Unix seconds. */
+  readonly at: number;
+};
+const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+function failureAfterStarted(
+  value: unknown
+): { failure: NativeFailureAfterStarted } | Record<string, never> {
+  if (
+    !(
+      isRecord(value) &&
+      typeof value.code === "string" &&
+      FAILURE_CODE.test(value.code) &&
+      Number.isSafeInteger(value.at) &&
+      (value.service === undefined ||
+        value.service === null ||
+        (typeof value.service === "string" && SERVICE.test(value.service)))
+    )
+  ) {
+    return {};
+  }
+  return {
+    failure: {
+      code: value.code,
+      ...(typeof value.service === "string" ? { service: value.service } : {}),
+      at: value.at as number,
+    },
   };
 }
 function containerItem(
@@ -387,6 +427,7 @@ export async function nativeProjectPs(
     items: snapshot.items,
     phase: snapshot.phase,
     ...(readiness ? { readiness } : {}),
+    ...(snapshot.failure ? { failure: snapshot.failure } : {}),
     ...(ports.length ? { ports } : {}),
   };
 }
@@ -440,8 +481,6 @@ export async function followNativeProjectLogs(
     /** Injected per service when several services share one output. */
     readonly stdout?: Writable;
     readonly stderr?: Writable;
-    /** Print what exists and stop; see `FollowInput.noFollow`. */
-    readonly noFollow?: boolean;
   }
 ): Promise<number> {
   const selected = nativeLogFollowOptions(opts);
@@ -510,7 +549,7 @@ export async function nativeProjectLogs(
     opts.service,
     service.container
   );
-  const after = await inspect(opts, run);
+  const after = await inspect(opts, run, true);
   if (
     after.items.find((item) => item.service === opts.service)?.container !==
     service.container
@@ -555,7 +594,7 @@ export async function nativeProjectAllLogs(
       ...(await readServiceLogs(opts, run, item.service, item.container)),
     });
   }
-  const after = await inspect(opts, run);
+  const after = await inspect(opts, run, true);
   for (const entry of services) {
     if (
       after.items.find((item) => item.service === entry.service)?.container !==
@@ -615,7 +654,8 @@ async function requireLogRun(opts: Options): Promise<NativeProjectRun> {
 
 async function inspectForLogs(opts: Options, run: NativeProjectRun) {
   try {
-    return await inspect(opts, run);
+    // Lease-free: a warming run's owner holds the lease until ready.
+    return await inspect(opts, run, true);
   } catch (error: unknown) {
     throw isNativeRuntimeNotRunning(error) ? runtimeNotRunning() : error;
   }

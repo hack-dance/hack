@@ -62,6 +62,7 @@ import {
   parseNativeHttpsSelection,
   prepareNativeProjectServices,
   reviewedNativeHttpsRoutes,
+  startedServiceSummary,
   startNativeProject,
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
@@ -4487,7 +4488,9 @@ test("lost shared HTTPS acquire reply retains intent and recovers only after gra
     let intent: ReturnType<typeof leaseIdentity> | undefined;
     opts.dependencies.finalization = async (request) => {
       const lifetime = await beginNativeProjectFinalization(request);
-      events.push("intent");
+      // The lifetime is registered before the mapping (no lease yet); the lease
+      // intent then adds the lease to it (PR B review, item 1).
+      events.push(request.httpsLease ? "intent" : "lifetime");
       return {
         ...lifetime,
         complete: async () => {
@@ -4535,7 +4538,10 @@ test("restart callback follows ready and acknowledgement follows all finalizers"
   opts.dependencies.finalization = async (request) => {
     const lifetime = await beginNativeProjectFinalization(request);
     if (!request.httpsLease) {
-      throw new Error("missing HTTPS lease");
+      // Registered before the mapping; the lease is added to it below.
+      expect(events).not.toContain("save");
+      events.push("lifetime");
+      return lifetime;
     }
     expect(lifetime.token).toMatchObject({
       version: 3,
@@ -7296,4 +7302,37 @@ test.each([
     ].join("\n")
   );
   expect(events).toEqual([]);
+});
+
+test("the started envelope comes from observations: running jobs and unmet health goals are warming", () => {
+  const args = [
+    "--ready",
+    "web=started",
+    "--ready",
+    "db=healthy",
+    "--ready",
+    "migrate=completed",
+    "--ready",
+    "seed=completed",
+  ];
+  expect(
+    startedServiceSummary(args, {
+      observations: {
+        "container:web": { state: "running", health: "none" },
+        "container:db": { state: "running", health: "starting" },
+        "container:migrate": { state: "running", health: "none" },
+        "container:seed": { state: "exited", code: 0 },
+      },
+    })
+  ).toEqual({
+    started: ["web"],
+    completed: ["seed"],
+    warming: ["db", "migrate"],
+  });
+  // Nothing observed: nothing claimed done.
+  expect(startedServiceSummary(args, {})).toEqual({
+    started: ["web"],
+    completed: [],
+    warming: ["db", "migrate", "seed"],
+  });
 });

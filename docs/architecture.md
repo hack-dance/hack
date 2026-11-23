@@ -1058,8 +1058,8 @@ reaches `started` (every container started, by Compose's rule) before `ready`
 saves the run mapping, with or without `--wait`. Without `--wait`, `up` then
 commits the down-hook debt and returns, and the run shows as `warming` until it
 is ready. With `--wait` it returns at `ready`. A `down` while the run is warming
-cancels the owner's wait; the owner accepts the stop between passes of its start
-loop, never half-way through a service publication. A failure after resources
+queues a stop. The owner accepts it between passes of its start loop, which
+cancels its wait, and never half-way through a service publication. A failure after resources
 were created must leave them owned: either cleanup is confirmed, or the
 frontend's final read-only inspection authenticates the owner receipt and
 records it.

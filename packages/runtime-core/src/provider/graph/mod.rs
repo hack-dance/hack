@@ -301,8 +301,12 @@ pub(super) const STARTED_OBSERVED: &str = "started-observed";
 
 impl Receipt {
     /// Set the receipt's phase. `started_from` belongs to `started-observed` only, so
-    /// every phase change clears it; [`mark_started`] is its only writer.
+    /// every phase change clears it; [`mark_started`] is its only writer. A new start
+    /// also clears the previous start's `failed_after_started`.
     pub(super) fn set_phase(&mut self, phase: &str) {
+        if matches!(phase, "preparing" | "restoring" | "restarting") {
+            self.failed_after_started = None;
+        }
         self.phase = phase.into();
         self.started_from = None;
     }
@@ -359,6 +363,9 @@ pub struct Receipt {
     /// Most recent observed startup failure; retained after cleanup and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_failure: Option<startup_failure::Failure>,
+    /// A start that failed after `started-observed`; see [`startup_failure::AfterStarted`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_after_started: Option<startup_failure::AfterStarted>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalized_input: Option<NormalizedInputIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -683,6 +690,10 @@ fn load_at(
         .startup_failure
         .as_ref()
         .is_some_and(|failure| !failure.valid(&receipt))
+        || receipt
+            .failed_after_started
+            .as_ref()
+            .is_some_and(|failure| !failure.valid())
         || receipt.version != 1
         || receipt.run != run
         || receipt.owner != incarnation
@@ -1763,6 +1774,7 @@ fn run_inputs(
     let probe_states = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     let receipt = Receipt {
         started_from: None,
+        failed_after_started: None,
         startup_failure: None,
         normalized_input,
         relay_startup: None,
@@ -1819,6 +1831,7 @@ fn run_inputs(
         )
     })();
     if let Err(failure) = result {
+        startup_failure::record_after_started(&mut session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);
@@ -2637,6 +2650,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     };
     session.save()?;
     if let Err(failure) = execution::run(&prepared.graph, &mut session, options.timeout) {
+        startup_failure::record_after_started(&mut session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);

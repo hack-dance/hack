@@ -59,6 +59,40 @@ function httpsLease(run: Awaited<ReturnType<typeof fixture>>["run"]) {
     planId: run.planId,
   };
 }
+test("a frontend registered before its mapping adds its HTTPS lease to the same lifetime, keeping its attempt", async () => {
+  const opts = await fixture();
+  const first = await beginNativeProjectFinalization({
+    ...opts,
+    httpsPort: null,
+  });
+  expect(first.token.version).toBe(2);
+  // A lease for another attempt never replaces the registered lifetime.
+  await expectClosedRefusal(
+    beginNativeProjectFinalization({
+      ...opts,
+      httpsPort: 18_443,
+      httpsLease: httpsLease(opts.run),
+    }),
+    "finalization"
+  );
+  // The same frontend's lease, same attempt: one lifetime, now with the lease.
+  const leased = await beginNativeProjectFinalization({
+    ...opts,
+    httpsPort: 18_443,
+    httpsLease: { ...httpsLease(opts.run), attempt: first.token.attempt },
+  });
+  expect(leased.token).toMatchObject({
+    version: 3,
+    attempt: first.token.attempt,
+  });
+  // A second registration without a lease still refuses replacement.
+  await expectClosedRefusal(
+    beginNativeProjectFinalization({ ...opts, httpsPort: null }),
+    "finalization"
+  );
+  await leased.complete();
+});
+
 test("shared HTTPS finalization v3 binds the exact lease and never inherits a stale completion", async () => {
   const opts = await fixture();
   const lease = httpsLease(opts.run);

@@ -36,6 +36,52 @@ impl Failure {
                 .is_some_and(|resource| resource.kind == Kind::Container)
     }
 }
+/// Why a start failed after it reported `started-observed`, when its frontend may
+/// be gone: the error code, the failed service when known, and when (Unix seconds).
+/// Value-free; kept through cleanup until the next start, for status and `ps`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AfterStarted {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    pub at: u64,
+}
+impl AfterStarted {
+    pub(super) fn valid(&self) -> bool {
+        (1..=64).contains(&self.code.len())
+            && self
+                .code
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_')
+            && self.service.as_ref().is_none_or(|service| {
+                (1..=128).contains(&service.len())
+                    && service
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            })
+    }
+}
+/// Record `failure` on a receipt still in `started-observed`; call before the
+/// failed phase replaces it. The recorded startup failure names the service first.
+pub(super) fn record_after_started(receipt: &mut Receipt, failure: &CandidateError) {
+    // A stop (signal or `hack down`) is not a failure.
+    if receipt.phase != super::STARTED_OBSERVED || failure.code == "graph_cancelled" {
+        return;
+    }
+    let service = (receipt.startup_failure.as_ref().map(|f| f.service.as_str()))
+        .or(failure.service.as_deref())
+        .map(str::to_owned);
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let recorded = AfterStarted {
+        code: failure.code.into(),
+        service,
+        at,
+    };
+    receipt.failed_after_started = recorded.valid().then_some(recorded);
+}
 pub(super) fn record(
     receipt: &mut Receipt,
     service: &str,
@@ -113,6 +159,53 @@ fn refused() -> CandidateError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_failure_after_started_is_kept_through_cleanup_until_the_next_start() {
+        let mut receipt: Receipt = serde_json::from_value(serde_json::json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),
+            "plan_id":"d".repeat(64),"phase":"started-observed","started_from":"preparing",
+            "readiness":{"web":"healthy"},"resources":{"container:web":{"key":"web","kind":"container",
+            "name":format!("hkg-{}-container-0", "a".repeat(32)),"id":"e".repeat(64),"phase":"started",
+            "image":format!("sha256:{}", "f".repeat(64))}}}))
+        .unwrap();
+        let mut stopped = receipt.clone();
+        record_after_started(
+            &mut stopped,
+            &CandidateError::new("graph_cancelled", "stopped"),
+        );
+        assert_eq!(stopped.failed_after_started, None);
+        record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
+        record_after_started(
+            &mut receipt,
+            &CandidateError::new("graph_service_failed", "x"),
+        );
+        let recorded = receipt.failed_after_started.clone().unwrap();
+        assert_eq!(recorded.code, "graph_service_failed");
+        assert_eq!(recorded.service.as_deref(), Some("web"));
+        assert!(recorded.at > 0);
+        // Failed, then cleaned up with data retained: still there, and only once.
+        receipt.set_phase("failed-retained");
+        record_after_started(&mut receipt, &CandidateError::new("graph_timeout", "x"));
+        receipt.set_phase("stopped-data-retained");
+        assert_eq!(receipt.failed_after_started.as_ref(), Some(&recorded));
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(json["failed_after_started"]["service"], "web");
+        assert_eq!(json["failed_after_started"]["code"], "graph_service_failed");
+        // Without a recorded service the error's own service is used.
+        let mut timed_out = serde_json::from_value::<Receipt>(json.clone()).unwrap();
+        timed_out.startup_failure = None;
+        timed_out.phase = super::super::STARTED_OBSERVED.into();
+        record_after_started(&mut timed_out, &CandidateError::new("graph_timeout", "x"));
+        assert_eq!(timed_out.failed_after_started.unwrap().service, None);
+        receipt.set_phase("restoring");
+        assert_eq!(receipt.failed_after_started, None);
+        let invalid = AfterStarted {
+            code: "Not value-free".into(),
+            service: None,
+            at: 1,
+        };
+        assert!(!invalid.valid());
+    }
     use serde_json::json;
 
     fn receipt() -> Receipt {

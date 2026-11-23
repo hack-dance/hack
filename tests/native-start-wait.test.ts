@@ -82,20 +82,94 @@ test("exec gives up at the start budget, naming the warming service, and on a fa
   );
 });
 
-test("open waits for its own service only, and stops at the budget with its state", async () => {
-  // db is already healthy: opening it does not wait for web.
-  const db = clock([ps("warming", "starting")]);
+test("open waits for its own service's goal and verified publication, then for the route", async () => {
+  const published = (result: NativeProjectPsResult, ...services: string[]) =>
+    ({
+      ...result,
+      ports: services.map((service) => ({
+        service,
+        port: 18_080,
+        target: 8080,
+        state: "observed",
+      })),
+    }) as NativeProjectPsResult;
+  // db healthy and published: no wait, and nothing printed.
+  const db = clock([published(ps("warming", "starting"), "db")]);
   await waitForNativeOpenTarget({ ...db.opts, target: "db" });
   expect(db.lines).toEqual([]);
-  const web = clock([ps("warming", "starting"), ps("warming", "healthy")]);
-  await waitForNativeOpenTarget({ ...web.opts, target: "web" });
+  // db healthy but its port not verified yet: wait for the publication.
+  const unpublished = clock([
+    ps("warming", "starting"),
+    published(ps("warming", "starting"), "db"),
+  ]);
+  await waitForNativeOpenTarget({ ...unpublished.opts, target: "db" });
+  expect(unpublished.reads()).toBe(2);
+  // web warming, then healthy and published; then the route answers on retry.
+  const web = clock([
+    ps("warming", "starting"),
+    published(ps("warming", "healthy"), "web"),
+  ]);
+  let probes = 0;
+  await waitForNativeOpenTarget({
+    ...web.opts,
+    target: "web",
+    probe: async () => {
+      probes += 1;
+      return probes > 1;
+    },
+  });
   expect(web.lines).toEqual(["waiting for web to answer…"]);
+  expect(probes).toBe(2);
+  // A route that never answers stops at the budget.
+  const silent = clock([published(ps("warming", "healthy"), "web")]);
+  await expect(
+    waitForNativeOpenTarget({
+      ...silent.opts,
+      target: "web",
+      probe: async () => false,
+    })
+  ).rejects.toThrow("the route for web did not answer within 3 s");
+  // Never ready: stops at the budget, naming the state.
   const never = clock([ps("warming", "starting")]);
   await expect(
     waitForNativeOpenTarget({ ...never.opts, target: "web" })
   ).rejects.toThrow(
     "Native open stopped waiting: web is not ready after 3 s (starting). Nothing was opened."
   );
+});
+
+test("open refuses a target that failed, a replaced run, or a run that ended", async () => {
+  const unhealthy = clock([
+    ps("warming", "starting"),
+    ps("warming", "unhealthy"),
+  ]);
+  await expect(
+    waitForNativeOpenTarget({ ...unhealthy.opts, target: "web" })
+  ).rejects.toThrow("Native open refused: web is unhealthy.");
+  const replaced = clock([
+    ps("warming", "starting"),
+    { ...ps("warming", "starting"), run: "other" } as NativeProjectPsResult,
+  ]);
+  await expect(
+    waitForNativeOpenTarget({ ...replaced.opts, target: "web" })
+  ).rejects.toThrow("was replaced");
+  const ended = clock([
+    ps("warming", "starting"),
+    ps(undefined, "none", "stopped-data-retained"),
+  ]);
+  await expect(
+    waitForNativeOpenTarget({ ...ended.opts, target: "web" })
+  ).rejects.toThrow("the project is not running (phase stopped-data-retained)");
+  // A run that is not warming when first seen opens as before, without probing.
+  const ready = clock([ps("ready", "healthy")]);
+  await waitForNativeOpenTarget({
+    ...ready.opts,
+    target: "web",
+    probe: async () => {
+      throw new Error("must not probe a ready run");
+    },
+  });
+  expect(ready.lines).toEqual([]);
 });
 
 test("--wait waits; --json and --no-interactive follow one constant", () => {

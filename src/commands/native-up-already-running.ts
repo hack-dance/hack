@@ -19,6 +19,10 @@ import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts"
 import { quoteShellWord } from "../lib/logs.ts";
 import { readNativeComposeDocument } from "../lib/native-compose-backend-features.ts";
 import {
+  waitForNativeProjectReady,
+  warmingItem,
+} from "../lib/native-start-wait.ts";
+import {
   canPrintStartSelection,
   scopedHackCommand,
 } from "../lib/printed-shell-command.ts";
@@ -52,6 +56,8 @@ export type NativeAlreadyRunning =
        * `started-observed` (an `up` that returned at started); empty once ready.
        */
       readonly warming: string[];
+      /** From the graph: `warming` while `started-observed`, else `ready`. */
+      readonly readiness: "warming" | "ready";
     }
   /** The graph is live and ready, but these services are not up. */
   | { readonly kind: "partial"; readonly down: string[] };
@@ -65,16 +71,6 @@ function byCodePoint(a: string, b: string): number {
 }
 
 type PsItem = NativeProjectPsResult["items"][number];
-
-/** Running, with a health goal its check has not passed yet (nor failed). */
-function warmingItem(item: PsItem): boolean {
-  return (
-    item.state === "running" &&
-    item.readiness === "healthy" &&
-    item.health !== "healthy" &&
-    item.health !== "unhealthy"
-  );
-}
 
 /** Running with its own goal met (a job's goal is completion, not running). */
 function startedItem(item: PsItem): boolean {
@@ -136,6 +132,7 @@ export function classifyNativeAlreadyRunning(
         started: by.started.sort(byCodePoint),
         completed: by.completed.sort(byCodePoint),
         warming: by.warming.sort(byCodePoint),
+        readiness: startedRun ? "warming" : "ready",
       };
 }
 
@@ -163,6 +160,8 @@ export function reportNativeAlreadyRunning(opts: {
   readonly started: readonly string[];
   readonly completed: readonly string[];
   readonly warming?: readonly string[];
+  /** From the graph phase; see `NativeAlreadyRunning`. */
+  readonly readiness?: "warming" | "ready";
   readonly startedAtMs: number;
   readonly restartCommand: string;
 }): void {
@@ -190,7 +189,7 @@ export function reportNativeAlreadyRunning(opts: {
           stopped: [],
           failed: [],
         },
-        readiness: warming.length > 0 ? "warming" : "ready",
+        readiness: opts.readiness ?? "ready",
         durationMs: Date.now() - opts.startedAtMs,
       },
     }),
@@ -274,6 +273,52 @@ export async function explainUnconfirmedNativeDetachedStart(opts: {
 }
 
 /** Read-only admission adapter; resolving the CLI's project and branch stays injected. */
+type RunningState = Extract<NativeAlreadyRunning, { kind: "running" }>;
+
+/**
+ * `up --wait` on a warming run: wait for this run's graph to be ready, bounded by
+ * the start budget, then classify it again; otherwise the state as observed.
+ */
+async function settleForWait(opts: {
+  readonly state: RunningState;
+  readonly wait: { readonly budgetMs: number } | undefined;
+  readonly json: boolean;
+  readonly ps: () => Promise<NativeProjectPsResult>;
+  readonly restartCommand: string;
+}): Promise<RunningState> {
+  if (!(opts.wait && opts.state.readiness === "warming")) {
+    return opts.state;
+  }
+  await waitForNativeProjectReady({
+    ps: opts.ps,
+    budgetMs: opts.wait.budgetMs,
+    onWaiting: (line) => {
+      if (!opts.json) {
+        process.stderr.write(`${line}\n`);
+      }
+    },
+  });
+  const settled = classifyNativeAlreadyRunning(await opts.ps());
+  if (settled.kind === "partial") {
+    throw nativePartiallyRunningRefusal(settled.down, opts.restartCommand);
+  }
+  return settled.kind === "running" ? settled : opts.state;
+}
+
+/** The last start failed after `up` returned: say so before starting again. */
+function noteFailureAfterStarted(
+  result: NativeProjectPsResult,
+  json: boolean
+): void {
+  if (!result.failure || json) {
+    return;
+  }
+  const { service, code, at } = result.failure;
+  process.stderr.write(
+    `The last start failed after up returned: ${service ?? "a service"} (${code}) at ${new Date(at * 1000).toISOString()}. Starting again.\n`
+  );
+}
+
 export async function answerNativeAlreadyRunning(opts: {
   readonly native: NativeRuntimeSelection;
   readonly json: boolean;
@@ -290,6 +335,11 @@ export async function answerNativeAlreadyRunning(opts: {
     saved: NativeProjectRun,
     project: ProjectContext
   ) => Promise<void>;
+  /**
+   * `up --wait`: a warming run is waited on (its graph reaching ready, bounded by
+   * the start budget) before it is reported, as a fresh `up --wait` would be.
+   */
+  readonly wait?: { readonly budgetMs: number };
 }): Promise<number | null> {
   const startedAtMs = Date.now();
   let observed: {
@@ -299,6 +349,7 @@ export async function answerNativeAlreadyRunning(opts: {
     matches: boolean;
     saved: NativeProjectRun;
     project: ProjectContext;
+    scope: NativeProjectRunScope;
   };
   try {
     const project = await opts.resolveProject();
@@ -317,6 +368,7 @@ export async function answerNativeAlreadyRunning(opts: {
     });
     const state = classifyNativeAlreadyRunning(result);
     if (state.kind === "launch") {
+      noteFailureAfterStarted(result, opts.json);
       return null;
     }
     const saved = await loadNativeProjectRun(scope);
@@ -329,6 +381,7 @@ export async function answerNativeAlreadyRunning(opts: {
       branch,
       saved,
       project,
+      scope,
       // Compose's `*` selects every declared profile; the saved run records
       // the expanded names.
       matches: selectionMatches(saved, {
@@ -378,6 +431,18 @@ export async function answerNativeAlreadyRunning(opts: {
   }
   if (observed.state.kind === "running") {
     await opts.notifyRunning?.(observed.saved, observed.project);
+    const state = await settleForWait({
+      state: observed.state,
+      wait: opts.wait,
+      json: opts.json,
+      ps: () =>
+        nativeProjectPs({
+          runtime: opts.native,
+          scope: observed.scope,
+          includeReadiness: true,
+        }),
+      restartCommand,
+    });
     reportNativeAlreadyRunning({
       json: opts.json,
       project: observed.projectName,
@@ -386,9 +451,10 @@ export async function answerNativeAlreadyRunning(opts: {
         projectName: observed.projectName,
         branch: observed.branch,
       }),
-      started: observed.state.started,
-      completed: observed.state.completed,
-      warming: observed.state.warming,
+      started: state.started,
+      completed: state.completed,
+      warming: state.warming,
+      readiness: state.readiness,
       startedAtMs,
       restartCommand,
     });

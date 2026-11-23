@@ -194,6 +194,29 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_a_failure_after_started_without_the_lease() {
+        let (_fixture, candidate, mut receipt, root) = fixture();
+        receipt.set_phase("stopped-data-retained");
+        receipt.failed_after_started = Some(startup_failure::AfterStarted {
+            code: "graph_timeout".into(),
+            service: Some("web".into()),
+            at: 1,
+        });
+        state::write(&root.join("state.json"), &receipt).unwrap();
+        let _held = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+        let read = Read {
+            receipt: &receipt,
+            during: &|| {},
+        };
+        let json =
+            serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
+        assert_eq!(
+            json["receipt"]["failed_after_started"],
+            json!({"code":"graph_timeout","service":"web","at":1})
+        );
+    }
+
+    #[test]
     fn journal_change_during_status_never_returns_a_mixed_snapshot() {
         for mode in ["replace", "pending", "rewrite"] {
             let (_fixture, candidate, receipt, root) = fixture();

@@ -1,6 +1,6 @@
 //! Explicit bounded application log reads. Output is returned to the caller, never journaled.
-use super::{Engine, Kind, Resource, error, hex, inspect_resource, load, service_exec_generation};
-use crate::provider::engine::LogLine;
+use super::{Kind, Resource, error, hex, inspect_resource, service_exec_generation};
+use crate::provider::engine::{LogLine, LogTail, inspection::Inspection};
 use crate::{Candidate, CandidateError};
 use serde::Serialize;
 
@@ -52,7 +52,7 @@ pub fn service_selection(
         expected_generation: &placeholder,
         tail: 1,
     })?;
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = reader(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     super::startup::require_dependency_rebind_complete(&root, &receipt)?;
     if journal_pending(&root)? {
@@ -80,9 +80,43 @@ pub fn service_selection(
         owner: receipt.owner.clone(),
         namespace: receipt.namespace.clone(),
         container: container.to_owned(),
-        boot: engine.guest().boot_id().to_owned(),
+        boot: engine.boot_id()?.to_owned(),
         generation: service_exec_generation(&receipt)?,
     })
+}
+
+/// Selection and snapshots read lease-free on macOS, like `graph logs-follow`: a
+/// warming graph's start loop holds the provider lease, and these reads check the
+/// recorded container identity before and after instead.
+#[cfg(target_os = "macos")]
+fn reader(candidate: &Candidate) -> Result<super::super::engine::Observer<'_>, CandidateError> {
+    super::super::engine::Observer::connect(candidate)
+}
+#[cfg(not(target_os = "macos"))]
+fn reader(candidate: &Candidate) -> Result<super::Engine<'_>, CandidateError> {
+    super::Engine::connect_cleanup(candidate)
+}
+trait Snapshot: Inspection {
+    fn tail(&self, id: &str, tail: u16) -> Result<LogTail, CandidateError>;
+}
+#[cfg(target_os = "macos")]
+impl Snapshot for super::super::engine::Observer<'_> {
+    fn tail(&self, id: &str, tail: u16) -> Result<LogTail, CandidateError> {
+        self.logs_tail_lines(id, tail)
+    }
+}
+#[cfg(not(target_os = "macos"))]
+impl Snapshot for super::Engine<'_> {
+    fn tail(&self, id: &str, tail: u16) -> Result<LogTail, CandidateError> {
+        self.logs_tail_lines(id, tail)
+    }
+}
+fn load(
+    candidate: &Candidate,
+    engine: &impl Inspection,
+    run: &str,
+) -> Result<(super::Receipt, std::path::PathBuf), CandidateError> {
+    super::load_at(super::directory(candidate, run)?, run, engine.incarnation())
 }
 
 fn refused() -> CandidateError {
@@ -130,7 +164,7 @@ fn selected(resource: &Resource, options: &ServiceLogOptions<'_>) -> Result<(), 
     Ok(())
 }
 
-/// Read an explicitly selected service, including exited services, under the VM lease.
+/// Read an explicitly selected service, including exited services, without the lease on macOS.
 /// Immutable identity and ownership are checked before and after reading. Application
 /// logs may contain sensitive values; callers must not persist them as diagnostic receipts.
 /// Text is UTF-8-lossy whole lines, newest kept within the engine's bounded tail
@@ -140,9 +174,16 @@ pub fn service_logs(
     options: &ServiceLogOptions<'_>,
 ) -> Result<ServiceLogResult, CandidateError> {
     validate(options)?;
-    let engine = Engine::connect_cleanup(candidate)?;
-    let (receipt, root) = load(candidate, &engine, options.run)?;
-    if engine.guest().boot_id() != options.expected_boot
+    snapshot(candidate, options, &reader(candidate)?)
+}
+
+fn snapshot(
+    candidate: &Candidate,
+    options: &ServiceLogOptions<'_>,
+    engine: &impl Snapshot,
+) -> Result<ServiceLogResult, CandidateError> {
+    let (receipt, root) = load(candidate, engine, options.run)?;
+    if engine.boot_id()? != options.expected_boot
         || service_exec_generation(&receipt)? != options.expected_generation
         || journal_pending(&root)?
     {
@@ -153,11 +194,11 @@ pub fn service_logs(
         .get(&format!("container:{}", options.service))
         .ok_or_else(refused)?;
     selected(resource, options)?;
-    if inspect_resource(&engine, &receipt, resource)?.is_none() {
+    if inspect_resource(engine, &receipt, resource)?.is_none() {
         return Err(refused());
     }
-    let tail = engine.logs_tail_lines(options.expected_container, options.tail)?;
-    if inspect_resource(&engine, &receipt, resource)?.is_none() {
+    let tail = engine.tail(options.expected_container, options.tail)?;
+    if inspect_resource(engine, &receipt, resource)?.is_none() {
         return Err(refused());
     }
     let (stdout, stderr) = tail.split();
@@ -230,5 +271,108 @@ mod tests {
         assert!(selected(&resource, &options()).is_err());
         resource.id = Some("b".repeat(64));
         assert!(selected(&resource, &options()).is_err());
+    }
+    /// Reads with the recorded identity; asserts the provider lease stays held by
+    /// another owner (a warming start loop) for every read.
+    struct Warming<'a> {
+        receipt: &'a super::super::Receipt,
+        pool: std::path::PathBuf,
+        reads: std::cell::Cell<u32>,
+    }
+    impl Warming<'_> {
+        fn leased(&self) {
+            self.reads.set(self.reads.get() + 1);
+            assert!(matches!(
+                super::super::state::Lock::acquire(&self.pool),
+                Err(e) if e.code == "provider_busy"
+            ));
+        }
+    }
+    impl Inspection for Warming<'_> {
+        fn incarnation(&self) -> &str {
+            &self.receipt.owner
+        }
+        fn boot_id(&self) -> Result<&str, CandidateError> {
+            Ok("boot")
+        }
+        fn verify(&self) -> Result<(), CandidateError> {
+            Ok(())
+        }
+        fn get(&self, path: &str) -> Result<serde_json::Value, CandidateError> {
+            self.leased();
+            let resource = self
+                .receipt
+                .resources
+                .values()
+                .find(|r| path.contains(r.id.as_deref().unwrap()))
+                .unwrap();
+            Ok(
+                serde_json::json!({"Id":resource.id,"Name":resource.name,"Image":resource.image,
+                "Config":{"Labels":super::super::expected_labels(self.receipt, resource)},
+                "State":{"Status":"running","Running":true}}),
+            )
+        }
+        fn probe_status(&self, _: &str) -> Result<Option<String>, CandidateError> {
+            panic!("no probe")
+        }
+    }
+    impl Snapshot for Warming<'_> {
+        fn tail(&self, id: &str, _: u16) -> Result<LogTail, CandidateError> {
+            self.leased();
+            Ok(LogTail {
+                lines: vec![LogLine {
+                    stream: crate::provider::engine::LogStream::Stdout,
+                    text: format!("{}\n", &id[..1]),
+                }],
+                truncated: false,
+            })
+        }
+    }
+    #[test]
+    fn snapshots_of_a_warming_graph_complete_while_its_owner_holds_the_lease() {
+        let fixture = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let container = |key: &str, id: char| {
+            serde_json::json!({"key":key,"kind":"container","name":format!("hkg-{RUN}-container-{}", u8::from(key == "web")),
+                "id":id.to_string().repeat(64),"phase":"started","image":format!("sha256:{}", "f".repeat(64))})
+        };
+        let receipt: super::super::Receipt = serde_json::from_value(serde_json::json!({
+            "version":1,"run":RUN,"owner":"b".repeat(32),"namespace":"c".repeat(64),
+            "plan_id":"d".repeat(64),"phase":"preparing","readiness":{"api":"started","web":"started"},
+            "resources":{"container:api":container("api", 'a'),"container:web":container("web", 'e')}}))
+        .unwrap();
+        let root = super::super::directory(&candidate, RUN).unwrap();
+        super::super::state::private_directory(&root).unwrap();
+        super::super::state::write(&root.join("state.json"), &receipt).unwrap();
+        let pool = candidate.state_root.join("run/smolvm");
+        let _start_loop = super::super::state::Lock::acquire(&pool).unwrap();
+        let reader = Warming {
+            receipt: &receipt,
+            pool,
+            reads: std::cell::Cell::new(0),
+        };
+        let generation = service_exec_generation(&receipt).unwrap();
+        // One service, then every service as the all-services read calls it.
+        for (service, id) in [("web", 'e'), ("api", 'a'), ("web", 'e')] {
+            let container = id.to_string().repeat(64);
+            let result = snapshot(
+                &candidate,
+                &ServiceLogOptions {
+                    service,
+                    expected_container: &container,
+                    expected_generation: &generation,
+                    ..options()
+                },
+                &reader,
+            )
+            .unwrap();
+            let json = serde_json::to_value(&result).unwrap();
+            assert_eq!(json["container"], container.as_str());
+            assert_eq!(json["stdout"], format!("{id}\n"));
+            assert_eq!(json["stderr"], "");
+            assert_eq!(json["truncated"], false);
+        }
+        // Identity checked before and after each read.
+        assert_eq!(reader.reads.get(), 9);
     }
 }

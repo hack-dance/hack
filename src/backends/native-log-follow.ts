@@ -404,11 +404,6 @@ type FollowInput = {
   readonly stderr?: Writable;
   readonly project?: string;
   readonly branch?: string;
-  /**
-   * Print what exists and stop (`hack logs` without `-f` while a run warms):
-   * the same lock-free read with `--no-follow`, never resumed.
-   */
-  readonly noFollow?: boolean;
 };
 
 function runtimeEnvironment(): Record<string, string> {
@@ -683,10 +678,6 @@ async function runLogSession(
     });
     selection = { ...selection, container };
     signal.throwIfAborted();
-    if (input.noFollow) {
-      await output.end(0, signal);
-      return 0;
-    }
     const resume = input.resume;
     const next = resume
       ? await abortableLogRead(() => resume(selection, signal), signal)
@@ -751,7 +742,6 @@ async function readSelectedLogs({
           ...(selection.native ? ["--native"] : []),
           ...(input.timestamps ? ["--timestamps"] : []),
           ...(resumed ? ["--from-start"] : []),
-          ...noFollowArgs(input.noFollow),
           ...(opts.since === undefined ? [] : ["--since", String(opts.since)]),
         ],
         {
@@ -829,9 +819,4 @@ function closedOutput(error: unknown): boolean {
     "code" in error &&
     (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED")
   );
-}
-
-/** `--no-follow` for a finite lock-free read, only when asked. */
-function noFollowArgs(noFollow: boolean | undefined): readonly string[] {
-  return noFollow ? ["--no-follow"] : [];
 }

@@ -348,6 +348,7 @@ test("only a live, ready graph whose owner answers counts as already running", (
     started: ["web"],
     completed: [],
     warming: [],
+    readiness: "ready",
   });
   expect(
     classifyNativeAlreadyRunning({
@@ -360,7 +361,13 @@ test("only a live, ready graph whose owner answers counts as already running", (
         }),
       ],
     })
-  ).toEqual({ kind: "running", started: ["web"], completed: [], warming: [] });
+  ).toEqual({
+    kind: "running",
+    started: ["web"],
+    completed: [],
+    warming: [],
+    readiness: "ready",
+  });
   // A run that returned at started: a service still waiting on its health
   // check is warming, so a second `up` says "already running" instead of
   // refusing it as not up. A service that exited is still down.
@@ -386,6 +393,7 @@ test("only a live, ready graph whose owner answers counts as already running", (
     started: ["db"],
     completed: [],
     warming: ["web"],
+    readiness: "warming",
   });
   expect(
     classifyNativeAlreadyRunning({
@@ -398,13 +406,37 @@ test("only a live, ready graph whose owner answers counts as already running", (
         }),
       ],
     })
-  ).toEqual({ kind: "running", started: [], completed: [], warming: ["web"] });
+  ).toEqual({
+    kind: "running",
+    started: [],
+    completed: [],
+    warming: ["web"],
+    readiness: "warming",
+  });
   expect(
     classifyNativeAlreadyRunning({
       ...started,
       items: [item("web", { state: "exited", code: 1, readiness: "healthy" })],
     })
   ).toEqual({ kind: "partial", down: ["web"] });
+  // A completion job still running in a warming run is warming, not down.
+  expect(
+    classifyNativeAlreadyRunning({
+      ...started,
+      items: [
+        item("migrate", { state: "running", readiness: "completed" }),
+        item("db", {
+          state: "running",
+          health: "healthy",
+          readiness: "healthy",
+        }),
+      ],
+    })
+  ).toMatchObject({
+    kind: "running",
+    warming: ["migrate"],
+    readiness: "warming",
+  });
   // The same service in a ready run is down, not warming: today's rule.
   expect(
     classifyNativeAlreadyRunning({

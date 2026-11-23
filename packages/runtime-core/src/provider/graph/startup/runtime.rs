@@ -910,6 +910,8 @@ impl HostRelayRuntime {
             Option<CandidateError>,
         ) -> Result<(), CandidateError>,
     ) -> Result<(), CandidateError> {
+        // Cleanup passes no callback and so answers no requests either.
+        let requests = cancelled.and(self.startup_requests.as_ref());
         for ((name, _), child) in &mut self.children {
             if child.poll_exit()?.is_some() {
                 let resource = receipt
@@ -922,12 +924,7 @@ impl HostRelayRuntime {
                     Instant::now() + LISTENER_EXIT_SETTLE,
                     LISTENER_EXIT_POLL,
                     || {
-                        if cancelled.is_some_and(|check| check()) {
-                            return Err(error(
-                                "graph_cancelled",
-                                "Foreground startup was cancelled; owned cleanup is required.",
-                            ));
-                        }
+                        startup_cancelled(cancelled, requests)?;
                         inspect_resource(engine, receipt, resource)?.ok_or_else(refused)
                     },
                 )?;
@@ -971,12 +968,14 @@ fn report_all_started(
 }
 
 /// Requests the foreground owner answers while its start loop runs: the loop calls
-/// [`StartupRequests::serve`] wherever it checks cancellation, so between engine
-/// operations, never inside one (and never inside a service's publication, which runs
-/// within one `ServiceReady` record). The worst-case delay before a request is
-/// answered is therefore one engine call: an engine request is bounded by the
-/// engine transport's 40 s timeout (after a 3 s connect), and a publication by the
-/// start's own deadline. Between passes the loop waits at most 100 ms.
+/// [`StartupRequests::serve`] wherever it checks cancellation, between engine
+/// operations and never inside one. Final verification serves them too, between its
+/// listener-exit polls (25 ms) and between deferred-publication settlement rounds
+/// (100 ms). A request waits for at most one in-flight step: one engine request (the
+/// engine transport's 40 s timeout, after a 3 s connect), or one service's
+/// publication (inside its `ServiceReady` record, or one settlement round), bounded
+/// by the start's own deadline. A stop never interrupts a publication: it takes
+/// effect after the publication commits or is withdrawn.
 pub(in crate::provider::graph) trait StartupRequests {
     /// Answer pending requests; true once a stop has been requested, which cancels the
     /// start so the owner takes its cleanup path with data retained.
@@ -1078,7 +1077,9 @@ impl Driver for HostRelayRuntime {
         )?;
         #[cfg(target_os = "macos")]
         if let Some(publications) = &mut self.early_publications {
-            publications.settle(engine, receipt)?;
+            // Answer requests between settlement rounds, after each round's publications.
+            let (check, requests) = (self.startup_cancelled, self.startup_requests.as_ref());
+            publications.settle(engine, receipt, || startup_cancelled(check, requests))?;
         }
         Ok(())
     }

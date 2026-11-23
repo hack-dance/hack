@@ -299,6 +299,8 @@ async function acquireReadyHttps(opts: {
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
   readonly acquire: typeof acquireNativeHttpsLease;
+  /** The frontend lifetime's attempt, so the lease is recorded on that lifetime. */
+  readonly attempt?: string;
   readonly onIntent: (identity: NativeHttpsLeaseIdentity) => Promise<void>;
 }): Promise<Awaited<ReturnType<typeof acquireNativeHttpsLease>>> {
   const pool = await opts.invoke({
@@ -328,7 +330,7 @@ async function acquireReadyHttps(opts: {
     pool: { owner: opts.run.owner, bootId: pool.guest_boot_id },
     lease: {
       run: opts.run.run,
-      attempt: randomBytes(16).toString("hex"),
+      attempt: opts.attempt ?? randomBytes(16).toString("hex"),
       namespace: opts.run.namespace,
       planId: opts.run.planId,
     },
@@ -1697,6 +1699,60 @@ function readyProgress(opts: {
   };
 }
 
+/**
+ * The started envelope, from what each container is observed doing (not from its
+ * configured goal): a completion job counts as completed only once it exited 0, a
+ * health goal only once healthy; anything not there yet is warming.
+ */
+export function startedServiceSummary(
+  readinessArgs: readonly string[],
+  inspected: unknown
+): {
+  readonly started: readonly string[];
+  readonly completed: readonly string[];
+  readonly warming: readonly string[];
+} {
+  const observations =
+    isRecord(inspected) && isRecord(inspected.observations)
+      ? inspected.observations
+      : {};
+  const by = {
+    started: [] as string[],
+    completed: [] as string[],
+    warming: [] as string[],
+  };
+  for (const [service, goal] of Object.entries(
+    nativeReadinessGoals(readinessArgs)
+  )) {
+    const seen = observations[`container:${service}`];
+    const state = isRecord(seen) ? seen.state : undefined;
+    const done = isRecord(seen) && state === "exited" && seen.code === 0;
+    if (goal === "completed") {
+      (done ? by.completed : by.warming).push(service);
+    } else if (goal === "healthy") {
+      (isRecord(seen) && state === "running" && seen.health === "healthy"
+        ? by.started
+        : by.warming
+      ).push(service);
+    } else {
+      by.started.push(service);
+    }
+  }
+  return by;
+}
+/** Started summary plus routes not verified yet; `warming` until every goal is met. */
+function startedEnvelope(
+  summary: ReturnType<typeof startedServiceSummary>,
+  routed: ReadonlySet<string>
+) {
+  const warming = [...new Set([...summary.warming, ...routed])].sort();
+  return {
+    started: summary.started.filter((service) => !warming.includes(service)),
+    completed: summary.completed,
+    readiness: "warming" as const,
+    warming,
+  };
+}
 /** Ready completion goals have succeeded; keep jobs separate in lifecycle JSON. */
 function readyServiceSummary(readinessArgs: readonly string[]): {
   readonly started: readonly string[];
@@ -3282,14 +3338,16 @@ async function startNativeProjectAttempt(
             | {
                 readonly readyMapping: NativeProjectRun;
                 readonly persistedMapping: NativeProjectRun;
+                readonly inspected: unknown;
               }
             | undefined;
           const ensureMapping = async () => {
             if (mapped) {
               return mapped;
             }
+            const inspected = await invokeInspect();
             const readyMapping = authoritative(
-              await invokeInspect(),
+              inspected,
               run,
               review.namespace,
               restore?.planId ?? review.planId
@@ -3308,6 +3366,14 @@ async function startNativeProjectAttempt(
               runtimeMetadata: metadata !== undefined,
               environmentMarkers,
             });
+            // This frontend's lifetime is registered before the mapping becomes
+            // selectable, so `down` and recovery always find both. An HTTPS lease
+            // is added to the same lifetime (same attempt) when its intent lands.
+            finalization ??= await deps.finalization({
+              scope: opts.scope,
+              run: persistedMapping,
+              httpsPort: null,
+            });
             mappingAttempted = true;
             await deps.save({
               ...opts.scope,
@@ -3315,7 +3381,7 @@ async function startNativeProjectAttempt(
               expected: expectedMapping,
             });
             mapping = persistedMapping;
-            mapped = { readyMapping, persistedMapping };
+            mapped = { readyMapping, persistedMapping, inspected };
             return mapped;
           };
           // After a started return: the owner reported every goal met, so the
@@ -3422,6 +3488,7 @@ async function startNativeProjectAttempt(
                     signal: controller.signal,
                     invoke: deps.invoke,
                     acquire: deps.https,
+                    attempt: finalization?.token.attempt,
                     onIntent: async (identity) => {
                       finalization = await deps.finalization({
                         scope: opts.scope,
@@ -3446,12 +3513,16 @@ async function startNativeProjectAttempt(
                 }
                 // Injectable frontends may return a lease without publishing intent;
                 // production publishes this marker before sending its acquire frame.
-                finalization ??= await deps.finalization({
-                  scope: opts.scope,
-                  run: persistedMapping,
-                  httpsPort: https ? opts.https?.httpsPort : null,
-                  httpsLease: https?.identity,
-                });
+                // Either way the lifetime registered before the mapping carries the
+                // lease from here on (same attempt).
+                if (https && finalization?.token.version !== 3) {
+                  finalization = await deps.finalization({
+                    scope: opts.scope,
+                    run: persistedMapping,
+                    httpsPort: opts.https?.httpsPort,
+                    httpsLease: https.identity,
+                  });
+                }
                 // The registered lifetime now describes this startup.
                 await admission?.retire();
                 requireActiveStartup(controller.signal);
@@ -3494,11 +3565,16 @@ async function startNativeProjectAttempt(
                 requireActiveStartup(controller.signal);
                 const httpsPort = servedHttpsPort(https, opts.https);
                 await opts.onReady?.(
-                  {
-                    ...readyServiceSummary(readinessArgs),
-                    readiness: returnAtStarted ? "warming" : "ready",
-                    warming: returnAtStarted ? [...routes.services].sort() : [],
-                  },
+                  returnAtStarted
+                    ? startedEnvelope(
+                        startedServiceSummary(readinessArgs, mapped?.inspected),
+                        routes.services
+                      )
+                    : {
+                        ...readyServiceSummary(readinessArgs),
+                        readiness: "ready",
+                        warming: [],
+                      },
                   httpsPort === null
                     ? []
                     : nativeReadyRouteHosts({

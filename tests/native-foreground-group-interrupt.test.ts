@@ -42,6 +42,7 @@ test.each([
     process.on("SIGHUP", () => process.exit(94));
     const server = Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>new Response("ready")});
     const port = server.port;
+    console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${"a".repeat(32)}"}));
     console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${"a".repeat(32)}"}));
     await stopped;
     clearTimeout(deadline);

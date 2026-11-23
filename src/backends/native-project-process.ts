@@ -85,11 +85,21 @@ type ProcessOptions = {
  * acceptance; the caller must inspect ownership before publishing a run mapping.
  * Aborted/failed attempts retain native recovery state and are never replayed.
  */
-/** One of the owner's own JSON lines, for this run. */
-function ownerFrame(line: string, kind: string, run: string): boolean {
+/** One of the owner's own JSON lines, for this run (and phase, when given). */
+function ownerFrame(
+  line: string,
+  kind: string,
+  run: string,
+  phase?: string
+): boolean {
   try {
     const value: unknown = JSON.parse(line);
-    return isRecord(value) && value.kind === kind && value.run === run;
+    return (
+      isRecord(value) &&
+      value.kind === kind &&
+      value.run === run &&
+      (phase === undefined || value.phase === phase)
+    );
   } catch {
     return false;
   }
@@ -134,6 +144,8 @@ export async function serveNativeProjectGraph(
     readyLimit: 8192,
     strictReady: false,
     isolateOwner: true,
+    // After a started return a later failure still reports its log tails.
+    startupLogsAfterReady: started,
     ignoreBeforeReady: (line) =>
       nativePublisherExitNotice(line, opts.run) !== null,
     // Under --wait the started line comes first and is handled here.
@@ -142,7 +154,12 @@ export async function serveNativeProjectGraph(
       : {
           beforeReady: async (line: string) => {
             if (
-              !ownerFrame(line, "graph_foreground_started", opts.run) ||
+              !ownerFrame(
+                line,
+                "graph_foreground_started",
+                opts.run,
+                "started-observed"
+              ) ||
               startedSeen
             ) {
               return false;
@@ -172,7 +189,9 @@ export async function serveNativeProjectGraph(
         value.kind !==
           (started ? "graph_foreground_started" : "graph_foreground_ready") ||
         value.run !== opts.run ||
-        (started && value.phase !== "started-observed")
+        (started && value.phase !== "started-observed") ||
+        // Under --wait the owner reports started first; ready alone is refused.
+        !(started || startedSeen)
       ) {
         throw new ClosedCliError(
           "Native graph readiness identity is invalid or canceled."
@@ -385,6 +404,8 @@ async function serveGraphProcess(
     readonly onEvent?: (line: string) => void;
     readonly ignoreBeforeReady?: (line: string) => boolean;
     readonly beforeReady?: (line: string) => Promise<boolean>;
+    /** Report startup log tails even after the ready frame (a started return). */
+    readonly startupLogsAfterReady?: boolean;
     readonly onReady: (
       value: unknown,
       interrupted: () => boolean,
@@ -541,7 +562,11 @@ async function serveGraphProcess(
     });
     const code = await child.exited;
     const failure = await failureCode;
-    await reportStartupLogs(opts, ready, failureCodes);
+    await reportStartupLogs(
+      opts,
+      ready && opts.startupLogsAfterReady !== true,
+      failureCodes
+    );
     rethrowNativeInputFailure(inputFailure, {
       interrupted: timedOut || canceled,
       code,

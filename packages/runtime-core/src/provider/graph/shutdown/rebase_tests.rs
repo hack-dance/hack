@@ -6,6 +6,7 @@ fn receipt() -> Receipt {
     resource.phase = "absent".into();
     Receipt {
         started_from: None,
+        failed_after_started: None,
         normalized_input: None,
         relay_startup: None,
         relay_cleanup: None,

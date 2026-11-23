@@ -308,6 +308,9 @@ impl Flow {
 
     pub fn skip(&mut self, step: Step, pane: &mut Pane) {
         if self.can_skip(step, pane) {
+            if self.outcome.as_ref().is_some_and(|run| run.step == step) {
+                self.outcome = None;
+            }
             pane.skipped.insert(step.id().into());
             for card in step.cards(&pane.report) {
                 if card.status != Status::Passed {
@@ -395,6 +398,36 @@ mod tests {
         assert_eq!(flow.state(Step::Https, &pane), StepState::Skipped);
         assert_eq!(flow.evidence(Step::Https, &pane), StepState::NeedsAction);
         assert!(flow.can_open(Step::Https, &pane));
+    }
+
+    #[test]
+    fn skipping_a_failed_command_keeps_the_step_reopenable() {
+        let mut flow = Flow::default();
+        let mut pane = ready();
+        let step = Step::Https;
+        pane.report
+            .cards
+            .iter_mut()
+            .find(|card| card.id == step.id())
+            .unwrap()
+            .status = Status::NeedsAttention;
+        flow.enter(Screen::Step(step));
+        let failed = || RunOutcome {
+            step,
+            exit: CommandExit::Code(1),
+            diagnosis: None,
+        };
+        flow.outcome = Some(failed());
+        assert_eq!(flow.state(step, &pane), StepState::Failed);
+
+        flow.skip(step, &mut pane);
+        assert_eq!(flow.screen, Screen::Step(Step::Login));
+        assert_eq!(flow.state(step, &pane), StepState::Skipped);
+        assert!(flow.can_open(step, &pane));
+
+        flow.enter(Screen::Step(step));
+        flow.outcome = Some(failed());
+        assert_eq!(flow.state(step, &pane), StepState::Failed);
     }
 
     #[test]

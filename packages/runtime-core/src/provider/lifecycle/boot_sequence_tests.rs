@@ -50,6 +50,7 @@ fn fresh_boot_waits_before_audit_and_never_adopts_failed_socket_readiness() {
         let checks = Cell::new(0);
         let mut adopted = false;
         let result = finish_boot_with(
+            crate::provider::PoolLayout::Legacy,
             &mut adopted,
             |_| {
                 events.borrow_mut().push("templates");
@@ -75,6 +76,7 @@ fn fresh_boot_waits_before_audit_and_never_adopts_failed_socket_readiness() {
                 // Deleting the production wait now fails this assertion: the
                 // scheduled bind has not occurred when audit runs immediately.
                 super::super::bridge::verify_sockets(
+                    crate::provider::PoolLayout::Legacy,
                     &directory,
                     super::super::bridge::BridgeIntent::new(1)?,
                     &mut Vec::new(),
@@ -120,6 +122,7 @@ fn template_refusal_cannot_reach_socket_observation_audit_or_adoption() {
         on_sleep: RefCell::new(Box::new(|| panic!("no wait"))),
     };
     let failure = finish_boot_with(
+        crate::provider::PoolLayout::Legacy,
         &mut (),
         |_| Err(CandidateError::new("disk_template_untrusted", "fixture")),
         |_| panic!("no socket observation"),

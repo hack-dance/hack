@@ -125,6 +125,14 @@ export type NativeAuthoredReceipt = NativeAuthoredInventory &
         readonly topology: NativeTopology;
       }
   );
+function validGuestSharePath(project: string, path: unknown): path is string {
+  const digest = createHash("sha256").update(project).digest("hex");
+  return (
+    path === `/mnt/hack-projects/${digest}` ||
+    path === `/mnt/hp/${digest.slice(0, 16)}`
+  );
+}
+
 function refused(): never {
   throw new Error(
     "Native authored graph response is invalid or changed; values omitted."
@@ -235,8 +243,7 @@ function sourceBinding(
     !unsigned(value.share.inode) ||
     value.share.inode === 0 ||
     value.share.unfiltered_source !== true ||
-    value.share.guest_path !==
-      `/mnt/hack-projects/${createHash("sha256").update(value.share.project).digest("hex")}` ||
+    !validGuestSharePath(value.share.project, value.share.guest_path) ||
     !isRecord(value.mounts) ||
     !isRecord(value.anchors)
   ) {

@@ -1,0 +1,7 @@
+stateDiagram-v2
+    [*] --> Uninitialized
+    Uninitialized --> Legacy: old executor creates
+    Uninitialized --> Compact: new executor creates
+    Legacy --> Legacy: boot, stop, recover, replay
+    Compact --> Compact: boot, stop, recover, replay
+    Compact --> Compact: older executor refuses

@@ -147,7 +147,7 @@ fn arguments(
         action.to_owned(),
         assignment.reservation.clone(),
         marker,
-        format!("/run/hack-local/bridge-{slot:02}.sock"),
+        engine.guest().socket_layout().bridge(slot),
         relay.binary_sha256.clone(),
         relay.target_pid.to_string(),
         relay.target_start.to_string(),
@@ -281,10 +281,12 @@ pub(super) fn retirement_absence(
     })?;
     let slot_arg = slot.to_string();
     let serial_arg = relay.launch_serial.to_string();
+    let socket = engine.guest().socket_layout().bridge(slot);
     let args = [
         assignment.reservation.as_str(),
         slot_arg.as_str(),
         serial_arg.as_str(),
+        socket.as_str(),
     ];
     let result = engine
         .guest()
@@ -403,7 +405,7 @@ fn observe_cleanup(
             assignment.reservation,
             assignment.boot_id
         ),
-        format!("/run/hack-local/bridge-{slot:02}.sock"),
+        engine.guest().socket_layout().bridge(slot),
         relay.binary_sha256.clone(),
         relay.launch_serial.to_string(),
         slot.to_string(),
@@ -529,7 +531,7 @@ fn observe_normalization(
             assignment.reservation,
             assignment.boot_id
         ),
-        format!("/run/hack-local/bridge-{slot:02}.sock"),
+        engine.guest().socket_layout().bridge(slot),
         relay.binary_sha256.clone(),
         relay.launch_serial.to_string(),
         slot.to_string(),
@@ -691,6 +693,7 @@ mod tests {
                     allocation,
                     "0",
                     serial,
+                    base.join("bridge-00.sock").to_str().unwrap(),
                 ])
                 .output()
                 .unwrap()

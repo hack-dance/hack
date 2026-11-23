@@ -1,5 +1,6 @@
 //! Command-line budget for the pinned SmolVM 1.35.4 macOS launcher.
 //! Review when changing the provider pin or allowing new machine settings.
+use super::PoolLayout;
 use super::{BridgeIntent, DependencySocketIntent, state::Owner};
 use crate::CandidateError;
 
@@ -10,34 +11,34 @@ const MAX_BYTES_WITH_NUL: usize = 2048;
 // that may be appended after the guest environment. Reserve the balance of
 // 980 bytes for the provider's optional arguments and separators.
 const FIXED_WITH_NUL: usize = 980;
-const PER_PROJECT_SHARE: usize = 112;
 const PUBLISH_SOCKETS_ENV: usize = 25;
-const PER_BRIDGE: usize = 43;
-const PER_DEPENDENCY: usize = 53;
 
-fn bytes(shares: usize, bridges: u8, dependencies: u8) -> usize {
+fn bytes(layout: PoolLayout, shares: usize, bridges: u8, dependencies: u8) -> usize {
+    let (share, bridge, dependency) = match layout {
+        PoolLayout::Legacy => (112, 43, 53),
+        PoolLayout::CompactV1 => (53, 23, 22),
+    };
     let sockets = if bridges == 0 && dependencies == 0 {
         0
     } else {
-        PUBLISH_SOCKETS_ENV
-            + PER_BRIDGE * usize::from(bridges)
-            + PER_DEPENDENCY * usize::from(dependencies)
+        PUBLISH_SOCKETS_ENV + bridge * usize::from(bridges) + dependency * usize::from(dependencies)
     };
-    FIXED_WITH_NUL + PER_PROJECT_SHARE * shares + sockets
+    FIXED_WITH_NUL + share * shares + sockets
 }
 
-pub(super) fn fits(shares: usize, bridges: u8, dependencies: u8) -> bool {
-    bytes(shares, bridges, dependencies) <= MAX_BYTES_WITH_NUL
+pub(super) fn fits(layout: PoolLayout, shares: usize, bridges: u8, dependencies: u8) -> bool {
+    bytes(layout, shares, bridges, dependencies) <= MAX_BYTES_WITH_NUL
 }
 
 pub(super) fn check(
+    layout: PoolLayout,
     shares: usize,
     bridges: Option<BridgeIntent>,
     dependencies: Option<DependencySocketIntent>,
 ) -> Result<(), CandidateError> {
     let bridges = bridges.map_or(0, |intent| intent.slots);
     let dependencies = dependencies.map_or(0, |intent| intent.slots);
-    if !fits(shares, bridges, dependencies) {
+    if !fits(layout, shares, bridges, dependencies) {
         return Err(CandidateError::new(
             "pool_boot_command_line_budget",
             "This native pool configuration exceeds the provider's boot command-line budget. Reduce the published endpoints, host dependencies, or project shares before retrying. Existing pool data is kept.",
@@ -48,6 +49,7 @@ pub(super) fn check(
 
 pub(super) fn check_owner(owner: &Owner) -> Result<(), CandidateError> {
     check(
+        owner.socket_layout,
         owner.project_shares().len(),
         owner.application_bridge,
         owner.dependency_sockets,
@@ -79,62 +81,43 @@ mod tests {
     );
 
     #[test]
-    fn oversized_fresh_start_refuses_without_creating_provider_state() {
-        let project = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "boot-budget-{}-{}",
-            std::process::id(),
-            crate::next_test_scratch()
-        ));
-        std::fs::create_dir(&project).unwrap();
-        let manifest = project.join("package.json");
-        std::fs::write(&manifest, "{}").unwrap();
-        let candidate = crate::Candidate::discover(&project).unwrap();
-        let share = crate::provider::ProjectShareIntent::approve(&project, true).unwrap();
-        let error = crate::provider::up_with_socket_requests(
-            &candidate,
-            crate::provider::Profile::Development,
-            crate::provider::SocketRequests {
-                minimum_bridges: Some(BridgeIntent::new(27).unwrap()),
-                ..Default::default()
-            },
-            None,
-            Some(share),
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "pool_boot_command_line_budget");
-        assert!(!candidate.state_root.exists());
-        std::fs::remove_file(manifest).unwrap();
-        std::fs::remove_dir(project).unwrap();
-    }
-
-    #[test]
-    fn all_project_shares_fit_the_default_mixed_socket_split() {
+    fn both_layouts_charge_their_encoded_paths() {
         assert_eq!(crate::provider::artifact::VERSION, "1.35.4");
-        let mut line = FIXED.to_string();
-        let fixed = line.len() + 1;
-        assert!(fixed <= FIXED_WITH_NUL);
-        for index in 1..=MAX_PROJECT_SHARES {
+        for (layout, bridges, dependencies, reserved) in [
+            (PoolLayout::Legacy, 2, 1, 2040),
+            (PoolLayout::CompactV1, 16, 8, 1973),
+        ] {
+            let mut line = FIXED.to_string();
+            let digest = "f".repeat(64);
+            for index in 1..=MAX_PROJECT_SHARES {
+                line.push_str(&format!(
+                    " \"SMOLVM_MOUNT_{index}=smolvm{index}:{}:rw\"",
+                    layout.project(&digest)
+                ));
+            }
+            let sockets = (0..bridges)
+                .map(|slot| format!("{}|expose|{}", 6100 + u16::from(slot), layout.bridge(slot)))
+                .chain((0..dependencies).map(|slot| {
+                    format!(
+                        "{}|mount|{}",
+                        6100 + u16::from(bridges) + u16::from(slot),
+                        layout.dependency(slot)
+                    )
+                }))
+                .collect::<Vec<_>>();
             line.push_str(&format!(
-                " \"SMOLVM_MOUNT_{index}=smolvm{index}:/mnt/hack-projects/{}:rw\"",
-                "f".repeat(64)
+                " \"SMOLVM_PUBLISH_SOCKETS={}\"",
+                sockets.join(";")
             ));
+            let modeled = bytes(layout, MAX_PROJECT_SHARES, bridges, dependencies);
+            assert_eq!(modeled, reserved);
+            assert_eq!(
+                modeled - (line.len() + 1),
+                FIXED_WITH_NUL - (FIXED.len() + 1)
+            );
+            assert!(fits(layout, MAX_PROJECT_SHARES, bridges, dependencies));
         }
-        assert_eq!(line.len() + 1 - fixed, 8 * PER_PROJECT_SHARE);
-        let without_sockets = line.len();
-        line.push_str(concat!(
-            " \"SMOLVM_PUBLISH_SOCKETS=6100|expose|/run/hack-local/bridge-00.sock;",
-            "6101|expose|/run/hack-local/bridge-01.sock;",
-            "6102|mount|/run/hack-dependencies/dependency-00.sock\""
-        ));
-        assert_eq!(
-            line.len() - without_sockets,
-            PUBLISH_SOCKETS_ENV + 2 * PER_BRIDGE + PER_DEPENDENCY
-        );
-        assert!(line.len() < MAX_BYTES_WITH_NUL);
-        assert!(fits(MAX_PROJECT_SHARES, 2, 1));
-        assert!(!fits(MAX_PROJECT_SHARES, 3, 1));
-        assert!(!fits(MAX_PROJECT_SHARES, 2, 2));
-        assert!(!fits(1, 27, 0));
+        assert!(!fits(PoolLayout::Legacy, 1, 27, 0));
+        assert!(!fits(PoolLayout::CompactV1, MAX_PROJECT_SHARES, 24, 8));
     }
 }

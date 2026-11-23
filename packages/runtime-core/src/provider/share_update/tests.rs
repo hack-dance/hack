@@ -485,3 +485,14 @@ fn replaced_project_selected_before_acquisition_is_refused() {
     assert!(matches!(outcome, Err(error) if error.code == "project_share_update"));
     assert!(!root(&candidate).join(JOURNAL).exists());
 }
+
+#[test]
+fn a_digest_prefix_collision_names_both_projects() {
+    let f = fixture();
+    let mut requested = f.third.clone();
+    requested.guest_path.clone_from(&f.second.guest_path);
+    let failure = refuse_guest_path_collision(&[&f.second], &requested).unwrap_err();
+    assert_eq!(failure.code, "project_share_collision");
+    assert!(failure.message.contains("second-app"));
+    assert!(failure.message.contains("third-app"));
+}

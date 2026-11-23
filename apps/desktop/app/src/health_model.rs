@@ -8,6 +8,7 @@ use hack_desktop_core::{
     setup::{self, Remedy, SafeAction, Status},
     source::DaemonRecovery,
     terminal::{CommandAvailability, CommandControl, CommandControlSize},
+    upgrade::ReleaseUpdate,
 };
 
 #[cfg(any(test, hack_terminal))]
@@ -251,7 +252,7 @@ pub struct Health {
 #[derive(Default)]
 pub struct HealthSignals {
     pub(crate) wrong_cli: Option<WrongCli>,
-    pub(crate) update: Option<String>,
+    pub(crate) update: Option<ReleaseUpdate>,
     pub(crate) offline: bool,
     pub(crate) routing_permission_denied: bool,
 }

@@ -67,7 +67,7 @@ impl HackApp {
                 this.health.update_checking = false;
                 this.health.signals.offline = observed == UpdateObservation::NetworkUnavailable;
                 this.health.signals.update = match observed {
-                    UpdateObservation::Available(version) => Some(version),
+                    UpdateObservation::Available(release) => Some(release),
                     _ => None,
                 };
                 cx.notify();

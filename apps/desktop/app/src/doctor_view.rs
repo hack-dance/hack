@@ -69,6 +69,7 @@ pub enum Next {
     Doc(String),
     Recheck,
     Review,
+    ReviewRelease,
     None,
 }
 
@@ -156,11 +157,15 @@ pub fn rows(app: &HackApp, view: &DoctorView) -> (Vec<Row>, Vec<Row>) {
                 title: "Upgrade".into(),
                 summary: app.health.signals.update.as_ref().map_or_else(
                     || "Review upgrade readiness".into(),
-                    |version| format!("Hack {version} is available"),
+                    |release| format!("Hack {} is available", release.latest),
                 ),
                 details: None,
                 mark: Mark::Unknown,
-                next: Next::Review,
+                next: if app.health.signals.update.is_some() {
+                    Next::ReviewRelease
+                } else {
+                    Next::Review
+                },
             },
         );
     }
@@ -804,18 +809,23 @@ fn row_action(
         )
         .on_click(cx.listener(|this, _, _, cx| this.load_doctor(cx)))
         .into_any_element(),
-        Next::Review => button(
-            format!("doctor-review-{id}"),
-            Glyph::Upgrade,
-            "Review",
-            true,
-            ui,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.open_upgrade(cx);
-            this.review_upgrade(cx);
-        }))
-        .into_any_element(),
+        Next::Review | Next::ReviewRelease => {
+            let review_findings = matches!(&row.next, Next::Review);
+            button(
+                format!("doctor-review-{id}"),
+                Glyph::Upgrade,
+                "Review",
+                true,
+                ui,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_upgrade(cx);
+                if review_findings {
+                    this.review_upgrade(cx);
+                }
+            }))
+            .into_any_element()
+        }
         Next::Recheck | Next::None => div().into_any_element(),
     };
     div()

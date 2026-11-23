@@ -12,6 +12,7 @@ use hack_desktop_core::{
     models::{DoctorCheck, DoctorCheckFix, DoctorReport},
     setup::{Card, Remedy, Report, SafeAction, Status},
     terminal::{CommandAvailability, CommandControl, CommandControlSize, CommandSpec},
+    upgrade::ReleaseUpdate,
 };
 use hack_desktop_ui::{
     components::{StyledExt as _, Ui, action_button, primary_button},
@@ -67,7 +68,14 @@ pub fn open(app: &mut HackApp, frame: Fixture, window: &mut Window, cx: &mut Con
     let generation = app.setup.begin();
     app.setup.finish(generation, report.clone());
     app.setup.skipped.insert("login".into());
-    app.health.signals.update = Some("5.1.0".into());
+    app.health.signals.update = Some(ReleaseUpdate {
+        latest: "5.1.0".into(),
+        upgrade_command: Some(vec![
+            "brew".into(),
+            "upgrade".into(),
+            "hack-dance/tap/hack".into(),
+        ]),
+    });
     app.health.observed_setup = Some((checked_at, report.clone()));
     match frame {
         Fixture::BannerDns => {
@@ -248,7 +256,7 @@ fn dns_notice(report: &Report) -> Notice {
 }
 
 pub fn banners(ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
-    use Action::{Copy, None, Review, Run, Setup, Show, Switch};
+    use Action::{Copy, None, ReviewRelease, Run, Setup, Show, Switch};
     let report = report();
     let dns = dns_notice(&report);
     let mut running = Notice::new(
@@ -322,7 +330,7 @@ pub fn banners(ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
                 Mark::Unknown,
                 "Hack 5.1.0 is available",
                 "You have 5.0.0.",
-                Review,
+                ReviewRelease,
             ),
         ),
         (

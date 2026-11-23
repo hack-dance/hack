@@ -270,7 +270,7 @@ each describes the selected exact target and must not be de-duplicated across pr
 
 | State | Source | Shown | Action |
 |---|---|---|---|
-| Update available | R14 via `hack update --check --json --observe` (read-only, any install kind) | Follow-up "Hack X is available" | Review |
+| Update available | R14 via `hack update --check --json --observe` (read-only, any install kind) | Follow-up "Hack X is available" | Review in the Upgrade pane, with the target release and a copyable install command when R14 supplies one |
 | Checking | `hack upgrade check --json` (#790) | Spinner, then plan | none |
 | Blocked | `ready: false`. `blockers[]` / `incomplete[]` are `{scope,id,summary}`; the command or action comes from the matching finding (`machine[]` or `projects[].findings[]` by scope + id) | One card per blocker | Copy / Open Terminal; Run only with R17's `kind: safe`; Re-check |
 | Ready | `ready: true`, `plan[]` (`command` / `args` / `action`, `blocker`) | Ordered plan | Upgrade |

@@ -31,6 +31,7 @@ pub enum Action {
     Switch(Option<PathBuf>),
     Setup,
     Review,
+    ReviewRelease,
     Doctor,
     Show,
     Guide(String),
@@ -185,13 +186,13 @@ pub fn observed(app: &HackApp, list: &ListView) -> Vec<Notice> {
             .join(", ");
         notices.push(notice);
     }
-    if let Some(version) = &app.health.signals.update {
+    if let Some(release) = &app.health.signals.update {
         notices.push(Notice::new(
             Kind::Update,
             Mark::Unknown,
-            &format!("Hack {version} is available"),
+            &format!("Hack {} is available", release.latest),
             "Review the update before applying it.",
-            Action::Review,
+            Action::ReviewRelease,
         ));
     }
     if app.health.signals.offline {
@@ -406,7 +407,7 @@ fn button(
         Action::Copy(_) => (Glyph::Copy, "Copy", true),
         Action::Switch(_) => (Glyph::Restart, "Switch", !busy),
         Action::Setup => (Glyph::Stethoscope, "Finish setup", !busy),
-        Action::Review => (Glyph::Upgrade, "Review", true),
+        Action::Review | Action::ReviewRelease => (Glyph::Upgrade, "Review", true),
         Action::Doctor => (Glyph::Stethoscope, "Open Doctor", true),
         Action::Show => (Glyph::Terminal, "Show", true),
         Action::Guide(_) => (Glyph::ExternalLink, "Open guide", true),
@@ -443,6 +444,7 @@ fn button(
                 this.open_upgrade(cx);
                 this.review_upgrade(cx);
             }
+            Action::ReviewRelease => this.open_upgrade(cx),
             Action::Show => this.show_health_drawer(window, cx),
             Action::Guide(url) => cx.open_url(url),
             Action::None => {}
@@ -490,7 +492,11 @@ mod tests {
                             setup_card(app.health_report(), "daemon").unwrap().status,
                             Status::Passed
                         );
-                        app.health.signals.update = Some("5.1.0".into());
+                        app.health.signals.update =
+                            Some(hack_desktop_core::upgrade::ReleaseUpdate {
+                                latest: "5.1.0".into(),
+                                upgrade_command: None,
+                            });
                         app.health.signals.offline = true;
                         app.simulate_daemon_unavailable(false);
 
@@ -502,6 +508,8 @@ mod tests {
                             Action::Run(_) | Action::Recover(DaemonRecovery::Start)
                         ));
                         assert_eq!(notices.last().unwrap().kind, Kind::Offline);
+                        assert!(notices.iter().any(|notice| notice.kind == Kind::Update
+                            && matches!(notice.action, Action::ReviewRelease)));
                         let evidence = notices[0].evidence.clone();
                         app.health
                             .follow_ups

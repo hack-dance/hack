@@ -3533,7 +3533,11 @@ async function startNativeProjectAttempt(
                     httpsPort,
                   })
                 );
-                if (built.size > 0 && opts.imageTagMode !== "offline") {
+                if (
+                  built.size > 0 &&
+                  opts.imageTagMode !== "offline" &&
+                  process.env.HACK_NATIVE_BUILD_RETENTION !== "0"
+                ) {
                   scheduleRetention(0);
                 }
                 // Superseded build images go once the new ones run; this never

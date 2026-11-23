@@ -1106,6 +1106,8 @@ impl HackApp {
         }
         if before != after {
             self.model.source_changed();
+            self.action_started.clear();
+            self.action_progress.clear();
             self.configuration.invalidate();
             self.changes = Default::default();
             // A Start or Restart hackd still running belongs to the

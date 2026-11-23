@@ -287,7 +287,7 @@ const ADVICE: Readonly<Record<NativeDataAdvisoryCode, string>> = {
 export function nativeDataCheckResult(
   advisories: readonly NativeDataAdvisory[]
 ): {
-  readonly name: string;
+  readonly name: typeof NATIVE_DATA_CHECK;
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly nativeData: NativeDataReport;

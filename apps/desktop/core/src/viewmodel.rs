@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
-use crate::models::{ProjectRow, Worktree};
+use crate::models::{LifecycleResult, ProjectRow, Worktree};
 pub use crate::source::UpdateSide;
-use crate::source::{ActionOutcome, DaemonRecovery, Snapshot, SourceError};
+use crate::source::{ActionOutcome, DaemonRecovery, ServiceActionError, Snapshot, SourceError};
 use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
 
 /// One runnable instance: a project's base instance (`branch: None`) or one
@@ -832,21 +832,42 @@ impl AppModel {
         true
     }
 
-    pub fn finish_service_action(&mut self, key: InstanceKey, result: Result<(), SourceError>) {
+    pub fn finish_service_action(
+        &mut self,
+        key: InstanceKey,
+        result: Result<LifecycleResult, ServiceActionError>,
+    ) {
         self.service_actions.remove(&key);
         self.action_epoch += 1;
-        if let Err(error) = result {
-            self.action_errors.insert(key, describe(&error));
+        match result {
+            Ok(receipt) => {
+                if let Some(stopped_at) = receipt.stopped_at {
+                    self.record_service_stop(&key, receipt.stopped_container_ids, &stopped_at);
+                }
+            }
+            Err(error) => {
+                if let Some(receipt) = error.stopped {
+                    self.record_service_stop(
+                        &key,
+                        receipt.stopped_container_ids,
+                        &receipt.stopped_at,
+                    );
+                }
+                self.action_errors.insert(key, describe(&error.source));
+            }
         }
     }
 
-    /// Remember only the containers observed when the successful Stop was issued.
-    pub fn record_service_stop(
+    /// Remember only containers whose stop was confirmed by the CLI.
+    fn record_service_stop(
         &mut self,
         key: &InstanceKey,
         containers: Vec<String>,
         stopped_at: &str,
     ) {
+        if containers.is_empty() {
+            return;
+        }
         self.local
             .entry(key.clone())
             .or_default()
@@ -2512,7 +2533,7 @@ mod tests {
         assert!(model.detail().unwrap().busy);
         assert!(model.detail().unwrap().state.is_active());
         assert!(model.can_start(&release));
-        model.finish_service_action(feature, Ok(()));
+        model.finish_service_action(feature, Ok(LifecycleResult::default()));
 
         model.apply(Event::SelectInstance(release.clone()));
         assert!(model.selected_service().is_none());
@@ -2608,6 +2629,71 @@ mod tests {
             Some(InstanceKey::project("storefront"))
         );
         assert!(model.selected_service().is_none());
+    }
+
+    #[test]
+    fn partial_stop_keeps_the_error_and_records_only_confirmed_replicas() {
+        let mut snapshot = fixtures::snapshot(Fixture::GroupedSidebar).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        let runtime = &mut project.branch_runtime[0].runtime;
+        runtime.services.retain(|service| service.service == "api");
+        let containers = &mut runtime.services[0].containers;
+        containers[0].id = Some("confirmed".into());
+        containers[0].started_at = Some("2026-11-23T00:00:00.000Z".into());
+        let mut replica = containers[0].clone();
+        replica.id = Some("unconfirmed".into());
+        containers.push(replica);
+
+        let key = InstanceKey::branch_at(
+            "storefront",
+            "feature-search",
+            Some("/work/storefront/.worktrees/feature-search".into()),
+        );
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snapshot.clone())));
+        model.apply(Event::SelectInstance(key.clone()));
+        assert!(model.begin_service_action(&key));
+        model.finish_service_action(
+            key,
+            Err(crate::runner::RunError::Cli(crate::models::CliError {
+                code: "E_COMPOSE_FAILED".into(),
+                message: "Could not stop api (Docker exit 1).".into(),
+                detail: Some(serde_json::json!({
+                    "stoppedContainerIds": ["confirmed"],
+                    "stoppedAt": "2026-11-23T00:00:30.000Z"
+                })),
+            })
+            .into()),
+        );
+
+        let mut refresh = |replicas: usize| {
+            let project = snapshot
+                .projects
+                .projects
+                .iter_mut()
+                .find(|p| p.name == "storefront")
+                .unwrap();
+            for container in
+                &mut project.branch_runtime[0].runtime.services[0].containers[..replicas]
+            {
+                container.state = "exited".into();
+                container.status = "Exited (137)".into();
+            }
+            model.apply(Event::Refreshed(Ok(snapshot.clone())));
+            model.detail().unwrap()
+        };
+        let partial = refresh(1);
+        assert!(matches!(partial.state, ProjectState::Running { .. }));
+        assert_eq!(
+            partial.last_error.as_deref(),
+            Some("E_COMPOSE_FAILED: Could not stop api (Docker exit 1).")
+        );
+        assert!(matches!(refresh(2).state, ProjectState::FailedStart { .. }));
     }
 
     #[test]

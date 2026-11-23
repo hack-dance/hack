@@ -9155,15 +9155,27 @@ async function runServiceStop(
         ...active.map((container) => container.id),
       ],
       {
+        cwd: dirname(opts.project.composeFile),
         stdin: "ignore",
         env: { ...opts.env },
         timeoutMs: INSTANCE_STOP_GRACE_CAP_MS,
       }
     );
     if (result.exitCode !== 0) {
+      // Docker prints one requested ID per successful stop, even when other
+      // replicas fail. Only exact matches are receipts for this action.
+      const confirmed = new Set(
+        result.stdout.split("\n").map((id) => id.trim())
+      );
+      const stoppedContainerIds = active
+        .filter((container) => confirmed.has(container.id))
+        .map((container) => container.id);
       throw new HackCliError({
         code: "E_COMPOSE_FAILED",
         message: `Could not stop ${opts.service} (Docker exit ${result.exitCode}).`,
+        detail: stoppedContainerIds.length
+          ? { stoppedContainerIds, stoppedAt: new Date().toISOString() }
+          : undefined,
       });
     }
   }

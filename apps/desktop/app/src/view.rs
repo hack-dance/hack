@@ -770,16 +770,7 @@ impl HackApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.model.source_epoch() == epoch {
-                    if let Ok(receipt) = &result
-                        && let Some(stopped_at) = &receipt.stopped_at
-                    {
-                        this.model.record_service_stop(
-                            &key,
-                            receipt.stopped_container_ids.clone(),
-                            stopped_at,
-                        );
-                    }
-                    this.model.finish_service_action(key, result.map(|_| ()));
+                    this.model.finish_service_action(key, result);
                     this.refresh_now_async(cx);
                     cx.notify();
                 }

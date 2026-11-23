@@ -408,6 +408,62 @@ test("desktop Start pins the resolved name of a never-started Compose copy", asy
   expect(log).not.toContain("HACK_TEST_STACK_NAME");
 }, 20_000);
 
+test("service Stop reports confirmed replicas on failure and uses the Compose working directory", async () => {
+  const fixture = await createWorktreeFixture();
+  const projectDir = join(fixture.worktreeRoot, ".hack");
+  const dockerConfig = join(projectDir, "relative-docker-config");
+  await mkdir(dockerConfig);
+  await writeFile(join(dockerConfig, "fixture-context"), "qa\n");
+  await writeFile(
+    join(projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    DOCKER_CONFIG: relative-docker-config",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    fixture.dockerComposeRowsPath,
+    JSON.stringify(
+      ["api-one", "api-two"].map((ID) => ({
+        ID,
+        Service: "api",
+        State: "running",
+        Labels: `com.docker.compose.project.working_dir=${projectDir}`,
+      }))
+    )
+  );
+  const result = await runCliWithCapturedOutput([
+    "down",
+    "--path",
+    fixture.worktreeRoot,
+    "--branch",
+    "feature-current",
+    "--service",
+    "api",
+    "--json",
+  ]);
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_COMPOSE_FAILED",
+      message: "Could not stop api (Docker exit 1).",
+      detail: {
+        stoppedContainerIds: ["api-one"],
+        stoppedAt: expect.any(String),
+      },
+    },
+  });
+  const log = await readFile(fixture.dockerLogPath, "utf8");
+  expect(log).toContain("stop -- api-one api-two");
+  expect(log).not.toMatch(/ down(?:\s|$)/);
+}, 20_000);
+
 test("detached linked worktree down still requires an explicit branch", async () => {
   const fixture = await createWorktreeFixture();
   runGit({ cwd: fixture.worktreeRoot, args: ["checkout", "--detach"] });
@@ -740,6 +796,14 @@ async function createWorktreeFixture(): Promise<{
     [
       "#!/bin/sh",
       `echo "$@" >> "${dockerLogPath}"`,
+      'if [ "${DOCKER_CONFIG:-}" = "relative-docker-config" ]; then',
+      '  [ -f "$DOCKER_CONFIG/fixture-context" ] || exit 29',
+      '  if [ "$1" = "stop" ]; then',
+      '    printf "%s\\n" "api-one" "unrelated"',
+      '    printf "%s\\n" "fixture could not stop api-two" >&2',
+      "    exit 1",
+      "  fi",
+      "fi",
       'if [ "$1" = "ps" ]; then',
       `  cat "${dockerRowsPath}"`,
       "  exit 0",

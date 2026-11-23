@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::daemon::DaemonClient;
 use crate::doctor::DoctorRun;
 use crate::fixtures::{self, Fixture};
@@ -255,6 +257,45 @@ impl From<RunError> for SourceError {
 pub enum ActionOutcome {
     Lifecycle(LifecycleResult),
     Opened(OpenResult),
+}
+
+/// A service action can fail after Docker confirms a subset of its stops.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceActionError {
+    pub source: Box<SourceError>,
+    pub(crate) stopped: Option<ServiceStopReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServiceStopReceipt {
+    pub stopped_container_ids: Vec<String>,
+    pub stopped_at: String,
+}
+
+impl From<SourceError> for ServiceActionError {
+    fn from(source: SourceError) -> Self {
+        Self {
+            source: Box::new(source),
+            stopped: None,
+        }
+    }
+}
+
+impl From<RunError> for ServiceActionError {
+    fn from(error: RunError) -> Self {
+        let stopped = match &error {
+            RunError::Cli(error) if error.code == "E_COMPOSE_FAILED" => error
+                .detail
+                .as_ref()
+                .and_then(|detail| ServiceStopReceipt::deserialize(detail).ok()),
+            _ => None,
+        };
+        Self {
+            source: Box::new(error.into()),
+            stopped,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,12 +661,13 @@ pub trait Source: Send + Sync {
         _compose_project: Option<&str>,
         _service: &str,
         _action: Action,
-    ) -> Result<LifecycleResult, SourceError> {
+    ) -> Result<LifecycleResult, ServiceActionError> {
         Err(SourceError::Cli {
             code: "E_APP_SERVICE_ACTION".into(),
             message: "Service actions are unavailable for this source.".into(),
             failed: vec![],
-        })
+        }
+        .into())
     }
 
     /// Last log lines for a project or one of its branch instances (no follow).
@@ -2215,7 +2257,7 @@ impl Source for LiveSource {
         compose_project: Option<&str>,
         service: &str,
         action: Action,
-    ) -> Result<LifecycleResult, SourceError> {
+    ) -> Result<LifecycleResult, ServiceActionError> {
         let branch = branch.map(validate_branch).transpose()?;
         let root = trusted_root(repo_root)?;
         // `--service=<name>` always stays the value of the service selector.
@@ -2244,7 +2286,8 @@ impl Source for LiveSource {
                     code: "E_APP_SERVICE_ACTION".into(),
                     message: "Invalid service action or service name.".into(),
                     failed: vec![],
-                });
+                }
+                .into());
             }
         };
         let expected = compose_project.map(|name| format!("--expect-compose-project={name}"));

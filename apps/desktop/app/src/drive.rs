@@ -757,12 +757,6 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
                     app.open_env_edit(Some(&row), window, cx)
                 })
                 .map_err(|e| e.to_string())?;
-            // An unread plaintext value is read first: wait for the field.
-            poll(handle, cx, ENV_WAIT, |app, _, _| {
-                app.env_edit.as_ref().is_some_and(|e| e.ready).then_some(())
-            })
-            .await
-            .ok_or("the editor did not get the current value")?;
             save_env(handle, cx, name, None, &value.0).await
         }
         Step::EnvAdd {

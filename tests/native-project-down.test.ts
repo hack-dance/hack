@@ -325,6 +325,56 @@ test("down of a run that failed after started clears its failure record", async 
   // Without a record nothing extra is called (see the test above).
 });
 
+test.each([
+  { recover: false },
+  { recover: true },
+])("down of a warming run while its owner holds the provider lease goes to the owner (recover $recover)", async ({
+  recover,
+}) => {
+  // A start that returned at started: the owner holds the provider lease until
+  // its ready line, so every leased command is refused until the stop lands.
+  const opts = await fixture();
+  let held = true;
+  const calls: string[] = [];
+  const warming = snapshot(false);
+  warming.receipt.phase = "started-observed";
+  const started = performance.now();
+  const result = await nativeProjectDown({
+    ...opts,
+    recover,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "status" || command === "foreground-owner") {
+        return command === "status"
+          ? warming
+          : ownerSelection("running", "started-observed");
+      }
+      if (command === "cleanup") {
+        // The owner's socket takes the stop without the lease; then it lets go.
+        held = false;
+        return {};
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      if (held) {
+        throw new NativeRuntimeRequestError({
+          message:
+            "Native runtime request failed (provider_busy); inspect owned state before retrying.",
+          nativeCode: "provider_busy",
+        });
+      }
+      return snapshot(true);
+    },
+  }).catch((error: unknown) => error);
+  expect(calls).toContain("status");
+  expect(calls).toContain("cleanup");
+  expect(result).toMatchObject({ status: "stopped" });
+  // No wait for the lease the owner holds: well under the 15 s busy wait.
+  expect(performance.now() - started).toBeLessThan(5000);
+});
+
 test("already-stopped unacknowledged frontend refuses without replaying compute", async () => {
   const opts = await fixture();
   const root = finalizationRoot(opts.scope);

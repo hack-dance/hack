@@ -19,7 +19,11 @@ import {
   recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
-import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import {
+  inspectNativeProjectGraph,
+  isNativeProviderBusy,
+  observeStartingNativeProjectGraph,
+} from "./native-project-inspect.ts";
 import { recoverNativeInterruptedStartupCleanup } from "./native-project-interrupted-cleanup.ts";
 import {
   retireNativeRecoveredPublisher,
@@ -765,13 +769,41 @@ async function nativeProjectDownOnce(opts: {
     } as const;
   }
   const invoke = withNativeRecoveryGuidance(opts.invoke ?? invokeNativeRuntime);
-  const inspect = () =>
+  const leased = (busyWaitMs?: number) =>
     inspectNativeProjectGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       run: run.run,
       invoke,
+      busyWaitMs,
     });
+  // A start that returned at started holds the provider lease until its ready
+  // line. Seen lease-free as `started-observed`, the run is checked from that
+  // snapshot and stopped through its owner (`graph cleanup` reaches the owner's
+  // socket without the lease); any other busy lease is waited out as before.
+  const inspect = async () => {
+    try {
+      return await leased(0);
+    } catch (error) {
+      if (!isNativeProviderBusy(error)) {
+        throw error;
+      }
+      const observed = await observeStartingNativeProjectGraph({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        run: run.run,
+        invoke,
+      }).catch(() => undefined);
+      if (
+        isRecord(observed) &&
+        isRecord(observed.receipt) &&
+        observed.receipt.phase === "started-observed"
+      ) {
+        return observed;
+      }
+      return await leased();
+    }
+  };
   let initial = await inspectOrStartStoppedPool({
     inspect,
     startStoppedPool: opts.startStoppedPool === true,

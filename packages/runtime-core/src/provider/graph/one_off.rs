@@ -236,7 +236,7 @@ pub(super) fn recovery_selection(
         startup.services.remove(&service);
     }
     parent.environment_attached = intent.original_environment_attached;
-    parent.phase = "ready-observed".into();
+    parent.set_phase("ready-observed");
     if service_exec_generation(&parent)? != intent.generation
         || !parent
             .resources

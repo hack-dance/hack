@@ -1,0 +1,22 @@
+stateDiagram-v2
+    [*] --> Recovery
+    state Recovery {
+        [*] --> Unknown
+        Unknown --> List
+        List --> Inspect
+        Inspect --> Absent
+        Absent --> RetrySameHandle
+        RetrySameHandle --> Conflict
+        Conflict --> Inspect
+    }
+    Recovery --> Execution: same incarnation
+    Execution --> Recovery: deadline or restart
+    state Execution {
+        [*] --> Reserved
+        Reserved --> Running
+        Reserved --> SpawnFailed
+        Running --> Exited
+        Exited --> RecordResult
+        SpawnFailed --> RecordResult
+        RecordResult --> Tombstone
+    }

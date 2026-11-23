@@ -679,9 +679,9 @@ export async function withLocalDirectoriesOverride(opts: {
     notify: opts.notify,
   });
   const internalDir = resolve(opts.project.projectDir, ".internal");
-  await ensureDir(internalDir);
+  await ensureDir(internalDir, 0o700);
   const overridePath = resolve(internalDir, OVERRIDE_FILENAME);
-  await writeTextFileIfChanged(overridePath, YAML.stringify(override));
+  await writeTextFileIfChanged(overridePath, YAML.stringify(override), 0o600);
   return [...opts.composeFiles, overridePath];
 }
 

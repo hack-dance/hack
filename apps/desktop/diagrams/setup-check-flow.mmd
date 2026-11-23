@@ -1,0 +1,26 @@
+---
+title: Setup check flow
+---
+stateDiagram-v2
+    direction TB
+    state VersionResult <<choice>>
+    state DaemonResult <<choice>>
+    state "Check the CLI" as CheckCli
+    state "Later steps blocked" as Blocked
+    state "Check hackd" as CheckDaemon
+    state "Show Check again" as RetryDaemon
+    state "Use known remedy" as KnownRemedy
+    state "Publish ordered cards" as Publish
+
+    [*] --> CheckCli
+    CheckCli --> VersionResult
+    VersionResult --> Blocked : [CLI not ready]
+    VersionResult --> CheckDaemon : [Hack 5]
+    CheckDaemon --> DaemonResult
+    DaemonResult --> RetryDaemon : [unreadable]
+    DaemonResult --> KnownRemedy : [off or mismatch]
+    DaemonResult --> Publish : [compatible]
+    RetryDaemon --> Publish
+    KnownRemedy --> Publish
+    Blocked --> [*]
+    Publish --> [*]

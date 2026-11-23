@@ -29,7 +29,7 @@ use crate::doctor_view::Pane;
 use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 
 use hack_desktop_core::source::target_keys;
-use hack_desktop_core::state::{Action, ProjectState};
+use hack_desktop_core::state::{Action, ProjectState, ServiceView};
 use hack_desktop_core::viewmodel::{
     AppModel, Banner, BranchRow, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken,
     Row, UpdateSide,
@@ -1698,10 +1698,7 @@ impl HackApp {
         if self.tab == crate::files_view::FILES_TAB {
             tabs = tabs.child(self.project_files_picker(d, cx));
         }
-        let stats_service = self
-            .stats_service
-            .as_ref()
-            .and_then(|name| d.services.iter().find(|service| &service.name == name));
+        let stats_service = self.stats_service_for(d);
         let body: AnyElement = match self.tab {
             crate::files_view::FILES_TAB => {
                 self.project_files(d, ui, window, cx).into_any_element()
@@ -1826,6 +1823,23 @@ impl HackApp {
 }
 
 impl HackApp {
+    fn stats_service_for<'a>(&self, detail: &'a DetailView) -> Option<&'a ServiceView> {
+        let name = self.stats_service.as_deref()?;
+        detail.services.iter().find(|service| service.name == name)
+    }
+
+    /// The command drawer has its own actions. Keep the project panel's
+    /// state and sessions intact while the Stats body is using its space.
+    #[cfg(hack_terminal)]
+    fn project_terminal_shortcuts(&self) -> bool {
+        self.pane == Pane::Project
+            && !self.panels.command.visible()
+            && self
+                .model
+                .detail()
+                .is_some_and(|detail| self.stats_service_for(&detail).is_none())
+    }
+
     /// The panel's window-level handlers: drag the handle, and the panel
     /// actions wherever focus is.
     #[cfg(hack_terminal)]
@@ -1853,14 +1867,14 @@ impl HackApp {
             cx.listener(|this, _, _, _| this.panels.dragging = false),
         )
         .on_action(cx.listener(|this, _: &TogglePanel, window, cx| {
-            if !this.toggle_command_drawer(window, cx) {
+            if !this.toggle_command_drawer(window, cx) && this.project_terminal_shortcuts() {
                 this.toggle_panel(cx);
             }
         }))
         .on_action(cx.listener(|this, _: &ToggleMaximize, _, cx| {
             if this.panels.command.visible() {
                 this.make_command_taller(cx);
-            } else {
+            } else if this.project_terminal_shortcuts() {
                 this.toggle_maximize(cx);
             }
         }))
@@ -1870,24 +1884,24 @@ impl HackApp {
             },
         ))
         .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-            if !this.panels.command.visible() {
+            if this.project_terminal_shortcuts() {
                 this.open_menu(crate::terminal::Menu::Main, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
             if this.panels.command.visible() {
                 this.close_command_drawer(cx);
-            } else {
+            } else if this.project_terminal_shortcuts() {
                 this.close_active_tab(window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &NextTab, window, cx| {
-            if !this.panels.command.visible() {
+            if this.project_terminal_shortcuts() {
                 this.step_tab(true, window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
-            if !this.panels.command.visible() {
+            if this.project_terminal_shortcuts() {
                 this.step_tab(false, window, cx);
             }
         }))
@@ -2103,6 +2117,96 @@ mod tests {
         let mut m = AppModel::new();
         m.apply(Event::Refreshed(FixtureSource(f).snapshot()));
         m.list()
+    }
+
+    #[cfg(all(feature = "screenshots", hack_terminal))]
+    #[test]
+    fn stats_keeps_the_hidden_shell_open_and_selected() {
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{HeadlessAppContext, WindowOptions};
+        use hack_desktop_term::actions::CloseTab;
+        use hack_desktop_term::launch::{Launch, SessionKind, SessionPlan};
+        use hack_desktop_term::pty::PtyOptions;
+        use hack_desktop_term::terminal::{Status, TerminalCore};
+        use hack_desktop_term::view::TerminalView;
+
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_kit::NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let (handle, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(
+                    WindowOptions {
+                        focus: false,
+                        show: false,
+                        ..crate::window_options()
+                    },
+                    cx,
+                    |window, cx| {
+                        cx.new(|cx| {
+                            let mut app = HackApp::new(
+                                Arc::new(FixtureSource(Fixture::Usage)),
+                                false,
+                                window,
+                                cx,
+                            );
+                            app.select("storefront");
+                            app
+                        })
+                    },
+                )
+            })
+            .unwrap();
+
+        let (sessions, shell) = cx
+            .update_window(handle, |_, window, cx| {
+                app.update(cx, |app, cx| {
+                    app.ensure_panel(window, cx);
+                    let key = app.model.selected_key().unwrap();
+                    let sessions = app.panels.by_key[&key].sessions.clone();
+                    let mut options = PtyOptions::new("/bin/sh")
+                        .arg("-c")
+                        .arg("IFS= read -r line");
+                    options.env_clear = true;
+                    let core = TerminalCore::session(SessionPlan {
+                        attempts: vec![Launch {
+                            kind: SessionKind::HostShell { shell: "sh".into() },
+                            options,
+                        }],
+                    })
+                    .unwrap();
+                    let shell = cx.new(|cx| TerminalView::from_core(core, cx));
+                    sessions.update(cx, |panel, cx| panel.add_tab(shell.clone(), window, cx));
+                    app.stats_service = Some("api".into());
+                    app.search.update(cx, |search, cx| search.focus(window, cx));
+                    (sessions, shell)
+                })
+            })
+            .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(Box::new(CloseTab), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(app.stats_service.as_deref(), Some("api"));
+                app.stats_service = None;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(sessions.read(cx).active(), Some(&shell));
+            assert_eq!(shell.read(cx).status(), &Status::Running);
+            window.dispatch_action(Box::new(CloseTab), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(sessions.read(cx).tab_count(), 1));
     }
 
     #[test]

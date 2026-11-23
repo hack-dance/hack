@@ -21,6 +21,8 @@ const UPSTREAM = /^\{\{upstreams ([0-9]+)\}\}$/;
 const HOST_LABEL = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i;
 const SERVICE_NAME = /^[\w.-]+$/;
 const ROUTE_LABEL = /^caddy(?:[._]|$)/;
+const SHORT_PORT =
+  /^(?:(?:\[[\da-f.:]+\]|[\d.]+):(?=\d+(?:-\d+)?:))?(\d+)(?:-(\d+))?(?::(\d+)(?:-(\d+))?)?(?:\/(?:tcp|udp|sctp))?$/iu;
 
 export const validHost = (host: string): boolean =>
   host.length <= 253 && host.split(".").every((part) => HOST_LABEL.test(part));
@@ -30,6 +32,18 @@ export const validPort = (port: unknown): port is number =>
   Number.isInteger(port) &&
   port >= 1 &&
   port <= 65_535;
+
+export function validComposeShortPort(value: unknown): boolean {
+  if (typeof value !== "string") {
+    return validPort(value);
+  }
+  const endpoints = SHORT_PORT.exec(value);
+  return (
+    endpoints
+      ?.slice(1)
+      .every((port) => port === undefined || validPort(Number(port))) ?? false
+  );
+}
 
 export function parseRouteAddress(site: string) {
   const match = ADDRESS.exec(site);
@@ -159,6 +173,9 @@ function serviceRoutes(opts: {
 }): { readonly routes: readonly RouteView[]; readonly droppedAll: boolean } {
   const { labels, branch, baseHosts } = opts;
   const routes: RouteView[] = [];
+  if (branch !== null && baseHosts.length === 0) {
+    return { routes, droppedAll: false };
+  }
   let droppedAll = false;
   for (const { key, value } of labels) {
     if (!(isCaddySiteLabel(key) && value.trim())) {
@@ -193,7 +210,10 @@ function composePorts(value: unknown): unknown[] {
     return [];
   }
   return value.flatMap((port: unknown): unknown[] => {
-    if (typeof port === "string" || typeof port === "number") {
+    if (
+      typeof port === "number" ||
+      (typeof port === "string" && !isConfigSecret("", port))
+    ) {
       return [port];
     }
     if (!isRecord(port)) {
@@ -212,7 +232,8 @@ function composePorts(value: unknown): unknown[] {
               "name",
               "app_protocol",
             ].includes(key) &&
-            (typeof item === "number" || typeof item === "string")
+            (typeof item === "number" ||
+              (typeof item === "string" && !isConfigSecret("", item)))
         )
       ),
     ];
@@ -303,7 +324,34 @@ export function composeModel(opts: {
   }
   const rows = Object.entries(services).flatMap(([name, service]) => {
     if (!isRecord(service)) {
+      issues.push(
+        composeFieldIssue(
+          source,
+          ["services", name],
+          "A Compose service must be an object.",
+          "E_CONFIG_PARSE"
+        )
+      );
       return [];
+    }
+    if (
+      Array.isArray(service.ports) &&
+      service.ports.some(
+        (port: unknown) =>
+          !(
+            isRecord(port) ||
+            (typeof port === "string" && port.includes("$")) ||
+            validComposeShortPort(port)
+          )
+      )
+    ) {
+      issues.push(
+        composeFieldIssue(
+          source,
+          ["services", name, "ports"],
+          "Use ports between 1 and 65535."
+        )
+      );
     }
     const depends_on = serviceNames(service.depends_on);
     const missingDependency = composeDependencyIssue(source, name, depends_on);
@@ -354,6 +402,25 @@ export function composeModel(opts: {
     ];
   });
   return { services: rows, issues };
+}
+
+function composeFieldIssue(
+  source: ComposeSource,
+  path: string[],
+  message: string,
+  code = "E_CONFIG_INVALID"
+): ConfigIssue {
+  const node = source.doc.getIn(path, true);
+  return {
+    layer: "2",
+    path,
+    line:
+      (isSeq(node) || isMap(node) || isScalar(node)) && node.range
+        ? source.lines.linePos(node.range[0]).line
+        : null,
+    code,
+    message,
+  };
 }
 
 /** Update only the label nodes in the parsed document, keeping pair/item order and comments. */

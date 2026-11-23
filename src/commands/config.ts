@@ -18,6 +18,7 @@ import {
   DEFAULT_DOMAIN_CONFIG_KEY,
   parseDefaultDomain,
 } from "../lib/default-domain.ts";
+import { withEnvLayerLock } from "../lib/env-layer-lock.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import {
   LOGGING_ENABLED_CONFIG_KEY,
@@ -178,6 +179,24 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
     return 1;
   }
 
+  const write = () => updateConfigValue(project, parsedKey, value);
+  if (project.scope === "global") {
+    return await write();
+  }
+  await assertLegacyProjectDirectory({
+    projectDir: project.project.projectDir,
+  });
+  return await withEnvLayerLock({
+    layerPath: project.project.configFile,
+    run: write,
+  });
+};
+
+async function updateConfigValue(
+  project: ConfigTarget,
+  parsedKey: readonly string[],
+  value: unknown
+): Promise<number> {
   const read = await readConfigJsonForSet({ target: project });
   if (!read.ok) {
     logger.error({ message: read.error });
@@ -212,7 +231,7 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
     message: result.changed ? `Updated ${read.path}` : "No changes needed.",
   });
   return 0;
-};
+}
 
 export const configCommand = defineCommand({
   ...configSpec,

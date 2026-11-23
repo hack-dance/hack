@@ -451,6 +451,7 @@ import {
 } from "../lib/open-host.ts";
 import { openUrl, urlOpenerAvailable } from "../lib/os.ts";
 import {
+  defaultProjectDevHost,
   defaultProjectSlugFromPath,
   findProjectContext,
   findRepoRootForInit,
@@ -3733,7 +3734,7 @@ async function resolveRuntimeDevHost(opts: {
   }
   return (
     (await readProjectDevHost(opts.project)) ??
-    `${defaultProjectSlugFromPath(opts.project.projectRoot)}.${DEFAULT_PROJECT_TLD}`
+    defaultProjectDevHost(opts.project.projectRoot)
   );
 }
 

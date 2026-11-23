@@ -1,10 +1,7 @@
 import { constants } from "node:fs";
 import { access, lstat, open, realpath } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
-import {
-  DEFAULT_PROJECT_TLD,
-  PROJECT_CONFIG_LEGACY_FILENAME,
-} from "../constants.ts";
+import { PROJECT_CONFIG_LEGACY_FILENAME } from "../constants.ts";
 import { autoWorktreeBranch, resolveEffectiveBranch } from "./branches.ts";
 import { HackCliError } from "./cli-result.ts";
 import { type ConfigIssue, composeModel } from "./config-editor-compose.ts";
@@ -18,14 +15,13 @@ import {
 import { listGitWorktrees } from "./git-worktree.ts";
 import { isRecord } from "./guards.ts";
 import {
-  defaultProjectSlugFromPath,
+  defaultProjectDevHost,
   findProjectContext,
   findProjectContextAtRoot,
   normalizeEnvConfigName,
   type ProjectContext,
   parseProjectConfigRecord,
-  readProjectConfig,
-  readProjectDevHost,
+  readLegacyProjectDevHost,
   resolveProjectOauthAliasHost,
   resolveProjectRouteBaseHosts,
   resolveWorktreeAutoBranch,
@@ -35,6 +31,7 @@ import {
   listProjectEnvOverlays,
   type ProjectEnvStoredValue,
   parseProjectEnvConfigText,
+  resolveProjectEnvConfigPath,
   resolveProjectEnvEffectiveLocalConfigPath,
   resolveProjectEnvLocalConfigPath,
   resolveProjectEnvSelection,
@@ -64,10 +61,15 @@ export type LayerSnapshot = Layer & {
   readonly text: string | null;
 };
 
-export function configRevision(text: string | null): string {
-  return text === null
-    ? "missing"
-    : new Bun.CryptoHasher("sha256").update(text).digest("hex");
+function configRevision(
+  layer: Layer,
+  project: ProjectContext,
+  text: string | null
+): string {
+  // Even an absent file belongs to one checkout and destination.
+  return new Bun.CryptoHasher("sha256")
+    .update(JSON.stringify([project.projectRoot, layer.file, text]))
+    .digest("hex");
 }
 
 export async function readConfigLayer(file: string): Promise<string | null> {
@@ -167,7 +169,7 @@ async function snapshotLayer(
   return {
     ...layer,
     text,
-    revision: configRevision(text),
+    revision: configRevision(layer, project, text),
     writable: await writableLayer(layer, text !== null),
   };
 }
@@ -234,8 +236,35 @@ function envLayer(opts: {
   return { ...opts, kind: "env", active: opts.active ?? true };
 }
 
+async function readProjectLayer(
+  project: ProjectContext
+): Promise<LayerSnapshot> {
+  const legacy = resolve(project.projectDir, PROJECT_CONFIG_LEGACY_FILENAME);
+  const json = await snapshotLayer(
+    {
+      id: "1",
+      file: project.configFile,
+      kind: "project",
+      ownership: "shared",
+      active: true,
+    },
+    project
+  );
+  if (
+    json.text !== null ||
+    !(await lstat(legacy).then(
+      () => true,
+      () => false
+    ))
+  ) {
+    return json;
+  }
+  return await snapshotLayer({ ...json, file: legacy }, project);
+}
+
 async function configLayers(opts: {
   readonly project: ProjectContext;
+  readonly projectLayer: LayerSnapshot;
   readonly branch: string | null;
   readonly overlay: string | null | undefined;
 }) {
@@ -252,24 +281,7 @@ async function configLayers(opts: {
       ...(overlay ? [overlay] : []),
     ]),
   ].filter((name) => normalizeEnvConfigName(name) === name);
-  const legacyConfig = resolve(p.projectDir, PROJECT_CONFIG_LEGACY_FILENAME);
-  const jsonExists = await lstat(p.configFile).then(
-    () => true,
-    () => false
-  );
   const layers: Layer[] = [
-    {
-      id: "1",
-      file: jsonExists
-        ? p.configFile
-        : await lstat(legacyConfig).then(
-            () => legacyConfig,
-            () => p.configFile
-          ),
-      kind: "project",
-      ownership: "shared",
-      active: true,
-    },
     {
       id: "2",
       file: p.composeFile,
@@ -280,10 +292,17 @@ async function configLayers(opts: {
     envLayer({ id: "3", file: env.defaultPath, ownership: "shared" }),
   ];
   for (const name of names) {
+    const file = resolveProjectEnvConfigPath({
+      projectDir: p.projectDir,
+      envName: name,
+    });
+    if (file === env.localDefaultPath) {
+      continue;
+    }
     layers.push(
       envLayer({
         id: `3:${name}`,
-        file: resolve(p.projectDir, `hack.env.${name}.yaml`),
+        file,
         ownership: "shared",
         overlay: name,
         active: name === overlay,
@@ -361,7 +380,10 @@ async function configLayers(opts: {
     }
   );
   return {
-    layers: await Promise.all(layers.map((layer) => snapshotLayer(layer, p))),
+    layers: [
+      opts.projectLayer,
+      ...(await Promise.all(layers.map((layer) => snapshotLayer(layer, p)))),
+    ],
     overlay,
     overlays: names,
   };
@@ -376,7 +398,9 @@ export async function readConfigEditor(opts: {
   if (!project) {
     return null;
   }
-  const cfg = await readProjectConfig(project);
+  const projectLayer = await readProjectLayer(project);
+  const raw = parseProjectLayer(projectLayer);
+  const cfg = parseProjectConfigRecord(raw ?? {}, projectLayer.file);
   const branch = (
     await resolveEffectiveBranch({
       explicitBranch: explicit,
@@ -384,20 +408,45 @@ export async function readConfigEditor(opts: {
       autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
     })
   ).branch;
-  const devHost =
-    (await readProjectDevHost(project)) ??
-    `${defaultProjectSlugFromPath(project.projectRoot)}.${DEFAULT_PROJECT_TLD}`;
-  const baseHosts = resolveProjectRouteBaseHosts({
-    devHost,
-    aliasHost: resolveProjectOauthAliasHost({ oauth: cfg.oauth, devHost }),
-  });
-  const layers = await configLayers({ project, branch, overlay: opts.overlay });
-  return { ...layers, project, branch, baseHosts };
+  const hostFallback =
+    (await readLegacyProjectDevHost(project)) ??
+    (branch === null ? defaultProjectDevHost(project.projectRoot) : null);
+  const baseHosts = patchedBaseHosts(
+    raw ?? {},
+    projectLayer.file,
+    hostFallback
+  );
+  const layers =
+    raw === null
+      ? { layers: [projectLayer], overlay: opts.overlay ?? null, overlays: [] }
+      : await configLayers({
+          project,
+          projectLayer,
+          branch,
+          overlay: opts.overlay,
+        });
+  return { ...layers, project, branch, baseHosts, hostFallback };
 }
 
 export type ConfigSnapshot = NonNullable<
   Awaited<ReturnType<typeof readConfigEditor>>
 >;
+
+function parseProjectLayer(
+  layer: LayerSnapshot
+): Record<string, unknown> | null {
+  if (layer.text === null) {
+    return {};
+  }
+  try {
+    const raw: unknown = layer.file.endsWith(".toml")
+      ? Bun.TOML.parse(layer.text)
+      : JSON.parse(layer.text);
+    return isRecord(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
 
 function projectModel(
   layer: LayerSnapshot,
@@ -442,7 +491,10 @@ function scrubLegacyProject(
 ): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(record).flatMap(([key, value]) => {
-      if (isConfigSecret(key, value) && key !== "oauth") {
+      if (
+        ["startup", "lifecycle"].includes(key) ||
+        (isConfigSecret(key, value) && key !== "oauth")
+      ) {
         return [[key, "[redacted]"]];
       }
       if (isRecord(value)) {
@@ -570,6 +622,16 @@ export function showConfigEditor(snapshot: ConfigSnapshot | null) {
   const projectLayer = layers.find((layer) => layer.id === "1");
   const compose = layers.find((layer) => layer.id === "2");
   const project = projectLayer ? projectModel(projectLayer, issues) : {};
+  const missingBranchHost = snapshot?.branch && snapshot.baseHosts.length === 0;
+  if (missingBranchHost && issues.length === 0) {
+    issues.push({
+      layer: "1",
+      path: ["dev_host"],
+      line: null,
+      code: "E_CONFIG_INVALID",
+      message: "Set dev_host before starting or restarting this branch.",
+    });
+  }
   const result =
     compose?.text != null && snapshot
       ? composeModel({
@@ -609,14 +671,14 @@ export function showConfigEditor(snapshot: ConfigSnapshot | null) {
 export function patchedBaseHosts(
   project: Record<string, unknown>,
   file: string,
-  fallback: string[]
+  fallback: string | null
 ) {
   const cfg = parseProjectConfigRecord(project, file);
-  const devHost = cfg.devHost ?? fallback[0];
+  const devHost = cfg.devHost ?? fallback;
   return devHost
     ? resolveProjectRouteBaseHosts({
         devHost,
         aliasHost: resolveProjectOauthAliasHost({ oauth: cfg.oauth, devHost }),
       })
-    : fallback;
+    : [];
 }

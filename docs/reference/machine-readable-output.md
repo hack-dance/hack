@@ -195,8 +195,9 @@ env values.
 
 Pass the same checkout and overlay flags to `config validate` and
 `config apply`. Read revisions from a fresh `show` and send the patch on
-stdin. The minimum base includes every edited layer. Additional revisions
-can protect inputs the client used to prepare the patch.
+stdin. Each revision identifies the resolved checkout, layer file and its
+contents or absence. The minimum base includes every edited layer. Additional
+revisions can protect inputs the client used to prepare the patch.
 
 ```json
 {

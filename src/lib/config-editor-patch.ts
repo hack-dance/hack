@@ -7,6 +7,7 @@ import {
   editableComposeField,
   parseComposeSource,
   parseRouteAddress,
+  validComposeShortPort,
   validHost,
   validPort,
 } from "./config-editor-compose.ts";
@@ -31,21 +32,24 @@ import {
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
 import { isRecord } from "./guards.ts";
-import { normalizeEnvConfigName, parseProjectConfigRecord } from "./project.ts";
+import {
+  ENV_CONFIG_NAME_MAX_LENGTH,
+  normalizeEnvConfigName,
+  parseProjectConfigRecord,
+} from "./project.ts";
 import {
   isValidProjectEnvScopeName,
   mutateProjectEnvLayer,
   type ProjectEnvLayerChange,
+  projectEnvLayerFits,
 } from "./project-env-config.ts";
 import { assertLegacyProjectDirectory } from "./project-input-selection.ts";
 
-const BASE_REV = /^(?:[a-f0-9]{64}|missing)$/;
+const BASE_REV = /^[a-f0-9]{64}$/;
 const ENV_KEY = /^[A-Z_][A-Z0-9_]*$/;
 const SERVICE = /^[\w.-]+$/;
-const COMPOSE_PORT =
-  /^(?:[\da-f.:[\]-]+:)?\d+(?:-\d+)?(?:\/(?:tcp|udp|sctp))?$/iu;
 const HOSTS = /[\s,]+/;
-const layerId = z.string().max(90);
+const layerId = z.string().max(ENV_CONFIG_NAME_MAX_LENGTH + "3:".length);
 const serviceName = z.string().max(160).regex(SERVICE);
 
 const changeSchema = z.discriminatedUnion("kind", [
@@ -141,10 +145,7 @@ const PROJECT_STRINGS = new Set([
   "env.defaultOverlay",
 ]);
 
-function projectFieldError(
-  path: string,
-  value: string | boolean
-): string | null {
+function projectFieldError(path: string, value: unknown): string | null {
   if (PROJECT_TOGGLES.has(path)) {
     return typeof value === "boolean" ? null : "Choose on or off.";
   }
@@ -287,8 +288,7 @@ function prepareService(
       Array.isArray(change.value) &&
       change.value.every((value) =>
         change.field === "ports"
-          ? validPort(value) ||
-            (typeof value === "string" && COMPOSE_PORT.test(value))
+          ? validComposeShortPort(value)
           : typeof value === "string" && Object.hasOwn(source.services, value)
       )
     )
@@ -500,7 +500,7 @@ function prospectiveSnapshot(
   }
   const parsed: unknown = JSON.parse(project.text);
   const baseHosts = isRecord(parsed)
-    ? patchedBaseHosts(parsed, project.layer.file, snapshot.baseHosts)
+    ? patchedBaseHosts(parsed, project.layer.file, snapshot.hostFallback)
     : snapshot.baseHosts;
   return { ...snapshot, layers, baseHosts };
 }
@@ -511,24 +511,76 @@ function sourceIssues(files: Map<string, Prepared>): ConfigIssue[] {
     return [];
   }
   const parsed: unknown = JSON.parse(project.text);
-  if (!parseProjectConfigRecord(parsed, project.layer.file).parseError) {
-    return [];
+  const issues: ConfigIssue[] = [];
+  const tree = jsonConfigTree(project.text);
+  for (const field of [...PROJECT_TOGGLES, ...PROJECT_STRINGS]) {
+    const path = field.split(".");
+    const node = tree.root && findNodeAtLocation(tree.root, path);
+    if (!node) {
+      continue;
+    }
+    const message = projectFieldError(field, node.value);
+    if (message) {
+      issues.push({
+        layer: "1",
+        path,
+        line: configLine(project.text, node.offset),
+        code: "E_CONFIG_INVALID",
+        message,
+      });
+    }
   }
-  return [
-    {
+  if (parseProjectConfigRecord(parsed, project.layer.file).parseError) {
+    issues.push({
       layer: "1",
       path: [],
       line: 1,
       code: "E_CONFIG_INVALID",
       message: "Check the project settings and their types.",
-    },
-  ];
+    });
+  }
+  return issues;
+}
+
+function layerSizeIssues(
+  snapshot: ConfigSnapshot,
+  files: Map<string, Prepared>
+): ConfigIssue[] {
+  const inheritsLocal = snapshot.layers.some((layer) => layer.inherited);
+  return [...files.values()].flatMap(({ layer, text, env }) => {
+    const fits =
+      layer.kind === "env"
+        ? projectEnvLayerFits({
+            path: layer.file,
+            text,
+            envName: layer.overlay ?? null,
+            changes: env,
+            inheritsLocal: layer.ownership === "local" && inheritsLocal,
+            maxBytes: CONFIG_SOURCE_LIMIT,
+          })
+        : text === null || Buffer.byteLength(text) <= CONFIG_SOURCE_LIMIT;
+    return fits
+      ? []
+      : [
+          {
+            layer: layer.id,
+            path: [],
+            line: null,
+            code: "E_CONFIG_INVALID",
+            message: "The updated file exceeds the 512 KiB limit.",
+          },
+        ];
+  });
 }
 
 export function assessConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
   const { files, issues } = preparePatch(snapshot, patch);
   if (issues.some((issue) => issue.code === "E_CONFLICT")) {
     return { files, issues, previews: {} };
+  }
+  const sizeIssues = layerSizeIssues(snapshot, files);
+  if (sizeIssues.length > 0) {
+    return { files, issues: [...issues, ...sizeIssues], previews: {} };
   }
   const next = showConfigEditor(prospectiveSnapshot(snapshot, files));
   const previews = Object.fromEntries(
@@ -633,6 +685,7 @@ async function writePreparedLayer(
         local: layer.ownership === "local",
         changes: file.env,
         expected: { file: layer.file, text: layer.text },
+        maxBytes: CONFIG_SOURCE_LIMIT,
       })
     ).changed;
   }

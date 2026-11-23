@@ -58,10 +58,18 @@ struct Selection {
     target: ConfigTarget,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SaveOperation {
+    epoch: u64,
+    generation: u64,
+}
+
 #[derive(Clone, Default)]
 struct Draft {
     base: BTreeMap<String, String>,
     changes: BTreeMap<String, ConfigChange>,
+    pending_save: Option<SaveOperation>,
+    save_result: Option<Result<ConfigSaved, ConfigError>>,
 }
 
 #[derive(Default)]
@@ -85,7 +93,7 @@ pub(crate) struct ConfigPane {
     conflict: bool,
     saved: Option<ConfigSaved>,
     loading: bool,
-    saving: bool,
+    save_generation: u64,
     restarting: bool,
     inputs: BTreeMap<String, (Entity<InputState>, Subscription)>,
     editor: Option<(String, Entity<EditorState>, Subscription)>,
@@ -109,6 +117,7 @@ impl ConfigPane {
             self.draft.changes.remove(&id);
         }
         self.revision += 1;
+        self.draft.save_result = None;
         self.saved = None;
         self.error = None;
         self.validation = None;
@@ -135,11 +144,84 @@ impl ConfigPane {
 
     fn can_save(&self) -> bool {
         !self.draft.changes.is_empty()
-            && !self.saving
+            && !self.saving()
             && !self.conflict
             && !self.loading
             && self.validation.as_ref().is_some_and(|check| check.valid)
             && self.error.is_none()
+    }
+
+    fn saving(&self) -> bool {
+        self.draft.pending_save.is_some()
+    }
+
+    fn begin_save(&mut self, epoch: u64) -> SaveOperation {
+        self.save_generation += 1;
+        let operation = SaveOperation {
+            epoch,
+            generation: self.save_generation,
+        };
+        self.draft.pending_save = Some(operation);
+        self.draft.save_result = None;
+        operation
+    }
+
+    fn finish_save(
+        &mut self,
+        selection: &Selection,
+        operation: SaveOperation,
+        result: Result<ConfigSaved, ConfigError>,
+    ) -> bool {
+        let visible = &self.selection == selection;
+        let draft = if visible {
+            &mut self.draft
+        } else if let Some(draft) = self.stashed.get_mut(selection) {
+            draft
+        } else {
+            return false;
+        };
+        if draft.pending_save != Some(operation) {
+            return false;
+        }
+        draft.pending_save = None;
+        if result.is_ok() {
+            draft.base.clear();
+            draft.changes.clear();
+        }
+        draft.save_result = Some(result);
+        visible
+    }
+
+    fn present_save(&mut self) -> bool {
+        match &self.draft.save_result {
+            Some(Ok(saved)) => {
+                self.saved = Some(saved.clone());
+                self.draft.save_result = None;
+                self.validation = None;
+                self.conflict = false;
+                self.view = View::Map;
+                self.clear_editors();
+                true
+            }
+            Some(Err(error)) => {
+                self.conflict |= error.code == "E_CONFLICT" || !error.changed.is_empty();
+                self.error = Some(error.clone());
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn stash_draft(&mut self) {
+        if !self.draft.changes.is_empty() || self.draft.save_result.is_some() {
+            self.stashed
+                .insert(self.selection.clone(), std::mem::take(&mut self.draft));
+        }
+    }
+
+    fn restore_draft(&mut self) {
+        self.draft = self.stashed.remove(&self.selection).unwrap_or_default();
+        self.present_save();
     }
 
     fn clear_editors(&mut self) {
@@ -158,7 +240,7 @@ impl ConfigPane {
             if self.draft.changes.is_empty() {
                 self.draft.base = current;
             } else {
-                self.conflict = self.draft.base != current;
+                self.conflict |= self.draft.base != current;
             }
             if !data
                 .services
@@ -192,6 +274,84 @@ impl ConfigPane {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn select(pane: &mut ConfigPane, selection: &Selection) {
+        pane.stash_draft();
+        pane.selection = selection.clone();
+        pane.error = None;
+        pane.restore_draft();
+    }
+
+    fn stage_name(pane: &mut ConfigPane) {
+        pane.stage(
+            "name".into(),
+            Some(ConfigChange::Project {
+                layer: "1".into(),
+                path: "name".into(),
+                value: Value::String("storefront".into()),
+            }),
+        );
+    }
+
+    #[test]
+    fn a_pending_save_preserves_its_draft_and_failure_across_project_switches() {
+        let mut pane = ConfigPane::default();
+        let storefront = Selection {
+            root: "/storefront".into(),
+            ..Selection::default()
+        };
+        let other = Selection {
+            root: "/other".into(),
+            ..Selection::default()
+        };
+        select(&mut pane, &storefront);
+        stage_name(&mut pane);
+        let operation = pane.begin_save(1);
+
+        select(&mut pane, &other);
+        select(&mut pane, &storefront);
+        assert!(pane.saving());
+        select(&mut pane, &other);
+        assert!(!pane.finish_save(&storefront, operation, Err(ConfigError::unavailable())));
+        select(&mut pane, &storefront);
+        assert!(!pane.saving());
+        assert!(pane.draft.changes.contains_key("name"));
+        assert_eq!(
+            pane.error.as_ref().map(|e| e.code.as_str()),
+            Some("E_UNAVAILABLE")
+        );
+
+        stage_name(&mut pane);
+        let retry = pane.begin_save(1);
+        let saved = ConfigSaved {
+            changed: vec!["1".into()],
+            restart_offered: true,
+        };
+        assert!(!pane.finish_save(&storefront, operation, Ok(saved.clone())));
+        assert!(pane.draft.changes.contains_key("name"));
+        assert!(pane.finish_save(&storefront, retry, Ok(saved)));
+        assert!(pane.draft.changes.is_empty());
+    }
+
+    #[test]
+    fn the_previous_cli_cannot_complete_a_new_installations_save() {
+        let mut first = ConfigPane::default();
+        stage_name(&mut first);
+        let expired = first.begin_save(1);
+
+        let mut second = ConfigPane::default();
+        stage_name(&mut second);
+        second.begin_save(2);
+        let selection = second.selection.clone();
+        assert!(!second.finish_save(&selection, expired, Err(ConfigError::unavailable())));
+        assert!(second.saving());
+        assert!(second.draft.save_result.is_none());
+    }
+}
+
 impl HackApp {
     pub(crate) fn sync_config_tab(&mut self, cx: &mut Context<Self>) {
         if self.tab != TAB || !self.live {
@@ -203,8 +363,11 @@ impl HackApp {
         };
         let key = self.model.selected_key();
         if native {
+            self.config.stash_draft();
             self.config = ConfigPane {
                 project: key,
+                stashed: std::mem::take(&mut self.config.stashed),
+                save_generation: self.config.save_generation,
                 ..ConfigPane::default()
             };
             return;
@@ -212,8 +375,7 @@ impl HackApp {
         if self.config.project != key || self.config.project_root != root {
             #[cfg(hack_terminal)]
             self.collapse_detail_terminal(cx);
-            self.stash_config_draft();
-            let stashed = std::mem::take(&mut self.config.stashed);
+            self.config.stash_draft();
             let branch = key.as_ref().and_then(|key| key.branch.clone());
             let selection = Selection {
                 root: root.clone(),
@@ -225,11 +387,12 @@ impl HackApp {
             self.config = ConfigPane {
                 project: key,
                 project_root: root,
-                stashed,
+                stashed: std::mem::take(&mut self.config.stashed),
+                save_generation: self.config.save_generation,
                 selection,
                 ..ConfigPane::default()
             };
-            self.restore_config_draft();
+            self.config.restore_draft();
             self.load_config(false, cx);
             self.load_config_copies(cx);
         } else if self.config.report.is_none() && !self.config.loading {
@@ -238,21 +401,9 @@ impl HackApp {
         self.watch_config(cx);
     }
 
-    fn stash_config_draft(&mut self) {
-        let pane = &mut self.config;
-        if !pane.draft.changes.is_empty() && !pane.saving {
-            pane.stashed
-                .insert(pane.selection.clone(), std::mem::take(&mut pane.draft));
-        }
-    }
-
-    fn restore_config_draft(&mut self) {
-        let pane = &mut self.config;
-        pane.draft = pane.stashed.remove(&pane.selection).unwrap_or_default();
-    }
-
     fn load_config_copies(&mut self, cx: &mut Context<Self>) {
         let root = self.config.project_root.clone();
+        let epoch = self.model.source_epoch();
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         self.config.copies_task = Some(cx.spawn(async move |this, cx| {
             let copies = cx
@@ -260,6 +411,9 @@ impl HackApp {
                 .spawn(async move { source.copies(&root, false) })
                 .await;
             let _ = this.update(cx, |app, cx| {
+                if app.model.source_epoch() != epoch {
+                    return;
+                }
                 app.config.copies_task = None;
                 if let Ok(report) = copies {
                     app.config.choices = report
@@ -294,6 +448,7 @@ impl HackApp {
             self.config.report = None;
         }
         self.config.loading = true;
+        let epoch = self.model.source_epoch();
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         self.config.load_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -301,6 +456,9 @@ impl HackApp {
                 .spawn(async move { source.config_show(&selection.root, &selection.target) })
                 .await;
             let _ = this.update(cx, |app, cx| {
+                if app.model.source_epoch() != epoch {
+                    return;
+                }
                 app.config.load_task = None;
                 app.config.inputs.clear();
                 app.config.editor = None;
@@ -324,7 +482,7 @@ impl HackApp {
                     (app.tab == TAB
                         && app.pane == crate::doctor_view::Pane::Project
                         && !pane.loading
-                        && !pane.saving
+                        && !pane.saving()
                         && pane.load_task.is_none()
                         && !pane.conflict
                         && pane.report().is_some())
@@ -333,12 +491,13 @@ impl HackApp {
                             pane.selection.clone(),
                             app.source.pinned().unwrap_or_else(|| app.source.clone()),
                             pane.revision,
+                            app.model.source_epoch(),
                         )
                     })
                 }) else {
                     break;
                 };
-                let Some((selection, source, revision)) = request else {
+                let Some((selection, source, revision, epoch)) = request else {
                     continue;
                 };
                 let target = selection.clone();
@@ -349,9 +508,10 @@ impl HackApp {
                 if this
                     .update(cx, |app, cx| {
                         let pane = &mut app.config;
-                        if pane.selection != selection
+                        if app.model.source_epoch() != epoch
+                            || pane.selection != selection
                             || pane.revision != revision
-                            || pane.saving
+                            || pane.saving()
                             || pane.loading
                         {
                             return;
@@ -378,21 +538,24 @@ impl HackApp {
     }
 
     fn select_config_target(&mut self, selection: Selection, cx: &mut Context<Self>) {
-        if self.config.selection == selection || self.config.saving || self.config.restarting {
+        if self.config.selection == selection || self.config.saving() || self.config.restarting {
             return;
         }
-        self.stash_config_draft();
+        self.config.stash_draft();
         self.config.selection = selection;
-        self.restore_config_draft();
         self.config.clear_editors();
         self.config.conflict = false;
         self.config.saved = None;
         self.config.error = None;
         self.config.validation = None;
+        self.config.restore_draft();
         self.load_config(false, cx);
     }
 
     fn reload_config(&mut self, cx: &mut Context<Self>) {
+        if self.config.saving() {
+            return;
+        }
         self.config.draft = Draft::default();
         self.config.error = None;
         self.config.conflict = false;
@@ -403,7 +566,7 @@ impl HackApp {
     }
 
     fn stage_config(&mut self, id: String, change: Option<ConfigChange>, cx: &mut Context<Self>) {
-        if self.config.loading || self.config.saving || self.config.conflict {
+        if self.config.loading || self.config.saving() || self.config.conflict {
             return;
         }
         self.config.stage(id, change);
@@ -413,10 +576,15 @@ impl HackApp {
 
     fn queue_config_validation(&mut self, cx: &mut Context<Self>) {
         self.config.validation_task = None;
-        if !self.live || self.config.draft.changes.is_empty() || self.config.conflict {
+        if !self.live
+            || self.config.draft.changes.is_empty()
+            || self.config.conflict
+            || self.config.saving()
+        {
             return;
         }
         let revision = self.config.revision;
+        let epoch = self.model.source_epoch();
         let patch = self.config.patch();
         let selection = self.config.selection.clone();
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
@@ -431,7 +599,7 @@ impl HackApp {
                     })
                     .await;
             let _ = this.update(cx, |app, cx| {
-                if app.config.revision != revision {
+                if app.model.source_epoch() != epoch || app.config.revision != revision {
                     return;
                 }
                 app.config.validation_task = None;
@@ -455,7 +623,8 @@ impl HackApp {
         let patch = self.config.patch();
         let selection = self.config.selection.clone();
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
-        self.config.saving = true;
+        let epoch = self.model.source_epoch();
+        let operation = self.config.begin_save(epoch);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -465,24 +634,13 @@ impl HackApp {
                 })
                 .await;
             let _ = this.update(cx, |app, cx| {
-                if app.config.selection != selection {
+                if app.model.source_epoch() != epoch
+                    || !app.config.finish_save(&selection, operation, result)
+                {
                     return;
                 }
-                app.config.saving = false;
-                match result {
-                    Ok(saved) => {
-                        app.config.draft = Draft::default();
-                        app.config.validation = None;
-                        app.config.saved = Some(saved);
-                        app.config.view = View::Map;
-                        app.config.clear_editors();
-                        app.load_config(true, cx);
-                    }
-                    Err(error) => {
-                        app.config.conflict =
-                            error.code == "E_CONFLICT" || !error.changed.is_empty();
-                        app.config.error = Some(error);
-                    }
+                if app.config.present_save() {
+                    app.load_config(true, cx);
                 }
                 cx.notify();
             });
@@ -504,6 +662,7 @@ impl HackApp {
         let branch = report.branch.clone();
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let selection = self.config.selection.clone();
+        let epoch = self.model.source_epoch();
         self.config.restarting = true;
         cx.spawn(async move |this, cx| {
             let outcome = cx
@@ -511,7 +670,7 @@ impl HackApp {
                 .spawn(async move { source.act(&root, false, branch.as_deref(), Action::Restart) })
                 .await;
             let _ = this.update(cx, |app, cx| {
-                if app.config.selection != selection {
+                if app.model.source_epoch() != epoch || app.config.selection != selection {
                     return;
                 }
                 app.config.restarting = false;
@@ -719,7 +878,7 @@ impl HackApp {
             action_button(
                 "config-save",
                 Glyph::Check,
-                if pane.saving { "Saving…" } else { "Save" },
+                if pane.saving() { "Saving…" } else { "Save" },
                 false,
                 ui,
             )
@@ -750,17 +909,23 @@ impl HackApp {
                         )
                 }))
                 .child(
-                    action_button("config-revert", Glyph::Restart, "Revert", !pane.saving, ui)
-                        .w(px(96.))
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            if !app.config.saving {
-                                app.config.draft.changes.clear();
-                                app.config.error = None;
-                                app.config.validation = None;
-                                app.config.clear_editors();
-                                cx.notify();
-                            }
-                        })),
+                    action_button(
+                        "config-revert",
+                        Glyph::Restart,
+                        "Revert",
+                        !pane.saving(),
+                        ui,
+                    )
+                    .w(px(96.))
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        if !app.config.saving() {
+                            app.config.draft.changes.clear();
+                            app.config.error = None;
+                            app.config.validation = None;
+                            app.config.clear_editors();
+                            cx.notify();
+                        }
+                    })),
                 )
                 .child(saved.w(px(96.)))
                 .into_any_element(),

@@ -225,10 +225,12 @@ export async function readProjectDevHost(
   ctx: ProjectContext
 ): Promise<string | null> {
   const cfg = await readProjectConfig(ctx);
-  if (cfg.devHost) {
-    return cfg.devHost;
-  }
+  return cfg.devHost ?? (await readLegacyProjectDevHost(ctx));
+}
 
+export async function readLegacyProjectDevHost(
+  ctx: ProjectContext
+): Promise<string | null> {
   // Legacy fallback: older scaffolds wrote DEV_HOST into `.hack/.env`.
   const envText = await readTextFile(ctx.envFile);
   if (!envText) {
@@ -238,6 +240,11 @@ export async function readProjectDevHost(
   const env = parseDotEnv(envText);
   const host = env.DEV_HOST;
   return typeof host === "string" && host.length > 0 ? host : null;
+}
+
+/** Routing namespace used by base instances without a configured hostname. */
+export function defaultProjectDevHost(projectRoot: string): string {
+  return `${defaultProjectSlugFromPath(projectRoot)}.${DEFAULT_PROJECT_TLD}`;
 }
 
 export async function readProjectDefaultEnvConfig(opts: {

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { showConfigEditor } from "../src/lib/config-editor-model.ts";
+import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 setDefaultTimeout(45_000);
@@ -109,7 +110,7 @@ async function fixture() {
       env("  api:\n    SEARCH_INDEX: products_fs")
     ),
   ]);
-  return { root, main, linked, project };
+  return { root, main, linked, project, git };
 }
 
 async function cli(opts: {
@@ -345,6 +346,16 @@ test("show reports missing, unreadable JSON and read-only layers distinctly", as
     code: "E_CONFIG_PARSE",
   });
   expect(invalid.layers[0]?.source).toBeNull();
+  const linkedPath = join(f.linked, ".hack/hack.config.json");
+  await writeFile(linkedPath, '{\n "name": "shop"\n "internal": {}\n}\n');
+  const linkedInvalid = await show(f.root, f.linked);
+  expect(linkedInvalid.state).toBe("invalid");
+  expect(linkedInvalid.issues[0]).toMatchObject({
+    layer: "1",
+    line: 3,
+    code: "E_CONFIG_PARSE",
+  });
+  expect(linkedInvalid.layers.some((layer) => layer.inherited)).toBe(false);
   await writeFile(path, "{}");
   await chmod(path, 0o444);
   expect((await show(f.root, f.main)).layers[0]?.writable).toBe(false);
@@ -417,17 +428,290 @@ test("Source saves surrounding edits while preserving private slots", async () =
       original.replace("storefront-web:dev", "storefront-web:test")
   ).toBe(true);
   const current = await show(f.root, f.main);
-  const changed = patch.changes.map((change) => ({
-    ...change,
-    text: change.text.replace("SERVICE_TOKEN", "PUBLIC_NAME"),
-  }));
-  const refused = await cli({
+  for (const replacement of ["PUBLIC_NAME", "OTHER_TOKEN"]) {
+    const refused = await cli({
+      root: f.root,
+      cwd: f.main,
+      args: ["apply"],
+      patch: {
+        base: bases(current),
+        changes: patch.changes.map((change) => ({
+          ...change,
+          text: change.text.replace("SERVICE_TOKEN", replacement),
+        })),
+      },
+    });
+    expect(refused.payload.error.code).toBe("E_CONFIG_INVALID");
+  }
+});
+
+test("show and validation previews omit authorization headers and commands", async () => {
+  const f = await fixture();
+  const [projectPath, composePath] = [
+    "hack.config.json",
+    "docker-compose.yml",
+  ].map((file) => join(f.project, file));
+  if (!(projectPath && composePath)) {
+    throw new Error("Expected fixture layer paths.");
+  }
+  const command = "curl -H 'Authorization: fixture-ciphertext-marker'";
+  await Promise.all([
+    writeFile(
+      projectPath,
+      JSON.stringify({
+        name: "storefront",
+        startup: [{ run: command }],
+        lifecycle: { up: { before: [command] } },
+      })
+    ),
+    writeFile(
+      composePath,
+      compose
+        .replace(
+          "- unrelated=kept",
+          "- caddy.reverse_proxy.header_up=Authorization Bearer fixture-ciphertext-marker"
+        )
+        .replace(
+          '      caddy.handle_path: "/foo/*"',
+          "      caddy.reverse_proxy.header_up: Authorization fixture-ciphertext-marker"
+        )
+    ),
+  ]);
+  const report = await show(f.root, f.main);
+  expect(report.layers[0]?.hidden).toBe(true);
+  expect(report.layers[1]?.hidden).toBe(true);
+  const result = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["validate"],
+    patch: {
+      base: bases(report),
+      changes: [
+        { layer: "1", kind: "project", path: "name", value: "shop" },
+        {
+          layer: "2",
+          kind: "service",
+          service: "web",
+          field: "image",
+          value: "test:latest",
+        },
+      ],
+    },
+  });
+  expect(result.payload.data.valid).toBe(true);
+  expect(result.payload.data.previews["1"]).toContain('"[redacted:');
+  expect(result.payload.data.previews["2"]).toContain('"[redacted:');
+});
+
+test("minimal revisions cannot redirect a stale worktree patch to the main checkout", async () => {
+  const f = await fixture();
+  const branch = ["--branch", "feature/search"];
+  const report = await show(f.root, f.main, ...branch);
+  const base = bases(report);
+  const main = await show(f.root, f.main);
+  // The project JSON is identical and the generated override is missing in both.
+  expect(report.layers.find((layer) => layer.id === "6")?.exists).toBe(false);
+  expect(base["1"]).not.toBe(bases(main)["1"]);
+  f.git(f.main, "worktree", "remove", "--force", f.linked);
+  const stale = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["apply", ...branch],
+    patch: {
+      base: { "1": base["1"] },
+      changes: [{ layer: "1", kind: "project", path: "name", value: "stale" }],
+    },
+  });
+  expect(stale.payload.error.code).toBe("E_CONFLICT");
+  expect((await show(f.root, f.main)).project.name).toBe("storefront");
+});
+
+test("the local overlay cannot alias the private base layer, while a tracked local overlay still works", async () => {
+  const f = await fixture();
+  const overlay = ["--env", "local"];
+  const report = await show(f.root, f.main, ...overlay);
+  expect(report.layers.find((layer) => layer.id === "3:local")).toBeUndefined();
+  const local = report.layers.find((layer) => layer.id === "5");
+  expect(local?.file.endsWith("/hack.env.local.yaml")).toBe(true);
+  expect(local?.ownership).toBe("local");
+  f.git(f.main, "add", "-f", ".hack/hack.env.local.yaml");
+  const legacy = await show(f.root, f.main, ...overlay);
+  expect(legacy.layers.find((layer) => layer.id === "3:local")).toMatchObject({
+    file: local?.file,
+    ownership: "shared",
+    writable: true,
+  });
+  expect(legacy.layers.find((layer) => layer.id === "5")?.file).toEndWith(
+    "/hack.env.default.local.yaml"
+  );
+});
+
+test("form and Source validation reject invalid Compose ports, services and hostnames", async () => {
+  const f = await fixture();
+  const base = bases(await show(f.root, f.main));
+  const invalid = [
+    [
+      {
+        layer: "2",
+        kind: "service",
+        service: "web",
+        field: "ports",
+        value: ["99999"],
+      },
+      "2",
+    ],
+    [{ layer: "2", kind: "source", text: "services:\n  web: 42\n" }, "2"],
+    [
+      { layer: "1", kind: "source", text: '{\n  "dev_host": "bad host"\n}' },
+      "1",
+    ],
+  ] as const;
+  for (const [change, layer] of invalid) {
+    const check = await cli({
+      root: f.root,
+      cwd: f.main,
+      args: ["validate"],
+      patch: { base, changes: [change] },
+    });
+    expect(check.payload.data.valid).toBe(false);
+    expect(check.payload.data.issues[0]?.layer).toBe(layer);
+  }
+});
+
+test("oversized serialized project and env files fail preflight before an earlier layer writes", async () => {
+  const f = await fixture();
+  const base = bases(await show(f.root, f.main));
+  const text = "é".repeat(270_000);
+  const source = {
+    layer: "1",
+    kind: "source",
+    text: JSON.stringify({ example: text }),
+  };
+  const project = {
+    layer: "1",
+    kind: "project",
+    path: "name",
+    value: "oversize",
+  };
+  for (const changes of [
+    [source],
+    [
+      project,
+      {
+        layer: "5",
+        kind: "env",
+        scope: "global",
+        key: "LARGE_VALUE",
+        value: text,
+      },
+    ],
+    [
+      project,
+      {
+        layer: "5",
+        kind: "env",
+        scope: "global",
+        key: "LARGE_SECRET",
+        value: "a".repeat(410_000),
+        secret: true,
+      },
+    ],
+  ]) {
+    const check = await cli({
+      root: f.root,
+      cwd: f.main,
+      args: ["apply"],
+      patch: { base, changes },
+    });
+    expect(check.payload.error.code).toBe("E_CONFIG_INVALID");
+    expect(check.payload.error.detail.issues[0]?.message).toContain("512 KiB");
+  }
+  expect(bases(await show(f.root, f.main))).toEqual(base);
+});
+
+test("branch routes require an authored or legacy dev host", async () => {
+  const f = await fixture();
+  await writeFile(join(f.project, "hack.config.json"), "{}");
+  const args = ["--branch", "branch-copy"];
+  const report = await show(f.root, f.main, ...args);
+  expect(report.services.every((service) => service.routes.length === 0)).toBe(
+    true
+  );
+  expect(
+    report.issues.some((issue) => issue.path.join(".") === "dev_host")
+  ).toBe(true);
+  await writeFile(join(f.project, ".env"), "DEV_HOST=storefront.hack\n");
+  const withLegacyHost = await show(f.root, f.main, ...args);
+  expect(
+    withLegacyHost.services.find((service) => service.name === "web")?.routes[0]
+      ?.host
+  ).toBe("branch-copy.storefront.hack");
+});
+
+test("the longest supported overlay can be included in a patch base", async () => {
+  const f = await fixture();
+  const name = "a".repeat(128);
+  await writeFile(
+    join(f.project, `hack.env.${name}.yaml`),
+    env("  global: {}", name)
+  );
+  const base = bases(await show(f.root, f.main));
+  expect(base[`3:${name}`]).toBeDefined();
+  const result = await cli({
     root: f.root,
     cwd: f.main,
     args: ["apply"],
-    patch: { base: bases(current), changes: changed },
+    patch: {
+      base,
+      changes: [
+        { layer: "1", kind: "project", path: "name", value: "long-overlay" },
+      ],
+    },
   });
-  expect(refused.payload.error.code).toBe("E_CONFIG_INVALID");
+  expect(result.payload.ok).toBe(true);
+});
+
+test("config set reads project JSON only after acquiring the editor's writer lock", async () => {
+  const f = await fixture();
+  const layerPath = join(f.project, "hack.config.json");
+  const child = await withEnvLayerLock({
+    layerPath,
+    run: async () => {
+      const pending = Bun.spawn(
+        [
+          process.execPath,
+          "--no-env-file",
+          entry,
+          "config",
+          "set",
+          "name",
+          "shop",
+        ],
+        {
+          cwd: f.main,
+          env: privateCliEnv({ root: f.root }),
+          stdout: "ignore",
+          stderr: "ignore",
+        }
+      );
+      expect(
+        await Promise.race([
+          pending.exited,
+          Bun.sleep(700).then(() => "waiting"),
+        ])
+      ).toBe("waiting");
+      await writeFile(
+        layerPath,
+        '{"name":"storefront","dev_host":"editor.hack"}\n'
+      );
+      return pending;
+    },
+  });
+  expect(await child.exited).toBe(0);
+  expect((await show(f.root, f.main)).project).toMatchObject({
+    name: "shop",
+    dev_host: "editor.hack",
+  });
 });
 
 test("a concurrent apply using the same base can commit only once", async () => {

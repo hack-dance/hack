@@ -3644,6 +3644,38 @@ export type ProjectEnvLayerChange = {
   | { readonly op: "unset" }
 );
 
+/** Measure the env writer's prospective document without accessing a project key. */
+export function projectEnvLayerFits(opts: {
+  readonly path: string;
+  readonly text: string | null;
+  readonly envName: string | null;
+  readonly changes: readonly ProjectEnvLayerChange[];
+  readonly inheritsLocal: boolean;
+  readonly maxBytes: number;
+}): boolean {
+  const { config, parseError } = parseProjectEnvConfigText({
+    path: opts.path,
+    environment: opts.envName ?? "default",
+    text: opts.text,
+  });
+  // The caller reports parse errors from the original layer.
+  if (parseError) {
+    return true;
+  }
+  // AES-GCM ciphertext and its YAML representation depend on length, not
+  // the project key. The temporary key only exists in memory for this check.
+  const keyText = opts.changes.some(
+    (change) => change.op === "set" && change.secret
+  )
+    ? randomBytes(32).toString("base64")
+    : null;
+  const next = nextProjectEnvLayer({ ...opts, config, keyText });
+  return (
+    !next.changed ||
+    Buffer.byteLength(serializeProjectEnvConfig(next.config)) <= opts.maxBytes
+  );
+}
+
 export async function setProjectEnvValue(
   opts: ProjectEnvLayerTarget & {
     readonly scope: string;
@@ -3682,6 +3714,7 @@ export async function mutateProjectEnvLayer(
   opts: ProjectEnvLayerTarget & {
     readonly changes: readonly ProjectEnvLayerChange[];
     readonly expected?: { readonly file: string; readonly text: string | null };
+    readonly maxBytes?: number;
   }
 ): Promise<{
   readonly changed: boolean;
@@ -3720,6 +3753,20 @@ async function mutateLockedProjectEnvLayer(
   }
 ) {
   const { filePath } = opts;
+  // The index can change after Config classified the legacy overlay. Do
+  // not write a checkout-local destination as a shared layer.
+  if (
+    opts.expected &&
+    opts.local !== true &&
+    opts.envName === "local" &&
+    filePath ===
+      (await resolveProjectEnvEffectiveLocalConfigPath({
+        ...opts,
+        envName: null,
+      }))
+  ) {
+    throw new AtomicWriteConflictError();
+  }
   const { read, text } = await readProjectEnvLayerForMutation({
     projectRoot: opts.projectRoot,
     path: filePath,
@@ -3728,7 +3775,6 @@ async function mutateLockedProjectEnvLayer(
   if (opts.expected && opts.expected.text !== text) {
     throw new AtomicWriteConflictError();
   }
-  const values: ProjectEnvValuesByScope = structuredClone(read.config.values);
   const secrets = await projectEnvMutationKey(opts, read.config);
   const hasSet = opts.changes.some((change) => change.op === "set");
   if (hasSet && opts.local === true) {
@@ -3740,30 +3786,43 @@ async function mutateLockedProjectEnvLayer(
     opts.local === true &&
     opts.changes.some((change) => change.op === "unset") &&
     (await resolvePrimaryLocalProjectDir(opts)) !== null;
-  let changed = false;
-  for (const change of opts.changes) {
-    changed =
-      applyProjectEnvLayerChange({
-        values,
-        change,
-        inheritsLocal,
-        keyText: secrets.keyText,
-      }) || changed;
-  }
+  const next = nextProjectEnvLayer({
+    ...opts,
+    config: read.config,
+    inheritsLocal,
+    keyText: secrets.keyText,
+  });
+  let changed = next.changed;
   if (changed || hasSet) {
     changed = await writeProjectEnvConfigFile({
       projectRoot: opts.projectRoot,
       path: filePath,
-      config: {
-        ...read.config,
-        environment: opts.envName ?? "default",
-        values,
-      },
+      config: next.config,
+      maxBytes: opts.maxBytes,
       expectedExisting: text,
       machineLocal: opts.local === true,
     });
   }
   return { changed, filePath, createdKey: secrets.createdKey };
+}
+
+function nextProjectEnvLayer(opts: {
+  readonly config: ProjectEnvConfig;
+  readonly envName: string | null;
+  readonly changes: readonly ProjectEnvLayerChange[];
+  readonly inheritsLocal: boolean;
+  readonly keyText: string | null;
+}) {
+  const values: ProjectEnvValuesByScope = structuredClone(opts.config.values);
+  let changed = false;
+  for (const change of opts.changes) {
+    changed =
+      applyProjectEnvLayerChange({ ...opts, values, change }) || changed;
+  }
+  return {
+    changed,
+    config: { ...opts.config, environment: opts.envName ?? "default", values },
+  };
 }
 
 async function projectEnvMutationKey(
@@ -4860,6 +4919,7 @@ async function writeProjectEnvConfigFile(opts: {
   readonly config: ProjectEnvConfig;
   /** Compare-and-swap guard; see `writeTextFileAtomicIfChanged`. */
   readonly expectedExisting?: string | null;
+  readonly maxBytes?: number;
   /**
    * A machine-local layer, which may hold plaintext values: when this write
    * creates it, it is private (0600) from creation, and an existing layer
@@ -4871,6 +4931,12 @@ async function writeProjectEnvConfigFile(opts: {
   readonly machineLocal?: boolean;
 }): Promise<boolean> {
   const text = serializeProjectEnvConfig(opts.config);
+  if (opts.maxBytes !== undefined && Buffer.byteLength(text) > opts.maxBytes) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: "The updated env layer exceeds the config file size limit.",
+    });
+  }
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
   if (opts.machineLocal === true) {
     await assertMachineLocalLayerWriteDestination({

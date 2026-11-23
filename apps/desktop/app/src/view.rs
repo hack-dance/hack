@@ -1012,6 +1012,7 @@ impl HackApp {
         }
         if before != after {
             self.model.source_changed();
+            self.config = Default::default();
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
             // previous installation: it must not block this one.
@@ -1040,6 +1041,9 @@ impl HackApp {
             }
             #[cfg(hack_terminal)]
             self.close_all_terminals(window, cx);
+            if self.pane == Pane::Project {
+                self.sync_config_tab(cx);
+            }
         }
         let _ = window;
         self.refresh_now_async(cx);

@@ -54,6 +54,23 @@ function readSelection(selection: Selection) {
   });
 }
 
+async function readPatchSelection(selection: Selection) {
+  const snapshot = await readSelection(selection).catch((error: unknown) => {
+    if (error instanceof HackCliError && error.code === "E_PROJECT_NOT_FOUND") {
+      return null;
+    }
+    throw error;
+  });
+  if (snapshot === null) {
+    throw new HackCliError({
+      code: "E_CONFLICT",
+      message:
+        "The selected checkout is no longer available. Reload before saving.",
+    });
+  }
+  return snapshot;
+}
+
 async function runConfigEditor(work: () => Promise<unknown>): Promise<number> {
   try {
     emitCliResult({ result: okResult({ data: await work() }) });
@@ -92,13 +109,10 @@ export const configApplyCommand = withHandler(apply, async ({ ctx, args }) => {
   }
   return await runConfigEditor(async () => {
     const patch = readConfigPatch((await readConfigPatchStdin()) ?? "");
-    const snapshot = await readSelection({ cwd: ctx.cwd, ...args.options });
-    if (snapshot === null) {
-      throw new HackCliError({
-        code: "E_PROJECT_NOT_FOUND",
-        message: "This folder has no Hack config. Run hack init.",
-      });
-    }
+    const snapshot = await readPatchSelection({
+      cwd: ctx.cwd,
+      ...args.options,
+    });
     return await applyConfigPatch(snapshot, patch);
   });
 });
@@ -151,13 +165,7 @@ export async function validateConfigEditorStdin(
   }
   return await runConfigEditor(async () => {
     const patch = readConfigPatch(input ?? "");
-    const snapshot = await readSelection(selection);
-    if (!snapshot) {
-      throw new HackCliError({
-        code: "E_PROJECT_NOT_FOUND",
-        message: "This folder has no Hack config. Run hack init.",
-      });
-    }
+    const snapshot = await readPatchSelection(selection);
     const { issues, previews } = assessConfigPatch(snapshot, patch);
     return {
       schema: CONFIG_EDITOR_SCHEMA,

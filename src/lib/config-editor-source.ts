@@ -1,13 +1,23 @@
 import { type Node, type ParseError, parseTree } from "jsonc-parser";
-import { isAlias, isMap, isScalar, isSeq, parseDocument, visit } from "yaml";
+import {
+  isAlias,
+  isMap,
+  isPair,
+  isScalar,
+  isSeq,
+  parseDocument,
+  visit,
+} from "yaml";
 
 const SECRET_KEY =
   /(?:access[_-]?key|auth(?:orization)?|credential|pass(?:word|phrase|wd)?\b|secret|secure|token|private[_-]?key|api[_-]?key)/i;
 const SECRET_TEXT =
-  /(?:[a-z][a-z\d+.-]*:\/\/[^\s/@]+:[^\s/@]+@|[?&](?:token|key|secret|password|signature)=|-----BEGIN [^-]+PRIVATE KEY-----)/i;
+  /(?:[a-z][a-z\d+.-]*:\/\/[^\s/@]+:[^\s/@]+@|[?&](?:token|key|secret|password|signature)=|-----BEGIN [^-]+PRIVATE KEY-----|\bauthorization\s*:?\s+(?:bearer|basic)\s+\S)/i;
 const PRIVATE_COMPOSE_FIELDS = /^(?:command|entrypoint|args|secrets|test)$/;
+const CADDY_HEADER =
+  /^caddy(?:[._].*)?[._](?:header_up|header_down|header|request_header)(?:[._]|$)/i;
 const PRIVATE_COMMENT =
-  /(?:#|\/\/).*?(?:credential|password|secret|token|api[_-]?key)\s*[:=]/i;
+  /(?:#|\/\/).*?(?:(?:authorization|credential|password|secret|token|api[_-]?key)\s*[:=]|\bauthorization\s+(?:bearer|basic)\s+\S)/i;
 
 export function isConfigSecret(key: string, value: unknown): boolean {
   return (
@@ -40,19 +50,25 @@ export function jsonConfigTree(text: string) {
   };
 }
 
-type Range = { readonly start: number; readonly length: number };
+type SourcePath = readonly (string | number)[];
+type Range = {
+  readonly start: number;
+  readonly length: number;
+  readonly path: SourcePath;
+};
 
 const PRIVATE_SLOT = /"\[redacted:\d+\]"/;
 
 function sourceSlots(text: string, ranges: readonly Range[]) {
   return ranges
     .toSorted((left, right) => left.start - right.start)
-    .map(({ start, length }, index) => {
+    .map(({ start, length, path }, index) => {
       const value = text.slice(start, start + length);
       const lineBreaks = value.match(/\r?\n/g)?.join("") ?? "";
       return {
         start,
         length,
+        path,
         value,
         marker: `"[redacted:${index + 1}]"${lineBreaks}`,
       };
@@ -68,20 +84,33 @@ function redact(text: string, ranges: readonly Range[]) {
   return output;
 }
 
-function jsonSecretRanges(node: Node, ranges: Range[]): void {
-  if (node.type === "property") {
-    const [key, child] = node.children ?? [];
-    if (child && typeof key?.value === "string" && secretProperty(key.value)) {
-      ranges.push({ start: child.offset, length: child.length });
-      return;
-    }
-  } else if (node.type === "string" && isConfigSecret("", node.value)) {
-    ranges.push({ start: node.offset, length: node.length });
+function privateProjectCommand(path: SourcePath): boolean {
+  return (
+    path[0] === "startup" ||
+    (path[0] === "lifecycle" && path.length > 1 && path[1] !== "runner")
+  );
+}
+
+function jsonSecretRanges(node: Node, path: SourcePath, ranges: Range[]): void {
+  const key = path.at(-1);
+  if (
+    (typeof key === "string" && secretProperty(key)) ||
+    (node.type === "string" &&
+      (privateProjectCommand(path) || isConfigSecret("", node.value)))
+  ) {
+    ranges.push({ start: node.offset, length: node.length, path });
     return;
   }
-  for (const child of node.children ?? []) {
-    jsonSecretRanges(child, ranges);
-  }
+  (node.children ?? []).forEach((child, index) => {
+    if (child.type === "property") {
+      const [property, value] = child.children ?? [];
+      if (value && typeof property?.value === "string") {
+        jsonSecretRanges(value, [...path, property.value], ranges);
+      }
+    } else {
+      jsonSecretRanges(child, [...path, index], ranges);
+    }
+  });
 }
 
 /** Location-preserving redaction. Invalid source is kept out of the JSON contract. */
@@ -91,7 +120,7 @@ function jsonRanges(text: string): Range[] | null {
     return null;
   }
   const ranges: Range[] = [];
-  jsonSecretRanges(tree.root, ranges);
+  jsonSecretRanges(tree.root, [], ranges);
   return ranges;
 }
 
@@ -100,6 +129,22 @@ export function safeJsonSource(text: string) {
   return ranges
     ? { source: redact(text, ranges), hidden: ranges.length > 0 }
     : { source: null, hidden: true };
+}
+
+function yamlPath(parents: readonly unknown[], key: unknown): SourcePath {
+  const path: (string | number)[] = [];
+  parents.forEach((parent, index) => {
+    const child = parents[index + 1];
+    if (isPair(parent) && isScalar(parent.key)) {
+      path.push(String(parent.key.value));
+    } else if (isSeq(parent)) {
+      const position = child === undefined ? key : parent.items.indexOf(child);
+      if (typeof position === "number") {
+        path.push(position);
+      }
+    }
+  });
+  return path;
 }
 
 function yamlSecretRanges(
@@ -113,11 +158,15 @@ function yamlSecretRanges(
   }
   const ranges: Range[] = [];
   let aliases = false;
+  // Check even nodes underneath a private parent which the masking pass skips.
   visit(doc, {
     Alias() {
       aliases = true;
+      return visit.BREAK;
     },
-    Pair(_, pair) {
+  });
+  visit(doc, {
+    Pair(index, pair, parents) {
       const key =
         isScalar(pair.key) && typeof pair.key.value === "string"
           ? pair.key.value
@@ -127,34 +176,39 @@ function yamlSecretRanges(
         !(
           privateKeys.has(key) ||
           secretProperty(key) ||
-          (compose && PRIVATE_COMPOSE_FIELDS.test(key))
+          (compose &&
+            (PRIVATE_COMPOSE_FIELDS.test(key) || CADDY_HEADER.test(key)))
         )
       ) {
         return;
       }
-      if (isAlias(node)) {
-        aliases = true;
-      }
       if (isMap(node) || isSeq(node) || isScalar(node) || isAlias(node)) {
         const range = node.range;
-        if (range) {
-          ranges.push({ start: range[0], length: range[1] - range[0] });
+        if (range && range[0] < range[1]) {
+          ranges.push({
+            start: range[0],
+            length: range[1] - range[0],
+            path: [...yamlPath(parents, index), key],
+          });
           return visit.SKIP;
         }
       }
     },
-    Scalar(_, node) {
+    Scalar(index, node, parents) {
       const value: unknown = node.value;
-      if (typeof value !== "string" || !node.range) {
+      if (typeof value !== "string" || !node.range || index === "key") {
         return;
       }
       const separator = value.indexOf("=");
+      const key = separator > 0 ? value.slice(0, separator) : "";
       const assignment =
-        separator > 0 && secretProperty(value.slice(0, separator));
+        key !== "" &&
+        (secretProperty(key) || (compose && CADDY_HEADER.test(key)));
       if (assignment || isConfigSecret("", value)) {
         ranges.push({
           start: node.range[0],
           length: node.range[1] - node.range[0],
+          path: yamlPath(parents, index),
         });
       }
     },
@@ -178,7 +232,7 @@ export function safeYamlSource(
 /**
  * Keep private source text on disk and in the CLI. An editor gets numbered
  * slots. A save restores the original bytes, then re-runs the masking parser
- * to prove the same slots are still private and in the same order.
+ * to prove the same slots are still private, at the same paths and in order.
  */
 export function restoreConfigSource(opts: {
   readonly original: string;
@@ -215,7 +269,14 @@ export function restoreConfigSource(opts: {
   }
   output += input;
   const next = rangesFor(output);
-  if (!next || redact(output, next) !== opts.draft) {
+  if (
+    !next ||
+    redact(output, next) !== opts.draft ||
+    sourceSlots(output, next).some(
+      (slot, index) =>
+        JSON.stringify(slot.path) !== JSON.stringify(slots[index]?.path)
+    )
+  ) {
     return null;
   }
   return output;

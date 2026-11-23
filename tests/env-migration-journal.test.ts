@@ -771,11 +771,21 @@ test("cleanup and rollback recover an interrupted Config save and remove its new
   const snapshots = envMigrationSnapshots();
   const path = join(project.projectDir, "hack.config.json");
   const overlay = join(project.projectDir, "hack.env.new.local.yaml");
+  const ignore = join(project.projectDir, ".gitignore");
+  await writeFile(join(project.projectDir, ".env"), "");
+  await writeFile(join(project.projectDir, ".env.qa"), "");
   const before = await readFile(path, "utf8");
-  const plan = await prepareImplicitEnvMigration(project, [
-    { path, text: before },
-    { path: overlay, text: null },
-  ]);
+  const plan = await prepareImplicitEnvMigration(project, {
+    edits: [
+      { path, text: before },
+      { path: overlay, text: null },
+    ],
+    writesLocalEnv: true,
+  });
+  expect(plan.prepared.files.some(({ kind }) => kind === "local_layer")).toBe(
+    false
+  );
+  expect(plan.prepared.files.some(({ path }) => path === ignore)).toBe(true);
   const migration = await applyEnvMigration({
     project,
     snapshots,
@@ -815,6 +825,11 @@ test("cleanup and rollback recover an interrupted Config save and remove its new
   const renamed = { ...project, projectName: "renamed" };
   await recordEnvMigrationProjectRun(renamed);
   const cleanup = { project: renamed, snapshots, acceptTrackedChanges: false };
+  await writeFile(overlay, `${overlayText}# edited after start\n`);
+  await expect(cleanupEnvMigration(cleanup)).rejects.toThrow(
+    "Env layers changed"
+  );
+  await writeFile(overlay, overlayText);
   await writeFile(path, '{"name":"edited-later"}\n');
   await expect(cleanupEnvMigration(cleanup)).rejects.toThrow("input changed");
   await writeFile(path, after);
@@ -826,6 +841,7 @@ test("cleanup and rollback recover an interrupted Config save and remove its new
   });
   expect(await readFile(path, "utf8")).toBe(before);
   expect(await Bun.file(overlay).exists()).toBe(false);
+  expect(await Bun.file(ignore).exists()).toBe(false);
 }, 30_000);
 
 test("later Compose repair refuses damaged originals before changing the completed journal", async () => {

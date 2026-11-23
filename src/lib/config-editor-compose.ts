@@ -24,6 +24,7 @@ const SERVICE_NAME = /^[\w.-]+$/;
 const ROUTE_LABEL = /^caddy(?:[._]|$)/;
 const PORT_RANGE = /^([\d*]+)(?:-([\d*]+))?$/;
 const PORT_NUMBER = /^[\d*]+$/;
+const IPV6_TEMPLATE = /^[a-f\d:.*]+(?:%[\w.*-]+)?$/i;
 const VARIABLE_REFERENCE =
   /\$(?:\$|\{[A-Za-z_]\w*(?:\}|(:?[-+?]))|[A-Za-z_]\w*)/y;
 const PORT_PROTOCOLS = ["tcp", "udp", "sctp"];
@@ -75,10 +76,39 @@ export function validComposePort(value: unknown): boolean {
 }
 
 function validPortHost(value: string): boolean {
-  const host =
-    value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
-  // An interpolated component can supply some or all of an IP address.
-  return host.includes("*") || isIP(host) !== 0;
+  const bracketed = value.startsWith("[") && value.endsWith("]");
+  const host = bracketed ? value.slice(1, -1) : value;
+  if (!host.includes("*")) {
+    return isIP(host) !== 0;
+  }
+  if (bracketed || host.includes(":") || !host.includes(".")) {
+    const address = host.split("%", 1)[0] ?? "";
+    const parts = address.split(":");
+    return (
+      IPV6_TEMPLATE.test(host) &&
+      !address.includes(":::") &&
+      address.indexOf("::") === address.lastIndexOf("::") &&
+      parts.every((part, index) =>
+        part.includes(".")
+          ? index === parts.length - 1 && validIpv4Template(part)
+          : part.replaceAll("*", "").length <= 4
+      )
+    );
+  }
+  return validIpv4Template(host);
+}
+
+function validIpv4Template(host: string): boolean {
+  const octets = host.split(".");
+  return (
+    octets.length <= 4 &&
+    octets.every((part) => {
+      const digits = part.replaceAll("*", "");
+      return (
+        PORT_NUMBER.test(part) && digits.length <= 3 && Number(digits) <= 255
+      );
+    })
+  );
 }
 
 function matchesComposeOption(

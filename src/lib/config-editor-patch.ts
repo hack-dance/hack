@@ -39,6 +39,7 @@ import {
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   applyEnvMigration,
+  assertEnvMigrationConsent,
   type ImplicitEnvMigrationPlan,
   type MigrationConfigWrite,
   prepareImplicitEnvMigration,
@@ -696,14 +697,25 @@ async function stageConfigMigration(
         "Fix the legacy env contract before saving env changes."
       );
     }
-    const outputs = await preflightLegacyEnvContract({
-      ...project,
-      contract: legacy.contract,
-      projectText:
-        snapshot.layers.find((layer) => layer.id === "1")?.text ?? null,
-      maxLayerBytes: CONFIG_SOURCE_LIMIT,
-    });
+    const writesLocalEnv = [...files.values()].some(
+      ({ layer, env }) =>
+        layer.kind === "env" &&
+        layer.ownership === "local" &&
+        env.some(({ op }) => op === "set")
+    );
     if (mode === "validate") {
+      const outputs = await preflightLegacyEnvContract({
+        ...project,
+        contract: legacy.contract,
+        projectText:
+          snapshot.layers.find(
+            ({ id, file }) =>
+              id === "1" && basename(file) === "hack.config.json"
+          )?.text ?? null,
+        writesLocalEnv,
+        maxLayerBytes: CONFIG_SOURCE_LIMIT,
+      });
+      await assertEnvMigrationConsent(project, [...outputs.keys()], false);
       return { migration: null, outputs };
     }
     const migration = await prepareImplicitEnvMigration(
@@ -714,10 +726,13 @@ async function stageConfigMigration(
           composeFile: project.composeFile,
         }),
       },
-      [...files.values()].map(({ layer }) => ({
-        path: layerDestination(layer),
-        text: layer.text,
-      }))
+      {
+        writesLocalEnv,
+        edits: [...files.values()].map(({ layer }) => ({
+          path: layerDestination(layer),
+          text: layer.text,
+        })),
+      }
     );
     await assertConfigMigrationInputs(snapshot, migration);
     return {

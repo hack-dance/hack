@@ -7162,6 +7162,7 @@ export async function preflightLegacyEnvContract(opts: {
   readonly projectDir: string;
   readonly contract: HackEnvContract;
   readonly projectText: string | null;
+  readonly writesLocalEnv: boolean;
   readonly maxLayerBytes: number;
 }): Promise<ReadonlyMap<string, string>> {
   const overlayNames = await discoverLegacyOverlayNames({
@@ -7179,6 +7180,12 @@ export async function preflightLegacyEnvContract(opts: {
     (entry) => entry.source === "plain_env"
   );
   const outputs = new Map<string, string>();
+  outputs.set(
+    resolveProjectEnvConfigPath({ ...opts, envName: null }),
+    serializeProjectEnvConfig(
+      buildMigratedProjectEnvConfig({ environment: "default", values: {} })
+    )
+  );
   const project = migratedProjectConfigText(opts.projectText, opts.projectRoot);
   if (project !== null) {
     outputs.set(resolve(opts.projectDir, PROJECT_CONFIG_FILENAME), project);
@@ -7221,9 +7228,38 @@ export async function preflightLegacyEnvContract(opts: {
         envName,
       });
       outputs.set(path, text);
+      outputs.set(
+        resolveProjectEnvConfigPath({ ...opts, envName }),
+        serializeProjectEnvConfig(
+          buildMigratedProjectEnvConfig({
+            environment: envName ?? "default",
+            values: {},
+          })
+        )
+      );
+    }
+  }
+  if (
+    opts.writesLocalEnv ||
+    [...outputs.keys()].some((path) => path.endsWith(".local.yaml"))
+  ) {
+    const ignore = await planLocalEnvMigrationIgnore(opts);
+    if (ignore) {
+      outputs.set(ignore.path, ignore.text);
     }
   }
   return outputs;
+}
+
+async function planLocalEnvMigrationIgnore(opts: {
+  readonly projectDir: string;
+}) {
+  const options = hackDirGitignoreFileOptions(opts);
+  const previous = await readReplaceablePrivateFile(options);
+  const text = mergeHackDirGitignore({ existing: previous?.text ?? null });
+  return text === previous?.text
+    ? null
+    : { path: options.path, mode: previous?.mode ?? 0o644, text };
 }
 
 function migratedProjectConfigText(
@@ -7255,6 +7291,7 @@ export async function prepareLegacyProjectEnvMigration(opts: {
   readonly projectName: string;
   readonly serviceNames: readonly string[];
   readonly repairCompose?: boolean;
+  readonly writesLocalEnv?: boolean;
 }): Promise<PreparedLegacyEnvMigration> {
   try {
     return await prepareLegacyProjectEnvMigrationInternal(opts);
@@ -7682,6 +7719,7 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
   readonly projectName: string;
   readonly serviceNames: readonly string[];
   readonly repairCompose?: boolean;
+  readonly writesLocalEnv?: boolean;
 }): Promise<PreparedLegacyEnvMigration> {
   await assertLegacyProjectDirectory(opts);
   await assertLegacyProjectInputFamily(opts);
@@ -7763,15 +7801,17 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
       add,
       addLayer,
     });
-  if (files.some((file) => file.kind === "local_layer")) {
-    const path = resolve(opts.projectDir, ".gitignore");
-    const previous = await readReplaceablePrivateFile(
-      hackDirGitignoreFileOptions(opts)
-    );
-    await add(
-      { path, kind: "ignore", keys: [], mode: previous?.mode ?? 0o644 },
-      mergeHackDirGitignore({ existing: previous?.text ?? null })
-    );
+  if (
+    opts.writesLocalEnv ||
+    files.some((file) => file.kind === "local_layer")
+  ) {
+    const ignore = await planLocalEnvMigrationIgnore(opts);
+    if (ignore) {
+      await add(
+        { path: ignore.path, kind: "ignore", keys: [], mode: ignore.mode },
+        ignore.text
+      );
+    }
   }
   const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
   if (opts.repairCompose !== false) {

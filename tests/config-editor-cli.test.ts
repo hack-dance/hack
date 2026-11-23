@@ -1037,6 +1037,86 @@ test("Config preflights malformed and oversized legacy migration data before app
   expect(bases(await show(root, root))).toEqual(bases(before));
 });
 
+test("legacy env validation accepts TOML and reports migration consent before Apply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-config-legacy-source-"));
+  scratch.push(root);
+  for (const format of ["toml", "json"]) {
+    const cwd = join(root, format);
+    const project = join(cwd, ".hack");
+    await mkdir(project, { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(project, "docker-compose.yml"),
+        "services:\n  api:\n    image: alpine\n"
+      ),
+      writeFile(
+        join(project, "hack.env.json"),
+        '{"version":1,"vars":[{"key":"LEGACY","source":"plain_env"}]}\n'
+      ),
+      writeFile(
+        join(project, ".env"),
+        format === "toml" ? "" : "LEGACY=retained\n"
+      ),
+      format === "toml"
+        ? writeFile(
+            join(project, "hack.toml"),
+            'name = "legacy"\ndev_host = "legacy.hack"\n'
+          )
+        : writeFile(
+            join(project, "hack.config.json"),
+            '{"name":"legacy","dev_host":"legacy.hack","defaultEnvConfig":"qa"}\n'
+          ),
+    ]);
+    if (format === "json") {
+      for (const args of [
+        ["init", "-b", "main"],
+        ["add", ".hack/hack.config.json"],
+      ]) {
+        expect(
+          Bun.spawnSync(["git", "-C", cwd, ...args], {
+            env: privateCliEnv({ root }),
+            stdout: "ignore",
+            stderr: "ignore",
+          }).exitCode
+        ).toBe(0);
+      }
+    }
+    const selection = ["--env", "default"];
+    const before = await show(root, cwd, ...selection);
+    const patch = {
+      base: bases(before),
+      changes: [
+        {
+          layer: "5",
+          kind: "env",
+          scope: "global",
+          key: "NEW",
+          value: "added",
+        },
+      ],
+    };
+    const { payload } = await cli({
+      root,
+      cwd,
+      patch,
+      args: ["validate", ...selection],
+    });
+    if (format === "toml") {
+      expect(payload.data.valid).toBe(true);
+      expect(
+        (await cli({ root, cwd, patch, args: ["apply", ...selection] })).payload
+          .ok
+      ).toBe(true);
+      expect(await Bun.file(join(project, ".gitignore")).exists()).toBe(true);
+    } else {
+      expect(payload.data.valid).toBe(false);
+      expect(payload.data.issues[0]?.message).toContain(
+        "--accept-tracked-env-changes"
+      );
+    }
+  }
+});
+
 test("an identical replacement layer directory invalidates a revision", async () => {
   const f = await fixture();
   const report = await show(f.root, f.main);
@@ -1163,6 +1243,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
         "80",
         "${PORT:-8080}:80",
         "127.0.0.${OCTET:-1}:8080:80",
+        "[::${ADDR:-1}]:8080:80",
         "::1:8080:80",
         "127.0.0.1::80",
         "8082:81",
@@ -1200,6 +1281,8 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     "{published: 8081}",
     "'${PORT:-8080}:70000'",
     "'${PORT'",
+    "'invalid-host.${OCTET:-1}:8080:80'",
+    "'[12345::${ADDR:-1}]:8080:80'",
   ];
   const invalid = await check([
     {

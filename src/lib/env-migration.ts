@@ -424,14 +424,27 @@ export type ImplicitEnvMigrationPlan = Preparation & {
 /** Preflight immutable migration payloads as part of a larger validated edit. */
 export async function prepareImplicitEnvMigration(
   input: EnvMigrationProject,
-  edits: readonly { readonly path: string; readonly text: string | null }[] = []
+  {
+    edits = [],
+    writesLocalEnv = false,
+  }: {
+    readonly edits?: readonly {
+      readonly path: string;
+      readonly text: string | null;
+    }[];
+    readonly writesLocalEnv?: boolean;
+  } = {}
 ): Promise<ImplicitEnvMigrationPlan> {
   const project = await canonicalProject(input);
   assertFreshMigration(
     await readJournal(envMigrationJournalPath(project.projectRoot), project)
   );
-  const plan = await prepareConsistent({ ...project, repairCompose: false });
-  await assertConsent(
+  const plan = await prepareConsistent({
+    ...project,
+    repairCompose: false,
+    writesLocalEnv,
+  });
+  await assertEnvMigrationConsent(
     project,
     plan.prepared.files.map((file) => file.path),
     false
@@ -457,7 +470,10 @@ function assertFreshMigration(journal: Journal | null): void {
 }
 
 async function prepareConsistent(
-  project: EnvMigrationProject & { readonly repairCompose?: boolean }
+  project: EnvMigrationProject & {
+    readonly repairCompose?: boolean;
+    readonly writesLocalEnv?: boolean;
+  }
 ): Promise<Preparation> {
   // Discover the complete inventory before the pass whose immutable payloads
   // will be published. A changed inventory or input refuses before consent.
@@ -612,8 +628,8 @@ export async function previewEnvCleanup(
   return { ...preview, files };
 }
 
-async function assertConsent(
-  project: EnvMigrationProject,
+export async function assertEnvMigrationConsent(
+  project: Pick<EnvMigrationProject, "projectRoot">,
   paths: readonly string[],
   accept: boolean
 ): Promise<void> {
@@ -856,7 +872,7 @@ async function extendComposeRepair(
     return completed;
   }
   const { prepared, sources } = preparation;
-  await assertConsent(
+  await assertEnvMigrationConsent(
     project,
     prepared.files.map((file) => file.path),
     accept
@@ -1092,7 +1108,7 @@ export async function applyEnvMigration(input: {
     : (existing?.writes
         .filter((entry) => !entry.done)
         .map((entry) => entry.path) ?? []);
-  await assertConsent(project, changed, input.acceptTrackedChanges);
+  await assertEnvMigrationConsent(project, changed, input.acceptTrackedChanges);
   if (
     preparation &&
     (!existing || existing.state === "rolled_back") &&
@@ -1145,7 +1161,7 @@ export async function applyEnvMigration(input: {
           input.acceptTrackedChanges
         );
       }
-      await assertConsent(
+      await assertEnvMigrationConsent(
         project,
         journal.writes
           .filter((entry) => !entry.done)
@@ -1442,7 +1458,7 @@ async function cleanupLocked(
     journal.store && journal.removable.includes(journal.store.path)
       ? await prepareLegacyEnvCleanupConfig(project)
       : null;
-  await assertConsent(
+  await assertEnvMigrationConsent(
     project,
     [...journal.removable, ...(repair ? [repair.path] : [])],
     input.acceptTrackedChanges
@@ -1684,12 +1700,20 @@ export async function recordEnvMigrationProjectRun(
       if (!journal || journal.state !== "complete") {
         return;
       }
-      const validated = await Promise.all(
+      const layerPaths = new Set(
         journal.writes
           .filter(
             (entry) => entry.kind === "layer" || entry.kind === "local_layer"
           )
-          .map(async (entry) => (await readState(entry.path)).state)
+          .map((entry) => entry.path)
+      );
+      for (const edit of journal.configEdits ?? []) {
+        if (CONFIG_ENV_LAYER.test(basename(edit.after.path))) {
+          layerPaths.add(edit.after.path);
+        }
+      }
+      const validated = await Promise.all(
+        [...layerPaths].map(async (path) => (await readState(path)).state)
       );
       await writeMetadata(path, { ...journal, validated });
     },

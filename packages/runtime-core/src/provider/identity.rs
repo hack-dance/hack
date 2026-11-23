@@ -5,6 +5,7 @@ use crate::CandidateError;
 #[cfg(target_os = "macos")]
 pub(crate) use incarnation::birth;
 pub(crate) use incarnation::incarnation_gone;
+pub(crate) use incarnation::provider_gone;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};

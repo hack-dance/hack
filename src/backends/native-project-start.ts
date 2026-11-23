@@ -1874,6 +1874,8 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   readonly recover: (() => Promise<void>) | undefined;
   readonly warn: (line: string) => void;
   readonly signal?: AbortSignal;
+  /** Set on the one retry after an exited provider was recovered (HACK-2579). */
+  readonly exitedProviderRecovered?: true;
 }): ReturnType<typeof selectNativeStartup> {
   try {
     return await opts.select();
@@ -1885,6 +1887,7 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
     if (
       error instanceof NativeRuntimeRequestError &&
       EXITED_PROVIDER_REFUSALS.has(error.nativeCode ?? "") &&
+      !opts.exitedProviderRecovered &&
       !opts.signal?.aborted &&
       (await recoverExitedNativeRuntime({
         runtime: opts.runtime,
@@ -1898,7 +1901,10 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
         },
       }))
     ) {
-      return await selectNativeStartupRecoveringStoppedPool(opts);
+      return await selectNativeStartupRecoveringStoppedPool({
+        ...opts,
+        exitedProviderRecovered: true,
+      });
     }
     if (
       !(

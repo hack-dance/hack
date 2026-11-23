@@ -675,7 +675,13 @@ async function inspectOrStartStoppedPool(opts: {
 }
 
 /** Raised inside a down that recovered a pool whose provider exited (HACK-2579). */
-class ExitedPoolRecovered extends Error {}
+class ExitedPoolRecovered extends Error {
+  constructor() {
+    super(
+      "The native runtime's provider had exited and the pool was recovered, but this down still found it unavailable; nothing else was changed. Run hack down again."
+    );
+  }
+}
 
 /** Whether an inspected graph is stopped with its data retained. */
 function stoppedRetained(snapshot: unknown): boolean {

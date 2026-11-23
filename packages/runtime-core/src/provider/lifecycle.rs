@@ -1015,7 +1015,9 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         }
     });
     let alive = if let Some(process) = &owner.process {
-        let alive = identity::alive(process.pid)?;
+        // HACK-2579: a killed provider whose parent has not reaped it (a zombie), or a
+        // reused pid, is gone too; status then reports `process-exited`.
+        let alive = !identity::provider_gone(process)?;
         if alive {
             verify_live(candidate, &owner)?;
         }
@@ -3316,7 +3318,7 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         interrupted::recover(candidate, &mut owner, &lock)?;
         return status(candidate);
     };
-    if identity::alive(process.pid)? {
+    if !identity::provider_gone(process)? {
         // A live provider is stopped here only when its identity verifies and its guest
         // agent stopped responding; a responsive guest is stopped cleanly by `down`.
         // Refuse first, without probing, while a build is admitted.

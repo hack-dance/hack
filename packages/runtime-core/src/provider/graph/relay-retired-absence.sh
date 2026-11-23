@@ -20,6 +20,15 @@ private_file() {
  test "$(stat -c %u:%g:%a:%h "$1")" = 0:0:600:1
  test "$(stat -c %s "$1")" -le 256
 }
+nn=$(printf '%02d' "$slot")
+case "$socket" in
+ "$base/bridge-$nn.sock") ;;
+ "/run/hb/$nn")
+  private_dir /run/hb
+  test "$(findmnt -n -o FSTYPE --mountpoint /run/hb)" = tmpfs
+  ;;
+ *) exit 1;;
+esac
 private_dir "$base"
 private_dir "$base/graph-relays"
 root="$base/graph-relays/$allocation"

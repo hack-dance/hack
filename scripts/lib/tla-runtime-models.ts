@@ -183,7 +183,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-pool-layout",
     module: "PoolLayout",
-    states: 4,
+    states: 38,
     invariant: "LayoutPreserved",
     action: "OlderUse",
     fields: ['owner = "legacy"', 'initial = "compact"', "refused = TRUE"],

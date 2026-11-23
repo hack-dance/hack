@@ -486,13 +486,70 @@ fn replaced_project_selected_before_acquisition_is_refused() {
     assert!(!root(&candidate).join(JOURNAL).exists());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
-fn a_digest_prefix_collision_names_both_projects() {
+#[ignore = "Requires a fresh prepared candidate home under the VM lock"]
+fn compact_add_replays_the_converted_share_after_record_commit() {
     let f = fixture();
-    let mut requested = f.third.clone();
-    requested.guest_path.clone_from(&f.second.guest_path);
-    let failure = refuse_guest_path_collision(&[&f.second], &requested).unwrap_err();
-    assert_eq!(failure.code, "project_share_collision");
-    assert!(failure.message.contains("second-app"));
-    assert!(failure.message.contains("third-app"));
+    let candidate =
+        Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap())).unwrap();
+    assert_eq!(
+        lifecycle::status(&candidate).unwrap().phase,
+        "uninitialized"
+    );
+    lifecycle::up_with_project_share(
+        &candidate,
+        super::super::Profile::Development,
+        None,
+        None,
+        None,
+        f.owner.project_share.clone(),
+    )
+    .unwrap();
+    lifecycle::down(&candidate).unwrap();
+
+    add_project_share(&candidate, &f.second.project, true).unwrap();
+    let owner = Owner::load(&candidate).unwrap();
+    assert_eq!(owner.socket_layout, super::super::PoolLayout::CompactV1);
+    let compact_second = f.second.clone().with_layout(owner.socket_layout).unwrap();
+    assert_eq!(owner.additional_project_shares, [compact_second.clone()]);
+
+    let db = network_update::database(&candidate);
+    let record = config_audit::read_database(&db, &owner.machine).unwrap();
+    let compact_third = f.third.clone().with_layout(owner.socket_layout).unwrap();
+    let j = plan(
+        &owner,
+        record,
+        Operation::Add,
+        &compact_third,
+        network_update::file_identity_with(&db, refused).unwrap(),
+    )
+    .unwrap();
+    let journal = root(&candidate).join(JOURNAL);
+    {
+        let _lock = state::Lock::acquire(&root(&candidate)).unwrap();
+        let _vm_lock = network_update::stopped_with(&candidate, &owner, refused).unwrap();
+        state::write(&journal, &j).unwrap();
+        network_update::apply_record(
+            &db,
+            &owner.machine,
+            j.database_identity,
+            &j.record_before,
+            &j.record_after,
+            refused,
+        )
+        .unwrap();
+    }
+    fs::rename(&f.third.project, f.directory.join("moved-third")).unwrap();
+    add_project_share(&candidate, &f.third.project, true).unwrap();
+    assert!(!journal.exists());
+    let saved = Owner::load(&candidate).unwrap();
+    assert_eq!(
+        saved.additional_project_shares,
+        [compact_second, compact_third]
+    );
+    assert_eq!(
+        config_audit::read_database(&db, &saved.machine).unwrap(),
+        j.record_after
+    );
 }

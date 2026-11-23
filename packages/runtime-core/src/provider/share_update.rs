@@ -93,40 +93,6 @@ fn record_mounts(record: &Value, owner: &Owner) -> Result<Value, CandidateError>
     Ok(Value::Array(mounts))
 }
 
-fn refuse_guest_path_collision(
-    existing: &[&ProjectShareIntent],
-    requested: &ProjectShareIntent,
-) -> Result<(), CandidateError> {
-    if let Some(other) = existing.iter().find(|other| {
-        other.project != requested.project && other.guest_path == requested.guest_path
-    }) {
-        let label = |path: &Path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("unnamed")
-                .chars()
-                .map(|ch| {
-                    if ch.is_ascii_alphanumeric() || "._-".contains(ch) {
-                        ch
-                    } else {
-                        '_'
-                    }
-                })
-                .take(64)
-                .collect::<String>()
-        };
-        return Err(CandidateError::new(
-            "project_share_collision",
-            format!(
-                "Project share names collide for {} and {}.",
-                label(&other.project),
-                label(&requested.project)
-            ),
-        ));
-    }
-    Ok(())
-}
-
 /// Pure plan: the exact owner and record after one add or remove. Only the share set
 /// and the record's mount list change; every other owner and record field is kept.
 fn plan(
@@ -149,7 +115,6 @@ fn plan(
     let mut after = owner.clone();
     match operation {
         Operation::Add => {
-            refuse_guest_path_collision(&owner.project_shares(), share)?;
             if owner
                 .project_shares()
                 .iter()

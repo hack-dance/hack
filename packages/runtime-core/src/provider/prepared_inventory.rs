@@ -76,11 +76,12 @@ const UPPER_LINKS: [&str; 2] = ["run/docker.sock", "workspace"];
 
 /// Empty mount points and working directories the provider, guest setup and the iptables
 /// package create. Only directories: any file below them is reported separately.
-const UPPER_DIRS: [&str; 19] = [
+const UPPER_DIRS: [&str; 20] = [
     "opt/hack-engine",
     "var/lib/docker",
     "var/lib/containerd",
     "run/hack-local",
+    "run/hb",
     "run/smolvm",
     "run/smolvm/virtiofs",
     // SmolVM 1.34.1 creates these empty at every boot (seen on a real verifier boot).

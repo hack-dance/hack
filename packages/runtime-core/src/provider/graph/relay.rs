@@ -616,9 +616,9 @@ pub(super) fn verify_cleanup(
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn relay_start_prepares_compact_socket_parent_and_refuses_replacements() {
+    fn relay_start_requires_private_compact_tmpfs_and_exact_slot() {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
         use std::os::unix::net::UnixListener;
         use std::process::Command;
@@ -639,15 +639,22 @@ mod tests {
         // Run the real launch checks up to payload staging. This fixture
         // substitutes the guest filesystem and uid, and needs no container netns.
         let prefix = body.split_once(" mkdir -m 700 \"$root\"").unwrap().0;
-        let program = format!("{prefix}\nfi\n")
-            .replace(
-                "test \"$(findmnt -n -o FSTYPE --target /run/hack-local)\" = tmpfs",
-                ":",
-            )
-            .replace("/run/hack-local", base.to_str().unwrap())
-            .replace("/run/hb", compact.to_str().unwrap())
-            .replace("0:0:", &format!("{}:{}:", owner.uid(), owner.gid()));
-        let run = |socket: &str, slot: &str| {
+        let program =
+            format!("findmnt() {{ printf '%s\\n' \"$RELAY_TEST_FILESYSTEM\"; }}\n{prefix}\nfi\n")
+                .replace(
+                    "test \"$(findmnt -n -o FSTYPE --target /run/hack-local)\" = tmpfs",
+                    ":",
+                )
+                .replace("/run/hack-local", base.to_str().unwrap())
+                .replace("/run/hb", compact.to_str().unwrap())
+                .replace("0:0:", &format!("{}:{}:", owner.uid(), owner.gid()));
+        #[cfg(target_os = "macos")]
+        let program = program
+            .replace("stat -c %u:%g:%a:%h", "/usr/bin/stat -f %u:%g:%Lp:%l")
+            .replace("stat -c %u:%g:%a", "/usr/bin/stat -f %u:%g:%Lp")
+            .replace("stat -c %s", "/usr/bin/stat -f %z")
+            .replace("flock -w 7 9", ":");
+        let run = |socket: &str, slot: &str, filesystem: &str| {
             // Each call represents an independent guest start selection.
             let controls = base.join("relay-slots");
             if controls.exists() {
@@ -657,6 +664,7 @@ mod tests {
                 .replace("/run/hack-local", base.to_str().unwrap())
                 .replace("/run/hb", compact.to_str().unwrap());
             Command::new("/bin/sh")
+                .env("RELAY_TEST_FILESYSTEM", filesystem)
                 .args([
                     "-c",
                     &program,
@@ -677,23 +685,29 @@ mod tests {
                 .unwrap()
         };
         let legacy = super::super::super::PoolLayout::Legacy.bridge(0);
-        assert!(run(&legacy, "0").status.success());
+        assert!(run(&legacy, "0", "ext4").status.success());
         assert!(!compact.exists());
 
         let socket = super::super::super::PoolLayout::CompactV1.bridge(1);
-        let result = run(&socket, "1");
+        assert!(!run(&socket, "1", "tmpfs").status.success());
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&compact)
+            .unwrap();
+        assert!(!run(&socket, "1", "ext4").status.success());
+        let result = run(&socket, "1", "tmpfs");
         assert!(result.status.success(), "{:?}", result.stderr);
         let listener = UnixListener::bind(compact.join("01")).unwrap();
-        assert!(!run(&socket, "1").status.success());
+        assert!(!run(&socket, "1", "tmpfs").status.success());
         drop(listener);
         std::fs::remove_file(compact.join("01")).unwrap();
-        assert!(!run(&socket, "2").status.success());
+        assert!(!run(&socket, "2", "tmpfs").status.success());
 
         std::fs::set_permissions(&compact, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(!run(&socket, "1").status.success());
+        assert!(!run(&socket, "1", "tmpfs").status.success());
         std::fs::remove_dir(&compact).unwrap();
         symlink(&base, &compact).unwrap();
-        assert!(!run(&socket, "1").status.success());
+        assert!(!run(&socket, "1", "tmpfs").status.success());
     }
 
     #[cfg(target_os = "macos")]
@@ -786,6 +800,22 @@ mod tests {
         let valid = run(&allocation, "7");
         assert!(valid.status.success(), "{:?}", valid.stderr);
         assert_eq!(valid.stdout, b"absent\n");
+        let wrong_slot_socket = base.join("bridge-01.sock");
+        assert!(
+            !Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &script,
+                    "retired-absence-test",
+                    &allocation,
+                    "0",
+                    "7",
+                    wrong_slot_socket.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(!run(&"b".repeat(32), "7").status.success());
         assert!(!run(&allocation, "8").status.success());
         for phase in [

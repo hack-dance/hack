@@ -1422,12 +1422,12 @@ fn start_pool_observed(
         intent.validate()?;
     }
     reject_aliased_state(&root(candidate))?;
+    let owner_present = root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?;
     let (existing, existing_network, existing_dependencies, existing_share, existing_additional) =
-        if root(candidate)
-            .join("owner.json")
-            .try_exists()
-            .map_err(io)?
-        {
+        if owner_present {
             let owner = Owner::load(candidate)?;
             request.check(
                 &owner,
@@ -1452,10 +1452,7 @@ fn start_pool_observed(
                 bridges,
                 network.clone().unwrap_or_default(),
                 dependencies,
-                project_share
-                    .clone()
-                    .map(|share| share.with_layout(super::PoolLayout::CompactV1))
-                    .transpose()?,
+                project_share.clone(),
                 Vec::new(),
             )
         };
@@ -1620,7 +1617,13 @@ fn start_pool_observed(
     };
     // Hooks and admission can outlive the read-only frontend check. Never adopt
     // unrelated state that appeared before this operation acquired its lock.
-    if fresh_owner && project_share.is_some() {
+    if owner_present && fresh_owner {
+        return Err(CandidateError::new(
+            "project_share",
+            "Pool ownership changed before the operation lock.",
+        ));
+    }
+    if !owner_present && project_share.is_some() {
         require_fresh_source_pool(candidate)?;
     }
     let mut owner = Owner::create_with_project_share(
@@ -1646,8 +1649,11 @@ fn start_pool_observed(
         &owner.project_shares(),
         project_share.as_ref(),
     )?;
-    if owner.project_share != existing_share
-        || owner.additional_project_shares != existing_additional
+    // Fresh creation converts the approved path once, in Owner::create_with_project_share.
+    // check_request above compares the fresh share with the exact recorded identity.
+    if !fresh_owner
+        && (owner.project_share != existing_share
+            || owner.additional_project_shares != existing_additional)
     {
         return Err(CandidateError::new(
             "project_share",
@@ -2139,6 +2145,11 @@ fn adopt_boot(
             &artifact::digest(
                 &artifact::root(candidate).join("agent-rootfs/usr/local/bin/smolvm-agent"),
             )?,
+            if owner.socket_layout.is_legacy() {
+                "legacy"
+            } else {
+                "compact"
+            },
         ],
         false,
     )?;

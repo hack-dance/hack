@@ -73,8 +73,6 @@ function nativeLogPhase(value: unknown): NativeLogFailurePhase | undefined {
   return NATIVE_LOG_PHASES.find((phase) => phase === value);
 }
 
-const PROJECT_SHARE_COLLISION =
-  /^Project share names collide for [A-Za-z0-9._-]{1,64} and [A-Za-z0-9._-]{1,64}\.$/;
 const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
 const FIXED_MESSAGE_LIMIT = 400;
 const PROVIDER_SAID = "The provider's own error:";
@@ -88,13 +86,6 @@ const TRAILING_SLASHES = /\/+$/;
 function fixedNativeMessage(
   value: Record<string, unknown>
 ): string | undefined {
-  if (
-    value.code === "project_share_collision" &&
-    typeof value.message === "string" &&
-    PROJECT_SHARE_COLLISION.test(value.message)
-  ) {
-    return value.message;
-  }
   const fixed =
     value.message_fixed === true &&
     typeof value.message === "string" &&

@@ -60,14 +60,12 @@ if test "$action" = start; then
  # Concurrent starts of other slots may create it first; private_dir decides.
  test -e "$base" || mkdir -m 700 "$base" 2>/dev/null || test -d "$base"
  private_dir "$base"
- # The provider expose mapping connects to a guest listener. It does not
- # provision the compact listener's parent directory.
+ # The compact listener lives on its own boot-local mount.
  case "$socket" in
   /run/hb/*)
    test "$socket" = "/run/hb/$(printf '%02d' "$slot")"
-   test ! -L /run/hb
-   test -e /run/hb || mkdir -m 700 /run/hb 2>/dev/null || test -d /run/hb
    private_dir /run/hb
+   test "$(findmnt -n -o FSTYPE --mountpoint /run/hb)" = tmpfs
    ;;
  esac
  test ! -L "$socket"; test ! -e "$socket"

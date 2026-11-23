@@ -1473,6 +1473,8 @@ async function refuseReplacementBeforeStop(opts: {
   readonly trace: DaemonCommandTrace;
   /** `start` already checked the loaded job in checkRunningLaunchdDaemon. */
   readonly launchdChecked?: true;
+  /** `restart` may have read a stale pidfile that names an unrelated process. */
+  readonly unverifiedPid?: number;
 }): Promise<number | null> {
   const { paths, trace } = opts;
   let managed = trace.manager === "launchd";
@@ -1505,6 +1507,12 @@ async function refuseReplacementBeforeStop(opts: {
     }
   }
   if (managed) {
+    return null;
+  }
+  if (
+    opts.unverifiedPid !== undefined &&
+    !(await isHackDaemonProcess({ pid: opts.unverifiedPid }))
+  ) {
     return null;
   }
   const servicePath = await readDirectReplacementPath(executingDaemonArgv());
@@ -1563,7 +1571,11 @@ async function restartDaemon(opts: {
     // The same eligibility checks `start` runs before replacing a running
     // daemon: refuse now, with nothing stopped, when the start after the
     // stop would be refused.
-    const blocked = await refuseReplacementBeforeStop({ paths, trace });
+    const blocked = await refuseReplacementBeforeStop({
+      paths,
+      trace,
+      unverifiedPid: status.pid,
+    });
     if (blocked !== null) {
       return blocked;
     }

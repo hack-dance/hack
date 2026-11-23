@@ -181,6 +181,30 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "guest-execution",
+    module: "GuestAgent",
+    states: 3900,
+    invariant: "ResultBeforeRelease",
+    action: "Release",
+    fields: ['job = "released"', 'saved = "none"'],
+    additionalControls: [
+      {
+        name: "duplicate",
+        negative: true,
+        invariant: "StartedOnce",
+        action: "Next",
+        fields: ["starts = <<2, 0>>", "id = 1"],
+      },
+      {
+        name: "record-running",
+        negative: true,
+        invariant: "SavedOutcome",
+        action: "Record",
+        fields: ['belief = "running"', 'saved = "running"'],
+      },
+    ],
+  },
+  {
     name: "project-prerequisites",
     module: "ProjectPrerequisites",
     states: 13,

@@ -233,6 +233,14 @@ impl ConfigPane {
         self.revision += 1;
     }
 
+    fn revert_draft(&mut self) {
+        self.draft.changes.clear();
+        self.draft.save_result = None;
+        self.error = None;
+        self.validation = None;
+        self.clear_editors();
+    }
+
     fn settle_report(&mut self, report: Result<ConfigReport, ConfigError>) {
         self.loading = false;
         if let Ok(data) = &report {
@@ -271,84 +279,6 @@ impl ConfigPane {
             }
         }
         self.report = Some(report);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn select(pane: &mut ConfigPane, selection: &Selection) {
-        pane.stash_draft();
-        pane.selection = selection.clone();
-        pane.error = None;
-        pane.restore_draft();
-    }
-
-    fn stage_name(pane: &mut ConfigPane) {
-        pane.stage(
-            "name".into(),
-            Some(ConfigChange::Project {
-                layer: "1".into(),
-                path: "name".into(),
-                value: Value::String("storefront".into()),
-            }),
-        );
-    }
-
-    #[test]
-    fn a_pending_save_preserves_its_draft_and_failure_across_project_switches() {
-        let mut pane = ConfigPane::default();
-        let storefront = Selection {
-            root: "/storefront".into(),
-            ..Selection::default()
-        };
-        let other = Selection {
-            root: "/other".into(),
-            ..Selection::default()
-        };
-        select(&mut pane, &storefront);
-        stage_name(&mut pane);
-        let operation = pane.begin_save(1);
-
-        select(&mut pane, &other);
-        select(&mut pane, &storefront);
-        assert!(pane.saving());
-        select(&mut pane, &other);
-        assert!(!pane.finish_save(&storefront, operation, Err(ConfigError::unavailable())));
-        select(&mut pane, &storefront);
-        assert!(!pane.saving());
-        assert!(pane.draft.changes.contains_key("name"));
-        assert_eq!(
-            pane.error.as_ref().map(|e| e.code.as_str()),
-            Some("E_UNAVAILABLE")
-        );
-
-        stage_name(&mut pane);
-        let retry = pane.begin_save(1);
-        let saved = ConfigSaved {
-            changed: vec!["1".into()],
-            restart_offered: true,
-        };
-        assert!(!pane.finish_save(&storefront, operation, Ok(saved.clone())));
-        assert!(pane.draft.changes.contains_key("name"));
-        assert!(pane.finish_save(&storefront, retry, Ok(saved)));
-        assert!(pane.draft.changes.is_empty());
-    }
-
-    #[test]
-    fn the_previous_cli_cannot_complete_a_new_installations_save() {
-        let mut first = ConfigPane::default();
-        stage_name(&mut first);
-        let expired = first.begin_save(1);
-
-        let mut second = ConfigPane::default();
-        stage_name(&mut second);
-        second.begin_save(2);
-        let selection = second.selection.clone();
-        assert!(!second.finish_save(&selection, expired, Err(ConfigError::unavailable())));
-        assert!(second.saving());
-        assert!(second.draft.save_result.is_none());
     }
 }
 
@@ -919,10 +849,7 @@ impl HackApp {
                     .w(px(96.))
                     .on_click(cx.listener(|app, _, _, cx| {
                         if !app.config.saving() {
-                            app.config.draft.changes.clear();
-                            app.config.error = None;
-                            app.config.validation = None;
-                            app.config.clear_editors();
+                            app.config.revert_draft();
                             cx.notify();
                         }
                     })),
@@ -1225,4 +1152,103 @@ fn chip(label: impl Into<SharedString>, active: bool, ui: &Ui) -> gpui_kit::Div 
 
 fn setting<'a>(project: &'a Value, key: &str) -> &'a Value {
     key.split('.').fold(project, |value, part| &value[part])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn select(pane: &mut ConfigPane, selection: &Selection) {
+        pane.stash_draft();
+        pane.selection = selection.clone();
+        pane.error = None;
+        pane.restore_draft();
+    }
+
+    fn stage_name(pane: &mut ConfigPane) {
+        pane.stage(
+            "name".into(),
+            Some(ConfigChange::Project {
+                layer: "1".into(),
+                path: "name".into(),
+                value: Value::String("storefront".into()),
+            }),
+        );
+    }
+
+    #[test]
+    fn a_pending_save_preserves_its_draft_and_failure_across_project_switches() {
+        let mut pane = ConfigPane::default();
+        let storefront = Selection {
+            root: "/storefront".into(),
+            ..Selection::default()
+        };
+        let other = Selection {
+            root: "/other".into(),
+            ..Selection::default()
+        };
+        select(&mut pane, &storefront);
+        stage_name(&mut pane);
+        let operation = pane.begin_save(1);
+
+        select(&mut pane, &other);
+        select(&mut pane, &storefront);
+        assert!(pane.saving());
+        select(&mut pane, &other);
+        assert!(!pane.finish_save(&storefront, operation, Err(ConfigError::unavailable())));
+        select(&mut pane, &storefront);
+        assert!(!pane.saving());
+        assert!(pane.draft.changes.contains_key("name"));
+        assert_eq!(
+            pane.error.as_ref().map(|e| e.code.as_str()),
+            Some("E_UNAVAILABLE")
+        );
+
+        stage_name(&mut pane);
+        let retry = pane.begin_save(1);
+        let saved = ConfigSaved {
+            changed: vec!["1".into()],
+            restart_offered: true,
+        };
+        assert!(!pane.finish_save(&storefront, operation, Ok(saved.clone())));
+        assert!(pane.draft.changes.contains_key("name"));
+        assert!(pane.finish_save(&storefront, retry, Ok(saved)));
+        assert!(pane.draft.changes.is_empty());
+    }
+
+    #[test]
+    fn the_previous_cli_cannot_complete_a_new_installations_save() {
+        let mut first = ConfigPane::default();
+        stage_name(&mut first);
+        let expired = first.begin_save(1);
+
+        let mut second = ConfigPane::default();
+        stage_name(&mut second);
+        second.begin_save(2);
+        let selection = second.selection.clone();
+        assert!(!second.finish_save(&selection, expired, Err(ConfigError::unavailable())));
+        assert!(second.saving());
+        assert!(second.draft.save_result.is_none());
+    }
+
+    #[test]
+    fn reverting_a_failed_save_discards_its_error_with_the_draft() {
+        let mut pane = ConfigPane::default();
+        let first = pane.selection.clone();
+        stage_name(&mut pane);
+        let operation = pane.begin_save(1);
+        assert!(pane.finish_save(&first, operation, Err(ConfigError::unavailable())));
+        assert!(!pane.present_save());
+        assert!(pane.error.is_some());
+
+        pane.revert_draft();
+        let other = Selection {
+            root: "/other".into(),
+            ..Selection::default()
+        };
+        select(&mut pane, &other);
+        select(&mut pane, &first);
+        assert!(pane.draft.changes.is_empty());
+        assert!(pane.error.is_none());
+    }
 }

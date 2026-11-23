@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { applyEdits, findNodeAtLocation, modify } from "jsonc-parser";
 import { z } from "zod";
 import { HackCliError, type HackErrorCode } from "./cli-result.ts";
@@ -7,16 +8,19 @@ import {
   editableComposeField,
   parseComposeSource,
   parseRouteAddress,
+  updateComposeServiceField,
   validComposeShortPort,
   validHost,
   validPort,
 } from "./config-editor-compose.ts";
 import {
+  assertConfigEnvReadable,
+  assertConfigLayerDirectory,
   CONFIG_EDITOR_SCHEMA,
   CONFIG_SOURCE_LIMIT,
   type ConfigSnapshot,
+  captureConfigEditor,
   type LayerSnapshot,
-  patchedBaseHosts,
   readConfigLayer,
   showConfigEditor,
 } from "./config-editor-model.ts";
@@ -31,16 +35,22 @@ import {
   AtomicWriteConflictError,
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
-import { isRecord } from "./guards.ts";
+import { readHackEnvContract } from "./hack-env.ts";
 import {
+  ENV_BASE_SELECTION_ALIASES,
   ENV_CONFIG_NAME_MAX_LENGTH,
-  normalizeEnvConfigName,
+  parseEnvConfigSelection,
   parseProjectConfigRecord,
+  resolveEffectiveProjectName,
 } from "./project.ts";
 import {
+  discoverComposeServiceNames,
+  finishImplicitLegacyEnvMigration,
   isValidProjectEnvScopeName,
+  migrateLegacyProjectEnv,
   mutateProjectEnvLayer,
   type ProjectEnvLayerChange,
+  projectEnvConfigExistsForMutation,
   projectEnvLayerFits,
 } from "./project-env-config.ts";
 import { assertLegacyProjectDirectory } from "./project-input-selection.ts";
@@ -162,9 +172,10 @@ function projectFieldError(path: string, value: unknown): string | null {
   }
   if (
     path === "env.defaultOverlay" &&
-    normalizeEnvConfigName(value) !== value
+    !ENV_BASE_SELECTION_ALIASES.has(value) &&
+    parseEnvConfigSelection(value) !== value
   ) {
-    return "Use a lowercase overlay name with letters, digits and dashes.";
+    return "Use up to 128 lowercase letters, digits and dashes, or enter default for base layers.";
   }
   if (path === "open.prefer" && !["auto", "dev", "alias"].includes(value)) {
     return "Choose auto, dev or alias.";
@@ -302,7 +313,7 @@ function prepareService(
     );
   }
   try {
-    source.doc.setIn(path, change.value);
+    updateComposeServiceField({ source, path, value: change.value });
     file.text = source.doc.toString({ lineWidth: 0 });
     return null;
   } catch {
@@ -486,23 +497,25 @@ function preparePatch(snapshot: ConfigSnapshot, patch: Patch) {
   return { files, issues };
 }
 
-function prospectiveSnapshot(
+async function prospectiveSnapshot(
   snapshot: ConfigSnapshot,
   files: Map<string, Prepared>
 ) {
-  const layers = snapshot.layers.map((layer) => {
-    const file = files.get(layer.id);
-    return file ? { ...layer, text: file.text } : layer;
-  });
   const project = files.get("1");
-  if (!(project?.text && jsonConfigTree(project.text).ok)) {
-    return { ...snapshot, layers };
-  }
-  const parsed: unknown = JSON.parse(project.text);
-  const baseHosts = isRecord(parsed)
-    ? patchedBaseHosts(parsed, project.layer.file, snapshot.hostFallback)
-    : snapshot.baseHosts;
-  return { ...snapshot, layers, baseHosts };
+  const prospective =
+    project?.text !== undefined && project.text !== project.layer.text
+      ? await captureConfigEditor({
+          ...snapshot,
+          projectLayer: { ...project.layer, text: project.text },
+        })
+      : snapshot;
+  const layers = prospective.layers.map((layer) => {
+    const file = files.get(layer.id);
+    return file && file.layer.file === layer.file
+      ? { ...layer, text: file.text }
+      : layer;
+  });
+  return { ...prospective, layers };
 }
 
 function sourceIssues(files: Map<string, Prepared>): ConfigIssue[] {
@@ -544,10 +557,14 @@ function sourceIssues(files: Map<string, Prepared>): ConfigIssue[] {
 
 function layerSizeIssues(
   snapshot: ConfigSnapshot,
-  files: Map<string, Prepared>
+  files: Map<string, Prepared>,
+  envOnly: boolean
 ): ConfigIssue[] {
   const inheritsLocal = snapshot.layers.some((layer) => layer.inherited);
   return [...files.values()].flatMap(({ layer, text, env }) => {
+    if ((layer.kind === "env") !== envOnly) {
+      return [];
+    }
     const fits =
       layer.kind === "env"
         ? projectEnvLayerFits({
@@ -573,16 +590,35 @@ function layerSizeIssues(
   });
 }
 
-export function assessConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
+export async function assessConfigPatch(
+  snapshot: ConfigSnapshot,
+  patch: Patch
+) {
   const { files, issues } = preparePatch(snapshot, patch);
   if (issues.some((issue) => issue.code === "E_CONFLICT")) {
-    return { files, issues, previews: {} };
+    return { files, issues, previews: {}, prospective: snapshot };
   }
-  const sizeIssues = layerSizeIssues(snapshot, files);
+  // Bound staged text before deriving a new selection from it.
+  const sizeIssues = layerSizeIssues(snapshot, files, false);
   if (sizeIssues.length > 0) {
-    return { files, issues: [...issues, ...sizeIssues], previews: {} };
+    return {
+      files,
+      issues: [...issues, ...sizeIssues],
+      previews: {},
+      prospective: snapshot,
+    };
   }
-  const next = showConfigEditor(prospectiveSnapshot(snapshot, files));
+  const prospective = await prospectiveSnapshot(snapshot, files);
+  const envSizes = layerSizeIssues(prospective, files, true);
+  if (envSizes.length > 0) {
+    return {
+      files,
+      issues: [...issues, ...envSizes],
+      previews: {},
+      prospective,
+    };
+  }
+  const next = showConfigEditor(prospective);
   const previews = Object.fromEntries(
     next.layers
       .filter((layer) => files.has(layer.id) && layer.kind !== "env")
@@ -590,6 +626,7 @@ export function assessConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
   );
   return {
     files,
+    prospective,
     previews,
     issues: [...issues, ...sourceIssues(files), ...next.issues],
   };
@@ -597,7 +634,10 @@ export function assessConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
 
 /** Validate a whole patch before effect and publish each affected file once. */
 export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
-  const { files, issues } = assessConfigPatch(snapshot, patch);
+  const { files, issues, prospective } = await assessConfigPatch(
+    snapshot,
+    patch
+  );
   const code = patchIssueCode(issues);
   if (code !== null) {
     throw new HackCliError({
@@ -611,20 +651,16 @@ export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
     // Preflight every compared file before the first commit. Writers also
     // recheck the actual bytes inside their per-file lock at commit time.
     for (const layer of snapshot.layers) {
-      if (
-        patch.base[layer.id] !== undefined &&
-        layer.active &&
-        (await readConfigLayer(layer.file)) !== layer.text
-      ) {
-        throw new AtomicWriteConflictError();
+      if (patch.base[layer.id] !== undefined) {
+        if (layer.directory && layer.ownership !== "generated") {
+          await assertConfigLayerDirectory(layer);
+        }
+        if ((await readConfigLayer(layer.file)) !== layer.text) {
+          throw new AtomicWriteConflictError();
+        }
       }
     }
-    for (const file of files.values()) {
-      const didChange = await writePreparedLayer(snapshot, file);
-      if (didChange) {
-        changed.push(file.layer.id);
-      }
-    }
+    await publishPreparedLayers({ snapshot: prospective, files, changed });
   } catch (error) {
     if (error instanceof AtomicWriteConflictError) {
       throw new HackCliError({
@@ -660,6 +696,77 @@ export async function applyConfigPatch(snapshot: ConfigSnapshot, patch: Patch) {
   };
 }
 
+async function publishPreparedLayers(opts: {
+  readonly snapshot: ConfigSnapshot;
+  readonly files: Map<string, Prepared>;
+  readonly changed: string[];
+}) {
+  const { snapshot, files, changed } = opts;
+  const ordered = [...files.values()];
+  const env = ordered.filter((file) => file.layer.kind === "env");
+  for (const file of ordered.filter((file) => file.layer.kind !== "env")) {
+    if (await writePreparedLayer(snapshot, file, file.layer.text)) {
+      changed.push(file.layer.id);
+    }
+  }
+  if (env.length === 0) {
+    return;
+  }
+  const migrated = await migrateConfigEnv(snapshot, env[0]?.layer);
+  for (const layer of snapshot.layers) {
+    if (migrated.has(layer.file) && !changed.includes(layer.id)) {
+      changed.push(layer.id);
+    }
+  }
+  for (const file of env) {
+    const expected = migrated.has(file.layer.file)
+      ? await readConfigLayer(file.layer.file)
+      : file.layer.text;
+    if (
+      (await writePreparedLayer(snapshot, file, expected)) &&
+      !changed.includes(file.layer.id)
+    ) {
+      changed.push(file.layer.id);
+    }
+  }
+}
+
+function inheritedEnvDir(snapshot: ConfigSnapshot): string | null {
+  const inherited = snapshot.layers.find((layer) => layer.inherited);
+  return inherited ? dirname(inherited.file) : null;
+}
+
+async function migrateConfigEnv(
+  snapshot: ConfigSnapshot,
+  layer?: LayerSnapshot
+) {
+  const { project } = snapshot;
+  await assertConfigEnvReadable(project.projectRoot, inheritedEnvDir(snapshot));
+  if (layer) {
+    await assertConfigLayerDirectory(layer);
+  }
+  if (
+    (await projectEnvConfigExistsForMutation(project)) ||
+    !(await readHackEnvContract(project)).exists
+  ) {
+    return new Set<string>();
+  }
+  const migrated = await migrateLegacyProjectEnv({
+    ...project,
+    projectName: await resolveEffectiveProjectName(project),
+    serviceNames: await discoverComposeServiceNames({
+      composeFile: project.composeFile,
+    }),
+    materialize: false,
+  });
+  await finishImplicitLegacyEnvMigration({ ...project, migrated });
+  const paths = new Set(migrated.wroteFiles);
+  if (migrated.updatedProjectConfig) {
+    paths.add(project.configFile);
+  }
+  return paths;
+}
+
 function patchIssueCode(issues: readonly ConfigIssue[]): HackErrorCode | null {
   if (issues.length === 0) {
     return null;
@@ -674,9 +781,22 @@ function patchIssueCode(issues: readonly ConfigIssue[]): HackErrorCode | null {
 
 async function writePreparedLayer(
   snapshot: ConfigSnapshot,
-  file: Prepared
+  file: Prepared,
+  expected: string | null
 ): Promise<boolean> {
   const { layer, text } = file;
+  const validate = async () => {
+    await assertConfigLayerDirectory(layer);
+    await assertLegacyProjectDirectory({
+      projectDir: snapshot.project.projectDir,
+    });
+    if (layer.kind === "env") {
+      await assertConfigEnvReadable(
+        snapshot.project.projectRoot,
+        inheritedEnvDir(snapshot)
+      );
+    }
+  };
   if (layer.kind === "env") {
     return (
       await mutateProjectEnvLayer({
@@ -684,7 +804,7 @@ async function writePreparedLayer(
         envName: layer.overlay ?? null,
         local: layer.ownership === "local",
         changes: file.env,
-        expected: { file: layer.file, text: layer.text },
+        expected: { file: layer.file, text: expected, validate },
         maxBytes: CONFIG_SOURCE_LIMIT,
       })
     ).changed;
@@ -692,10 +812,6 @@ async function writePreparedLayer(
   if (text === null || text === layer.text) {
     return false;
   }
-  const validate = async () =>
-    await assertLegacyProjectDirectory({
-      projectDir: snapshot.project.projectDir,
-    });
   await validate();
   return await withEnvLayerLock({
     layerPath: layer.file,

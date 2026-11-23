@@ -193,6 +193,12 @@ commands. Secure entries are emitted as markers. Source can be redacted
 or withheld. Use the Env layers grid or the existing env writer to edit
 env values.
 
+The default overlay uses the same names as `--env`. Use `default` to select
+base layers. Config honors the env migration journal for the selected
+checkout and any inherited layers. On the first env write to a project
+with a legacy contract, apply migrates that contract through the same
+path as `hack env add`.
+
 Pass the same checkout and overlay flags to `config validate` and
 `config apply`. Read revisions from a fresh `show` and send the patch on
 stdin. Each revision identifies the resolved checkout, layer file and its

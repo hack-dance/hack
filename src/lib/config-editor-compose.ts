@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import {
   isAlias,
   isMap,
@@ -22,7 +23,10 @@ const HOST_LABEL = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i;
 const SERVICE_NAME = /^[\w.-]+$/;
 const ROUTE_LABEL = /^caddy(?:[._]|$)/;
 const SHORT_PORT =
-  /^(?:(?:\[[\da-f.:]+\]|[\d.]+):(?=\d+(?:-\d+)?:))?(\d+)(?:-(\d+))?(?::(\d+)(?:-(\d+))?)?(?:\/(?:tcp|udp|sctp))?$/iu;
+  /^(?:(\[[^\]]+\]|[^:]+):(?=[^:]*:))?(?:([^:]*):)?(\d+(?:-\d+)?)(?:\/(?:tcp|udp|sctp))?$/iu;
+const PORT_RANGE = /^(\d+)(?:-(\d+))?$/;
+const PORT_NUMBER = /^\d+$/;
+const VARIABLE_REFERENCE = /\$\{?[A-Za-z_]/;
 
 export const validHost = (host: string): boolean =>
   host.length <= 253 && host.split(".").every((part) => HOST_LABEL.test(part));
@@ -37,11 +41,53 @@ export function validComposeShortPort(value: unknown): boolean {
   if (typeof value !== "string") {
     return validPort(value);
   }
-  const endpoints = SHORT_PORT.exec(value);
+  const match = SHORT_PORT.exec(value);
+  if (!match) {
+    return false;
+  }
+  const [, host, published, target] = match;
   return (
-    endpoints
-      ?.slice(1)
-      .every((port) => port === undefined || validPort(Number(port))) ?? false
+    (host === undefined || isIP(host.replace(/^\[|\]$/g, "")) !== 0) &&
+    (!published || validPortRange(published, true)) &&
+    target !== undefined &&
+    validPortRange(target)
+  );
+}
+
+function validPortRange(value: string, dynamic = false): boolean {
+  const match = PORT_RANGE.exec(value);
+  if (dynamic && value === "0") {
+    return true;
+  }
+  return (
+    match !== null &&
+    validPort(Number(match[1])) &&
+    (match[2] === undefined ||
+      (validPort(Number(match[2])) && Number(match[1]) <= Number(match[2])))
+  );
+}
+
+function hasInterpolation(value: unknown): boolean {
+  return typeof value === "string" && VARIABLE_REFERENCE.test(value);
+}
+
+function validSourcePort(port: unknown): boolean {
+  if (!isRecord(port)) {
+    return hasInterpolation(port) || validComposeShortPort(port);
+  }
+  const { target, published, host_ip } = port;
+  return (
+    (validPort(target) ||
+      (typeof target === "string" &&
+        (hasInterpolation(target) ||
+          (PORT_NUMBER.test(target) && validPort(Number(target)))))) &&
+    (published === undefined ||
+      hasInterpolation(published) ||
+      ((typeof published === "string" || typeof published === "number") &&
+        validPortRange(String(published), true))) &&
+    (host_ip === undefined ||
+      hasInterpolation(host_ip) ||
+      (typeof host_ip === "string" && isIP(host_ip) !== 0))
   );
 }
 
@@ -171,13 +217,12 @@ function serviceRoutes(opts: {
   readonly branch: string | null;
   readonly baseHosts: readonly string[];
 }): { readonly routes: readonly RouteView[]; readonly droppedAll: boolean } {
-  const { labels, branch, baseHosts } = opts;
+  const { branch, baseHosts } = opts;
+  // Compose reduces repeated list labels to the last assignment.
+  const labels = new Map(opts.labels.map(({ key, value }) => [key, value]));
   const routes: RouteView[] = [];
-  if (branch !== null && baseHosts.length === 0) {
-    return { routes, droppedAll: false };
-  }
   let droppedAll = false;
-  for (const { key, value } of labels) {
+  for (const [key, value] of labels) {
     if (!(isCaddySiteLabel(key) && value.trim())) {
       continue;
     }
@@ -188,9 +233,7 @@ function serviceRoutes(opts: {
     if (branch !== null && !resolved) {
       droppedAll = true;
     }
-    const port = upstreamPort(
-      labels.find((label) => label.key === `${key}.reverse_proxy`)?.value
-    );
+    const port = upstreamPort(labels.get(`${key}.reverse_proxy`));
     for (const site of splitCaddySites(resolved)) {
       const address = parseRouteAddress(site);
       if (address) {
@@ -280,6 +323,14 @@ function composeDependencyIssue(
   service: string,
   dependencies: readonly string[]
 ): ConfigIssue | null {
+  const path = ["services", service, "depends_on"];
+  if (dependencies.includes(service)) {
+    return composeFieldIssue(
+      source,
+      path,
+      "A service cannot depend on itself."
+    );
+  }
   if (!source.checksDependencies) {
     return null;
   }
@@ -289,20 +340,13 @@ function composeDependencyIssue(
   if (missing === undefined) {
     return null;
   }
-  const path = ["services", service, "depends_on"];
-  const node = source.doc.getIn(path, true);
-  return {
-    layer: "2",
+  return composeFieldIssue(
+    source,
     path,
-    line:
-      isSeq(node) || isMap(node) || isScalar(node)
-        ? source.lines.linePos(node.range?.[0] ?? 0).line
-        : null,
-    code: "E_CONFIG_INVALID",
-    message: SERVICE_NAME.test(missing)
+    SERVICE_NAME.test(missing)
       ? `depends_on names a service that is not defined: ${missing}`
-      : "depends_on names a service that is not defined.",
-  };
+      : "depends_on names a service that is not defined."
+  );
 }
 
 export function composeModel(opts: {
@@ -313,6 +357,7 @@ export function composeModel(opts: {
   const source = parseComposeSource(opts.text);
   const { doc, services } = source;
   const issues: ConfigIssue[] = [];
+  const resolveRoutes = opts.branch === null || opts.baseHosts.length > 0;
   if (source.invalid !== null) {
     issues.push({
       layer: "2",
@@ -335,21 +380,14 @@ export function composeModel(opts: {
       return [];
     }
     if (
-      Array.isArray(service.ports) &&
-      service.ports.some(
-        (port: unknown) =>
-          !(
-            isRecord(port) ||
-            (typeof port === "string" && port.includes("$")) ||
-            validComposeShortPort(port)
-          )
-      )
+      service.ports != null &&
+      !(Array.isArray(service.ports) && service.ports.every(validSourcePort))
     ) {
       issues.push(
         composeFieldIssue(
           source,
           ["services", name, "ports"],
-          "Use ports between 1 and 65535."
+          "Use valid port mappings with a target port between 1 and 65535."
         )
       );
     }
@@ -359,11 +397,13 @@ export function composeModel(opts: {
       issues.push(missingDependency);
     }
     const labels = composeLabels(service);
-    const { routes, droppedAll } = serviceRoutes({
-      labels,
-      branch: opts.branch,
-      baseHosts: opts.baseHosts,
-    });
+    const { routes, droppedAll } = resolveRoutes
+      ? serviceRoutes({
+          labels,
+          branch: opts.branch,
+          baseHosts: opts.baseHosts,
+        })
+      : { routes: [], droppedAll: false };
     if (droppedAll) {
       issues.push({
         layer: "2",
@@ -402,6 +442,41 @@ export function composeModel(opts: {
     ];
   });
   return { services: rows, issues };
+}
+
+/** Reuse surviving scalar nodes, including each node's comments and style. */
+export function updateComposeServiceField(opts: {
+  readonly source: ComposeSource;
+  readonly path: string[];
+  readonly value: string | (string | number)[];
+}): void {
+  const { doc } = opts.source;
+  const { path, value } = opts;
+  const node = doc.getIn(path, true);
+  if (!(Array.isArray(value) && isSeq(node))) {
+    doc.setIn(path, value);
+    return;
+  }
+  const previous = node.items.filter(isScalar);
+  const retained = new Set<(typeof previous)[number]>();
+  const matching = value.map((entry) => {
+    const item = previous.find(
+      (old) => old.value === entry && !retained.has(old)
+    );
+    if (item) {
+      retained.add(item);
+    }
+    return item;
+  });
+  const remaining = previous.filter((item) => !retained.has(item));
+  node.items = value.map((entry, index) => {
+    const item = matching[index] ?? remaining.shift();
+    if (!item) {
+      return doc.createNode(entry);
+    }
+    item.value = entry;
+    return item;
+  });
 }
 
 function composeFieldIssue(

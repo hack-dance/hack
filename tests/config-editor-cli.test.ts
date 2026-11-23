@@ -4,6 +4,8 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -11,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { showConfigEditor } from "../src/lib/config-editor-model.ts";
 import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
-import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
 setDefaultTimeout(45_000);
 
@@ -476,10 +478,19 @@ test("show and validation previews omit authorization headers and commands", asy
           "      caddy.reverse_proxy.header_up: Authorization fixture-ciphertext-marker"
         )
     ),
+    writeFile(
+      join(f.project, "hack.env.default.yaml"),
+      env(
+        "  global:\n    REDIS_URL: redis://:fixture-ciphertext-marker@redis.example.test:6379"
+      )
+    ),
   ]);
   const report = await show(f.root, f.main);
   expect(report.layers[0]?.hidden).toBe(true);
   expect(report.layers[1]?.hidden).toBe(true);
+  expect(
+    report.env.find((row) => row.key === "REDIS_URL")?.values[0]?.secret
+  ).toBe(true);
   const result = await cli({
     root: f.root,
     cwd: f.main,
@@ -733,4 +744,276 @@ test("a concurrent apply using the same base can commit only once", async () => 
   const failures = outcomes.filter((outcome) => outcome.code === 1);
   expect(failures).toHaveLength(1);
   expect(failures[0]?.payload.error.code).toBe("E_CONFLICT");
+});
+
+test("pending env migration blocks the selected checkout and readers of its inherited layers", async () => {
+  const f = await fixture();
+  const base = bases(await show(f.root, f.main));
+  const primary = await realpath(f.main);
+  const hash = new Bun.CryptoHasher("sha256").update(primary).digest("hex");
+  const journal = join(privateCliHome(f.root), ".hack/env-migrations", hash);
+  await mkdir(journal, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(journal, "journal.json"),
+    JSON.stringify({
+      version: 1,
+      kind: "hack-env-migration",
+      project: { projectRoot: primary },
+      state: "applying",
+    }),
+    { mode: 0o600 }
+  );
+  const [selected, inherited, apply] = await Promise.all([
+    cli({ root: f.root, cwd: f.main, args: ["show"] }),
+    cli({ root: f.root, cwd: f.linked, args: ["show"] }),
+    cli({
+      root: f.root,
+      cwd: f.main,
+      args: ["apply"],
+      patch: {
+        base,
+        changes: [
+          {
+            layer: "5",
+            kind: "env",
+            scope: "global",
+            key: "TEST",
+            value: "new",
+          },
+        ],
+      },
+    }),
+  ]);
+  for (const result of [selected, inherited, apply]) {
+    expect(result.payload.error.message).toContain("migration is unfinished");
+  }
+});
+
+test("the first Config env write migrates an existing legacy contract before publishing its change", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-config-legacy-env-"));
+  scratch.push(root);
+  const cwd = join(root, "legacy");
+  const project = join(cwd, ".hack");
+  await mkdir(project, { recursive: true });
+  await Promise.all([
+    writeFile(
+      join(project, "hack.config.json"),
+      '{"name":"legacy","dev_host":"legacy.hack"}\n'
+    ),
+    writeFile(
+      join(project, "docker-compose.yml"),
+      "services:\n  api:\n    image: test:dev\n"
+    ),
+    writeFile(
+      join(project, "hack.env.json"),
+      JSON.stringify({
+        version: 1,
+        vars: [
+          { key: "EXISTING", source: "plain_env", services: ["api"] },
+          { key: "ANOTHER", source: "plain_env" },
+        ],
+      })
+    ),
+    writeFile(join(project, ".env"), "EXISTING=kept\nANOTHER=also-kept\n"),
+  ]);
+  const before = await show(root, cwd);
+  const applied = await cli({
+    root,
+    cwd,
+    args: ["apply"],
+    patch: {
+      base: bases(before),
+      changes: [
+        { layer: "5", kind: "env", scope: "api", key: "NEW", value: "added" },
+      ],
+    },
+  });
+  expect(applied.payload.ok).toBe(true);
+  expect(applied.payload.data.restart_offered).toBe(false);
+  const after = await show(root, cwd);
+  expect(
+    after.env.map((row) => [row.key, row.scope, row.values[0]?.value])
+  ).toEqual(
+    expect.arrayContaining([
+      ["EXISTING", "api", "kept"],
+      ["ANOTHER", "global", "also-kept"],
+      ["NEW", "api", "added"],
+    ])
+  );
+});
+
+test("an identical replacement layer directory invalidates a revision", async () => {
+  const f = await fixture();
+  const report = await show(f.root, f.main);
+  const projectPath = join(f.project, "hack.config.json");
+  const original = await readFile(projectPath, "utf8");
+  const old = join(f.main, ".old-hack");
+  await rename(f.project, old);
+  await mkdir(f.project);
+  await Promise.all([
+    writeFile(projectPath, original),
+    writeFile(join(f.project, "docker-compose.yml"), compose),
+  ]);
+  const result = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["apply"],
+    patch: {
+      base: { "1": bases(report)["1"] },
+      changes: [{ layer: "1", kind: "project", path: "name", value: "wrong" }],
+    },
+  });
+  expect(result.payload.error.code).toBe("E_CONFLICT");
+  expect(await readFile(projectPath, "utf8")).toBe(original);
+});
+
+test("validation reads newly selected layers and honors an explicit selection", async () => {
+  const f = await fixture();
+  const checkOverlay = async (value: string, args: string[] = []) =>
+    await cli({
+      root: f.root,
+      cwd: f.main,
+      args: ["validate", ...args],
+      patch: {
+        base: bases(await show(f.root, f.main, ...args)),
+        changes: [
+          { layer: "1", kind: "project", path: "env.defaultOverlay", value },
+        ],
+      },
+    });
+  await writeFile(join(f.project, "hack.env.qa.yaml"), "invalid: [");
+  const qa = await checkOverlay("qa");
+  expect(qa.payload.data.issues).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ layer: "3:qa", code: "E_CONFIG_PARSE" }),
+    ])
+  );
+  expect(
+    (await checkOverlay("qa", ["--env", "default"])).payload.data.valid
+  ).toBe(true);
+  expect((await checkOverlay("a".repeat(129))).payload.data.valid).toBe(false);
+  await writeFile(
+    join(f.project, "hack.config.json"),
+    '{"dev_host":"storefront.hack","env":{"defaultOverlay":"default"}}'
+  );
+  const base = await show(f.root, f.main);
+  expect(base.overlay).toBeNull();
+  expect(
+    base.layers.filter((layer) => layer.file.endsWith("hack.env.default.yaml"))
+  ).toHaveLength(1);
+
+  await writeFile(join(f.linked, ".hack/hack.config.json"), "{}");
+  const cfg = await show(f.root, f.linked);
+  const patch = {
+    base: bases(cfg),
+    changes: [
+      {
+        layer: "1",
+        kind: "project",
+        path: "worktree.auto_branch",
+        value: false,
+      },
+    ],
+  };
+  const implicit = await cli({
+    root: f.root,
+    cwd: f.linked,
+    args: ["validate"],
+    patch,
+  });
+  expect(implicit.payload.data.valid).toBe(true);
+  const explicit = ["--branch", "feature-search"];
+  const explicitCheck = await cli({
+    root: f.root,
+    cwd: f.linked,
+    args: ["validate", ...explicit],
+    patch: { ...patch, base: bases(await show(f.root, f.linked, ...explicit)) },
+  });
+  expect(explicitCheck.payload.data.valid).toBe(false);
+});
+
+test("Compose ports and labels match runtime interpretation and sequence edits keep comments", async () => {
+  const f = await fixture();
+  const file = join(f.project, "docker-compose.yml");
+  await writeFile(
+    file,
+    compose
+      .replace(
+        "    depends_on: [api]",
+        "    ports:\n      - '127.0.0.1::80' # loopback target\n      - '8081:81' # published target\n    depends_on:\n      - api # API dependency"
+      )
+      .replace("      - unrelated=kept", "      - caddy=last.storefront.hack")
+  );
+  const report = await show(f.root, f.main);
+  const web = report.services.find((service) => service.name === "web");
+  expect(web?.routes.map((route) => route.host)).toEqual([
+    "last.storefront.hack",
+  ]);
+  expect(web?.route_edit).toBeNull();
+  const check = async (changes: unknown[]) =>
+    await cli({
+      root: f.root,
+      cwd: f.main,
+      args: ["validate"],
+      patch: { base: bases(report), changes },
+    });
+  const valid = await check([
+    {
+      layer: "2",
+      kind: "service",
+      service: "web",
+      field: "ports",
+      value: ["127.0.0.1::80", "8082:81"],
+    },
+    {
+      layer: "2",
+      kind: "service",
+      service: "web",
+      field: "depends_on",
+      value: ["api", "worker"],
+    },
+  ]);
+  expect(valid.payload.data.valid).toBe(true);
+  for (const comment of [
+    "# loopback target",
+    "# published target",
+    "# API dependency",
+  ]) {
+    expect(valid.payload.data.previews["2"]).toContain(comment);
+  }
+  const invalidMappings = [
+    "'8082-8081:81'",
+    "'127.0.0.999:8081:81'",
+    "{published: 8081}",
+  ];
+  for (const mapping of invalidMappings) {
+    const invalid = await check([
+      {
+        layer: "2",
+        kind: "source",
+        text: `services:\n  web:\n    ports: [${mapping}]\n`,
+      },
+    ]);
+    expect(invalid.payload.data.valid).toBe(false);
+  }
+  const self = await check([
+    {
+      layer: "2",
+      kind: "service",
+      service: "web",
+      field: "depends_on",
+      value: ["web"],
+    },
+  ]);
+  expect(self.payload.data.valid).toBe(false);
+});
+
+test("an authored dev_host avoids opening a legacy dotenv input", async () => {
+  const f = await fixture();
+  const legacy = join(f.project, ".env");
+  await mkdir(legacy);
+  expect((await show(f.root, f.main)).state).toBe("ready");
+  await writeFile(join(f.project, "hack.config.json"), "{}");
+  const fallback = await cli({ root: f.root, cwd: f.main, args: ["show"] });
+  expect(fallback.payload.error.code).toBe("E_PERMISSION");
 });

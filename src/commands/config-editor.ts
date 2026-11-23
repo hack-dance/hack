@@ -56,7 +56,10 @@ function readSelection(selection: Selection) {
 
 async function readPatchSelection(selection: Selection) {
   const snapshot = await readSelection(selection).catch((error: unknown) => {
-    if (error instanceof HackCliError && error.code === "E_PROJECT_NOT_FOUND") {
+    if (
+      error instanceof HackCliError &&
+      (error.code === "E_PROJECT_NOT_FOUND" || error.code === "E_PATH_CONFLICT")
+    ) {
       return null;
     }
     throw error;
@@ -166,7 +169,7 @@ export async function validateConfigEditorStdin(
   return await runConfigEditor(async () => {
     const patch = readConfigPatch(input ?? "");
     const snapshot = await readPatchSelection(selection);
-    const { issues, previews } = assessConfigPatch(snapshot, patch);
+    const { issues, previews } = await assessConfigPatch(snapshot, patch);
     return {
       schema: CONFIG_EDITOR_SCHEMA,
       valid: issues.length === 0,

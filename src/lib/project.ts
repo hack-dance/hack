@@ -233,7 +233,11 @@ export async function readLegacyProjectDevHost(
 ): Promise<string | null> {
   // Legacy fallback: older scaffolds wrote DEV_HOST into `.hack/.env`.
   const envText = await readTextFile(ctx.envFile);
-  if (!envText) {
+  return legacyProjectDevHost(envText);
+}
+
+export function legacyProjectDevHost(envText: string | null): string | null {
+  if (envText === null) {
     return null;
   }
 
@@ -258,7 +262,17 @@ export async function readProjectDefaultEnvConfig(opts: {
     envFile: resolve(opts.projectDir, PROJECT_ENV_FILENAME),
     configFile: resolve(opts.projectDir, PROJECT_CONFIG_FILENAME),
   });
-  return config.env?.defaultOverlay ?? config.defaultEnvConfig ?? null;
+  return resolveProjectDefaultEnvOverlay(config);
+}
+
+export function resolveProjectDefaultEnvOverlay(
+  config: ProjectConfig
+): string | null {
+  return (
+    parseEnvConfigSelection(
+      config.env?.defaultOverlay ?? config.defaultEnvConfig
+    ) ?? null
+  );
 }
 
 export interface ProjectConfig {

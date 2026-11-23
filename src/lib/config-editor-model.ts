@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, lstat, open, realpath } from "node:fs/promises";
+import { access, lstat, open, realpath, stat } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { PROJECT_CONFIG_LEGACY_FILENAME } from "../constants.ts";
 import { autoWorktreeBranch, resolveEffectiveBranch } from "./branches.ts";
@@ -12,16 +12,23 @@ import {
   safeJsonSource,
   safeYamlSource,
 } from "./config-editor-source.ts";
+import {
+  assertEnvMigrationReadable,
+  EnvMigrationPendingError,
+} from "./env-migration-state.ts";
+import { AtomicWriteConflictError } from "./fs.ts";
 import { listGitWorktrees } from "./git-worktree.ts";
 import { isRecord } from "./guards.ts";
 import {
   defaultProjectDevHost,
   findProjectContext,
   findProjectContextAtRoot,
-  normalizeEnvConfigName,
+  legacyProjectDevHost,
+  type ProjectConfig,
   type ProjectContext,
+  parseEnvConfigSelection,
   parseProjectConfigRecord,
-  readLegacyProjectDevHost,
+  resolveProjectDefaultEnvOverlay,
   resolveProjectOauthAliasHost,
   resolveProjectRouteBaseHosts,
   resolveWorktreeAutoBranch,
@@ -59,16 +66,63 @@ export type LayerSnapshot = Layer & {
   readonly writable: boolean;
   readonly revision: string;
   readonly text: string | null;
+  readonly directory: ConfigDirectory | null;
 };
+
+type ConfigDirectory = {
+  readonly path: string;
+  readonly device: number;
+  readonly inode: number;
+};
+
+async function configDirectory(file: string): Promise<ConfigDirectory | null> {
+  try {
+    const path = await realpath(dirname(file));
+    const info = await stat(path);
+    if (info.isDirectory()) {
+      return { path, device: info.dev, inode: info.ino };
+    }
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+  }
+  throw new HackCliError({
+    code: "E_PATH_CONFLICT",
+    message: "The config layer directory could not be verified.",
+  });
+}
+
+export async function assertConfigLayerDirectory(
+  layer: LayerSnapshot
+): Promise<void> {
+  const current = await configDirectory(layer.file).catch(() => null);
+  if (
+    !current ||
+    current.path !== layer.directory?.path ||
+    current.device !== layer.directory.device ||
+    current.inode !== layer.directory.inode
+  ) {
+    throw new AtomicWriteConflictError();
+  }
+}
 
 function configRevision(
   layer: Layer,
   project: ProjectContext,
-  text: string | null
+  text: string | null,
+  directory: ConfigDirectory | null
 ): string {
   // Even an absent file belongs to one checkout and destination.
   return new Bun.CryptoHasher("sha256")
-    .update(JSON.stringify([project.projectRoot, layer.file, text]))
+    .update(
+      JSON.stringify([
+        project.projectRoot,
+        layer.file,
+        layer.ownership === "generated" ? null : directory,
+        text,
+      ])
+    )
     .digest("hex");
 }
 
@@ -149,14 +203,13 @@ async function snapshotLayer(
   }
   // Managed source paths can contain runtime state. Follow only real
   // directories inside the selected checkout and never follow a leaf link.
-  const directory = dirname(layer.file);
-  const realDirectory = await realpath(directory).catch(() => null);
+  const directory = await configDirectory(layer.file);
   if (
-    realDirectory !== null &&
-    realDirectory !==
+    directory !== null &&
+    directory.path !==
       resolve(
         await realpath(project.projectRoot),
-        relative(project.projectRoot, directory)
+        relative(project.projectRoot, dirname(layer.file))
       ) &&
     !layer.inherited
   ) {
@@ -169,7 +222,8 @@ async function snapshotLayer(
   return {
     ...layer,
     text,
-    revision: configRevision(layer, project, text),
+    directory,
+    revision: configRevision(layer, project, text, directory),
     writable: await writableLayer(layer, text !== null),
   };
 }
@@ -267,12 +321,18 @@ async function configLayers(opts: {
   readonly projectLayer: LayerSnapshot;
   readonly branch: string | null;
   readonly overlay: string | null | undefined;
+  readonly config: ProjectConfig;
 }) {
   const p = opts.project;
-  const [env, inherited, overlays] = await Promise.all([
-    resolveProjectEnvSelection({ ...p, envName: opts.overlay }),
-    resolvePrimaryLocalProjectDir(p),
-    listProjectEnvOverlays(p),
+  const defaultEnv = resolveProjectDefaultEnvOverlay(opts.config);
+  const inherited = await resolvePrimaryLocalProjectDir({
+    ...p,
+    inheritLocal: opts.config.worktree?.inheritLocal !== false,
+  });
+  await assertConfigEnvReadable(p.projectRoot, inherited);
+  const [env, overlays] = await Promise.all([
+    resolveProjectEnvSelection({ ...p, envName: opts.overlay, defaultEnv }),
+    listProjectEnvOverlays({ ...p, defaultEnv, primaryDir: inherited }),
   ]);
   const overlay = env.effectiveEnv;
   const names = [
@@ -280,7 +340,7 @@ async function configLayers(opts: {
       ...overlays.map((entry) => entry.name),
       ...(overlay ? [overlay] : []),
     ]),
-  ].filter((name) => normalizeEnvConfigName(name) === name);
+  ].filter((name) => parseEnvConfigSelection(name) === name);
   const layers: Layer[] = [
     {
       id: "2",
@@ -296,7 +356,7 @@ async function configLayers(opts: {
       projectDir: p.projectDir,
       envName: name,
     });
-    if (file === env.localDefaultPath) {
+    if (file === env.localDefaultPath || file === env.defaultPath) {
       continue;
     }
     layers.push(
@@ -389,6 +449,26 @@ async function configLayers(opts: {
   };
 }
 
+export async function assertConfigEnvReadable(
+  projectRoot: string,
+  inherited: string | null
+): Promise<void> {
+  try {
+    await assertEnvMigrationReadable({ projectRoot });
+    if (inherited) {
+      await assertEnvMigrationReadable({ projectRoot: dirname(inherited) });
+    }
+  } catch (error) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        error instanceof EnvMigrationPendingError
+          ? error.message
+          : "The env migration journal could not be verified.",
+    });
+  }
+}
+
 export async function readConfigEditor(opts: {
   readonly start: string;
   readonly branch: string | undefined;
@@ -398,34 +478,68 @@ export async function readConfigEditor(opts: {
   if (!project) {
     return null;
   }
-  const projectLayer = await readProjectLayer(project);
+  return await captureConfigEditor({
+    project,
+    projectLayer: await readProjectLayer(project),
+    explicitBranch: explicit,
+    requestedOverlay: opts.overlay,
+  });
+}
+
+/** Observe the selected layers using the supplied, possibly edited project file. */
+export async function captureConfigEditor(opts: {
+  readonly project: ProjectContext;
+  readonly projectLayer: LayerSnapshot;
+  readonly explicitBranch: string | null;
+  readonly requestedOverlay: string | null | undefined;
+}) {
+  const { project, projectLayer, explicitBranch, requestedOverlay } = opts;
   const raw = parseProjectLayer(projectLayer);
+  if (raw !== null) {
+    await assertConfigEnvReadable(project.projectRoot, null);
+  }
   const cfg = parseProjectConfigRecord(raw ?? {}, projectLayer.file);
   const branch = (
     await resolveEffectiveBranch({
-      explicitBranch: explicit,
+      explicitBranch,
       projectRoot: project.projectRoot,
       autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
     })
   ).branch;
-  const hostFallback =
-    (await readLegacyProjectDevHost(project)) ??
+  const devHost =
+    cfg.devHost ??
+    (raw !== null
+      ? legacyProjectDevHost(await readConfigLayer(project.envFile))
+      : null) ??
     (branch === null ? defaultProjectDevHost(project.projectRoot) : null);
-  const baseHosts = patchedBaseHosts(
-    raw ?? {},
-    projectLayer.file,
-    hostFallback
-  );
+  const baseHosts = devHost
+    ? resolveProjectRouteBaseHosts({
+        devHost,
+        aliasHost: resolveProjectOauthAliasHost({ oauth: cfg.oauth, devHost }),
+      })
+    : [];
   const layers =
     raw === null
-      ? { layers: [projectLayer], overlay: opts.overlay ?? null, overlays: [] }
+      ? {
+          layers: [projectLayer],
+          overlay: requestedOverlay ?? null,
+          overlays: [],
+        }
       : await configLayers({
           project,
           projectLayer,
           branch,
-          overlay: opts.overlay,
+          overlay: requestedOverlay,
+          config: cfg,
         });
-  return { ...layers, project, branch, baseHosts, hostFallback };
+  return {
+    ...layers,
+    project,
+    branch,
+    baseHosts,
+    explicitBranch,
+    requestedOverlay,
+  };
 }
 
 export type ConfigSnapshot = NonNullable<
@@ -510,7 +624,7 @@ function publicLayer(
   privateKeys: ReadonlySet<string>,
   invalid: boolean
 ) {
-  const { text, ...rest } = layer;
+  const { text, directory: _directory, ...rest } = layer;
   const legacy = basename(layer.file) === PROJECT_CONFIG_LEGACY_FILENAME;
   let source = { source: null as string | null, hidden: legacy || invalid };
   if (text !== null && !(legacy || invalid)) {
@@ -666,19 +780,4 @@ export function showConfigEditor(snapshot: ConfigSnapshot | null) {
     checkout: snapshot?.project.projectRoot ?? null,
     writable: layers.some((layer) => layer.writable),
   };
-}
-
-export function patchedBaseHosts(
-  project: Record<string, unknown>,
-  file: string,
-  fallback: string | null
-) {
-  const cfg = parseProjectConfigRecord(project, file);
-  const devHost = cfg.devHost ?? fallback;
-  return devHost
-    ? resolveProjectRouteBaseHosts({
-        devHost,
-        aliasHost: resolveProjectOauthAliasHost({ oauth: cfg.oauth, devHost }),
-      })
-    : [];
 }

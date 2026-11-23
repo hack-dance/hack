@@ -1427,11 +1427,13 @@ export async function resolveProjectEnvSelection(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName?: string | null;
+  readonly defaultEnv?: string | null;
 }): Promise<ProjectEnvSelection> {
   const requestedEnv = opts.envName === undefined ? undefined : opts.envName;
-  const defaultEnv = await readProjectDefaultEnvConfig({
-    projectDir: opts.projectDir,
-  });
+  const defaultEnv =
+    opts.defaultEnv === undefined
+      ? await readProjectDefaultEnvConfig(opts)
+      : opts.defaultEnv;
   const effectiveEnv = requestedEnv === undefined ? defaultEnv : requestedEnv;
   const defaultPath = resolveProjectEnvConfigPath({
     projectDir: opts.projectDir,
@@ -1832,14 +1834,17 @@ function localOverlayLayerNames(entries: readonly string[]): string[] {
 export async function listProjectEnvOverlays(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
+  readonly primaryDir?: string | null;
+  readonly defaultEnv?: string | null;
 }): Promise<readonly ProjectEnvOverlayEntry[]> {
   const localSuffix = `.${PROJECT_ENV_LOCAL_SEGMENT}`;
   const entries = await listOverlayLayerEntryNames(opts.projectDir);
   // Best effort, like the rest of this listing: an inheritance that cannot
   // be resolved adds no names (runtime reads report it).
-  const primaryDir = await resolvePrimaryLocalProjectDir(opts).catch(
-    () => null
-  );
+  const primaryDir =
+    opts.primaryDir === undefined
+      ? await resolvePrimaryLocalProjectDir(opts).catch(() => null)
+      : opts.primaryDir;
   const inheritedNames =
     primaryDir === null
       ? []
@@ -1872,9 +1877,10 @@ export async function listProjectEnvOverlays(opts: {
         name !== "default" &&
         name !== PROJECT_ENV_LOCAL_SEGMENT
     );
-  const defaultEnv = await readProjectDefaultEnvConfig({
-    projectDir: opts.projectDir,
-  });
+  const defaultEnv =
+    opts.defaultEnv === undefined
+      ? await readProjectDefaultEnvConfig(opts)
+      : opts.defaultEnv;
   const names = new Set<string>([
     ...committed,
     ...discovered,
@@ -3713,7 +3719,11 @@ export async function unsetProjectEnvValue(
 export async function mutateProjectEnvLayer(
   opts: ProjectEnvLayerTarget & {
     readonly changes: readonly ProjectEnvLayerChange[];
-    readonly expected?: { readonly file: string; readonly text: string | null };
+    readonly expected?: {
+      readonly file: string;
+      readonly text: string | null;
+      readonly validate?: () => Promise<void>;
+    };
     readonly maxBytes?: number;
   }
 ): Promise<{
@@ -3753,6 +3763,7 @@ async function mutateLockedProjectEnvLayer(
   }
 ) {
   const { filePath } = opts;
+  await opts.expected?.validate?.();
   // The index can change after Config classified the legacy overlay. Do
   // not write a checkout-local destination as a shared layer.
   if (
@@ -3799,6 +3810,7 @@ async function mutateLockedProjectEnvLayer(
       path: filePath,
       config: next.config,
       maxBytes: opts.maxBytes,
+      validate: opts.expected?.validate,
       expectedExisting: text,
       machineLocal: opts.local === true,
     });
@@ -4920,6 +4932,7 @@ async function writeProjectEnvConfigFile(opts: {
   /** Compare-and-swap guard; see `writeTextFileAtomicIfChanged`. */
   readonly expectedExisting?: string | null;
   readonly maxBytes?: number;
+  readonly validate?: () => Promise<void>;
   /**
    * A machine-local layer, which may hold plaintext values: when this write
    * creates it, it is private (0600) from creation, and an existing layer
@@ -4954,6 +4967,7 @@ async function writeProjectEnvConfigFile(opts: {
         ? { createMode: 0o600, noFollowTarget: true, tightenExisting: true }
         : {}),
       validatePath: async (path) => {
+        await opts.validate?.();
         await assertProjectEnvLayerPath({
           projectRoot: opts.projectRoot,
           path,

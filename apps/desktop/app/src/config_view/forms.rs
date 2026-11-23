@@ -930,7 +930,7 @@ impl HackApp {
                     .find(|entry| entry.layer == layer.id);
                 let scope = cell
                     .or(original)
-                    .map_or_else(|| row.scope.clone(), |cell| cell.scope.clone());
+                    .map_or_else(|| self.config.scope.clone(), |cell| cell.scope.clone());
                 let field = Field::Env {
                     layer: layer.id.clone(),
                     scope,

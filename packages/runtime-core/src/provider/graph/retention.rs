@@ -467,7 +467,7 @@ mod chain_tests {
         // The oldest one still has an archive (a partial prune): it is kept.
         let partial = format!("{:032x}", 0);
         state::private_directory(
-            &archive::path(&candidate, &partial)
+            archive::path(&candidate, &partial)
                 .unwrap()
                 .parent()
                 .unwrap(),

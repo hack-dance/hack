@@ -1,5 +1,11 @@
 # Desktop process tests
 
+Build the Ghostty drawer and capture its command states in both appearances
+with `bash scripts/build.sh --features screenshots` and
+`target/debug/hack-desktop --command-screenshots <directory>`. The captures
+run harmless fixture processes through real PTYs, including an echo-disabled
+password prompt. They never run the production commands shown in their labels.
+
 Run `bash scripts/test.sh` from `apps/desktop`. It checks the exact nextest pin
 from the repository installer, runs the workspace tests in separate processes
 with zero retries, then runs doctests. Each invocation creates and removes its

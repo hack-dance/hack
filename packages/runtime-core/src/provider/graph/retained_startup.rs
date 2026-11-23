@@ -92,7 +92,7 @@ pub(in crate::provider::graph) fn checked(
     }
     match (&owner.process, owner.phase == "running") {
         (Some(process), running) => {
-            if identity::alive(process.pid)? != running {
+            if !identity::provider_gone(process)? != running {
                 return Err(refused());
             }
         }

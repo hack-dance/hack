@@ -75,8 +75,19 @@ fn zombie(_pid: i32) -> bool {
 /// belongs to another process (a different birth). An incarnation that cannot be
 /// read is not gone; the caller's own identity checks then decide, as before.
 pub(crate) fn provider_gone(recorded: &ProcessIdentity) -> Result<bool, CandidateError> {
-    if !alive(recorded.pid)? {
-        return Ok(true);
+    match alive(recorded.pid) {
+        Ok(false) => return Ok(true),
+        Ok(true) => {}
+        // `kill 0` refused (EPERM): the pid belongs to a process we may not signal. A
+        // readable birth under another uid or time proves the recorded provider gone.
+        Err(error) => {
+            return match birth(recorded.pid) {
+                Ok((start, uid)) if start != recorded.start_micros || uid != recorded.uid => {
+                    Ok(true)
+                }
+                _ => Err(error),
+            };
+        }
     }
     if zombie(recorded.pid) {
         return Ok(true);

@@ -1665,7 +1665,7 @@ fn start_pool_observed(
         ));
     }
     if let Some(process) = &owner.process {
-        if identity::alive(process.pid)? {
+        if !identity::provider_gone(process)? {
             return Err(CandidateError::new(
                 "process_identity_mismatch",
                 "Previous PID is still alive; refusing restart or adoption.",
@@ -2657,7 +2657,7 @@ fn observed_stopped(owner: &Owner) -> Result<bool, CandidateError> {
     }
     match &owner.process {
         None => Ok(true),
-        Some(process) => Ok(!identity::alive(process.pid)?),
+        Some(process) => identity::provider_gone(process),
     }
 }
 
@@ -3125,7 +3125,7 @@ fn finish_stopped(
     if owner
         .process
         .as_ref()
-        .map(|p| identity::alive(p.pid))
+        .map(|p| identity::provider_gone(p).map(|gone| !gone))
         .transpose()?
         .unwrap_or(true)
     {

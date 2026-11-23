@@ -144,6 +144,7 @@ import {
 } from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import {
+  type DoctorCheckId,
   type DoctorMetadata,
   type DoctorScope,
   doctorMetadata,
@@ -377,7 +378,7 @@ type CheckStatus = "ok" | "warn" | "error";
 const NATIVE_TEMP_ALIASES_CHECK = "native temporary aliases";
 
 interface CheckResult {
-  readonly name: string;
+  readonly name: DoctorCheckId;
   readonly status: CheckStatus;
   readonly message: string;
   readonly scope?: DoctorScope;
@@ -1020,11 +1021,14 @@ async function runDoctorAudit(
     // (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); read failures are reported.
     const serviceCheck = await resolveSystemdSummary({
       paths: resolveDaemonPaths({}),
-    }).then(buildDaemonServiceCheck, (error: unknown) => ({
-      name: DAEMON_SERVICE_CHECK,
-      status: "warn" as const,
-      message: `Could not read the hackd systemd service: ${error instanceof Error ? error.message : String(error)}`,
-    }));
+    }).then(
+      buildDaemonServiceCheck,
+      (error: unknown): CheckResult => ({
+        name: DAEMON_SERVICE_CHECK,
+        status: "warn" as const,
+        message: `Could not read the hackd systemd service: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    );
     if (serviceCheck) {
       results.push(await runCheck(s, DAEMON_SERVICE_CHECK, () => serviceCheck));
     }
@@ -1343,7 +1347,7 @@ async function collectPrerequisiteChecks(
   );
   return await Promise.all(
     observed.map(({ name, state, check, login, tools }) => {
-      const checkName = `prerequisite ${name}`;
+      const checkName = `prerequisite ${name}` as const;
       const label =
         state.state === "missing" ? `${state.bin} not found` : state.state;
       return runCheck(progress, checkName, () =>
@@ -2290,7 +2294,7 @@ export function bunCheckOptional(main: string = Bun.main): boolean {
 }
 
 async function checkTool(opts: {
-  readonly name: string;
+  readonly name: DoctorCheckId;
   readonly cmd: string;
   readonly optional?: boolean;
 }): Promise<CheckResult> {
@@ -2843,7 +2847,7 @@ export async function checkHackLocalDns(
 ): Promise<CheckResult> {
   const domain = opts.domain ?? DEFAULT_NEW_PROJECT_TLD;
   const host = `doctor.${domain}`;
-  const name = `dns:${domain}`;
+  const name = `dns:${domain}` as const;
   try {
     const { address } = await (opts.lookup ?? lookup)(host);
     let ok = [DEFAULT_CADDY_IP, DEFAULT_HOST_DNS_IP, "::1"].includes(address);
@@ -6484,7 +6488,7 @@ async function canConnectTcp(opts: {
 // (Called from the command handler.)
 async function runCheck(
   _s: DoctorProgress,
-  name: string,
+  name: DoctorCheckId,
   fn: () => CheckResult | Promise<CheckResult>,
   opts?: { readonly timeoutMs?: number }
 ): Promise<TimedCheckResult> {

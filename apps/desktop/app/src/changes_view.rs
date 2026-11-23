@@ -60,30 +60,32 @@ impl HackApp {
         if check {
             button = button.on_click(cx.listener(|this, _, _, cx| this.read_changes(cx)));
         }
-        let body = div().flex().flex_col().gap(space::S4).type_step(text::BODY);
-        let body = match &self.changes.result {
+        let heading = div()
+            .flex()
+            .items_center()
+            .gap(space::S4)
+            .type_step(text::BODY);
+        let heading = match &self.changes.result {
             None if self.changes.pending.is_some() || !self.live => {
-                body.child("Reading Git status…")
+                heading.child("Reading Git status…")
             }
-            None => body.child("Select a project with a known checkout."),
-            Some(Err(error)) => body.child(*error),
-            Some(Ok(report)) => body
+            None => heading.child("Select a project with a known checkout."),
+            Some(Err(error)) => heading.child(*error),
+            Some(Ok(report)) => heading
                 .child(
                     div()
-                        .flex()
-                        .gap(space::S5)
-                        .items_center()
-                        .child(
-                            div()
-                                .type_step(text::BODY_STRONG)
-                                .child(report.branch.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_color(p.text_secondary)
-                                .child(report.checkout.clone()),
-                        ),
+                        .type_step(text::BODY_STRONG)
+                        .child(report.branch.clone()),
                 )
+                .child(
+                    div()
+                        .text_color(p.text_secondary)
+                        .child(report.checkout.clone()),
+                ),
+        };
+        let body = div().flex().flex_col().gap(space::S4).type_step(text::BODY);
+        let body = match &self.changes.result {
+            Some(Ok(report)) => body
                 .children(
                     report
                         .files
@@ -108,6 +110,7 @@ impl HackApp {
                         )
                         .child(div().text_color(p.text_secondary).child(file.state.clone()))
                 })),
+            _ => body,
         };
         div()
             .flex()
@@ -117,7 +120,7 @@ impl HackApp {
             .gap(space::S4)
             .px(space::S8)
             .pb(space::S5)
-            .child(div().flex().justify_end().child(button))
+            .child(heading.child(button))
             .child(
                 div()
                     .id("changed-files")

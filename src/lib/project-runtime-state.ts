@@ -20,6 +20,10 @@ export type ProjectRuntimeStateEntry = {
   readonly updatedAt: string;
   /** Effective Compose base name when this instance last started. */
   readonly launchComposeBase?: string;
+  /** Logical copy in this checkout. Missing on records predating copy association. */
+  readonly launchBranch?: string | null;
+  /** Configured secret-store namespace used to resolve this launch's overlay. */
+  readonly envProjectName?: string;
   /** Base name explicitly passed to Compose at startup, before any branch suffix. */
   readonly pinnedComposeBase?: string;
   /**
@@ -98,12 +102,37 @@ export async function readProjectRuntimeStateEntry(opts: {
   );
 }
 
+/** Select the latest launch recorded for this checkout and logical copy. */
+export async function readProjectRuntimeCopyLaunch(opts: {
+  readonly projectDir: string;
+  readonly branch: string | null;
+}): Promise<ProjectRuntimeStateEntry | undefined> {
+  const entries = await readProjectRuntimeState(opts);
+  let latest: ProjectRuntimeStateEntry | undefined;
+  for (const entry of entries) {
+    if (
+      entry.launchBranch === opts.branch &&
+      entry.launchComposeBase &&
+      (!latest || entry.updatedAt > latest.updatedAt)
+    ) {
+      latest = entry;
+    }
+  }
+  return latest;
+}
+
 export async function upsertProjectRuntimeStateEntry(opts: {
   readonly projectDir: string;
   readonly entry: ProjectRuntimeStateEntry;
+  readonly replaceComposeProject?: string;
 }): Promise<void> {
   await mutateProjectRuntimeState(opts.projectDir, (entries) =>
-    replaceRuntimeEntry(entries, opts.entry)
+    replaceRuntimeEntry(
+      entries.filter(
+        (entry) => entry.composeProject !== opts.replaceComposeProject
+      ),
+      opts.entry
+    )
   );
 }
 
@@ -210,6 +239,8 @@ function parseProjectRuntimeStateEntry(
   const envFingerprint = parseComposeEnvFingerprintRecord(value.envFingerprint);
   const pinnedComposeBase = getString(value, "pinnedComposeBase");
   const launchComposeBase = getString(value, "launchComposeBase");
+  const launchBranch = value.launchBranch;
+  const envProjectName = getString(value, "envProjectName");
   const composeProfiles = Array.isArray(value.composeProfiles)
     ? value.composeProfiles.filter(
         (profile): profile is string =>
@@ -222,6 +253,10 @@ function parseProjectRuntimeStateEntry(
     envName,
     updatedAt,
     ...(launchComposeBase ? { launchComposeBase } : {}),
+    ...(launchBranch === null || typeof launchBranch === "string"
+      ? { launchBranch }
+      : {}),
+    ...(envProjectName ? { envProjectName } : {}),
     ...(pinnedComposeBase ? { pinnedComposeBase } : {}),
     ...(envFingerprint ? { envFingerprint } : {}),
     ...(composeProfiles ? { composeProfiles } : {}),

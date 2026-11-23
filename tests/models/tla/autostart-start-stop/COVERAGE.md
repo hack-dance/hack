@@ -60,6 +60,11 @@ supervisor regression starts under a Compose name override and a nondefault
 overlay, then checks that Down uses that overlay and retires the matching host
 process. The mux controller tests exercise distinct names that normalize to
 the same registry slug, plus adoption and retirement of an owned legacy session.
+The saved launch associates the exact Compose identity and overlay with the
+logical copy in its checkout. A source CLI regression supplies the name override
+only through the launch overlay and verifies that a plain Down selects the
+recorded name and engine. A separate upgrade fixture starts with a live owner
+under the old lifecycle key and checks that Start leaves only one host owner.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

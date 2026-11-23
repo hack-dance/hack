@@ -96,13 +96,15 @@ async function run(
   args: string[],
   login = false,
   cwd = join(root, "project"),
-  overrides: Readonly<Record<string, string>> = {}
+  overrides: Readonly<Record<string, string>> = {},
+  extraPreload?: string
 ) {
   const child = Bun.spawn(
     [
       process.execPath,
       "--preload",
       DOCKER_TRUST_PRELOAD,
+      ...(extraPreload ? ["--preload", extraPreload] : []),
       cli,
       "--no-interactive",
       ...args,
@@ -155,6 +157,9 @@ async function installComposeNameFixture(opts?: {
   readonly holdBeforePin?: boolean;
   readonly foreignCheckout?: string;
   readonly foreignStack?: string;
+  readonly foreignContext?: string;
+  readonly defaultStack?: string;
+  readonly shellStack?: string;
   readonly startContainers?: boolean;
   readonly savedContextOnly?: boolean;
 }) {
@@ -170,7 +175,7 @@ const running = fixture + "/compose-running";
 const created = fixture + "/compose-created";
 const containerId = "f".repeat(64);
 const context = process.env.DOCKER_CONTEXT || "none";
-const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || "sample";
+const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || options.defaultStack || "sample";
 if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   const model = JSON.parse(await Bun.stdin.text());
   if (options.failFirstProbe && !(await Bun.file(fixture + "/name-probed").exists())) {
@@ -200,7 +205,7 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   }) + "\\n");
 } else if (mode === "exec") {
   if (args[0] === "compose") {
-    if (stack !== "sample" || context !== "saved-files-context") process.exit(9);
+    if (stack !== (options.shellStack || "sample") || context !== "saved-files-context") process.exit(9);
     process.stdout.write("shell-ready\\n");
     process.exit(0);
   }
@@ -218,7 +223,7 @@ if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
       await Bun.sleep(10);
     }
   }
-  const foreign = !options.foreignStack || options.foreignStack === stack;
+  const foreign = (!options.foreignStack || options.foreignStack === stack) && (!options.foreignContext || options.foreignContext === context);
   const inSavedContext = !options.savedContextOnly || context === "saved-files-context";
   const isRunning = await Bun.file(running).exists() && (await Bun.file(running).text()) === stack;
   const isCreated = await Bun.file(created).exists();
@@ -1080,8 +1085,145 @@ test("ordinary Down refuses an interpolated branch stack owned by another checko
 });
 
 const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
+test("Exec and Restart use the configured secret namespace of an overridden Compose stack", async () => {
+  const project = join(root, "project");
+  const projectDir = join(project, ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    '{"name":"sample","dev_host":"sample.hack"}'
+  );
+  await writeOwnedFixture(
+    join(projectDir, "docker-compose.yml"),
+    "name: demo_team\nservices:\n  app:\n    image: example.invalid/app\n"
+  );
+  await writeOwnedFixture(
+    join(projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "DOCKER_CONTEXT", source: "keychain", required: true }],
+    })
+  );
+  const trace = join(root, "secret-namespace");
+  const preload = join(root, "fake-keychain.ts");
+  await writeOwnedFixture(
+    preload,
+    `
+import { appendFile } from "node:fs/promises";
+import { keychain } from ${JSON.stringify(resolve("src/lib/keychain.ts"))};
+keychain.get = async ({ service }) => {
+  await appendFile(${JSON.stringify(trace)}, service + "\\n");
+  return service === "hack-demo-team" ? "saved-files-context" : null;
+};
+keychain.set = keychain.delete = async () => { throw new Error("Unexpected fixture keychain mutation"); };
+`
+  );
+  await installComposeNameFixture({
+    startContainers: true,
+    savedContextOnly: true,
+    shellStack: "alternate",
+  });
+  const env = {
+    COMPOSE_PROJECT_NAME: "alternate",
+    HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "0",
+  };
+  for (const command of [
+    ["up", "-d", "--json"],
+    ["exec", "app", "--", "sh"],
+    ["restart", "--json"],
+    ["down", "--json"],
+  ]) {
+    await Bun.write(trace, "");
+    const result = await run(command, false, project, env, preload);
+    expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+    expect(new Set((await Bun.file(trace).text()).trim().split("\n"))).toEqual(
+      new Set(["hack-demo-team"])
+    );
+  }
+}, 40_000);
+
 test.skipIf(!supervisorBinary)(
-  "ordinary Start records its overridden Compose name and nondefault overlay",
+  "Start verifies a live legacy lifecycle owner before starting the upgraded copy",
+  async () => {
+    const project = join(root, "project");
+    const projectDir = join(project, ".hack");
+    const processDefinition = {
+      name: "sleeper",
+      command: "exec /bin/sleep 120",
+    };
+    await writeOwnedFixture(
+      join(projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "sample",
+        dev_host: "sample.hack",
+        lifecycle: { runner: "supervisor", processes: [processDefinition] },
+      })
+    );
+    await writeInterpolatedStack(project, "STACK_A");
+    await installComposeNameFixture({ startContainers: true });
+    const legacyKey = sanitizeProjectSlug("${STACK_A:-sample}");
+    const seed = join(root, "seed-legacy-owner.ts");
+    await writeOwnedFixture(
+      seed,
+      `
+import { createLifecycleProcessController } from ${JSON.stringify(resolve("src/lib/project-lifecycle-controller.ts"))};
+const starter = createLifecycleProcessController({
+  runner: "supervisor",
+  project: { projectRoot: ${JSON.stringify(project)}, projectDir: ${JSON.stringify(projectDir)} },
+  projectName: ${JSON.stringify(legacyKey)}, branch: null, composeProject: ${JSON.stringify(legacyKey)},
+  env: {}, definitionHash: "legacy-fixture", mux: () => Promise.reject(new Error("Unexpected mux")),
+});
+await starter.startMany({ processes: [${JSON.stringify(processDefinition)}] });
+await starter.finalize();
+`
+    );
+    const env = {
+      HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
+      PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+    };
+    const seeded = Bun.spawn([process.execPath, seed], {
+      cwd: project,
+      env: privateCliEnv({ root, home: join(root, "home"), env }),
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const seedError = await new Response(seeded.stderr).text();
+    try {
+      expect(await seeded.exited, seedError).toBe(0);
+      await upsertProjectRuntimeStateEntry({
+        projectDir,
+        entry: {
+          composeProject: legacyKey,
+          envName: null,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      const [previous] = await readLifecycleState({ projectDir });
+      const oldPid = previous?.processes[0]?.processGroupId ?? 0;
+      expect(oldPid).toBeGreaterThan(1);
+      expect(() => process.kill(-oldPid, 0)).not.toThrow();
+      const start = await run(["up", "-d", "--json"], false, project, env);
+      expect(start.exitCode, start.stdout + start.stderr).toBe(0);
+      const owners = await readLifecycleState({ projectDir });
+      expect(owners).toHaveLength(1);
+      const nextPid = owners[0]?.processes[0]?.processGroupId ?? 0;
+      expect(nextPid).toBeGreaterThan(1);
+      expect(() => process.kill(-nextPid, 0)).not.toThrow();
+      if (nextPid !== oldPid) {
+        expect(() => process.kill(-oldPid, 0)).toThrow();
+      }
+      const down = await run(["down", "--json"], false, project, env);
+      expect(down.exitCode, down.stdout + down.stderr).toBe(0);
+      expect(() => process.kill(-nextPid, 0)).toThrow();
+      expect(await readLifecycleState({ projectDir })).toHaveLength(0);
+    } finally {
+      await run(["down", "--json"], false, project, env);
+    }
+  },
+  40_000
+);
+
+test.skipIf(!supervisorBinary)(
+  "plain Down finds the name and overlay supplied only at ordinary Start",
   async () => {
     const project = join(root, "project");
     const projectDir = join(project, ".hack");
@@ -1102,14 +1244,17 @@ test.skipIf(!supervisorBinary)(
     );
     await writeOwnedFixture(
       join(projectDir, "hack.env.qa.yaml"),
-      "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n"
+      "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    COMPOSE_PROJECT_NAME: alternate\n    DOCKER_CONTEXT: saved-files-context\n"
     );
     await installComposeNameFixture({
       startContainers: true,
       savedContextOnly: true,
+      defaultStack: "demo_team",
+      foreignCheckout: join(root, "foreign", ".hack"),
+      foreignStack: "demo_team",
+      foreignContext: "none",
     });
     const env = {
-      COMPOSE_PROJECT_NAME: "alternate",
       HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
       PATH: `${join(root, "bin")}:/usr/bin:/bin`,
     };
@@ -1126,7 +1271,12 @@ test.skipIf(!supervisorBinary)(
           projectDir,
           composeProject: "alternate",
         })
-      ).toMatchObject({ launchComposeBase: "alternate", envName: "qa" });
+      ).toMatchObject({
+        launchComposeBase: "alternate",
+        launchBranch: null,
+        envProjectName: "demo-team",
+        envName: "qa",
+      });
       const [state] = await readLifecycleState({ projectDir });
       expect(state).toMatchObject({ composeProject: "alternate" });
       const pid = state?.processes[0]?.processGroupId ?? 0;
@@ -1134,6 +1284,9 @@ test.skipIf(!supervisorBinary)(
       expect(() => process.kill(-pid, 0)).not.toThrow();
       const stopped = await run(["down", "--json"], false, project, env);
       expect(stopped.exitCode, stopped.stdout + stopped.stderr).toBe(0);
+      expect(
+        (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
+      ).toEqual(["compose", "-p", "alternate"]);
       expect(await Bun.file(join(root, "down-context")).text()).toBe(
         "saved-files-context"
       );

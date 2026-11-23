@@ -73,8 +73,8 @@ impl Step {
             CheckScope::Cli,
             CheckScope::Daemon,
             CheckScope::Docker,
-            CheckScope::Domains,
-            CheckScope::Https,
+            CheckScope::Network,
+            CheckScope::Network,
             CheckScope::Login,
         ][self.index()]
     }
@@ -238,7 +238,7 @@ impl Flow {
         if evidence == StepState::Passed && self.visited[step.index()] {
             return evidence;
         }
-        if pane.skipped.contains(step.id()) {
+        if Self::explicitly_skipped(step, pane) {
             return StepState::Skipped;
         }
         if !self.visited[step.index()] {
@@ -267,9 +267,37 @@ impl Flow {
 
     pub fn first_unresolved(&self, pane: &Pane) -> Option<Step> {
         Step::ALL.into_iter().find(|&step| {
-            self.evidence(step, pane) != StepState::Passed
-                && (step == Step::Cli || !pane.skipped.contains(step.id()))
+            self.evidence(step, pane) != StepState::Passed && !Self::explicitly_skipped(step, pane)
         })
+    }
+
+    fn explicitly_skipped(step: Step, pane: &Pane) -> bool {
+        step != Step::Cli
+            && pane.skipped.contains(step.id())
+            && (step != Step::Docker
+                || step.cards(&pane.report).all(|card| {
+                    card.id == step.id()
+                        || card.status == Status::Passed
+                        || pane.skipped.contains(&card.id)
+                }))
+    }
+
+    pub fn skip_label(&self, step: Step, pane: &Pane) -> &'static str {
+        if self.state(step, pane) == StepState::Skipped {
+            return "Keep skipped";
+        }
+        match step {
+            Step::Docker
+                if step.card(&pane.report).is_some()
+                    && step
+                        .cards(&pane.report)
+                        .all(|card| card.id == step.id() || card.status == Status::Passed) =>
+            {
+                "I only use native"
+            }
+            Step::Login => "Not now",
+            _ => "Skip for now",
+        }
     }
 
     pub fn next_screen(&self, step: Step, pane: &Pane) -> Screen {
@@ -415,6 +443,87 @@ mod tests {
 
         pane.skipped.insert(Step::Daemon.id().into());
         assert_eq!(flow.next_screen(Step::Login, &pane), Screen::Done);
+    }
+
+    #[test]
+    fn a_fresh_https_check_keeps_dns_failure_evidence_for_completion() {
+        let mut flow = Flow::default();
+        let mut pane = ready();
+        let scope = Step::Https.check_scope();
+        let mut https_report = pane.report.clone();
+        https_report
+            .cards
+            .iter_mut()
+            .find(|card| card.id == Step::Domains.id())
+            .unwrap()
+            .status = Status::NeedsAttention;
+        https_report.cards.retain(|card| scope.includes(&card.id));
+        pane.report = https_report.with_prior(&pane.report, scope);
+        flow.enter(Screen::Step(Step::Https));
+        assert!(flow.can_advance(&pane), "HTTPS passed");
+        assert_eq!(
+            flow.next_screen(Step::Https, &pane),
+            Screen::Step(Step::Login)
+        );
+
+        let scope = Step::Login.check_scope();
+        let mut login_report = pane.report.clone();
+        login_report.cards.retain(|card| scope.includes(&card.id));
+        pane.report = login_report.with_prior(&pane.report, scope);
+        flow.enter(Screen::Step(Step::Login));
+        assert!(flow.can_advance(&pane), "login passed");
+        assert_eq!(
+            flow.next_screen(Step::Login, &pane),
+            Screen::Step(Step::Domains)
+        );
+    }
+
+    #[test]
+    fn a_skip_that_includes_native_runtime_does_not_say_docker_only() {
+        let mut flow = Flow::default();
+        let mut pane = ready();
+        pane.report
+            .cards
+            .iter_mut()
+            .find(|card| card.id == Step::Docker.id())
+            .unwrap()
+            .status = Status::NeedsAttention;
+        flow.enter(Screen::Step(Step::Docker));
+        assert_eq!(flow.skip_label(Step::Docker, &pane), "I only use native");
+
+        let native_only = hack_desktop_core::setup_fixtures::load("native-unknown").unwrap();
+        pane.report.cards.extend(
+            native_only
+                .cards
+                .iter()
+                .filter(|card| card.id.starts_with("native:"))
+                .cloned(),
+        );
+        assert_eq!(flow.skip_label(Step::Docker, &pane), "Skip for now");
+
+        let native_card = pane
+            .report
+            .cards
+            .iter_mut()
+            .find(|card| card.id.starts_with("native:"))
+            .unwrap();
+        native_card.status = Status::Passed;
+        assert_eq!(flow.skip_label(Step::Docker, &pane), "I only use native");
+        flow.skip(Step::Docker, &mut pane);
+        assert_eq!(flow.state(Step::Docker, &pane), StepState::Skipped);
+
+        let native_card = pane
+            .report
+            .cards
+            .iter_mut()
+            .find(|card| card.id.starts_with("native:"))
+            .unwrap();
+        native_card.status = Status::Unknown;
+        assert_eq!(flow.first_unresolved(&pane), Some(Step::Docker));
+        flow.enter(Screen::Step(Step::Docker));
+
+        pane.report = native_only;
+        assert_eq!(flow.skip_label(Step::Docker, &pane), "Skip for now");
     }
 
     #[test]

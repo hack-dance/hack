@@ -568,21 +568,7 @@ fn remedy(
                 .into_any_element(),
         );
     }
-    let card = match step.remedy_card(&app.setup.report) {
-        Some(card) => card,
-        None if state == StepState::Unchecked => {
-            return Some(
-                div()
-                    .flex()
-                    .child(
-                        button("setup-check", "Check again", Some(Glyph::Restart), true, ui)
-                            .on_click(cx.listener(|this, _, _, cx| this.retry_setup_check(cx))),
-                    )
-                    .into_any_element(),
-            );
-        }
-        None => return None,
-    };
+    let card = step.remedy_card(&app.setup.report)?;
     let remedy = &card.remedy;
     let p = ui.p;
     let password = match step {
@@ -682,15 +668,7 @@ fn footer(
         }
     } else if app.setup_flow.can_skip(step, &app.setup) {
         has_action = true;
-        let label = if state == StepState::Skipped {
-            "Keep skipped"
-        } else {
-            match step {
-                Step::Docker => "I only use native",
-                Step::Login => "Not now",
-                _ => "Skip for now",
-            }
-        };
+        let label = app.setup_flow.skip_label(step, &app.setup);
         row.child(
             button("setup-skip", label, None, false, ui)
                 .w(px(160.))
@@ -719,7 +697,9 @@ fn footer(
         button("setup-next", "Next", None, false, ui)
             .on_click(cx.listener(|this, _, _, cx| this.advance_setup(cx)))
     } else {
-        button("setup-recheck", "Check again", None, false, ui)
+        let primary =
+            state == StepState::Unchecked && step.remedy_card(&app.setup.report).is_none();
+        button("setup-recheck", "Check again", None, primary, ui)
             .on_click(cx.listener(|this, _, _, cx| this.retry_setup_check(cx)))
     };
     Some(

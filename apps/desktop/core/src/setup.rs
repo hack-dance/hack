@@ -56,8 +56,7 @@ pub enum CheckScope {
     Cli,
     Daemon,
     Docker,
-    Domains,
-    Https,
+    Network,
     Login,
 }
 
@@ -66,10 +65,12 @@ impl CheckScope {
         self == Self::Full
             || id == "cli"
             || (id == "daemon" && self != Self::Cli)
+            // Both scopes run machine Doctor and retain all its setup findings.
+            || (matches!(self, Self::Docker | Self::Network)
+                && matches!(id, "docker" | "routing" | "trust"))
             || match self {
-                Self::Docker => id == "docker" || id.starts_with("native:"),
-                Self::Domains => id == "routing" || id.starts_with("dns:"),
-                Self::Https => id == "trust" || id.starts_with("trust:"),
+                Self::Docker => id.starts_with("native:"),
+                Self::Network => id.starts_with("dns:") || id.starts_with("trust:"),
                 Self::Login => id == "login",
                 _ => false,
             }

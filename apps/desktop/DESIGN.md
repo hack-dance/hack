@@ -188,7 +188,8 @@ Setup presents one step at a time, in this order:
 | Start at login | Daemon service state and home ownership | `hack daemon install` if eligible |
 
 Each arrival checks the current step and its prerequisites in the background.
-Only a full refresh checks every step. Passing evidence starts a
+Machine Doctor refreshes Docker, DNS, and trust evidence together. Only a full
+refresh checks every step. Passing evidence starts a
 two-second advance that the user can pause or complete immediately. A failed
 check can be retried. Passing and skipped steps remain available from the
 progress list. The CLI is required by the other steps and cannot be skipped.

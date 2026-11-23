@@ -106,7 +106,7 @@ impl LiveSource {
         let socket = client.as_ref().and_then(|d| d.status().ok());
         let check_projects = matches!(
             scope,
-            CheckScope::Full | CheckScope::Docker | CheckScope::Domains | CheckScope::Https
+            CheckScope::Full | CheckScope::Docker | CheckScope::Network
         );
         let mut projects = socket
             .as_ref()
@@ -151,7 +151,7 @@ impl LiveSource {
                 .unwrap_or_default();
             match scope {
                 CheckScope::Docker => targets.clear(),
-                CheckScope::Domains | CheckScope::Https => targets.retain(|target| target.native),
+                CheckScope::Network => targets.retain(|target| target.native),
                 _ => {}
             }
             // Machine routing/trust describe Compose. Project observers choose

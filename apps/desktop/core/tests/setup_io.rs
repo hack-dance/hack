@@ -90,6 +90,11 @@ esac
             &["cli", "daemon", "login"][..],
             &["version --json", "daemon status --json"][..],
         ),
+        (
+            CheckScope::Network,
+            &["cli", "docker", "daemon", "routing", "trust"][..],
+            &["version --json", "daemon status --json", "doctor --json"][..],
+        ),
     ] {
         std::fs::write(&calls, "").unwrap();
         let report = source.setup_for(scope);

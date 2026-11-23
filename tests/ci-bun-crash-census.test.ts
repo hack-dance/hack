@@ -525,6 +525,11 @@ describe("sharded test suite (HACK-1424)", () => {
       );
     }
     expect(workflowJobBunVersion(workflow, "test")).toBeNull();
+    expect(workflowJobBunVersion(workflow, "docs site")).toBe(pin);
+    expect(
+      workflowJobBunVersion(workflow, "Compose trial / test fan-in")
+    ).toBeNull();
+    expect(workflowJobBunVersion(workflow, "compose-upgrade-trial")).toBe(pin);
   });
 
   test("job selectors: default reads shards, or the legacy test job when a run has none", () => {

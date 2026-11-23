@@ -15,7 +15,8 @@ test -x "$HACK_E2E_CLI_BIN"
 command -v tmux >/dev/null
 docker info >/dev/null
 docker image inspect alpine:3.20 >/dev/null
-printf 'source=%s\n' "$(git rev-parse HEAD)"
+source_revision=$(git rev-parse --verify HEAD)
+printf 'source=%s\n' "$source_revision"
 if command -v sha256sum >/dev/null; then
   sha256sum "$HACK_E2E_CLI_BIN"
 else

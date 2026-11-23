@@ -887,4 +887,5 @@ gh workflow run ci.yml --repo hack-dance/hack --ref "$qualification_ref" -f comp
 Record distinct run IDs and verify each run's head SHA and
 `compose-upgrade-trial` job. Each trial requires three SIGINT passes and a real
 MCP SDK pass. Missing jobs, skips, and runs built from another revision do not
-count. Capture the local and hosted results independently.
+count. Capture the local and hosted results independently. The focused dispatch
+has separate check names from the regular CI and full release qualification.

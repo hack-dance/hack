@@ -146,7 +146,7 @@ pub(crate) fn read(
         )
         .map_err(|_| "Could not read this setting")?;
     let current = match code {
-        Some(0) => Some(field.parse(&out)?.to_owned()),
+        Some(0) => Some(out.trim().to_owned()),
         Some(1) if err.contains("Key not found:") || err.contains("Missing global config at") => {
             None
         }
@@ -179,7 +179,15 @@ pub(crate) fn write(
     }
     let mut new = read(runner, report.root.clone(), field)
         .map_err(|_| "Saved, but could not confirm the current value")?;
-    if new.current.as_deref() != Some(field.parse(input)?) {
+    let expected = field.parse(input)?;
+    let matches_input = new
+        .current
+        .as_deref()
+        .is_some_and(|current| match field.kind {
+            Kind::Address => current.eq_ignore_ascii_case(expected),
+            _ => current == expected,
+        });
+    if !matches_input {
         return Err("Current value differs from the saved input");
     }
     new.names.clone_from(&report.names);
@@ -215,6 +223,37 @@ esac
         let result = write(&runner, &initial, field, "true");
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(result.unwrap().current.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn retired_mux_can_be_replaced_and_bind_address_readback_is_case_insensitive() {
+        let dir =
+            std::env::temp_dir().join(format!("desktop-config-repair-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let bin = dir.join("hack");
+        crate::test_support::script(
+            &bin,
+            r#"#!/bin/sh
+case "$2:$4:$5" in
+  'get:sessions.mux:') if [ -f mux ]; then echo tmux; else echo zellij; fi ;;
+  'set:sessions.mux:"tmux"') touch mux ;;
+  'get:proxy.bind_address:') if [ -f bind ]; then echo 2001:db8::1; else echo ::1; fi ;;
+  'set:proxy.bind_address:"2001:DB8::1"') touch bind ;;
+  *) exit 2 ;;
+esac
+"#,
+        );
+        let runner = CliRunner::new(bin).with_cwd(&dir);
+        for (field, old, input, saved) in [
+            (GLOBAL[0], "zellij", "tmux", "tmux"),
+            (GLOBAL[2], "::1", "2001:DB8::1", "2001:db8::1"),
+        ] {
+            let initial = read(&runner, None, field).unwrap();
+            assert_eq!(initial.current.as_deref(), Some(old));
+            let result = write(&runner, &initial, field, input).unwrap();
+            assert_eq!(result.current.as_deref(), Some(saved));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

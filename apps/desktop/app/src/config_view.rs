@@ -31,6 +31,7 @@ mod map;
 pub(crate) mod screenshots;
 
 pub(crate) const TAB: usize = 5;
+const STATE_ACTION_WIDTH: gpui_kit::Pixels = px(136.);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum View {
@@ -739,10 +740,8 @@ impl HackApp {
         {
             bar = bar.child(self.scope_picker(report, cx));
         } else if !self.config.draft.changes.is_empty() {
-            bar = bar.child(muted(
-                format!("{} changes", self.config.draft.changes.len()),
-                ui,
-            ));
+            let count = self.config.draft.changes.len();
+            bar = bar.child(muted(format!("{count} {}", change_noun(count)), ui));
         }
         let body = match &self.config.report {
             Some(Err(error)) => {
@@ -849,10 +848,7 @@ impl HackApp {
                 .items_center()
                 .gap(space::S3)
                 .child(strong(
-                    format!(
-                        "{count} unsaved {}",
-                        if count == 1 { "change" } else { "changes" }
-                    ),
+                    format!("{count} unsaved {}", change_noun(count)),
                     ui,
                 ))
                 .children(error.map(|error| warning(error.message.clone(), ui)))
@@ -923,15 +919,17 @@ impl HackApp {
                     .gap(space::S3)
                     .children(issue.map(|issue| {
                         action_button("config-error-source", Glyph::Logs, "Open source", true, ui)
+                            .w(STATE_ACTION_WIDTH)
+                            .justify_center()
                             .on_click(
                                 cx.listener(move |app, _, _, cx| app.jump_config_issue(&issue, cx)),
                             )
                     }))
-                    .children(
-                        layer
-                            .filter(|layer| layer.exists)
-                            .map(|layer| self.editor_button(layer.file.clone(), ui, cx)),
-                    ),
+                    .children(layer.filter(|layer| layer.exists).map(|layer| {
+                        self.editor_button(layer.file.clone(), ui, cx)
+                            .w(STATE_ACTION_WIDTH)
+                            .justify_center()
+                    })),
             )
             .child(muted("Running copies keep using the last good config.", ui))
             .into_any_element()
@@ -1090,11 +1088,15 @@ impl HackApp {
                                 !self.config.restarting,
                                 ui,
                             )
+                            .w(STATE_ACTION_WIDTH)
+                            .justify_center()
                             .on_click(cx.listener(|app, _, _, cx| app.restart_config(cx))),
                         )
                     })
                     .child(
                         action_button("config-view-changes", Glyph::Eye, "View changes", true, ui)
+                            .w(STATE_ACTION_WIDTH)
+                            .justify_center()
                             .on_click(cx.listener(|app, _, _, cx| {
                                 if let Some(id) = app
                                     .config
@@ -1210,6 +1212,10 @@ fn muted(label: impl Into<SharedString>, ui: &Ui) -> gpui_kit::Div {
         .type_step(text::SMALL)
         .text_color(ui.p.text_muted)
         .child(label.into())
+}
+
+fn change_noun(count: usize) -> &'static str {
+    if count == 1 { "change" } else { "changes" }
 }
 
 fn strong(label: impl Into<SharedString>, ui: &Ui) -> gpui_kit::Div {

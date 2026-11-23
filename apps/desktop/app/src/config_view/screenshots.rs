@@ -248,7 +248,7 @@ pub(crate) fn run(dir: &Path) {
         Arc::new(hack_desktop_ui::icons::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
-    cx.update(gpui_kit::init);
+    cx.update(hack_desktop_ui::tokens::init);
     for (mode, suffix) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {
         cx.update(|cx| Theme::change(mode, None, cx));
         for frame in [

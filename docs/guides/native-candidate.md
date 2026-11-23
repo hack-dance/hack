@@ -2538,7 +2538,10 @@ finish or unwind first. The next `hack up` or `hack down --recover` waits for th
 process to be gone, then recovers its run. A `hack up`, `hack restart` or `hack down
 --recover` that meets that start still exiting (the pool record shows the pool
 stopped) says so in one line and waits up to 15 seconds for it before it decides as
-for an exited owner; a live foreground owner on a running pool still refuses at once. A command that finds an earlier start of the instance
+for an exited owner; a live foreground owner on a running pool still refuses at once.
+An owner that is ending can read for a moment as neither running nor exited (its
+process exited but is not yet reaped, or its publication is read mid-change); the
+runtime reports that as `graph_foreground_owner_uncertain`, and the same wait covers it. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0

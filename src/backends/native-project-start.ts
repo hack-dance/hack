@@ -135,7 +135,10 @@ import {
   requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
-import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import {
+  inspectNativeProjectGraph,
+  observeStartingNativeProjectGraph,
+} from "./native-project-inspect.ts";
 import {
   applyNativeInternalHostAliases,
   type NativeHostAliasSource,
@@ -3345,7 +3348,15 @@ async function startNativeProjectAttempt(
             if (mapped) {
               return mapped;
             }
-            const inspected = await invokeInspect();
+            // The owner holds the provider lease until its ready line, so the
+            // mapping is read lease-free; `graph inspect` would be refused.
+            const inspected = await observeStartingNativeProjectGraph({
+              runtime: opts.runtime,
+              projectRoot: opts.scope.projectRoot,
+              run,
+              invoke: deps.invoke,
+              signal: controller.signal,
+            });
             const readyMapping = authoritative(
               inspected,
               run,
@@ -3384,9 +3395,90 @@ async function startNativeProjectAttempt(
             mapped = { readyMapping, persistedMapping, inspected };
             return mapped;
           };
-          // After a started return: the owner reported every goal met, so the
-          // routes it published are checked now and the run is reported ready.
+          // Takes the HTTPS lease on the lifetime registered before the mapping.
+          const acquireHttps = async (
+            readyMapping: NativeProjectRun,
+            persistedMapping: NativeProjectRun
+          ) => {
+            // Enrollment must exist before taking a shared lease: release
+            // requires independent proof of this exact graph's cleanup.
+            if (opts.https && routes.services.size > 0) {
+              https = await acquireReadyHttps({
+                runtime: opts.runtime,
+                selection: opts.https,
+                run: readyMapping,
+                signal: controller.signal,
+                invoke: deps.invoke,
+                acquire: deps.https,
+                attempt: finalization?.token.attempt,
+                onIntent: async (identity) => {
+                  finalization = await deps.finalization({
+                    scope: opts.scope,
+                    run: persistedMapping,
+                    httpsPort: opts.https?.httpsPort ?? null,
+                    httpsLease: identity,
+                  });
+                  httpsIntent = identity;
+                },
+              }).catch((error: unknown) => {
+                httpsAcquisitionFailure = error;
+                throw error;
+              });
+              void https.exited.then(() => {
+                if (!httpsClosing) {
+                  httpsFailure = new ClosedCliError(
+                    "Native HTTPS owner exited unexpectedly; graph shutdown requested."
+                  );
+                  controller.abort();
+                }
+              });
+            }
+            // Injectable frontends may return a lease without publishing intent;
+            // production publishes this marker before sending its acquire frame.
+            // Either way the lifetime registered before the mapping carries the
+            // lease from here on (same attempt).
+            if (https && finalization?.token.version !== 3) {
+              finalization = await deps.finalization({
+                scope: opts.scope,
+                run: persistedMapping,
+                httpsPort: opts.https?.httpsPort,
+                httpsLease: https.identity,
+              });
+            }
+          };
+          const reclaim = () => {
+            // Superseded build images go once the new ones run; this never
+            // fails or delays the start (HACK-2533). It needs the provider
+            // lease, so a started return runs it at the owner's ready line.
+            void reclaimNativeBuildImagesAfterRebuild({
+              rebuilt,
+              runtime: opts.runtime,
+              projectRoot: opts.scope.projectRoot,
+              invoke: deps.invoke,
+            });
+          };
+          // After a started return: the owner reported every goal met and
+          // released the provider lease, so HTTPS is taken now, the routes are
+          // checked and the run is reported ready.
           const allReady = async () => {
+            if (mapped) {
+              try {
+                await acquireHttps(
+                  mapped.readyMapping,
+                  mapped.persistedMapping
+                );
+              } catch (error) {
+                httpsFailure =
+                  error instanceof Error
+                    ? error
+                    : new ClosedCliError(
+                        "Native HTTPS lease acquisition failed."
+                      );
+                controller.abort();
+                return;
+              }
+            }
+            reclaim();
             try {
               await verifyHttpsRoutes(
                 https,
@@ -3478,50 +3570,10 @@ async function startNativeProjectAttempt(
                 void startupStatus.stop();
                 const { readyMapping, persistedMapping } =
                   await ensureMapping();
-                // Enrollment must exist before taking a shared lease: release
-                // requires independent proof of this exact graph's cleanup.
-                if (opts.https && routes.services.size > 0) {
-                  https = await acquireReadyHttps({
-                    runtime: opts.runtime,
-                    selection: opts.https,
-                    run: readyMapping,
-                    signal: controller.signal,
-                    invoke: deps.invoke,
-                    acquire: deps.https,
-                    attempt: finalization?.token.attempt,
-                    onIntent: async (identity) => {
-                      finalization = await deps.finalization({
-                        scope: opts.scope,
-                        run: persistedMapping,
-                        httpsPort: opts.https?.httpsPort ?? null,
-                        httpsLease: identity,
-                      });
-                      httpsIntent = identity;
-                    },
-                  }).catch((error: unknown) => {
-                    httpsAcquisitionFailure = error;
-                    throw error;
-                  });
-                  void https.exited.then(() => {
-                    if (!httpsClosing) {
-                      httpsFailure = new ClosedCliError(
-                        "Native HTTPS owner exited unexpectedly; graph shutdown requested."
-                      );
-                      controller.abort();
-                    }
-                  });
-                }
-                // Injectable frontends may return a lease without publishing intent;
-                // production publishes this marker before sending its acquire frame.
-                // Either way the lifetime registered before the mapping carries the
-                // lease from here on (same attempt).
-                if (https && finalization?.token.version !== 3) {
-                  finalization = await deps.finalization({
-                    scope: opts.scope,
-                    run: persistedMapping,
-                    httpsPort: opts.https?.httpsPort,
-                    httpsLease: https.identity,
-                  });
+                // The HTTPS owner admits a lease only under the provider lease, for a
+                // ready graph: a started return takes it at the owner's ready line.
+                if (!returnAtStarted) {
+                  await acquireHttps(readyMapping, persistedMapping);
                 }
                 // The registered lifetime now describes this startup.
                 await admission?.retire();
@@ -3594,14 +3646,9 @@ async function startNativeProjectAttempt(
                   }),
                   ...(returnAtStarted ? { phase: "started" as const } : {}),
                 });
-                // Superseded build images go once the new ones run; this never
-                // fails or delays the start (HACK-2533).
-                void reclaimNativeBuildImagesAfterRebuild({
-                  rebuilt,
-                  runtime: opts.runtime,
-                  projectRoot: opts.scope.projectRoot,
-                  invoke: deps.invoke,
-                });
+                if (!returnAtStarted) {
+                  reclaim();
+                }
               },
             });
           } catch (error) {

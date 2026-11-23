@@ -87,6 +87,13 @@ afterEach(async () => {
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   );
 });
+/** Commands the runtime answers without the provider lease. */
+const LEASE_FREE = new Set([
+  "graph status",
+  "graph observe",
+  "graph owner-status",
+  "runtime status",
+]);
 async function fixture(withEnvironment = true) {
   const root = await mkdtemp(join(tmpdir(), "native-start-test-"));
   roots.push(root);
@@ -97,7 +104,13 @@ async function fixture(withEnvironment = true) {
   );
   const events: string[] = [];
   // Set once a serve request starts: later inspections describe that run.
-  const state = { serving: false };
+  // `leaseHeld` models the owner holding the provider lease from its started
+  // line until its ready line: every leased command is refused meanwhile.
+  const state = {
+    serving: false,
+    leaseHeld: false,
+    refused: [] as string[],
+  };
   let run = "";
   let ready = false;
   // A retained-data removal request makes later inspections report removal.
@@ -147,6 +160,14 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (state.leaseHeld && !LEASE_FREE.has(opts.args.slice(0, 2).join(" "))) {
+        state.refused.push(opts.args.slice(0, 2).join(" "));
+        throw new NativeRuntimeRequestError({
+          message:
+            "Native runtime request failed (provider_busy); inspect owned state before retrying.",
+          nativeCode: "provider_busy",
+        });
+      }
       if (opts.args[1] === "ensure-images") {
         const jobs = JSON.parse(
           new TextDecoder().decode(opts.privateInput)
@@ -217,7 +238,7 @@ async function fixture(withEnvironment = true) {
         dataRemoved = true;
         return {};
       }
-      if (opts.args[1] === "inspect") {
+      if (opts.args[1] === "inspect" || opts.args[1] === "status") {
         let phase = "stopped-data-retained";
         if (ready) {
           phase = "ready-observed";
@@ -262,16 +283,21 @@ async function fixture(withEnvironment = true) {
       }
       expect(opts.args.join(" ")).not.toContain("synthetic-secret");
       try {
-        // As the owner does: started first, then ready (see returnAtStarted).
+        // As the owner does: started first, holding the provider lease, then
+        // ready once the lease is released (see returnAtStarted).
+        state.leaseHeld = true;
         if (opts.returnAtStarted) {
           await opts.onReady();
+          state.leaseHeld = false;
           opts.onAllReady?.();
         } else {
           await opts.onStarted?.();
+          state.leaseHeld = false;
           await opts.onReady();
         }
         return 0;
       } finally {
+        state.leaseHeld = false;
         ready = false;
       }
     },
@@ -476,7 +502,7 @@ test("foreground saves after readiness and retains mapping after confirmed stop"
   expect(events).toEqual([
     "before",
     "runtime up",
-    "graph inspect",
+    "graph status",
     "save",
     "ready",
     "graph inspect",
@@ -1089,7 +1115,7 @@ test("foreground partial shutdown is reported without selecting failed-start rec
     throw new Error("synthetic-private-canary");
   };
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] !== "inspect") {
+    if (request.args[1] !== "inspect" && request.args[1] !== "status") {
       return invoke(request);
     }
     requests.push(request.args[1]);
@@ -1116,7 +1142,8 @@ test("foreground partial shutdown is reported without selecting failed-start rec
   );
   expect(String(failure)).toContain("Native retaining shutdown is incomplete");
   expect(Bun.inspect(failure)).not.toContain("synthetic-private-canary");
-  expect(requests).toEqual(["inspect", "inspect"]);
+  // The mapping is read lease-free at started; the final inspection is leased.
+  expect(requests).toEqual(["status", "inspect"]);
   expect(events).toContain("ready");
   expect(events).toContain("save");
   expect(events).not.toContain("remove");
@@ -1324,7 +1351,7 @@ test("a ready receipt for another namespace is an integrity refusal", async () =
   };
   opts.dependencies.invoke = async (request) => {
     const reply = await invoke(request);
-    if (request.args[1] === "inspect" && serving) {
+    if (request.args[1] === "status" && serving) {
       const graph = reply as { receipt: Record<string, unknown> };
       return {
         ...graph,
@@ -3065,7 +3092,7 @@ test("routed HTTPS verification precedes readiness and closes after graph cleanu
     };
   };
   expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
-  expect(events.indexOf("graph inspect")).toBeLessThan(
+  expect(events.indexOf("graph status")).toBeLessThan(
     events.indexOf("https-start")
   );
   expect(events.indexOf("https-start")).toBeLessThan(
@@ -3076,6 +3103,74 @@ test("routed HTTPS verification precedes readiness and closes after graph cleanu
   expect(events).not.toContain("remove");
   expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-close"));
   expect(events.indexOf("https-close")).toBeLessThan(events.indexOf("cleanup"));
+});
+test.each([
+  { waitForReady: true },
+  { waitForReady: false },
+])("the started chain runs while the owner holds the provider lease (--wait $waitForReady)", async ({
+  waitForReady,
+}) => {
+  // The owner holds the provider lease from its started line to its ready
+  // line; the fixture refuses every leased command meanwhile, and so does the
+  // HTTPS owner (its acquire check is a leased inspection of a ready graph).
+  const { opts, events, state } = await httpsFixture();
+  opts.dependencies.https = async (selection) => {
+    if (state.leaseHeld) {
+      state.refused.push("https acquire");
+      throw new Error("provider lease held by the start");
+    }
+    events.push("https-start");
+    return {
+      identity: leaseIdentity(selection),
+      caPath: "/synthetic/root.crt",
+      httpsPort: 8443,
+      exited: new Promise(() => {}),
+      verifyHostname: async () => {
+        events.push("https-verify");
+        return { statusCode: 200 };
+      },
+      releaseAfterCleanup: async () => {
+        events.push("https-close");
+      },
+    };
+  };
+  const controller = new AbortController();
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    await serve(request);
+    // A started return finishes its ready step after the owner's ready line.
+    await Bun.sleep(20);
+    controller.abort();
+    throw new Error("cancelled after ready");
+  };
+  const progress: string[] = [];
+  await startNativeProject({
+    ...opts,
+    https: httpsSelection,
+    waitForReady,
+    signal: controller.signal,
+    onReady: () => {
+      events.push("release");
+    },
+    onProgress: (event) => {
+      progress.push(event.phase);
+    },
+  });
+  expect(state.refused).toEqual([]);
+  expect(events).toContain("save");
+  expect(events).toContain("https-verify");
+  expect(progress).not.toContain("routes-not-answering");
+  if (waitForReady) {
+    expect(events.indexOf("https-start")).toBeLessThan(
+      events.indexOf("release")
+    );
+  } else {
+    // Released at started; HTTPS is taken once the owner is ready.
+    expect(events.indexOf("release")).toBeLessThan(
+      events.indexOf("https-start")
+    );
+    expect(progress).toContain("all-ready");
+  }
 });
 test("shared HTTPS lease is never acquired before graph readiness or without a live pool", async () => {
   const beforeReady = await httpsFixture();
@@ -3108,7 +3203,9 @@ test("shared HTTPS lease is never acquired before graph readiness or without a l
     const invoke = opts.dependencies.invoke!;
     let acquired = false;
     opts.dependencies.invoke = async (request) =>
-      request.args[1] === "status" ? status : invoke(request);
+      request.args[0] === "runtime" && request.args[1] === "status"
+        ? status
+        : invoke(request);
     opts.dependencies.https = async () => {
       acquired = true;
       throw new Error("unexpected lease acquisition");
@@ -3267,7 +3364,8 @@ test("failed cleanup reports sanitized TLS failure and retained state without re
   let inspections = 0;
   opts.dependencies.invoke = async (request) => {
     const value = await invoke(request);
-    if (request.args[1] === "inspect" && ++inspections === 2) {
+    // The first leased inspection is the final one; the mapping read is lease-free.
+    if (request.args[1] === "inspect" && ++inspections === 1) {
       return {
         ...(value as object),
         observations: { "container:web": { state: "running" } },
@@ -3421,9 +3519,15 @@ test("HACK-2351: a ready start stops reading its startup status", async () => {
   opts.dependencies.startupStatusIntervalMs = 5;
   let statusReads = 0;
   let readsAtReady = 0;
+  // The started and ready steps' mapping read is not a startup status read.
+  let inReady = false;
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
-    if (request.args[0] === "graph" && request.args[1] === "status") {
+    if (
+      request.args[0] === "graph" &&
+      request.args[1] === "status" &&
+      !inReady
+    ) {
       statusReads += 1;
       return { receipt: { phase: "preparing" }, observations: {} };
     }
@@ -3433,9 +3537,16 @@ test("HACK-2351: a ready start stops reading its startup status", async () => {
   opts.dependencies.serve = async (request) =>
     await serve({
       ...request,
+      onStarted: async () => {
+        inReady = true;
+        await request.onStarted?.();
+        inReady = false;
+      },
       onReady: async (...args) => {
         await Bun.sleep(40);
+        inReady = true;
         await request.onReady(...args);
+        inReady = false;
         readsAtReady = statusReads;
         // The ready graph keeps running; no startup reads continue.
         await Bun.sleep(60);
@@ -3451,7 +3562,8 @@ test("final inspection failure reports uncertainty without echoing arbitrary fai
   const invoke = opts.dependencies.invoke!;
   let inspections = 0;
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] === "inspect" && ++inspections === 2) {
+    // The first leased inspection is the final one; the mapping read is lease-free.
+    if (request.args[1] === "inspect" && ++inspections === 1) {
       throw new Error("synthetic-private-canary");
     }
     return invoke(request);
@@ -3515,7 +3627,8 @@ test("an unreserved inspection without a settled startup failure stays uncertain
   const invoke = opts.dependencies.invoke!;
   let inspections = 0;
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] === "inspect" && ++inspections === 2) {
+    // The first leased inspection is the final one; the mapping read is lease-free.
+    if (request.args[1] === "inspect" && ++inspections === 1) {
       throw new NativeRuntimeRequestError({
         message: "unreserved",
         nativeCode: "graph_unreserved",

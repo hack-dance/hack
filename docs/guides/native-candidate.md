@@ -674,8 +674,10 @@ after that: the run is **warming** until every goal is met and every route
 answers, then **ready**. `--wait` returns at ready, exactly as before, with the
 same lines, exit codes and timeout text.
 
-- **At started:** the run mapping is saved first, then the HTTPS lease, `up.after`,
-  the exit watcher and the down-hook debt; then `up` returns. The closing line
+- **At started:** the run mapping is saved first, then `up.after`, the exit
+  watcher and the down-hook debt; then `up` returns. The HTTPS routes and the
+  removal of superseded build images wait for ready, because the runtime is
+  still busy with the start until then. The closing line
   counts the routes still warming: `https://web.app.hack  up in 4.6s · native ·
   2 routes warming`. With `--json`, the result has `readiness: "warming"` (or
   `"ready"`) and `services.warming`.
@@ -689,8 +691,8 @@ same lines, exit codes and timeout text.
   - `hack exec` and one-off `hack run` wait for the whole project to be ready
     (one line on stderr), then run, so `hack up -d && hack exec api ...` keeps
     working;
-  - `hack logs SERVICE` without `-f` prints what exists so far through the
-    lock-free reader (with `--json`, as line events);
+  - `hack logs SERVICE` without `-f` prints what exists so far, in the same
+    format as for a ready run;
   - `hack down` stops the run with data retained; the owner accepts the stop
     between start passes, after any publication in progress has committed or
     been withdrawn. `hack down --remove-data` waits for ready: stop first, then

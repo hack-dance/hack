@@ -71,3 +71,40 @@ export async function inspectNativeProjectGraph(opts: {
     }
   }
 }
+
+/**
+ * Lease-free `graph status` of a run whose owner still holds the provider lease
+ * (its start loop, until the ready line). Same receipt shape as `graph inspect`,
+ * but a point-in-time observation: it authorizes no effect, and every effect on
+ * what it selects (down, recovery) re-inspects under the lease. A journal that
+ * moves during the read (`graph_status_changed`) is read again, bounded.
+ */
+export async function observeStartingNativeProjectGraph(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: string;
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly signal?: AbortSignal;
+}): Promise<unknown> {
+  const deadline = performance.now() + 5000;
+  for (;;) {
+    try {
+      return await (opts.invoke ?? invokeNativeRuntime)({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: ["graph", "status", "--run-id", opts.run, "--json"],
+        timeoutMs: 30_000,
+        signal: opts.signal,
+      });
+    } catch (error) {
+      const changed =
+        error instanceof NativeRuntimeRequestError &&
+        (error.nativeCode === "graph_status_changed" ||
+          error.nativeCauseCode === "graph_status_changed");
+      if (!changed || performance.now() >= deadline || opts.signal?.aborted) {
+        throw error;
+      }
+      await Bun.sleep(50);
+    }
+  }
+}

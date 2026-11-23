@@ -669,15 +669,48 @@ fn card(
                             .text_color(p.text_secondary)
                             .child(
                                 div()
-                                    .type_step(text::SMALL_STRONG)
-                                    .text_color(p.text_primary)
-                                    .child(format!("{} · {state}", check.id)),
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(space::S4)
+                                    .child(
+                                        div()
+                                            .type_step(text::SMALL_STRONG)
+                                            .text_color(p.text_primary)
+                                            .child(format!(
+                                                "{} · {state}",
+                                                dns_piece_name(&check.id)
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(ui.mono.clone())
+                                            .text_color(p.text_muted)
+                                            .child(check.id.clone()),
+                                    ),
                             )
                             .child(check.detail.clone())
                     })),
             )
         })
         .into_any_element()
+}
+
+fn dns_piece_name(id: &str) -> String {
+    match id {
+        "dnsmasq:53" => "Local DNS server answers".into(),
+        "coredns forwarding" => "Containers can resolve project names".into(),
+        "linux dns route" => "Linux sends project domains to Hack".into(),
+        _ => {
+            if let Some(domain) = id.strip_prefix("resolver:") {
+                format!("Mac sends *.{domain} to Hack")
+            } else if let Some(domain) = id.strip_prefix("dnsmasq.conf:") {
+                format!("Hack answers for *.{domain}")
+            } else {
+                id.into()
+            }
+        }
+    }
 }
 
 #[cfg(test)]

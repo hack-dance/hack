@@ -75,7 +75,9 @@ pub(crate) fn login_card(
             "https://github.com/hack-dance/hack/blob/next/docs/architecture.md#daemon".into(),
         )
     };
-    if let Some(why) = refusal {
+    if state.0 == Status::Unknown && service.is_none() {
+        state.1 = "Couldn't check the login service.".into();
+    } else if let Some(why) = refusal {
         state.1 = format!("{}; {why}", state.1);
     }
     card(LOGIN.0, LOGIN.1, state, remedy)

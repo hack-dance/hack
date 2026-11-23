@@ -48,6 +48,7 @@ pub struct Choice {
     pub selected: Option<Install>,
     /// CLIs found but refused: another user can change them.
     pub rejected: Vec<PathBuf>,
+    compatible: Vec<PathBuf>,
 }
 
 impl Choice {
@@ -79,19 +80,26 @@ impl Choice {
         if self.installs.len() < 2 {
             return self;
         }
-        let mut best = None;
+        let mut compatible = Vec::new();
+        let mut mismatch = None;
         for install in self.selected.iter().chain(self.others()) {
             if let Some(found) = version(install) {
                 if crate::setup::supported_cli(&found) {
-                    best = Some(install.clone());
-                    break;
+                    compatible.push(install.path.clone());
+                } else {
+                    mismatch.get_or_insert(install);
                 }
-                best.get_or_insert_with(|| install.clone());
             }
         }
-        if let Some(install) = best {
-            self.selected = Some(install);
+        if let Some(install) = self
+            .installs
+            .iter()
+            .find(|install| Some(&install.path) == compatible.first())
+            .or(mismatch)
+        {
+            self.selected = Some(install.clone());
         }
+        self.compatible = compatible;
         self
     }
 
@@ -108,14 +116,20 @@ impl Choice {
             installs,
             selected,
             rejected: Vec::new(),
+            compatible: Vec::new(),
         }
     }
 
-    /// The installs the app could switch to.
+    /// The other installs found on this machine.
     pub fn others(&self) -> impl Iterator<Item = &Install> {
         self.installs
             .iter()
             .filter(move |i| Some(*i) != self.selected.as_ref())
+    }
+
+    /// Alternatives with a confirmed, compatible version.
+    pub fn compatible_alternatives(&self) -> impl Iterator<Item = &Install> {
+        self.others().filter(|i| self.compatible.contains(&i.path))
     }
 
     /// Select `path` (one of the installs) and save it as the choice.
@@ -309,6 +323,40 @@ mod tests {
         assert!(none.is_empty());
         assert_eq!(rejected, [home.join(".hack-next/bin/hack-next")]);
         std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn a_switch_is_offered_only_to_a_confirmed_compatible_install() {
+        let stable = Install {
+            name: "hack".into(),
+            channel: Channel::Stable,
+            path: "/bin/hack".into(),
+        };
+        let next = Install {
+            name: "hack-next".into(),
+            channel: Channel::Prerelease,
+            path: "/bin/hack-next".into(),
+        };
+        let choice = |stable_version: Option<&str>| {
+            Choice::pick(vec![stable.clone(), next.clone()], Some(&next.path)).prefer_supported(
+                |install| {
+                    if install == &stable {
+                        stable_version
+                    } else {
+                        Some("5.0.0-next.24")
+                    }
+                    .map(str::to_owned)
+                },
+            )
+        };
+        assert_eq!(choice(Some("4.3.1")).compatible_alternatives().count(), 0);
+        assert_eq!(choice(None).compatible_alternatives().count(), 0);
+        assert_eq!(
+            choice(Some("5.0.0"))
+                .compatible_alternatives()
+                .collect::<Vec<_>>(),
+            [&stable],
+        );
     }
 
     #[test]

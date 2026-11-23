@@ -59,8 +59,10 @@ The app looks for two installs:
 It offers only an install that no other user on the machine can change. Among
 compatible Hack 5 installs, it prefers the one you chose last time, then stable,
 then the prerelease. If the installed CLI is too old, Setup names its version
-and shows the later steps as blocked. The status bar names the CLI in use, for example
-`hack-next 5.0.0-next.19 · prerelease`, and one click switches to the other.
+and shows the later steps as blocked. The status bar names the CLI in use, for
+example `hack-next 5.0.0-next.19 · prerelease`. It offers a switch when another
+compatible install was confirmed. If no CLI was found, use **Set up Hack** in
+the main pane to check your install.
 
 The app then asks that CLI where its `hackd` is (`hack daemon status --json`)
 and reads that one. This matters with a prerelease: `hack-next` keeps its own

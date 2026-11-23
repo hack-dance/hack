@@ -958,8 +958,7 @@ impl HackApp {
     }
 
     /// The status bar, naming the Hack CLI the app runs (`hack-next
-    /// 5.0.0-next.19 · prerelease`) and offering another install when one
-    /// was found (HACK-2283).
+    /// 5.0.0-next.19 · prerelease`) and offering another compatible install.
     fn status_bar_with_cli(
         &self,
         list: &ListView,
@@ -968,7 +967,9 @@ impl HackApp {
     ) -> gpui_kit::Div {
         let choice = self.source.cli_choice();
         let version = self.cli_label_for(list);
-        let other = choice.as_ref().and_then(|c| c.others().next().cloned());
+        let other = choice
+            .as_ref()
+            .and_then(|c| c.compatible_alternatives().next().cloned());
         let p = ui.p;
         let disconnected = disconnected_status(list);
         let setup = (self.pane != Pane::Setup && disconnected.is_some()).then(|| {
@@ -976,7 +977,7 @@ impl HackApp {
                 .id("status-setup")
                 .ml(space::S5)
                 .cursor_pointer()
-                .text_color(p.accent)
+                .text_color(p.text_primary)
                 .hover(|d| d.underline())
                 .child("Set up")
                 .on_click(cx.listener(|this, _, _, cx| this.open_setup(cx)))
@@ -989,7 +990,7 @@ impl HackApp {
                     .id("use-other-cli")
                     .ml(space::S5)
                     .cursor_pointer()
-                    .text_color(p.accent)
+                    .text_color(p.text_primary)
                     .hover(|d| d.underline())
                     .child(label)
                     .on_click(
@@ -1947,10 +1948,14 @@ impl Render for HackApp {
             }
             Phase::CliMissing => empty_pane(
                 Glyph::CircleAlert,
-                "Hack CLI not found",
-                "The app needs a Hack 5 CLI. Open Set up to check your install.",
+                "Hack isn't connected",
+                "The app can't find a Hack 5 CLI on this machine.",
                 None,
                 &ui,
+            )
+            .child(
+                primary_button("missing-cli-setup", Glyph::Stethoscope, "Set up Hack", &ui)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_setup(cx))),
             )
             .into_any_element(),
             Phase::CliUnsupported { version } => empty_pane(

@@ -608,7 +608,7 @@ pub(crate) fn supported_cli(version: &str) -> bool {
 }
 
 pub fn unsupported_cli_detail(version: &str) -> String {
-    format!("Hack {version} is installed, this app needs 5")
+    format!("Hack {version} is installed. This app needs Hack 5.")
 }
 
 /// How old a shown Setup pane's checks may get before they run again.

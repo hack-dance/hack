@@ -118,9 +118,9 @@ The app finds stable `hack` on PATH and a prerelease `hack-next` (on PATH or
 `~/.hack-next/bin/hack-next`), offering only installs no other user can change.
 It prefers a compatible Hack 5 CLI in this order: saved choice, stable, then
 prerelease. When every readable CLI is incompatible, Setup names the installed
-version and blocks the remaining checks. The status bar
-names it (`hack-next 5.0.0-next.19 · prerelease`) and offers the other with one
-click (**Use hack (stable)**); the choice is saved in the app's settings
+version and blocks the remaining checks. The status bar names the CLI in use
+(`hack-next 5.0.0-next.19 · prerelease`) and offers a switch when another
+compatible install was confirmed. The choice is saved in the app's settings
 (`~/Library/Application Support/dance.hack.desktop/settings.json` on macOS,
 `$XDG_CONFIG_HOME/hack-desktop/settings.json` elsewhere), never an environment
 variable. `--drive` has `use-cli <name>` and `expect-cli <text>` for it.

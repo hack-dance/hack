@@ -474,7 +474,7 @@ esac
         assert_eq!(report.cards[0].status, Status::NeedsAttention);
         assert_eq!(
             report.cards[0].detail,
-            "Hack 4.3.1 is installed, this app needs 5"
+            "Hack 4.3.1 is installed. This app needs Hack 5."
         );
         assert_eq!(
             report.cards[1..]
@@ -511,6 +511,8 @@ fn unreadable_daemon_status_is_not_a_confirmed_stop() {
     let daemon = report.cards.iter().find(|c| c.id == "daemon").unwrap();
     assert_eq!(daemon.status, Status::Unknown);
     assert_eq!(daemon.remedy, hack_desktop_core::setup::Remedy::None);
+    let login = report.cards.iter().find(|c| c.id == "login").unwrap();
+    assert_eq!(login.detail, "Couldn't check the login service.");
     assert!(matches!(
         source.listing(),
         Err(hack_desktop_core::source::SourceError::DaemonUnreadable)

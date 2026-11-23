@@ -17,6 +17,10 @@ import {
   assertAutostartProjectCurrent,
   withAutostartProjectLock,
 } from "../src/lib/autostart-project-lock.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let root = "";
@@ -29,14 +33,14 @@ const DOCKER_TRUST_PRELOAD = resolve(
 beforeEach(async () => {
   // macOS links /var to /private/var; the product compares resolved paths.
   root = await realpath(await mkdtemp(join(tmpdir(), "autostart-intent-")));
-  await mkdir(join(root, "project", ".hack"), { recursive: true });
-  await mkdir(join(root, "home", ".hack"), { recursive: true });
-  await mkdir(join(root, "bin"));
-  await writeFile(
+  await mkdirOwnedFixture(join(root, "project", ".hack"), true);
+  await mkdirOwnedFixture(join(root, "home", ".hack"), true);
+  await mkdirOwnedFixture(join(root, "bin"));
+  await writeOwnedFixture(
     join(root, "project", ".hack", "hack.config.json"),
     '{"name":"sample"}'
   );
-  await writeFile(
+  await writeOwnedFixture(
     join(root, "project", ".hack", "docker-compose.yml"),
     "services:\n  app:\n    image: example.invalid/app\n"
   );
@@ -146,7 +150,7 @@ test("down accepts legacy alias names when deciding whether to pause", async () 
 test("login refuses a pending legacy migration without touching dotenv or changing intent", async () => {
   await writeRegistry(false);
   const envFile = join(root, "project", ".hack", ".env");
-  await writeFile(envFile, "SAMPLE_VALUE=fixture\n");
+  await writeOwnedFixture(envFile, "SAMPLE_VALUE=fixture\n");
   const result = await run(["up", "--json", "-d"], true);
   expect(result.exitCode).not.toBe(0);
   expect(result.stdout + result.stderr).toContain("pending env migration");
@@ -393,7 +397,7 @@ async function legacyWritableRegistry(redirect = false) {
   Reflect.deleteProperty(registry.projects[0], "autostart");
   if (redirect) {
     const other = join(root, "redirected");
-    await mkdir(join(other, ".hack"), { recursive: true });
+    await mkdirOwnedFixture(join(other, ".hack"), true);
     await writeFile(
       join(other, ".hack", "hack.config.json"),
       '{"name":"sample"}'

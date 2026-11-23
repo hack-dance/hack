@@ -33,6 +33,7 @@ import {
   prepareNativeComposeStorageWitness,
   verifyNativeComposeStorageWitness,
 } from "../src/lib/native-compose-storage-witness.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const roots: string[] = [];
 const stores: NativeComposeGenerationStore[] = [];
@@ -410,7 +411,7 @@ async function fixture() {
     await mkdtemp(join(tmpdir(), "native-storage-witness-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack", "hack.project.json"),
     JSON.stringify({ schema_version: 1, name: "witness" })

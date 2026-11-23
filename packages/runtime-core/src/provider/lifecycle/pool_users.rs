@@ -17,6 +17,7 @@
 //! already refuses while one runs. Any entry that cannot be read or is not
 //! recognized makes the answer unknown or "in use", never idle.
 use super::state;
+use crate::CandidateError;
 use std::{fs, io::ErrorKind, path::Path};
 
 /// Bound on entries read from one directory; more is treated as unknown.
@@ -139,6 +140,7 @@ const LIVE_PHASES: [(&str, &[&str]); 2] = [
         &[
             "preparing",
             "restoring",
+            "started-observed",
             "ready-observed",
             "failed-retained",
             "cleanup-intent",
@@ -199,10 +201,145 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
     live.sort();
     Some(live)
 }
+/// The recovery intent a graph run directory may hold (`graph::dead_owner_cleanup`),
+/// and its staging file. A completed intent stays as history: it records
+/// `complete_sha256` and is not a pending operation.
+const CLEANUP_INTENT: &str = "dead-owner-cleanup.json";
+const CLEANUP_STAGING: &str = "dead-owner-cleanup.pending";
+
+/// Whether this run directory holds an unfinished dead-owner recovery: a staging file,
+/// or an intent without its completion digest. `None` when either cannot be read.
+fn recovery_pending(run: &Path) -> Option<bool> {
+    match fs::symlink_metadata(run.join(CLEANUP_STAGING)) {
+        Ok(_) => return Some(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    match fs::symlink_metadata(run.join(CLEANUP_INTENT)) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+        Ok(_) => {}
+    }
+    let intent: serde_json::Value = state::read(&run.join(CLEANUP_INTENT)).ok()?;
+    Some(!intent["complete_sha256"].is_string())
+}
+/// The refusal code of a pool that is not idle (HACK-2535).
+pub(super) const POOL_IN_USE: &str = "project_share_pool_in_use";
+
+/// Refuse unless nothing uses the running pool live, so stopping it loses nothing but
+/// a boot (HACK-2535): no graph run whose receipt is live (`live_graph_runs`: running,
+/// starting, restoring, stopping, or a failed start that kept its services), no
+/// pending dead-owner recovery, and no interactive exec session. Retained and removed
+/// runs hold no containers and do not count. Anything unreadable refuses. An active
+/// image build is checked by `runtime down` itself, under the same lease.
+pub(super) fn require_idle(state_root: &Path) -> Result<(), CandidateError> {
+    const LIVE: &str = "The running native pool has a live project run (running, starting, restoring or stopping), so it was not stopped; nothing was changed.";
+    const UNREAD: &str = "The running native pool's project runs or sessions could not be read, so it was not stopped; nothing was changed.";
+    const RECOVERY: &str = "A project run of the running native pool has a pending recovery, so the pool was not stopped; nothing was changed.";
+    const SESSION: &str = "The running native pool has an open interactive session, so it was not stopped; nothing was changed. `hack exec-sessions --reconcile` clears sessions that have finished.";
+    let in_use = |message: &'static str| CandidateError::new(POOL_IN_USE, message);
+    match live_graph_runs(state_root) {
+        None => return Err(in_use(UNREAD)),
+        Some(runs) if !runs.is_empty() => return Err(in_use(LIVE)),
+        Some(_) => {}
+    }
+    for directory in GRAPH_DIRECTORIES {
+        let pending = count(&state_root.join(directory), |name, path| {
+            if !is_graph_run(name) {
+                return Some(false);
+            }
+            recovery_pending(path)
+        });
+        match pending {
+            Some(0) => {}
+            Some(_) => return Err(in_use(RECOVERY)),
+            None => return Err(in_use(UNREAD)),
+        }
+    }
+    match count(&state_root.join("run/exec-sessions"), |name, _| {
+        Some(name != LOCK_FILE)
+    }) {
+        Some(0) => Ok(()),
+        Some(_) => Err(in_use(SESSION)),
+        None => Err(in_use(UNREAD)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn only_a_pool_without_live_runs_pending_recovery_or_sessions_is_idle() {
+        let home = Home::new();
+        assert!(require_idle(&home.0).is_ok());
+        // Retained and removed runs hold no containers.
+        for (run, phase) in [("a", "stopped-data-retained"), ("b", "removed")] {
+            let dir = home.dir(&format!("run/graphs/{}", run.repeat(32)));
+            state::write(
+                &dir.join("state.json"),
+                &serde_json::json!({ "phase": phase }),
+            )
+            .unwrap();
+        }
+        let native = home.dir(&format!("run/native-graphs/{}", "c".repeat(32)));
+        state::write(
+            &native.join("state.json"),
+            &serde_json::json!({ "phase": "stopped" }),
+        )
+        .unwrap();
+        assert!(require_idle(&home.0).is_ok());
+        let refused = |home: &Home, why: &str| {
+            let error = require_idle(&home.0).unwrap_err();
+            assert_eq!(error.code, POOL_IN_USE);
+            assert!(error.message.contains(why), "{}", error.message);
+        };
+        // A pending recovery of a retained run: an intent without its completion digest,
+        // or a staging file.
+        let intent = native.join(CLEANUP_INTENT);
+        state::write(&intent, &serde_json::json!({ "complete_sha256": null })).unwrap();
+        refused(&home, "pending recovery");
+        // A completed recovery stays as history and does not keep the pool in use.
+        state::write(
+            &intent,
+            &serde_json::json!({ "complete_sha256": "a".repeat(64) }),
+        )
+        .unwrap();
+        assert!(require_idle(&home.0).is_ok());
+        fs::write(native.join(CLEANUP_STAGING), b"{}").unwrap();
+        refused(&home, "pending recovery");
+        fs::remove_file(native.join(CLEANUP_STAGING)).unwrap();
+        // An unreadable intent refuses.
+        fs::write(&intent, b"{").unwrap();
+        refused(&home, "could not be read");
+        fs::remove_file(&intent).unwrap();
+        // An open interactive session.
+        let sessions = home.dir("run/exec-sessions");
+        fs::write(sessions.join(LOCK_FILE), b"").unwrap();
+        assert!(require_idle(&home.0).is_ok());
+        fs::write(sessions.join("session.json"), b"{}").unwrap();
+        refused(&home, "open interactive session");
+        fs::remove_file(sessions.join("session.json")).unwrap();
+        // A starting run, named.
+        for phase in [
+            "preparing",
+            "ready-observed",
+            "failed-retained",
+            "cleanup-intent",
+        ] {
+            let dir = home.dir(&format!("run/graphs/{}", "d".repeat(32)));
+            state::write(
+                &dir.join("state.json"),
+                &serde_json::json!({ "phase": phase }),
+            )
+            .unwrap();
+            refused(&home, "live project run");
+        }
+        // An unreadable receipt refuses.
+        home.dir(&format!("run/graphs/{}", "e".repeat(32)));
+        refused(&home, "could not be read");
+    }
     #[test]
     fn runtime_down_names_only_runs_whose_receipt_is_live() {
         let home = Home::new();
@@ -213,6 +350,7 @@ mod tests {
             ("c", "restoring"),
             ("d", "removed"),
             ("6", "failed-retained"),
+            ("5", "started-observed"),
         ] {
             let dir = home.dir(&format!("run/graphs/{}", run.repeat(32)));
             state::write(
@@ -223,7 +361,12 @@ mod tests {
         }
         assert_eq!(
             live_graph_runs(&home.0),
-            Some(vec!["6".repeat(32), "a".repeat(32), "c".repeat(32)])
+            Some(vec![
+                "5".repeat(32),
+                "6".repeat(32),
+                "a".repeat(32),
+                "c".repeat(32)
+            ])
         );
         // Native-authored graphs are listed by their own phases.
         for (run, phase) in [
@@ -242,6 +385,7 @@ mod tests {
         assert_eq!(
             live_graph_runs(&home.0),
             Some(vec![
+                "5".repeat(32),
                 "6".repeat(32),
                 "7".repeat(32),
                 "8".repeat(32),

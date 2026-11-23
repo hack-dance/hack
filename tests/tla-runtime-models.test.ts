@@ -31,6 +31,16 @@ for (const model of contracts) {
     expect(
       model.verify({ negative: false, exitCode: 0, output: positive })
     ).toBe(true);
+    expect(
+      model.verify({
+        negative: false,
+        exitCode: 0,
+        output: positive.replace(
+          String(model.states),
+          model.states.toLocaleString("en-US")
+        ),
+      })
+    ).toBe(true);
     for (const output of [
       "",
       positive.replace(`${model.states} distinct`, "999 distinct"),
@@ -79,6 +89,39 @@ test("runtime model config selection rejects paths and arbitrary filenames", () 
       "Invalid runtime model control name"
     );
   }
+});
+
+test("both services can be the final publication counterexample", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "per-service-publication"
+  );
+  expect(model).toBeDefined();
+  const bind = model?.additionalControls.find(
+    (entry) => entry.name === "bind-before-commit"
+  );
+  expect(bind).toBeDefined();
+  const recordSecond = tlaWitness({
+    invariant: "Safe",
+    action: "Record",
+    fields: [
+      'recorded = {"second"}',
+      'child = [first |-> "absent", second |-> "gated"]',
+    ],
+  });
+  const bindSecond = tlaWitness({
+    invariant: "Safe",
+    action: "Bind",
+    fields: [
+      'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+      "recorded = {}",
+    ],
+  });
+  expect(
+    model?.verify({ negative: true, exitCode: 12, output: recordSecond })
+  ).toBe(true);
+  expect(
+    bind?.verify({ negative: true, exitCode: 12, output: bindSecond })
+  ).toBe(true);
 });
 
 test("persistent enrollment accepts both genuine changed-birth witnesses only", () => {

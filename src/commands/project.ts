@@ -50,6 +50,7 @@ import {
   type HookCompletion,
   type HookStart,
 } from "./compose-up-progress.ts";
+import { runProjectCopies } from "./project-copies.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -347,7 +348,10 @@ import {
   bootstrapDependencyCaches,
   dependencyCacheBootstrapFailure,
 } from "../lib/dependency-cache-bootstrap.ts";
-import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
+import {
+  type CacheVolumeKept,
+  removeDisposableCacheVolumes,
+} from "../lib/disposable-cache-volumes.ts";
 import { dockerHelperRunEnvironment } from "../lib/docker-helper-environment.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
@@ -826,6 +830,12 @@ const restartOptions = [
 ] as const;
 const psOptions = [
   defineOption({
+    name: "copies",
+    type: "boolean",
+    long: "--copies",
+    description: "Show all checkouts and branch instances of the project",
+  }),
+  defineOption({
     name: "wide",
     type: "boolean",
     long: "--wide",
@@ -1265,6 +1275,7 @@ export type LifecycleJsonData = {
     readonly failed: readonly string[];
   };
   readonly cacheVolumesRemoved?: readonly string[];
+  readonly cacheVolumesKept?: readonly CacheVolumeKept[];
   /** One-shot dependencies this command stopped mid-run (HACK-2310). */
   readonly interrupted?: readonly string[];
   readonly warnings?: readonly string[];
@@ -1376,6 +1387,7 @@ export function buildLifecycleJsonData(opts: {
   readonly stopped?: readonly string[];
   readonly failed?: readonly string[];
   readonly cacheVolumesRemoved?: readonly string[];
+  readonly cacheVolumesKept?: readonly CacheVolumeKept[];
   readonly interruption?: OneShotInterruption;
   readonly durationMs: number;
 }): LifecycleJsonData {
@@ -1392,6 +1404,9 @@ export function buildLifecycleJsonData(opts: {
     },
     ...(opts.cacheVolumesRemoved
       ? { cacheVolumesRemoved: [...opts.cacheVolumesRemoved].sort() }
+      : {}),
+    ...(opts.cacheVolumesKept
+      ? { cacheVolumesKept: opts.cacheVolumesKept }
       : {}),
     ...(opts.interruption && opts.interruption.services.length > 0
       ? {
@@ -3657,12 +3672,12 @@ async function resolveBranchComposeFiles(opts: {
 
   await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".branch");
-  await ensureDir(overrideDir);
+  await ensureDir(overrideDir, 0o700);
   const overridePath = resolve(
     overrideDir,
     `compose.${opts.branch}.override.yml`
   );
-  await writeTextFileIfChanged(overridePath, override);
+  await writeTextFileIfChanged(overridePath, override, 0o600);
   return [opts.project.composeFile, overridePath];
 }
 
@@ -3698,14 +3713,14 @@ export async function resolveRuntimeHostMetadataOverride(opts: {
     opts.project.projectDir,
     opts.branch ? ".branch" : ".internal"
   );
-  await ensureDir(overrideDir);
+  await ensureDir(overrideDir, 0o700);
   const overridePath = resolve(
     overrideDir,
     opts.branch
       ? `compose.${opts.branch}.runtime.override.yml`
       : "compose.runtime.override.yml"
   );
-  await writeTextFileIfChanged(overridePath, override);
+  await writeTextFileIfChanged(overridePath, override, 0o600);
   return overridePath;
 }
 
@@ -4040,8 +4055,10 @@ async function writeInternalComposeOverride(opts: {
   readonly path: string;
   readonly text: string;
 }): Promise<string> {
-  await ensureDir(dirname(opts.path));
-  await writeTextFileAtomicIfChanged(opts.path, opts.text);
+  await ensureDir(dirname(opts.path), 0o700);
+  await writeTextFileAtomicIfChanged(opts.path, opts.text, {
+    createMode: 0o600,
+  });
   return opts.path;
 }
 
@@ -4738,7 +4755,7 @@ export async function handleInit({
     },
   });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureDir(hackDir);
+  await ensureDir(hackDir, 0o755);
 
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
@@ -4915,7 +4932,7 @@ async function handleInitAuto({
         backend,
       });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureDir(hackDir);
+  await ensureDir(hackDir, 0o755);
 
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
@@ -5018,12 +5035,13 @@ async function writeInitScaffoldFile(opts: {
   await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
   if (basename(opts.file) === PROJECT_ENV_CONFIG_DEFAULT_FILENAME) {
     await writeTextFileAtomicIfChanged(opts.file, opts.content, {
+      createMode: 0o644,
       validatePath: async (path) =>
         await assertProjectEnvLayerPath({ projectRoot: opts.repoRoot, path }),
     });
     return;
   }
-  await writeTextFileIfChanged(opts.file, opts.content);
+  await writeTextFileIfChanged(opts.file, opts.content, 0o644);
 }
 
 /**
@@ -9062,6 +9080,7 @@ async function runDownCommand({
   noteActivityBranch(branch);
   await recordBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
+  const cacheVolumesKept: CacheVolumeKept[] = [];
   const cachePruneCandidates =
     pruneCaches && runtime
       ? await prepareDisposableCachePrune({
@@ -9073,6 +9092,7 @@ async function runDownCommand({
             writeDownNotice({ json, level, message });
           },
           yes: confirmCachePrune,
+          kept: cacheVolumesKept,
         })
       : [];
   const projectName = sanitizeProjectSlug(baseProjectName);
@@ -9298,7 +9318,18 @@ async function runDownCommand({
   }
   const cacheRemoval = await removeDisposableCacheVolumes({
     candidates: cachePruneCandidates,
+    kept: cacheVolumesKept,
   });
+  for (const volume of cacheVolumesKept) {
+    if (volume.reason === "identity-changed") {
+      writeDownNotice({
+        json,
+        level: "warn",
+        message: `Kept volume "${volume.name}": its identity could not be verified after stopping.`,
+      });
+    }
+  }
+  cacheVolumesKept.sort((left, right) => left.name.localeCompare(right.name));
   await removeProjectRuntimeStateEntry({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
@@ -9350,6 +9381,7 @@ async function runDownCommand({
         detail: {
           removed: cacheRemoval.removed,
           failed: cacheRemoval.failed,
+          kept: cacheVolumesKept,
         },
       }),
       exitCode: 1,
@@ -9365,6 +9397,7 @@ async function runDownCommand({
         composeProject: composeProjectName ?? baseProjectName,
         stopped: runningServicesBeforeDown,
         cacheVolumesRemoved: cacheRemoval.removed,
+        cacheVolumesKept: pruneCaches ? cacheVolumesKept : undefined,
         interruption: interruptionCheck.interruption,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),
@@ -11204,6 +11237,37 @@ async function handlePs({
   readonly ctx: CliContext;
   readonly args: PsArgs;
 }): Promise<number> {
+  if (args.options.copies) {
+    if (
+      args.options.branch !== undefined ||
+      args.options.profile !== undefined ||
+      args.options.wide
+    ) {
+      throw new CliUsageError(
+        "--copies cannot be combined with --branch, --profile or --wide."
+      );
+    }
+    return await runProjectCopies({
+      cwd: ctx.cwd,
+      path: args.options.path,
+      project: args.options.project,
+      json: args.options.json === true,
+      legacyContext: () =>
+        resolveProjectForArgs({
+          ctx,
+          pathOpt: args.options.path,
+          projectOpt: args.options.project,
+          touchRegistration: false,
+        }),
+      addresses: async (project, branch, native) =>
+        readProjectServiceAddresses({
+          project,
+          cfg: await readProjectConfig(project),
+          branch,
+          native,
+        }),
+    });
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,

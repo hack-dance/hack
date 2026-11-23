@@ -208,6 +208,11 @@ async function reportFixturePhases(
   if (!DEADLINE_MODES.includes(fixtureMode)) {
     return;
   }
+  if (fixtureMode === "slow-runtime") {
+    // Model the loaded Mac: the first phase arrives after the full runtime
+    // budget would have expired if the fixture clock still counted startup.
+    await Bun.sleep(fixtureLimits(fixtureMode).budgetMs + 250);
+  }
   setNativeDetachedHeartbeatIntervalForTests(10);
   nativeDetachedUpProgress("input");
   nativeDetachedUpProgress("runtime");

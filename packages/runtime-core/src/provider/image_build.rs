@@ -116,7 +116,7 @@ const GIB: u64 = 1024 * 1024 * 1024;
 const STORAGE_FLOOR: u64 = 6 * GIB;
 /// BuildKit cache kept after each successful build. The cache in this engine is created
 /// only by Hack builds and is regenerable; pruning never touches images or volumes.
-pub(super) const CACHE_BUDGET: u64 = 8 * GIB;
+pub(super) const CACHE_BUDGET: u64 = 4 * GIB;
 /// Labels a Dockerfile (or a base image) must not set on an image Hack runs: the same
 /// reserved ownership namespaces the frontend refuses on authored services.
 const RESERVED_LABEL_PREFIXES: [&str; 5] = [

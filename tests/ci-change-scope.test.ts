@@ -216,6 +216,7 @@ describe("pull request diff", () => {
       cwd,
       env: fixtureGitEnv(),
       stdin: "ignore",
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -274,6 +275,7 @@ describe("pull request diff", () => {
           PR_DRAFT: "false",
           PR_FULL: "false",
         },
+        timeout: 15_000,
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -298,6 +300,7 @@ describe("pull request diff", () => {
           PR_DRAFT: "false",
           PR_FULL: "false",
         },
+        timeout: 15_000,
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -311,6 +314,7 @@ describe("pull request diff", () => {
     const missing = Bun.spawnSync([process.execPath, script], {
       cwd: repoRoot,
       env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -318,6 +322,7 @@ describe("pull request diff", () => {
     const push = Bun.spawnSync([process.execPath, script, "--event=push"], {
       cwd: repoRoot,
       env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -328,6 +333,13 @@ describe("pull request diff", () => {
 });
 
 describe("CI workflow wiring", () => {
+  test("only dispatches enable the Compose upgrade trial", async () => {
+    const { jobs } = await ciWorkflow();
+    expect(jobs["compose-upgrade-trial"]?.if).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.compose_upgrade_trial }}"
+    );
+  });
+
   test("the changes job exposes every scope output and checks out the merge parent", async () => {
     const changes = (await ciWorkflow()).jobs.changes;
     const keys = [...Object.keys(fullPushPlan()), "ci_evidence"].sort();
@@ -444,12 +456,10 @@ describe("CI workflow wiring", () => {
         "${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}"
       );
     }
-    // Ordinary CI always reports the required docs status. After the scope
-    // report, gated steps make it a no-op when the docs did not change.
+    // `docs site` is a required check: the job always runs, and every step
+    // after the scope report is gated, so it passes as a no-op when unneeded.
     expect(jobs["docs-site"]?.needs).toBe("changes");
-    expect(jobs["docs-site"]?.if).toBe(
-      "${{ always() && !inputs.compose_upgrade_trial }}"
-    );
+    expect(jobs["docs-site"]?.if).toBe("${{ always() }}");
     const docsSteps = jobs["docs-site"]?.steps ?? [];
     expect(docsSteps[0]?.name).toBe("Report scope");
     expect(docsSteps[0]?.if).toBeUndefined();
@@ -470,29 +480,9 @@ describe("CI workflow wiring", () => {
     expect(jobs["state-models"]?.if).toBe(
       "${{ needs.changes.outputs.build_smoke == 'true' }}"
     );
-    expect(jobs["secret-scan"]?.needs).toBeUndefined();
-    expect(jobs["secret-scan"]?.if).toBe(
-      "${{ !inputs.compose_upgrade_trial }}"
-    );
-  });
-
-  test("the focused Compose dispatch has distinct fan-in check names", async () => {
-    const { jobs } = await ciWorkflow();
-    expect(jobs["compose-upgrade-trial"]?.if).toBe(
-      "${{ github.event_name == 'workflow_dispatch' && inputs.compose_upgrade_trial }}"
-    );
-    expect(jobs.changes?.if).toBe("${{ !inputs.compose_upgrade_trial }}");
-    for (const [job, regularName, trialName] of [
-      ["docs-site", "docs site", "docs site"],
-      ["test", "test", "test fan-in"],
-      ["docker-e2e", "docker-e2e", "Docker fan-in"],
-    ] as const) {
-      expect(jobs[job]?.name).toBe(
-        `\${{ inputs.compose_upgrade_trial && 'Compose trial / ${trialName}' || '${regularName}' }}`
-      );
-      expect(jobs[job]?.if).toBe(
-        "${{ always() && !inputs.compose_upgrade_trial }}"
-      );
+    for (const name of ["secret-scan"]) {
+      expect(jobs[name]?.needs, name).toBeUndefined();
+      expect(jobs[name]?.if, name).toBeUndefined();
     }
   });
 });

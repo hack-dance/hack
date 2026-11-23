@@ -878,7 +878,7 @@ On macOS a long absolute `TMPDIR` can prevent Docker from opening its CLI
 plugin control socket. In a disposable scratch checkout, run the sweep with
 `TMPDIR=.` to use short relative socket addresses and keep files in scratch.
 
-Dispatch the focused CI trial ten times on the same ref:
+Enable the Compose qualification trial on CI dispatches for the same ref:
 
 ```sh
 gh workflow run ci.yml --repo hack-dance/hack --ref "$qualification_ref" -f compose_upgrade_trial=true
@@ -887,5 +887,5 @@ gh workflow run ci.yml --repo hack-dance/hack --ref "$qualification_ref" -f comp
 Record distinct run IDs and verify each run's head SHA and
 `compose-upgrade-trial` job. Each trial requires three SIGINT passes and a real
 MCP SDK pass. Missing jobs, skips, and runs built from another revision do not
-count. Capture the local and hosted results independently. The focused dispatch
-has separate check names from the regular CI and full release qualification.
+count. Capture the local and hosted results independently. The dispatch adds the Compose trial to
+the ordinary CI run, which retains its required checks.

@@ -115,8 +115,6 @@ const LEGACY_TEST_JOB = "test";
 const WORKFLOW_JOB_KEY = /^ {2}([A-Za-z0-9_-]+):\s*$/;
 const WORKFLOW_JOB_NAME = /^ {4}name:\s*(.+?)\s*$/;
 const WORKFLOW_EXPRESSION = /\$\{\{.*?\}\}/;
-const WORKFLOW_INPUT_NAME =
-  /^\$\{\{\s*inputs\.[A-Za-z0-9_]+\s*&&\s*'([^']+)'\s*\|\|\s*'([^']+)'\s*\}\}$/;
 const WORKFLOW_BUN_VERSION = /^\s+bun-version:\s*["']?([^"'\s]+)["']?\s*$/;
 /** A YAML comment after a value: `#` preceded by whitespace, to end of line. */
 const YAML_TRAILING_COMMENT = /\s+#.*$/;
@@ -153,9 +151,9 @@ export function jobNameMatches(pattern: string, name: string): boolean {
 
 /**
  * Whether a workflow job with key `key` and an optional `name:` template has
- * the display name `name`. An input choosing between literal names matches
- * either literal. Other expressions match non-empty text, so
- * `test shard ${{ matrix.shard }}/4` names `test shard 2/4`.
+ * the display name `name`. A `${{ ... }}` expression in the template matches
+ * any non-empty text, so `test shard ${{ matrix.shard }}/4` names
+ * `test shard 2/4`.
  */
 function workflowJobNamed(opts: {
   readonly key: string;
@@ -166,10 +164,6 @@ function workflowJobNamed(opts: {
     return opts.key === opts.name;
   }
   const template = opts.template.replace(/^(["'])(.*)\1$/, "$2");
-  const names = WORKFLOW_INPUT_NAME.exec(template);
-  if (names) {
-    return opts.name === names[1] || opts.name === names[2];
-  }
   return new RegExp(
     `^${template.split(WORKFLOW_EXPRESSION).map(escapeRegExp).join(".+")}$`
   ).test(opts.name);

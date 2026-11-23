@@ -19,7 +19,7 @@ on:
         required: true
         default: true
       compose_upgrade_trial:
-        description: Run one Compose signal and MCP SDK release trial only
+        description: Add one Compose signal and MCP SDK release trial
         type: boolean
         default: false
       rust_repetitions:
@@ -39,7 +39,6 @@ concurrency:
 
 jobs:
   changes:
-    if: ${{ !inputs.compose_upgrade_trial }}
     # PRs and next pushes use trusted base policy over their actual diff.
     # Main and explicit release qualification stay full; uncertainty widens.
     # PR tiers layer over selection (scripts/ci-pr-plan.ts). Light PRs defer
@@ -595,12 +594,11 @@ jobs:
     # runs and reports: its work happens when the change touches docs/, site/,
     # scripts/docs/ or this workflow (and on every push), and it passes as a
     # no-op otherwise, instead of leaving a skipped required check.
-    # A skipped job from a focused dispatch must not report a required status.
-    name: ${{ inputs.compose_upgrade_trial && 'Compose trial / docs site' || 'docs site' }}
+    name: docs site
     needs: changes
     # Like `test`: report even when the scope job did not succeed, so a failed
     # scope fails this check instead of leaving it skipped.
-    if: ${{ always() && !inputs.compose_upgrade_trial }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -665,7 +663,6 @@ jobs:
           fi
 
   secret-scan:
-    if: ${{ !inputs.compose_upgrade_trial }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -884,9 +881,8 @@ jobs:
     # It always runs: incomplete evidence fails, and shards skipped
     # because the change scope excludes the suite pass; failures, a failed scope
     # and any other skip still fail. Prerelease gates separately require every shard.
-    name: ${{ inputs.compose_upgrade_trial && 'Compose trial / Docker fan-in' || 'docker-e2e' }}
     needs: [changes, docker-e2e-shard]
-    if: ${{ always() && !inputs.compose_upgrade_trial }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -1106,9 +1102,8 @@ jobs:
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    name: ${{ inputs.compose_upgrade_trial && 'Compose trial / test fan-in' || 'test' }}
     needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler, guest-protocol]
-    if: ${{ always() && !inputs.compose_upgrade_trial }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

@@ -217,6 +217,23 @@ the hand-off instead of fixing a different engine.
 
 ## 3. Doctor
 
+### Shared command control
+
+Setup, Doctor and machine views share `core::terminal::CommandControl` and the
+desktop command drawer. Use a stable ID per action and target, a short command
+label for display, and authored argv from the check that offered the command
+(for example, `setup::Report::command`). Run, Copy and terminal hand-off use
+this same spec. Pass blocked or version-mismatch copy in `CommandAvailability`
+when the check cannot offer a command. These states do not start a terminal.
+
+In the app crate, `command_control::render` accepts the props, a caller-busy
+flag and an exit callback. The callback receives a run ID, a typed
+`CommandExit` and an optional diagnosis. Start a fresh check on exit, then
+call `HackApp::command_checked` with that run ID and its result. A zero exit
+with a passing check closes the drawer after 1.5 seconds. A failed command
+or check leaves its output available. Use `HackApp::run_drawer_command` for
+an explicit run initiated outside a button pair, such as Doctor's Fix all.
+
 Source: `hack doctor --json --path <root>` per registered project, plus
 `hack doctor --machine --json` for machine findings, on open and every 10
 minutes while visible. The project audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; the machine variant uses the same envelope with `data.schema: "hack.doctor.machine.v1"` (R7c). Checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a). Until the app switches to the machine variant, it still runs one plain `hack doctor --json` outside any project and de-duplicates machine checks.

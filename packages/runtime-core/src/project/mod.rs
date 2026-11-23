@@ -12,6 +12,7 @@ pub mod inputs;
 pub mod live_source;
 #[cfg(feature = "native-config-plan")]
 pub mod native;
+pub(crate) mod private_files;
 pub mod registry;
 pub mod snapshot;
 mod source;

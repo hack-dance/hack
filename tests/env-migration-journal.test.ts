@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
+import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
 import {
   applyEnvMigration,
   cleanupEnvMigration,
@@ -32,6 +33,7 @@ import { stageMigrationPayloads } from "../src/lib/env-migration-payloads.ts";
 import { envMigrationSnapshots } from "../src/lib/env-migration-snapshot.ts";
 import { assertEnvMigrationReadable } from "../src/lib/env-migration-state.ts";
 import { AtomicWriteConflictError } from "../src/lib/fs.ts";
+import { normalizeEnvConfigName } from "../src/lib/project.ts";
 import {
   LegacyEnvCleanupError,
   resolveProjectEnvConfig,
@@ -1041,6 +1043,73 @@ test("rollback restores original bytes and refuses a later user edit", async () 
     manifestPath: result.manifestPath,
   });
   expectRestored(await projectFiles(), before);
+});
+
+test("resumed migration checks private overlay filenames under the project lock", async () => {
+  const marker = "recovery-private-overlay-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const path = join(project.projectDir, "hack.config.json");
+  const original = JSON.stringify({
+    name: "journal",
+    env: { defaultOverlay: authored },
+    defaultEnvConfig: "qa",
+  });
+  await writeFile(path, original);
+  const plan = await prepareImplicitEnvMigration(project);
+  const projectIndex = plan.prepared.files.findIndex(
+    (file) => file.path === path
+  );
+  expect(projectIndex).toBeGreaterThanOrEqual(0);
+  const options = {
+    project,
+    snapshots: fixtureEnvSnapshots(root),
+    acceptTrackedChanges: false,
+    repairCompose: false,
+  };
+  await expect(
+    apply({
+      ...options,
+      plan,
+      hooks: {
+        boundary: async ({ phase, index }) => {
+          if (phase === "before_publish" && index === projectIndex) {
+            throw new Error(
+              "synthetic interruption before project publication"
+            );
+          }
+        },
+      },
+    })
+  ).rejects.toThrow("synthetic interruption");
+
+  const legacy = join(project.projectDir, `.env.${name}`);
+  const result = await withEnvLayerLock({
+    layerPath: path,
+    run: async () => {
+      const { promise: reachedWrite, resolve: release } =
+        Promise.withResolvers<void>();
+      const resume = apply({
+        ...options,
+        hooks: {
+          boundary: async ({ phase, index }) => {
+            if (phase === "before_publish" && index === projectIndex) {
+              release();
+            }
+          },
+        },
+      });
+      await Promise.race([reachedWrite, resume]);
+      await writeFile(legacy, "TOKEN=late\n");
+      return { resume };
+    },
+  });
+  await expect(result.resume).rejects.toBeInstanceOf(AtomicWriteConflictError);
+  expect((await readFile(path, "utf8")) === original).toBe(true);
+  await rm(legacy);
+  const migrated = await apply(options);
+  expect(migrated.status).toBe("applied");
+  expect((await readFile(path, "utf8")).includes(marker)).toBe(false);
 });
 
 test("a partial publication refuses implicit commands before they can use incomplete layers", async () => {

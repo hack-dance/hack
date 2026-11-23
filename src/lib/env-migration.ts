@@ -1,6 +1,8 @@
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
+import { privateProjectOverlayNames } from "./config-editor-source.ts";
+import { privateOverlayFilesExist } from "./config-overlay-files.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   assertMigrationStorageOutsideWorkingTrees as assertOutsideWorkingTrees,
@@ -33,6 +35,7 @@ import {
   PRIVATE_STAGING_DIRNAME,
   preparePrivateStaging,
 } from "./private-staging.ts";
+import { parseProjectConfigRecord } from "./project.ts";
 import {
   acquireLegacyEnvCleanupContext,
   assertLegacyEnvMigrationDelivery,
@@ -51,6 +54,7 @@ import {
   resolveProjectEnvSharedKeyLocation,
 } from "./project-env-config.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
+import { resolvePrimaryLocalProjectDir } from "./worktree-local-config.ts";
 
 export const ENV_MIGRATION_VERSION = 1 as const;
 const FILE_LIMIT = 32 * 1024 * 1024;
@@ -923,6 +927,48 @@ async function publishStagingGuard(
   }
 }
 
+/** The retained payload and locked original carry the same privacy check on resume. */
+async function assertMigrationOverlayNamesStayPrivate(opts: {
+  readonly project: EnvMigrationProject;
+  readonly path: string;
+  readonly before: string | null;
+  readonly after: string;
+}): Promise<void> {
+  if (opts.before === null) {
+    return;
+  }
+  const before: unknown = JSON.parse(opts.before);
+  const after: unknown = JSON.parse(opts.after);
+  if (!(isRecord(before) && isRecord(after))) {
+    return;
+  }
+  const remaining = privateProjectOverlayNames(after);
+  const removed = [...privateProjectOverlayNames(before)].filter(
+    (name) => !remaining.has(name)
+  );
+  if (removed.length === 0) {
+    return;
+  }
+  const inheritLocal = [before, after].some(
+    (record) =>
+      parseProjectConfigRecord(record, opts.path).worktree?.inheritLocal !==
+      false
+  );
+  const primary = await resolvePrimaryLocalProjectDir({
+    ...opts.project,
+    inheritLocal,
+  });
+  if (
+    await privateOverlayFilesExist({
+      projectDir: opts.project.projectDir,
+      inheritedDirs: [primary],
+      names: removed,
+    })
+  ) {
+    throw new AtomicWriteConflictError();
+  }
+}
+
 async function publishEntry(
   project: EnvMigrationProject,
   entry: Publication,
@@ -973,10 +1019,11 @@ async function publishEntry(
       publication?.onPublished?.(entry);
       return;
     }
+    const text = payload.text;
     await replacePrivateFileAtomic({
       path: entry.path,
       directories: [dirname(entry.path)],
-      text: payload.text,
+      text,
       mode: entry.mode ?? 0o600,
       refusal: refuse,
       beforeRename: async () => {
@@ -986,8 +1033,17 @@ async function publishEntry(
             keyPath: entry.path,
           });
         }
-        if (!same((await readState(entry.path)).state, entry.before)) {
+        const original = await readState(entry.path);
+        if (!same(original.state, entry.before)) {
           throw refuse();
+        }
+        if (entry.kind === "config") {
+          await assertMigrationOverlayNamesStayPrivate({
+            project,
+            path: entry.path,
+            before: original.text,
+            after: text,
+          });
         }
         await publication?.validateDestination?.();
       },

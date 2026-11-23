@@ -204,6 +204,8 @@ A missing checkout or malformed project settings report `null`. A failure
 to read the file returns an `E_PERMISSION` error envelope.
 When an existing env layer or legacy dotenv filename was derived from a private
 setting, move or rename that file before replacing the setting in Config.
+If a legacy encrypted store could still supply the overlay, migrate the env
+or move its store entries before replacing the setting.
 During implicit migration, affected private overlays use `3:[redacted]` or
 `5:[redacted]` in `changed`. Migration diagnostics redact known private overlay
 names.

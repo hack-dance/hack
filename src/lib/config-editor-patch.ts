@@ -39,6 +39,7 @@ import {
   privateProjectOverlayNames,
   restoreConfigSource,
 } from "./config-editor-source.ts";
+import { privateOverlayFilesExist } from "./config-overlay-files.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   applyEnvMigration,
@@ -55,7 +56,7 @@ import {
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
 import { isRecord } from "./guards.ts";
-import { readHackEnvContract, resolveEnvFilePath } from "./hack-env.ts";
+import { readHackEnvContract, readHackEnvRuntimeConfig } from "./hack-env.ts";
 import {
   ENV_BASE_SELECTION_ALIASES,
   ENV_CONFIG_NAME_MAX_LENGTH,
@@ -71,10 +72,9 @@ import {
   preflightLegacyEnvContract,
   projectEnvConfigExistsForMutation,
   projectEnvLayerFits,
-  resolveProjectEnvConfigPath,
-  resolveProjectEnvLocalConfigPath,
 } from "./project-env-config.ts";
 import { assertLegacyProjectDirectory } from "./project-input-selection.ts";
+import { resolveFileSecretStorePaths } from "./secret-store.ts";
 
 const BASE_REV = /^[a-f0-9]{64}$/;
 const ENV_KEY = /^[A-Z_][A-Z0-9_]*$/;
@@ -604,54 +604,43 @@ function hasPrivateOverlayValue(
   return false;
 }
 
-/** Probe known private filenames directly, including when a directory cannot be listed. */
-async function privateOverlayFilesExist(opts: {
-  readonly projectDir: string;
-  readonly inheritedDirs: readonly (string | null)[];
-  readonly names: readonly string[];
-  readonly planned?: ReadonlyMap<string, string> | null;
-}): Promise<boolean> {
-  const dirs = new Set([
-    opts.projectDir,
-    ...opts.inheritedDirs.filter((dir) => dir !== null),
-  ]);
-  for (const envName of opts.names) {
-    const selectable = parseEnvConfigSelection(envName) === envName;
-    const paths = [
-      resolveEnvFilePath({ projectDir: opts.projectDir, envName }),
-    ];
-    if (selectable) {
-      paths.push(
-        resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName })
-      );
-      for (const projectDir of dirs) {
-        paths.push(resolveProjectEnvLocalConfigPath({ projectDir, envName }));
-      }
-    }
-    for (const path of paths) {
-      if (
-        opts.planned?.has(path) ||
-        (await lstat(path).then(
-          () => true,
-          (error: unknown) => {
-            // The legacy migrator discovers dotenv files by filename, including
-            // names outside the selector limit that still fit on disk.
-            if (
-              isRecord(error) &&
-              (error.code === "ENOENT" ||
-                (!selectable && error.code === "ENAMETOOLONG"))
-            ) {
-              return false;
-            }
-            throw error;
-          }
-        ))
-      ) {
-        return true;
-      }
-    }
+/** An existing legacy store may have undiscovered overlays. Inspect metadata only. */
+async function legacyStoreMayContainOverlays(
+  snapshot: ConfigSnapshot
+): Promise<boolean> {
+  const { project } = snapshot;
+  const legacy = await readHackEnvContract(project);
+  if (!legacy.exists) {
+    return false;
   }
-  return false;
+  const { active, storePath } = await resolveFileSecretStorePaths({
+    projectDir: project.projectDir,
+    strict: true,
+  });
+  if (!active) {
+    return false;
+  }
+  const usesStore =
+    legacy.parseError ||
+    legacy.contract.vars.some(({ source }) => source === "keychain") ||
+    (await readHackEnvRuntimeConfig(project)).storePlaintextInBackend;
+  if (!usesStore) {
+    return false;
+  }
+  const store = await lstat(storePath).catch((error: unknown) => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  return (
+    store !== null &&
+    (!store.isFile() || store.size > 0) &&
+    !(await projectEnvConfigExistsForMutation({
+      ...project,
+      inheritLocal: inheritedEnvDir(snapshot) !== null,
+    }))
+  );
 }
 
 async function privateOverlayReplacementMessage(opts: {
@@ -695,8 +684,11 @@ async function privateOverlayReplacementMessage(opts: {
       ) {
         return "Move or rename the env layer with a private filename before replacing this setting.";
       }
+      if (!outputs && (await legacyStoreMayContainOverlays(after))) {
+        return "The legacy secret store may contain this overlay. Migrate the legacy env or move its overlay entries before replacing this setting.";
+      }
     } catch {
-      return "Could not verify the private env layer filenames before replacing this setting.";
+      return "Could not verify the private env inputs before replacing this setting.";
     }
   }
   return null;
@@ -1256,18 +1248,6 @@ async function publishConfigMigration(
   if (!projectLayer) {
     throw new AtomicWriteConflictError();
   }
-  const projectPath = layerDestination(projectLayer);
-  const migratedProject: unknown = migration.prepared.files.some(
-    ({ path }) => path === projectPath
-  )
-    ? JSON.parse(migration.prepared.payload(projectPath))
-    : null;
-  const removed = isRecord(migratedProject)
-    ? removedPrivateOverlays(
-        snapshot,
-        privateProjectOverlayNames(migratedProject)
-      )
-    : [];
   const layerIds = migrationLayerIds(snapshot, migration);
   const result = await applyEnvMigration({
     project: migration.project,
@@ -1275,19 +1255,8 @@ async function publishConfigMigration(
     acceptTrackedChanges: false,
     snapshots: envMigrationSnapshots(),
     repairCompose: false,
-    validateDestination: async () => {
-      await assertConfigLayerDirectory(projectLayer);
-      if (
-        removed.length > 0 &&
-        (await privateOverlayFilesExist({
-          projectDir: snapshot.project.projectDir,
-          inheritedDirs: [inheritedEnvDir(snapshot)],
-          names: removed,
-        }))
-      ) {
-        throw new AtomicWriteConflictError();
-      }
-    },
+    validateDestination: async () =>
+      await assertConfigLayerDirectory(projectLayer),
     onPublished: ({ path }) => {
       const id = layerIds.get(path);
       if (id && !changed.includes(id)) {
@@ -1360,11 +1329,12 @@ async function writePreparedLayer(
     if (
       layer.kind === "project" &&
       removedOverlayNames.length > 0 &&
-      (await privateOverlayFilesExist({
+      ((await privateOverlayFilesExist({
         projectDir: snapshot.project.projectDir,
         inheritedDirs: [originalInheritedDir, inheritedEnvDir(snapshot)],
         names: removedOverlayNames,
-      }))
+      })) ||
+        (await legacyStoreMayContainOverlays(snapshot)))
     ) {
       throw new AtomicWriteConflictError();
     }

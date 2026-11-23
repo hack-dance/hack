@@ -1635,6 +1635,74 @@ test("a project-only save preserves redaction for a later legacy env migration",
   expect(JSON.stringify(later.payload).includes(marker)).toBe(false);
 });
 
+test("a project-only save cannot expose an encrypted-store-only overlay", async () => {
+  const marker = "private-store-overlay-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const f = await legacyOverlayFixture({
+    name: "legacy",
+    env: { defaultOverlay: authored },
+    controlPlane: {
+      secrets: {
+        backend: "encrypted_file",
+        encryptedFile: { path: "legacy-store.json", keyPath: "legacy.key" },
+      },
+    },
+  });
+  await writeFile(
+    join(f.project, "hack.env.json"),
+    '{"version":1,"vars":[{"key":"MODE","source":"plain_env"},{"key":"SECRET_TOKEN","source":"keychain"}]}\n'
+  );
+  const storeModule = resolve(import.meta.dir, "../src/lib/secret-store.ts");
+  const store = Bun.spawn([process.execPath, "--no-env-file", "-"], {
+    cwd: f.cwd,
+    env: privateCliEnv({ root: f.root }),
+    stdin: new Blob([
+      "import { resolveSecretStore } from ",
+      JSON.stringify(storeModule),
+      ';\nconst store = await resolveSecretStore({ projectDir: ".hack", projectName: "legacy" });\n',
+      "await store.set(",
+      JSON.stringify({
+        key: `env.${name}.SECRET_TOKEN`,
+        value: "fixture-ciphertext-marker",
+      }),
+      ");\n",
+    ]),
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  expect(await store.exited).toBe(0);
+  const base = bases(await show(f.root, f.cwd));
+  const patch = { base, changes: [selectBaseChoice] };
+  const key = join(f.cwd, "legacy.key");
+  const held = join(f.cwd, "held-legacy.key");
+  await rename(key, held);
+  try {
+    for (const command of ["validate", "apply"]) {
+      const result = await cli({ ...f, args: [command], patch });
+      const issues =
+        result.payload.data?.issues ?? result.payload.error?.detail.issues;
+      expect(issues[0]?.message).toContain("legacy secret store may contain");
+      expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+    }
+    expect(await Bun.file(key).exists()).toBe(false);
+    expect((await readFile(f.projectPath, "utf8")) === f.original).toBe(true);
+  } finally {
+    await rename(held, key);
+  }
+  const migrated = await cli({
+    ...f,
+    args: ["apply"],
+    patch: { base, changes: [addEnvChoice] },
+  });
+  expect(migrated.payload.ok).toBe(true);
+  expect(migrated.payload.data.changed).toContain("3:[redacted]");
+  expect(JSON.stringify(migrated.payload).includes(marker)).toBe(false);
+  expect(JSON.stringify(await show(f.root, f.cwd)).includes(marker)).toBe(
+    false
+  );
+});
+
 test("legacy migration errors redact private dotenv filenames", async () => {
   const marker = "private-dotenv-error-fixture";
   const authored = `https://fixture:${marker}@example.invalid`;

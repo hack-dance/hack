@@ -214,6 +214,8 @@ pub enum SourceError {
     CliUnsupported {
         version: String,
     },
+    /// Neither a reachable status socket nor a CLI report saying hackd is off.
+    DaemonUnreadable,
     /// Project reads require a matching daemon until observe-only CLI listing exists.
     DaemonUnavailable {
         cli: String,
@@ -1148,6 +1150,7 @@ struct FoundHackd {
     program: PathBuf,
     cli_version: Option<String>,
     client: Option<DaemonClient>,
+    reported_off: bool,
     asked: std::time::Instant,
 }
 
@@ -1472,13 +1475,16 @@ impl LiveSource {
             })?;
         }
         let t = std::time::Instant::now();
-        let client = self.hackd_for(&runner, Some(&cli_version), generation);
+        let (client, reported_off) = self.hackd_for(&runner, Some(&cli_version), generation);
         timed("find hackd (cached after the first read)", t);
         let t = std::time::Instant::now();
         let daemon = client.as_ref().and_then(|d| d.status().ok());
         timed("hackd status", t);
         if client.is_some() && daemon.is_none() {
             self.forget_hackd(generation);
+        }
+        if daemon.is_none() && !reported_off {
+            return Err(SourceError::DaemonUnreadable);
         }
         let t = std::time::Instant::now();
         let daemon_compatible = daemon
@@ -1507,7 +1513,7 @@ impl LiveSource {
                     "hackd {} here belongs to {other}, which shares this home with the app's CLI ({cli_version}). The app does not restart it: use {other} in the app, or give each install its own home.",
                     d.version
                 ),
-                (None, _) => "hackd is off or unreachable. Start hackd to read project status.".into(),
+                (None, _) => "hackd is not running. Start hackd to read project status.".into(),
                 (Some(d), None) if daemon_compatible != Some(true) => {
                     format!(
                         "{} to read project status.",
@@ -1561,7 +1567,7 @@ impl LiveSource {
     /// CLI reports ([`Self::hackd_for`]).
     pub fn hackd(&self) -> Option<DaemonClient> {
         let generation = self.cache.generation();
-        self.hackd_for(&self.runner.fixed(), None, generation)
+        self.hackd_for(&self.runner.fixed(), None, generation).0
     }
 
     /// The hackd `runner`'s CLI reports (`hack daemon status --json` →
@@ -1576,20 +1582,25 @@ impl LiveSource {
         runner: &CliRunner,
         cli_version: Option<&str>,
         generation: u64,
-    ) -> Option<DaemonClient> {
+    ) -> (Option<DaemonClient>, bool) {
         if let Some(d) = &self.daemon {
-            return Some(d.clone());
+            return (Some(d.clone()), false);
         }
-        let program = runner.program_path()?;
+        let Some(program) = runner.program_path() else {
+            return (None, false);
+        };
         if let Ok(found) = self.cache.hackd.lock()
             && let Some(f) = found.as_ref()
             && f.program == program
             && (cli_version.is_none() || f.cli_version.as_deref() == cli_version)
             && (f.client.is_some() || f.asked.elapsed() < HACKD_LOOKUP_RETRY)
         {
-            return f.client.clone();
+            return (f.client.clone(), f.reported_off);
         }
-        let client = self.ask_cli_for_hackd(runner);
+        let (client, reported_off) = match self.ask_cli_for_hackd(runner) {
+            Some((client, off)) => (Some(client), off),
+            None => (None, false),
+        };
         if let Ok(mut found) = self.cache.hackd.lock()
             && self.cache.generation() == generation
         {
@@ -1597,10 +1608,11 @@ impl LiveSource {
                 program,
                 cli_version: cli_version.map(str::to_owned),
                 client: client.clone(),
+                reported_off,
                 asked: std::time::Instant::now(),
             });
         }
-        client
+        (client, reported_off)
     }
 
     /// `runner`'s version, reused for [`CLI_VERSION_TTL`] per executable.
@@ -1648,7 +1660,7 @@ impl LiveSource {
                 None => {
                     let s = self
                         .ask_cli_for_hackd(&other_runner)
-                        .map(|d| d.socket().to_path_buf());
+                        .map(|(d, _)| d.socket().to_path_buf());
                     if let Ok(mut m) = self.cache.other_sockets.lock() {
                         m.insert(other.path.clone(), (s.clone(), std::time::Instant::now()));
                     }
@@ -1682,15 +1694,12 @@ impl LiveSource {
         }
     }
 
-    fn ask_cli_for_hackd(&self, runner: &CliRunner) -> Option<DaemonClient> {
-        let report = checked_daemon_runner(runner)
-            .ok()?
-            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
-            .ok()
-            // Exit 1 still carries the report when hackd is not running.
-            .and_then(|(out, _, _)| serde_json::from_str::<serde_json::Value>(&out).ok())
-            .filter(serde_json::Value::is_object)?;
+    fn ask_cli_for_hackd(&self, runner: &CliRunner) -> Option<(DaemonClient, bool)> {
+        let runner = checked_daemon_runner(runner).ok()?;
+        let report = read_daemon_status(&runner, Self::DAEMON_STATUS).ok()?;
+        if !report.is_object() {
+            return None;
+        }
         let socket = match report.get("socket_path") {
             Some(v) => PathBuf::from(v.as_str()?),
             // A valid report from a CLI that does not name its socket: the
@@ -1703,9 +1712,10 @@ impl LiveSource {
                 std::env::var("HOME").ok().as_deref(),
             )?,
         };
-        socket
-            .is_absolute()
-            .then(|| DaemonClient::new(socket, Duration::from_secs(3)))
+        socket.is_absolute().then(|| {
+            let off = crate::setup::daemon_running(&report) == Some(false);
+            (DaemonClient::new(socket, Duration::from_secs(3)), off)
+        })
     }
 
     #[must_use]
@@ -2189,6 +2199,7 @@ fn describe_error(e: &SourceError) -> String {
         }
         SourceError::CliMissing => "hack was not found on PATH".into(),
         SourceError::CliUnsupported { version } => crate::setup::unsupported_cli_detail(version),
+        SourceError::DaemonUnreadable => "Could not check hackd. Check again.".into(),
         SourceError::Pending => "still loading".into(),
     }
 }
@@ -3163,10 +3174,7 @@ esac
         let r = src.snapshot();
         server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            matches!(&r, Err(SourceError::DaemonUnavailable { .. })),
-            "{r:?}"
-        );
+        assert!(matches!(&r, Err(SourceError::DaemonUnreadable)), "{r:?}");
     }
 
     #[test]

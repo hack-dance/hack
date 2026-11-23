@@ -649,7 +649,7 @@ pub use crate::setup_login::{installation_refusal, qualify_login};
 /// with `api_ok` or `api_reachable`) runs even without a tracked PID (one
 /// started outside the CLI's PID file, for example). `None` when the report
 /// says neither.
-fn daemon_running(d: &serde_json::Value) -> Option<bool> {
+pub(crate) fn daemon_running(d: &serde_json::Value) -> Option<bool> {
     let flag = |key: &str| d.get(key).and_then(serde_json::Value::as_bool);
     let api_answers = matches!(
         d.get("status").and_then(serde_json::Value::as_str),

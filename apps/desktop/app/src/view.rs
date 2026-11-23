@@ -952,7 +952,7 @@ impl HackApp {
         let version = self.cli_label_for(list);
         let other = choice.as_ref().and_then(|c| c.others().next().cloned());
         let p = ui.p;
-        let disconnected = disconnected_status(list, &self.setup.report);
+        let disconnected = disconnected_status(list);
         let setup = (self.pane != Pane::Setup && disconnected.is_some()).then(|| {
             div()
                 .id("status-setup")
@@ -1307,10 +1307,12 @@ impl HackApp {
     }
 
     fn banners(&self, list: &ListView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
-        let daemon_banner = list
-            .banners
-            .iter()
-            .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }));
+        let daemon_banner = list.banners.iter().any(|b| {
+            matches!(
+                b,
+                Banner::DaemonOff | Banner::DaemonUnreadable | Banner::DaemonMismatch { .. }
+            )
+        });
         let mut col = div().flex().flex_col();
         let recovery = self.model.daemon_recovery();
         let mut recovery_shown = false;
@@ -1328,6 +1330,7 @@ impl HackApp {
                     true,
                 ),
                 Banner::DaemonMismatch { .. } => (BannerTone::Warn, b.text(), true),
+                Banner::DaemonUnreadable => (BannerTone::Warn, b.text(), false),
                 Banner::EngineDown { error } => (
                     BannerTone::Error,
                     format!("Docker is not reachable: {error}"),
@@ -1766,12 +1769,7 @@ impl HackApp {
     }
 }
 
-fn disconnected_status(
-    list: &ListView,
-    setup: &hack_desktop_core::setup::Report,
-) -> Option<(Status, String)> {
-    use hack_desktop_core::setup::{Remedy, SafeAction};
-
+fn disconnected_status(list: &ListView) -> Option<(Status, String)> {
     let cause = match &list.phase {
         Phase::CliMissing => (Status::Unknown, "Hack CLI not found".into()),
         Phase::CliUnsupported { version } => {
@@ -1779,16 +1777,8 @@ fn disconnected_status(
         }
         _ => {
             if let Some(cause) = list.banners.iter().find_map(|banner| match banner {
-                Banner::DaemonOff => {
-                    let off = setup.cards.iter().any(|card| {
-                        card.id == "daemon" && card.remedy == Remedy::Run(SafeAction::StartDaemon)
-                    });
-                    Some(if off {
-                        (Status::Stopped, "hackd not running")
-                    } else {
-                        (Status::Unknown, "Couldn't check hackd")
-                    })
-                }
+                Banner::DaemonOff => Some((Status::Stopped, "hackd not running")),
+                Banner::DaemonUnreadable => Some((Status::Unknown, "Couldn't check hackd")),
                 Banner::DaemonMismatch { .. } => Some((Status::Degraded, "hackd version mismatch")),
                 Banner::DaemonReadFailed { .. } => {
                     Some((Status::Unknown, "Couldn't read projects from hackd"))
@@ -1899,9 +1889,7 @@ impl Render for HackApp {
                 Glyph::CircleAlert,
                 "Could not read projects",
                 format!("{message} ({code})"),
-                self.model
-                    .daemon_recovery()
-                    .is_none()
+                (self.model.daemon_recovery().is_none() && code != "E_APP_DAEMON_UNREADABLE")
                     .then_some("hack projects --json"),
                 &ui,
             )
@@ -2052,25 +2040,19 @@ mod tests {
 
     #[test]
     fn footer_distinguishes_missing_unsupported_and_unreachable() {
-        use hack_desktop_core::{setup::Report, setup_fixtures};
-
-        let empty = Report::default();
-        let label = |list: &ListView, report: &Report| disconnected_status(list, report).unwrap().1;
-        assert_eq!(
-            label(&list(Fixture::CliMissing), &empty),
-            "Hack CLI not found"
-        );
+        let label = |list: &ListView| disconnected_status(list).unwrap().1;
+        assert_eq!(label(&list(Fixture::CliMissing)), "Hack CLI not found");
 
         let mut model = AppModel::new();
         model.apply(Event::Refreshed(Err(SourceError::CliUnsupported {
             version: "4.3.1".into(),
         })));
-        assert_eq!(label(&model.list(), &empty), "Hack 4.3.1 · needs Hack 5");
+        assert_eq!(label(&model.list()), "Hack 4.3.1 · needs Hack 5");
 
-        let down = list(Fixture::DaemonDown);
-        assert_eq!(label(&down, &empty), "Couldn't check hackd");
-        let off = setup_fixtures::load("partial").expect("stopped daemon fixture");
-        assert_eq!(label(&down, &off), "hackd not running");
+        model.apply(Event::Refreshed(Err(SourceError::DaemonUnreadable)));
+        assert_eq!(label(&model.list()), "Couldn't check hackd");
+        assert_eq!(model.daemon_recovery(), None);
+        assert_eq!(label(&list(Fixture::DaemonDown)), "hackd not running");
     }
 
     #[test]

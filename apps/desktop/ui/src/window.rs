@@ -338,6 +338,7 @@ impl MainWindow {
                     Some((Glyph::Power, "Start hackd")),
                 ),
                 Banner::DaemonMismatch { .. } => (BannerTone::Warn, b.text(), None),
+                Banner::DaemonUnreadable => (BannerTone::Warn, b.text(), None),
                 Banner::EngineDown { error } => (
                     BannerTone::Error,
                     format!("Docker is not reachable: {error}"),
@@ -578,11 +579,12 @@ impl MainWindow {
     }
 
     fn daemon_banner(&self) -> bool {
-        self.data
-            .list
-            .banners
-            .iter()
-            .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }))
+        self.data.list.banners.iter().any(|b| {
+            matches!(
+                b,
+                Banner::DaemonOff | Banner::DaemonUnreadable | Banner::DaemonMismatch { .. }
+            )
+        })
     }
 
     fn status_items(&self) -> Vec<(Option<Status>, String)> {

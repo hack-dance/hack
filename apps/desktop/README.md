@@ -64,8 +64,9 @@ never clears a failed start. `read_steps` names when the window shows the
 list (`list shown in the window after`) before the native reads. This lasts
 until hackd reports native runtime itself (DESIGN.md R19).
 The window retains stale names with Unknown states and disables project actions.
-It offers **Start hackd** when unreachable or **Restart hackd** for a version
-mismatch. Only a fresh matching snapshot restores observed states.
+It offers **Start hackd** when the CLI reports it is stopped, or **Restart
+hackd** when a readable hackd needs updating. A failed status read offers a
+recheck. Only a fresh matching snapshot restores observed states.
 It applies that to the same view model and prints the list and
 each project's detail as JSON. It runs no action, opens no window and writes
 nothing.

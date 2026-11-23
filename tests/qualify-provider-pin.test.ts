@@ -314,7 +314,7 @@ describe("provider pin qualification", () => {
         expect(await main([...argv, "--run"])).toBe(64);
       }
       expect(await main(["--hack"])).toBe(64);
-      expect(Bun.spawnSync(["ls", "-A", root]).stdout.toString()).toBe("");
+      expect(readdirSync(root)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true });
     }

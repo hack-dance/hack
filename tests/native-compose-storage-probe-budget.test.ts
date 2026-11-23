@@ -57,6 +57,7 @@ import {
   refuseNativeComposeStorageXattr,
 } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
 import * as shell from "../src/lib/shell.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 // HACK-1369: storage probes are bounded by the carrier's remaining
 // HACK_NATIVE_STORAGE_TIMEOUT_MS budget, not by fixed 15 s/10 s caps. The engine
@@ -173,7 +174,7 @@ async function withAuthority(
   }) => Promise<void>
 ): Promise<void> {
   const root = await tempDirectory("native-storage-budget-project-");
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({ schema_version: 1, name: "storage" })

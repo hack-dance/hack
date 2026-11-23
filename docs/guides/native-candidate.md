@@ -126,9 +126,11 @@ the installed stable executable.
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
 worktree when its exact source root can be shared with a fresh or matching pool.
 The runtime checks source compatibility before startup hooks; `restart` repeats
-this check before stopping the existing graph. A root that a running pool does not
-already share is refused, because a running VM's mounts never change. Stop the pool
-and run `up` again: the root joins at the next boot. Projects and worktrees the pool was started with can run together; see
+this check before stopping the existing graph. A running VM's mounts never change, so
+a root that a running pool does not already share needs a restart of the pool. When
+nothing uses the pool live, `up` restarts it for the root and prints one line saying
+so. Otherwise it refuses: stop the projects that use the pool (`down` in
+each) and run `up` again. Projects and worktrees the pool was started with can run together; see
 [one pool, several project roots](#explicit-writable-development-source).
 
 Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
@@ -1250,8 +1252,12 @@ Downloads never pass through a shell, proxy configuration, keychain or admin pro
 Networks that require an HTTP proxy must use the offline form below; setup ignores
 proxy environment variables.
 
-Private partial files and verified archives stay under
-`<candidate-home>/.hack-local/setup/downloads`. A rerun resumes a partial download
+Private partial files and verified archives are downloaded under
+`<candidate-home>/.hack-local/setup/downloads`. After durable provider publication,
+online setup removes its two recorded provider downloads, and a later setup retries
+interrupted cleanup. Older or replaced files without matching ownership evidence are
+reported and kept. Offline inputs and provider repair archives are kept.
+A rerun resumes a partial download
 when the server supports ranges, otherwise restarts it. Every complete file is
 hashed before any extraction; a mismatch reports `setup_hash_mismatch` with the
 filename and publishes no provider. A corrupt complete cache file is preserved
@@ -1551,7 +1557,7 @@ JSON file (a singly linked, mode-`0600` file owned by you):
 - A cold build needs at least 6 GiB free on the runtime's storage disk, or twice the
   last image of the same build if that is larger; otherwise it refuses with
   `native_build_storage` and deletes nothing. After each successful build, BuildKit's
-  cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
+  cache is pruned to 4 GiB. The cache holds only build steps; pruning never removes
   images, containers or volumes.
 
 `runtime reclaim-build-images --json` removes build images that newer builds
@@ -1810,7 +1816,14 @@ once instead of reusing the shared one. Any other edit to another service, such 
 environment value on the app, keeps the cache. An edit to one of those inputs,
 including a lockfile, selects the cache for the new identity as a fresh `up` would, so the initializer installs into it; the old cache
 is shared and is only released by this run. Each such `up` publishes the current
-source snapshot. A retained named volume is never reused as a dependency cache:
+source snapshot. A pool keeps at most 64 dependency cache volumes. When a new one is
+needed at that bound, cache volumes that nothing refers to are deleted, oldest
+created first, to make room (HACK-2576): no graph receipt that is not removed, no native-authored
+receipt and no cache quarantine record names them, and the engine refuses to delete
+one a container still uses. A retained run always finds every cache it recorded.
+Only when every cache is still referred to does `hack up` refuse with
+`graph_cache_capacity`, and it says to remove the data of a project you no longer
+use. A retained named volume is never reused as a dependency cache:
 declaring one refuses and names the service and the `hack.dependencies.cache-volume`
 field. Caches recorded by earlier builds, whose identity also covered the whole
 Compose file, are kept while that file is unchanged and replaced once on the first
@@ -1821,6 +1834,18 @@ hostname change mixed with other edits refuses with `graph_hostname_change` and 
 service name. Every refusal says to revert the edit, or to run
 `hack down --remove-data` and then `hack up`. `hack restart` of a stopped graph
 refuses and points to `hack up`.
+The home's active graph inventory (`run/graphs`) holds at most 64 runs. Removed
+runs used to stay in it until an explicit `graph archive`, which no `hack` command
+ran, so every `down --remove-data` and every failed fresh start used a place for
+good, and the 65th fresh start refused for ever (HACK-2576). Now a start (or a source
+job) that needs a new run and finds the inventory full archives removed runs itself, oldest first, under the
+provider lease it already holds and with the same proof `graph archive` uses (every
+owned resource absent, no pending journal). Runs that keep data are never archived;
+when they alone fill the inventory, `hack up` refuses with `graph_retention_budget`
+and says to remove the data of a project you no longer use. The archive keeps up to
+256 runs; past that the refusal is `graph_archive_budget`. A project whose removed
+run was archived this way before its `hack down --remove-data` confirmed the removal
+still confirms it: inspection reads a removed run from the archive.
 For a shared-source graph that reconciliation does not select (live source, a
 carried cache scope, a pending source-device rebind or initializer cache release)
 and that was admitted with a retained compatibility contract, ordinary
@@ -2346,9 +2371,27 @@ pool's primary share. Native `up` in another root adds that root itself when the
 pool is **stopped**, before any lifecycle hook runs, with the same unfiltered-source
 consent the first root gave; the share is mounted at the next boot. The explicit
 form is `runtime project-share add --project-share /absolute/other-project --unfiltered-source --json`.
-A running pool's mounts never change: `up` in a root outside the set refuses before
-hooks and says to stop the projects using the pool (`down` in each), stop the pool
-(`runtime down --json` on the native home), and run `up` again. Remove an additional root (for
+A running pool's mounts never change. When it is **running but idle**, `up` in a root
+outside the set stops it, adds the root as above and boots it again, before any hook
+runs, printing `Restarting the native runtime to add this project's folder.`
+(HACK-2535; `runtime project-share add … --stop-idle-pool --json`). Idle means no
+project run whose receipt is live (running, starting, restoring, stopping, or a failed
+start that kept its services), no pending dead-owner recovery, no open interactive
+session and no image build. The runtime checks this under its provider lease before
+any effect and again right before the guest stops, and holds that lease in between,
+so a start that begins meanwhile waits for the lease (up to 5 s) and then finds the
+pool stopped; it is never stopped itself. A pool found in use refuses with
+`project_share_pool_in_use`. The host-side
+releases of a stop (the managed hostname authority and the pool's publishers) follow
+that second check, so either refusal changes nothing. The same rule applies to a
+pool started by hand with `runtime up`. A pool in use, or one still starting or
+stopping, refuses before hooks and says to stop the projects using the pool (`down` in
+each), then run `up` again. It names up to three of them, from the live run ids that
+`runtime status` reports (`live_runs`) and the run mappings of registered projects and
+their worktrees, then "and N more"; when no registered checkout maps a live run, it
+says so. A full or conflicting share set refuses with
+`project_share_limit` before anything stops. See the [idle restart chart](../diagrams/native-idle-pool-restart.svg)
+([source](../diagrams/native-idle-pool-restart.mmd)). Remove an additional root (for
 example a deleted worktree) from a stopped pool with
 `runtime project-share remove --project-share /absolute/old-worktree --json`; removal
 refuses with `project_share_in_use` while any retained graph still names that
@@ -2508,8 +2551,16 @@ that is still retiring. If a recovery stopped the run but could not finish that 
 starts a stopped pool to finish it, with data kept.
 
 A detached start (`hack up -d`) whose pool stopped or booted again ends on its
-own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
---recover` recovers its run. A command that finds an earlier start of the instance
+own, as a crash would: within about a second once it is ready (its services went
+with the guest), or about 11 seconds later while it is still starting, so it can
+finish or unwind first. The next `hack up` or `hack down --recover` waits for that
+process to be gone, then recovers its run. A `hack up`, `hack restart` or `hack down
+--recover` that meets that start still exiting (the pool record shows the pool
+stopped) says so in one line and waits up to 15 seconds for it before it decides as
+for an exited owner; a live foreground owner on a running pool still refuses at once.
+An owner that is ending can read for a moment as neither running nor exited (its
+process exited but is not yet reaped, or its publication is read mid-change); the
+runtime reports that as `graph_foreground_owner_uncertain`, and the same wait covers it. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0

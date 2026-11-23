@@ -1,13 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
-import {
-  mkdir,
-  mkdtemp,
-  realpath,
-  rename,
-  rm,
-  symlink,
-} from "node:fs/promises";
+import { mkdtemp, realpath, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +8,7 @@ import {
   holdDirectory,
   recheckDirectories,
 } from "../src/lib/native-compose-private-state.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const roots: string[] = [];
 const held: HeldDirectory[] = [];
@@ -28,7 +22,7 @@ async function tree(...paths: readonly string[]) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "native-recheck-")));
   roots.push(root);
   for (const path of paths) {
-    await mkdir(join(root, path), { recursive: true });
+    await mkdirOwnedFixture(join(root, path), true);
   }
   return root;
 }

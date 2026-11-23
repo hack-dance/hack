@@ -1,3 +1,4 @@
+use super::private_files::generated_state_child;
 use super::{Diagnostic, problem};
 use crate::CandidateError;
 use caseless::Caseless;
@@ -169,7 +170,7 @@ pub fn excluded(path: &Path) -> bool {
             || [".pem", ".key", ".p12", ".pfx"]
                 .iter()
                 .any(|suffix| lower.ends_with(suffix))
-            || (index > 0 && parts[index - 1] == ".hack" && [".internal", ".branch"].contains(part))
+            || (index > 0 && generated_state_child(parts[index - 1].as_ref(), part.as_ref()))
         {
             return true;
         }

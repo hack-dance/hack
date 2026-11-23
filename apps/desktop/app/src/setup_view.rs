@@ -1,47 +1,45 @@
-//! Setup (DESIGN.md section 2), in design v1: ordered cards from fresh
-//! checks, shown on a live launch when something needs attention and from
-//! Doctor ("Run setup again").
-//!
-//! Every effect needs an explicit click. Reads never start services. The
-//! only actions the app runs are the fixed daemon start and install, each
-//! followed by fresh checks. Admin steps (`hack global install`, `hack
-//! global trust`) go to the user's own terminal, which shows the command
-//! and waits for Enter: no password passes through the app. Skips last for
-//! this session only and never satisfy a check.
+//! Setup check orchestration and guarded navigation.
 
-use gpui_kit::{
-    AnyElement, ClipboardItem, Context, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::*, px,
-};
+use gpui_kit::Context;
 use hack_desktop_core::machine_gate::Holder;
-use hack_desktop_core::setup::{Card, Pane as SetupPane, Remedy, SafeAction, Status};
-use hack_desktop_ui::components::{
-    StyledExt as _, Ui, action_button, empty_pane, pill, primary_button,
-};
-use hack_desktop_ui::icons::Glyph;
-use hack_desktop_ui::tokens::{radius, space, text};
+use hack_desktop_core::setup::{Remedy, Report, SafeAction, Status};
 
 use crate::doctor_view::Pane;
+use crate::setup_flow::{ADVANCE_DELAY, Flow, Screen, Step};
 use crate::view::HackApp;
 
 impl HackApp {
-    /// Fixtures and screenshots: show setup with a canned report.
-    #[cfg_attr(not(feature = "screenshots"), allow(dead_code))]
-    pub(crate) fn show_setup_now(&mut self, report: hack_desktop_core::setup::Report) {
+    #[cfg(hack_terminal)]
+    pub(super) fn setup_position(&self) -> String {
+        if self.pane != Pane::Setup {
+            return "closed".into();
+        }
+        match self.setup_flow.screen {
+            Screen::Welcome => "welcome".into(),
+            Screen::Done => "done".into(),
+            Screen::Step(step) => format!(
+                "{} {:?}",
+                step.id(),
+                self.setup_flow.state(step, &self.setup)
+            ),
+        }
+    }
+
+    /// Use a report without machine reads when drawing fixtures.
+    #[cfg(feature = "screenshots")]
+    pub(crate) fn show_setup_now(&mut self, report: Report) {
         self.pane = Pane::Setup;
         let generation = self.setup.begin();
         self.setup.finish(generation, report);
     }
 
-    /// Show setup and check again.
     pub(crate) fn open_setup(&mut self, cx: &mut Context<Self>) {
+        self.user_navigated();
         self.pane = Pane::Setup;
+        self.setup_flow.enter(Screen::Welcome);
         self.load_setup(cx);
     }
 
-    /// Fresh checks, off the UI thread. A launch check opens setup only when
-    /// something needs attention and the user has not navigated since
-    /// launch; losing the CLI always brings it back.
     pub(crate) fn load_setup(&mut self, cx: &mut Context<Self>) {
         if self.setup.loading {
             self.setup.refresh_again = true;
@@ -51,6 +49,7 @@ impl HackApp {
             return;
         }
         let generation = self.setup.begin();
+        self.setup_flow.advance_at = None;
         if !self.live {
             let report = self.source.setup();
             self.setup_checked(generation, report, cx);
@@ -68,60 +67,127 @@ impl HackApp {
         cx.notify();
     }
 
-    /// A setup check finished. The launch check opens setup only if the user
-    /// has not gone anywhere since launch (see [`Self::user_navigated`]):
-    /// the check can take seconds, and must never pull the window away from
-    /// a project, a Doctor run or a terminal tab the user opened meanwhile.
     pub(crate) fn setup_checked(
         &mut self,
         generation: u64,
-        report: hack_desktop_core::setup::Report,
+        report: Report,
         cx: &mut Context<Self>,
     ) {
-        // A check the app no longer waits for (a newer one, or a CLI
-        // switch) changes nothing: no report, no reopening, no auto-open.
         if !self.setup.is_current(generation) {
             return;
         }
         let needed = report.needed();
         self.setup.finish(generation, report);
-        let again = std::mem::take(&mut self.setup.refresh_again);
-        if again {
-            self.load_setup(cx);
-        } else {
-            self.setup.pending_fix = false;
-        }
         if std::mem::take(&mut self.setup_on_launch) && needed {
             self.pane = Pane::Setup;
         }
-        if self.setup.report.force_cli_gate && !self.setup.report.cli_ready() {
+        if self.setup.report.force_cli_gate
+            && !self.setup.report.cli_ready()
+            && self.pane == Pane::Project
+        {
             self.pane = Pane::Setup;
+        }
+        if self.pane == Pane::Setup {
+            self.setup_flow.reconcile(&self.setup);
+        }
+        if std::mem::take(&mut self.setup.refresh_again) {
+            self.load_setup(cx);
+        } else {
+            self.setup.pending_fix = false;
+            self.schedule_setup_advance(cx);
         }
         cx.notify();
     }
 
-    /// The user chose where to look (an instance, a detail tab, an env
-    /// overlay or scope, Doctor, the new-tab menu):
-    /// the launch check no longer opens setup by itself. Losing the CLI
-    /// still does.
-    pub(crate) fn user_navigated(&mut self) {
-        self.setup_on_launch = false;
+    fn schedule_setup_advance(&mut self, cx: &mut Context<Self>) {
+        if self.pane != Pane::Setup
+            || self.setup_flow.stay
+            || !self.setup_flow.can_advance(&self.setup)
+        {
+            return;
+        }
+        let start = std::time::Instant::now();
+        self.setup_flow.advance_at = Some(start);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ADVANCE_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.setup_flow.advance_at == Some(start) {
+                    this.advance_setup(cx);
+                }
+            });
+        })
+        .detach();
     }
 
-    fn skip_setup(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.setup.skip(id);
+    pub(crate) fn user_navigated(&mut self) {
+        self.setup_on_launch = false;
+        self.setup_flow.advance_at = None;
+    }
+
+    pub(super) fn start_setup(&mut self, cx: &mut Context<Self>) {
+        self.enter_setup_step(Step::Cli, cx);
+    }
+
+    pub(super) fn reopen_setup_step(&mut self, step: Step, cx: &mut Context<Self>) {
+        if !self.setup.action_busy && self.setup_flow.can_open(step, &self.setup) {
+            self.enter_setup_step(step, cx);
+        }
+    }
+
+    fn enter_setup_step(&mut self, step: Step, cx: &mut Context<Self>) {
+        self.setup_flow.enter(Screen::Step(step));
+        self.load_setup(cx);
+    }
+
+    pub(super) fn stay_on_setup_step(&mut self, cx: &mut Context<Self>) {
+        self.setup_flow.advance_at = None;
+        self.setup_flow.stay = true;
         cx.notify();
     }
 
-    fn finish_setup(&mut self, cx: &mut Context<Self>) {
-        if self.setup.report.cli_ready() && !self.setup.loading && !self.setup.action_busy {
+    pub(super) fn advance_setup(&mut self, cx: &mut Context<Self>) {
+        if self.pane != Pane::Setup || !self.setup_flow.can_advance(&self.setup) {
+            return;
+        }
+        if let Some(step) = self.setup_flow.step() {
+            self.setup_flow.enter(Flow::next_screen(step));
+            self.check_next_setup_step(cx);
+        }
+    }
+
+    pub(super) fn skip_setup(&mut self, step: Step, cx: &mut Context<Self>) {
+        if self.setup_flow.can_skip(step, &self.setup) {
+            self.setup_flow.skip(step, &mut self.setup);
+            self.check_next_setup_step(cx);
+        }
+    }
+
+    fn check_next_setup_step(&mut self, cx: &mut Context<Self>) {
+        if self.setup_flow.step().is_some() {
+            self.load_setup(cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn retry_setup_check(&mut self, cx: &mut Context<Self>) {
+        self.setup_flow.outcome = None;
+        self.setup_flow.stay = false;
+        self.load_setup(cx);
+    }
+
+    pub(super) fn finish_setup(&mut self, cx: &mut Context<Self>) {
+        if self.setup_flow.screen == Screen::Done
+            && self.setup.report.cli_ready()
+            && !self.setup.loading
+            && !self.setup.action_busy
+        {
             self.pane = Pane::Project;
             cx.notify();
         }
     }
 
     /// One of the fixed daemon actions, only while a card offers it.
-    fn run_setup_action(&mut self, action: SafeAction, cx: &mut Context<Self>) {
+    pub(super) fn run_setup_action(&mut self, action: SafeAction, cx: &mut Context<Self>) {
         let offered = self
             .setup
             .report
@@ -172,7 +238,7 @@ impl HackApp {
 
     /// Hand an admin step to the user's terminal: it shows the command and
     /// waits for Enter. Launching proves nothing; checks run again after.
-    fn open_setup_terminal(&mut self, args: Vec<String>, cx: &mut Context<Self>) {
+    pub(super) fn open_setup_terminal(&mut self, args: Vec<String>, cx: &mut Context<Self>) {
         use hack_desktop_core::terminal::{Platform, Script, SystemLauncher, linux_adapter};
         let offered = self
             .setup
@@ -241,328 +307,12 @@ impl HackApp {
     }
 }
 
-/// `machine_busy`: another machine action (Start / Restart hackd from the
-/// project pane) holds the shared gate, so this pane's actions wait too.
-pub fn render(
-    pane: &SetupPane,
-    machine_busy: bool,
-    ui: &Ui,
-    cx: &mut Context<HackApp>,
-) -> AnyElement {
-    let p = ui.p;
-    let busy = pane.loading || pane.action_busy || machine_busy;
-    let mut recheck = action_button(
-        "setup-recheck",
-        Glyph::Restart,
-        if pane.loading {
-            "Checking…"
-        } else {
-            "Check again"
-        },
-        !busy,
-        ui,
-    );
-    if !busy {
-        recheck = recheck.on_click(cx.listener(|this, _, _, cx| this.load_setup(cx)));
-    }
-    let ready = pane.report.cli_ready() && !busy;
-    let mut done = if ready {
-        primary_button("setup-continue", Glyph::Check, "Continue", ui)
-    } else {
-        action_button("setup-continue", Glyph::Check, "Continue", false, ui)
-    };
-    if ready {
-        done = done.on_click(cx.listener(|this, _, _, cx| this.finish_setup(cx)));
-    }
-    let header = div()
-        .px(space::S8)
-        .pt(space::S7)
-        .pb(space::S5)
-        .flex()
-        .items_center()
-        .gap(space::S4)
-        .hairline_b(p.border)
-        .child(
-            div()
-                .type_step(text::TITLE)
-                .text_color(p.text_primary)
-                .child("Set up Hack"),
-        )
-        .child(div().flex_1())
-        .child(recheck)
-        .child(done);
-    let body: AnyElement = if pane.report.cards.is_empty() {
-        empty_pane(
-            if pane.loading {
-                Glyph::Loader
-            } else {
-                Glyph::Stethoscope
-            },
-            if pane.loading {
-                "Checking setup…"
-            } else {
-                "Setup has not been checked"
-            },
-            "Checks only read; they never start a service.",
-            None,
-            ui,
-        )
-        .into_any_element()
-    } else {
-        let mut col = div()
-            .id("setup-cards")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .px(space::S8)
-            .py(space::S6)
-            .gap(space::S5)
-            .child(
-                div()
-                    .type_step(text::BODY)
-                    .text_color(p.text_secondary)
-                    .child("Checks only read. Skipped and unknown steps stay unresolved. Admin steps open in your terminal and wait for Enter."),
-            );
-        if let Some(result) = &pane.result {
-            col = col.child(
-                div()
-                    .p(space::S5)
-                    .rounded(radius::PANEL)
-                    .hairline(p.border)
-                    .bg(p.surface_1)
-                    .type_step(text::BODY)
-                    .text_color(p.text_primary)
-                    .child(result.clone()),
-            );
-        }
-        for (i, c) in pane.report.cards.iter().enumerate() {
-            col = col.child(card(i, c, pane, busy, ui, cx));
-        }
-        col.into_any_element()
-    };
-    div()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .flex()
-        .flex_col()
-        .child(header)
-        .child(body)
-        .into_any_element()
-}
-
-/// The `hack …` part of a bound command, for display: a bound command is
-/// `'/usr/bin/env' '-i' 'KEY=value'… '/path/to/hack' 'arg'…` (each argument
-/// quoted); the full one is what Copy and the terminal get. Anything else
-/// is shown as it is.
-fn short_command(bound: &str) -> String {
-    let Some(inner) = bound.strip_prefix('\'').and_then(|b| b.strip_suffix('\'')) else {
-        return bound.to_owned();
-    };
-    let tokens: Vec<&str> = inner.split("' '").collect();
-    if tokens.first() != Some(&"/usr/bin/env") || tokens.iter().any(|t| t.contains('\'')) {
-        return bound.to_owned();
-    }
-    let program = tokens
-        .iter()
-        .skip(1)
-        .position(|t| *t != "-i" && !t.contains('='))
-        .map(|i| i + 1);
-    match program {
-        Some(i) => std::iter::once("hack")
-            .chain(tokens[i + 1..].iter().copied())
-            .collect::<Vec<_>>()
-            .join(" "),
-        None => bound.to_owned(),
-    }
-}
-
-fn card(
-    i: usize,
-    c: &Card,
-    pane: &SetupPane,
-    busy: bool,
-    ui: &Ui,
-    cx: &mut Context<HackApp>,
-) -> AnyElement {
-    let p = ui.p;
-    let skipped = pane.skipped.contains(&c.id);
-    let (label, colors) = match (c.status, skipped) {
-        (_, true) => ("Skipped for now", p.states.unknown),
-        (Status::Passed, false) => ("Passed", p.states.running),
-        (Status::NeedsAttention, false) => ("Needs attention", p.states.degraded),
-        (Status::Unknown, false) => ("Unknown", p.states.unknown),
-    };
-    let cli = pane.report.cli_ready();
-    let mut actions = div().flex().items_center().gap(space::S3);
-    let mut command_line: Option<String> = None;
-    if c.status != Status::Passed {
-        match &c.remedy {
-            Remedy::Copy(cmd) => {
-                command_line = Some(short_command(cmd));
-                let cmd = cmd.clone();
-                actions =
-                    actions.child(
-                        action_button(("setup-copy", i), Glyph::Copy, "Copy command", cli, ui)
-                            .when(cli, |b| {
-                                b.on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(cmd.clone()));
-                                })
-                            }),
-                    );
-            }
-            Remedy::Doc(url) => {
-                let url = url.clone();
-                actions = actions.child(
-                    action_button(("setup-doc", i), Glyph::ExternalLink, "Open doc", true, ui)
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
-                );
-            }
-            Remedy::Run(action) => {
-                let action = *action;
-                let label = match action {
-                    SafeAction::StartDaemon => "Start hackd",
-                    SafeAction::InstallDaemon => "Install hackd",
-                };
-                let enabled = cli && !busy;
-                actions =
-                    actions.child(
-                        action_button(("setup-run", i), Glyph::Play, label, enabled, ui).when(
-                            enabled,
-                            |b| {
-                                b.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.run_setup_action(action, cx)
-                                }))
-                            },
-                        ),
-                    );
-            }
-            Remedy::Admin(args) => {
-                let bound = pane.report.command(args.clone()).and_then(|c| c.display());
-                let available = cli && bound.is_ok();
-                // Shown short; Copy and the terminal get the bound command,
-                // which pins the checked CLI and its non-secret context.
-                command_line = Some(format!("hack {}", args.join(" ")));
-                let copy = bound.unwrap_or_default();
-                actions = actions.child(
-                    action_button(
-                        ("setup-copy", i),
-                        Glyph::Copy,
-                        "Copy command",
-                        available,
-                        ui,
-                    )
-                    .when(available, |b| {
-                        b.on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                        })
-                    }),
-                );
-                let enabled = available && !busy;
-                let args = args.clone();
-                actions = actions.child(
-                    action_button(
-                        ("setup-terminal", i),
-                        Glyph::Terminal,
-                        "Open in terminal",
-                        enabled,
-                        ui,
-                    )
-                    .when(enabled, |b| {
-                        b.on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_setup_terminal(args.clone(), cx)
-                        }))
-                    }),
-                );
-            }
-        }
-        // The CLI cannot be skipped: everything else needs it.
-        if c.id != "cli" && !skipped {
-            let id = c.id.clone();
-            let enabled = !busy;
-            actions = actions.child(
-                action_button(("setup-skip", i), Glyph::Close, "Skip for now", enabled, ui)
-                    .when(enabled, |b| {
-                        b.on_click(cx.listener(move |this, _, _, cx| this.skip_setup(&id, cx)))
-                    }),
-            );
-        }
-    }
-    div()
-        .id(SharedString::from(format!("setup-card-{}", c.id)))
-        .flex()
-        .flex_col()
-        .gap(space::S3)
-        .p(space::S6)
-        .rounded(radius::PANEL)
-        .hairline(p.border)
-        .bg(p.surface)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(space::S4)
-                .child(
-                    div()
-                        .type_step(text::SMALL_STRONG)
-                        .text_color(p.text_muted)
-                        .child(format!("{}", i + 1)),
-                )
-                .child(
-                    div()
-                        .type_step(text::BODY_STRONG)
-                        .text_color(p.text_primary)
-                        .child(c.title.clone()),
-                )
-                .child(div().flex_1())
-                .child(pill(label, colors.bg, colors.fg)),
-        )
-        .when(!c.detail.is_empty(), |d| {
-            d.child(
-                div()
-                    .type_step(text::BODY)
-                    .text_color(p.text_secondary)
-                    .child(c.detail.clone()),
-            )
-        })
-        .children(command_line.map(|cmd| {
-            div()
-                .px(space::S4)
-                .py(px(1.))
-                .rounded(radius::PILL)
-                .bg(p.surface_1)
-                .font_family(ui.mono.clone())
-                .type_step(text::MONO)
-                .text_color(p.text_primary)
-                .child(cmd)
-        }))
-        .child(actions)
-        .into_any_element()
-}
-
-#[cfg(test)]
-mod display_tests {
-    use super::short_command;
-
-    #[test]
-    fn a_bound_command_is_shown_as_its_hack_part() {
-        let bound = "'/usr/bin/env' '-i' 'HOME=/h' 'PATH=/usr/bin:/bin' 'HACK_MCP_COMMAND=/opt/x/hack' '/opt/x/hack' 'daemon' 'restart'";
-        assert_eq!(short_command(bound), "hack daemon restart");
-        assert_eq!(short_command("hack update"), "hack update");
-        // An argument with a quote in it is shown in full, never guessed at.
-        let odd = "'/usr/bin/env' '-i' 'HOME=/h' '/opt/x/hack' 'it'\\''s'";
-        assert_eq!(short_command(odd), odd);
-    }
-}
-
 // A headless app needs GPUI's test support (the `screenshots` feature).
 #[cfg(all(test, feature = "screenshots"))]
 mod tests {
     use std::sync::Arc;
 
-    use gpui_kit::{HeadlessAppContext, WindowOptions};
+    use gpui_kit::{AppContext as _, HeadlessAppContext, WindowOptions};
     use hack_desktop_core::fixtures::Fixture;
     use hack_desktop_core::source::FixtureSource;
 
@@ -593,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn run_setup_again_shows_fresh_cards_and_continue_returns_to_projects() {
+    fn setup_starts_at_welcome_and_open_hack_requires_completion() {
         let (mut cx, app) = app();
         cx.update(|cx| app.update(cx, |a, cx| a.open_setup(cx)));
         let (pane, cards, ready) = cx.update(|cx| {
@@ -608,7 +358,48 @@ mod tests {
         assert!(cards > 0, "the checks produced cards");
         assert!(ready, "the fixture has a CLI");
         cx.update(|cx| app.update(cx, |a, cx| a.finish_setup(cx)));
+        assert_eq!(cx.update(|cx| app.read(cx).pane), Pane::Setup);
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.setup_flow.enter(Screen::Done);
+                a.finish_setup(cx);
+            })
+        });
         assert_eq!(cx.update(|cx| app.read(cx).pane), Pane::Project);
+    }
+
+    #[test]
+    fn a_pass_waits_two_seconds_and_stay_cancels_the_advance() {
+        let (mut cx, app) = app();
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.open_setup(cx);
+                a.start_setup(cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.advance_clock(ADVANCE_DELAY - std::time::Duration::from_millis(1));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| app.read(cx).setup_flow.step()),
+            Some(Step::Cli)
+        );
+        cx.update(|cx| app.update(cx, |a, cx| a.stay_on_setup_step(cx)));
+        cx.advance_clock(ADVANCE_DELAY);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| app.read(cx).setup_flow.step()),
+            Some(Step::Cli)
+        );
+
+        cx.update(|cx| app.update(cx, |a, cx| a.retry_setup_check(cx)));
+        cx.run_until_parked();
+        cx.advance_clock(ADVANCE_DELAY);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| app.read(cx).setup_flow.step()),
+            Some(Step::Daemon)
+        );
     }
 
     /// A launch check that finishes after the user opened something (the
@@ -698,7 +489,7 @@ mod tests {
         // Not when another pane is shown.
         cx.update(|cx| {
             app.update(cx, |a, cx| {
-                a.finish_setup(cx);
+                a.pane = Pane::Project;
                 a.setup.checked_at = Some(old);
                 a.minute_tick(cx);
             });
@@ -750,28 +541,19 @@ mod tests {
     fn a_skip_lasts_for_the_session_and_the_cli_cannot_be_skipped() {
         let (mut cx, app) = app();
         cx.update(|cx| app.update(cx, |a, cx| a.open_setup(cx)));
-        let other = cx.update(|cx| {
-            app.read(cx)
-                .setup
-                .report
-                .cards
-                .iter()
-                .find(|c| c.id != "cli")
-                .map(|c| c.id.clone())
-                .expect("a card besides the CLI")
-        });
         cx.update(|cx| {
             app.update(cx, |a, cx| {
-                a.skip_setup("cli", cx);
-                a.skip_setup(&other, cx);
+                a.setup_flow.enter(Screen::Step(Step::Cli));
+                a.skip_setup(Step::Cli, cx);
+                a.setup_flow.enter(Screen::Step(Step::Daemon));
+                a.skip_setup(Step::Daemon, cx);
             })
         });
         let skipped = cx.update(|cx| app.read(cx).setup.skipped.clone());
         assert!(!skipped.contains("cli"));
-        assert!(skipped.contains(&other));
-        // Checking again keeps the skip; it never satisfies the check.
+        assert!(skipped.contains("daemon"));
         cx.update(|cx| app.update(cx, |a, cx| a.load_setup(cx)));
-        assert!(cx.update(|cx| app.read(cx).setup.skipped.contains(&other)));
+        assert!(cx.update(|cx| app.read(cx).setup.skipped.contains("daemon")));
     }
 
     #[test]
@@ -813,7 +595,7 @@ mod tests {
 #[cfg(all(test, feature = "screenshots"))]
 mod gate_tests {
     use super::*;
-    use gpui_kit::{HeadlessAppContext, WindowOptions};
+    use gpui_kit::{AppContext as _, HeadlessAppContext, WindowOptions};
     use hack_desktop_core::fixtures::Fixture;
     use hack_desktop_core::source::FixtureSource;
     use std::sync::Arc;

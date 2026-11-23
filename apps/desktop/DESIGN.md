@@ -174,31 +174,24 @@ snapshot, only counts and nothing else.
 
 ## 2. First-run onboarding
 
-Shown on first launch when a check needs attention and the user has not yet
-selected an instance, opened Doctor or opened a terminal tab (a lost CLI shows
-it regardless), and from the Doctor row ("Run setup again"). One card per
-check, in order. Every check is read-only; every card offers **Check again**.
+The welcome screen opens when the launch check finds something to do and the
+user has not navigated elsewhere. Doctor also opens Setup on request.
+Setup presents one step at a time, in this order:
 
-![Onboarding](diagrams/onboarding.svg) ([source](diagrams/onboarding.mmd))
+| Step | Read-only evidence | Fix |
+|---|---|---|
+| Hack CLI | Supported `hack version --json` result | Install guide or choose another available install |
+| Hack service | `hack daemon status --json` and matching socket observation | Start hackd, or follow the checked remedy for its version or shared home |
+| Docker | Machine Doctor’s Docker reachability check, and native runtime observations where applicable | Docker guide or native runtime guide |
+| Local domains | Machine Doctor’s DNS checks and each native project’s `native host dns` | `hack global install` for Compose, guide for native |
+| HTTPS | Machine Doctor’s certificate trust check and each native project’s `native root trust` | `hack global trust` for Compose, guide for native |
+| Start at login | Daemon service state and home ownership | `hack daemon install` if eligible |
 
-| Step | Read-only check | Fix | Admin | Skipped / unknown shows |
-|---|---|---|---|---|
-| CLI | `hack --version` (text; R1 for JSON) | `brew install hack-dance/tap/hack` (copy) | no | Cannot skip |
-| Docker (Compose projects) | `runtime_ok` from `/v1/projects` or `hack projects --json` (Docker only) | open Docker Desktop / Docker docs | no | "Docker not reachable" on Compose projects only |
-| Native runtime (native projects) | native `ps` `data.status` per native project (`runtime_not_running` etc.) | native setup doc (HACK-2193) | no | that native project shows Unknown; Compose projects unaffected |
-| hackd | `hack daemon status --json` | `hack daemon start` | no | Status bar "hackd off"; slower refresh |
-| Routing and DNS (Compose) | macOS: doctor `resolver:<tld>`, `dnsmasq.conf:<tld>`, `dnsmasq:53` and `coredns forwarding` (all must pass). Linux: doctor `linux dns route`. Never `hack global status` (can start Docker) | `hack global install` | **yes** | URLs greyed "DNS not set up"; "unknown" when a check is missing |
-| Routing and DNS (native) | `hack doctor --browser-url <project URL>` → `native host dns` (absent without `--browser-url`) | none from the app: `hack global install` refuses native; link to the native setup doc (HACK-2193) | — | "unknown" |
-| Certificate trust (Compose) | **Unknown** today: doctor `caddy local ca` checks the exported CA, not system or browser trust (R16) | `hack global trust` | **yes** | Lock icon on URLs: "browser may warn" |
-| Certificate trust (native) | doctor `native root trust` | none from the app: `hack global trust` refuses native; doc link | — | "unknown" |
-| Login service | `daemon status` `service.installed` | `hack daemon install` | no | Always-on switch disabled |
-
-Skips are not stored: the next check finds the step still open and Doctor lists
-it. Non-admin **Run** executes the command and shows its output, then re-checks.
-Admin steps offer **Copy command** and **Open Terminal**; neither is assumed to
-have succeeded until **Check again** (also run when the window regains focus).
-
-![Admin hand-off](diagrams/admin-handoff.svg) ([source](diagrams/admin-handoff.mmd))
+Each arrival checks again in the background. Passing evidence starts a
+two-second advance that the user can pause or complete immediately. A failed
+check can be retried. Passing and skipped steps remain available from the
+progress list. The CLI is required by the other steps and cannot be skipped.
+Other skips are session-only and do not satisfy checks.
 
 Terminal hand-off (recommended for both platforms; comparison in [Appendix A](#appendix-a-system-prompt-vs-terminal)):
 

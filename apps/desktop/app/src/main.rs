@@ -27,6 +27,11 @@ mod logs_view;
 mod machine_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+mod setup_command;
+mod setup_flow;
+#[cfg(feature = "screenshots")]
+mod setup_frames;
+mod setup_screen;
 mod setup_view;
 #[cfg(hack_terminal)]
 mod terminal;
@@ -46,6 +51,7 @@ pub(crate) struct Args {
     pub logs_fixture: Option<hack_desktop_core::logs::fixtures::LogsFixture>,
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
+    pub setup_frames: Option<std::path::PathBuf>,
     pub sequence: Option<std::path::PathBuf>,
     /// `--drive`: run the steps file in a child app and report.
     pub drive: Option<std::path::PathBuf>,
@@ -71,6 +77,7 @@ fn parse_args() -> Args {
         logs_fixture: None,
         theme: None,
         screenshots: None,
+        setup_frames: None,
         sequence: None,
         drive: None,
         drive_child: None,
@@ -125,6 +132,7 @@ fn parse_args() -> Args {
                 });
             }
             "--screenshots" => a.screenshots = Some(it.next().unwrap_or_else(|| usage()).into()),
+            "--setup-frames" => a.setup_frames = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--sequence" => a.sequence = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--drive-child" => {
                 let steps = it.next().unwrap_or_else(|| usage());
@@ -199,6 +207,11 @@ fn main() {
         std::process::exit(2);
     }
     #[cfg(feature = "screenshots")]
+    if let Some(dir) = &args.setup_frames {
+        screenshots::run_setup(dir);
+        return;
+    }
+    #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.sequence {
         screenshots::sequence(dir);
         return;
@@ -209,8 +222,10 @@ fn main() {
         return;
     }
     #[cfg(not(feature = "screenshots"))]
-    if args.screenshots.is_some() || args.sequence.is_some() {
-        eprintln!("--screenshots and --sequence need a build with --features screenshots");
+    if args.screenshots.is_some() || args.sequence.is_some() || args.setup_frames.is_some() {
+        eprintln!(
+            "--screenshots, --setup-frames and --sequence need a build with --features screenshots"
+        );
         std::process::exit(2);
     }
     gpui_kit::application()

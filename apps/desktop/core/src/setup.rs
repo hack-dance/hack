@@ -14,6 +14,10 @@ pub enum Status {
     Passed,
     NeedsAttention,
     Unknown,
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "version-mismatch")]
+    VersionMismatch,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SafeAction {

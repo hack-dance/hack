@@ -69,6 +69,14 @@ pub enum Glyph {
     Copy,
     /// Header: copied.
     Check,
+    SetupDone,
+    SetupIdle,
+    SetupBlocked,
+    SetupUnchecked,
+    SetupFailed,
+    SetupSkipped,
+    Clock,
+    ChevronRight,
 }
 
 impl Glyph {
@@ -106,6 +114,14 @@ impl Glyph {
             Self::EyeOff => "icons/eye-off.svg",
             Self::Key => "icons/key-round.svg",
             Self::Pencil => "icons/pencil.svg",
+            Self::SetupDone => "icons/circle-check.svg",
+            Self::SetupIdle => "icons/circle.svg",
+            Self::SetupBlocked => "icons/lock-keyhole.svg",
+            Self::SetupUnchecked => "icons/circle-question-mark.svg",
+            Self::SetupFailed => "icons/circle-x.svg",
+            Self::SetupSkipped => "icons/skip-forward.svg",
+            Self::Clock => "icons/clock.svg",
+            Self::ChevronRight => "icons/chevron-right.svg",
         }
     }
 }
@@ -144,6 +160,14 @@ icon_assets!(
         EyeOff,
         KeyRound,
         Pencil,
+        CircleCheck,
+        Circle,
+        LockKeyhole,
+        CircleQuestionMark,
+        CircleX,
+        SkipForward,
+        Clock,
+        ChevronRight,
     ]
 );
 
@@ -204,6 +228,14 @@ mod tests {
             Glyph::EyeOff,
             Glyph::Key,
             Glyph::Pencil,
+            Glyph::SetupDone,
+            Glyph::SetupIdle,
+            Glyph::SetupBlocked,
+            Glyph::SetupUnchecked,
+            Glyph::SetupFailed,
+            Glyph::SetupSkipped,
+            Glyph::Clock,
+            Glyph::ChevronRight,
         ] {
             assert!(
                 Assets.load(g.path()).unwrap().is_some(),

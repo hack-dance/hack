@@ -33,7 +33,14 @@ fn published_owner_refused(candidate: &Candidate, run: &str) -> CandidateError {
             "graph_foreground_owner_exited_unadmitted",
             "The previous foreground owner of this run exited before its start was confirmed and did not retire its publication. Data is retained, but no supported command can prove and retire that attempt yet; keep the native home unchanged for inspection.",
         ),
-        _ => refused(),
+        // HACK-2572: an owner that is ending reads this way for a moment: its process
+        // has exited but is not yet reaped (alive to `kill 0`, unobservable), or its
+        // publication changed between the two reads. The caller may wait and read again.
+        Ok(PublishedOwner::Uncertain | PublishedOwner::Absent) => error(
+            "graph_foreground_owner_uncertain",
+            "The previous foreground owner of this run is ending or its publication cannot be classified yet; nothing was changed. Run hack up again once it has ended; hack ps --json shows its state.",
+        ),
+        Err(_) => refused(),
     }
 }
 /// A ready graph, or a same-boot dead-owner recovery of one that was interrupted:
@@ -733,6 +740,15 @@ pub(in crate::provider::graph) mod tests {
         let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
         assert_eq!(error.code, "graph_foreground_owner_exited_unadmitted");
         assert!(!error.message.contains("hack down --recover"));
+        // An owner that is ending (a publication that cannot be classified for a
+        // moment) has its own code, which a caller may wait on.
+        let fixture = Fixture::new();
+        foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
+        let owner = fixture._publication.join("owner.json");
+        fs::write(&owner, b"{").unwrap();
+        let before = state(&fixture);
+        assert_eq!(refusal(&fixture), "graph_foreground_owner_uncertain");
+        assert_eq!(state(&fixture), before);
         // An owner that exited while its graph was ready names `hack down --recover`.
         let fixture = Fixture::new();
         let mut receipt = fixture.receipt();

@@ -50,6 +50,7 @@ import {
   type HookCompletion,
   type HookStart,
 } from "./compose-up-progress.ts";
+import { runProjectCopies } from "./project-copies.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -825,6 +826,12 @@ const restartOptions = [
   optExpectFrontendPid,
 ] as const;
 const psOptions = [
+  defineOption({
+    name: "copies",
+    type: "boolean",
+    long: "--copies",
+    description: "Show all checkouts and branch instances of the project",
+  }),
   defineOption({
     name: "wide",
     type: "boolean",
@@ -11204,6 +11211,37 @@ async function handlePs({
   readonly ctx: CliContext;
   readonly args: PsArgs;
 }): Promise<number> {
+  if (args.options.copies) {
+    if (
+      args.options.branch !== undefined ||
+      args.options.profile !== undefined ||
+      args.options.wide
+    ) {
+      throw new CliUsageError(
+        "--copies cannot be combined with --branch, --profile or --wide."
+      );
+    }
+    return await runProjectCopies({
+      cwd: ctx.cwd,
+      path: args.options.path,
+      project: args.options.project,
+      json: args.options.json === true,
+      legacyContext: () =>
+        resolveProjectForArgs({
+          ctx,
+          pathOpt: args.options.path,
+          projectOpt: args.options.project,
+          touchRegistration: false,
+        }),
+      addresses: async (project, branch, native) =>
+        readProjectServiceAddresses({
+          project,
+          cfg: await readProjectConfig(project),
+          branch,
+          native,
+        }),
+    });
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,

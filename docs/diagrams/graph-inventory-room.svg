@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-state" viewBox="0 0 924 451" width="924" height="451" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_tw:var(--pele-title-weight,bold);--_fm:var(--pele-font-mono,Geist Mono);font:15px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Geist)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="state" data-theme="light"><style><![CDATA[/* Hack Dance house theme for Pele 1.9.x: ink on cream (fleet palette B). Light by default; dark via [data-theme=dark].
+   Colour only for meaning (house classes). Never resize label text: Pele sized label boxes for its own font size. */
+.pele {
+  --pele-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --pele-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --pele-bg: #F3EFE3;
+  --pele-fg: #1D1D1B;
+  --pele-muted: #3D3C37;
+  --pele-line: #3D3C37;
+  --pele-surface: #FBF9F1;
+  --pele-surface-alt: #E8E4D8;
+  --pele-border: #66625A;
+  --pele-accent: #1D1D1B;
+  --pele-critical: #C2461F;
+  --pele-error: #C2461F;
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: #5b3df5; --pele-series-2: #0e9f8a; --pele-series-3: #e08a00; --pele-series-4: #d6345a;
+  --pele-series-5: #2f7de1; --pele-series-6: #8a5cf6; --pele-series-7: #4f9d2d; --pele-series-8: #a0674b;
+  /* semantic state tints (house classes) */
+  --hd-live: #4B4790;  --hd-live-bg: #E6E4F0;
+  --hd-wait: #34506E;  --hd-wait-bg: #D3DBE5;
+  --hd-ok:   #3A7A2E;  --hd-ok-bg:   #E2EBD9;
+  --hd-fail: #C2461F;  --hd-fail-bg: #F5E0D6;
+  --hd-idle: #8A8576;  --hd-idle-bg: #E8E4D8;
+  background: var(--pele-bg);
+}
+.pele[data-theme="dark"], [data-theme="dark"] .pele {
+  --pele-bg: #11100E;
+  --pele-fg: #EDE8D9;
+  --pele-muted: #C9C3B2;
+  --pele-line: #C9C3B2;
+  --pele-surface: #191815;
+  --pele-surface-alt: #1B1A17;
+  --pele-border: #8F897A;
+  --pele-accent: #EDE8D9;
+  --pele-critical: #FF7A52;
+  --pele-error: #FF7A52;
+  --pele-series-1: #9a86ff; --pele-series-2: #3fd1b8; --pele-series-3: #ffb547; --pele-series-4: #ff6b8b;
+  --pele-series-5: #6aa8ff; --pele-series-6: #c4a5ff; --pele-series-7: #8fd16a; --pele-series-8: #d29b7f;
+  --hd-live: #A39CE0;  --hd-live-bg: #24223A;
+  --hd-wait: #9DB4CF;  --hd-wait-bg: #22303D;
+  --hd-ok:   #7CC25E;  --hd-ok-bg:   #1C2A17;
+  --hd-fail: #FF7A52;  --hd-fail-bg: #33190F;
+  --hd-idle: #7A7466;  --hd-idle-bg: #1B1A17;
+}
+/* polish */
+.pele .pele-edge path { stroke-width: 1.4px; stroke-linecap: round; }
+.pele .pele-edge-label rect { fill: var(--pele-bg); }
+.pele .pele-edge-label text { fill: var(--pele-muted); }
+.pele .pele-cluster-label, .pele .pele-title { letter-spacing: .01em; }
+.pele .pele-node > rect, .pele .pele-node > path, .pele .pele-node > polygon, .pele .pele-node > circle, .pele .pele-node > ellipse { stroke-width: 1.2px; }
+/* house semantic classes: in Mermaid write `classDef live stroke-width:1.6px` + `class X live` */
+.pele .live > rect, .pele .live > path, .pele .live > polygon, .pele .live > circle, .pele .live > ellipse { fill: var(--hd-live-bg) !important; stroke: var(--hd-live) !important; }
+.pele .wait > rect, .pele .wait > path, .pele .wait > polygon, .pele .wait > circle, .pele .wait > ellipse { fill: var(--hd-wait-bg) !important; stroke: var(--hd-wait) !important; }
+.pele .ok   > rect, .pele .ok   > path, .pele .ok   > polygon, .pele .ok > circle, .pele .ok > ellipse { fill: var(--hd-ok-bg)   !important; stroke: var(--hd-ok)   !important; }
+.pele .fail > rect, .pele .fail > path, .pele .fail > polygon, .pele .fail > circle, .pele .fail > ellipse { fill: var(--hd-fail-bg) !important; stroke: var(--hd-fail) !important; }
+.pele .idle > rect, .pele .idle > path, .pele .idle > polygon, .pele .idle > circle, .pele .idle > ellipse { fill: var(--hd-idle-bg) !important; stroke: var(--hd-idle) !important; stroke-dasharray: 4 3; }
+.pele .live .pele-label { fill: var(--hd-live); font-weight: 600; }
+.pele .wait .pele-label { fill: var(--hd-wait); font-weight: 600; }
+.pele .ok   .pele-label { fill: var(--hd-ok);   font-weight: 600; }
+.pele .fail .pele-label { fill: var(--hd-fail); font-weight: 600; }
+.pele .idle .pele-label { fill: var(--hd-idle); }
+]]></style><text class="pele-title" font-weight="var(--_tw)" text-anchor="middle" xml:space="preserve"><tspan x="462" y="40.75">Fresh run · inventory room</tspan></text><g transform="translate(0,35)"><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge pele-transition" data-id="edge0"><path d="M277.94,38L277.94,99"/><path class="pele-marker" d="M277.94,106L274.58,98L281.3,98Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge1"><path d="M255.59,149L255.59,161.25C255.59,171.02 220.9,177 164.3,177C107.69,177 73,192.2 73,217L73,268"/><path class="pele-marker" d="M73,275L69.64,267L76.36,267Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge2"><path d="M270.49,149L270.49,177C270.49,197 234.43,197 234.43,217L234.43,241C234.43,252 277.94,252 277.94,263L277.94,268"/><path class="pele-marker" d="M277.94,275L274.58,267L281.3,267Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge3"><path d="M300.28,149L300.28,161.25C300.28,171.02 365.07,177 470.77,177C576.47,177 641.26,192.2 641.26,217L641.26,268"/><path class="pele-marker" d="M641.26,275L637.9,267L644.62,267Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge4"><path d="M277.94,275L277.94,263C277.94,252 389.6,252 389.6,241L389.6,217C389.6,199.64 369.8,189 337.49,189C305.19,189 285.39,178.74 285.39,162L285.39,156"/><path class="pele-marker" d="M285.39,149L288.75,157L282.03,157Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge5"><path d="M73,318C73,339.5 395.92,339.5 395.92,361L395.92,367"/><path class="pele-marker" d="M395.92,374L392.56,366L399.28,366Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge6"><path d="M641.26,318L641.26,330C641.26,345.5 395.92,345.5 395.92,361L395.92,367"/><path class="pele-marker" d="M395.92,374L392.56,366L399.28,366Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-note-edge" stroke="var(--_b)" stroke-dasharray="3 4" data-id="archive-archive----note-7"><path d="M318.11,296.5L362.11,296.5"/></g><g class="pele-edge pele-note-edge" stroke="var(--_b)" stroke-dasharray="3 4" data-id="refused-refused----note-8"><path d="M682.27,296.5L726.27,296.5"/></g></g><g class="pele-edge-labels" font-size="13"><g class="pele-edge-label" data-id="edge0"><rect x="211.8" y="58.5" width="132.28" height="20" rx="3" fill="var(--_bg)"/><text x="277.94" y="73.05" text-anchor="middle">fresh start, lease held</text></g><g class="pele-edge-label" data-id="edge1"><rect x="26" y="219" width="94" height="20" rx="3" fill="var(--_bg)"/><text x="73" y="233.55" text-anchor="middle">[fewer than 64]</text></g><g class="pele-edge-label" data-id="edge2"><rect x="174.07" y="219" width="120.72" height="20" rx="3" fill="var(--_bg)"/><text x="234.43" y="233.55" text-anchor="middle">[64, a removed run]</text></g><g class="pele-edge-label" data-id="edge3"><rect x="596.06" y="219" width="90.39" height="20" rx="3" fill="var(--_bg)"/><text x="641.26" y="233.55" text-anchor="middle">[64 keep data]</text></g><g class="pele-edge-label" data-id="edge4"><rect x="314.79" y="219" width="149.61" height="20" rx="3" fill="var(--_bg)"/><text x="389.6" y="233.55" text-anchor="middle">oldest removed archived</text></g></g><g class="pele-nodes"><g class="pele-node pele-state-start" data-id="root_start" transform="translate(277.94,31)"><circle r="7" fill="var(--_l)"/></g><g class="pele-node pele-state" data-id="count" transform="translate(277.94,127.5)"><rect x="-34.34" y="-21.5" width="68.69" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">count</text></g><g class="pele-node pele-state ok" data-id="admit" transform="translate(73,296.5)"><rect x="-34.34" y="-21.5" width="68.68" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)" style="stroke-width:1.6px;"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">admit</text></g><g class="pele-node pele-state-end" data-id="root_end" transform="translate(395.92,383)"><circle r="8.5" fill="var(--_bg)" stroke="var(--_l)"/><circle r="5" fill="var(--_l)"/></g><g class="pele-node pele-state" data-id="archive" transform="translate(277.94,296.5)"><rect x="-40.17" y="-21.5" width="80.35" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">archive</text></g><g class="pele-node pele-state fail" data-id="refused" transform="translate(641.26,296.5)"><rect x="-41.01" y="-21.5" width="82.03" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)" style="stroke-width:1.6px;"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">refused</text></g><g class="pele-note" data-id="archive----note-7" transform="translate(461.18,296.5)"><path d="M-99.07,-33.5H91.07L99.07,-25.5V33.5H-99.07Z" fill="var(--_bg)" stroke="var(--_b)"/><path d="M91.07,-33.5V-25.5H99.07" fill="none" stroke="var(--_b)"/><text class="pele-label" font-size="13" fill="var(--_m)" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-12.45">Same proof as graph archive:</tspan><tspan x="0" y="4.55">every owned resource absent,</tspan><tspan x="0" y="21.55">no pending journal.</tspan></text></g><g class="pele-note" data-id="refused----note-8" transform="translate(813.06,296.5)"><path d="M-86.79,-33.5H78.79L86.79,-25.5V33.5H-86.79Z" fill="var(--_bg)" stroke="var(--_b)"/><path d="M78.79,-33.5V-25.5H86.79" fill="none" stroke="var(--_b)"/><text class="pele-label" font-size="13" fill="var(--_m)" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-12.45">graph_retention_budget:</tspan><tspan x="0" y="4.55">remove the data of a</tspan><tspan x="0" y="21.55">project you no longer use.</tspan></text></g></g></g></svg>

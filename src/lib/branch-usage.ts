@@ -132,10 +132,11 @@ async function writeBranchUsage(opts: {
     branches[slug] = entry;
   }
   const file: BranchUsageFile = { version: BRANCH_USAGE_VERSION, branches };
-  await ensureDir(resolve(opts.projectDir, ".internal"));
+  await ensureDir(resolve(opts.projectDir, ".internal"), 0o700);
   await writeTextFileIfChanged(
     resolveBranchUsagePath(opts),
-    `${JSON.stringify(file, null, 2)}\n`
+    `${JSON.stringify(file, null, 2)}\n`,
+    0o600
   );
 }
 

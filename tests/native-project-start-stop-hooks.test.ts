@@ -167,8 +167,11 @@ async function fixture(opts: {
         if (request.args[1] === "dependency-plan") {
           return { dependency_plan_id: "f".repeat(64) };
         }
-        if (request.args[1] === "inspect") {
-          events.push("graph inspect");
+        // `status` is the lease-free mapping read at started.
+        if (request.args[1] === "inspect" || request.args[1] === "status") {
+          if (request.args[1] === "inspect") {
+            events.push("graph inspect");
+          }
           return {
             journal_incomplete: false,
             receipt: {

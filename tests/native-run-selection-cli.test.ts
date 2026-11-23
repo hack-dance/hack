@@ -209,12 +209,14 @@ test("run --profile with the running profile set runs the child command", async 
   expect(result.stdout).toBe(CHILD_STDOUT);
   const calls = await nativeCalls(f.root);
   expect(operations(calls)).toEqual([
+    // The ready-wait's one look (the run is not warming here).
+    "status",
     "refresh-dependencies",
     "run-selection",
     "run-service",
   ]);
   // The child argv reaches the runtime unchanged, after its separator.
-  expect(calls[2]?.endsWith(" -- bun --version")).toBe(true);
+  expect(calls[3]?.endsWith(" -- bun --version")).toBe(true);
 }, 30_000);
 
 test("a matching --env and an unordered, repeated profile list also run", async () => {
@@ -339,6 +341,8 @@ for (const profile of ["toolchain,", ",toolchain", " , toolchain , "]) {
     expect(result.code).toBe(0);
     expect(result.stdout).toBe(CHILD_STDOUT);
     expect(operations(await nativeCalls(f.root))).toEqual([
+      // The ready-wait's one look (the run is not warming here).
+      "status",
       "refresh-dependencies",
       "run-selection",
       "run-service",

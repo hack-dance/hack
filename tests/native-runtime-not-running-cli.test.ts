@@ -369,9 +369,11 @@ test("native exec and run against a stopped runtime say so and how to recover", 
     expect(output).not.toContain("identity or outcome is unconfirmed");
     expect(output).not.toMatch(STACK_FRAME);
   }
-  // Each command stopped at the refused dependency refresh; nothing else ran.
+  // Each command looked once whether the run is warming (the stopped runtime
+  // decides nothing there), then stopped at the refused dependency refresh.
   const refresh = `--candidate-root ${join(f.root, "native-home")} graph refresh-dependencies --run-id ${run.run} --json`;
-  expect(await nativeCalls(f.root)).toEqual([refresh, refresh]);
+  const look = `--candidate-root ${join(f.root, "native-home")} graph status --run-id ${run.run} --json`;
+  expect(await nativeCalls(f.root)).toEqual([look, refresh, look, refresh]);
 }, 30_000);
 
 test("other refused dependency refreshes keep the unconfirmed refusal", async () => {

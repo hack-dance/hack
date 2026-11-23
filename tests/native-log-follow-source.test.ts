@@ -17,7 +17,9 @@ test("native follow admission stays on the observer surface without mutation or 
   }
 });
 
-test("both graph entrypoints require Ready before selecting a log stream", async () => {
+// The imported graph also follows a run that returned at started: its
+// containers are running while their goals settle. The authored path is unchanged.
+test("both graph entrypoints require Ready (or started) before selecting a log stream", async () => {
   const imported = await Bun.file(
     new URL(
       "../packages/runtime-core/src/provider/graph/log_follow.rs",
@@ -30,7 +32,9 @@ test("both graph entrypoints require Ready before selecting a log stream", async
       import.meta.url
     )
   ).text();
-  expect(imported).toContain('receipt.phase == "ready-observed"');
+  expect(imported).toContain(
+    'matches!(phase, "ready-observed" | super::STARTED_OBSERVED)'
+  );
   expect(authored).toContain("receipt.phase == Phase::ReadyObserved");
 });
 

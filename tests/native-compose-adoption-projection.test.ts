@@ -40,6 +40,10 @@ import {
 import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 
 const CANARY = "synthetic-projection-private-value";
 const KEYS = ["CI", "HACK_EXECUTION_MODE", "HACK_ENV_SECRET_KEY"] as const;
@@ -52,8 +56,8 @@ beforeEach(async () => {
     Reflect.deleteProperty(process.env, key);
   }
   root = await realpath(await mkdtemp(join(tmpdir(), "adoption-projection-")));
-  await mkdir(join(root, ".hack/.internal"), { recursive: true });
-  await writeFile(
+  await mkdirOwnedFixture(join(root, ".hack/.internal"), true);
+  await writeOwnedFixture(
     join(root, ".hack/hack.config.json"),
     JSON.stringify({ name: "fixture", env: { default_overlay: "qa" } })
   );
@@ -81,7 +85,7 @@ async function source() {
   return await acquireNativeConfigImportInputs({ projectRoot: root });
 }
 async function layer(value = CANARY) {
-  await writeFile(
+  await writeOwnedFixture(
     join(root, ".hack/hack.env.default.yaml"),
     JSON.stringify({
       version: 1,
@@ -111,11 +115,14 @@ async function generated(value = CANARY) {
   if (!(env && runtime)) {
     throw new Error("Fixture projections unexpectedly missing");
   }
-  await writeFile(
+  await writeOwnedFixture(
     join(root, ".hack/.internal/compose.runtime.override.yml"),
     runtime
   );
-  await writeFile(join(root, ".hack/.internal/compose.env.override.yml"), env);
+  await writeOwnedFixture(
+    join(root, ".hack/.internal/compose.env.override.yml"),
+    env
+  );
 }
 async function refuses(run: () => Promise<unknown>) {
   let error: unknown;
@@ -380,7 +387,10 @@ test("missing or stale generated env provenance cannot silently drop managed val
 });
 
 test("metadata/freshness need no key and private secret fidelity uses the existing key owner", async () => {
-  await writeFile(join(root, PROJECT_ENV_KEY_FILENAME), "synthetic-key");
+  await writeOwnedFixture(
+    join(root, PROJECT_ENV_KEY_FILENAME),
+    "synthetic-key"
+  );
   await setProjectEnvValue({
     projectRoot: root,
     projectDir: join(root, ".hack"),
@@ -401,7 +411,10 @@ test("metadata/freshness need no key and private secret fidelity uses the existi
   if (text === null) {
     throw new Error("Fixture projection missing");
   }
-  await writeFile(join(root, ".hack/.internal/compose.env.override.yml"), text);
+  await writeOwnedFixture(
+    join(root, ".hack/.internal/compose.env.override.yml"),
+    text
+  );
   await rm(join(root, PROJECT_ENV_KEY_FILENAME));
   await mkdir(join(root, PROJECT_ENV_KEY_FILENAME));
   const projection = await LegacyComposeAdoptionProjection.acquire({
@@ -411,7 +424,10 @@ test("metadata/freshness need no key and private secret fidelity uses the existi
   expect(JSON.stringify(projection.report)).not.toContain(CANARY);
   await refuses(() => projection.resolve());
   await rm(join(root, PROJECT_ENV_KEY_FILENAME), { recursive: true });
-  await writeFile(join(root, PROJECT_ENV_KEY_FILENAME), "synthetic-key");
+  await writeOwnedFixture(
+    join(root, PROJECT_ENV_KEY_FILENAME),
+    "synthetic-key"
+  );
   expect((await projection.resolve()).globalEnv.PRIVATE).toBe(CANARY);
 });
 
@@ -481,7 +497,7 @@ test.each([
   await layer();
   await generated();
   if (name === "branch") {
-    await mkdir(join(root, ".hack/.branch"));
+    await mkdirOwnedFixture(join(root, ".hack/.branch"));
   } else {
     await writeFile(join(root, ".hack/.internal", name), "services: {}\n");
   }

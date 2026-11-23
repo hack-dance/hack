@@ -891,7 +891,13 @@ pub(super) fn run<P: BuildPool>(
         if Instant::now() >= deadline {
             return Err(expired_early());
         }
-        let resolved = pool.resolve(base, deadline, canceled)?;
+        let resolved = pool.resolve(base, deadline, canceled).map_err(|error| {
+            if error.code.starts_with("registry_") && error.cause_code.is_some() {
+                error.with_build_base_reference(base.reference.canonical())
+            } else {
+                error
+            }
+        })?;
         if !image_id(&resolved.source_digest)
             || !resolved
                 .pinned_reference

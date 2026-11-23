@@ -116,9 +116,12 @@ events queue behind it, and GitHub keeps at most one pending run per PR.
 Merge queue requests qualify GitHub’s combined commit with the full Linux
 unit pool, compiler hosts, candidate, Docker, build smoke, models and docs.
 macOS coverage stays with the PR and integration policies. Linux unit shard
-8 runs its normal assignment and then runs the fixed list in
-`scripts/test-shard-symlink-temp-files.json` with a symlinked `TMPDIR`.
-Duration updates affect only the normal assignment.
+8 runs the fixed list in `scripts/test-shard-symlink-temp-files.json` with a
+symlinked `TMPDIR`. When Linux shard 8 is scheduled, Linux unit shards leave
+those files to that step. Otherwise Linux runs its regular assignment.
+macOS keeps its regular assignment in either case. Each shard prints one
+result per executed file, and the required `test` check requires the shard
+matrix to succeed. Duration updates affect only the normal assignment.
 
 Config, lockfiles, manifests, workflows, scripts, fixtures, scenario/model data,
 Rust/guest inputs, unknown paths and deleted modules select the full unit set.

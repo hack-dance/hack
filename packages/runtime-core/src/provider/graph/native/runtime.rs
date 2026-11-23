@@ -1004,6 +1004,10 @@ pub(super) fn run_guarded(
 ) -> Result<Receipt, CandidateError> {
     check_startup(startup_guard)?;
     let (selected, input) = prepared.into_parts(candidate)?;
+    let run = input.review().scope().run;
+    if !journal::directory_absent(candidate, &super::archive::directory(candidate, run)?)? {
+        return Err(refused());
+    }
     // Metadata is not continuity proof. Storage requires an explicitly pinned
     // verifier before provider admission; no discovery or fallback is performed.
     if !input.inputs().storage.is_empty() && storage_tool.is_none() {
@@ -1119,6 +1123,12 @@ pub(super) fn run_guarded(
         engine.guest().incarnation(),
         engine.guest().boot_id(),
     )?;
+    if !config.data.is_empty() {
+        let runs = storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?;
+        if runs.len() == storage_inventory::RUN_LIMIT {
+            super::archive::make_room(candidate, engine.guest().incarnation(), &runs)?;
+        }
+    }
     let root = journal::reserve(candidate, &receipt)?;
     if let Some(admitted) = admitted {
         admitted.set(true);
@@ -1322,14 +1332,14 @@ fn logs_with<B: Backend>(
 /// keeps the ordinary receipt validation below.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
     #[cfg(target_os = "macos")]
-    if journal::absent(candidate, run)? {
+    if super::archive::inspection_directory(candidate, run)?.is_none() {
         super::foreground::require_unpublished(candidate, run)?;
-        if journal::absent(candidate, run)? {
+        if super::archive::inspection_directory(candidate, run)?.is_none() {
             return Err(journal::unreserved());
         }
     }
     let engine = Engine::connect_cleanup(candidate)?;
-    let (receipt, _) = journal::load(
+    let (receipt, _) = super::archive::load_inspection(
         candidate,
         run,
         engine.guest().incarnation(),
@@ -1958,14 +1968,11 @@ fn reservations_using_except(
     mut add: impl FnMut(&Value) -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     let runs = storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?;
-    if new_attempt && runs.len() == 64 {
-        return Err(refused());
-    }
-    for run in runs {
+    for run in &runs {
         if except == Some(run.as_str()) {
             continue;
         }
-        let (receipt, root) = journal::load_admission(candidate, &run, owner, boot)?;
+        let (receipt, root) = journal::load_admission(candidate, run, owner, boot)?;
         persistent_data::tool::require_idle(&root)?;
         if receipt.phase == Phase::Removed {
             continue;
@@ -1994,6 +2001,9 @@ fn reservations_using_except(
             }
             add(&value)?;
         }
+    }
+    if new_attempt && runs.len() == storage_inventory::RUN_LIMIT {
+        super::archive::make_room(candidate, owner, &runs)?;
     }
     Ok(())
 }

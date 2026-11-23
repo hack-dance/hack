@@ -7,10 +7,56 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
     pub program: String,
     pub args: Vec<String>,
+}
+
+/// Availability supplied by the check that owns a command. A runnable or
+/// copyable spec is authored argv bound to the checked execution context.
+/// Never construct it by parsing a CLI hint or a previously quoted string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandAvailability {
+    Ready(CommandSpec),
+    CopyOnly(CommandSpec),
+    Blocked(String),
+    VersionMismatch(String),
+}
+
+/// Width and placement of the equal Run/Copy buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandControlSize {
+    /// Standalone command box on a setup step.
+    Standard,
+    /// Inline actions on a Doctor finding or machine row.
+    Compact,
+}
+
+/// Props for a command control and its drawer session.
+#[derive(Debug, Clone)]
+pub struct CommandControl {
+    /// Stable, window-unique ID for this action, including its target.
+    pub id: String,
+    /// Short, display-only command, e.g. `hack global install`.
+    pub label: String,
+    /// Drawer title, e.g. `Terminal` or `Fix all · 2 of 4`.
+    pub title: String,
+    pub availability: CommandAvailability,
+    pub size: CommandControlSize,
+    /// Project root when the check targets a project. Otherwise runs at HOME.
+    pub cwd: Option<PathBuf>,
+    /// Allows the drawer to show the password guidance when sudo prompts.
+    pub expects_password: bool,
+}
+
+/// The PTY process outcome. A zero code still requires a fresh check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandExit {
+    Code(i32),
+    Signal(i32),
+    StatusUnavailable,
+    LaunchFailed(String),
 }
 impl CommandSpec {
     /// All arguments are quoted independently, including the executable.
@@ -20,6 +66,19 @@ impl CommandSpec {
             .map(|s| quote(s))
             .collect::<Result<Vec<_>, _>>()
             .map(|v| v.join(" "))
+    }
+
+    /// Render the same command with a working directory for shell hand-off.
+    pub fn display_in(&self, cwd: Option<&Path>) -> Result<String, String> {
+        let command = self.display()?;
+        let Some(cwd) = cwd else {
+            return Ok(command);
+        };
+        let directory = cwd
+            .to_str()
+            .filter(|_| cwd.is_absolute())
+            .ok_or("Command directory must be an absolute UTF-8 path")?;
+        Ok(format!("cd {} && {command}", quote(directory)?))
     }
 }
 pub fn quote(s: &str) -> Result<String, String> {
@@ -117,7 +176,16 @@ pub struct Script {
 }
 impl Script {
     pub fn create(temp_root: &Path, spec: &CommandSpec) -> Result<Self, String> {
-        let command = spec.display()?;
+        Self::create_in(temp_root, spec, None)
+    }
+
+    /// Hand off the checked working directory along with argv.
+    pub fn create_in(
+        temp_root: &Path,
+        spec: &CommandSpec,
+        cwd: Option<&Path>,
+    ) -> Result<Self, String> {
+        let command = spec.display_in(cwd)?;
         if !temp_root.is_absolute() || temp_root.to_str().is_none() {
             return Err("Terminal temp root must be an absolute UTF-8 path".into());
         }

@@ -16,7 +16,7 @@ second implementation of them.
 | The CLI is the only writer | Every action is one `hack <cmd> --no-interactive` run as the user with `--path <repo_root>`. Commands without `--json` are judged by exit code, then a fresh read. |
 | Reads observe only | A poll never starts Docker, hackd, a VM or anything else. A command that can start something (today: `hack global status`) is not polled until it has an observe-only mode (R13). |
 | No app state beyond window layout | Selected project, window size, sidebar width, theme override. Nothing else is stored. |
-| No credentials, no passwords | With **Run** in the Ghostty drawer, the CLI invokes `sudo` and the user responds to its prompt in the drawer. The app has no password field, does not collect the password, and never invokes `sudo` directly. See [Onboarding](#2-first-run-onboarding). |
+| No credentials, no passwords | **Run** uses an app-owned PTY in the Ghostty drawer. The CLI invokes `sudo` when needed, and the user responds to its prompt in the drawer. The app has no password field, does not collect the password, and never invokes `sudo` directly. See [Onboarding](#2-first-run-onboarding). |
 | Env values only through the CLI, one at a time | Owner decision (Nov 17): Env shows plaintext values and reveals a secret's value on request. Every read goes through the CLI on a pipe (`hack env get KEY` per name); the app never parses env files, decrypts or holds the key. A revealed value hides after 60 s and on any move; nothing bulk-reveals ([Env tab](#env-tab)). Logs are unredacted service output (which can include values Hack injected), shown as the CLI emits them, with a warning, never written to disk and with no copy-all (owner decision: the Logs tab is in scope). |
 | Unknown is not absent | A failed or timed-out read shows "could not read" with the error, never "stopped" or "0 projects". |
 | Small | Target under 4,000 lines of Rust for v0.1. The old `apps/macos` grew to 13,800 lines through an embedded terminal, command palette, editor and agent integrations, tickets and remote features. None of those come back. |
@@ -194,10 +194,11 @@ When the CLI check fails, the later steps show **Blocked** and offer no actions.
 | Certificate trust (native) | doctor `native root trust` | none from the app: `hack global trust` refuses native; doc link | — | "unknown" |
 | Login service | `daemon status` `service.installed` | `hack daemon install` | no | Always-on switch disabled |
 
-Skips are not stored: the next check finds the step still open and Doctor lists
-it. Non-admin **Run** executes the command and shows its output, then re-checks.
-Admin steps offer **Copy command** and **Open Terminal**; neither is assumed to
-have succeeded until **Check again** (also run when the window regains focus).
+Skips last for the session. Setup's daemon start, local domains and certificate
+trust commands use the shared **Run** and **Copy** control where Ghostty is
+available. Run opens the bottom terminal and checks the step again on exit.
+The drawer closes after 1.5 seconds when the command and the check both pass.
+The Terminal app hand-off also remains available from the drawer menu.
 
 ![Admin hand-off](diagrams/admin-handoff.svg) ([source](diagrams/admin-handoff.mmd))
 
@@ -217,6 +218,27 @@ absolute `DOCKER_CERT_PATH`). A selector the app cannot carry exactly refuses
 the hand-off instead of fixing a different engine.
 
 ## 3. Doctor
+
+### Shared command control
+
+Setup, Doctor and machine views share `core::terminal::CommandControl` and the
+desktop command drawer. Use a stable ID per action and target, a short command
+label for display, and authored argv from the check that offered the command
+(for example, `setup::Report::command`). Run, Copy and terminal hand-off use
+this same spec. Pass blocked or version-mismatch copy in `CommandAvailability`
+when the check cannot offer a command. These states do not start a terminal.
+
+In the app crate, `command_control::render` accepts the props, a caller-busy
+flag and an exit callback. The callback receives a run ID, a typed
+`CommandExit` and an optional diagnosis. Start a fresh check on exit, then
+call `HackApp::command_checked` with that run ID and its result. A zero exit
+with a passing check closes the drawer after 1.5 seconds. A failed command
+or check leaves its output available. Use `HackApp::run_drawer_command` for
+an explicit run initiated outside a button pair, such as Doctor's Fix all.
+Use `HackApp::show_command_output` with the control ID to reopen the latest
+run from a banner. Use `command_control::render_history` when a passing check
+removes its Run and Copy buttons. Closing the drawer retains the latest output until
+the next command starts or the CLI changes.
 
 Source: `hack doctor --json --path <root>` per registered project, plus
 `hack doctor --machine --json` for machine findings, on open and every 10

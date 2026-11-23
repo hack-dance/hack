@@ -339,3 +339,6 @@ pub fn write_frame_limited<T: Message>(
     stream.write_all(&buf)?;
     Ok(())
 }
+
+#[cfg(unix)]
+pub mod client;

@@ -43,6 +43,7 @@ import {
   providerProcesses,
   Qualification,
   qualificationInputSizes,
+  RELAY_CYCLES_SCRIPT,
   readJson,
   readyData,
   rootProblem,
@@ -55,6 +56,46 @@ import { formatNativeStartupLogReport } from "../src/backends/native-startup-log
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
 const repository = resolve(import.meta.dir, "..");
+
+test("relay qualification requires all 256 valid downloads", () => {
+  const run = (fault: string) =>
+    Bun.spawnSync([
+      "/bin/sh",
+      "-c",
+      `wget() {
+        if [ "$cycle" -eq 256 ] && [ "$fault" = fetch ]; then return 1; fi
+        printf '%s' "$cycle" > "$5"
+      }
+      sha256sum() {
+        n=$(cat "$1")
+        if [ "$n" -eq 256 ] && [ "$fault" = digest ]; then
+          printf 'invalid  %s\\n' "$1"
+        else
+          printf '%s  %s\\n' '${BLOB_SHA256}' "$1"
+        fi
+      }
+      fault=$1
+      ${RELAY_CYCLES_SCRIPT}`,
+      "relay-test",
+      fault,
+    ]);
+
+  const complete = run("none");
+  expect(complete.exitCode).toBe(0);
+  expect(complete.stdout.toString()).toBe("256\n");
+
+  const failed = run("fetch");
+  expect(failed.exitCode).toBe(1);
+  expect(failed.stderr.toString()).toContain(
+    "relay cycle 256: download failed"
+  );
+
+  const corrupt = run("digest");
+  expect(corrupt.exitCode).toBe(1);
+  expect(corrupt.stderr.toString()).toContain(
+    "relay cycle 256: payload digest mismatch"
+  );
+});
 const digest = `sha256:${"a".repeat(64)}`;
 const required = [
   "--hack",

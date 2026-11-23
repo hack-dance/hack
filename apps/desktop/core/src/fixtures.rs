@@ -48,6 +48,11 @@ pub enum Fixture {
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
     Branches,
+    CopiesEmpty,
+    CopiesError,
+    CopiesLoading,
+    CopiesPartial,
+    CopiesReady,
     // Doctor pane.
     /// Findings across areas, machine and project scoped, one failed run.
     Doctor,
@@ -73,7 +78,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 40] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -100,6 +105,11 @@ impl Fixture {
         Self::FailedStart,
         Self::NeedsAttention,
         Self::Branches,
+        Self::CopiesEmpty,
+        Self::CopiesError,
+        Self::CopiesLoading,
+        Self::CopiesPartial,
+        Self::CopiesReady,
         Self::Doctor,
         Self::DoctorClean,
         Self::DoctorLink,
@@ -140,6 +150,11 @@ impl Fixture {
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
+            Self::CopiesEmpty => "copies-empty",
+            Self::CopiesError => "copies-error",
+            Self::CopiesLoading => "copies-loading",
+            Self::CopiesPartial => "copies-partial",
+            Self::CopiesReady => "copies-ready",
             Self::Doctor => "doctor",
             Self::DoctorClean => "doctor-clean",
             Self::DoctorLink => "doctor-link",

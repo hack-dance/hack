@@ -67,6 +67,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if fixtures::loads_usage(f) {
                                 app.show_usage_now();
                             }
+                            if f.name().starts_with("copies-") {
+                                app.show_copies_fixture(f.name());
+                            }
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture(f.name(), window, cx);
                             }

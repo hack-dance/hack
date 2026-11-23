@@ -311,7 +311,42 @@ impl LogFeed for FixtureFeed {
     }
 }
 
+/// Names and observed state from `hack ps --copies --json`.
+#[derive(Debug, serde::Deserialize)]
+pub struct CopiesReport {
+    pub copies: Vec<ProjectCopy>,
+    pub observation: CopiesObservation,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProjectCopy {
+    pub branch: Option<String>,
+    pub checkout: CopyCheckout,
+    pub instance: Option<String>,
+    pub backend: String,
+    pub state: String,
+    pub address: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CopyCheckout {
+    pub name: String,
+    pub root: String,
+    pub kind: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CopiesObservation {
+    pub ok: bool,
+    pub code: Option<String>,
+}
+
 pub trait Source: Send + Sync {
+    /// Observe the project family in the selected checkout.
+    fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, SourceError> {
+        Err(SourceError::Pending)
+    }
+
     /// Read names-only env metadata; diagnostics must never contain CLI output.
     fn env(&self, _root: &Path, _native: bool) -> crate::env::EnvView {
         crate::env::EnvView::Unreadable
@@ -2021,6 +2056,17 @@ impl Source for LiveSource {
 
     fn native_ps(&self, repo_root: &Path) -> Option<crate::models::NativePs> {
         Self::read_native_ps(&Self::native_runner(&self.runner.fixed()), repo_root)
+    }
+
+    fn copies(&self, root: &Path, native: bool) -> Result<CopiesReport, SourceError> {
+        let root = trusted_root(root)?;
+        // The CLI gives its parallel observation jobs 45 s. Leave time for
+        // project discovery and address resolution before the runner retires it.
+        Ok(self.runner_for(native).run_json(
+            &["ps", "--copies", "--json"],
+            Some(&root),
+            Duration::from_secs(60),
+        )?)
     }
 
     fn act(
@@ -4625,6 +4671,36 @@ esac
 
     fn untrusted(r: Result<PathBuf, SourceError>) -> bool {
         matches!(r, Err(SourceError::Cli { ref code, .. }) if code == "E_APP_UNTRUSTED_ROOT")
+    }
+
+    #[test]
+    fn copies_reads_the_selected_checkout_and_keeps_partial_observations() {
+        let dir = base("copies");
+        let root = dir.join("worktree");
+        make_project(&root, ".hack", "docker-compose.yml");
+        let binary = dir.join("hack");
+        crate::test_support::script(
+            &binary,
+            r#"#!/bin/sh
+[ "$#" -eq 5 ] && [ "$1 $2 $3 $4" = 'ps --copies --json --path' ] || exit 2
+[ "${5##*/}" = worktree ] || exit 3
+[ "$HACK_RUNTIME_BACKEND" = native ] || exit 4
+echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop","kind":"worktree"},"branch":"feature/search","instance":"feature-search","backend":"native","state":"unknown","address":null}],"observation":{"ok":false,"code":"E_TIMEOUT"}}}'
+"#,
+        );
+        let source = LiveSource {
+            cache: Default::default(),
+            runner: fixture_runner(&binary),
+            daemon: None,
+        };
+        let report = source.copies(&root, true);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let report = report.expect("partial report");
+        assert!(!report.observation.ok);
+        assert_eq!(report.observation.code.as_deref(), Some("E_TIMEOUT"));
+        assert_eq!(report.copies[0].instance.as_deref(), Some("feature-search"));
+        assert_eq!(report.copies[0].checkout.kind, "worktree");
+        assert_eq!(report.copies[0].state, "unknown");
     }
 
     #[test]

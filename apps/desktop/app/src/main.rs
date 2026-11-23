@@ -18,6 +18,7 @@
 //! ```
 
 mod clipboard;
+mod copies_view;
 mod doctor_view;
 #[cfg(hack_terminal)]
 mod drive;
@@ -251,6 +252,9 @@ fn main() {
                             if !fixtures::opens_doctor(f) {
                                 app.show_project();
                             }
+                        }
+                        if f.name().starts_with("copies-") {
+                            app.show_copies_fixture(f.name());
                         }
                         if f.name().starts_with("env-") {
                             app.show_env_fixture(f.name(), window, cx);

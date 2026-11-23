@@ -38,6 +38,11 @@ names refuses the branch start and names the label. After a Docker Compose
 `hack up`, Hack also warns when another running instance lists one of this
 instance's hosts; the native backend refuses such a collision instead.
 
+In the Hack desktop preview, select the project and open **Copies** to see
+its checkouts, branches, instance names, and reported runtime state. **Check
+again** refreshes the report. An incomplete read keeps any copies Hack could
+identify and marks the observation incomplete.
+
 ## What a branch instance still shares
 
 A separate branch instance does not isolate external databases, shared

@@ -1311,13 +1311,6 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
             let n = u16::try_from(x - start).unwrap_or(u16::MAX);
             window.paint_quad(fill(rect(start as u16, y, n), hsla(bg)));
         }
-        if let Some(Some((s, e))) = a.frame.selection.get(y) {
-            let mut sel = hsla(a.theme.selection_bg);
-            if a.theme.selection_fg.is_none() {
-                sel = sel.opacity(0.45);
-            }
-            window.paint_quad(fill(rect(*s, y, e - s + 1), sel));
-        }
     }
     for &(row, s, e, active) in &a.frame.matches {
         let c = if active {
@@ -1329,6 +1322,17 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
             rect(s, usize::from(row), e - s + 1),
             hsla(c).opacity(0.9),
         ));
+    }
+    // Keep selected glyphs paired with their selection background even
+    // when a Find highlight crosses the selection.
+    let mut selection = hsla(a.theme.selection_bg);
+    if a.theme.selection_fg.is_none() {
+        selection = selection.opacity(0.45);
+    }
+    for (row, span) in a.frame.selection.iter().enumerate() {
+        if let Some((start, end)) = span {
+            window.paint_quad(fill(rect(*start, row, end - start + 1), selection));
+        }
     }
     // A block cursor covers its cell. Bar, underline and hollow cursors
     // leave the lettering as it is.

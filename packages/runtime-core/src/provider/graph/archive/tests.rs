@@ -136,3 +136,71 @@ fn archived_reconciliation_reads_committed_enrollment_without_promoting_pending(
     state::write(&file, &receipt).unwrap();
     assert!(read_reconciliation(&fixture.0, &run, &owner).is_err());
 }
+
+/// HACK-2576: at 64 retained attempts, only fully removed ones are selected for
+/// archival, oldest first; runs that keep data, pending journals and foreign
+/// entries are never selected. Below the bound nothing is.
+#[test]
+fn a_full_inventory_selects_only_removed_attempts_oldest_first() {
+    let fixture = Fixture::new();
+    let parent = fixture.0.state_root.join("run/graphs");
+    let write = |run: &str, phase: &str, age: u64| {
+        let root = parent.join(run);
+        state::private_directory(&parent).unwrap();
+        state::private_directory(&root).unwrap();
+        state::write(
+            &root.join("state.json"),
+            &json!({"version":1,"run":run,"owner":"b".repeat(32),"namespace":"c".repeat(64),
+                "plan_id":"d".repeat(64),"phase":phase,"readiness":{},"resources":{}}),
+        )
+        .unwrap();
+        let time = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+        fs::File::options()
+            .write(true)
+            .open(root.join("state.json"))
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    };
+    for index in 0..60 {
+        write(&format!("{index:032x}"), "stopped-data-retained", 10);
+    }
+    write(&format!("{:032x}", 100), "removed", 300);
+    write(&format!("{:032x}", 101), "removed", 100);
+    write(&format!("{:032x}", 102), "removed", 200);
+    assert_eq!(archivable(&parent).unwrap(), (63, Vec::new()));
+    // A removed run with a pending journal is never selected.
+    write(&format!("{:032x}", 103), "removed", 900);
+    fs::write(
+        parent.join(format!("{:032x}", 103)).join("state.pending"),
+        b"{}",
+    )
+    .unwrap();
+    let (count, selected) = archivable(&parent).unwrap();
+    assert_eq!(count, 64);
+    assert_eq!(
+        selected,
+        vec![
+            format!("{:032x}", 100),
+            format!("{:032x}", 102),
+            format!("{:032x}", 101)
+        ]
+    );
+}
+
+/// HACK-2576 review: a removed run that a fresh start archived may still be mapped by
+/// its project's CLI, which confirms the removal by inspecting it. Inspection reads
+/// the active directory while it exists, else the archive; with neither it stays on
+/// the active path, so the existing "not found" refusals do not change.
+#[test]
+fn inspection_reads_an_archived_run_only_when_it_is_no_longer_active() {
+    let fixture = Fixture::new();
+    let run = "a".repeat(32);
+    let active = directory(&fixture.0, &run).unwrap();
+    let archived = path(&fixture.0, &run).unwrap();
+    assert_eq!(inspection_root(&fixture.0, &run).unwrap(), active);
+    fixture.receipt(&archived, "removed");
+    assert_eq!(inspection_root(&fixture.0, &run).unwrap(), archived);
+    fixture.receipt(&active, "removed");
+    assert_eq!(inspection_root(&fixture.0, &run).unwrap(), active);
+}

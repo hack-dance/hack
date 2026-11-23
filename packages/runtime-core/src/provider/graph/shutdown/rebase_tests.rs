@@ -5,6 +5,7 @@ fn receipt() -> Receipt {
     let (mut resource, _) = super::tests::fixture();
     resource.phase = "absent".into();
     Receipt {
+        started_from: None,
         normalized_input: None,
         relay_startup: None,
         relay_cleanup: None,

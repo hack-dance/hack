@@ -228,6 +228,8 @@ Historical remote guides are excluded from the supported documentation.
   - `tui` without a terminal refuses for that reason first.
   - `env get` never prints a failure reason, since its output is raw values: it prints one fixed
     line on stderr, with or without `--json`.
+  - `config show --json` reports `state: "missing"` in a success envelope. `config apply --json`
+    returns `E_CONFLICT` when it receives a well-formed patch for a missing checkout.
   - `config validate`, `plan`, `import` and `adopt` read native configuration and keep their own
     refusals: `E_NATIVE_PROJECT_UNSUPPORTED` for `validate`/`plan`, a refused preview for
     `import --dry-run`, and `E_CONFIG_INVALID` for `adopt`.

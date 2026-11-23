@@ -39,10 +39,16 @@ async function removeFixture(root: string): Promise<void> {
   await rm(root, { recursive: true, force: true });
   fixtureRoots.delete(root);
 }
-function liveFixturePids(): number[] {
+const PS_SNAPSHOT_TIMEOUT_MS = 10_000;
+const FIXTURE_EXIT_POLL_MS = 2 * PS_SNAPSHOT_TIMEOUT_MS + 2000;
+
+function liveFixturePids(timeout: number): number[] | null {
   const snapshot = Bun.spawnSync(["/bin/ps", "-wwaxo", "pid=,stat=,args="], {
-    timeout: 1000,
+    timeout,
   });
+  if (snapshot.exitedDueToTimeout) {
+    return null;
+  }
   expect(snapshot.exitCode).toBe(0);
   return snapshot.stdout
     .toString()
@@ -59,14 +65,26 @@ function liveFixturePids(): number[] {
 
 afterAll(async () => {
   await Promise.all([...fixtureRoots].map(recordFixturePids));
-  const deadline = performance.now() + 2000;
-  let alive = liveFixturePids();
-  while (alive.length > 0 && performance.now() < deadline) {
+  const deadline = performance.now() + FIXTURE_EXIT_POLL_MS;
+  let alive: number[] | null = null;
+  for (
+    let remaining = Math.floor(deadline - performance.now());
+    remaining > 0;
+    remaining = Math.floor(deadline - performance.now())
+  ) {
+    alive = liveFixturePids(Math.min(PS_SNAPSHOT_TIMEOUT_MS, remaining));
+    if (alive?.length === 0) {
+      return;
+    }
     await Bun.sleep(25);
-    alive = liveFixturePids();
   }
-  expect(alive, "Fixture processes still alive").toEqual([]);
-}, 5000);
+  expect(
+    alive,
+    alive === null
+      ? "Could not verify fixture exit: ps snapshot timed out"
+      : "Fixture processes still alive"
+  ).toEqual([]);
+}, 30_000);
 
 function fixtureEnv(root: string) {
   return privateCliEnv({

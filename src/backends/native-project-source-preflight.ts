@@ -84,27 +84,33 @@ async function addNativeProjectShare(opts: {
     );
   }
   if (status.phase === "running" || status.process_alive === true) {
-    throw new ClosedCliError(
-      "The running native pool does not share this project root, and a running pool's mounts never change. " +
-        "Stop the native projects that use this pool (`down` in each), stop the pool (`runtime down --json` on this native home), then run `up` here again: " +
-        "the stopped pool adds this root and shares it from the next boot. Startup hooks were not run."
-    );
+    throw runningPoolShareRefusal();
   }
-  const added = await opts.invoke({
-    runtime: opts.runtime,
-    cwd: opts.runtime.home,
-    args: [
-      "runtime",
-      "project-share",
-      "add",
-      "--project-share",
-      opts.projectRoot,
-      "--unfiltered-source",
-      "--json",
-    ],
-    timeoutMs: 30_000,
-    signal: opts.signal,
-  });
+  const added = await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.runtime.home,
+      args: [
+        "runtime",
+        "project-share",
+        "add",
+        "--project-share",
+        opts.projectRoot,
+        "--unfiltered-source",
+        "--json",
+      ],
+      timeoutMs: 30_000,
+      signal: opts.signal,
+    })
+    .catch((error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED
+      ) {
+        throw runningPoolShareRefusal();
+      }
+      throw error;
+    });
   if (
     !isRecord(added) ||
     added.kind !== "project_share_added" ||
@@ -116,4 +122,12 @@ async function addNativeProjectShare(opts: {
       "Native project share update returned an invalid receipt; startup hooks were not run."
     );
   }
+}
+
+function runningPoolShareRefusal(): ClosedCliError {
+  return new ClosedCliError(
+    "The running native pool does not share this project root, and a running pool's mounts never change. " +
+      "Stop the native projects that use this pool (`down` in each), stop the pool (`runtime down --json` on this native home), then run `up` here again: " +
+      "the stopped pool adds this root and shares it from the next boot. Startup hooks were not run."
+  );
 }

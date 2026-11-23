@@ -19,6 +19,10 @@ import {
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
+import {
+  admitNativeProjectBuilds,
+  nativeBuildIdentity,
+} from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
 import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
@@ -3793,9 +3797,10 @@ test("retained startup refuses missing, unacknowledged or changed finalization b
       https: httpsSelection,
       adaptationFile: join(opts.scope.projectRoot, "unread-adaptation.json"),
     });
-    await expect(attempt).rejects.toThrow(
-      "frontend finalization is unconfirmed"
-    );
+    await expect(attempt).rejects.toMatchObject({
+      code: "E_RECOVERY_REQUIRED",
+      message: expect.stringContaining("Run hack down --recover"),
+    });
     try {
       await attempt;
     } catch (error) {
@@ -4018,9 +4023,7 @@ test("retained acknowledgement cannot authorize a newer or concurrently changed 
       };
     }
     await expect(startNativeProject(opts)).rejects.toThrow(
-      fault === "newer-run"
-        ? "frontend finalization is unconfirmed"
-        : "mapping changed"
+      fault === "newer-run" ? "has no confirmed shutdown" : "mapping changed"
     );
     expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
   }
@@ -5094,28 +5097,39 @@ test("an invalid image reference is refused before hooks, VM, provider or image 
   expect(served).toBe(false);
 });
 
-test("Docker Hub shorthand is admitted once per distinct reference before the runtime starts", async () => {
+test("startup admits each reference once and reuses validated pins for shared service images", async () => {
   const { opts, events } = await fixture(false);
   const id = `sha256:${"e".repeat(64)}`;
+  const cacheId = `sha256:${"f".repeat(64)}`;
+  const canonical = "docker.io/library/alpine:3.21";
   withImages(opts, {
     web: "alpine:3.21",
-    worker: "alpine:3.21",
+    worker: canonical,
     cache: "redis",
     pinned: id,
   });
-  opts.dependencies.review = async (request) =>
-    request.run({
+  opts.dependencies.review = async (request) => {
+    const { services } = JSON.parse(request.input.normalizedComposeJson);
+    expect(services.web.image).toBe(id);
+    expect(services.worker.image).toBe(id);
+    expect(services.cache.image).toBe(cacheId);
+    expect(services.pinned.image).toBe(id);
+    return await request.run({
       planId: "a".repeat(64),
       namespace: "b".repeat(64),
       projectArgs: ["--project", request.projectRoot],
       report: { plan: { enrollment_compatible: true, services: {} } },
     });
+  };
   const invoke = opts.dependencies.invoke!;
   const order: string[] = [];
   opts.dependencies.invoke = async (request) => {
     if (request.args[1] === "admit-image") {
       order.push(`admit ${request.args[3]}`);
       expect(request.timeoutMs).toBeLessThanOrEqual(10_000);
+      if (request.args[3] === "alpine:3.21") {
+        return { reference: canonical, kind: "docker_hub" };
+      }
     }
     if (request.args[0] === "runtime" && request.args[1] === "up") {
       order.push("runtime up");
@@ -5131,20 +5145,66 @@ test("Docker Hub shorthand is admitted once per distinct reference before the ru
         String(request.args[3]),
         "--json",
       ]);
-      return { image_id: id };
+      return { image_id: request.args[3] === "alpine:3.21" ? id : cacheId };
     }
     return await invoke(request);
   };
   expect(await startNativeProject(opts)).toBe(0);
   expect(order).toEqual([
     "admit alpine:3.21",
+    `admit ${canonical}`,
     "admit redis",
     "runtime up",
-    "ensure alpine:3.21",
     "ensure alpine:3.21",
     "ensure redis",
   ]);
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
+});
+
+test("a changed 11-service plan uses the loaded selections of two recorded references", async () => {
+  const { opts } = await fixture(false);
+  const image = `sha256:${"e".repeat(64)}`;
+  const reference = "docker.io/fixture/app:stable";
+  const alias = "docker.io/fixture/app:also-stable";
+  const names = [
+    "web",
+    ...Array.from({ length: 10 }, (_, index) => `worker${index + 1}`),
+  ];
+  withImages(
+    opts,
+    Object.fromEntries(
+      names.map((name, index) => [name, index < 8 ? reference : alias])
+    )
+  );
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    originalSha256: "1".repeat(64),
+  });
+  const ensureRequests: string[] = [];
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      ensureRequests.push(String(request.args[3]));
+      return {
+        image_id: image,
+        pinned_reference: `docker.io/fixture/app@${image}`,
+        tag_resolution: { source: "recorded" },
+      };
+    }
+    return await invoke(request);
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    const specs = JSON.parse(request.input.normalizedComposeJson).services;
+    expect(Object.keys(specs)).toEqual(names);
+    expect(
+      Object.values(specs).map((spec) => (spec as { image: string }).image)
+    ).toEqual(names.map(() => image));
+    return await review(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(ensureRequests).toEqual([reference, alias]);
 });
 
 test("a service outside the selected profiles is not pulled, and the start says it was left out (HACK-2338)", async () => {
@@ -5236,10 +5296,12 @@ test("a runtime failure during image admission keeps its own diagnostic and star
 test("opted-in amd64 services boot a translation pool and pin with their own platform policy", async () => {
   const { opts } = await fixture(false);
   const id = `sha256:${"e".repeat(64)}`;
+  const sharedTag = "example/shared-image:2";
+  const immutable = `docker.io/example/shared-image@${id}`;
   withImages(opts, {
     legacy: "example/amd64-only:1",
-    tool: "example/multi-arch:2",
-    cache: "redis",
+    tool: sharedTag,
+    cache: sharedTag,
   });
   const adaptationFile = join(opts.scope.projectRoot, "adaptation.json");
   await writeFile(
@@ -5273,6 +5335,7 @@ test("opted-in amd64 services boot a translation pool and pin with their own pla
       ensured.push([...request.args]);
       return {
         image_id: id,
+        pinned_reference: immutable,
         platform: request.args.includes("amd64")
           ? "linux/amd64"
           : "linux/arm64",
@@ -5297,12 +5360,20 @@ test("opted-in amd64 services boot a translation pool and pin with their own pla
       "runtime",
       "ensure-image",
       "--reference",
-      "example/multi-arch:2",
+      sharedTag,
       "--emulation",
       "prefer-native",
       "--json",
     ],
-    ["runtime", "ensure-image", "--reference", "redis", "--json"],
+    [
+      "runtime",
+      "ensure-image",
+      "--reference",
+      sharedTag,
+      "--json",
+      "--command-image-pin",
+      immutable,
+    ],
   ]);
   // Only opted-in services carry the reviewed runtime opt-in.
   expect(reviewed.legacy?.["x-hack-amd64-emulation"]).toBe("amd64");
@@ -5332,7 +5403,50 @@ test("without an emulation selection the runtime pool and image pins stay arm64-
   expect(calls.flat()).not.toContain("--emulation");
 });
 
-test("retained startup reviews the saved content ID instead of a newly resolved mutable tag", async () => {
+test("a start reports the fallback reason once for each distinct image", async () => {
+  const { opts } = await fixture(false);
+  const notices: string[] = [];
+  opts.dependencies.warn = (notice) => notices.push(notice);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: { image: "alpine:latest" },
+        worker: { image: "redis:latest" },
+        another: { image: "alpine:latest" },
+      },
+    }),
+  });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      const rateLimited = request.args.includes("redis:latest");
+      return {
+        image_id: `sha256:${"a".repeat(64)}`,
+        pinned_reference: `docker.io/library/alpine@sha256:${"b".repeat(64)}`,
+        platform: "linux/arm64",
+        tag_resolution: {
+          source: "offline",
+          fallback_reason: rateLimited
+            ? "registry_http_429"
+            : "registry_http_404",
+          resolved_at_unix_seconds: 1,
+        },
+      };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(
+    notices.filter((line) => line.includes("using the loaded image"))
+  ).toEqual([
+    "tag no longer exists in the registry (404), using the loaded image resolved 1970-01-01T00:00:01.000Z",
+    "registry rate limit reached, using the loaded image resolved 1970-01-01T00:00:01.000Z",
+  ]);
+});
+
+test("retained startup asks the runtime to confirm the tag before review", async () => {
   const { opts, events } = await fixture(false);
   const saved = {
     run: "1".repeat(32),
@@ -5369,9 +5483,25 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   });
   const invoke = opts.dependencies.invoke!;
   let beforeReview = true;
+  let confirmed = false;
   opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "image-tag-status") {
+      return [
+        {
+          reference: "docker.io/library/redis:latest",
+          aliases: ["redis:latest"],
+          registry: "docker.io",
+          source_digest: image,
+          resolved_at_unix_seconds: Math.floor(Date.now() / 1000),
+          selections: [
+            { policy: "native", platform: "linux/arm64", image_id: image },
+          ],
+        },
+      ];
+    }
     if (request.args[1] === "ensure-image") {
-      throw new Error("mutable tag was unexpectedly resolved");
+      confirmed = true;
+      return { image_id: image, platform: "linux/arm64" };
     }
     if (request.args[1] === "inspect" && beforeReview) {
       expect(events).toContain("runtime up");
@@ -5385,6 +5515,7 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   const review = opts.dependencies.review!;
   opts.dependencies.review = async (request) => {
     beforeReview = false;
+    expect(confirmed).toBe(true);
     expect(
       JSON.parse(request.input.normalizedComposeJson).services.web.image
     ).toBe(image);
@@ -5393,7 +5524,123 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
 });
 
-test("retained startup selects an image again when the service's emulation policy changed", async () => {
+test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {
+  const saved = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+  };
+  const retained = `sha256:${"e".repeat(64)}`;
+  const rebuilt = `sha256:${"7".repeat(64)}`;
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    for (const [restart, reused] of [
+      [false, false],
+      [false, true],
+      [true, false],
+    ] as const) {
+      const { opts } = await fixture(false);
+      const request = admitNativeProjectBuilds({
+        services: { web: { build: "." } },
+        projectRoot: opts.scope.projectRoot,
+        composeFile: opts.composeFile,
+        enabled: true,
+      }).get("web");
+      if (!request) {
+        throw new Error("the fixture's build service was not admitted");
+      }
+      const verified = restart
+        ? new Map([
+            [
+              "web",
+              { imageId: rebuilt, identity: nativeBuildIdentity(request) },
+            ],
+          ])
+        : undefined;
+      const stopped = stoppedGraph(saved);
+      const observed = {
+        ...stopped,
+        receipt: {
+          ...stopped.receipt,
+          normalized_input: {
+            namespace: saved.namespace,
+            original_compose_sha256: "d".repeat(64),
+            normalized_compose_sha256: "f".repeat(64),
+          },
+          resources: {
+            "container:web": {
+              ...stopped.receipt.resources["container:web"],
+              image: retained,
+            },
+          },
+        },
+      };
+      opts.dependencies.retainedImages = selectNativeRetainedImages;
+      const prepare = opts.dependencies.prepare!;
+      opts.dependencies.prepare = async (request) => ({
+        ...(await prepare(request)),
+        normalizedComposeJson: JSON.stringify({
+          services: { web: { build: "." } },
+        }),
+      });
+      let builds = 0;
+      opts.dependencies.build = async () => {
+        builds += 1;
+        return { imageId: rebuilt, buildKey: "c".repeat(64), reused };
+      };
+      const invoke = opts.dependencies.invoke!;
+      let beforeReview = true;
+      const reclaims: string[][] = [];
+      opts.dependencies.invoke = async (request) => {
+        if (request.args[1] === "reclaim-build-images") {
+          reclaims.push([...request.args]);
+          // A failed reclamation never fails or delays the start.
+          throw new Error("reclaim failed");
+        }
+        if (request.args[1] === "inspect" && beforeReview) {
+          return observed;
+        }
+        if (request.args[1] === "restore-selection") {
+          return { ...saved, plan: saved.planId, generation: "2".repeat(64) };
+        }
+        return await invoke(request);
+      };
+      const review = opts.dependencies.review!;
+      let reviewedImage: unknown;
+      opts.dependencies.review = async (request) => {
+        beforeReview = false;
+        reviewedImage = JSON.parse(request.input.normalizedComposeJson).services
+          .web.image;
+        return await review(request);
+      };
+      await startNativeProject({
+        ...opts,
+        restore: saved,
+        verifiedBuildImages: verified,
+      });
+      // The retained image never stands in for the build: a restore asks the
+      // runtime, and a restart's resolved image is pinned without asking again.
+      expect(reviewedImage).toBe(rebuilt);
+      expect(builds).toBe(verified ? 0 : 1);
+      // Only a start that actually built an image reclaims, once it is ready.
+      expect(reclaims).toEqual(
+        restart || reused
+          ? []
+          : [["runtime", "reclaim-build-images", "--best-effort", "--json"]]
+      );
+    }
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
+  }
+});
+
+test("retained startup confirms the image under the currently selected emulation policy", async () => {
   const saved = {
     run: "1".repeat(32),
     owner: "c".repeat(32),
@@ -5439,9 +5686,26 @@ test("retained startup selects an image again when the service's emulation polic
     const ensured: string[][] = [];
     let beforeReview = true;
     opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "image-tag-status") {
+        return [
+          {
+            reference: "docker.io/library/redis:latest",
+            aliases: ["redis:latest"],
+            registry: "docker.io",
+            source_digest: retained,
+            resolved_at_unix_seconds: Math.floor(Date.now() / 1000),
+            selections: [
+              { policy: "amd64", platform: "linux/amd64", image_id: retained },
+            ],
+          },
+        ];
+      }
       if (request.args[1] === "ensure-image") {
         ensured.push([...request.args]);
-        return { image_id: selected, platform: "linux/amd64" };
+        return {
+          image_id: retainedPolicy === "amd64" ? retained : selected,
+          platform: "linux/amd64",
+        };
       }
       if (request.args[1] === "inspect" && beforeReview) {
         return observed;
@@ -5462,21 +5726,17 @@ test("retained startup selects an image again when the service's emulation polic
     expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
     const changed = retainedPolicy !== "amd64";
     expect(reviewedImage).toBe(changed ? selected : retained);
-    expect(ensured).toEqual(
-      changed
-        ? [
-            [
-              "runtime",
-              "ensure-image",
-              "--reference",
-              "redis:latest",
-              "--emulation",
-              "amd64",
-              "--json",
-            ],
-          ]
-        : []
-    );
+    expect(ensured).toEqual([
+      [
+        "runtime",
+        "ensure-image",
+        "--reference",
+        "redis:latest",
+        "--emulation",
+        "amd64",
+        "--json",
+      ],
+    ]);
   }
 });
 
@@ -6375,7 +6635,7 @@ test("invalid HTTP retries name the service and field before hooks or runtime ef
   expect(events).not.toContain("runtime ensure-image");
 });
 
-test("missing registry tags name the service and image field without echoing values", async () => {
+test("a missing shared tag names the requested image and every affected active service", async () => {
   const { opts } = await fixture(false);
   const prepare = opts.dependencies.prepare!;
   opts.dependencies.prepare = async (request) => {
@@ -6383,12 +6643,26 @@ test("missing registry tags name the service and image field without echoing val
     return {
       ...input,
       normalizedComposeJson: JSON.stringify({
-        services: { web: { image: "synthetic:missing" } },
+        services: {
+          web: { image: "synthetic:missing" },
+          worker: { image: "docker.io/library/synthetic:missing" },
+          inactive: { image: "synthetic:missing", profiles: ["jobs"] },
+          unrelated: { image: "another:latest" },
+        },
       }),
     };
   };
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
+    if (
+      request.args[1] === "admit-image" &&
+      request.args[3] === "synthetic:missing"
+    ) {
+      return {
+        reference: "docker.io/library/synthetic:missing",
+        kind: "docker_hub",
+      };
+    }
     if (request.args[1] === "ensure-image") {
       throw new NativeRuntimeRequestError({
         nativeCode: "registry_image_not_found",
@@ -6401,9 +6675,11 @@ test("missing registry tags name the service and image field without echoing val
     (failure: unknown) => failure
   );
   expect((error as Error).message).toContain(
-    "service web field image (registry_image_not_found)"
+    "services web, worker field image (registry_image_not_found)"
   );
-  expect((error as Error).message).not.toContain("synthetic:missing");
+  expect((error as Error).message).not.toContain("inactive");
+  expect((error as Error).message).not.toContain("unrelated");
+  expect((error as Error).message).toContain("synthetic:missing");
   expect((error as Error).message).not.toContain("private registry detail");
 });
 
@@ -6736,3 +7012,110 @@ for (const [name, hotReload, expected] of [
     ).toEqual(expected ? [renderNativeHotReloadNotice(expected)] : []);
   });
 }
+
+// HACK-2456: the pool stopped under the run while its foreground owner died.
+function ownerExitedRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_exited",
+    message: "The run's foreground owner exited.",
+  });
+}
+async function stoppedPoolUnderRunFixture(poolPhase: "stopped" | "running") {
+  const { opts, events } = await retainedFinalizationFixture();
+  const saved = await opts.dependencies.load!(opts.scope);
+  await acknowledgeRetainedFrontend(opts.scope, saved!);
+  let recovered = false;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && !recovered) {
+      events.push("graph retained-preflight refused");
+      throw ownerExitedRefusal();
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "status") {
+      events.push("runtime status");
+      return poolPhase === "running"
+        ? { phase: "running", process_alive: true }
+        : { phase: "stopped", process_alive: false };
+    }
+    return await invoke(request);
+  };
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const start = {
+    ...opts,
+    recoverStoppedPool: async () => {
+      events.push("down --recover");
+      recovered = true;
+    },
+  };
+  return { start, events, notices };
+}
+
+test("up on a stopped pool whose run's owner died recovers the run with data retained, then starts it", async () => {
+  const { start, events, notices } =
+    await stoppedPoolUnderRunFixture("stopped");
+  expect(await startNativeProject(start)).toBe(0);
+  expect(events.slice(0, 5)).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+    "down --recover",
+    "graph retained-preflight",
+    "graph inspect",
+  ]);
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(events.indexOf("down --recover")).toBeLessThan(
+    events.indexOf("runtime up")
+  );
+  expect(events).toContain("save");
+  expect(notices.join("\n")).toContain("recovered with data retained");
+});
+
+test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {
+  const { start, events } = await stoppedPoolUnderRunFixture("running");
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_exited"
+  );
+  expect(events).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+  ]);
+});
+
+test("up without a recovery callback keeps the owner-exited refusal and reads no status", async () => {
+  const { start, events } = await stoppedPoolUnderRunFixture("stopped");
+  const { recoverStoppedPool: _omitted, ...plain } = start;
+  await expect(startNativeProject(plain)).rejects.toBeInstanceOf(
+    NativeRuntimeRequestError
+  );
+  expect(events).toEqual(["graph retained-preflight refused"]);
+});
+
+test.each([
+  [
+    "Provider lease acquisition refused; recorded holder: retained startup check; no operation was admitted.",
+    "retained startup check",
+  ],
+  [undefined, "unavailable"],
+])("a bounded startup lock refusal reports holder %s and tells the user how to retry", async (nativeMessage, holder) => {
+  const { opts, events } = await fixture();
+  const blocker = new NativeRuntimeRequestError({
+    message: "Native runtime request failed (provider_busy).",
+    nativeCode: "provider_busy",
+    nativeMessage,
+  });
+  opts.dependencies.invoke = async () => {
+    throw blocker;
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    [
+      "Native startup could not acquire a runtime lock (provider_busy).",
+      `Holder: ${holder}.`,
+      "Run hack up again after the holder finishes.",
+    ].join("\n")
+  );
+  expect(events).toEqual([]);
+});

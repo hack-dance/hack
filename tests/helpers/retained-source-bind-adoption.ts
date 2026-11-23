@@ -79,7 +79,7 @@ if(kind==='container'&&selected===id){
  else if(format.includes('.Mounts')){
   if(!format.includes('index $m "Name"'))red();
   console.log(JSON.stringify({id,name:'/fixture-db-1',project:'fixture',native:'',service:'db',number:'1',oneoff:'False',running:m.running,workingDir:root+'/.hack',configFiles:root+'/.hack/docker-compose.yml',mounts:[{type:'volume',name:'fixture_data',source:'/var/lib/docker/volumes/original/_data',target:'/data',rw:true},{type:'bind',name:null,source:m.source,target:'/work',rw:!m.readOnly}],networks:[{name:'fixture_default',id:network}]}));
- }else if(format.includes('.State.Running'))console.log(JSON.stringify({id,running:m.running,paused:false,status:m.running?'running':'exited',...(format.includes('Health')?{health:''}:{})}));else red();
+ }else if(format.includes('.State.Running'))console.log(JSON.stringify({id,running:m.running,paused:false,status:m.running?'running':'exited',...(format.includes('Health')?{health:''}:{}),...(format.includes('ExitCode')?{exitCode:17}:{})}));else red();
 }else if(kind==='volume'&&selected==='fixture_data')console.log(JSON.stringify({id:'fixture_data',name:'fixture_data',project:'fixture',native:'',storage:'data',createdAt:m.volumeBirth,driver:'local',scope:'local',mountpoint:'/var/lib/docker/volumes/original/_data',options:null}));
 else if(kind==='network'&&selected===network)console.log(JSON.stringify({id:network,name:'fixture_default',project:'fixture',native:'',logical:'default',createdAt:born,driver:'bridge',scope:'local',internal:false,containers:m.running?[id]:[]}));else red();
 `

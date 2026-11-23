@@ -7,9 +7,11 @@ import {
   inspectNativeSetup,
   nativeSetupCanResume,
   nativeSetupGuidance,
+  nativeSetupLacksBuilder,
   previewNativeSetup,
   runNativeSetupChild,
 } from "../backends/native-runtime-setup.ts";
+import { inspectTempAliases } from "../backends/native-temp-aliases.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
@@ -21,7 +23,7 @@ const setupSpec = defineCommand({
   summary: "Download and prepare the pinned native runtime for this home",
   group: "Global",
   description:
-    "Verifies and resumes pinned downloads without starting a VM. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. --json passes the runtime result through unchanged.",
+    "Verifies and resumes pinned downloads without starting a VM: the VM provider, the engine, the guest networking packages and the image builder. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. A home that is already set up is left as it is; with --accept-downloads it gains the image builder if it has none. --json passes the runtime result through unchanged.",
   options: [
     optJson,
     defineOption({
@@ -53,6 +55,14 @@ const setupSpec = defineCommand({
       description:
         "Private directory containing all pinned networking packages",
     } as const),
+    defineOption({
+      name: "builder",
+      type: "string",
+      long: "--builder",
+      valueHint: "<path>",
+      description:
+        "Offline pinned image builder file (optional; with the offline input set)",
+    } as const),
   ],
   positionals: [],
   subcommands: [],
@@ -71,10 +81,14 @@ const setup = withHandler(setupSpec, async ({ ctx, args }) => {
       detail: { platform: process.platform, arch: process.arch },
     });
   }
-  const { archive, engineArchive, networkToolsDirectory } = args.options;
-  const hasOffline = [archive, engineArchive, networkToolsDirectory].some(
-    (value) => value !== undefined
-  );
+  const { archive, engineArchive, networkToolsDirectory, builder } =
+    args.options;
+  const hasOffline = [
+    archive,
+    engineArchive,
+    networkToolsDirectory,
+    builder,
+  ].some((value) => value !== undefined);
   if (
     hasOffline &&
     !(
@@ -87,7 +101,7 @@ const setup = withHandler(setupSpec, async ({ ctx, args }) => {
     throw new HackCliError({
       code: "E_USAGE",
       message:
-        "Offline setup needs --archive, --engine-archive and --network-tools-directory together, without --accept-downloads.",
+        "Offline setup needs --archive, --engine-archive and --network-tools-directory together, without --accept-downloads; --builder adds the pinned image builder file to them.",
     });
   }
   const runtime = resolveNativeSetupSelection();
@@ -99,8 +113,21 @@ const setup = withHandler(setupSpec, async ({ ctx, args }) => {
       detail: { runtime_setup: inspection.state, native_code: inspection.code },
     });
   }
+  // A set-up home is never downloaded to again, except for an image builder it
+  // lacks, and that only on the consent given with --accept-downloads.
+  const lacksBuilder = nativeSetupLacksBuilder(inspection);
   if (inspection.state !== "ready") {
     previewNativeSetup({ runtime, inspection });
+  } else if (
+    lacksBuilder &&
+    inspection.builder &&
+    args.options.acceptDownloads
+  ) {
+    previewNativeSetup({
+      runtime,
+      inspection,
+      pins: [inspection.builder.pin],
+    });
   }
   let accepted = args.options.acceptDownloads === true;
   if (
@@ -138,6 +165,7 @@ const setup = withHandler(setupSpec, async ({ ctx, args }) => {
           engineArchive,
           "--network-tools-directory",
           networkToolsDirectory,
+          ...(builder ? ["--builder", builder] : []),
         ]
       : undefined;
   return await runNativeSetupChild({
@@ -146,6 +174,9 @@ const setup = withHandler(setupSpec, async ({ ctx, args }) => {
     json: args.options.json === true,
     acceptDownloads: accepted,
     offline,
+    // For the summary's notice when the run leaves the home without the image
+    // builder, or with one that does not match the pinned release.
+    builder: inspection.builder?.paths,
   });
 });
 
@@ -246,6 +277,68 @@ function phaseOf(value: unknown): string | undefined {
     : undefined;
 }
 
+const tempAliasesSpec = defineCommand({
+  name: "temp-aliases",
+  summary: "List dangling native provider HOME aliases",
+  description:
+    "List old aliases whose native home is gone, or remove them with --fix.",
+  group: "Global",
+  options: [
+    optJson,
+    defineOption({
+      name: "fix",
+      type: "boolean",
+      long: "--fix",
+      description: "Remove verified dangling aliases",
+    } as const),
+    defineOption({
+      name: "includeUnverifiedVolumes",
+      type: "boolean",
+      long: "--include-unverified-volumes",
+      description: "With --fix, include aliases whose volume may be unmounted",
+    } as const),
+  ],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const tempAliases = withHandler(tempAliasesSpec, async ({ ctx, args }) => {
+  if (args.options.includeUnverifiedVolumes && !args.options.fix) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: "--include-unverified-volumes requires --fix.",
+    });
+  }
+  const report = await inspectTempAliases({
+    runtime: resolveNativeSetupSelection(),
+    cwd: ctx.cwd,
+    fix: args.options.fix === true,
+    includeUnverifiedVolumes: args.options.includeUnverifiedVolumes === true,
+  });
+  if (args.options.json) {
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    return 0;
+  }
+  for (const name of report.dangling) {
+    process.stdout.write(
+      `${report.removed.includes(name) ? "Removed" : "Dangling"} ${name}\n`
+    );
+  }
+  for (const name of report.uncertainVolume) {
+    process.stdout.write(
+      report.removed.includes(name)
+        ? `Removed ${name}\n`
+        : `Cannot tell for ${name} (volume not mounted, or home deleted).\n`
+    );
+  }
+  if (report.incomplete) {
+    process.stdout.write("Temporary alias scan was incomplete.\n");
+  } else if (report.dangling.length + report.uncertainVolume.length === 0) {
+    process.stdout.write("No old dangling provider HOME aliases found.\n");
+  }
+  return 0;
+});
+
 /** Explicit native operations never change the project's Compose backend. */
 export const nativeCommand = defineCommand({
   name: "native",
@@ -253,6 +346,6 @@ export const nativeCommand = defineCommand({
   group: "Global",
   options: [],
   positionals: [],
-  subcommands: [setup, recover],
+  subcommands: [setup, recover, tempAliases],
   expandInRootHelp: true,
 } as const);

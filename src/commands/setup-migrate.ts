@@ -24,9 +24,10 @@ import { optJson, optPath } from "../cli/options.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { readHomeEnv } from "../lib/home-dir.ts";
+import { quoteShellWord } from "../lib/logs.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { type DisplayStatusItem, display } from "../ui/display.ts";
-import { logger } from "../ui/logger.ts";
+import { createTextOutput } from "../ui/text-output.ts";
 
 /**
  * `hack setup migrate`: preview (default, read-only), `--apply`, or
@@ -243,7 +244,7 @@ export async function handleSetupMigrate({
 
   if (!options.apply) {
     const plan = await planPluginMigration(input);
-    return await reportPreview({ plan, json: options.json === true });
+    return await reportPreview({ plan, options });
   }
   const result = await applyPluginMigration({
     ...input,
@@ -370,12 +371,38 @@ function planItems(plan: PluginMigrationPlan): DisplayStatusItem[] {
   });
 }
 
+function previewApplyCommand(options: SetupMigrateArgs["options"]): string {
+  const words = ["hack", "setup", "migrate", "--apply"];
+  const flags = [
+    [options.global, optMigrateGlobal.long],
+    [options.allScopes, optMigrateAllScopes.long],
+    [options.claude, optMigrateClaude.long],
+    [options.codex, optMigrateCodex.long],
+    [options.cursor, optMigrateCursor.long],
+  ] as const;
+  for (const [enabled, name] of flags) {
+    if (enabled) {
+      words.push(name);
+    }
+  }
+  const values = [
+    [options.path, optPath.long],
+    [options.skipPluginCheck, optSkipPluginCheck.long],
+  ] as const;
+  for (const [value, name] of values) {
+    if (value !== undefined) {
+      words.push(name, quoteShellWord(value));
+    }
+  }
+  return words.join(" ");
+}
+
 async function reportPreview(opts: {
   readonly plan: PluginMigrationPlan;
-  readonly json: boolean;
+  readonly options: SetupMigrateArgs["options"];
 }): Promise<number> {
   const exitCode = migratePreviewExitCode(opts.plan);
-  if (opts.json) {
+  if (opts.options.json) {
     emitCliResult({
       result: okResult({
         data: {
@@ -394,10 +421,11 @@ async function reportPreview(opts: {
     title: "Plugin migration preview (nothing changed)",
     items: planItems(opts.plan),
   });
-  logger.info({
-    message: blocked
-      ? "Install the hack plugin for the blocked clients and verify it loads in a fresh session (or pass --skip-plugin-check after checking it yourself), then rerun with --apply."
-      : "Rerun with --apply to back up and remove the files marked 'would remove'.",
+  createTextOutput().hint({
+    text: blocked
+      ? "install the hack plugin for blocked clients and verify it loads in a fresh session (or pass --skip-plugin-check after checking it yourself). run:"
+      : "back up and remove the marked files. run:",
+    command: previewApplyCommand(opts.options),
   });
   return exitCode;
 }
@@ -420,6 +448,16 @@ const REFUSAL_MESSAGES: Readonly<
   "backup-failed":
     "Migration refused; nothing was changed. A file could not be read for backup.",
 };
+
+function writeMigrationError(message: string): void {
+  const output = createTextOutput({
+    tty: process.stderr.isTTY === true,
+    color: false,
+    write: (line) => process.stderr.write(line),
+  });
+  const name = "plugin migration";
+  output.stepRows([{ name }])({ name, status: "error", result: message });
+}
 
 async function reportApply(opts: {
   readonly result: PluginMigrationApplyResult;
@@ -450,7 +488,7 @@ async function reportApply(opts: {
       title: "Plugin migration refused",
       items: planItems(result.plan),
     });
-    logger.error({ message: REFUSAL_MESSAGES[result.reason] });
+    writeMigrationError(REFUSAL_MESSAGES[result.reason]);
     return exitCode;
   }
   if (result.status === "nothing-to-migrate") {
@@ -472,9 +510,9 @@ async function reportApply(opts: {
       },
     ],
   });
-  logger.info({ message: `Backup manifest: ${result.manifestPath}` });
-  logger.info({
-    message: `Undo with: hack setup migrate --rollback-manifest ${result.manifestPath}`,
+  createTextOutput().hint({
+    text: "undo with:",
+    command: `hack setup migrate --rollback-manifest ${quoteShellWord(result.manifestPath)}`,
   });
   return exitCode;
 }
@@ -507,7 +545,7 @@ async function reportRollback(opts: {
     return exitCode;
   }
   if (result.status === "invalid-manifest") {
-    logger.error({ message: result.message });
+    writeMigrationError(result.message);
     return exitCode;
   }
   const counts = countBy(result.results.map((entry) => entry.status));

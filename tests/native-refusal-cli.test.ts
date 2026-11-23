@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
 import {
   beginNativeProjectStartupObservation,
+  loadNativeProjectRun,
   type NativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
@@ -24,6 +25,7 @@ import { installNext13Frontend } from "./helpers/native-next13-state.ts";
 import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
 /**
  * Known native refusals reachable from image-project `up`, `restart` and `ps`
@@ -93,6 +95,10 @@ async function fixture(compose = COMPOSE) {
     binary,
     `#!/bin/sh
 ${nativeSetupShellReply()}
+if [ -f '${stub}/'"$3-$4"'.hold' ]; then
+  printf '%s' ready > './interrupt-ready'
+  exec sleep 20
+fi
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then
   if [ -f '${stub}/'"$3-$4"'.after-inspect' ]; then cp '${stub}/'"$3-$4"'.after-inspect' '${stub}/graph-inspect.out'; fi
@@ -138,9 +144,12 @@ exit 1
       join(stub, `${request.replace(" ", "-")}.after-inspect`),
       JSON.stringify(value)
     );
+  const hold = async (request: string) =>
+    await writeFile(join(stub, `${request.replace(" ", "-")}.hold`), "");
   return {
     root,
     project,
+    hold,
     projectDir,
     scope,
     binary,
@@ -823,7 +832,12 @@ test(
     await f.fail("graph inspect", { code: "runtime_not_running" });
     const refused = await cli({ fixture: f, args: ["down", "--recover"] });
     expect(refused.code).toBe(1);
-    expect(refused.output).toContain("Run hack ps --json");
+    expect(refused.output).toContain(
+      "Run hack ps --json to see whether the native runtime is stopped"
+    );
+    expect(refused.output).not.toContain("containers are running");
+    // No readable owner selection: nothing starts the pool (HACK-2456).
+    expect(await f.calls()).not.toContain("runtime up");
     const next = await cli({ fixture: f, args: ["ps", "--json"] });
     expect(next.code).toBe(0);
     expect(JSON.parse(next.stdout).data.status).toBe("runtime_not_running");
@@ -869,6 +883,84 @@ test(
 const REGISTRY_COMPOSE = JSON.stringify({
   services: { web: { image: "localhost:5000/example/app:1" } },
 });
+test.each(["fetch", "graph", "hook"] as const)(
+  "Ctrl-C during native startup %s reports one interruption and exits 130",
+  async (stage) => {
+    const f = await fixture(stage === "fetch" ? REGISTRY_COMPOSE : COMPOSE);
+    await scriptUpThroughReview(f);
+    if (stage === "fetch") {
+      await f.reply("runtime admit-image", {
+        reference: "localhost:5000/example/app:1",
+        kind: "registry",
+      });
+      await f.hold("runtime ensure-image");
+    } else if (stage === "graph") {
+      await f.hold("graph serve");
+      await f.fail("graph inspect", { code: "graph_unreserved" });
+    } else {
+      await Bun.write(
+        join(f.projectDir, "hack.config.json"),
+        JSON.stringify({
+          name: "refusal-fixture",
+          lifecycle: {
+            up: {
+              before: [
+                { command: "printf ready > interrupt-ready; exec sleep 20" },
+                { command: "touch unexpected-hook" },
+              ],
+            },
+          },
+        })
+      );
+    }
+    const child = Bun.spawn(
+      [process.execPath, entrypoint, "--path", f.project, "up"],
+      {
+        cwd: f.project,
+        env: f.env(SHARED),
+        detached: true,
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: SPAWN_TIMEOUT_MS - 5000,
+      }
+    );
+    const stdout = new Response(child.stdout).text();
+    const stderr = new Response(child.stderr).text();
+    try {
+      await waitForFileContent({
+        path: join(f.project, "interrupt-ready"),
+        complete: (value) => (value === "ready" ? value : undefined),
+        what: stage,
+        budgetMs: 10_000,
+      });
+      process.kill(-child.pid, "SIGINT");
+      expect(await child.exited).toBe(130);
+      const output = (await stdout) + (await stderr);
+      expect(
+        output.split("\n").filter((line) => /interrupted/i.test(line))
+      ).toEqual(["Native project startup interrupted."]);
+      expect(output).not.toMatch(/failed/i);
+      const calls = await f.calls();
+      if (stage === "graph") {
+        expect(calls.at(-1)).toBe("graph inspect");
+      } else {
+        expect(calls).not.toContain("graph inspect");
+      }
+      expect(calls.includes("runtime up")).toBe(stage !== "hook");
+      expect(await loadNativeProjectRun(f.scope)).toBeNull();
+      expect(await Bun.file(join(f.project, "unexpected-hook")).exists()).toBe(
+        false
+      );
+    } finally {
+      if (child.exitCode === null) {
+        process.kill(-child.pid, "SIGKILL");
+        await child.exited;
+      }
+    }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
 const IMAGE_REFUSAL =
   "Native project image reference refused before runtime startup: use a Docker Hub or OCI registry reference (shorthand such as alpine:3.21 is accepted; local registries need HACK_NATIVE_LOCAL_REGISTRIES) or a sha256 image ID; no VM, provider or image acquisition was started.";
 
@@ -947,6 +1039,38 @@ test(
     expect(await f.calls()).toEqual([]);
   },
   SPAWN_TIMEOUT_MS
+);
+
+test(
+  "native-admission-reuse: a bound the runtime would refuse is one coded line before any request, for up and restart",
+  async () => {
+    const f = await fixture();
+    const refusal =
+      "HACK_NATIVE_ADMISSION_REUSE_SECONDS must be a whole number of seconds from 0 to 600; 0 turns reuse off. A larger value is refused, not reduced to 600.";
+    const env = { ...SHARED, HACK_NATIVE_ADMISSION_REUSE_SECONDS: "601" };
+    for (const args of [["up"], ["up", "--detach"], ["restart"]]) {
+      expectOneClosedLine(
+        await cli({ fixture: f, args, env }),
+        `E_CONFIG_INVALID: ${refusal}`
+      );
+    }
+    // The detached JSON restart refuses in the launcher, where the owner's
+    // own refusal would not be seen.
+    for (const args of [
+      ["up", "--json"],
+      ["up", "--detach", "--json"],
+      ["restart", "--json"],
+    ]) {
+      const result = await cli({ fixture: f, args, env });
+      expect(result.code).toBe(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_CONFIG_INVALID", message: refusal },
+      });
+    }
+    expect(await f.calls()).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS * 3
 );
 
 /** HACK-1952: home A stopped the run cleanly; home B is another launcher version's home. */
@@ -1419,4 +1543,127 @@ test(
     });
   },
   SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "down --recover on a stopped pool under a dead owner starts it, recovers with data retained and says it is still running",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    // No graph-inspect reply: the stub reports runtime_not_running until
+    // `runtime up` installs the ready graph.
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+      dead_owner_recovery: "8".repeat(64),
+    });
+    await f.reply("runtime up", { phase: "running" });
+    await f.finishOn("runtime up", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await f.reply("graph recover-cleanup", {
+      run: run.run,
+      recovered: true,
+      data_retained: true,
+    });
+    await f.finishOn("graph recover-cleanup", stoppedGraph);
+    await f.reply("graph retire-recovered-publisher", {
+      run: run.run,
+      publisher_retired: true,
+      data_retained: true,
+    });
+    const result = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(result.code).toBe(0);
+    expect(result.output).toMatch(
+      /✓ services {2}stopped · data retained · \d+\.\ds/
+    );
+    expect(result.output).toContain(
+      "The native runtime was started to recover this run and is still running; run `runtime down` to stop it."
+    );
+    const calls = await f.calls();
+    expect(calls.filter((call) => call === "runtime up")).toHaveLength(1);
+    expect(calls.indexOf("runtime up")).toBeLessThan(
+      calls.indexOf("graph recover-cleanup")
+    );
+    expect(calls.indexOf("graph recover-cleanup")).toBeLessThan(
+      calls.indexOf("graph retire-recovered-publisher")
+    );
+    expect(calls).not.toContain("graph cleanup");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "up on a stopped pool under a dead owner runs down --recover once, then retries its retained start",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    // The stub keeps refusing the preflight, so the retried start refuses too;
+    // this proves the CLI wiring and that recovery runs once.
+    await f.fail("graph retained-preflight", {
+      code: "graph_foreground_owner_exited",
+      message: "The run's foreground owner exited.",
+    });
+    await f.reply("runtime status", { phase: "stopped", process_alive: false });
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+      dead_owner_recovery: "8".repeat(64),
+    });
+    await f.reply("runtime up", { phase: "running" });
+    await f.finishOn("runtime up", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await f.reply("graph recover-cleanup", {
+      run: run.run,
+      recovered: true,
+      data_retained: true,
+    });
+    await f.finishOn("graph recover-cleanup", stoppedGraph);
+    await f.reply("graph retire-recovered-publisher", {
+      run: run.run,
+      publisher_retired: true,
+      data_retained: true,
+    });
+    const result = await cli({ fixture: f, args: ["up"], env: SHARED });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("graph_foreground_owner_exited");
+    const calls = await f.calls();
+    expect(calls.slice(0, 5)).toEqual([
+      "graph retained-preflight",
+      "runtime status",
+      "graph inspect",
+      "graph foreground-owner",
+      "runtime up",
+    ]);
+    expect(calls.filter((call) => call === "runtime up")).toHaveLength(1);
+    expect(calls).toContain("graph recover-cleanup");
+    expect(calls.indexOf("graph retire-recovered-publisher")).toBeLessThan(
+      calls.lastIndexOf("graph retained-preflight")
+    );
+    expect(
+      calls.filter((call) => call === "graph retained-preflight")
+    ).toHaveLength(2);
+  },
+  SPAWN_TIMEOUT_MS
 );

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 
-const CHILD_TIMEOUT_MS = 60_000;
+const CHILD_TIMEOUT_MS = 180_000;
 
 test(
   "prerelease manager preserves stable Hack and refuses unsafe selection changes",

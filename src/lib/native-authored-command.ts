@@ -47,7 +47,9 @@ import {
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { display } from "../ui/display.ts";
+import { writeLifecycleStopped } from "../ui/lifecycle-closing.ts";
 import { logger } from "../ui/logger.ts";
+import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
@@ -334,6 +336,14 @@ function stoppedRuntimeStartup(
   return new HackCliError({
     code: "E_DOCKER_UNAVAILABLE",
     message,
+    startBlocker: {
+      thing: "native runtime",
+      problem: "not running",
+      which:
+        error.outcome === "retained" ? "startup evidence retained" : undefined,
+      needs: "this start needs a working native runtime",
+      command: "hack doctor",
+    },
     detail: {
       outcome: error.outcome,
       canceled: error.canceled,
@@ -420,6 +430,7 @@ const STATUS_NOTES: Readonly<
 async function showStatus(options: {
   readonly result: NativeAuthoredProjectStatus;
   readonly json?: boolean;
+  readonly psWide?: boolean;
   readonly statusMetadata?: NativeComposeCommandOptions["statusMetadata"];
 }): Promise<void> {
   const { result } = options;
@@ -433,6 +444,18 @@ async function showStatus(options: {
   }
   if (result.status !== "observed") {
     logger.info({ message: STATUS_NOTES[result.status] });
+  }
+  if (options.psWide !== undefined) {
+    renderPs({
+      wide: options.psWide,
+      hintWhenEmpty: result.status === "not_started",
+      rows: result.items.map((item) => ({
+        ...item,
+        address: null,
+        state: psServiceState(item),
+      })),
+    });
+    return;
   }
   await display.table({
     columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
@@ -547,6 +570,7 @@ async function runStatus(input: LifecycleInput): Promise<number> {
   await showStatus({
     result,
     json: input.options.json,
+    psWide: input.options.psWide,
     statusMetadata: input.options.statusMetadata,
   });
   return 0;
@@ -609,6 +633,7 @@ async function runRecovery(input: LifecycleInput): Promise<number> {
 }
 
 async function runStop(input: LifecycleInput): Promise<number> {
+  const startedAt = performance.now();
   try {
     await (input.seams.stop ?? stopNativeAuthoredProject)({
       scope: input.scope,
@@ -624,9 +649,7 @@ async function runStop(input: LifecycleInput): Promise<number> {
     }
     return await runRecovery(input);
   }
-  logger.info({
-    message: "Selected native project stopped; persistent data is retained.",
-  });
+  writeLifecycleStopped(performance.now() - startedAt, { retained: true });
   return 0;
 }
 

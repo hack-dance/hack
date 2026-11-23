@@ -1,16 +1,20 @@
 # Run a project on another machine or in a cloud agent sandbox
 
-The `.hack/` folder you commit with your code is everything Hack needs to run the
-project, so the same folder and the same `hack up` work on your laptop, on
-another machine, or inside a cloud agent's sandbox. Hack does not provide the
-machine or the sandbox, and it adds no isolation: it runs inside whatever you
-give it, with that environment's rules for Docker, secrets, network and
-persistence.
+The `.hack/` folder you commit with your code holds what Hack needs to run the
+project. The same folder and the same commands start the project on your laptop
+and on another machine with Docker. The table below says where that has been
+run. Cloud agent sandboxes are listed there and have not been run yet.
 
-On Linux, Hack's Compose runtime needs a Docker Engine the user can reach, and
-Docker Compose v2. v5 has no Linux release yet (the prerelease installer
-supports Apple Silicon macOS only), so every page below starts from a `hack`
-binary you supply.
+Hack does not provide the machine or the sandbox, and it adds no isolation: it
+runs inside whatever you give it, with that environment's rules for Docker,
+secrets, network and persistence.
+
+On Linux, Hack's Compose backend needs a Docker Engine the user can reach, and
+Docker Compose v2. `5.0.0-next.24` publishes Linux x86_64 and arm64 archives
+with the Compose backend. Install it with the same prerelease installer as on
+macOS; [Install](../install.md) has the commands. The runs recorded below were
+made before a Linux archive was published, with a `hack` built from source, and
+have not been repeated with the published archive.
 
 ## Pick your environment
 
@@ -60,6 +64,7 @@ Coder. They have no page yet.
   `hack config set --global proxy.bind_address 127.0.0.1` before
   `hack global install`. Without it, Hack's proxy listens on every interface,
   and anyone who can reach the machine's ports 80 and 443 can open the app,
+  and with the opt-in logging stack on (`hack global up --logging`) also
   query Hack's log store (Loki, whose API has no authentication) and reach the
   Grafana log viewer's sign-in page, which keeps its default admin password
   unless you change it. Leave it unset only if you want that
@@ -74,14 +79,16 @@ translate project configuration into a deployment.
 
 ## Reaching the app without local DNS
 
-Hack's addresses (`https://<project>.hack`) need local DNS. On Linux, Hack sets
+Hack's project addresses need local DNS. A fresh project defaults to
+`https://<project>.hack.local`; use the configured `dev_host` for an existing
+project. On Linux, Hack sets
 it up only through systemd-resolved, which most containers and cloud sandboxes
 do not run, so the name has no address there. The app still runs, and Hack's
 proxy answers on this machine's ports 80 and 443. `hack open` then warns and
 prints the address with a command that needs no DNS, for example:
 
 ```sh
-curl --noproxy 'hello.hack' --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/'
+curl --noproxy 'hello.hack.local' --resolve 'hello.hack.local:443:127.0.0.1' 'https://hello.hack.local/'
 ```
 
 The command sends the request to the address the proxy publishes on, and

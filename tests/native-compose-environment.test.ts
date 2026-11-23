@@ -712,8 +712,6 @@ test("ordinary env-file and shell values matching literal build args still build
     profiles: [],
     builds,
     specs,
-    retainedImages: new Map(),
-    restore: false,
     rebuild: false,
     signal: new AbortController().signal,
     invoke: async ({ requestFile }) => {

@@ -58,6 +58,10 @@ const CLASSIFIED: Readonly<Record<string, Reason>> = {
     kind: "scoped",
     what: "owner HTTPS servers awaited to close by the owner lifetime that started them",
   },
+  "src/backends/native-start-pool-watch.ts": {
+    kind: "scoped",
+    what: "pool watch interval, unref'd, cleared when the start settles; it never keeps a finished start alive",
+  },
   "src/backends/native-https-port.ts": {
     kind: "scoped",
     what: "port probe server closed in its listen callback",

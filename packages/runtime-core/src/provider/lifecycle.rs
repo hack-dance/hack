@@ -101,6 +101,16 @@ pub struct RuntimeStatus {
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repaired_sockets: Option<socket_repairs::RepairedSockets>,
+    /// Only from `runtime down` of a running pool: graph runs, Compose and
+    /// native-authored, whose receipts were live when it stopped the pool under them
+    /// (HACK-2456). Their containers
+    /// stopped with the guest; `hack up` in each project starts the pool and recovers
+    /// the run with its data kept. An empty list when there were none, absent otherwise
+    /// or when the inventory could not be read (`interrupted_runs_unknown`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_runs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted_runs_unknown: bool,
     /// Whether this process hashes SHA-256 with the CPU's instructions (`sha256_backend`).
     pub hashing: crate::sha256_backend::Report,
 }
@@ -266,28 +276,10 @@ fn operation_lease<T>(
     deadline: Option<Instant>,
     verify: impl FnOnce() -> Result<T, CandidateError>,
 ) -> Result<(state::Lock, T), CandidateError> {
-    let mut holder = None;
-    let lock = loop {
-        if deadline.is_some_and(|limit| Instant::now() >= limit) {
-            return Err(holder.unwrap_or_else(|| {
-                CandidateError::new(
-                    "provider_busy",
-                    "Provider lease acquisition deadline expired; no operation was admitted.",
-                )
-            }));
-        }
-        match state::Lock::acquire(root) {
-            Ok(lock) => break lock,
-            Err(error) if error.code == "provider_busy" && deadline.is_some() => {
-                holder = Some(error);
-                let remaining = deadline
-                    .expect("bounded acquisition")
-                    .saturating_duration_since(Instant::now());
-                std::thread::sleep(remaining.min(Duration::from_millis(50)));
-            }
-            Err(error) => return Err(error),
-        }
-    };
+    let lock = match deadline {
+        Some(deadline) => state::Lock::acquire_until(root, deadline),
+        None => state::Lock::acquire(root),
+    }?;
     let current = verify()?;
     Ok((lock, current))
 }
@@ -298,6 +290,14 @@ fn operation_lease<T>(
 /// still bound, so this waits longer than startup does.
 #[cfg(target_os = "macos")]
 pub(super) const OWNED_CLEANUP_LEASE_WAIT: Duration = Duration::from_secs(30);
+/// Refusals of every command that needs the running pool (source transfer,
+/// graph start, stop, inspect, exec). They say only what the refusal establishes:
+/// the pool record is absent, or its phase is not `running` (which includes a pool
+/// that is still booting or quiescing, whose containers may still run). They name no
+/// command of their own: the CLI adds the next step for its own command (HACK-2420).
+const NOT_STARTED: &str =
+    "No native runtime has been started in this Hack home; nothing was changed.";
+const NOT_RUNNING: &str = "The native runtime is not in its running state, so this command did not connect to it; nothing was changed.";
 
 /// How long ordinary startup waits for a provider lease that another operation holds, such as
 /// a finite `graph inspect` (presentation `ps` takes no provider lease).
@@ -336,7 +336,6 @@ pub(super) struct ObservedGuest<'a> {
 }
 
 impl<'a> ObservedGuest<'a> {
-    #[cfg(target_os = "macos")]
     pub(super) fn boot_id(&self) -> Result<&str, CandidateError> {
         self.owner.guest_boot_id.as_deref().ok_or_else(|| {
             CandidateError::new("runtime_changed", "Observed guest boot is unavailable.")
@@ -398,13 +397,16 @@ impl<'a> ObservedGuest<'a> {
         verify_live(self.candidate, &current)
     }
 
+    pub(super) fn amd64_emulation(&self) -> bool {
+        self.owner.amd64_emulation
+    }
+
     pub(super) fn engine_socket(&self) -> Result<std::path::PathBuf, CandidateError> {
         self.verify()?;
         socket(self.candidate, &self.owner, "docker.sock")
     }
 
     /// The observed runtime incarnation; receipts name the incarnation that owns them.
-    #[cfg(target_os = "macos")]
     pub(super) fn incarnation(&self) -> &str {
         &self.owner.token
     }
@@ -516,6 +518,12 @@ impl<'a> OwnedGuest<'a> {
         Self::connect_mode(candidate, false, None)
     }
 
+    pub(super) fn connect_cleanup_for_start(
+        candidate: &'a Candidate,
+    ) -> Result<Self, CandidateError> {
+        Self::connect_mode(candidate, false, Some(Instant::now() + STARTUP_LEASE_WAIT))
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(
@@ -537,17 +545,11 @@ impl<'a> OwnedGuest<'a> {
             .try_exists()
             .map_err(io)?
         {
-            return Err(CandidateError::new(
-                "runtime_not_running",
-                "Start the owned candidate runtime before transferring source.",
-            ));
+            return Err(CandidateError::new("runtime_not_running", NOT_STARTED));
         }
         let owner = Owner::load(candidate)?;
         if owner.phase != "running" || owner.guest_boot_id.is_none() {
-            return Err(CandidateError::new(
-                "runtime_not_running",
-                "Start the owned candidate runtime before transferring source.",
-            ));
+            return Err(CandidateError::new("runtime_not_running", NOT_RUNNING));
         }
         let (lock, current) = operation_lease(&root(candidate), deadline, || {
             let current = Owner::load(candidate)?;
@@ -993,6 +995,8 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             guest_memory_peaks: None,
             disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
             repaired_sockets: None,
+            interrupted_runs: None,
+            interrupted_runs_unknown: false,
             hashing: crate::sha256_backend::report(),
         });
     }
@@ -1065,6 +1069,8 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         )),
         persistent_disks_identified: owner.storage.is_some(),
         repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
+        interrupted_runs: None,
+        interrupted_runs_unknown: false,
         hashing: crate::sha256_backend::report(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
@@ -1751,6 +1757,9 @@ fn start_pool_observed(
     }
     // The last check before `machine start` releases the VM lock to the provider.
     let permit = boot.release(candidate, &lock)?;
+    // `begin_boot` keeps only one earlier boot id; dead-owner recovery of a run from an
+    // older boot needs its raw id, so record the ids being superseded first.
+    super::boot_history::record(candidate, &owner)?;
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
     // Chosen from the shares this boot mounts; the `booting` receipt below records it before
@@ -2700,6 +2709,10 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
+    // Stopping a running pool stops every graph's containers with the guest. This is
+    // reported, not refused: a crash or host reboot ends the same way, and `hack up`
+    // recovers each run (HACK-2456).
+    let live = pool_users::live_graph_runs(&candidate.state_root);
     let peak = read_memory_peak(&candidate.state_root, &owner, |script, args, deadline| {
         agent::exec_until(
             &socket(candidate, &owner, "agent.sock")?,
@@ -2723,6 +2736,10 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
         Err(error) => Err(error),
     };
     keep_memory_peak(&root(candidate), peak, &mut result);
+    if let Ok(status) = &mut result {
+        status.interrupted_runs_unknown = live.is_none();
+        status.interrupted_runs = live;
+    }
     stop_sample.settle(&root(candidate), &lock, &admission::opening::System);
     result
 }
@@ -3661,9 +3678,11 @@ mod tests {
             std::fs::write(&identity, "original").unwrap();
             let held = state::Lock::acquire(&root).unwrap();
             let calls = std::cell::Cell::new(0);
+            let immediate = Instant::now();
             assert!(
                 matches!(operation_lease(&root, None, || { calls.set(1); Ok(()) }), Err(e) if e.code == "provider_busy")
             );
+            assert!(immediate.elapsed() < Duration::from_secs(1));
             let writer = identity.clone();
             let worker = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(100));

@@ -1,0 +1,13 @@
+---
+title: LeaseWait · bounded native startup
+---
+stateDiagram-v2
+  direction TB
+  [*] --> waiting
+  waiting --> waiting : Tick [below bound]
+  waiting --> waiting : Release [first holder]
+  waiting --> acquired : Acquire [free, in time]
+  waiting --> expired : Expire [at bound]
+  class waiting wait
+  class acquired ok
+  class expired fail

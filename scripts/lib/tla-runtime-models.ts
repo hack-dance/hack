@@ -181,6 +181,14 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "project-prerequisites",
+    module: "ProjectPrerequisites",
+    states: 13,
+    invariant: "CheckedBeforeHooks",
+    action: "Login",
+    fields: ['phase = "allowed"', "checked = FALSE", "loggedIn = TRUE"],
+  },
+  {
     name: "autostart-start-stop",
     module: "StartStop",
     states: 41,
@@ -1775,6 +1783,34 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-start-lock-wait",
+    module: "LeaseWait",
+    states: 19,
+    invariant: "NoEffectWhileHeld",
+    action: "Acquire",
+    fields: ['holder = "second"', 'waiter = "acquired"', "earlyEffect = TRUE"],
+    additionalControls: [
+      {
+        name: "acquisition-reachable",
+        negative: true,
+        invariant: "NeverAcquired",
+        action: "Acquire",
+        fields: [
+          'holder = "second"',
+          'waiter = "acquired"',
+          "earlyEffect = FALSE",
+        ],
+      },
+      {
+        name: "expiry-reachable",
+        negative: true,
+        invariant: "NeverExpired",
+        action: "Expire",
+        fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,
@@ -2142,6 +2178,78 @@ const contracts: readonly ModelContract[] = [
           "reviewed = TRUE",
           "admitted = FALSE",
         ],
+      },
+    ],
+  },
+  {
+    // src/lib/global-logging.ts and `hack global install/up`: the logging
+    // stack is opt-in; a home that had it keeps it, a new one never starts
+    // it unasked, and turning it off never removes its logs.
+    name: "global-logging-optin",
+    module: "LoggingOptIn",
+    states: 1014,
+    invariant: "FreshNeverStartsUnasked",
+    action: "Install",
+    fields: [
+      "existing = FALSE",
+      "asked = FALSE",
+      "running = TRUE",
+      'setting = "unset"',
+    ],
+    additionalControls: [
+      {
+        name: "legacy-unset-off",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+          },
+        ],
+      },
+      {
+        name: "off-removes-volumes",
+        negative: true,
+        invariant: "NoSurpriseDataLoss",
+        action: "UpFlag",
+        fields: ["prevData = TRUE", "data = FALSE", 'setting = "off"'],
+      },
+      {
+        // The first start does not save an existing home's choice: with its
+        // logging directory moved aside, the next start turns it off.
+        name: "decision-not-saved",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: [
+          "existing = TRUE",
+          'setting = "unset"',
+          "dir = FALSE",
+          "running = FALSE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: [
+              "existing = TRUE",
+              'setting = "unset"',
+              "dir = FALSE",
+              "running = FALSE",
+            ],
+          },
+        ],
+      },
+      {
+        // A failed save of `--logging` that is not reported: the stack runs
+        // with the setting still off, and nothing told the user.
+        name: "unsaved-silent",
+        negative: true,
+        invariant: "OffMeansStopped",
+        action: "UpFlag",
+        fields: ['setting = "off"', "unsaved = FALSE", "running = TRUE"],
       },
     ],
   },
@@ -2755,6 +2863,168 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    // HACK-2456: a pool that stops or dies under a live run. Positive: the
+    // stopped-pool recovery plus recovery from any earlier boot of the pool,
+    // with every fault (other boots, a stop between a recovery's boot and its
+    // graph recovery). The failing controls document the old predecessor-only
+    // rule: `negative` is `next` before HACK-2456, `by-hand` adds an unnamed
+    // `runtime up`, `strict` keeps predecessor-only recovery while something
+    // else boots the pool, `crash-in-recovery` lets the pool stop between the
+    // recovery's boot and its graph recovery: each reaches a dead end.
+    name: "native-pool-stop",
+    module: "PoolStop",
+    states: 210,
+    invariant: "NoDeadEnd",
+    action: "OwnerCrash",
+    fields: [
+      'pool = "stopped"',
+      'run = "ready"',
+      'owner = "dead"',
+      "pub = TRUE",
+    ],
+    alternativeWitnesses: [
+      {
+        action: "OwnerNotices",
+        fields: [
+          'pool = "stopped"',
+          'run = "ready"',
+          'owner = "dead"',
+          "pub = TRUE",
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "by-hand",
+        negative: true,
+        action: "RuntimeUp",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          'owner = "dead"',
+        ],
+        // TLC's two workers may report the same dead end one boot later, after
+        // an extra `runtime up` and stop before the start (fault bound 3).
+        alternativeWitnesses: [
+          {
+            action: "RuntimeUp",
+            fields: [
+              'pool = "running"',
+              "runBoot = 2",
+              "boot = 4",
+              'owner = "dead"',
+            ],
+          },
+        ],
+      },
+      {
+        name: "strict",
+        negative: true,
+        action: "RecoverStopped",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          'owner = "dead"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "RuntimeUp",
+            fields: [
+              'pool = "running"',
+              "runBoot = 1",
+              "boot = 3",
+              'owner = "dead"',
+            ],
+          },
+        ],
+      },
+      {
+        name: "crash-in-recovery",
+        negative: true,
+        action: "RecoverStopped",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          "recovering = TRUE",
+        ],
+      },
+      // The shared HTTPS owner (HACK-2456, seen on a real VM). `https` is this
+      // change for a project with HTTPS routes. Each control turns one part off:
+      // the owner never retires when its boot ends, the previous-boot archive
+      // cannot prove quiescence, or down --recover does not start a stopped pool
+      // for a pending finalization. Each strands the recovered run's lease.
+      { name: "https", negative: false, states: 292 },
+      {
+        name: "https-no-retire",
+        negative: true,
+        action: "RecoverRunning",
+        fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
+        // TLC's two workers may report the recovery's own boot instead.
+        alternativeWitnesses: [
+          {
+            action: "RecoverStopped",
+            fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
+          },
+        ],
+      },
+      {
+        name: "https-archive",
+        negative: true,
+        action: "RecoverRunning",
+        fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+        // The owner may retire before or after the graph recovery.
+        alternativeWitnesses: [
+          {
+            action: "OwnerRetire",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+          {
+            action: "RecoverStopped",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+        ],
+      },
+      {
+        // HACK-2550: a completed recovery whose archive could not run before its
+        // boot ended (z338, z282) is stranded when the archive stays bound to
+        // the recovery's own boot.
+        name: "https-finish-bound",
+        negative: true,
+        action: "RuntimeUp",
+        fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+        alternativeWitnesses: [
+          {
+            action: "RecoverStopped",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+          {
+            action: "OwnerRetire",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+        ],
+      },
+      {
+        name: "https-stopped",
+        negative: true,
+        action: "OwnerRetire",
+        fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+        alternativeWitnesses: [
+          {
+            action: "RuntimeDown",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+          {
+            action: "PoolRecover",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+        ],
+      },
+    ],
+  },
+  {
     // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
     // doubtful reading, and a host-side bound on "starting". Slow, refusing and
     // hanging apps; `legacy` runs the steady cadence before the first success.
@@ -3042,6 +3312,56 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverHits",
         ...statKeyedHits({ withCtime: true, stale: false }),
+      },
+    ],
+  },
+  {
+    name: "native-image-presence",
+    module: "ImagePresence",
+    states: 7712,
+    invariant: "Safe",
+    action: "Readback",
+    fields: [
+      'phase = "ready"',
+      'source = "cached"',
+      'receipt = "complete"',
+      "observed = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "expired-tag",
+        negative: true,
+        invariant: "TagSafe",
+        action: "ResolveTag",
+        fields: [
+          'mode = "normal"',
+          'recorded = "expired"',
+          'chose = "recorded"',
+        ],
+      },
+      {
+        name: "eviction",
+        negative: true,
+        invariant: "NeverEvictionRefusal",
+        action: "Create",
+        fields: [
+          'phase = "create_refused"',
+          'guest = "absent"',
+          "observed = TRUE",
+        ],
+      },
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverSkipsRead",
+        action: "Readback",
+        fields: [
+          'phase = "ready"',
+          'receipt = "complete"',
+          'guest = "present"',
+          "verified = FALSE",
+          "observed = TRUE",
+        ],
       },
     ],
   },

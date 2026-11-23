@@ -16,6 +16,7 @@ import {
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
   readComposeBackendFeatures,
   refuseNativeComposeBackendFeatures,
+  unsupportedNativeBuild,
 } from "../src/lib/native-compose-backend-features.ts";
 import { expectCodedRefusal } from "./helpers/closed-refusal.ts";
 
@@ -223,6 +224,92 @@ test("the build refusal phrase follows whether native builds are enabled", () =>
       buildsEnabled: true,
     }).message
   ).toContain("a Compose build field other than context, dockerfile");
+});
+
+test("with native builds enabled, the refusal names the first service and build field", () => {
+  const compose = (services: Record<string, unknown>) => ({ services });
+  // The three fields users meet most carry what to change.
+  for (const [field, reason] of [
+    ["additional_contexts", "native builds read one context directory"],
+    ["ssh", "SSH agent forwarding into a native build is not supported"],
+    [
+      "dockerfile_inline",
+      "put the Dockerfile in a file inside the context and set build.dockerfile",
+    ],
+  ] as const) {
+    expect(
+      unsupportedNativeBuild(
+        compose({ web: { build: { context: "..", [field]: "synthetic" } } })
+      )
+    ).toEqual({ service: "web", what: `build.${field}`, reason, others: 0 });
+  }
+  // Another known field is named without a reason; the first service in name
+  // order is the one named, and the others are counted.
+  expect(
+    unsupportedNativeBuild(
+      compose({
+        worker: { build: { context: "..", ssh: ["default"] } },
+        api: { build: { context: "..", cache_from: ["x"] } },
+        web: { image: IMAGE },
+      })
+    )
+  ).toEqual({ service: "api", what: "build.cache_from", others: 1 });
+  // An unknown key is authored text: never printed. So is an unusual name.
+  const unknown = unsupportedNativeBuild(
+    compose({ "web service!": { build: { context: "..", "private-key": 1 } } })
+  );
+  expect(unknown).toEqual({ others: 0 });
+  expect(
+    unsupportedNativeBuild(compose({ web: { build: "..", image: IMAGE } }))
+  ).toEqual({ service: "web", what: "image together with build", others: 0 });
+  expect(unsupportedNativeBuild(compose({ web: { image: IMAGE } }))).toBe(
+    undefined
+  );
+
+  const build = { service: "web", what: "build.ssh", reason: "r", others: 0 };
+  const features = ["unsupported_build"] as const;
+  const refused = composeBackendRefusal({
+    features,
+    restart: false,
+    buildsEnabled: true,
+    build,
+  });
+  expect(refused.message).toContain(" Service web uses build.ssh: r.");
+  expect(refused.startBlocker).toMatchObject({
+    thing: "build",
+    problem: "web uses build.ssh",
+    which: "r",
+  });
+  // Another feature as well: the closed message only, naming both.
+  const both = composeBackendRefusal({
+    features: ["external_network", "unsupported_build"],
+    restart: false,
+    buildsEnabled: true,
+    build,
+  });
+  expect(both.startBlocker).toBeUndefined();
+  expect(both.message).toContain(" Service web uses build.ssh: r.");
+  // `image` together with `build` asks for one of them, not to remove a phrase.
+  expect(
+    composeBackendRefusal({
+      features,
+      restart: false,
+      buildsEnabled: true,
+      build: { service: "web", what: "image together with build", others: 0 },
+    }).startBlocker
+  ).toMatchObject({
+    problem: "web uses image together with build",
+    needs:
+      "use either image or build for native builds, or run this project on the Compose backend",
+  });
+  expect(refused.startBlocker).toMatchObject({
+    needs:
+      "remove build.ssh for native builds, or run this project on the Compose backend",
+  });
+  // Without native builds, the build detail is not used.
+  expect(
+    composeBackendRefusal({ features, restart: false, build }).startBlocker
+  ).toBeUndefined();
 });
 
 test("only the native linux/arm64 platform passes", () => {

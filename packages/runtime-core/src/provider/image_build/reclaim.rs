@@ -5,9 +5,20 @@
 //!
 //! - it carries exactly this pool's build ownership labels (kind, owner digest of the
 //!   current incarnation, a namespace and a build key) and no other reserved labels;
-//! - no build receipt of any namespace names it as its verified image;
+//! - no build receipt protects it: per namespace (project root and branch) and build
+//!   declaration (context, Dockerfile and target, recorded in the receipt), the
+//!   verified image of the key in use most recently (the largest receipt `sequence`)
+//!   and of the one before it are kept, so one edit can be reverted without a
+//!   rebuild; ties keep every tied key. Older keys' images become removable. A
+//!   verified receipt without a declaration or sequence (written before they existed)
+//!   always protects its image;
 //! - no retained graph state (`run/graphs`, `run/native-graphs`, `run/graph-archive`)
-//!   mentions its content ID anywhere, whatever the graph's phase or branch;
+//!   mentions its content ID anywhere, whatever the graph's phase or branch. A run's
+//!   restore history (`restore-history.json`, its `.pending` replacement and legacy
+//!   `restore-<n>` directories) is not read: it is diagnostic, and recovery only
+//!   compares its container IDs, phases and names with the current receipt; nothing
+//!   starts a container from it (HACK-2554). The current receipt and every recovery
+//!   sidecar are still read;
 //! - the engine agrees to remove it without force, which it refuses while any
 //!   container, running or stopped, uses the image. Untagged parent images are never
 //!   pruned along with it (`noprune=true`); each must pass these checks itself.
@@ -42,8 +53,11 @@ const MAX_BUILD_IMAGES: usize = 4096;
 pub enum Retained {
     /// Its labels are not exactly this pool's build ownership labels.
     NotOwned,
-    /// A build receipt names it as a key's current image.
+    /// A build receipt names it as its declaration's image in use (or it predates
+    /// declarations, which always protects it).
     Current,
+    /// A build receipt names it as its declaration's previous image.
+    Previous,
     /// Retained graph state references it.
     Referenced,
     /// The engine refused removal (in use by a container) or the outcome is unknown.
@@ -111,6 +125,14 @@ pub(super) fn referenced_images(candidate: &Candidate) -> Result<BTreeSet<String
     Ok(found)
 }
 
+/// A legacy restore-history directory (`restore-1` to `restore-8`). Only a real
+/// directory is skipped: a symlink under that name still makes the scan unprovable.
+fn restore_history_directory(name: &str) -> bool {
+    name.strip_prefix("restore-")
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| (1..=8).contains(&n) && name == format!("restore-{n}"))
+}
+
 fn scan_directory(
     directory: &Path,
     depth: usize,
@@ -127,9 +149,19 @@ fn scan_directory(
         }
         let path = entry.map_err(|_| unprovable())?.path();
         let metadata = fs::symlink_metadata(&path).map_err(|_| unprovable())?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         if metadata.is_dir() {
+            if restore_history_directory(name) {
+                continue;
+            }
             scan_directory(&path, depth + 1, entries, found)?;
         } else if metadata.is_file() {
+            if matches!(name, "restore-history.json" | "restore-history.pending") {
+                continue;
+            }
             if metadata.len() > MAX_SCAN_FILE {
                 return Err(unprovable());
             }
@@ -159,13 +191,14 @@ fn scan_directory(
     Ok(())
 }
 
-/// Image IDs that build receipts of every namespace record as verified.
-fn current_images(candidate: &Candidate) -> Result<BTreeSet<String>, CandidateError> {
+/// The images build receipts protect, with why: per namespace and declaration, the
+/// most recent and the previous verified key (see the module documentation).
+fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, CandidateError> {
     let root = builds_root(candidate);
-    let mut current = BTreeSet::new();
+    let mut protected = BTreeMap::new();
     let namespaces = match fs::read_dir(&root) {
         Ok(namespaces) => namespaces,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(protected),
         Err(_) => return Err(unprovable()),
     };
     for namespace in namespaces {
@@ -178,6 +211,8 @@ fn current_images(candidate: &Candidate) -> Result<BTreeSet<String>, CandidateEr
         if !hex64(name) || !metadata.is_dir() {
             return Err(unprovable());
         }
+        // Declaration to its verified keys' (sequence, image).
+        let mut declarations: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
         for entry in fs::read_dir(&namespace).map_err(|_| unprovable())? {
             let path = entry.map_err(|_| unprovable())?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -186,14 +221,42 @@ fn current_images(candidate: &Candidate) -> Result<BTreeSet<String>, CandidateEr
             let receipt: Receipt =
                 crate::provider::state::read_bounded(&path, super::MAX_RECEIPT_BYTES)
                     .map_err(|_| unprovable())?;
-            if receipt.phase == Phase::ContentIdVerified
-                && let Some(id) = receipt.image_id
-            {
-                current.insert(id);
+            if receipt.phase != Phase::ContentIdVerified {
+                continue;
+            }
+            let Some(id) = receipt.image_id else { continue };
+            match (receipt.declaration, receipt.sequence) {
+                (Some(declaration), Some(sequence)) => declarations
+                    .entry(declaration)
+                    .or_default()
+                    .push((sequence, id)),
+                _ => {
+                    protected.insert(id, Retained::Current);
+                }
+            }
+        }
+        for mut keys in declarations.into_values() {
+            keys.sort_by_key(|key| std::cmp::Reverse(key.0));
+            let mut sequences = keys
+                .iter()
+                .map(|(sequence, _)| *sequence)
+                .collect::<Vec<_>>();
+            sequences.dedup();
+            for (sequence, id) in keys {
+                let reason = if Some(&sequence) == sequences.first() {
+                    Retained::Current
+                } else if Some(&sequence) == sequences.get(1) {
+                    Retained::Previous
+                } else {
+                    continue;
+                };
+                // An image two keys share keeps its strongest reason.
+                let slot = protected.entry(id).or_insert(reason);
+                *slot = (*slot).min(reason);
             }
         }
     }
-    Ok(current)
+    Ok(protected)
 }
 
 /// Whether listed labels are exactly this pool's build ownership labels.
@@ -225,7 +288,7 @@ fn owned_by(labels: &Value, owner: &str) -> bool {
 pub(super) fn plan(
     images: &[Value],
     owner: &str,
-    current: &BTreeSet<String>,
+    current: &BTreeMap<String, Retained>,
     referenced: &BTreeSet<String>,
 ) -> Result<(Vec<String>, BTreeMap<String, Retained>), CandidateError> {
     if images.len() > MAX_BUILD_IMAGES {
@@ -249,8 +312,8 @@ pub(super) fn plan(
             .to_owned();
         let reason = if !owned_by(&image["Labels"], owner) {
             Some(Retained::NotOwned)
-        } else if current.contains(&id) {
-            Some(Retained::Current)
+        } else if let Some(reason) = current.get(&id) {
+            Some(*reason)
         } else if referenced.contains(&id) {
             Some(Retained::Referenced)
         } else {
@@ -335,6 +398,57 @@ pub fn reclaim_build_images(candidate: &Candidate) -> Result<ReclaimReport, Cand
     run(candidate, &LivePool { candidate })
 }
 
+/// Why a best-effort reclamation removed nothing.
+#[derive(Debug, Serialize)]
+pub struct Skipped {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// The outcome of `runtime reclaim-build-images --best-effort`: a [`ReclaimReport`],
+/// plus `skipped` when reclamation could not run (a build is admitted, the runtime is
+/// busy or stopped, or the retained state could not be read) and nothing was removed.
+#[derive(Debug, Serialize)]
+pub struct BestEffortReport {
+    #[serde(flatten)]
+    pub report: ReclaimReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<Skipped>,
+}
+
+/// Reclaim for a caller that must not fail on it (`up` after readiness): every refusal
+/// or error becomes `skipped` in the report instead. Bounded like [`run`]: a
+/// non-blocking lease, bounded scans and one removal call per candidate image.
+pub(super) fn best_effort<P: ReclaimPool>(candidate: &Candidate, pool: &P) -> BestEffortReport {
+    match run(candidate, pool) {
+        Ok(report) => BestEffortReport {
+            report,
+            skipped: None,
+        },
+        Err(error) => BestEffortReport {
+            report: ReclaimReport {
+                removed: Vec::new(),
+                retained: BTreeMap::new(),
+                cache_reclaimed_bytes: None,
+            },
+            skipped: Some(Skipped {
+                code: error.code,
+                // Only fixed messages are safe to show; others may hold runtime values.
+                message: if error.message_fixed {
+                    error.message
+                } else {
+                    "Build image reclamation did not run; nothing was removed.".to_owned()
+                },
+            }),
+        },
+    }
+}
+
+/// `runtime reclaim-build-images --best-effort`: see [`best_effort`].
+pub fn reclaim_build_images_best_effort(candidate: &Candidate) -> BestEffortReport {
+    best_effort(candidate, &LivePool { candidate })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +457,7 @@ mod tests {
     const B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const D: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const E: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
     fn image(id: &str, owner: &str) -> Value {
         serde_json::json!({"Id": id, "Labels": {
@@ -368,7 +483,7 @@ mod tests {
                 &owner_label("other-pool"),
             ),
         ];
-        let current = BTreeSet::from([B.to_owned()]);
+        let current = BTreeMap::from([(B.to_owned(), Retained::Current)]);
         let referenced = BTreeSet::from([C.to_owned()]);
         let (remove, retained) = plan(&images, &owner, &current, &referenced).unwrap();
         assert_eq!(remove, vec![A.to_owned()]);
@@ -423,6 +538,38 @@ mod tests {
             referenced_images(&candidate).unwrap(),
             BTreeSet::from([A.to_owned(), B.to_owned()])
         );
+        // Restore history is diagnostic: its images are not references (HACK-2554).
+        let graph = candidate.state_root.join("run/graphs/r2");
+        crate::provider::state::private_directory(&graph.join("restore-3")).unwrap();
+        fs::write(graph.join("state.json"), format!("{{\"image\":\"{C}\"}}")).unwrap();
+        fs::write(graph.join("restore-history.json"), format!("[\"{D}\"]")).unwrap();
+        fs::write(graph.join("restore-history.pending"), format!("[\"{D}\"]")).unwrap();
+        fs::write(graph.join("restore-3/previous.json"), format!("[\"{D}\"]")).unwrap();
+        fs::write(graph.join("dead-owner-cleanup.json"), format!("[\"{E}\"]")).unwrap();
+        assert_eq!(
+            referenced_images(&candidate).unwrap(),
+            BTreeSet::from([A, B, C, E].map(str::to_owned))
+        );
+        // Only exact names are skipped: a lookalike is still read.
+        fs::write(graph.join("restore-history.json.old"), format!("[\"{D}\"]")).unwrap();
+        crate::provider::state::private_directory(&graph.join("restore-9")).unwrap();
+        assert!(referenced_images(&candidate).unwrap().contains(D));
+        fs::remove_file(graph.join("restore-history.json.old")).unwrap();
+        fs::write(graph.join("restore-9/previous.json"), format!("[\"{D}\"]")).unwrap();
+        assert!(referenced_images(&candidate).unwrap().contains(D));
+        fs::remove_dir_all(graph.join("restore-9")).unwrap();
+        // A symlink under a history name is not skipped: the scan refuses.
+        fs::remove_file(graph.join("restore-history.pending")).unwrap();
+        std::os::unix::fs::symlink(
+            graph.join("state.json"),
+            graph.join("restore-history.pending"),
+        )
+        .unwrap();
+        assert_eq!(
+            referenced_images(&candidate).unwrap_err().code,
+            "native_build_reclaim_unprovable"
+        );
+        fs::remove_file(graph.join("restore-history.pending")).unwrap();
         std::os::unix::fs::symlink(run.join("receipt.json"), archive.join("alias")).unwrap();
         assert_eq!(
             referenced_images(&candidate).unwrap_err().code,

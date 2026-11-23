@@ -147,6 +147,13 @@ async function fixture() {
   await Bun.write(
     binary,
     `#!${process.execPath}
+if (process.argv.includes("image-wait-fixture")) {
+  process.stderr.write("hack.image-wa");
+  await Bun.sleep(10);
+  process.stderr.write("it:begin\\nhack.image-wait:end\\n");
+  console.error(JSON.stringify({code:"image_tag_download_busy"}));
+  process.exit(2);
+}
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
 if (process.argv.includes("configuration-batch")) { console.error(JSON.stringify({code:"invalid_dependency_cache",message:"synthetic-secret-diagnostic",configuration_refusals:Array.from({length:128},(_,i)=>({text_fixed:true,service:"s"+i,field:"labels.hack.dependencies.lockfiles",message:"The file list is invalid.",fix:"Use relative paths without variables."})),startup_logs:[{service:"web",lines:["synthetic-secret-diagnostic"]}]})); process.exit(2); }
 if (process.argv.includes("old-provider")) { console.error(JSON.stringify({code:"provider_pin_changed",message:"synthetic-secret-diagnostic"})); process.exit(2); }
@@ -179,6 +186,7 @@ if (process.argv.includes("owner-unsafe")) { console.error(JSON.stringify({code:
 if (process.argv.includes("fail")) { console.error("synthetic-secret-diagnostic"); process.exit(23); }
 if (process.argv.includes("garbage")) { process.stdout.write("not-json"); process.exit(0); }
 if (process.argv.includes("hot-reload-probe")) { const {appendFileSync}=await import("node:fs"); appendFileSync("hot-reload-spawns","s"); console.log(JSON.stringify({ hotReload: process.env.HACK_NATIVE_HOT_RELOAD ?? null })); process.exit(0); }
+if (process.argv.includes("admission-reuse-probe")) { const {appendFileSync}=await import("node:fs"); appendFileSync("admission-reuse-spawns","s"); console.log(JSON.stringify({ admissionReuse: process.env.HACK_NATIVE_ADMISSION_REUSE_SECONDS ?? null, hotReload: process.env.HACK_NATIVE_HOT_RELOAD ?? null })); process.exit(0); }
 if (process.argv.includes("overflow")) { process.stdout.write("x".repeat(17 * 1024 * 1024)); }
 else {
  const input = await Bun.stdin.text();
@@ -1840,6 +1848,74 @@ test("HACK-2409: the hot-reload setting crosses the subprocess boundary for runt
   }
 });
 
+test("the admission reuse bound crosses the subprocess boundary for runtime up only, and a bad value never starts the runtime", async () => {
+  const runtime = await fixture();
+  const name = "HACK_NATIVE_ADMISSION_REUSE_SECONDS";
+  const prior = {
+    bound: process.env[name],
+    hotReload: process.env.HACK_NATIVE_HOT_RELOAD,
+  };
+  const up = ["runtime", "up", "admission-reuse-probe", "--json"];
+  const others = [
+    ["runtime", "status", "admission-reuse-probe"],
+    ["runtime", "down", "admission-reuse-probe"],
+    ["project", "plan", "admission-reuse-probe"],
+  ];
+  const ask = (args: string[]) =>
+    invokeNativeRuntime({ runtime, cwd: runtime.home, args });
+  const none = { admissionReuse: null, hotReload: null };
+  try {
+    Reflect.deleteProperty(process.env, "HACK_NATIVE_HOT_RELOAD");
+    Reflect.deleteProperty(process.env, name);
+    expect(await ask(up)).toEqual(none);
+    // 0 turns reuse off in the runtime, so it must arrive, not be dropped.
+    for (const value of ["0", "60", "600", "000600"]) {
+      process.env[name] = value;
+      expect(await ask(up)).toEqual({ ...none, admissionReuse: value });
+      // No other runtime command receives it.
+      for (const other of others) {
+        expect(await ask(other)).toEqual(none);
+      }
+    }
+    // The two settings travel together and neither displaces the other.
+    process.env.HACK_NATIVE_HOT_RELOAD = "off";
+    expect(await ask(up)).toEqual({
+      admissionReuse: "000600",
+      hotReload: "off",
+    });
+    Reflect.deleteProperty(process.env, "HACK_NATIVE_HOT_RELOAD");
+    process.env[name] = "";
+    expect(await ask(up)).toEqual(none);
+    const spawns = async () =>
+      (await readFile(join(runtime.home, "admission-reuse-spawns"), "utf8"))
+        .length;
+    const before = await spawns();
+    const bad = ["-1", "601", "1.5", "60s", " 60", "1000000", "\u0666\u0660"];
+    for (const value of bad) {
+      process.env[name] = value;
+      await expect(ask(up)).rejects.toMatchObject({
+        code: "E_CONFIG_INVALID",
+        message: `${name} must be a whole number of seconds from 0 to 600; 0 turns reuse off. A larger value is refused, not reduced to 600.`,
+      });
+      // Other commands do not read the setting and are not refused for it.
+      expect(await ask(others[0] ?? [])).toEqual(none);
+    }
+    // Only the status requests started a process: no refused up did.
+    expect(await spawns()).toBe(before + bad.length);
+  } finally {
+    for (const [key, value] of [
+      [name, prior.bound],
+      ["HACK_NATIVE_HOT_RELOAD", prior.hotReload],
+    ] as const) {
+      if (value === undefined) {
+        Reflect.deleteProperty(process.env, key);
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
 test("HACK-2418: a failed provider command shows the provider's own last line, validated here whatever the runtime sent", async () => {
   const runtime = await fixture();
   const failure = async (...args: string[]) =>
@@ -1926,3 +2002,22 @@ test("HACK-2418: a failed provider command shows the provider's own last line, v
     );
   }
 });
+
+bunTest(
+  "image wait markers survive split stderr and preserve the final refusal",
+  async () => {
+    const runtime = await fixture();
+    const wait: boolean[] = [];
+    const error = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["image-wait-fixture"],
+      onImageWait: (waiting) => wait.push(waiting),
+    }).catch((failure: unknown) => failure);
+    expect(wait).toEqual([true, false]);
+    expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+    expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+      "image_tag_download_busy"
+    );
+  }
+);

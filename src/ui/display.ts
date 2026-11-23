@@ -1,13 +1,12 @@
 import { gumJoin, gumStyle, gumTable, isGumAvailable } from "./gum.ts";
 import { isColorEnabled, isTty } from "./terminal.ts";
+import { createTextOutput, type StepStatus } from "./text-output.ts";
 
 export type DisplayCell = string | number | boolean | null | undefined;
 
-export type DisplayStatus = "ok" | "warn" | "error" | "info";
-
 export type DisplayStatusItem = {
   readonly label: string;
-  readonly status: DisplayStatus;
+  readonly status: StepStatus;
   readonly detail?: string;
   readonly meta?: string;
 };
@@ -105,26 +104,25 @@ function wrapLine(input: {
   return lines;
 }
 
-export function buildStatusListLines(input: {
+export function renderStatusList(input: {
+  readonly title?: string;
   readonly items: readonly DisplayStatusItem[];
   readonly width: number;
-}): readonly string[] {
-  const symbols: Readonly<Record<DisplayStatus, string>> = {
-    ok: "✓",
-    warn: "!",
-    error: "×",
-    info: "•",
-  };
-  const labelWidth = Math.max(
-    0,
-    ...input.items.map((item) => item.label.length)
+  readonly output: ReturnType<typeof createTextOutput>;
+}): void {
+  const { output, items } = input;
+  output.line();
+  if (input.title) {
+    output.line(input.title);
+  }
+  const render = output.stepRows(
+    items.map(({ label }) => ({ name: label })),
+    {
+      markGap: 2,
+    }
   );
-  const lines: string[] = [];
-
-  for (const item of input.items) {
-    const paddedLabel = item.label.padEnd(labelWidth);
-    const meta = item.meta ? `  ${item.meta}` : "";
-    lines.push(`${symbols[item.status]}  ${paddedLabel}${meta}`.trimEnd());
+  for (const item of items) {
+    render({ name: item.label, status: item.status, result: item.meta });
     if (!item.detail) {
       continue;
     }
@@ -135,12 +133,10 @@ export function buildStatusListLines(input: {
         text: paragraph,
         width: detailWidth,
       })) {
-        lines.push(`${detailIndent}${detailLine}`);
+        output.line(`${detailIndent}${detailLine}`, "dim");
       }
     }
   }
-
-  return lines;
 }
 
 export function buildPanelLines(input: {
@@ -163,46 +159,6 @@ export function buildPanelLines(input: {
         `${index === 0 ? firstPrefix : continuationPrefix}${part}`
     );
   });
-}
-
-function statusListWithAnsi(input: {
-  readonly title?: string;
-  readonly items: readonly DisplayStatusItem[];
-}): void {
-  const enableColor = isColorEnabled();
-  const RESET = "\x1b[0m";
-  const BOLD = "\x1b[1m";
-  const FAINT = "\x1b[2m";
-  const colors: Readonly<Record<DisplayStatus, string>> = {
-    ok: "\x1b[32m",
-    warn: "\x1b[33m",
-    error: "\x1b[31m",
-    info: "\x1b[36m",
-  };
-  const lines = buildStatusListLines({
-    items: input.items,
-    width: resolveReadingWidth(),
-  });
-
-  writeLine("");
-  if (input.title) {
-    writeLine(enableColor ? `${BOLD}${input.title}${RESET}` : input.title);
-  }
-  let itemIndex = 0;
-  for (const line of lines) {
-    const isDetail = line.startsWith("   ");
-    if (isDetail) {
-      writeLine(enableColor ? `${FAINT}${line}${RESET}` : line);
-      continue;
-    }
-    const status = input.items[itemIndex]?.status ?? "info";
-    const symbol = line.slice(0, 1);
-    const remainder = line.slice(1);
-    writeLine(
-      enableColor ? `${colors[status]}${symbol}${RESET}${remainder}` : line
-    );
-    itemIndex += 1;
-  }
 }
 
 function sanitizeCell(value: string): string {
@@ -482,7 +438,11 @@ export const display: Display = {
     panelWithAnsi(input);
   },
   statusList: (input) => {
-    statusListWithAnsi(input);
+    renderStatusList({
+      ...input,
+      width: resolveReadingWidth(),
+      output: createTextOutput(),
+    });
     return Promise.resolve();
   },
   columns: async (input) => {

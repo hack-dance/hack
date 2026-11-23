@@ -264,7 +264,13 @@ test("HACK-1953: a prepared intent left by an interrupted stop resumes through t
   // Preflight may confirm a stopped graph; the down then only confirms the
   // stop (it requests none for a stopped graph) and the exact old frontend
   // finalization is still awaited before the replacement starts.
-  expect(seen).toEqual([{ cleanedRetry: false, preparedRetry: true }]);
+  expect(seen).toEqual([
+    {
+      cleanedRetry: false,
+      preparedRetry: true,
+      signal: expect.any(AbortSignal),
+    },
+  ]);
   expect(f.events).toEqual([
     "preflight",
     "down",
@@ -1478,7 +1484,7 @@ test("stopped recovery reviews retained image IDs and resolves tags only after o
   }
 });
 
-test("restart pins an active build service to its retained image, drops its build declaration and leaves inactive ones unbuilt", async () => {
+test("restart checks an active build service's build key, pins its retained image, drops its build declaration and leaves inactive ones unbuilt", async () => {
   const listener = await listenerIntentFixture();
   const previous = process.env.HACK_NATIVE_BUILDS;
   process.env.HACK_NATIVE_BUILDS = "1";
@@ -1486,11 +1492,24 @@ test("restart pins an active build service to its retained image, drops its buil
     let reviewed: Record<string, unknown> | undefined;
     let inactive: Record<string, unknown> | undefined;
     const builtImage = `sha256:${"7".repeat(64)}`;
+    let builds = 0;
     await preflightNativeRestart({
       ...listener.options,
+      // The build request names the canonical project root, so it must exist.
+      scope: { ...listener.options.scope, projectRoot: listener.directory },
+      composeFile: join(listener.directory, ".hack", "docker-compose.yml"),
       recoverStopped: true,
       dependencies: {
         ...listener.options.dependencies,
+        // An unchanged build key: the runtime answers with the running image.
+        build: async () => {
+          builds += 1;
+          return {
+            imageId: builtImage,
+            buildKey: "c".repeat(64),
+            reused: true,
+          };
+        },
         retainedImages: selectNativeRetainedImages,
         prepare: async () => ({
           originalSha256: "1".repeat(64),
@@ -1554,6 +1573,7 @@ test("restart pins an active build service to its retained image, drops its buil
     expect(reviewed?.image).toBe(builtImage);
     expect(reviewed).not.toHaveProperty("build");
     expect(inactive).toEqual({ build: "..", profiles: ["tools"] });
+    expect(builds).toBe(1);
   } finally {
     if (previous === undefined) {
       Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");

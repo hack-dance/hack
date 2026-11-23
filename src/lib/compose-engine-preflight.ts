@@ -110,6 +110,11 @@ export async function preflightComposeEngine(opts: {
       new HackCliError({
         code: "E_DOCKER_UNAVAILABLE",
         message: NO_COMPOSE_MESSAGE,
+        startBlocker: {
+          thing: "docker compose",
+          problem:
+            "v2 plugin missing · install docker-compose-v2 or docker-compose-plugin on debian or ubuntu",
+        },
       })
     );
   }
@@ -348,6 +353,10 @@ function noDockerError(): HackCliError {
   return new HackCliError({
     code: "E_DOCKER_UNAVAILABLE",
     message: NO_DOCKER_MESSAGE,
+    startBlocker: {
+      thing: "docker",
+      problem: "cli missing · install docker engine with compose v2",
+    },
   });
 }
 

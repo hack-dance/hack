@@ -150,7 +150,13 @@ test("a project command 70 directories deep with no project gets the ordinary mi
       const actual = await cli({ root, cwd: deep, args });
       expect({ args, ...actual }).toEqual({ args, ...expected });
       expect(actual.exit).toBe(1);
-      expect(actual.output).toContain("No .hack/ (or legacy .dev/) found");
+      if (args[0] === "up") {
+        expect(actual.output).toBe(
+          "! project  E_PROJECT_NOT_FOUND: No .hack/ (or legacy .dev/) found. Run: hack init\n  this start needs a configured project. run:\n  hack init --auto\n"
+        );
+      } else {
+        expect(actual.output).toContain("No .hack/ (or legacy .dev/) found");
+      }
       expect(actual.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
     }
   } finally {
@@ -173,10 +179,22 @@ test("an active adoption more than 64 directories above the start directory is s
 
     // ps lists the retained container from either depth.
     const ps = await cli({ root: h.outer, cwd: deep, args: ["ps"] });
-    expect(ps).toEqual({ exit: 0, output: "db\texited\n" });
+    expect(ps).toEqual({
+      exit: 0,
+      output:
+        "SERVICE  ADDRESS     STATE\ndb       no address  exited\n\n1 service\n",
+    });
     expect(ps).toEqual(
       await cli({ root: h.outer, cwd: shallow, args: ["ps"] })
     );
+    const wide = await cli({
+      root: h.outer,
+      cwd: deep,
+      args: ["ps", "--wide"],
+    });
+    expect(wide.exit).toBe(0);
+    expect(wide.output).toContain("exited (17)");
+    expect(wide.output).toContain("EXIT CODE");
     // up stays on the adopted path from depth too: ordinary discovery reads
     // an active adoption as native input, so a missed adoption would reach
     // native startup instead.

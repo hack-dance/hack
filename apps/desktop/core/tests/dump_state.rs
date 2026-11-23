@@ -143,7 +143,7 @@ fn dump_state_without_hack_reports_the_missing_cli() {
 }
 
 #[test]
-fn missing_daemon_never_runs_the_registry_writing_cli_listing() {
+fn unreadable_daemon_never_runs_the_registry_writing_cli_listing() {
     let home = temp_dir("observe");
     let hack = home.join("hack");
     test_support::script(
@@ -163,13 +163,10 @@ fn missing_daemon_never_runs_the_registry_writing_cli_listing() {
     assert!(!home.join("unexpected").exists());
     let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(body["source"]["ok"], false);
-    assert!(
-        body["source"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("hackd is off")
-    );
+    assert_eq!(body["source"]["error"], "DaemonUnreadable");
     assert_eq!(body["list"]["phase"]["phase"], "error");
+    assert_eq!(body["list"]["phase"]["code"], "E_APP_DAEMON_UNREADABLE");
+    assert_eq!(body["list"]["banners"][0]["banner"], "daemon_unreadable");
     std::fs::remove_dir_all(home).unwrap();
 }
 

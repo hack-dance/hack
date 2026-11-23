@@ -427,12 +427,14 @@ export async function prepareImplicitEnvMigration(
   {
     edits = [],
     writesLocalEnv = false,
+    inheritLocal,
   }: {
     readonly edits?: readonly {
       readonly path: string;
       readonly text: string | null;
     }[];
     readonly writesLocalEnv?: boolean;
+    readonly inheritLocal?: boolean;
   } = {}
 ): Promise<ImplicitEnvMigrationPlan> {
   const project = await canonicalProject(input);
@@ -443,6 +445,7 @@ export async function prepareImplicitEnvMigration(
     ...project,
     repairCompose: false,
     writesLocalEnv,
+    inheritLocal,
   });
   await assertEnvMigrationConsent(
     project,
@@ -473,6 +476,7 @@ async function prepareConsistent(
   project: EnvMigrationProject & {
     readonly repairCompose?: boolean;
     readonly writesLocalEnv?: boolean;
+    readonly inheritLocal?: boolean;
   }
 ): Promise<Preparation> {
   // Discover the complete inventory before the pass whose immutable payloads

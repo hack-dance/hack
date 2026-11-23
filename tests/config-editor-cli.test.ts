@@ -1196,7 +1196,7 @@ test("legacy env validation matches empty values, Compose order, and normalized 
   expect(large.payload.data.issues[0]?.message).toContain("512 KiB");
 });
 
-test("a worktree's initial legacy unset journals the ignore repair for a null override", async () => {
+async function legacyContractWorktree(baseValue: string) {
   const f = await fixture();
   const project = join(f.linked, ".hack");
   f.git(
@@ -1207,23 +1207,32 @@ test("a worktree's initial legacy unset journals the ignore repair for a null ov
     ".hack/hack.env.qa.yaml"
   );
   await Promise.all([
-    rm(join(f.project, "hack.env.local.yaml")),
     rm(join(project, "hack.env.local.yaml")),
-    writeFile(join(f.linked, ".gitignore"), ".hack/.internal/\n"),
-    writeFile(join(project, ".env"), "LOG_LEVEL=\n"),
+    writeFile(join(project, ".env"), `LOG_LEVEL=${baseValue}\n`),
     writeFile(
       join(project, "hack.env.json"),
       '{"version":1,"vars":[{"key":"LOG_LEVEL","source":"plain_env"}]}\n'
     ),
   ]);
-  const selection = ["--env", "default"];
-  const before = await show(f.root, f.linked, ...selection);
-  expect(before.layers.some((layer) => layer.id === "4")).toBe(true);
-  const outcome = await cli({
-    root: f.root,
-    cwd: f.linked,
-    args: ["apply", ...selection],
-    patch: {
+  return { ...f, linkedProject: project };
+}
+
+test("a worktree's initial legacy unset journals only a needed ignore repair", async () => {
+  for (const alreadyIgnored of [false, true]) {
+    const f = await legacyContractWorktree("");
+    const project = f.linkedProject;
+    const ignore = join(await realpath(project), ".gitignore");
+    await rm(join(f.project, "hack.env.local.yaml"));
+    if (alreadyIgnored) {
+      await writeFile(ignore, "# tracked old ignore rules\n");
+      f.git(f.linked, "add", ".hack/.gitignore");
+    } else {
+      await writeFile(join(f.linked, ".gitignore"), ".hack/.internal/\n");
+    }
+    const selection = ["--env", "default"];
+    const before = await show(f.root, f.linked, ...selection);
+    expect(before.layers.some((layer) => layer.id === "4")).toBe(true);
+    const patch = {
       base: bases(before),
       changes: [
         {
@@ -1234,32 +1243,96 @@ test("a worktree's initial legacy unset journals the ignore repair for a null ov
           value: null,
         },
       ],
-    },
+    };
+    const validate = await cli({
+      root: f.root,
+      cwd: f.linked,
+      args: ["validate", ...selection],
+      patch,
+    });
+    expect(validate.payload.data.valid).toBe(true);
+    const outcome = await cli({
+      root: f.root,
+      cwd: f.linked,
+      args: ["apply", ...selection],
+      patch,
+    });
+    expect(outcome.payload.ok).toBe(true);
+    expect(
+      await readFile(join(project, "hack.env.local.yaml"), "utf8")
+    ).toContain("LOG_LEVEL: null");
+    const hash = new Bun.CryptoHasher("sha256")
+      .update(await realpath(f.linked))
+      .digest("hex");
+    const journal = JSON.parse(
+      await readFile(
+        join(
+          privateCliHome(f.root),
+          ".hack/env-migrations",
+          hash,
+          "journal.json"
+        ),
+        "utf8"
+      )
+    );
+    expect(
+      journal.writes.some(
+        (file: { path: string; done: boolean }) =>
+          file.path === ignore && file.done
+      )
+    ).toBe(!alreadyIgnored);
+    if (alreadyIgnored) {
+      expect(await readFile(ignore, "utf8")).toBe(
+        "# tracked old ignore rules\n"
+      );
+    }
+  }
+});
+
+test("disabling worktree inheritance and writing env migrates legacy values in the same save", async () => {
+  const f = await legacyContractWorktree("legacy-configured");
+  const selection = ["--env", "default"];
+  const before = await show(f.root, f.linked, ...selection);
+  expect(before.layers.some((layer) => layer.id === "4" && layer.exists)).toBe(
+    true
+  );
+  const patch = {
+    base: bases(before),
+    changes: [
+      {
+        layer: "1",
+        kind: "project",
+        path: "worktree.inherit_local",
+        value: false,
+      },
+      { layer: "5", kind: "env", scope: "global", key: "NEW", value: "added" },
+    ],
+  };
+  const validation = await cli({
+    root: f.root,
+    cwd: f.linked,
+    args: ["validate", ...selection],
+    patch,
   });
-  expect(outcome.payload.ok).toBe(true);
+  expect(validation.payload.data.valid).toBe(true);
+  const apply = await cli({
+    root: f.root,
+    cwd: f.linked,
+    args: ["apply", ...selection],
+    patch,
+  });
+  expect(apply.payload.ok).toBe(true);
+  const saved = await readFile(
+    join(f.linkedProject, "hack.env.local.yaml"),
+    "utf8"
+  );
+  expect(saved).toContain("LOG_LEVEL: legacy-configured");
+  expect(saved).toContain("NEW: added");
   expect(
-    await readFile(join(project, "hack.env.local.yaml"), "utf8")
-  ).toContain("LOG_LEVEL: null");
-  const hash = new Bun.CryptoHasher("sha256")
-    .update(await realpath(f.linked))
-    .digest("hex");
-  const journal = JSON.parse(
-    await readFile(
-      join(
-        privateCliHome(f.root),
-        ".hack/env-migrations",
-        hash,
-        "journal.json"
-      ),
-      "utf8"
+    (await show(f.root, f.linked, ...selection)).layers.some(
+      (layer) => layer.id === "4"
     )
-  );
-  expect(journal.writes).toContainEqual(
-    expect.objectContaining({
-      path: join(await realpath(project), ".gitignore"),
-      done: true,
-    })
-  );
+  ).toBe(false);
 });
 
 test("an identical replacement layer directory invalidates a revision", async () => {
@@ -1388,6 +1461,9 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
         "80",
         "${PORT:-8080}:80",
         "127.0.0.${OCTET:-1}:8080:80",
+        "127${MIDDLE:-.0.}0.1:8080:80",
+        ":8080:80",
+        "[]:8080:80",
         "[::${ADDR:-1}]:8080:80",
         "[2001${SEP:-:}db8::1]:8080:80",
         "::1:8080:80",
@@ -1430,6 +1506,8 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     "'invalid-host.${OCTET:-1}:8080:80'",
     "'[12345::${ADDR:-1}]:8080:80'",
     "'[1:2:3:4:5:6:7:8:${TAIL:-9}]:8080:80'",
+    "'[fe80::1%${IFACE:-en0}]:8080:80'",
+    "'[fe80::1%en0]:8080:80'",
   ];
   const invalid = await check([
     {

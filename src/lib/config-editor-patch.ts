@@ -61,6 +61,7 @@ import {
 } from "./project.ts";
 import {
   discoverComposeServiceNames,
+  isGitIgnoredProjectEnvPath,
   isValidProjectEnvScopeName,
   mutateProjectEnvLayer,
   type ProjectEnvLayerChange,
@@ -670,22 +671,32 @@ function layerDestination(layer: LayerSnapshot): string {
 }
 
 async function writesLocalEnvForMigration(
-  snapshot: ConfigSnapshot,
-  files: Map<string, Prepared>
+  projectRoot: string,
+  inheritLocal: boolean,
+  files: ReadonlyMap<string, Prepared>
 ): Promise<boolean> {
-  const changes = [...files.values()]
-    .filter(({ layer }) => layer.kind === "env" && layer.ownership === "local")
-    .flatMap(({ env }) => env);
-  if (changes.some(({ op }) => op === "set")) {
+  const localFiles = [...files.values()].filter(
+    ({ layer, env }) =>
+      layer.kind === "env" && layer.ownership === "local" && env.length > 0
+  );
+  if (localFiles.some(({ env }) => env.some(({ op }) => op === "set"))) {
     return true;
   }
-  // An unset in a linked checkout can publish a null entry to mask inheritance.
-  return (
-    changes.length > 0 &&
-    (await prospectiveSnapshot(snapshot, files)).layers.some(
-      ({ inherited }) => inherited
-    )
-  );
+  // A linked unset writes a null override. It only needs a repair when the
+  // destination is missing effective ignore coverage.
+  if (inheritLocal) {
+    for (const { layer } of localFiles) {
+      if (
+        (await isGitIgnoredProjectEnvPath({
+          projectRoot,
+          path: layerDestination(layer),
+        })) !== true
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 async function stageConfigMigration(
@@ -704,7 +715,9 @@ async function stageConfigMigration(
   const { project } = snapshot;
   try {
     await assertConfigLayerDirectory(env.layer);
-    if (await projectEnvConfigExistsForMutation(project)) {
+    const prospective = await prospectiveSnapshot(snapshot, files);
+    const inheritLocal = prospective.layers.some(({ inherited }) => inherited);
+    if (await projectEnvConfigExistsForMutation({ ...project, inheritLocal })) {
       return { migration: null, outputs: null };
     }
     const legacy = await readHackEnvContract(project);
@@ -716,7 +729,11 @@ async function stageConfigMigration(
         "Fix the legacy env contract before saving env changes."
       );
     }
-    const writesLocalEnv = await writesLocalEnvForMigration(snapshot, files);
+    const writesLocalEnv = await writesLocalEnvForMigration(
+      project.projectRoot,
+      inheritLocal,
+      files
+    );
     if (mode === "validate") {
       const outputs = await preflightLegacyEnvContract({
         ...project,
@@ -742,6 +759,7 @@ async function stageConfigMigration(
       },
       {
         writesLocalEnv,
+        inheritLocal,
         edits: [...files.values()].map(({ layer }) => ({
           path: layerDestination(layer),
           text: layer.text,
@@ -1148,6 +1166,7 @@ async function writePreparedLayer(
         changes: file.env,
         expected: { file: layer.file, text: layer.text, validate },
         beforePublish,
+        repairGitignore: beforePublish === undefined,
         maxBytes: CONFIG_SOURCE_LIMIT,
       })
     ).changed;

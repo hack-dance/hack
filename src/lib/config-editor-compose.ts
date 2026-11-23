@@ -24,7 +24,7 @@ const SERVICE_NAME = /^[\w.-]+$/;
 const ROUTE_LABEL = /^caddy(?:[._]|$)/;
 const PORT_RANGE = /^([\d*]+)(?:-([\d*]+))?$/;
 const PORT_NUMBER = /^[\d*]+$/;
-const IPV6_TEMPLATE = /^[a-f\d:.*]+(?:%[\w.*-]+)?$/i;
+const IPV6_TEMPLATE = /^[a-f\d:.*]+$/i;
 const VARIABLE_REFERENCE =
   /\$(?:\$|\{[A-Za-z_]\w*(?:\}|(:?[-+?]))|[A-Za-z_]\w*)/y;
 const PORT_PROTOCOLS = ["tcp", "udp", "sctp"];
@@ -63,7 +63,7 @@ export function validComposePort(value: unknown): boolean {
   const [target, published, ...address] = mapping.split(":").toReversed();
   const host = address.toReversed().join(":");
   return (
-    (address.length === 0 || validPortHost(host)) &&
+    (host === "" || host === "[]" || validPortHost(host)) &&
     (!published || validPortRange(published, true)) &&
     target !== undefined &&
     validPortRange(target) &&
@@ -76,6 +76,9 @@ export function validComposePort(value: unknown): boolean {
 }
 
 function validPortHost(value: string): boolean {
+  if (value.includes("%")) {
+    return false;
+  }
   const bracketed = value.startsWith("[") && value.endsWith("]");
   const host = bracketed ? value.slice(1, -1) : value;
   if (!host.includes("*")) {
@@ -87,13 +90,12 @@ function validPortHost(value: string): boolean {
 }
 
 function validIpv6Template(host: string): boolean {
-  const address = host.split("%", 1)[0] ?? "";
-  const sides = address.split("::");
+  const sides = host.split("::");
   if (
     !IPV6_TEMPLATE.test(host) ||
     sides.length > 2 ||
-    (address.startsWith(":") && !address.startsWith("::")) ||
-    (address.endsWith(":") && !address.endsWith("::"))
+    (host.startsWith(":") && !host.startsWith("::")) ||
+    (host.endsWith(":") && !host.endsWith("::"))
   ) {
     return false;
   }
@@ -133,15 +135,51 @@ function minimumIpv6Groups(part: string): number {
 }
 
 function validIpv4Template(host: string): boolean {
-  const octets = host.split(".");
+  let octets = 0;
+  for (const part of host.split(".")) {
+    octets += minimumIpv4Octets(part);
+    if (octets > 4) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** A substitution can fill out the current octet or insert a dot. */
+function minimumIpv4Octets(part: string): number {
+  if (!PORT_NUMBER.test(part)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const [first = "", ...rest] = part.split("*");
+  let octet = first;
+  let mayHavePrefix = first === "";
+  let count = 1;
+  for (const run of rest) {
+    if (canFitIpv4Octet(octet + run, mayHavePrefix)) {
+      octet += run;
+      continue;
+    }
+    if (!canFitIpv4Octet(octet, mayHavePrefix)) {
+      return Number.POSITIVE_INFINITY;
+    }
+    count += 1;
+    octet = run;
+    mayHavePrefix = true;
+  }
+  return canFitIpv4Octet(octet, mayHavePrefix)
+    ? count
+    : Number.POSITIVE_INFINITY;
+}
+
+function canFitIpv4Octet(digits: string, mayHavePrefix: boolean): boolean {
+  if (digits.length < 2) {
+    return true;
+  }
   return (
-    octets.length <= 4 &&
-    octets.every((part) => {
-      const digits = part.replaceAll("*", "");
-      return (
-        PORT_NUMBER.test(part) && digits.length <= 3 && Number(digits) <= 255
-      );
-    })
+    digits.length <= 3 &&
+    (digits.startsWith("0")
+      ? mayHavePrefix && digits.length === 2
+      : Number(digits) <= 255)
   );
 }
 

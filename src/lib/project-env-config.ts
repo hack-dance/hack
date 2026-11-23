@@ -1055,6 +1055,7 @@ export async function assertProjectEnvLayerPaths(opts: {
 
 export async function projectEnvConfigExists(opts: {
   readonly projectDir: string;
+  readonly inheritLocal?: boolean;
 }): Promise<boolean> {
   await assertProjectEnvLayerPaths({
     projectRoot: dirname(opts.projectDir),
@@ -1089,6 +1090,7 @@ export async function projectEnvConfigExists(opts: {
   return await hasPrimaryLocalInputs({
     projectRoot: dirname(opts.projectDir),
     projectDir: opts.projectDir,
+    inheritLocal: opts.inheritLocal,
   });
 }
 
@@ -1124,6 +1126,7 @@ export class ProjectEnvLayerPathConflictError extends HackCliError {
  */
 export async function projectEnvConfigExistsForMutation(opts: {
   readonly projectDir: string;
+  readonly inheritLocal?: boolean;
 }): Promise<boolean> {
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
   let linkedLayer = false;
@@ -3736,6 +3739,8 @@ export async function mutateProjectEnvLayer(
       readonly validate?: () => Promise<void>;
     };
     readonly beforePublish?: (text: string, mode: number) => Promise<void>;
+    /** A migration transaction publishes any needed ignore repair itself. */
+    readonly repairGitignore?: boolean;
     readonly maxBytes?: number;
   }
 ): Promise<{
@@ -3802,7 +3807,7 @@ async function mutateLockedProjectEnvLayer(
   }
   const secrets = await projectEnvMutationKey(opts, read.config);
   const hasSet = opts.changes.some((change) => change.op === "set");
-  if (hasSet && opts.local === true) {
+  if (hasSet && opts.local === true && opts.repairGitignore !== false) {
     await ensureHackDirGitignoreForLocalEnvWrite({
       projectDir: opts.projectDir,
     });
@@ -3829,6 +3834,7 @@ async function mutateLockedProjectEnvLayer(
       noFollow: opts.expected !== undefined,
       expectedExisting: text,
       machineLocal: opts.local === true,
+      repairGitignore: opts.repairGitignore,
     });
   }
   return { changed, filePath, createdKey: secrets.createdKey };
@@ -4951,6 +4957,7 @@ async function writeProjectEnvConfigFile(opts: {
   readonly validate?: () => Promise<void>;
   readonly noFollow?: boolean;
   readonly beforePublish?: (text: string, mode: number) => Promise<void>;
+  readonly repairGitignore?: boolean;
   /**
    * A machine-local layer, which may hold plaintext values: when this write
    * creates it, it is private (0600) from creation, and an existing layer
@@ -4974,6 +4981,7 @@ async function writeProjectEnvConfigFile(opts: {
     await assertMachineLocalLayerWriteDestination({
       projectRoot: opts.projectRoot,
       path: opts.path,
+      repairGitignore: opts.repairGitignore,
     });
   }
   // Rename-committed: an interrupted mutation leaves the previous layer intact.
@@ -5140,10 +5148,14 @@ export async function assertMachineLocalFileGitPrivate(opts: {
 async function assertMachineLocalLayerWriteDestination(opts: {
   readonly projectRoot: string;
   readonly path: string;
+  readonly repairGitignore?: boolean;
 }): Promise<void> {
   await assertMachineLocalLayerNotLinked(opts);
   let problem = await machineLocalLayerGitProblem(opts);
   if (problem === "not_ignored") {
+    if (opts.repairGitignore === false) {
+      throw new AtomicWriteConflictError();
+    }
     // Silent: a caller has already warned about a read-only file.
     await ensureHackDirGitignore({ projectDir: dirname(opts.path) });
     problem = await machineLocalLayerGitProblem(opts);
@@ -7294,6 +7306,7 @@ export async function prepareLegacyProjectEnvMigration(opts: {
   readonly serviceNames: readonly string[];
   readonly repairCompose?: boolean;
   readonly writesLocalEnv?: boolean;
+  readonly inheritLocal?: boolean;
 }): Promise<PreparedLegacyEnvMigration> {
   try {
     return await prepareLegacyProjectEnvMigrationInternal(opts);
@@ -7728,6 +7741,7 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
   readonly serviceNames: readonly string[];
   readonly repairCompose?: boolean;
   readonly writesLocalEnv?: boolean;
+  readonly inheritLocal?: boolean;
 }): Promise<PreparedLegacyEnvMigration> {
   await assertLegacyProjectDirectory(opts);
   await assertLegacyProjectInputFamily(opts);

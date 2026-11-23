@@ -704,6 +704,7 @@ async function assertProjectConfigReadable(opts: {
 export async function hasPrimaryLocalInputs(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
+  readonly inheritLocal?: boolean;
 }): Promise<boolean> {
   const primaryDir = await resolvePrimaryLocalProjectDir(opts);
   if (primaryDir === null) {

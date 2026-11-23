@@ -348,7 +348,10 @@ import {
   bootstrapDependencyCaches,
   dependencyCacheBootstrapFailure,
 } from "../lib/dependency-cache-bootstrap.ts";
-import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
+import {
+  type CacheVolumeKept,
+  removeDisposableCacheVolumes,
+} from "../lib/disposable-cache-volumes.ts";
 import { dockerHelperRunEnvironment } from "../lib/docker-helper-environment.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
@@ -1272,6 +1275,7 @@ export type LifecycleJsonData = {
     readonly failed: readonly string[];
   };
   readonly cacheVolumesRemoved?: readonly string[];
+  readonly cacheVolumesKept?: readonly CacheVolumeKept[];
   /** One-shot dependencies this command stopped mid-run (HACK-2310). */
   readonly interrupted?: readonly string[];
   readonly warnings?: readonly string[];
@@ -1383,6 +1387,7 @@ export function buildLifecycleJsonData(opts: {
   readonly stopped?: readonly string[];
   readonly failed?: readonly string[];
   readonly cacheVolumesRemoved?: readonly string[];
+  readonly cacheVolumesKept?: readonly CacheVolumeKept[];
   readonly interruption?: OneShotInterruption;
   readonly durationMs: number;
 }): LifecycleJsonData {
@@ -1399,6 +1404,9 @@ export function buildLifecycleJsonData(opts: {
     },
     ...(opts.cacheVolumesRemoved
       ? { cacheVolumesRemoved: [...opts.cacheVolumesRemoved].sort() }
+      : {}),
+    ...(opts.cacheVolumesKept
+      ? { cacheVolumesKept: opts.cacheVolumesKept }
       : {}),
     ...(opts.interruption && opts.interruption.services.length > 0
       ? {
@@ -9072,6 +9080,7 @@ async function runDownCommand({
   noteActivityBranch(branch);
   await recordBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
+  const cacheVolumesKept: CacheVolumeKept[] = [];
   const cachePruneCandidates =
     pruneCaches && runtime
       ? await prepareDisposableCachePrune({
@@ -9083,6 +9092,7 @@ async function runDownCommand({
             writeDownNotice({ json, level, message });
           },
           yes: confirmCachePrune,
+          kept: cacheVolumesKept,
         })
       : [];
   const projectName = sanitizeProjectSlug(baseProjectName);
@@ -9308,7 +9318,18 @@ async function runDownCommand({
   }
   const cacheRemoval = await removeDisposableCacheVolumes({
     candidates: cachePruneCandidates,
+    kept: cacheVolumesKept,
   });
+  for (const volume of cacheVolumesKept) {
+    if (volume.reason === "identity-changed") {
+      writeDownNotice({
+        json,
+        level: "warn",
+        message: `Kept volume "${volume.name}": its identity could not be verified after stopping.`,
+      });
+    }
+  }
+  cacheVolumesKept.sort((left, right) => left.name.localeCompare(right.name));
   await removeProjectRuntimeStateEntry({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
@@ -9360,6 +9381,7 @@ async function runDownCommand({
         detail: {
           removed: cacheRemoval.removed,
           failed: cacheRemoval.failed,
+          kept: cacheVolumesKept,
         },
       }),
       exitCode: 1,
@@ -9375,6 +9397,7 @@ async function runDownCommand({
         composeProject: composeProjectName ?? baseProjectName,
         stopped: runningServicesBeforeDown,
         cacheVolumesRemoved: cacheRemoval.removed,
+        cacheVolumesKept: pruneCaches ? cacheVolumesKept : undefined,
         interruption: interruptionCheck.interruption,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),

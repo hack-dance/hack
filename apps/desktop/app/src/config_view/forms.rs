@@ -292,10 +292,8 @@ impl HackApp {
                 let path = "env.defaultOverlay";
                 let original = report
                     .default_overlay
-                    .as_deref()
-                    .or_else(|| setting(&report.project, path).as_str())
-                    .unwrap_or("default")
-                    .to_owned();
+                    .clone()
+                    .unwrap_or_else(|| legacy_default_overlay(&report.project));
                 let field = self.field_control(
                     Field::Project(path.into()),
                     original,
@@ -1385,6 +1383,36 @@ fn group_title(title: &str, report: &ConfigReport, id: &str, ui: &Ui) -> Div {
         )
 }
 
+// Older v1 producers expose only authored fields. Follow the CLI's legacy
+// name normalization and precedence without using the active preview overlay.
+fn legacy_default_overlay(project: &Value) -> String {
+    let name = |paths: [&str; 2]| {
+        let raw = paths
+            .into_iter()
+            .find_map(|path| setting(project, path).as_str())?
+            .trim();
+        if raw.starts_with("[redacted") {
+            return None;
+        }
+        let name: String = raw
+            .to_lowercase()
+            .replace(['_', ' ', '/'], "-")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        let name = name
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        (!name.is_empty()).then_some(name)
+    };
+    name(["env.defaultOverlay", "env.default_overlay"])
+        .or_else(|| name(["defaultEnvConfig", "default_env_config"]))
+        .filter(|name| name.len() <= 128 && !matches!(name.as_str(), "base" | "default" | "none"))
+        .unwrap_or_else(|| "default".into())
+}
+
 fn field_row(label: &str, detail: &str, element: impl IntoElement, ui: &Ui) -> Div {
     div()
         .flex()
@@ -1437,6 +1465,39 @@ mod tests {
             "env.defaultOverlay",
             "qa",
             "default",
+        );
+    }
+
+    #[test]
+    fn the_default_overlay_field_resolves_aliases_in_older_reports() {
+        assert_project_field_can_stage(
+            ConfigReport {
+                project: serde_json::json!({
+                    "env": { "default_overlay": " QA " },
+                    "defaultEnvConfig": "development",
+                }),
+                overlay: Some("staging".into()),
+                ..Default::default()
+            },
+            EditSection::Env,
+            "env.defaultOverlay",
+            "qa",
+            "default",
+        );
+        assert_eq!(
+            legacy_default_overlay(&serde_json::json!({"defaultEnvConfig": "qa"})),
+            "qa"
+        );
+        assert_eq!(
+            legacy_default_overlay(&serde_json::json!({"default_env_config": " qa_team "})),
+            "qa-team"
+        );
+        assert_eq!(
+            legacy_default_overlay(&serde_json::json!({
+                "env": { "defaultOverlay": "none", "default_overlay": "qa" },
+                "defaultEnvConfig": "qa",
+            })),
+            "default"
         );
     }
 

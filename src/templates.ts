@@ -1,4 +1,3 @@
-import projectPrivateFiles from "../packages/runtime-core/project-private-files.json";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
@@ -28,6 +27,7 @@ import {
 } from "./constants.ts";
 import { parseDefaultDomain } from "./lib/default-domain.ts";
 import { PROXY_PORTS, renderProxyPortMapping } from "./lib/proxy-bind.ts";
+import projectPrivateFiles from "./project-private-files.json";
 
 /**
  * A Compose `healthcheck` block for a global stack service. `hack global up`

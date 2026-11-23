@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import projectPrivateFiles from "../../packages/runtime-core/project-private-files.json";
+import projectPrivateFiles from "../project-private-files.json";
 import { publishFileExclusive } from "./exclusive-publish.ts";
 import { isRecord } from "./guards.ts";
 

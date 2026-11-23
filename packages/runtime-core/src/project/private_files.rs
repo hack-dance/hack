@@ -11,7 +11,7 @@ pub(crate) struct Policy {
 }
 
 pub(crate) static POLICY: LazyLock<Policy> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../../project-private-files.json"))
+    serde_json::from_str(include_str!("../../../../src/project-private-files.json"))
         .expect("embedded project private files policy")
 });
 

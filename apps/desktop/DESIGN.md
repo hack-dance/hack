@@ -53,7 +53,7 @@ detail pane, status bar. Light and dark follow the system
 | Backend | v0 | Source |
 |---|---|---|
 | Compose | Full detail | `/v1/projects` or `hack projects --json` (`runtime.services[].containers[]`) |
-| Native (beta) | State pill and services from native `ps`; no actions and no log tail in the app (see below) | `HACK_RUNTIME_BACKEND=native hack ps --json --path <root>` (`data.status`) |
+| Native (beta) | State and services from native `ps`; Start for stopped native projects | `HACK_RUNTIME_BACKEND=native hack ps --json --path <root>` (`data.status`) |
 
 Project views read legacy inputs; a canonical native project comes back with
 `input_diagnostic`. The app recognises that code and asks `hack ps` instead
@@ -61,8 +61,9 @@ rather than showing "Needs attention". Every command for a native project runs w
 `HACK_RUNTIME_BACKEND=native`, which is how the CLI selects that backend today.
 Native `up --json` already starts a detached owner and returns a JSON
 result, but native `restart` (and authored `down`/`restart`) stay in the
-foreground and refuse `--json`. v0 keeps native projects view-only as a scope
-choice: the header shows the terminal commands instead (R2b below). Native finite logs are a one-service snapshot,
+foreground and refuse `--json`. The header offers Start through the detached
+JSON path when the native project is stopped or the runtime is off, and lists terminal commands for Stop and
+Restart. Native finite logs are a one-service snapshot,
 so the combined tail is replaced by a note until the Logs tab reads them per service. Docker's `runtime_ok` never changes a native row. Native `data.status` maps as:
 `not_started` → Stopped, `pending` → Starting, `observed` → Running or Degraded
 from `items[].state` and `items[].health` (`readiness` is not in ordinary `ps` output; until R2 an exited service with exit 0 is "exited (0), role unknown" and any other exit is down), `runtime_degraded` → Degraded, `runtime_not_running` and

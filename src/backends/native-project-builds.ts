@@ -13,6 +13,7 @@ import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  NATIVE_BUILD_COPY_PRIVATE_RECOVERY,
   NATIVE_BUILDER_MISSING,
   NATIVE_BUILDER_NOT_PREPARED,
   type NativeBuilderCommandOptions,
@@ -967,6 +968,7 @@ const BUILD_SOURCE_POLICY: Readonly<Record<string, string>> = {
   native_build_source:
     "Keep the build context and Dockerfile inside the project as regular files reached without symlinks.",
   native_build_dockerfile: "Change the Dockerfile line it names.",
+  native_build_copy_private: NATIVE_BUILD_COPY_PRIVATE_RECOVERY,
   native_build_base_image:
     "Use public Docker Hub images in the Dockerfile's FROM and COPY --from.",
   native_build_argument:

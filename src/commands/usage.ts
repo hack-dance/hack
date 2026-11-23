@@ -835,7 +835,8 @@ function buildContainerIndex(opts: {
 async function readDockerStats(opts: {
   containerIds: readonly string[];
 }): Promise<
-  { ok: true; samples: DockerStatsSample[] } | { ok: false; error: string }
+  | { ok: true; samples: DockerStatsSample[]; sampledAtUnixMs: number }
+  | { ok: false; error: string }
 > {
   const res = await exec(
     [
@@ -848,6 +849,7 @@ async function readDockerStats(opts: {
     ],
     { stdin: "ignore" }
   );
+  const sampledAtUnixMs = Date.now();
   if (res.exitCode !== 0) {
     return { ok: false, error: res.stderr.trim() || "docker stats failed" };
   }
@@ -856,7 +858,7 @@ async function readDockerStats(opts: {
   if (samples.length === 0) {
     return { ok: false, error: "docker stats returned no samples" };
   }
-  return { ok: true, samples };
+  return { ok: true, samples, sampledAtUnixMs };
 }
 
 function parseDockerStatsOutput(opts: {
@@ -998,7 +1000,7 @@ async function runUsageOnce(opts: {
     : { rows: [], total: null };
   const stats =
     index.containerIds.length === 0
-      ? { ok: true as const, samples: [] }
+      ? { ok: true as const, samples: [], sampledAtUnixMs: null }
       : await readDockerStats({ containerIds: index.containerIds });
 
   if (!runtimeResult.ok) {
@@ -1040,6 +1042,7 @@ async function runUsageOnce(opts: {
   return await renderUsageSuccess({
     args: opts.args,
     report,
+    sampledAtUnixMs: stats.sampledAtUnixMs,
     hostReport,
     runtimeOk: runtimeResult.ok,
     runtimeError: runtimeResult.error,
@@ -1136,6 +1139,7 @@ async function renderNoSamples(opts: {
 async function renderUsageSuccess(opts: {
   readonly args: UsageArgs;
   readonly report: UsageReport;
+  readonly sampledAtUnixMs: number | null;
   readonly hostReport: HostUsageReport;
   readonly runtimeOk: boolean;
   readonly runtimeError: string | null;
@@ -1144,7 +1148,10 @@ async function renderUsageSuccess(opts: {
     writeJson({
       payload: {
         ...(opts.args.options.details
-          ? { containers: opts.report.containerDetails ?? [] }
+          ? {
+              containers: opts.report.containerDetails ?? [],
+              sampledAtUnixMs: opts.sampledAtUnixMs,
+            }
           : {}),
         projects: opts.report.projects,
         total: opts.report.total,
@@ -1271,9 +1278,8 @@ async function readSampleStartTimes(opts: {
       ids.add(container.id);
     }
   }
-  const starts = new Map<string, string>();
   if (ids.size === 0) {
-    return starts;
+    return new Map();
   }
   // Certify the container run around the sample, without asking for full
   // inspect data again. Failure leaves the point usable without I/O rates.
@@ -1289,15 +1295,27 @@ async function readSampleStartTimes(opts: {
     ],
     { stdin: "ignore", timeoutMs: 3000 }
   ).catch(() => null);
-  if (result?.exitCode !== 0) {
-    return starts;
-  }
-  for (const row of parseJsonLines(result.stdout)) {
+  return parseSampleStartTimes({ output: result?.stdout ?? "", ids });
+}
+
+// Docker can print complete lines for survivors and still exit nonzero
+// when another requested container disappeared.
+function parseSampleStartTimes(opts: {
+  readonly output: string;
+  readonly ids: ReadonlySet<string>;
+}): ReadonlyMap<string, string> {
+  const starts = new Map<string, string>();
+  for (const row of parseJsonLines(opts.output)) {
     const id = getString(row, "id");
     const startedAt = getString(row, "startedAt");
     if (id && startedAt) {
-      starts.set(id, startedAt);
-      starts.set(id.slice(0, 12), startedAt);
+      const shortId = id.slice(0, 12);
+      if (opts.ids.has(id)) {
+        starts.set(id, startedAt);
+      }
+      if (opts.ids.has(shortId)) {
+        starts.set(shortId, startedAt);
+      }
     }
   }
   return starts;
@@ -1568,6 +1586,7 @@ export const __testOnlyUsage = {
   buildHostUsageReport,
   buildServiceUsageRows,
   parseDockerStatsSampleLine,
+  parseSampleStartTimes,
 };
 
 type UsageServiceRow = {

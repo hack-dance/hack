@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -19,6 +19,54 @@ const MAX_SAMPLES: usize = 120;
 pub struct StatsReport {
     #[serde(default)]
     pub containers: Vec<ContainerUsage>,
+    #[serde(rename = "sampledAtUnixMs")]
+    pub sampled_at_unix_ms: Option<u64>,
+}
+
+/// Local clock anchors around one CLI invocation.
+#[derive(Clone, Copy)]
+pub struct SampleClock {
+    pub instant: Instant,
+    wall: SystemTime,
+}
+
+impl SampleClock {
+    #[must_use]
+    pub fn now() -> Self {
+        Self {
+            instant: Instant::now(),
+            wall: SystemTime::now(),
+        }
+    }
+}
+
+impl StatsReport {
+    /// Map the CLI's counter observation into the app's monotonic clock.
+    /// Missing timing or a clock step leaves CPU and memory readable while
+    /// breaking the rate baseline.
+    pub fn anchor_time(&mut self, began: SampleClock, received: SampleClock) -> Instant {
+        if let Some(observed) = self.observation_time(began, received) {
+            return observed;
+        }
+        for row in &mut self.containers {
+            row.started_at = None;
+        }
+        received.instant
+    }
+
+    fn observation_time(&self, began: SampleClock, received: SampleClock) -> Option<Instant> {
+        let wall_elapsed = received.wall.duration_since(began.wall).ok()?;
+        let mono_elapsed = received.instant.saturating_duration_since(began.instant);
+        // Allow for clock reads on either side of ordinary scheduling
+        // jitter and the CLI timestamp's millisecond resolution.
+        if wall_elapsed.abs_diff(mono_elapsed) > Duration::from_millis(20) {
+            return None;
+        }
+        let stamp = UNIX_EPOCH.checked_add(Duration::from_millis(self.sampled_at_unix_ms?))?;
+        let age = received.wall.duration_since(stamp).ok()?;
+        let observed = received.instant.checked_sub(age)?;
+        (observed >= began.instant).then_some(observed)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -536,6 +584,7 @@ mod tests {
                 std_row("111111111111", "shop", Some(1000)),
                 std_row("222222222222", "shop--preview", Some(0)),
             ],
+            ..StatsReport::default()
         }
     }
 
@@ -806,6 +855,50 @@ mod tests {
         assert_eq!(point.net_out_per_second, None);
         assert_eq!(point.network_per_second, Some(200_000.0));
         assert_eq!(point.disk_per_second, Some(200_000.0));
+    }
+
+    #[test]
+    fn differing_verification_delays_use_the_same_counter_interval() {
+        let now = Instant::now();
+        let clock = |seconds| {
+            let offset = Duration::from_secs(seconds);
+            SampleClock {
+                instant: now + offset,
+                wall: UNIX_EPOCH + Duration::from_secs(1_000) + offset,
+            }
+        };
+        let preview = key(InstanceKey::branch("shop", "preview"));
+        for (first_delay, second_delay) in [(0, 2), (2, 0)] {
+            let mut history = StatsHistory::default();
+            let mut sample = report();
+            sample.sampled_at_unix_ms = Some(1_001_000);
+            let first = sample.anchor_time(clock(0), clock(1 + first_delay));
+            history.record(&projects(), &sample, first);
+
+            sample.sampled_at_unix_ms = Some(1_006_000);
+            sample.containers[2].net_input_bytes = Some(1500);
+            sample.containers[2].block_input_bytes = Some(1500);
+            let second = sample.anchor_time(clock(5), clock(6 + second_delay));
+            history.record(&projects(), &sample, second);
+            let point = history.points(&preview, second).next_back().unwrap();
+            assert_eq!(point.at, now + Duration::from_secs(6));
+            assert_eq!(point.network_per_second, Some(200.0));
+            assert_eq!(point.disk_per_second, Some(200.0));
+        }
+    }
+
+    #[test]
+    fn a_wall_clock_step_breaks_rate_evidence() {
+        let began = SampleClock::now();
+        let received = SampleClock {
+            instant: began.instant + Duration::from_secs(1),
+            wall: began.wall + Duration::from_secs(2),
+        };
+        let mut sample = report();
+        let millis = began.wall.duration_since(UNIX_EPOCH).unwrap().as_millis();
+        sample.sampled_at_unix_ms = Some(u64::try_from(millis).unwrap() + 500);
+        assert_eq!(sample.anchor_time(began, received), received.instant);
+        assert!(sample.containers.iter().all(|row| row.started_at.is_none()));
     }
 
     #[test]

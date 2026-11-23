@@ -8,8 +8,8 @@ use gpui_kit::{
 use hack_desktop_core::models::{Container, ProjectRow};
 use hack_desktop_core::state::ServiceView;
 use hack_desktop_core::stats::{
-    HISTORY_WINDOW, MemoryLimit, SAMPLE_INTERVAL, ServiceKey, StatsHistory, StatsPoint,
-    has_running_services,
+    HISTORY_WINDOW, MemoryLimit, SAMPLE_INTERVAL, SampleClock, ServiceKey, StatsHistory,
+    StatsPoint, has_running_services,
 };
 use hack_desktop_core::usage;
 use hack_desktop_core::viewmodel::DetailView;
@@ -58,7 +58,15 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             let (report, sampled_at) = cx
                 .background_executor()
-                .spawn(async move { (source.stats_sample(), Instant::now()) })
+                .spawn(async move {
+                    let began = SampleClock::now();
+                    let mut report = source.stats_sample();
+                    let received = SampleClock::now();
+                    let observed = report
+                        .as_mut()
+                        .map_or(received.instant, |r| r.anchor_time(began, received));
+                    (report, observed)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.stats.in_flight = false;
@@ -739,6 +747,7 @@ impl HackApp {
                         block_output: Some(0),
                     },
                 }],
+                ..StatsReport::default()
             };
             self.stats.history.record(
                 &snapshot.projects,

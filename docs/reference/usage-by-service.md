@@ -81,3 +81,5 @@ inspections around the sample agree. Network and disk byte counters are
 cumulative. The `ioCounterErrorBytes` fields bound Docker's rounding for each
 counter. The desktop uses successive samples from the same known container
 run and draws gaps when the rounding bound is large relative to the change.
+`sampledAtUnixMs` records when Docker returned the counters, before the
+verification inspection.

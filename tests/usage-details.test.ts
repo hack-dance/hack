@@ -129,6 +129,21 @@ test("Docker usage retains the precision of printed network and disk counters", 
   });
 });
 
+test("post-sample inspection keeps complete rows for surviving requested containers", () => {
+  const surviving = "0123456789ab";
+  const gone = "111111111111";
+  const startedAt = "2026-01-01T00:00:00Z";
+  const starts = __testOnlyUsage.parseSampleStartTimes({
+    ids: new Set([surviving, gone]),
+    output: [
+      JSON.stringify({ id: `${surviving}cdef`, startedAt }),
+      '{"id":"111111111111',
+      JSON.stringify({ id: "222222222222", startedAt }),
+    ].join("\n"),
+  });
+  expect([...starts]).toEqual([[surviving, startedAt]]);
+});
+
 test("project-scoped host usage includes branch descendants and excludes other projects from totals", () => {
   const records: HostCommandRecord[] = [
     "alpha",

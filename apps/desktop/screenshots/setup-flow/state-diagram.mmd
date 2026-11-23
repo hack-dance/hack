@@ -1,0 +1,26 @@
+---
+title: Desktop setup
+---
+stateDiagram-v2
+    direction TB
+    state Result <<choice>>
+    state Progress <<choice>>
+    state "All done" as Done
+    state "Needs action" as NeedsAction
+    state "Couldn’t check" as Unchecked
+    [*] --> Welcome
+    Welcome --> Checking : Start setup
+    Checking --> Result
+    Result --> Passed : Evidence passed
+    Result --> NeedsAction : Fix available
+    Result --> Unchecked : Evidence unavailable
+    NeedsAction --> Checking : Check again
+    Unchecked --> Checking : Check again
+    Passed --> Progress : Two seconds or Next
+    Passed --> Passed : Stay
+    NeedsAction --> Progress : Skip allowed
+    Unchecked --> Progress : Skip allowed
+    Progress --> Checking : Next step
+    Progress --> Done : Final step
+    Done --> Checking : Reopen step
+    Done --> [*] : Open Hack

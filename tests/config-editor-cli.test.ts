@@ -7,6 +7,7 @@ import {
   realpath,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,6 +17,7 @@ import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
 import { normalizeEnvConfigName } from "../src/lib/project.ts";
 import { runFixtureGitSync } from "./helpers/fixture-git.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
+import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
 setDefaultTimeout(45_000);
 
@@ -1553,20 +1555,16 @@ test("a linked checkout checks inherited private overlay filenames without listi
   }
 });
 
-test("implicit migration receipts withhold private overlay names", async () => {
+async function legacyOverlayFixture(config: Record<string, unknown>) {
   const root = await mkdtemp(join(tmpdir(), "hack-config-private-migration-"));
   scratch.push(root);
   const cwd = join(root, "legacy");
   const project = join(cwd, ".hack");
   await mkdir(project, { recursive: true });
-  const marker = "private-overlay-migration-fixture";
-  const authored = `https://fixture:${marker}@example.invalid`;
-  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const projectPath = join(project, "hack.config.json");
+  const original = JSON.stringify(config);
   await Promise.all([
-    writeFile(
-      join(project, "hack.config.json"),
-      JSON.stringify({ env: { defaultOverlay: authored } })
-    ),
+    writeFile(projectPath, original),
     writeFile(
       join(project, "docker-compose.yml"),
       "services:\n  api:\n    image: alpine\n"
@@ -1576,31 +1574,144 @@ test("implicit migration receipts withhold private overlay names", async () => {
       '{"version":1,"vars":[{"key":"MODE","source":"plain_env"}]}\n'
     ),
     writeFile(join(project, ".env"), "MODE=base\n"),
-    writeFile(join(project, `.env.${name}`), "MODE=private-layer\n"),
   ]);
-  const report = await show(root, cwd);
-  const result = await cli({
-    root,
-    cwd,
-    args: ["apply"],
-    patch: {
-      base: bases(report),
-      changes: [
-        {
-          layer: "5",
-          kind: "env",
-          scope: "global",
-          key: "NEW",
-          value: "added",
-        },
-      ],
-    },
-  });
+  return { root, cwd, project, projectPath, original };
+}
+
+const addEnvChoice = {
+  layer: "5",
+  kind: "env",
+  scope: "global",
+  key: "NEW",
+  value: "added",
+};
+const selectBaseChoice = {
+  layer: "1",
+  kind: "project",
+  path: "env.defaultOverlay",
+  value: "default",
+};
+
+test("implicit migration receipts withhold private overlay names", async () => {
+  const marker = "private-overlay-migration-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const f = await legacyOverlayFixture({ env: { defaultOverlay: authored } });
+  await writeFile(join(f.project, `.env.${name}`), "MODE=private-layer\n");
+  const patch = {
+    base: bases(await show(f.root, f.cwd)),
+    changes: [addEnvChoice],
+  };
+  const result = await cli({ ...f, args: ["apply"], patch });
   expect(result.payload.ok).toBe(true);
   expect(
     result.payload.data.changed.some((id: string) => id.endsWith(":[redacted]"))
   ).toBe(true);
   expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+});
+
+test("a project-only save preserves redaction for a later legacy env migration", async () => {
+  const marker = "private-dotenv-filename-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const f = await legacyOverlayFixture({ env: { defaultOverlay: authored } });
+  await writeFile(join(f.project, `.env.${name}`), "MODE=private-layer\n");
+  const base = bases(await show(f.root, f.cwd));
+  const replacement = { base, changes: [selectBaseChoice] };
+  for (const command of ["validate", "apply"]) {
+    const result = await cli({ ...f, args: [command], patch: replacement });
+    const issues =
+      result.payload.data?.issues ?? result.payload.error?.detail.issues;
+    expect(issues[0]?.message).toContain("private filename");
+    expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+  }
+  expect((await readFile(f.projectPath, "utf8")) === f.original).toBe(true);
+  const later = await cli({
+    ...f,
+    args: ["apply"],
+    patch: { base, changes: [addEnvChoice] },
+  });
+  expect(later.payload.ok).toBe(true);
+  expect(JSON.stringify(later.payload).includes(marker)).toBe(false);
+});
+
+test("legacy migration errors redact private dotenv filenames", async () => {
+  const marker = "private-dotenv-error-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const f = await legacyOverlayFixture({ env: { defaultOverlay: authored } });
+  await symlink(".env", join(f.project, `.env.${name}`));
+  const patch = {
+    base: bases(await show(f.root, f.cwd)),
+    changes: [addEnvChoice],
+  };
+  for (const command of ["validate", "apply"]) {
+    const result = await cli({ ...f, args: [command], patch });
+    const issues =
+      result.payload.data?.issues ?? result.payload.error?.detail.issues;
+    expect(issues[0]?.message).toContain('".env.[redacted]" is a symlink');
+    expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+  }
+});
+
+test("env migration rechecks private filenames before replacing the project settings", async () => {
+  const marker = "private-dotenv-publication-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const f = await legacyOverlayFixture({
+    env: { defaultOverlay: authored },
+    defaultEnvConfig: "qa",
+  });
+  const patch = {
+    base: bases(await show(f.root, f.cwd)),
+    changes: [addEnvChoice],
+  };
+  const validation = await cli({ ...f, args: ["validate"], patch });
+  expect(validation.payload.data.valid).toBe(true);
+  const pending = await withEnvLayerLock({
+    layerPath: f.projectPath,
+    run: async () => {
+      const save = cli({ ...f, args: ["apply"], patch });
+      await waitForFileContent({
+        path: join(f.project, "hack.env.local.yaml"),
+        complete: (text) => (text.includes("MODE: base") ? true : undefined),
+        what: "migration local layer",
+        budgetMs: 7000,
+      });
+      await writeFile(join(f.project, `.env.${name}`), "MODE=private-layer\n");
+      return { save };
+    },
+  });
+  const result = await pending.save;
+  expect(result.payload.error?.code).toBe("E_CONFLICT");
+  expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+  expect((await readFile(f.projectPath, "utf8")) === f.original).toBe(true);
+});
+
+test("an overlong private overlay can be replaced when no legacy file exists", async () => {
+  const marker = "private-long-overlay-fixture";
+  for (const length of [128, 280]) {
+    const authored = `https://fixture:${marker}-${"x".repeat(length)}@example.invalid`;
+    const name = normalizeEnvConfigName(authored) ?? "invalid";
+    const f = await legacyOverlayFixture({ env: { defaultOverlay: authored } });
+    const patch = {
+      base: bases(await show(f.root, f.cwd)),
+      changes: [selectBaseChoice],
+    };
+    if (length === 128) {
+      const legacy = join(f.project, `.env.${name}`);
+      await writeFile(legacy, "MODE=private-layer\n");
+      const blocked = await cli({ ...f, args: ["apply"], patch });
+      expect(blocked.payload.error?.code).toBe("E_CONFIG_INVALID");
+      expect(JSON.stringify(blocked.payload).includes(marker)).toBe(false);
+      await rm(legacy);
+    }
+    const saved = await cli({ ...f, args: ["apply"], patch });
+    expect(saved.payload.ok).toBe(true);
+    const next = await show(f.root, f.cwd);
+    expect(next.default_overlay).toBe("default");
+    expect(JSON.stringify(next).includes(marker)).toBe(false);
+  }
 });
 
 test("validation reads newly selected layers and honors an explicit selection", async () => {

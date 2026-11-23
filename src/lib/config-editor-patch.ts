@@ -55,7 +55,7 @@ import {
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
 import { isRecord } from "./guards.ts";
-import { readHackEnvContract } from "./hack-env.ts";
+import { readHackEnvContract, resolveEnvFilePath } from "./hack-env.ts";
 import {
   ENV_BASE_SELECTION_ALIASES,
   ENV_CONFIG_NAME_MAX_LENGTH,
@@ -616,11 +616,17 @@ async function privateOverlayFilesExist(opts: {
     ...opts.inheritedDirs.filter((dir) => dir !== null),
   ]);
   for (const envName of opts.names) {
+    const selectable = parseEnvConfigSelection(envName) === envName;
     const paths = [
-      resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName }),
+      resolveEnvFilePath({ projectDir: opts.projectDir, envName }),
     ];
-    for (const projectDir of dirs) {
-      paths.push(resolveProjectEnvLocalConfigPath({ projectDir, envName }));
+    if (selectable) {
+      paths.push(
+        resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName })
+      );
+      for (const projectDir of dirs) {
+        paths.push(resolveProjectEnvLocalConfigPath({ projectDir, envName }));
+      }
     }
     for (const path of paths) {
       if (
@@ -628,7 +634,13 @@ async function privateOverlayFilesExist(opts: {
         (await lstat(path).then(
           () => true,
           (error: unknown) => {
-            if (isRecord(error) && error.code === "ENOENT") {
+            // The legacy migrator discovers dotenv files by filename, including
+            // names outside the selector limit that still fit on disk.
+            if (
+              isRecord(error) &&
+              (error.code === "ENOENT" ||
+                (!selectable && error.code === "ENAMETOOLONG"))
+            ) {
               return false;
             }
             throw error;
@@ -926,19 +938,24 @@ async function stageConfigMigration(
         code: conflict ? "E_CONFLICT" : "E_CONFIG_INVALID",
         message: conflict
           ? "Changed outside Hack. Reload before saving."
-          : configErrorMessage(
-              error,
-              "Could not prepare the legacy env migration."
-            ),
+          : configMigrationErrorMessage(error, snapshot.privateOverlays),
       },
     };
   }
 }
 
-function configErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ClosedCliError || error instanceof HackCliError
-    ? error.message
-    : fallback;
+function configMigrationErrorMessage(
+  error: unknown,
+  privateOverlays: ReadonlySet<string>
+): string {
+  if (!(error instanceof ClosedCliError || error instanceof HackCliError)) {
+    return "Could not prepare the legacy env migration.";
+  }
+  let message = error.message;
+  for (const name of [...privateOverlays].sort((a, b) => b.length - a.length)) {
+    message = message.replaceAll(name, "[redacted]");
+  }
+  return message;
 }
 
 async function assertConfigMigrationInputs(
@@ -1239,6 +1256,18 @@ async function publishConfigMigration(
   if (!projectLayer) {
     throw new AtomicWriteConflictError();
   }
+  const projectPath = layerDestination(projectLayer);
+  const migratedProject: unknown = migration.prepared.files.some(
+    ({ path }) => path === projectPath
+  )
+    ? JSON.parse(migration.prepared.payload(projectPath))
+    : null;
+  const removed = isRecord(migratedProject)
+    ? removedPrivateOverlays(
+        snapshot,
+        privateProjectOverlayNames(migratedProject)
+      )
+    : [];
   const layerIds = migrationLayerIds(snapshot, migration);
   const result = await applyEnvMigration({
     project: migration.project,
@@ -1246,8 +1275,19 @@ async function publishConfigMigration(
     acceptTrackedChanges: false,
     snapshots: envMigrationSnapshots(),
     repairCompose: false,
-    validateDestination: async () =>
-      await assertConfigLayerDirectory(projectLayer),
+    validateDestination: async () => {
+      await assertConfigLayerDirectory(projectLayer);
+      if (
+        removed.length > 0 &&
+        (await privateOverlayFilesExist({
+          projectDir: snapshot.project.projectDir,
+          inheritedDirs: [inheritedEnvDir(snapshot)],
+          names: removed,
+        }))
+      ) {
+        throw new AtomicWriteConflictError();
+      }
+    },
     onPublished: ({ path }) => {
       const id = layerIds.get(path);
       if (id && !changed.includes(id)) {

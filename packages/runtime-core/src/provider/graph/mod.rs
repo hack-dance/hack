@@ -2228,7 +2228,10 @@ pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Receipt,
             run,
             engine.guest().incarnation(),
         )?;
-        if receipt.phase == "removed" && !root.join("state.pending").exists() {
+        if receipt.phase == "removed"
+            && !root.join("state.pending").exists()
+            && !root.join("state.pending").is_symlink()
+        {
             archive::verify_removed(&engine, &receipt)?;
             return Ok(receipt);
         }

@@ -186,7 +186,7 @@ pub(super) fn make_room(candidate: &Candidate, engine: &Engine<'_>) -> Result<()
     if count >= ACTIVE_LIMIT && skipped > 0 {
         return Err(error(
             "graph_retention_budget",
-            "64 graph attempts are retained and the removed ones among them could not be proven removed, so none was archived; inspect them with hack doctor --native-cleanup inspect.",
+            "64 graph attempts are retained and not enough of the removed ones among them could be proven removed to make room; inspect them with hack doctor --native-cleanup inspect.",
         ));
     }
     Ok(())

@@ -141,7 +141,7 @@ function systemHomeDir(): string | undefined {
  * A tilde expands only at the start of an unquoted word, so a path that must
  * be quoted, or that steps out of the home with `..`, has no such form.
  */
-function homeRelativeLauncher(
+export function homeRelativeLauncher(
   command: string,
   homeDir: string | undefined
 ): string | undefined {

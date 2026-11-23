@@ -181,6 +181,30 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "guest-execution",
+    module: "GuestAgent",
+    states: 3900,
+    invariant: "ResultBeforeRelease",
+    action: "Release",
+    fields: ['job = "released"', 'saved = "none"'],
+    additionalControls: [
+      {
+        name: "duplicate",
+        negative: true,
+        invariant: "StartedOnce",
+        action: "Next",
+        fields: ["starts = <<2, 0>>", "id = 1"],
+      },
+      {
+        name: "record-running",
+        negative: true,
+        invariant: "SavedOutcome",
+        action: "Record",
+        fields: ['belief = "running"', 'saved = "running"'],
+      },
+    ],
+  },
+  {
     name: "project-prerequisites",
     module: "ProjectPrerequisites",
     states: 13,
@@ -2850,6 +2874,23 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-build-batch",
+    module: "BuildBatch",
+    states: 296,
+    invariant: "NoLiveReturn",
+    action: "Return",
+    fields: ["result = -2"],
+    additionalControls: [
+      {
+        name: "cancel-wins",
+        negative: true,
+        invariant: "FirstOutcome",
+        action: "Return",
+        fields: ["active = {}"],
+      },
+    ],
+  },
+  {
     name: "native-build-retention",
     module: "BuildRetention",
     states: 6181,
@@ -3061,6 +3102,34 @@ const contracts: readonly ModelContract[] = [
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
         ],
+      },
+    ],
+  },
+  {
+    // HACK-2524: release a checkout's run mapping whose native home is gone. The
+    // positive control releases when the path no longer holds the home and no
+    // process names it; `negative` is today (the clean-stop release from the
+    // home's own records), which strands a deleted home; `path-only` ignores the
+    // process scan and releases while the home's run is still alive.
+    name: "native-run-mapping-release",
+    module: "MappingRelease",
+    states: 21,
+    invariant: "NoStrandedMapping",
+    action: "Delete",
+    fields: ['home = "deleted"', 'mapping = "held"', "procs = FALSE"],
+    alternativeWitnesses: [
+      {
+        action: "Move",
+        fields: ['home = "moved"', 'mapping = "held"', "procs = FALSE"],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "path-only",
+        negative: true,
+        invariant: "NeverReleaseLive",
+        action: "GoneHomeRelease",
+        fields: ['mapping = "released"', "procs = TRUE", "unsafe = TRUE"],
       },
     ],
   },

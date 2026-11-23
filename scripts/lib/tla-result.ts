@@ -85,7 +85,7 @@ export function verifyRestoreHistoryModelResult(opts: {
 
 const TRACE_STATES = /(?=^State \d+:)/m;
 const DISTINCT_STATES =
-  /\b(\d+) distinct states found, 0 states left on queue\b/;
+  /\b(\d{1,3}(?:,\d{3})+|\d+) distinct states found, 0 states left on queue\b/;
 
 export function verifyFiniteModelResult(opts: {
   readonly negative: boolean;
@@ -104,7 +104,8 @@ export function verifyFiniteModelResult(opts: {
     return (
       opts.exitCode === 0 &&
       COMPLETED.test(opts.output) &&
-      Number(DISTINCT_STATES.exec(opts.output)?.[1]) === opts.states
+      Number(DISTINCT_STATES.exec(opts.output)?.[1]?.replaceAll(",", "")) ===
+        opts.states
     );
   }
   const expectedError = `Error: Invariant ${opts.invariant} is violated.`;

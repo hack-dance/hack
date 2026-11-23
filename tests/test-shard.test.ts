@@ -1316,11 +1316,16 @@ describe("hosted test CI fan-in", () => {
       "test-focus",
       "linux-process-lifetime",
       "config-compiler",
+      "guest-protocol",
     ]);
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
       (step) => step.name === "Reject failed or skipped test shards"
     );
+    expect(gate?.env?.GUEST_ENABLED).toBe(
+      "${{ needs.changes.outputs.runtime_core }}"
+    );
+    expect(gate?.env?.GUEST_RESULT).toBe("${{ needs.guest-protocol.result }}");
     expect(gate?.env?.SHARD_RESULT).toBe("${{ needs.test-shard.result }}");
     expect(gate?.env?.FOCUS_RESULT).toBe("${{ needs.test-focus.result }}");
     expect(gate?.env?.CHANGES_RESULT).toBe("${{ needs.changes.result }}");
@@ -1368,6 +1373,8 @@ describe("hosted test CI fan-in", () => {
       const run = Bun.spawnSync(["bash", "-e", "-c", gate.run], {
         env: {
           ...process.env,
+          GUEST_ENABLED: "false",
+          GUEST_RESULT: "skipped",
           CHANGES_RESULT: changes,
           SCOPE: "fixture",
           SUITE: suite,
@@ -1398,58 +1405,31 @@ describe("hosted test CI fan-in", () => {
       ["false", "success", 1],
       ["", "skipped", 1],
     ] as const) {
-      const run = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
-        env: {
-          ...process.env,
-          PR_DRAFT: "false",
-          CHANGES_RESULT: "success",
-          SCOPE: "fixture",
-          SUITE: "true",
-          SHARD_RESULT: "success",
-          FOCUS_RESULT: "success",
-          COMPILER_ENABLED: "false",
-          COMPILER_RESULT: "skipped",
-          LIFETIME_ENABLED: enabled,
-          LIFETIME_RESULT: result,
-        },
-        stdout: "ignore",
-        timeout: 5000,
-      });
-      expect(run.exitCode, `lifetime enabled=${enabled} result=${result}`).toBe(
-        exitCode
-      );
-    }
-    for (const [enabled, result, exitCode] of [
-      ["true", "success", 0],
-      ["true", "failure", 1],
-      ["true", "cancelled", 1],
-      ["true", "skipped", 1],
-      ["true", "", 1],
-      ["false", "skipped", 0],
-      ["false", "failure", 1],
-      ["false", "success", 1],
-      ["", "skipped", 1],
-    ] as const) {
-      const run = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
-        env: {
-          ...process.env,
-          PR_DRAFT: "false",
-          CHANGES_RESULT: "success",
-          SCOPE: "fixture",
-          SUITE: "true",
-          SHARD_RESULT: "success",
-          FOCUS_RESULT: "success",
-          LIFETIME_ENABLED: "false",
-          LIFETIME_RESULT: "skipped",
-          COMPILER_ENABLED: enabled,
-          COMPILER_RESULT: result,
-        },
-        stdout: "ignore",
-        timeout: 5000,
-      });
-      expect(run.exitCode, `compiler enabled=${enabled} result=${result}`).toBe(
-        exitCode
-      );
+      for (const job of ["GUEST", "LIFETIME", "COMPILER"]) {
+        const run = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
+          env: {
+            PR_DRAFT: "false",
+            CHANGES_RESULT: "success",
+            SCOPE: "fixture",
+            SUITE: "true",
+            SHARD_RESULT: "success",
+            FOCUS_RESULT: "success",
+            GUEST_ENABLED: "false",
+            GUEST_RESULT: "skipped",
+            LIFETIME_ENABLED: "false",
+            LIFETIME_RESULT: "skipped",
+            COMPILER_ENABLED: "false",
+            COMPILER_RESULT: "skipped",
+            [`${job}_ENABLED`]: enabled,
+            [`${job}_RESULT`]: result,
+          },
+          stdout: "ignore",
+          timeout: 5000,
+        });
+        expect(run.exitCode, `${job} enabled=${enabled} result=${result}`).toBe(
+          exitCode
+        );
+      }
     }
     const named = Object.entries(workflow.jobs).filter(
       ([key, job]) => (job.name ?? key) === "test"

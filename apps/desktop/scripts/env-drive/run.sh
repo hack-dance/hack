@@ -1,15 +1,6 @@
 #!/bin/sh
-# Env slice 2 against the real CLI, on a throwaway project only.
-#
-#   scripts/env-drive/run.sh <hack-desktop binary> [passes]
-#
-# Each pass makes a fresh temp project, HOME and HACK_HOME under /tmp, seeds
-# one plaintext value with this checkout's CLI (`bun index.ts`), drives the
-# app (edit that value, add a plaintext and a secret variable), then reads the
-# stored values back with the same CLI. A fake hackd serves the project list;
-# every `hack env` command the app runs is the real CLI. Nothing outside the
-# temp directory is read or written. Needs bun (the repo's pinned version) and
-# python3. BUN overrides the bun binary.
+# Read names through the real CLI on an isolated project.
+# Usage: scripts/env-drive/run.sh <hack-desktop binary> [passes]
 set -u
 APP=$1
 PASSES=${2:-1}
@@ -32,7 +23,16 @@ while [ "$n" -lt "$PASSES" ]; do
   cat > "$T/bin/hack" <<STANDIN
 #!/bin/sh
 case "\$1" in
-  env) exec "$BUN" "$REPO/index.ts" "\$@" ;;
+  env)
+    if [ "\$2" = list ]; then
+      case " \$* " in
+        *" --show-secrets "*|*" --show-values "*|*" --plaintext-values "*)
+          touch "$T/value-request"; exit 2 ;;
+      esac
+      exec "$BUN" "$REPO/index.ts" "\$@"
+    fi
+    touch "$T/value-request"
+    exit 2 ;;
   version) echo '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}' ;;
   daemon) echo '{"running":true,"status":"running","version":"5.0.0","api_ok":true}' ;;
   logs) printf 'api | fixture log line\r\n'; case " \$* " in *" --no-follow "*) ;; *) exec sleep 600 ;; esac ;;
@@ -63,12 +63,10 @@ STANDIN
   wait "$FD" 2>/dev/null
   ok=1
   echo "$out" | grep -q '@drive result pass' || ok=0
-  for kv in FIXTURE_MODE=fake-plain-two FIXTURE_NEW=fake-new-value FIXTURE_SECRET=fake-secret-value; do
-    k=${kv%%=*}
-    v=${kv#*=}
-    [ "$(cli env get "$k" --env default --service global --path "$T/proj" 2>/dev/null)" = "$v" ] || { echo "pass $n: $k not stored as expected"; ok=0; }
-  done
-  if grep -q 'fake-secret-value' "$T"/proj/.hack/*.yaml; then echo "pass $n: the secret is in a plaintext YAML"; ok=0; fi
+  if [ -e "$T/value-request" ]; then
+    echo "pass $n: the app requested a value"
+    ok=0
+  fi
   if [ "$ok" = 1 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "$out"; fi
   rm -rf "$T"
 done

@@ -125,12 +125,6 @@ pub struct HackApp {
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
     pub(crate) env: hack_desktop_core::env::EnvModel,
-    /// The Env tab's open edit, if any (`env_view`).
-    pub(crate) env_edit: Option<crate::env_view::EnvEdit>,
-    /// "Saved NAME" after the last write, until the next edit or listing.
-    pub(crate) env_saved: Option<String>,
-    /// Numbers each editor opened (`EnvEdit::id`).
-    pub(crate) env_edit_seq: u64,
     /// Terminal panels, one per project or branch instance.
     #[cfg(hack_terminal)]
     pub(crate) panels: crate::terminal::Panels,
@@ -203,9 +197,6 @@ impl HackApp {
             _visibility: None,
             _activation: None,
             env: Default::default(),
-            env_edit: None,
-            env_saved: None,
-            env_edit_seq: 0,
             live,
             search,
             filter: String::new(),
@@ -234,13 +225,6 @@ impl HackApp {
             this.refresh_now();
         }
         this.start_log_drain(cx);
-        // A secret copied less than REVEAL_FOR ago: clear it on quit too, if
-        // the clipboard still holds it.
-        cx.on_app_quit(|this, cx| {
-            this.clear_owned_clipboard(cx);
-            async {}
-        })
-        .detach();
         this
     }
 
@@ -372,19 +356,14 @@ impl HackApp {
                 this.maybe_auto_refresh(cx);
                 if this.window_visible {
                     this.recheck_setup_on_return(cx);
-                } else {
-                    this.hide_env_values(cx);
                 }
             },
         ));
         // Focus coming back checks setup again (switching back from the
-        // terminal usually leaves the window visible throughout); focus
-        // going away hides any revealed env value.
+        // terminal usually leaves the window visible throughout).
         self._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.recheck_setup_on_return(cx);
-            } else {
-                this.hide_env_values(cx);
             }
         }));
     }
@@ -514,18 +493,11 @@ impl HackApp {
     }
 
     /// Select the Env fixture without opening a window.
-    pub fn show_env_fixture(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn show_env_fixture(&mut self, name: &str, cx: &mut Context<Self>) {
         self.tab = 2;
         // The CLI does not report a running overlay per instance yet (R22).
         self.env.running = (name == "env-running").then(|| "staging".to_owned());
         self.read_env(cx);
-        // The editor open on a secret: an empty masked field and the command.
-        if name == "env-edit"
-            && let hack_desktop_core::env::EnvView::Report(r) = &self.env.view
-            && let Some(row) = r.vars.iter().find(|v| v.key == "API_TOKEN").cloned()
-        {
-            self.open_env_edit(Some(&row), window, cx);
-        }
     }
 
     /// Fixtures: mark an action as in flight without running it.
@@ -881,13 +853,11 @@ impl HackApp {
 
     /// Everything a selection change resets: the pane, the env read, the
     /// Logs tab's stream and its service filter.
-    /// Another instance: its own overlays and scopes, nothing revealed.
+    /// Another instance: its own overlays and scopes.
     /// Explicit selections and refreshes that change the selection both
     /// come through here, so a new project is never listed with the last
     /// one's overlay or scope.
     fn reset_env_selection(&mut self) {
-        self.env_edit = None;
-        self.env_saved = None;
         self.env.env = None;
         self.env.scope = None;
         self.env.running = None;
@@ -921,7 +891,6 @@ impl HackApp {
             return;
         }
         self.tab = to;
-        self.env_edit = None;
         self.env.begin();
         if to == 1 {
             self.open_logs(cx);

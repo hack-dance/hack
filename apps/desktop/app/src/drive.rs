@@ -55,13 +55,6 @@
 //! expect-hackd <text> [<seconds>] wait for the hackd card's title, or a line
 //!                                 of its always-on summary, to contain text
 //! expect-env <NAME> [<seconds>]   wait for NAME in the Env listing
-//! env-set <NAME> <value>          edit an existing row, as the pencil and
-//!                                 Save do (rest of the line is the value)
-//! env-add [--secret] <NAME> <value>
-//!                                 add a variable, as + Variable and Save do
-//!                                 (for a test project only: these write
-//!                                 through the CLI; the report never prints
-//!                                 a value, only its length)
 //! wait <milliseconds>
 //! check-container <service> <pattern>
 //!                                 after the app quits, count processes in
@@ -96,20 +89,6 @@ const TAB_WAIT: Duration = Duration::from_secs(20);
 const DRIVE_TIMEOUT: Duration = Duration::from_secs(600);
 /// Report lines the supervisor reads start with this.
 const TAG: &str = "@drive";
-
-/// A value an env step writes. The report prints steps with `Debug`, so this
-/// prints only the value's length.
-#[derive(Clone, PartialEq, Eq)]
-pub struct DriveValue(pub String);
-
-impl std::fmt::Debug for DriveValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<{} bytes>", self.0.len())
-    }
-}
-
-/// How long an env write step waits for "Saved NAME".
-const ENV_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
@@ -166,15 +145,6 @@ pub enum Step {
         name: String,
         within: Duration,
     },
-    EnvSet {
-        name: String,
-        value: DriveValue,
-    },
-    EnvAdd {
-        name: String,
-        value: DriveValue,
-        secret: bool,
-    },
     CheckContainer {
         service: String,
         pattern: String,
@@ -196,8 +166,7 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
         let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         let rest = rest.trim();
         let args: Vec<&str> = rest.split_whitespace().collect();
-        // A line that writes an env value is never echoed: a malformed one
-        // (a missing name, say) could otherwise print its value.
+        // Old drive scripts may include values on retired env write steps.
         let writes_value = matches!(word, "env-set" | "env-add");
         let bad = |why: &str| {
             if writes_value {
@@ -249,28 +218,6 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                     secs.parse().map_err(|_| bad("not a number of seconds"))?,
                 ),
             },
-            ("env-set", [_, _, ..]) => {
-                let (name, value) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-                Step::EnvSet {
-                    name: name.into(),
-                    value: DriveValue(value.trim_start().into()),
-                }
-            }
-            ("env-add", [_, _, ..]) => {
-                let (secret, rest) = match rest.strip_prefix("--secret") {
-                    Some(r) => (true, r.trim_start()),
-                    None => (false, rest),
-                };
-                let (name, value) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-                if value.trim().is_empty() {
-                    return Err(bad("env-add needs a name and a value"));
-                }
-                Step::EnvAdd {
-                    name: name.into(),
-                    value: DriveValue(value.trim_start().into()),
-                    secret,
-                }
-            }
             ("expect-styled", [n]) | ("expect-styled", [n, _]) => Step::ExpectStyled {
                 count: n.parse().map_err(|_| bad("not a number of cells"))?,
                 within: Duration::from_secs(
@@ -469,42 +416,6 @@ async fn env_row(
     })
     .await
     .ok_or_else(|| format!("{name} not in the Env listing within {within:?}"))
-}
-
-/// Fill the open editor (`new_name` for a new variable), press Save, and
-/// wait for "Saved NAME" or the editor's error (which never holds a value).
-async fn save_env(
-    handle: &Win,
-    cx: &mut AsyncApp,
-    name: &str,
-    new_name: Option<&str>,
-    value: &str,
-) -> Result<String, String> {
-    handle
-        .update(cx, |app, window, cx| {
-            let Some(edit) = app.env_edit.as_ref() else {
-                return;
-            };
-            let (field, name_field) = (edit.value.clone(), edit.name.clone());
-            if let (Some(n), Some(field)) = (new_name, name_field) {
-                let n = n.to_owned();
-                field.update(cx, |s, cx| s.set_value(n, window, cx));
-            }
-            let v = value.to_owned();
-            field.update(cx, |s, cx| s.set_value(v, window, cx));
-            app.save_env_edit(cx);
-        })
-        .map_err(|e| e.to_string())?;
-    let saved = format!("Saved {name}");
-    let outcome = poll(handle, cx, ENV_WAIT, |app, _, _| {
-        if app.env_saved.as_deref() == Some(saved.as_str()) {
-            return Some(Ok(()));
-        }
-        app.env_edit.as_ref().and_then(|e| e.error.clone()).map(Err)
-    })
-    .await
-    .ok_or_else(|| format!("{saved:?} not shown within {ENV_WAIT:?}"))?;
-    outcome.map(|()| String::new())
 }
 
 async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String, String> {
@@ -749,36 +660,6 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
         Step::ExpectEnv { name, within } => {
             env_row(handle, cx, name, *within).await?;
             Ok(String::new())
-        }
-        Step::EnvSet { name, value } => {
-            let row = env_row(handle, cx, name, Duration::from_secs(20)).await?;
-            handle
-                .update(cx, |app, window, cx| {
-                    app.open_env_edit(Some(&row), window, cx)
-                })
-                .map_err(|e| e.to_string())?;
-            // An unread plaintext value is read first: wait for the field.
-            poll(handle, cx, ENV_WAIT, |app, _, _| {
-                app.env_edit.as_ref().is_some_and(|e| e.ready).then_some(())
-            })
-            .await
-            .ok_or("the editor did not get the current value")?;
-            save_env(handle, cx, name, None, &value.0).await
-        }
-        Step::EnvAdd {
-            name,
-            value,
-            secret,
-        } => {
-            handle
-                .update(cx, |app, window, cx| {
-                    app.open_env_edit(None, window, cx);
-                    if *secret {
-                        app.toggle_env_edit_secret(window, cx);
-                    }
-                })
-                .map_err(|e| e.to_string())?;
-            save_env(handle, cx, name, Some(name), &value.0).await
         }
         Step::CheckContainer { service, pattern } => {
             let target = handle
@@ -1136,20 +1017,14 @@ mod tests {
     }
 
     #[test]
-    fn env_steps_never_print_their_values() {
-        let base = Path::new("/");
-        // Parsed: the report prints only the length.
-        let steps = parse("env-set FIXTURE_MODE fake-value-SENTINEL\nenv-add --secret FIXTURE_TOKEN fake-value-SENTINEL\n", base).unwrap();
-        assert!(!format!("{steps:?}").contains("SENTINEL"), "{steps:?}");
-        // Malformed: the error names the line, not its value.
-        for line in [
-            "env-add --secret fake-value-SENTINEL",
-            "env-set fake-value-SENTINEL",
-            "env-add fake-value-SENTINEL",
+    fn retired_env_write_steps_do_not_echo_their_arguments() {
+        for step in [
+            "env-add --secret API_KEY fixture-value",
+            "env-set API_KEY fixture-value",
         ] {
-            let err = parse(line, base).expect_err(line);
-            assert!(!err.contains("SENTINEL"), "{err}");
-            assert!(err.starts_with("line 1:"), "{err}");
+            let error = parse(step, Path::new("/")).unwrap_err();
+            assert!(error.starts_with("line 1:"));
+            assert!(!error.contains("fixture-value"));
         }
     }
 

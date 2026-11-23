@@ -324,39 +324,6 @@ pub trait Source: Send + Sync {
         self.env(root, native)
     }
 
-    /// One value, read when the user asks for it (`hack env get KEY` on a
-    /// pipe, never a terminal). The error never contains the value.
-    ///
-    /// # Errors
-    /// Why the value could not be read, with no value in it.
-    fn env_value(
-        &self,
-        _root: &Path,
-        _native: bool,
-        _selection: &EnvTarget,
-        _key: &str,
-    ) -> Result<crate::env::Revealed, String> {
-        Err("Values are unavailable for this source".into())
-    }
-
-    /// Set one value in the overlay and scope named (`hack env add KEY
-    /// [--secret] --value-stdin`): the value goes to the CLI on stdin,
-    /// never argv or the environment. The error never contains the value.
-    ///
-    /// # Errors
-    /// Why the value was not stored, with no value in it.
-    fn env_set(
-        &self,
-        _root: &Path,
-        _native: bool,
-        _target: &EnvTarget,
-        _key: &str,
-        _secret: bool,
-        _value: &crate::env::Revealed,
-    ) -> Result<(), String> {
-        Err("Editing is unavailable for this source".into())
-    }
-
     /// `hack daemon status --json`, for the hackd card: the selected CLI in
     /// its checked context, without starting hackd. `None` when it could not
     /// be read.
@@ -1788,78 +1755,6 @@ impl Source for LiveSource {
         }
     }
 
-    fn env_value(
-        &self,
-        root: &Path,
-        native: bool,
-        selection: &EnvTarget,
-        key: &str,
-    ) -> Result<crate::env::Revealed, String> {
-        let root = env_root(root).ok_or("This checkout's env cannot be read")?;
-        if !valid_env_name(key) {
-            return Err("Not a variable name the app reads".into());
-        }
-        let extra = selection.args()?;
-        let mut args = vec!["env", "get", key];
-        args.extend(extra.iter().map(String::as_str));
-        // stdout is the value; nothing from it reaches an error message.
-        match self
-            .runner_for(native)
-            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .run_raw(&args, Some(&root), Duration::from_secs(10))
-        {
-            Ok((out, _, Some(0))) if cli_selects_exactly(&root) => {
-                Ok(crate::env::Revealed::new(out))
-            }
-            Ok((_, _, Some(0))) => Err("The checkout changed while reading; try again".into()),
-            Ok((_, _, code)) => Err(format!(
-                "hack env get {key} {}",
-                code.map_or_else(|| "was stopped".into(), |c| format!("exited with code {c}"))
-            )),
-            // Only these carry no command output; anything else is named, not quoted.
-            Err(e @ (RunError::NotFound | RunError::Spawn(_) | RunError::Timeout { .. })) => {
-                Err(format!("hack env get {key}: {e}"))
-            }
-            Err(_) => Err(format!("hack env get {key} failed")),
-        }
-    }
-
-    fn env_set(
-        &self,
-        root: &Path,
-        native: bool,
-        target: &EnvTarget,
-        key: &str,
-        secret: bool,
-        value: &crate::env::Revealed,
-    ) -> Result<(), String> {
-        let root = env_root(root).ok_or("This checkout's env cannot be changed")?;
-        let args = env_set_args(target, key, secret)?;
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        // `--value-stdin` strips one trailing `\r\n`, else one `\n`.
-        // Ending the input with `\r\n` makes the CLI strip exactly that,
-        // so a value ending in a newline or `\r` is stored as typed.
-        let mut input = value.expose().as_bytes().to_vec();
-        input.extend_from_slice(b"\r\n");
-        match self
-            .runner_for(native)
-            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .run_raw_with_input(&args, Some(&root), Duration::from_secs(20), &input)
-        {
-            Ok((_, _, Some(0))) => Ok(()),
-            // No command output in the error: an echoed value can be
-            // trimmed, escaped or cut, so no check on it is safe.
-            Ok((_, _, code)) => Err(format!(
-                "hack env add {key} {}. Run the command shown in a terminal to see why.",
-                code.map_or_else(|| "was stopped".into(), |c| format!("exited with code {c}"))
-            )),
-            Err(e @ (RunError::NotFound | RunError::Spawn(_) | RunError::Timeout { .. })) => {
-                Err(format!("hack env add {key}: {e}"))
-            }
-            Err(_) => Err(format!("hack env add {key} failed")),
-        }
-    }
-
     fn daemon_status(&self) -> Option<crate::models::DaemonStatus> {
         // Exit 1 still carries the report when hackd is not running.
         let (out, _, _) = checked_daemon_runner(&self.runner.fixed())
@@ -2316,35 +2211,6 @@ impl Source for FixtureSource {
         crate::env::fixture(self.0.name())
     }
 
-    fn env_value(
-        &self,
-        _root: &Path,
-        _native: bool,
-        _target: &EnvTarget,
-        key: &str,
-    ) -> Result<crate::env::Revealed, String> {
-        // Obviously fake values only; a name the listing does not have fails.
-        match crate::env::fixture(self.0.name()) {
-            crate::env::EnvView::Report(r) if r.vars.iter().any(|v| v.key == key && !v.missing) => {
-                Ok(crate::env::Revealed::new(crate::env::fixture_value(key)))
-            }
-            _ => Err(format!("hack env get {key} exited with code 1")),
-        }
-    }
-
-    fn env_set(
-        &self,
-        _root: &Path,
-        _native: bool,
-        target: &EnvTarget,
-        key: &str,
-        secret: bool,
-        _value: &crate::env::Revealed,
-    ) -> Result<(), String> {
-        // Fixtures store nothing; they check the command as the CLI would get it.
-        env_set_args(target, key, secret).map(|_| ())
-    }
-
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
     }
@@ -2436,9 +2302,6 @@ pub struct EnvTarget {
     pub env: Option<String>,
     /// `--service` (`global` or a service name).
     pub scope: Option<String>,
-    /// Writes only: `--local`, the worktree-local layer
-    /// (`hack.env[.<overlay>].local.yaml`) instead of the shared file.
-    pub local: bool,
 }
 
 impl EnvTarget {
@@ -2464,41 +2327,6 @@ impl EnvTarget {
     }
 }
 
-/// The argv for setting `key` in `target` (`hack env add KEY [--secret]
-/// --value-stdin [--env X] [--service S]`), names checked. The value is
-/// never part of it.
-///
-/// # Errors
-/// A name the app does not pass to the CLI.
-pub fn env_set_args(target: &EnvTarget, key: &str, secret: bool) -> Result<Vec<String>, String> {
-    if !valid_env_name(key) {
-        return Err("Not a variable name the app writes".into());
-    }
-    let mut args = vec!["env".to_owned(), "add".into(), key.into()];
-    if secret {
-        args.push("--secret".into());
-    }
-    args.push("--value-stdin".into());
-    if target.local {
-        args.push("--local".into());
-    }
-    args.extend(target.args()?);
-    Ok(args)
-}
-
-/// The command shown before a write runs, exactly as run but without the
-/// checkout path, and never the value: `hack env add API_TOKEN --secret
-/// --value-stdin --env staging --service api`.
-///
-/// # Errors
-/// As [`env_set_args`].
-pub fn env_set_command(target: &EnvTarget, key: &str, secret: bool) -> Result<String, String> {
-    Ok(format!(
-        "hack {}",
-        env_set_args(target, key, secret)?.join(" ")
-    ))
-}
-
 /// Overlay and scope names: letters, digits, `.`, `_` and `-`, not starting
 /// with `-` (never read as an option), at most 128 bytes.
 fn valid_selector(s: &str) -> bool {
@@ -2507,16 +2335,6 @@ fn valid_selector(s: &str) -> bool {
         && !s.starts_with('-')
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
-/// Variable names as the CLI lists them: a letter or `_`, then letters,
-/// digits and `_`, at most 256 bytes.
-fn valid_env_name(s: &str) -> bool {
-    s.len() <= 256
-        && s.bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// The checkout an env command runs in. `hack env` walks ancestors, so a

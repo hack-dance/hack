@@ -289,13 +289,6 @@ expect-notice <text> [<seconds>]
                                 paste) to contain text
 tab <services|logs|env>        show that detail tab
 expect-env <NAME> [<seconds>]   wait for NAME in the Env listing
-env-set <NAME> <value>          edit a row as the pencil and Save do
-env-add [--secret] <NAME> <value>
-                                add a variable as + Variable and Save do
-                                (both write through the CLI: use them only
-                                on a throwaway project, see "Env writes
-                                against the real CLI"; the report prints a
-                                value's length, never the value)
 wait <milliseconds>
 check-container <service> <pattern>
                                 after the app has quit, count processes in
@@ -369,26 +362,12 @@ STEPS
 cargo run -p hack-desktop --features terminal -- --drive /tmp/panel/panel.steps  # the flag is only needed on Linux
 ```
 
-### Env writes against the real CLI
+### Env metadata against the real CLI
 
-`scripts/env-drive/run.sh <hack-desktop binary> [passes]` checks Env editing
-end to end without touching a real project. Each pass makes a temp project,
-`HOME` and `HACK_HOME` under `/tmp`, seeds one plaintext value with this
-checkout's CLI (`bun index.ts`), and drives the app with
-`scripts/env-drive/edit.steps`:
-- select the project and open Env;
-- edit that value;
-- add a plaintext variable and a secret variable.
-
-It then reads the values back with the same CLI and checks that the secret's
-value is in no plaintext YAML. A fake hackd (`fakehackd.py`) serves the
-project list, so no daemon runs; every `hack env` command the app runs is the
-real CLI. Needs `bun` (set `BUN` to choose one) and `python3`.
-
-```sh
-bash scripts/build.sh
-scripts/env-drive/run.sh target/debug/hack-desktop 10
-```
+`scripts/env-drive/run.sh <hack-desktop binary> [passes]` opens Env on an
+isolated fixture project and checks that the seeded variable name appears.
+A fake hackd serves the project list. The stand-in delegates metadata reads
+to this checkout's CLI and records any attempt to read or change a value.
 
 The report gives each step's result (a paste step names the notice it got), each
 tab's session leader, `after quit + 5s: N process(es) alive in the M
@@ -726,71 +705,15 @@ following resumes through Resume, not automatically when scrolling to the bottom
 
 ## Env tab
 
-Overlay tabs across the top (`base`, then each overlay the CLI names), scope
-pills on the right, one line for the secret key, and a Name / Value table.
-Names come from `hack env list --json [--env <overlay>] [--service <scope>]`;
-each value from `hack env get <KEY>` on a pipe, through the CLI and nothing
-else. Plaintext values load with the listing. A secret shows dots until its
-eye is pressed, for that one name; it hides again after 60 s and when the
-overlay, scope, detail tab or project changes, or the window is hidden or
-loses focus. Copy reads that one name, puts it on the clipboard and clears the
-clipboard after 60 s, or when the app quits sooner, if it still holds the
-value. A missing required name is
-listed first with a `required · missing` chip. With the key missing, the line
-says where the CLI looks and secrets cannot be revealed or copied.
+The Env tab lists variable names, service scopes and missing required names.
+The selected CLI provides metadata through `hack env list --json` with the
+chosen overlay and scope. Base, configured and selected overlays appear as
+tabs. The CLI also reports the status of the project's secret key. Use a
+terminal to manage values.
 
-On macOS the copied item is also marked concealed
-(`org.nspasteboard.ConcealedType`), so clipboard managers that follow that
-convention do not record it. Linux has no such convention: there the 60 s
-clear (or the clear on quit) is the only protection.
-
-**Edit** (the pencil on a row) and **+ Variable** open an editor: the name (new
-variables only), the value, **Secret** (new variables only), and the exact
-command Save runs, for example
-`hack env add API_TOKEN --secret --value-stdin --env staging --service api`.
-The value goes to the CLI on stdin, never in argv or the environment, and the
-command names the overlay and scope explicitly. An existing row is written in
-its own scope (a global variable shown in a service listing stays global) and
-its own layer (a row from `hack.env[.<overlay>].local.yaml`, or a legacy
-`.env` / `.env.<overlay>`, with `--local`, so a value kept out of the
-repository never lands in the shared YAML); a
-new one goes to the scope listed, in the shared file. A plaintext value starts filled in (read for
-that one name first when the listing has not shown it; until then Save
-stores only text you type, never an empty field, so an unchanged Save never
-blanks it; a late read never overwrites what you typed); a
-secret starts empty, and its field is masked. A secret cannot be edited while
-the key is missing, and a legacy variable limited to several services cannot
-be edited in the app (one write cannot cover them): the editor says to use the
-CLI per service or `hack env migrate`. Nor can a value held outside the env
-files (`portable_backend`, a legacy project's mirror in its encrypted
-backend, or `keychain` and `process`): Save would copy it into a YAML file
-instead, so the editor names the layer and says to use the CLI. The editor closes on another overlay, scope, tab or
-project. After Save the tab says "Saved NAME" and lists again.
-
-What needs the CLI is shown, not hidden: **+ Overlay** (create an overlay,
-R27; every overlay as a tab, R24), and, when the key is missing, **Choose key
-file** and **Use env var** (choose the key source for a run, R26). Each is
-inactive, and its tooltip names the request.
-
-Values never reach a log, a render, `--drive` output or an error message, and
-fixtures use fake values. A failed write shows the command and its exit code,
-never the CLI's output (an echoed value could be trimmed, escaped or cut, so
-no check on it is safe): run the command shown in a terminal to see why. A
-write started before a CLI switch runs through the CLI chosen when Save was
-pressed, and its result is not shown over the new CLI's listing.
-
-Dependencies (macOS only, for the concealed clipboard; all three were already
-in `Cargo.lock` through GPUI): `objc2 =0.6.5` (MIT), `objc2-app-kit =0.3.2`
-(Zlib OR Apache-2.0 OR MIT), `objc2-foundation =0.3.2` (MIT).
-
-Fixtures: `env-loading`, `env-error`, `env-normal`, `env-overlays`,
-`env-running`, `env-missing`, `env-locked`, `env-long`, `env-edit`,
-`env-empty`. Each
-renders offscreen in both themes through `--screenshots`.
-Screenshots: [overlays, running](screenshots/env-running-light.png),
-[key missing](screenshots/env-locked-dark.png),
-[required missing](screenshots/env-missing-light.png),
-[long](screenshots/env-long-dark.png).
+Fixtures `env-loading`, `env-error`, `env-normal`, `env-overlays`,
+`env-running`, `env-missing`, `env-locked`, `env-long` and `env-empty`
+render offscreen in both themes.
 
 ## Process-cleanup tests
 

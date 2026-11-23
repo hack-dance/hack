@@ -1,12 +1,7 @@
-# Env slice 2 on a throwaway project (see run.sh): edit a plaintext value,
-# add a plaintext and a secret variable, through the real CLI.
+# Names-only Env view on a throwaway project (see run.sh).
 select demo
 tab env
 expect-env FIXTURE_MODE 60
-env-set FIXTURE_MODE fake-plain-two
-env-add FIXTURE_NEW fake-new-value
-env-add --secret FIXTURE_SECRET fake-secret-value
-expect-env FIXTURE_SECRET 60
 # The hackd pane, read live through the checked CLI (the stand-in answers
 # daemon status; the fake hackd answers /v1/status).
 hackd

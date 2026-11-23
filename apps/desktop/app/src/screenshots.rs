@@ -68,7 +68,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                                 app.show_usage_now();
                             }
                             if f.name().starts_with("env-") {
-                                app.show_env_fixture(f.name(), window, cx);
+                                app.show_env_fixture(f.name(), cx);
                             }
                             if matches!(
                                 f,

@@ -43,7 +43,7 @@ import {
   writeStartBlocker,
   writeUpHookBlocker,
 } from "../ui/start-refusal-output.ts";
-import { createTextOutput } from "../ui/text-output.ts";
+import { createTextOutput, formatDuration } from "../ui/text-output.ts";
 import { writeComposeStarted } from "./compose-lifecycle-closing.ts";
 import {
   createComposeUpProgress,
@@ -6623,6 +6623,11 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
     case "runtime":
       logger.step({ message: "Starting the native runtime…" });
       return;
+    case "build-settled":
+      logger.info({
+        message: `Build ${event.services.join(", ")}: ${event.outcome} in ${formatDuration(event.durationMs)}`,
+      });
+      return;
     case "images":
       logger.step({ message: "Acquiring service images…" });
       return;
@@ -6982,7 +6987,10 @@ async function handleNativeUp({
       if (event.phase === "ready") {
         ready = true;
       }
-      if (restart || ready || event.phase !== "stopped") {
+      if (
+        (restart || ready || event.phase !== "stopped") &&
+        (event.phase !== "build-settled" || args.options.json !== true)
+      ) {
         reportNativeStartupProgress(event);
       }
     },

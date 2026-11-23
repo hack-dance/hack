@@ -5631,7 +5631,7 @@ test("retained startup asks the runtime to confirm the tag before review", async
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
 });
 
-test("a registry refusal during the build lists proven images and the retry command", async () => {
+test("a parallel build registry refusal keeps its blocker after the sibling settles", async () => {
   const previous = process.env.HACK_NATIVE_BUILDS;
   process.env.HACK_NATIVE_BUILDS = "1";
   try {
@@ -5642,15 +5642,40 @@ test("a registry refusal during the build lists proven images and the retry comm
     opts.dependencies.prepare = async (request) => ({
       ...(await prepare(request)),
       normalizedComposeJson: JSON.stringify({
-        services: { web: { build: "." }, other: { image: loaded } },
+        services: {
+          web: { build: "." },
+          worker: { build: { context: ".", target: "worker" } },
+          other: { image: loaded },
+        },
       }),
     });
-    opts.dependencies.build = async () => {
-      throw new NativeBuildRegistryError(base, "registry_http_429");
+    const siblingStarted = Promise.withResolvers<void>();
+    const siblingAborted = Promise.withResolvers<void>();
+    const allowSettlement = Promise.withResolvers<void>();
+    let starts = 0;
+    let siblingSettled = false;
+    opts.dependencies.build = async ({ signal }) => {
+      starts += 1;
+      if (starts === 1) {
+        await siblingStarted.promise;
+        throw new NativeBuildRegistryError(base, "registry_http_429");
+      }
+      signal?.addEventListener("abort", () => siblingAborted.resolve(), {
+        once: true,
+      });
+      siblingStarted.resolve();
+      await allowSettlement.promise;
+      siblingSettled = true;
+      throw new Error("sibling canceled");
     };
     const invoke = opts.dependencies.invoke!;
     opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "up" && request.args[0] === "runtime") {
+        await invoke(request);
+        return { profile: "development" };
+      }
       if (request.args[1] === "image-tag-status") {
+        expect(siblingSettled).toBe(true);
         expect(request.args).toEqual([
           "runtime",
           "image-tag-status",
@@ -5663,7 +5688,21 @@ test("a registry refusal during the build lists proven images and the retry comm
       }
       return await invoke(request);
     };
-    await expect(startNativeProject(opts)).rejects.toThrow(
+    const result = startNativeProject(opts);
+    try {
+      const aborted = await Promise.race([
+        siblingAborted.promise.then(() => true),
+        result.then(() => false),
+        Bun.sleep(2000).then(() => false),
+      ]);
+      expect(aborted).toBe(true);
+      expect(starts).toBe(2);
+      expect(siblingSettled).toBe(false);
+    } finally {
+      siblingStarted.resolve();
+      allowSettlement.resolve();
+    }
+    await expect(result).rejects.toThrow(
       `Image unavailable: could not resolve build base ${base} (registry rate limit reached).\nAlready present: ${loaded}.\nRetry hack up when the registry is reachable.`
     );
   } finally {

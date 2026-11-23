@@ -794,3 +794,132 @@ test("a native home without the image builder says so and how to add it", async 
   expect(message).not.toContain(VALUE);
   expect(written.join("")).toBe("resolving base images\n");
 });
+
+test.each([
+  { cpus: 4, cap: 3, outcome: "success" },
+  { cpus: 2, cap: 2, outcome: "success" },
+  { cpus: 1, cap: 1, outcome: "success" },
+  { cpus: 4, cap: 3, outcome: "failure" },
+  { cpus: 4, cap: 3, outcome: "interrupt" },
+] as const)("build batch $outcome with $cpus guest CPUs", async ({
+  cpus,
+  cap,
+  outcome,
+}) => {
+  const project = await root();
+  const controller = new AbortController();
+  const names = ["web", "worker", "tools", "jobs"];
+  const builds = new Map(
+    names.map((target) => [target, { ...request(), target }])
+  );
+  builds.set("duplicate", {
+    ...request(),
+    dockerfile: "./Dockerfile",
+    target: "web",
+  });
+  const specs: Record<string, Record<string, unknown>> = Object.fromEntries(
+    [...builds.keys()].map((name) => [name, { build: "app" }])
+  );
+  const started: string[] = [];
+  const releases = new Map<
+    string,
+    ReturnType<typeof Promise.withResolvers<boolean>>
+  >();
+  const cancelled = new Set<string>();
+  const completed: string[] = [];
+  const settlements: string[] = [];
+  let returned = false;
+  const result = buildNativeProjectImages({
+    runtime: { binary: "/test/runtime", home: project } as never,
+    projectRoot: project,
+    branch: null,
+    profiles: [],
+    builds,
+    specs,
+    rebuild: false,
+    guestCpus: cpus,
+    signal: controller.signal,
+    onBuildSettled: ({ outcome: decision, services }) => {
+      settlements.push(`${services.join(",")}: ${decision}`);
+    },
+    invoke: async ({ requestFile, signal }) => {
+      const target =
+        names[Number(/request-(\d+)\.json$/.exec(requestFile)?.[1])];
+      if (target === undefined) {
+        throw new Error("Unexpected request index");
+      }
+      expect(releases.size).toBeLessThan(cap);
+      started.push(target);
+      const release = Promise.withResolvers<boolean>();
+      releases.set(target, release);
+      signal?.addEventListener("abort", () => cancelled.add(target), {
+        once: true,
+      });
+      const fail = await release.promise;
+      releases.delete(target);
+      completed.push(target);
+      if (fail || cancelled.has(target)) {
+        throw new NativeRuntimeRequestError({
+          message: `fixture ${target}`,
+          nativeCode: "native_build_failed",
+        });
+      }
+      return { imageId: IMAGE, buildKey: KEY, reused: false };
+    },
+  })
+    .catch((error: unknown) => error)
+    .finally(() => {
+      returned = true;
+    });
+
+  const waitFor = async (condition: () => boolean) => {
+    const end = performance.now() + 2000;
+    while (!(condition() || returned) && performance.now() < end) {
+      await Bun.sleep(2);
+    }
+    expect(condition()).toBe(true);
+  };
+  try {
+    await waitFor(() => started.length === cap);
+    expect(started).toEqual(names.slice(0, cap));
+    if (outcome === "success") {
+      for (let index = 0; index < names.length; index++) {
+        const name = names[index] ?? "";
+        await waitFor(() => releases.has(name));
+        releases.get(name)?.resolve(false);
+      }
+      expect(await result).toEqual(new Set([...builds.keys()]));
+      expect(started).toEqual(names);
+      expect(specs.duplicate).toEqual({ image: IMAGE });
+      expect(settlements).toHaveLength(cap > 1 ? names.length : 0);
+    } else {
+      if (outcome === "failure") {
+        releases.get("worker")?.resolve(true);
+        await waitFor(() => cancelled.has("web"));
+      } else {
+        controller.abort();
+        await waitFor(() => cancelled.size === cap);
+      }
+      expect(returned).toBe(false);
+      for (const release of releases.values()) {
+        release.resolve(false);
+      }
+      const error = await result;
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).toContain(
+        outcome === "failure"
+          ? "service worker: fixture worker"
+          : "was canceled"
+      );
+      expect(started).toEqual(names.slice(0, cap));
+      expect(completed.toSorted()).toEqual(names.slice(0, cap).toSorted());
+      expect(releases.size).toBe(0);
+    }
+  } finally {
+    controller.abort();
+    for (const release of releases.values()) {
+      release.resolve(false);
+    }
+    await result;
+  }
+});

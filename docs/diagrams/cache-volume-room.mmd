@@ -1,0 +1,30 @@
+---
+title: New cache volume · room
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> count : new cache needed
+    state count <<choice>>
+    count --> create : [fewer than 64]
+    count --> evict : [64, one unreferenced]
+    count --> refused : [64, all referenced]
+    evict --> count : oldest deleted, no force
+    create --> [*]
+    refused --> [*]
+
+    note right of evict
+        Unreferenced: no receipt that
+        is not removed, no native
+        receipt, no quarantine record.
+    end note
+    note right of refused
+        graph_cache_capacity: remove
+        the data of a project you
+        no longer use.
+    end note
+
+    class create ok
+    class refused fail

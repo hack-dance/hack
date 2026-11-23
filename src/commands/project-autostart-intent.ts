@@ -51,19 +51,22 @@ import {
   reconcileImplicitDownBranch,
 } from "./project-down-safety.ts";
 
+export interface LocalComposeTarget {
+  readonly base: string;
+  readonly projectDir: string;
+  readonly lifecycle: {
+    readonly projectName: string;
+    readonly lifecycleComposeProject: string;
+  };
+  readonly envName: string | null | undefined;
+  readonly env: Readonly<Record<string, string>>;
+  readonly lifecycleEnv: Readonly<Record<string, string>>;
+  readonly pin: boolean;
+}
+
 export interface AutostartDownTarget {
   readonly branch: string | null;
-  readonly compose?: {
-    readonly base: string;
-    readonly projectDir: string;
-    readonly lifecycle: {
-      readonly projectName: string;
-      readonly lifecycleComposeProject: string;
-    };
-    readonly env: Readonly<Record<string, string>>;
-    readonly lifecycleEnv: Readonly<Record<string, string>>;
-    readonly pin: boolean;
-  };
+  readonly compose?: LocalComposeTarget;
 }
 interface AutostartCommandSelection {
   readonly cwd: string;
@@ -125,6 +128,20 @@ export async function withComposeCheckoutLock<T>(
       branch: null,
     },
     run: opts.run,
+  });
+}
+
+/** A checkout lock protects selection; the name lock serializes Compose effects across checkouts. */
+export async function withComposeNameLock<T>(
+  name: string | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  if (name === undefined) {
+    return await run();
+  }
+  return await withAutostartProjectLock({
+    scope: { projectId: "", composeProject: name, branch: null },
+    run,
   });
 }
 
@@ -389,7 +406,7 @@ export async function updateNativeAutostartIntent(opts: {
 
 /** Resolve the same registered instance for command serialization without native legacy discovery. */
 export async function withAutostartCommandLock<T>(opts: {
-  readonly action: "up" | "down" | "restart" | "service-down";
+  readonly action: "up" | "down" | "restart";
   readonly resolvedDownTarget?: AutostartDownTarget;
   readonly cwd: string;
   readonly path?: string;
@@ -409,15 +426,7 @@ export async function withAutostartCommandLock<T>(opts: {
       // The desktop sends the full name, including any branch suffix.
       // Execution revalidates it under this lock before mutating Compose.
       const name = opts.expectComposeProject;
-      const run = () =>
-        withAutostartProjectLock({
-          scope: {
-            projectId: "",
-            composeProject: name,
-            branch: null,
-          },
-          run: opts.run,
-        });
+      const run = () => withComposeNameLock(name, opts.run);
       if (opts.action === "up" || opts.action === "restart") {
         return await withComposeCheckoutLock({ ...opts, run });
       }

@@ -25,6 +25,7 @@ export interface ComposeLogOptions {
   readonly projectName?: string;
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
   /** Passed to `docker compose logs --since/--until`. */
   readonly since?: string;
   readonly until?: string;
@@ -85,6 +86,7 @@ export const composeLogBackend: ComposeLogBackend = {
         projectName: opts.projectName,
         composeProject: opts.composeProject,
         profiles: opts.profiles,
+        env: opts.env,
         since: opts.since,
         until: opts.until,
         streamContext: opts.streamContext,
@@ -102,6 +104,7 @@ export const composeLogBackend: ComposeLogBackend = {
         projectName: opts.projectName,
         composeProject: opts.composeProject,
         profiles: opts.profiles,
+        env: opts.env,
         since: opts.since,
         until: opts.until,
         lifecycle: opts.lifecycle,
@@ -117,6 +120,7 @@ export const composeLogBackend: ComposeLogBackend = {
       projectName: opts.projectName,
       composeProject: opts.composeProject,
       profiles: opts.profiles,
+      env: opts.env,
       since: opts.since,
       until: opts.until,
       lifecycle: opts.lifecycle,

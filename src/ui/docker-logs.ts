@@ -47,6 +47,7 @@ export interface DockerComposeLogsParams {
   readonly projectName?: string;
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
   /** `docker compose logs --since/--until` (a duration such as 10m, or a time). */
   readonly since?: string;
   readonly until?: string;
@@ -65,6 +66,7 @@ export async function dockerComposeLogsPlain(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    env: opts.env,
     since: opts.since,
     until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -154,6 +156,7 @@ export async function dockerComposeLogsPretty(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    env: opts.env,
     since: opts.since,
     until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -276,6 +279,7 @@ export async function dockerComposeLogsJson(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    env: opts.env,
     since: opts.since,
     until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -424,6 +428,7 @@ function spawnComposeLogs(opts: {
   readonly services?: readonly string[];
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
   readonly since?: string;
   readonly until?: string;
   readonly composeDisabled: boolean;
@@ -432,7 +437,7 @@ function spawnComposeLogs(opts: {
     return null;
   }
   return Bun.spawn(buildComposeLogsCommand(opts), {
-    env: childEnvironment(),
+    env: childEnvironment(process.env, opts.env),
     cwd: opts.cwd,
     stdin: "ignore",
     stdout: "pipe",

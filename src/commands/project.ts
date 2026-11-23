@@ -600,10 +600,12 @@ import {
   assertAutostartEnvironment,
   assertLoginAutostartCurrent,
   findAutostartRegistration,
+  type LocalComposeTarget,
   resolveFinalAutostartDownTarget,
   updateNativeAutostartIntent,
   withAutostartCommandLock,
   withComposeCheckoutLock,
+  withComposeNameLock,
 } from "./project-autostart-intent.ts";
 import { enableAutostartForUp } from "./project-autostart-opt-in.ts";
 import {
@@ -8922,15 +8924,17 @@ async function handleDown(
   validateComposeExpectation(input.args.options);
   parseRequestedTarget({ raw: input.args.options.target });
   if (input.args.options.service !== undefined) {
-    return await withAutostartCommandLock({
-      action: "service-down",
+    const selection = {
       cwd: input.ctx.cwd,
       path: input.args.options.path,
       project: input.args.options.project,
       branch: input.args.options.branch,
-      expectComposeProject: input.args.options.expectComposeProject,
       run: () => handleServiceDown(input),
-    });
+    };
+    const expected = input.args.options.expectComposeProject;
+    return expected === undefined
+      ? await withComposeCheckoutLock(selection)
+      : await withComposeNameLock(expected, selection.run);
   }
   const isNativeBackend = resolveInitComposeBackend(process.env) === "native";
   if (isNativeBackend && input.args.options.timeout !== undefined) {
@@ -8982,7 +8986,7 @@ async function runWholeDown({
         },
         {
           resolveComposeTarget: (target) =>
-            resolveLocalDownComposeTarget({
+            resolveLocalComposeTarget({
               ...target,
               target: input.args.options.target,
               envOption: input.args.options.env,
@@ -9063,36 +9067,23 @@ async function handleServiceDown({
       noticeToStderr: json === true,
     });
     const cfg = await readProjectConfig(project);
-    const base = await resolveCommandComposeBase({
+    const compose = await resolveComposeMutationTarget({
       project,
       cfg,
-      forBranch: branch !== null,
-      expected: args.options.expectComposeProject,
+      branch,
+      options: args.options,
     });
-    const targetNames = resolveRestartTarget({ baseProjectName: base, branch });
-    const composeProjectName = desktopComposeTarget({
-      expected: args.options.expectComposeProject,
-      base,
-      computed: targetNames.composeProjectName,
-    });
-    const { projectName, lifecycleComposeProject } =
-      await resolveStoredComposeLifecycleKey({
+    const { base, composeProjectName, lifecycle, envName } = compose;
+    const { env } =
+      compose.selected ??
+      (await resolveProjectExecutionEnv({
         project,
-        branch,
-        base,
-        legacyBase: await resolveComposeProjectName({ project, cfg }),
-      });
-    const { env } = await resolveDownRuntimeEnv({
-      project,
-      projectName,
-      lifecycleComposeProject,
-      envName: resolveRequestedEnvName({
-        envOption: args.options.env,
-      }),
-    });
+        projectName: lifecycle.projectName,
+        envName,
+      }));
     const { profiles } = await resolveInstanceStopSelection({
       projectDir: project.projectDir,
-      lifecycleComposeProject,
+      lifecycleComposeProject: lifecycle.lifecycleComposeProject,
       cliProfiles: parseCsvList(args.options.profile),
       composeEnv: env,
     });
@@ -9100,17 +9091,21 @@ async function handleServiceDown({
       flagTimeoutSeconds: parseComposeDownTimeoutFlag(timeout),
       projectValue: cfg.compose?.downTimeoutSeconds,
     });
-    return await runServiceStop({
-      project,
-      composeProjectName,
-      base,
-      branch,
-      profiles,
-      env,
-      service,
-      timeoutSeconds,
-      json: json === true,
-    });
+    return await withComposeNameLock(
+      compose.selected?.pin ? compose.expected : undefined,
+      () =>
+        runServiceStop({
+          project,
+          composeProjectName,
+          base,
+          branch,
+          profiles,
+          env,
+          service,
+          timeoutSeconds,
+          json: json === true,
+        })
+    );
   } catch (error) {
     if (!json) {
       throw error;
@@ -9300,13 +9295,13 @@ async function resolveLoginComposeBase(opts: {
   });
 }
 
-async function resolveLocalDownComposeTarget(opts: {
+async function resolveLocalComposeTarget(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly branch: string | null;
   readonly target?: string;
   readonly envOption?: string;
-}): Promise<AutostartDownTarget["compose"]> {
+}): Promise<LocalComposeTarget | undefined> {
   const { project, cfg, branch } = opts;
   const configured = await resolveComposeProjectName({ project, cfg });
   const forBranch = branch !== null;
@@ -9337,25 +9332,26 @@ async function resolveLocalDownComposeTarget(opts: {
       projectDir: project.projectDir,
       composeProject: key.lifecycleComposeProject,
     });
+    const envName = selectEnvForRunningInstance({
+      requestedEnvName: resolveRequestedEnvName({ envOption: opts.envOption }),
+      running: stored,
+    });
     return {
       stored,
+      envName,
       execution: await resolveProjectExecutionEnv({
         project,
         projectName: key.projectName,
-        envName: selectEnvForRunningInstance({
-          requestedEnvName: resolveRequestedEnvName({
-            envOption: opts.envOption,
-          }),
-          running: stored,
-        }),
+        envName,
       }),
     };
   };
-  const { stored, execution } = await readLaunch(lifecycle);
+  const { stored, execution, envName } = await readLaunch(lifecycle);
   const target = {
     ...execution,
     projectDir: project.projectDir,
     lifecycle,
+    envName,
   };
   // A pinned Start owns its saved name even if Compose would interpret the
   // same launch overlay as an override during an unbound Down.
@@ -9391,10 +9387,90 @@ async function resolveLocalDownComposeTarget(opts: {
   const resolvedLaunch = await readLaunch(resolvedLifecycle);
   return {
     ...target,
-    ...(resolvedLaunch.stored ? resolvedLaunch.execution : {}),
+    ...(resolvedLaunch.stored
+      ? { ...resolvedLaunch.execution, envName: resolvedLaunch.envName }
+      : {}),
     lifecycle: resolvedLifecycle,
     base,
     pin,
+  };
+}
+
+async function resolveComposeMutationTarget(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly branch: string | null;
+  readonly options: {
+    readonly target?: string;
+    readonly env?: string;
+    readonly expectComposeProject?: string;
+  };
+}) {
+  const { project, cfg, branch, options } = opts;
+  const explicit = options.expectComposeProject;
+  const selected =
+    explicit === undefined
+      ? await resolveLocalComposeTarget({
+          project,
+          cfg,
+          branch,
+          target: options.target,
+          envOption: options.env,
+        })
+      : undefined;
+  if (selected) {
+    const { base, pin, lifecycle, envName } = selected;
+    const { composeProjectName: branchName } = resolveRestartTarget({
+      baseProjectName: base,
+      branch,
+    });
+    const expected = pin ? (branchName ?? base) : undefined;
+    return {
+      base,
+      composeProjectName: expected ?? branchName,
+      expected,
+      lifecycle,
+      envName,
+      selected,
+    };
+  }
+  const configured = await resolveComposeProjectName({ project, cfg });
+  const base =
+    explicit === undefined
+      ? configured
+      : await requireResolvedComposeBase({
+          project,
+          cfg,
+          composeName: configured,
+          forBranch: branch !== null,
+        });
+  const { composeProjectName: branchName } = resolveRestartTarget({
+    baseProjectName: base,
+    branch,
+  });
+  const composeProjectName = desktopComposeTarget({
+    expected: explicit,
+    base,
+    computed: branchName,
+  });
+  const lifecycle = await resolveStoredComposeLifecycleKey({
+    project,
+    branch,
+    base,
+    legacyBase: configured,
+  });
+  const envName = await resolveStoredRuntimeEnvName({
+    requestedEnvName: resolveRequestedEnvName({ envOption: options.env }),
+    projectDir: project.projectDir,
+    composeProject: lifecycle.lifecycleComposeProject,
+  });
+  return {
+    base,
+    composeProjectName,
+    expected: explicit,
+    lifecycle,
+    envName,
+    selected,
   };
 }
 
@@ -11178,16 +11254,23 @@ async function handleRestart({
   }
   requireComposeOperationAvailable("restart");
   const json = args.options.json === true;
-  const run = (startedAtMs?: number) =>
-    withAutostartCommandLock({
-      action: "restart",
+  const run = (startedAtMs?: number) => {
+    const selection = {
       cwd: ctx.cwd,
       path: args.options.path,
       project: args.options.project,
       branch: args.options.branch,
-      expectComposeProject: args.options.expectComposeProject,
       run: () => runRestartCommand({ ctx, args, json, startedAtMs }),
-    });
+    };
+    const expected = args.options.expectComposeProject;
+    return expected === undefined
+      ? withComposeCheckoutLock(selection)
+      : withAutostartCommandLock({
+          ...selection,
+          action: "restart",
+          expectComposeProject: expected,
+        });
+  };
   if (!json) {
     return await run();
   }
@@ -11214,7 +11297,6 @@ async function handleRestart({
   }
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: restart coordinates preflight, scoped recreation, lifecycle preparation, repair, and JSON reporting in one transaction.
 async function runRestartCommand({
   ctx,
   args,
@@ -11301,43 +11383,68 @@ async function runRestartCommand({
     return sharedHelperRefusal;
   }
 
-  const baseProjectName = await resolveCommandComposeBase({
+  const compose = await resolveComposeMutationTarget({
     project,
     cfg,
-    forBranch: branch !== null,
-    expected: args.options.expectComposeProject,
+    branch,
+    options: args.options,
   });
+  return await withComposeNameLock(
+    compose.selected?.pin ? compose.expected : undefined,
+    () =>
+      runLocalRestart({
+        project,
+        cfg,
+        budgets,
+        branch,
+        profiles,
+        args,
+        compose,
+        json,
+        startedAtMs,
+      })
+  );
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: restart coordinates scoped recreation, lifecycle preparation, repair, and JSON reporting under the selected Compose lock.
+async function runLocalRestart({
+  project,
+  cfg,
+  budgets,
+  branch,
+  profiles,
+  args,
+  compose,
+  json,
+  startedAtMs,
+}: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly budgets: ComposeStartupBudgets;
+  readonly branch: string | null;
+  readonly profiles: readonly string[];
+  readonly args: RestartArgs;
+  readonly compose: Awaited<ReturnType<typeof resolveComposeMutationTarget>>;
+  readonly json: boolean;
+  readonly startedAtMs?: number;
+}): Promise<number> {
+  const {
+    base: baseProjectName,
+    composeProjectName,
+    lifecycle,
+    envName: effectiveEnvName,
+  } = compose;
+  const { projectName, lifecycleComposeProject } = lifecycle;
   if (
     resolveLifecycleRunner({ runner: cfg.lifecycle?.runner }) === "supervisor"
   ) {
     await preflightLifecycleSupervisor();
   }
-  const targetNames = resolveRestartTarget({ baseProjectName, branch });
-  const composeProjectName = desktopComposeTarget({
-    expected: args.options.expectComposeProject,
-    base: baseProjectName,
-    computed: targetNames.composeProjectName,
-  });
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
-  const { projectName, lifecycleComposeProject } =
-    await resolveStoredComposeLifecycleKey({
-      project,
-      branch,
-      base: baseProjectName,
-      legacyBase: await resolveComposeProjectName({ project, cfg }),
-    });
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
     requested: args.positionals.services,
     available: allServiceNames,
-  });
-  // Whole-stack and service-scoped restarts both keep the recorded running
-  // selection when --env is omitted (HACK-2280); a targeted restart also
-  // records its selection, so the default must not replace it.
-  const effectiveEnvName = await resolveStoredRuntimeEnvName({
-    requestedEnvName: envName,
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
   });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
@@ -11414,7 +11521,7 @@ async function runRestartCommand({
   }
   reportLifecycleProgress({ service: null, phase: "stopping" });
   await assertDesktopComposeOwnership({
-    expected: args.options.expectComposeProject,
+    expected: compose.expected,
     project,
     composeProjectName,
     profiles,
@@ -11474,7 +11581,7 @@ async function runRestartCommand({
   });
 
   const upOutcome = await runRestartUpPhase({
-    expectComposeProject: args.options.expectComposeProject,
+    expectComposeProject: compose.expected,
     budgets,
     project,
     cfg,
@@ -12755,11 +12862,13 @@ async function handleExec({
           composeProject: composeProjectName ?? baseProjectName,
         });
 
-  const projectName = sanitizeProjectSlug(baseProjectName);
-  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
-    projectName,
-    branch,
-  });
+  const { projectName, lifecycleComposeProject } =
+    await resolveStoredComposeLifecycleKey({
+      project,
+      branch,
+      base: baseProjectName,
+      legacyBase: await resolveComposeProjectName({ project, cfg }),
+    });
   // HACK-2280: with no --env, exec into the overlay the instance runs with,
   // as down/restart do, instead of the configured default.
   const envName = await resolveStoredRuntimeEnvName({
@@ -13556,6 +13665,8 @@ async function runLogsWithCompose(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectNameForPrefix: string;
   readonly composeProject: string | undefined;
+  readonly lifecycleComposeProject?: string;
+  readonly env?: Readonly<Record<string, string>>;
   readonly branch: string | null;
   readonly json: boolean;
   readonly follow: boolean;
@@ -13569,7 +13680,9 @@ async function runLogsWithCompose(opts: {
   readonly maxLineBytes: number | undefined;
 }): Promise<number> {
   const lifecycleComposeProject =
-    opts.composeProject ?? opts.projectNameForPrefix;
+    opts.lifecycleComposeProject ??
+    opts.composeProject ??
+    opts.projectNameForPrefix;
   const selection = await resolveLifecycleLogCompanion({
     projectDir: opts.project.projectDir,
     composeProject: lifecycleComposeProject,
@@ -13600,6 +13713,7 @@ async function runLogsWithCompose(opts: {
         : undefined,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    env: opts.env,
     since: opts.since,
     until: opts.until,
     format: opts.format,
@@ -13944,12 +14058,24 @@ async function handleLogs({
     base: baseProjectName,
     computed: branch ? projectNameForPrefix : null,
   });
+  const lifecycle =
+    expected === undefined
+      ? undefined
+      : await resolveStoredComposeLifecycleKey({
+          project,
+          branch,
+          base: baseProjectName,
+          legacyBase: await resolveComposeProjectName({ project, cfg }),
+        });
+  const runtimeEnv = lifecycle
+    ? await resolveDownRuntimeEnv({ project, ...lifecycle, envName: undefined })
+    : undefined;
   await assertDesktopComposeOwnership({
     expected,
     project,
     composeProjectName: composeProject,
     profiles,
-    env: {},
+    env: runtimeEnv?.env ?? {},
     services: services.length ? services : undefined,
     action: "read logs for",
   });
@@ -13979,6 +14105,8 @@ async function handleLogs({
       project,
       projectNameForPrefix,
       composeProject: composeProject ?? undefined,
+      lifecycleComposeProject: lifecycle?.lifecycleComposeProject,
+      env: runtimeEnv?.env,
       branch,
       json,
       follow,

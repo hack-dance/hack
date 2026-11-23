@@ -998,7 +998,7 @@ jobs:
 
   test-focus:
     # Retain this exact-head required job while PR subsets move to test-shard.
-    # It passes as a no-op when no legacy focus is requested. The prerelease
+    # The Doctor classification contract also runs here on every PR. The prerelease
     # gate requires every push job to succeed without skips.
     name: test focus
     needs: changes
@@ -1014,13 +1014,13 @@ jobs:
         run: |
           echo "scope ${SCOPE}; focused tests: ${TEST_FOCUS:-none, the bun shards run}"
       - name: Checkout
-        if: ${{ needs.changes.outputs.test_focus != '' }}
         uses: actions/checkout@v4
       - name: Setup Bun
-        if: ${{ needs.changes.outputs.test_focus != '' }}
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.4.4"
+      - name: Check Desktop Doctor classifications
+        run: bun test --config /dev/null tests/doctor-desktop-check-ids.test.ts
       - name: Install dependencies
         if: ${{ needs.changes.outputs.test_focus != '' }}
         run: bun install --frozen-lockfile

@@ -58,11 +58,11 @@ case " $* " in
     case " $* " in
       *" --format "*)
         if [ -f "$state/up-done" ]; then
-          printf '%s\\n' '{"ID":"c1","Service":"migrate","Name":"shop-migrate-1","State":"exited","Status":"Exited (0)","ExitCode":0}'
-          printf '%s\\n' '{"ID":"c2","Service":"api","Name":"shop-api-1","State":"running","Status":"Up","ExitCode":0}'
+          printf '%s\\n' '{"ID":"c1","Service":"migrate","Name":"shop-migrate-1","State":"exited","Status":"Exited (0)","ExitCode":0,"Labels":"com.docker.compose.project.working_dir='"$STUB_PROJECT_DIR"'"}'
+          printf '%s\\n' '{"ID":"c2","Service":"api","Name":"shop-api-1","State":"running","Status":"Up","ExitCode":0,"Labels":"com.docker.compose.project.working_dir='"$STUB_PROJECT_DIR"'"}'
         elif [ -f "$state/up-started" ]; then
-          printf '%s\\n' '{"ID":"c1","Service":"migrate","Name":"shop-migrate-1","State":"running","Status":"Up","ExitCode":0}'
-          printf '%s\\n' '{"ID":"c2","Service":"api","Name":"shop-api-1","State":"created","Status":"Created","ExitCode":0}'
+          printf '%s\\n' '{"ID":"c1","Service":"migrate","Name":"shop-migrate-1","State":"running","Status":"Up","ExitCode":0,"Labels":"com.docker.compose.project.working_dir='"$STUB_PROJECT_DIR"'"}'
+          printf '%s\\n' '{"ID":"c2","Service":"api","Name":"shop-api-1","State":"created","Status":"Created","ExitCode":0,"Labels":"com.docker.compose.project.working_dir='"$STUB_PROJECT_DIR"'"}'
         fi ;;
     esac
     exit 0 ;;
@@ -126,6 +126,7 @@ function fixtureEnv(extra: Readonly<Record<string, string>> = {}) {
       HACK_NO_INTERACTIVE: "1",
       NO_COLOR: "1",
       STUB_STATE: state,
+      STUB_PROJECT_DIR: join(project, ".hack"),
       ...extra,
     },
   });

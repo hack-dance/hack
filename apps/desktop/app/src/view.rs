@@ -17,7 +17,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, KeyBinding, ParentElement,
-    Render, SharedString, Styled, Task, Window, div, prelude::*, px,
+    Render, Styled, Task, Window, div, prelude::*, px,
 };
 use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
 use hack_desktop_core::machine_gate::{Holder, MachineGate};
@@ -31,13 +31,13 @@ use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 use hack_desktop_core::source::target_keys;
 use hack_desktop_core::state::{Action, ProjectState};
 use hack_desktop_core::viewmodel::{
-    AppModel, Banner, BranchRow, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken,
-    Row, UpdateSide,
+    AppModel, Banner, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken, Row,
+    UpdateSide,
 };
 use hack_desktop_ui::components::{
     BannerTone, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, banner, caption,
-    count_pill, dot, empty_pane, icon_button, machine_row, neutral_pill, pill_tab, primary_button,
-    project_row, services_table, skeleton, state_pill, status_bar,
+    count_pill, dot, empty_pane, icon_button, machine_row, neutral_pill, primary_button,
+    services_table, skeleton, state_pill, status_bar,
 };
 use hack_desktop_ui::icons::Glyph;
 use hack_desktop_ui::status::{Status, project_label, service_label};
@@ -134,6 +134,7 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) sidebar_menu: Option<String>,
     pub(crate) copies: crate::copies_view::CopiesPane,
     pub(crate) files: crate::files_view::ProjectFiles,
     pub(crate) env: hack_desktop_core::env::EnvModel,
@@ -198,7 +199,9 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let logs = crate::logs_view::LogsPane::new(window, cx);
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search projects, branches, services")
+        });
         cx.subscribe(&search, |this: &mut HackApp, state, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
                 this.filter = state.read(cx).value().trim().to_lowercase();
@@ -211,6 +214,7 @@ impl HackApp {
             source,
             logs,
             tab: 0,
+            sidebar_menu: None,
             copies: Default::default(),
             files: Default::default(),
             pane: Pane::Project,
@@ -468,6 +472,7 @@ impl HackApp {
     ) -> bool {
         let before = self.model.selected_key();
         let previous_root = self.selected_root();
+        let runtime_before = self.model.selected_runtime_target();
         if !self.model.finish_refresh(token, snap) {
             return false;
         }
@@ -486,17 +491,32 @@ impl HackApp {
         }
         let after = self.model.selected_key();
         let selection_changed = before != after || previous_root != self.selected_root();
+        let runtime_changed = runtime_before != self.model.selected_runtime_target();
+        let invalid_filter = self.logs.model.service.as_ref().is_some_and(|filter| {
+            self.model.project_list_readable()
+                && self.model.detail().is_none_or(|detail| {
+                    !detail
+                        .services
+                        .iter()
+                        .any(|service| &service.name == filter)
+                })
+        });
+        if selection_changed || invalid_filter {
+            self.logs.model.set_service(None);
+        }
+        if selection_changed || self.model.selected_service().is_none() {
+            self.sidebar_menu = None;
+        }
         if selection_changed {
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
-            self.logs.model.set_service(None);
             self.reset_env_selection();
             self.refresh_copies_if_open(cx);
             if self.tab == 2 {
                 self.read_env(cx);
             }
         }
-        if self.tab == 1 && selection_changed {
+        if self.tab == 1 && (selection_changed || invalid_filter || runtime_changed) {
             self.open_logs(cx);
         } else if self.tab == 1 {
             // A stopped project's finite read becomes a followed stream once
@@ -631,6 +651,21 @@ impl HackApp {
         if !self.model.can_start(&key) {
             return;
         }
+        let Some(detail) = self.model.detail() else {
+            return;
+        };
+        if !detail.actions.contains(&action) {
+            return;
+        }
+        if action == Action::Open && !detail.runtime_addressable {
+            if let Some(url) = detail.url {
+                cx.open_url(&url);
+            }
+            return;
+        }
+        let compose_project = row
+            .compose_project
+            .or_else(|| row.runtime.and_then(|rt| rt.project));
         self.model.apply(Event::ActionStarted {
             key: key.clone(),
             action,
@@ -649,7 +684,15 @@ impl HackApp {
                 .background_executor()
                 .spawn({
                     let branch = key.branch.clone();
-                    async move { source.act(&root, native, branch.as_deref(), action) }
+                    async move {
+                        source.act_on_copy(
+                            &root,
+                            native,
+                            branch.as_deref(),
+                            compose_project.as_deref(),
+                            action,
+                        )
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -675,6 +718,74 @@ impl HackApp {
             });
         })
         .detach();
+    }
+
+    pub(crate) fn run_service_action(
+        &mut self,
+        key: InstanceKey,
+        service: &str,
+        action: Action,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.selected_key().as_ref() != Some(&key) {
+            return;
+        }
+        let Some((root, false)) = self.selected_root() else {
+            return;
+        };
+        let valid_service = self.model.detail().is_some_and(|detail| {
+            detail.services.iter().any(|row| {
+                row.name == service
+                    && row.compose_container
+                    && (action != Action::Stop || row.running)
+            })
+        });
+        if !valid_service {
+            return;
+        }
+        if !self.live || self.machine.busy() || !self.model.begin_service_action(&key) {
+            return;
+        }
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        let epoch = self.model.source_epoch();
+        let branch = key.branch.clone();
+        let service = service.to_owned();
+        let compose_project = self.model.selected_row().and_then(|row| {
+            row.compose_project
+                .or_else(|| row.runtime.and_then(|rt| rt.project))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    source.act_on_service(
+                        &root,
+                        branch.as_deref(),
+                        compose_project.as_deref(),
+                        &service,
+                        action,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.model.source_epoch() == epoch {
+                    if let Ok(receipt) = &result
+                        && let Some(stopped_at) = &receipt.stopped_at
+                    {
+                        this.model.record_service_stop(
+                            &key,
+                            receipt.stopped_container_ids.clone(),
+                            stopped_at,
+                        );
+                    }
+                    this.model.finish_service_action(key, result.map(|_| ()));
+                    this.refresh_now_async(cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
@@ -880,12 +991,13 @@ impl HackApp {
 
     /// Whether a project row (or one of its branch instances) matches the
     /// title bar's filter. An empty filter matches everything.
-    fn matches(&self, r: &Row) -> bool {
+    pub(crate) fn matches(&self, r: &Row) -> bool {
         self.filter.is_empty()
             || r.name.to_lowercase().contains(&self.filter)
             || r.branches
                 .iter()
                 .any(|b| b.branch.to_lowercase().contains(&self.filter))
+            || self.model.project_has_service_match(&r.name, &self.filter)
     }
 
     pub(crate) fn select_instance(&mut self, key: InstanceKey, cx: &mut Context<Self>) {
@@ -914,6 +1026,7 @@ impl HackApp {
     }
 
     pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_menu = None;
         self.pane = Pane::Project;
         self.files = Default::default();
         self.user_navigated();
@@ -1148,44 +1261,7 @@ impl HackApp {
                 }
             }
             Phase::Ready => {
-                let running: Vec<&Row> = list.running.iter().filter(|r| self.matches(r)).collect();
-                let stopped: Vec<&Row> = list.stopped.iter().filter(|r| self.matches(r)).collect();
-                let all_unknown = !stopped.is_empty()
-                    && stopped
-                        .iter()
-                        .all(|r| matches!(r.state, ProjectState::Unknown { .. }));
-                for (label, rows) in [
-                    ("Running", running.as_slice()),
-                    (
-                        if all_unknown {
-                            "Not observed"
-                        } else {
-                            "Stopped"
-                        },
-                        stopped.as_slice(),
-                    ),
-                ] {
-                    if rows.is_empty() {
-                        continue;
-                    }
-                    projects = projects.child(caption(label, ui));
-                    for r in rows {
-                        projects = projects.child(self.project_row(r, ui, cx));
-                        for b in &r.branches {
-                            projects = projects.child(self.branch_row(b, ui, cx));
-                        }
-                    }
-                }
-                if !self.filter.is_empty() && running.is_empty() && stopped.is_empty() {
-                    projects = projects.child(
-                        div()
-                            .px(space::S5)
-                            .pt(space::S7)
-                            .type_step(text::BODY)
-                            .text_color(p.text_muted)
-                            .child("No project matches"),
-                    );
-                }
+                projects = projects.child(self.project_tree(list, ui, cx));
             }
             Phase::Empty | Phase::CliMissing | Phase::Error { .. } => {}
         }
@@ -1253,7 +1329,9 @@ impl HackApp {
             .flex()
             .flex_col()
             .bg(p.chrome)
-            .hairline_r(p.border)
+            .when(self.pane != Pane::Project, |sidebar| {
+                sidebar.hairline_r(p.border)
+            })
             .child(projects)
             .child(machine)
     }
@@ -1277,33 +1355,6 @@ impl HackApp {
             DoctorMark::Count(n) => count_pill(n, ui).into_any_element(),
             DoctorMark::Dot(s) => dot(s, ui).into_any_element(),
         }
-    }
-
-    fn project_row(&self, r: &Row, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
-        let name = r.name.clone();
-        project_row(
-            SharedString::from(format!("project-{}", r.name)),
-            r.name.clone(),
-            Status::of(&r.state),
-            r.always_on,
-            r.selected && self.pane == Pane::Project,
-            ui,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| this.select_project(name.clone(), cx)))
-        .into_any_element()
-    }
-
-    fn branch_row(&self, b: &BranchRow, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
-        let key = b.key.clone();
-        hack_desktop_ui::components::branch_row(
-            SharedString::from(format!("branch-{}-{}", b.key.project, b.branch)),
-            b.branch.clone(),
-            Status::of(&b.state),
-            b.selected && self.pane == Pane::Project,
-            ui,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| this.select_instance(key.clone(), cx)))
-        .into_any_element()
     }
 
     fn banners(&self, list: &ListView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1400,6 +1451,7 @@ impl HackApp {
 
     fn header(
         &self,
+        list: &ListView,
         d: &DetailView,
         compact: bool,
         ui: &Ui,
@@ -1430,9 +1482,39 @@ impl HackApp {
                 button
             });
         }
-        let daemon_banner = self
-            .model
-            .list()
+        if !compact {
+            actions = actions.child(self.copy_menu(ui, cx));
+        }
+        let project = list
+            .running
+            .iter()
+            .chain(&list.stopped)
+            .find(|row| row.key.project == d.name);
+        let branch = project.and_then(|row| row.branches.iter().find(|b| b.key == d.key));
+        let root = branch.and_then(|b| b.checkout.as_deref()).or_else(|| {
+            project
+                .filter(|_| d.branch.is_none())
+                .and_then(|row| row.root.as_deref())
+        });
+        let title = if compact {
+            d.name.clone()
+        } else {
+            branch.map_or_else(|| "main".into(), |b| b.branch.clone())
+        };
+        let kind = branch.map_or(d.backend.as_str(), |b| {
+            if b.worktree { "worktree" } else { "branch" }
+        });
+        let breadcrumb = root.map_or_else(
+            || format!("{} · {kind}", d.name),
+            |root| {
+                format!(
+                    "{} · {kind} · {}",
+                    d.name,
+                    crate::sidebar_view::short_path(root)
+                )
+            },
+        );
+        let daemon_banner = list
             .banners
             .iter()
             .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }));
@@ -1487,6 +1569,28 @@ impl HackApp {
             .flex()
             .flex_col()
             .gap(space::S4)
+            .when(!compact, |header| {
+                header.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space::S2)
+                        .text_color(p.text_muted)
+                        .child(hack_desktop_ui::components::icon(
+                            Glyph::Container,
+                            size::ICON,
+                            p.text_muted,
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(ui.mono.clone())
+                                .type_step(text::MONO)
+                                .child(breadcrumb),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -1500,9 +1604,9 @@ impl HackApp {
                                 text::TITLE
                             })
                             .text_color(p.text_primary)
-                            .child(d.name.clone()),
+                            .child(title),
                     )
-                    .children(d.branch.clone().map(|b| {
+                    .children(d.branch.clone().filter(|_| compact).map(|b| {
                         div()
                             .flex()
                             .items_center()
@@ -1516,8 +1620,32 @@ impl HackApp {
                             ))
                             .child(b)
                     }))
-                    .child(state_pill(status, project_label(&d.state), ui))
-                    .child(neutral_pill(d.backend.clone(), ui))
+                    .child(if compact {
+                        state_pill(status, project_label(&d.state), ui)
+                    } else {
+                        let running = d.services.iter().filter(|s| s.running).count();
+                        let label = if matches!(d.state, ProjectState::Running { .. })
+                            && !d.services.is_empty()
+                        {
+                            format!("Running · {running} of {}", d.services.len())
+                        } else {
+                            d.state.label()
+                        };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::S2)
+                            .px(space::S3)
+                            .rounded(radius::CONTROL)
+                            .hairline(p.border)
+                            .type_step(text::SMALL)
+                            .text_color(p.text_secondary)
+                            .child(dot(status, ui))
+                            .child(label)
+                    })
+                    .when(compact, |row| {
+                        row.child(neutral_pill(d.backend.clone(), ui))
+                    })
                     .children(self.usage_total_label().filter(|_| !compact).map(|t| {
                         div()
                             .type_step(text::SMALL)
@@ -1603,6 +1731,7 @@ impl HackApp {
 
     fn detail(
         &mut self,
+        list: &ListView,
         d: &DetailView,
         ui: &Ui,
         window: &mut Window,
@@ -1650,29 +1779,40 @@ impl HackApp {
                 }
             })
             .collect();
-        // With the terminal panel, logs live in the panel's Logs tab.
-        #[cfg(hack_terminal)]
-        let pills: &[(usize, &'static str)] = &[
-            (0, "Services"),
-            (2, "Env"),
-            (3, "Copies"),
-            (crate::files_view::FILES_TAB, "Files"),
-        ];
-        #[cfg(not(hack_terminal))]
-        let pills: &[(usize, &'static str)] = &[
-            (0, "Services"),
-            (1, "Logs"),
-            (2, "Env"),
-            (3, "Copies"),
-            (crate::files_view::FILES_TAB, "Files"),
-        ];
-        let mut tabs = div().flex().items_center().gap(space::S2);
-        for &(i, label) in pills {
-            tabs = tabs.child(
-                pill_tab(("detail-tab", i), label, self.tab == i, ui)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_tab(i, cx))),
-            );
-        }
+        let mut tabs = div().flex().items_center().gap(space::S7).children(
+            [
+                (0, "Services"),
+                (1, "Logs"),
+                (2, "Env"),
+                (crate::files_view::FILES_TAB, "Files"),
+            ]
+            .into_iter()
+            .map(|(i, label)| {
+                let selected = self.tab == i;
+                div()
+                    .id(("detail-tab", i))
+                    .pb(space::S2)
+                    .border_b_2()
+                    .border_color(if selected {
+                        ui.p.text_primary
+                    } else {
+                        gpui_kit::transparent_black()
+                    })
+                    .type_step(if selected {
+                        text::BODY_STRONG
+                    } else {
+                        text::BODY
+                    })
+                    .text_color(if selected {
+                        ui.p.text_primary
+                    } else {
+                        ui.p.text_secondary
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_tab(i, cx)))
+                    .child(label)
+            }),
+        );
         if self.tab == crate::files_view::FILES_TAB {
             tabs = tabs.child(self.project_files_picker(d, cx));
         }
@@ -1681,7 +1821,7 @@ impl HackApp {
                 self.project_files(d, ui, window, cx).into_any_element()
             }
             3 => self.copies_view(ui, cx).into_any_element(),
-            1 if cfg!(not(hack_terminal)) => {
+            1 => {
                 // The Logs tab scrolls inside its own virtualized list.
                 let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
                 self.render_logs(&names, cx).into_any_element()
@@ -1711,6 +1851,7 @@ impl HackApp {
                 } else {
                     services_table(&rows, ui)
                 })
+                .children(self.other_copies(list, d, ui, cx))
                 .into_any_element(),
         };
         #[cfg(hack_terminal)]
@@ -1736,10 +1877,10 @@ impl HackApp {
                     .pt(if maximized { space::S5 } else { space::S7 })
                     .pb(space::S5)
                     .when(maximized, |d| d.hairline_b(ui.p.border))
-                    .child(self.header(d, maximized, ui, cx)),
+                    .child(self.header(list, d, maximized, ui, cx)),
             )
             .when(!maximized, |col| {
-                col.child(div().px(space::S7).pb(space::S3).child(tabs))
+                col.child(div().px(space::S8).pb(space::S3).child(tabs))
                     .child(body)
             })
             .children(panel)
@@ -1876,8 +2017,17 @@ impl HackApp {
 
 impl Render for HackApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(hack_terminal)]
+        self.reconcile_terminal_targets(window, cx);
         let list = self.model.list();
-        let ui = self.ui(cx);
+        let mut ui = self.ui(cx);
+        let projects_open = self.pane == Pane::Project && list.phase == Phase::Ready;
+        if projects_open {
+            ui.p = Palette::projects(ui.p.mode);
+        }
+        if self.model.selected_service().is_none() || self.pane != Pane::Project {
+            self.sidebar_menu = None;
+        }
         let p = ui.p;
         let main: AnyElement = match &list.phase {
             // Setup applies whatever the project list shows, a missing CLI
@@ -1922,7 +2072,7 @@ impl Render for HackApp {
                 empty_pane(Glyph::Loader, "Loading projects…", "", None, &ui).into_any_element()
             }
             Phase::Ready => match self.model.detail() {
-                Some(d) => self.detail(&d, &ui, window, cx).into_any_element(),
+                Some(d) => self.detail(&list, &d, &ui, window, cx).into_any_element(),
                 None => {
                     empty_pane(Glyph::Folder, "Select a project", "", None, &ui).into_any_element()
                 }
@@ -1940,7 +2090,7 @@ impl Render for HackApp {
             .size_full()
             .flex()
             .flex_col()
-            .bg(p.surface)
+            .bg(if projects_open { p.chrome } else { p.surface })
             .text_color(p.text_primary)
             .font_family(ui.font.clone())
             .child(self.title_bar(&ui))
@@ -1957,6 +2107,12 @@ impl Render for HackApp {
                             .min_w_0()
                             .flex()
                             .flex_col()
+                            .when(projects_open, |pane| {
+                                pane.mr(space::S4)
+                                    .bg(p.surface)
+                                    .rounded(radius::PANEL)
+                                    .hairline(p.border)
+                            })
                             .child(self.banners(&list, &ui, cx))
                             .child({
                                 #[cfg(hack_terminal)]

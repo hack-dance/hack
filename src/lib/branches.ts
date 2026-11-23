@@ -167,7 +167,7 @@ export async function resolveEffectiveBranch(opts: {
  */
 export function autoWorktreeBranch(
   gitBranch: string,
-  worktrees: Awaited<ReturnType<typeof listGitWorktrees>>
+  worktrees: readonly { readonly branch: string | null }[] | null
 ): string | null {
   const slug = sanitizeBranchSlug(gitBranch);
   if (!(slug && worktrees)) {

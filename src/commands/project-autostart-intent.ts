@@ -23,6 +23,7 @@ import { pathExists } from "../lib/fs.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
 import {
   findProjectContextAtRoot,
+  type ProjectConfig,
   type ProjectContext,
   readProjectConfig,
   resolveWorktreeAutoBranch,
@@ -52,6 +53,11 @@ import {
 
 export interface AutostartDownTarget {
   readonly branch: string | null;
+  readonly compose?: {
+    readonly base: string;
+    readonly projectDir: string;
+    readonly env: Readonly<Record<string, string>>;
+  };
 }
 interface AutostartCommandSelection {
   readonly cwd: string;
@@ -69,6 +75,11 @@ export async function resolveFinalAutostartDownTarget(
     readonly readProjectsRegistry?: typeof readProjectsRegistry;
     readonly readRuntimeProjects?: typeof readRuntimeProjects;
     readonly isLocalTarget?: (project: ProjectContext) => Promise<boolean>;
+    readonly resolveComposeTarget?: (opts: {
+      readonly project: ProjectContext;
+      readonly cfg: ProjectConfig;
+      readonly branch: string | null;
+    }) => Promise<AutostartDownTarget["compose"]>;
     readonly setProjectAutostartPaused?: typeof setProjectAutostartPaused;
   }
 ): Promise<AutostartDownTarget | undefined> {
@@ -91,8 +102,18 @@ export async function resolveFinalAutostartDownTarget(
       "Detached linked worktree requires an explicit --branch <name>."
     );
   }
+  const targetFor = async (
+    branch: string | null
+  ): Promise<AutostartDownTarget> => {
+    const compose = await deps?.resolveComposeTarget?.({
+      project,
+      cfg,
+      branch,
+    });
+    return compose ? { branch, compose } : { branch };
+  };
   if (explicitBranch !== null || effective.branch === null) {
-    return { branch: effective.branch };
+    return await targetFor(effective.branch);
   }
   if (deps?.isLocalTarget && !(await deps.isLocalTarget(project))) {
     return undefined;
@@ -120,15 +141,17 @@ export async function resolveFinalAutostartDownTarget(
       message: `Cannot inspect runtime ownership before down: ${runtime.error}${paused ? " Automatic startup for this project is paused; run hack up to resume it." : ""}`,
     });
   }
-  return {
-    branch: reconcileImplicitDownBranch({
-      baseProjectName: await resolveComposeProjectName({ project, cfg }),
-      branch: effective.branch,
-      projectDir: project.projectDir,
-      runtime: runtime.runtime,
-      writeNotice: opts.writeNotice ?? (() => undefined),
-    }),
-  };
+  const current = await targetFor(effective.branch);
+  const reconciled = reconcileImplicitDownBranch({
+    baseProjectName:
+      current.compose?.base ??
+      (await resolveComposeProjectName({ project, cfg })),
+    branch: effective.branch,
+    projectDir: project.projectDir,
+    runtime: runtime.runtime,
+    writeNotice: opts.writeNotice ?? (() => undefined),
+  });
+  return reconciled === current.branch ? current : await targetFor(reconciled);
 }
 
 /**
@@ -311,17 +334,36 @@ export async function updateNativeAutostartIntent(opts: {
 
 /** Resolve the same registered instance for command serialization without native legacy discovery. */
 export async function withAutostartCommandLock<T>(opts: {
-  readonly action: "up" | "down";
+  readonly action: "up" | "down" | "restart" | "service-down";
   readonly resolvedDownTarget?: AutostartDownTarget;
   readonly cwd: string;
   readonly path?: string;
   readonly project?: string;
   readonly branch?: string;
-  readonly run: () => Promise<T>;
+  readonly expectComposeProject?: string;
+  readonly resolveLoginComposeBase?: (opts: {
+    readonly project: ProjectContext;
+    readonly cfg: ProjectConfig;
+  }) => Promise<string | undefined>;
+  readonly run: (loginComposeBase?: string) => Promise<T>;
 }): Promise<T> {
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
-  if (!login && opts.action === "up") {
-    return await opts.run();
+  if (!login) {
+    if (opts.expectComposeProject !== undefined) {
+      // The desktop sends the full name, including any branch suffix.
+      // Execution revalidates it under this lock before mutating Compose.
+      return await withAutostartProjectLock({
+        scope: {
+          projectId: "",
+          composeProject: opts.expectComposeProject,
+          branch: null,
+        },
+        run: opts.run,
+      });
+    }
+    if (opts.action !== "down") {
+      return await opts.run();
+    }
   }
   const branch = opts.branch?.trim()
     ? sanitizeBranchSlug(opts.branch.trim())
@@ -358,9 +400,15 @@ export async function withAutostartCommandLock<T>(opts: {
       root: project.projectRoot,
     });
   }
+  const loginComposeBase = login
+    ? await opts.resolveLoginComposeBase?.({ project, cfg })
+    : undefined;
   const scope = {
     projectId: projectId ?? "",
-    composeProject: await resolveComposeProjectName({ project, cfg }),
+    composeProject:
+      loginComposeBase ??
+      opts.resolvedDownTarget?.compose?.base ??
+      (await resolveComposeProjectName({ project, cfg })),
     branch: effective.branch,
   };
   return await withAutostartProjectLock({
@@ -372,7 +420,7 @@ export async function withAutostartCommandLock<T>(opts: {
           expectedRoot: project.projectRoot,
         });
       }
-      return await opts.run();
+      return await opts.run(loginComposeBase);
     },
   });
 }

@@ -33,6 +33,7 @@ mod machine_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod setup_view;
+mod sidebar_view;
 #[cfg(hack_terminal)]
 mod terminal;
 mod upgrade_view;

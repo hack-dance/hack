@@ -12,11 +12,15 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { withAutostartCommandLock } from "../src/commands/project-autostart-intent.ts";
 import { classifyAutostartExit } from "../src/daemon/autostart.ts";
 import {
   assertAutostartProjectCurrent,
   withAutostartProjectLock,
 } from "../src/lib/autostart-project-lock.ts";
+import { resolveDesktopComposeProjectName } from "../src/lib/compose-project-name.ts";
+import { readLifecycleState } from "../src/lib/lifecycle-runtime.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import {
   mkdirOwnedFixture,
   writeOwnedFixture,
@@ -125,6 +129,322 @@ test("down persists pause before a failing runtime, and a later up clears it", a
   expect((await marker()).paused).toBe(true);
   await run(["up", "--json", "-d"]);
   expect((await marker()).paused).toBe(false);
+});
+
+async function writeInterpolatedStack(projectRoot: string, variable: string) {
+  const composeFile = join(projectRoot, ".hack", "docker-compose.yml");
+  await writeOwnedFixture(
+    composeFile,
+    `name: "\${${variable}:-sample}"\nservices:\n  app:\n    image: example.invalid/app\n`
+  );
+  return { projectRoot, composeFile };
+}
+
+async function installComposeNameFixture(opts?: {
+  readonly failFirstProbe?: boolean;
+  readonly holdStart?: boolean;
+  readonly foreignCheckout?: string;
+  readonly startContainers?: boolean;
+}) {
+  await writeFile(
+    join(root, "bin", "docker"),
+    `#!${process.execPath}
+import { rm } from "node:fs/promises";
+const fixture = ${JSON.stringify(root)};
+const options = ${JSON.stringify(opts ?? {})};
+const args = process.argv.slice(2);
+const mode = args.find((arg) => ["config", "ps", "inspect", "up", "down"].includes(arg));
+const running = fixture + "/compose-running";
+if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
+  const model = JSON.parse(await Bun.stdin.text());
+  if (options.failFirstProbe && !(await Bun.file(fixture + "/name-probed").exists())) {
+    await Bun.write(fixture + "/name-probed", "probed");
+    process.exit(1);
+  }
+  const match = /:-([a-z]+)}/.exec(model.name);
+  if (!match) process.exit(1);
+  if (args.includes("/dev/null")) await Bun.write(fixture + "/unattended-probe", "seen");
+  process.stdout.write(JSON.stringify({name: match[1]}));
+} else if (mode === "config") {
+  process.stdout.write(JSON.stringify({name: "sample", services: {app: {image: "example.invalid/app"}}}));
+} else if (mode === "inspect" && args[0] === "image") {
+  process.stdout.write("sha256:" + "a".repeat(64) + "\\n");
+} else if (mode === "ps" || mode === "inspect") {
+  const directory = options.foreignCheckout ?? (await Bun.file(running).exists() ? process.cwd() : null);
+  process.stdout.write(JSON.stringify(directory ? [{
+    ID: "fixture-container", Service: "app", State: "running",
+    Labels: "com.docker.compose.project.working_dir=" + directory
+  }] : []));
+} else if (mode === "up") {
+  if (options.holdStart && args.includes("--no-start")) {
+    await Bun.write(fixture + "/compose-start", JSON.stringify(args));
+    const deadline = Date.now() + 12000;
+    while (!(await Bun.file(fixture + "/release-start").exists())) {
+      if (Date.now() > deadline) process.exit(99);
+      await Bun.sleep(10);
+    }
+  }
+  if (!options.startContainers) process.exit(1);
+  if (args.includes("-d")) await Bun.write(running, "running");
+} else if (mode === "down") {
+  await Bun.write(fixture + "/compose-down", JSON.stringify(args));
+  await rm(running, { force: true });
+}
+`,
+    { mode: 0o755 }
+  );
+}
+
+test("desktop Stop and Start update Always on intent for an interpolated name", async () => {
+  await writeInterpolatedStack(join(root, "project"), "STACK_A");
+  await installComposeNameFixture();
+  await writeRegistry(false);
+  const bound = [
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "sample",
+    "--json",
+  ];
+  await run(["down", ...bound]);
+  expect((await marker()).paused).toBe(true);
+  await run(["up", "-d", ...bound]);
+  expect((await marker()).paused).toBe(false);
+});
+
+test("a failed Always on identity lookup stops the command before it can retry", async () => {
+  await writeInterpolatedStack(join(root, "project"), "STACK_A");
+  await installComposeNameFixture({ failFirstProbe: true });
+  await writeRegistry(false);
+  const down = [
+    "down",
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "sample",
+    "--json",
+  ];
+  const failed = await run(down);
+  expect(failed.exitCode).toBe(1);
+  expect(JSON.parse(failed.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_COMPOSE_FAILED",
+      message: "Could not resolve the Compose project name.",
+    },
+  });
+  const invocation = Bun.file(join(root, "compose-down"));
+  expect(await invocation.exists()).toBe(false);
+  expect((await marker()).paused).toBe(false);
+  const retried = await run(down);
+  expect(retried.exitCode, retried.stderr || retried.stdout).toBe(0);
+  expect(await invocation.exists()).toBe(true);
+  expect((await marker()).paused).toBe(true);
+});
+
+for (const login of [false, true]) {
+  test(`ordinary Down shares the Compose lock with ${login ? "login startup" : "desktop Start"} on an interpolated stack`, async () => {
+    const projectRoot = join(root, "project");
+    await writeOwnedFixture(
+      join(projectRoot, ".hack", "hack.config.json"),
+      '{"name":"sample","dev_host":"sample.hack"}'
+    );
+    await writeInterpolatedStack(projectRoot, "STACK_A");
+    await installComposeNameFixture({ holdStart: true });
+    await writeRegistry(false);
+    const start = run(
+      [
+        "up",
+        "-d",
+        "--json",
+        ...(login
+          ? []
+          : ["--target", "local", "--expect-compose-project", "sample"]),
+      ],
+      login
+    );
+    const releaseStart = join(root, "release-start");
+    const downInvocation = join(root, "compose-down");
+    let down: ReturnType<typeof run> | undefined;
+    try {
+      await waitForCondition(
+        () => Bun.file(join(root, "compose-start")).exists(),
+        "Start did not reach the held Compose phase"
+      );
+      const upArgs = await Bun.file(join(root, "compose-start")).json();
+      expect(upArgs.slice(0, 3)).toEqual(["compose", "-p", "sample"]);
+      if (login) {
+        expect(upArgs).toContain("/dev/null");
+        expect(await Bun.file(join(root, "unattended-probe")).exists()).toBe(
+          true
+        );
+      }
+      down = run(["down", "--json"]);
+      await waitForCondition(
+        async () => (await marker()).paused === true,
+        "ordinary Down did not publish its Always on pause"
+      );
+      await Promise.race([Bun.sleep(250), down]);
+      expect(await Bun.file(downInvocation).exists()).toBe(false);
+      await Bun.write(releaseStart, "release");
+      await start;
+      const stopped = await down;
+      expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+      expect((await Bun.file(downInvocation).json()).slice(0, 3)).toEqual([
+        "compose",
+        "-p",
+        "sample",
+      ]);
+      expect((await marker()).paused).toBe(true);
+    } finally {
+      await Bun.write(releaseStart, "release");
+      await Promise.allSettled([start, down]);
+    }
+  }, 25_000);
+}
+
+test("ordinary Down refuses an interpolated branch stack owned by another checkout", async () => {
+  await writeInterpolatedStack(join(root, "project"), "STACK_A");
+  await installComposeNameFixture({
+    foreignCheckout: join(root, "foreign", ".hack"),
+  });
+  const stopped = await run(["down", "--branch", "preview", "--json"]);
+  expect(stopped.exitCode).toBe(1);
+  expect(JSON.parse(stopped.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      message: expect.stringContaining("do not all belong to this checkout"),
+    },
+  });
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+});
+
+const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
+test.skipIf(!supervisorBinary)(
+  "ordinary Down stops the host process launched by desktop Start",
+  async () => {
+    const projectRoot = join(root, "project");
+    const projectDir = join(projectRoot, ".hack");
+    await writeOwnedFixture(
+      join(projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "sample",
+        dev_host: "sample.hack",
+        lifecycle: {
+          runner: "supervisor",
+          processes: [{ name: "sleeper", command: "exec /bin/sleep 120" }],
+        },
+      })
+    );
+    await writeInterpolatedStack(projectRoot, "STACK_A");
+    await installComposeNameFixture({ startContainers: true });
+    const env = {
+      HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
+      PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+    };
+    const bound = [
+      "--target",
+      "local",
+      "--expect-compose-project",
+      "sample",
+      "--json",
+    ];
+    try {
+      const started = await run(
+        ["up", "-d", ...bound],
+        false,
+        projectRoot,
+        env
+      );
+      expect(started.exitCode, started.stderr || started.stdout).toBe(0);
+      const state = await readLifecycleState({ projectDir });
+      expect(state[0]).toMatchObject({
+        backend: "supervisor",
+        composeProject: "sample",
+      });
+      const pid = state[0]?.processes[0]?.processGroupId ?? 0;
+      expect(pid).toBeGreaterThan(1);
+      expect(() => process.kill(-pid, 0)).not.toThrow();
+      const stopped = await run(["down", "--json"], false, projectRoot, env);
+      expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+      expect(await readLifecycleState({ projectDir })).toHaveLength(0);
+      expect(() => process.kill(-pid, 0)).toThrow();
+    } finally {
+      await run(["down", ...bound], false, projectRoot, env);
+    }
+  },
+  30_000
+);
+
+test("desktop Starts from different expressions lock the same resolved branch stack", async () => {
+  const secondRoot = join(root, "second");
+  await mkdirOwnedFixture(join(secondRoot, ".hack"), true);
+  const firstProject = await writeInterpolatedStack(
+    join(root, "project"),
+    "STACK_A"
+  );
+  const secondProject = await writeInterpolatedStack(secondRoot, "STACK_B");
+  await installComposeNameFixture();
+  const previous = {
+    HACK_GLOBAL_CONFIG_PATH: process.env.HACK_GLOBAL_CONFIG_PATH,
+    HACK_AUTOSTART_LOGIN: process.env.HACK_AUTOSTART_LOGIN,
+    PATH: process.env.PATH,
+  };
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(
+    root,
+    "home",
+    ".hack",
+    "hack.config.json"
+  );
+  process.env.HACK_AUTOSTART_LOGIN = "0";
+  process.env.PATH = join(root, "bin");
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const start = async (
+    project: Awaited<ReturnType<typeof writeInterpolatedStack>>,
+    run: () => Promise<void>
+  ) => {
+    const name = await resolveDesktopComposeProjectName({ project });
+    expect(name).toBe("sample");
+    return await withAutostartCommandLock({
+      action: "up",
+      cwd: project.projectRoot,
+      branch: "preview",
+      expectComposeProject: `${name}--preview`,
+      run,
+    });
+  };
+  const first = start(firstProject, async () => {
+    entered.resolve();
+    await release.promise;
+  });
+  let second: Promise<void> | undefined;
+  try {
+    await Promise.race([entered.promise, first]);
+    const lockName = createHash("sha256")
+      .update("sample--preview")
+      .digest("hex");
+    expect(
+      await Bun.file(
+        join(root, "home", ".hack", "autostart-locks", `${lockName}.lock`)
+      ).exists()
+    ).toBe(true);
+    let secondRan = false;
+    second = start(secondProject, async () => {
+      secondRan = true;
+    });
+    await Promise.race([Bun.sleep(250), second]);
+    expect(secondRan).toBe(false);
+    release.resolve();
+    await Promise.all([first, second]);
+    expect(secondRan).toBe(true);
+  } finally {
+    release.resolve();
+    await Promise.allSettled([first, second]);
+    for (const [key, value] of Object.entries(previous)) {
+      restoreEnv(key, value);
+    }
+  }
 });
 test("an unrelated branch does not pause the marked base instance", async () => {
   await writeRegistry(false);

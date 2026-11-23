@@ -56,6 +56,9 @@ impl Status {
             }
             return (Self::Running, "running".into());
         }
+        if s.intentionally_stopped {
+            return (Self::Stopped, "stopped".into());
+        }
         if lower.starts_with("restarting") {
             return (Self::Failed, "restarting".into());
         }
@@ -194,6 +197,8 @@ mod tests {
             completed: !running && exit == Some(0),
             created,
             route: None,
+            compose_container: created,
+            intentionally_stopped: false,
         }
     }
 

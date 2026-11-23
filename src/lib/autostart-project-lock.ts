@@ -61,10 +61,9 @@ export async function withAutostartProjectLock<T>(opts: {
   }
   const key = createHash("sha256")
     .update(
-      JSON.stringify({
-        composeProject: opts.scope.composeProject,
-        branch: opts.scope.branch,
-      })
+      opts.scope.branch
+        ? `${opts.scope.composeProject}--${opts.scope.branch}`
+        : opts.scope.composeProject
     )
     .digest("hex");
   return await withProjectsRegistryLock({

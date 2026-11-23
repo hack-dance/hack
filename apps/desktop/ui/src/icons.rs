@@ -58,6 +58,8 @@ pub enum Glyph {
     Upgrade,
     /// Sidebar and header: a branch instance.
     Branch,
+    Worktree,
+    ChevronRight,
     /// Header: copy the URL.
     /// Env tab: reveal and hide a secret value.
     Eye,
@@ -109,6 +111,8 @@ impl Glyph {
             Self::ChevronUp => "icons/chevron-up.svg",
             Self::Upgrade => "icons/circle-arrow-up.svg",
             Self::Branch => "icons/git-branch.svg",
+            Self::Worktree => "icons/tree-structure.svg",
+            Self::ChevronRight => "icons/chevron-right.svg",
             Self::Copy => "icons/copy.svg",
             Self::Lock => "icons/lock-keyhole.svg",
             Self::More => "icons/ellipsis.svg",
@@ -155,6 +159,7 @@ icon_assets!(
         ChevronUp,
         CircleArrowUp,
         GitBranch,
+        ChevronRight,
         Copy,
         LockKeyhole,
         Ellipsis,
@@ -178,6 +183,11 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if path == Glyph::Worktree.path() {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/tree-structure.svg"
+            ))));
+        }
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -186,6 +196,9 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         let mut all = AppIcons.list(path)?;
+        if Glyph::Worktree.path().starts_with(path) {
+            all.push(Glyph::Worktree.path().into());
+        }
         all.extend(gpui_kit::assets::Assets.list(path)?);
         Ok(all)
     }
@@ -223,6 +236,8 @@ mod tests {
             Glyph::ChevronUp,
             Glyph::Upgrade,
             Glyph::Branch,
+            Glyph::Worktree,
+            Glyph::ChevronRight,
             Glyph::Copy,
             Glyph::Lock,
             Glyph::More,

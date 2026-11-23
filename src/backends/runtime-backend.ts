@@ -97,6 +97,8 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
    * Unattended starts also invoke it before preparation can create containers.
    */
   readonly beforeStart?: () => Promise<void>;
+  /** Recheck ownership before detached Compose can create or replace containers. */
+  readonly beforeCreate?: () => Promise<void>;
   readonly services?: readonly string[];
   readonly noDeps?: boolean;
   readonly forceRecreate?: boolean;
@@ -124,6 +126,7 @@ export interface RuntimeDownOptions extends RuntimeBaseOptions {
 
 export interface RuntimePsOptions extends RuntimeBaseOptions {
   readonly all?: boolean;
+  readonly noTrunc?: boolean;
 }
 
 export interface RuntimeRunOptions extends RuntimeBaseOptions {
@@ -550,6 +553,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
           return inputs.exitCode;
         }
         opts.onStartupPhase?.("images");
+        await opts.beforeCreate?.();
         const prepared = await runPhase(
           [
             ...composeArgs,
@@ -716,6 +720,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...buildComposeArgs(opts),
       "ps",
       ...(opts.all ? ["--all"] : []),
+      ...(opts.noTrunc ? ["--no-trunc"] : []),
       "--format",
       "json",
     ];

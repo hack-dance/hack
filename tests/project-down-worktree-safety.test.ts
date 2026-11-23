@@ -204,6 +204,210 @@ test("primary checkout down remains on the base Compose project", async () => {
   expect(log).not.toContain(" -p ");
 });
 
+test("down --service stops only the named service in its own branch checkout", async () => {
+  const fixture = await createWorktreeFixture();
+  const ownDir = join(fixture.worktreeRoot, ".hack");
+  const row = (
+    ID: string,
+    Service: string,
+    workingDir = ownDir,
+    oneOff = false
+  ) => ({
+    ID,
+    Service,
+    State: "running",
+    Labels: `com.docker.compose.project.working_dir=${workingDir},com.docker.compose.oneoff=${oneOff}`,
+  });
+  const entries = [
+    row("api-one", "api"),
+    row("api-two", "api"),
+    row("other", "db"),
+    row("oneoff", "api", ownDir, true),
+  ];
+  await writeFile(fixture.dockerComposeRowsPath, JSON.stringify(entries));
+  const args = [
+    "down",
+    "--path",
+    fixture.worktreeRoot,
+    "--branch",
+    "feature-current",
+    "--service",
+    "api",
+    "--json",
+  ];
+  const first = await runCliWithCapturedOutput(args);
+  expect(first.exitCode).toBe(0);
+  expect(JSON.parse(first.stdout)).toMatchObject({
+    ok: true,
+    data: {
+      branch: "feature-current",
+      composeProject: "downsafe--feature-current",
+      services: { stopped: ["api"] },
+      stoppedContainerIds: ["api-one", "api-two"],
+      stoppedAt: expect.any(String),
+    },
+  });
+  await writeFile(
+    fixture.dockerComposeRowsPath,
+    JSON.stringify([
+      ...entries,
+      row("foreign", "api", join(fixture.primaryRoot, ".hack")),
+    ])
+  );
+  const foreign = await runCliWithCapturedOutput(args);
+  expect(foreign.exitCode).toBe(1);
+  expect(JSON.parse(foreign.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      message: expect.stringContaining("do not all belong to this checkout"),
+    },
+  });
+  const restart = await runCliWithCapturedOutput([
+    "restart",
+    "--path",
+    fixture.worktreeRoot,
+    "--branch",
+    "feature-current",
+    "--target",
+    "local",
+    "--json",
+    "api",
+  ]);
+  expect(restart.exitCode).toBe(1);
+  expect(JSON.parse(restart.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      message: expect.stringContaining("Cannot restart api"),
+    },
+  });
+  const start = await runCliWithCapturedOutput([
+    "up",
+    "--path",
+    fixture.worktreeRoot,
+    "--branch",
+    "feature-current",
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "downsafe--feature-current",
+    "--detach",
+    "--json",
+  ]);
+  expect(start.exitCode).toBe(1);
+  expect(JSON.parse(start.stdout)).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("Cannot start this copy") },
+  });
+  const stale = await runCliWithCapturedOutput([
+    ...args,
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "oldname--feature-current",
+  ]);
+  expect(stale.exitCode).toBe(1);
+  expect(JSON.parse(stale.stdout)).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("Compose project changed") },
+  });
+  const empty = await runCliWithCapturedOutput([
+    ...args,
+    "--target",
+    "local",
+    "--expect-compose-project=",
+  ]);
+  expect(empty.exitCode).toBe(1);
+  expect(JSON.parse(empty.stdout)).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("nonempty name") },
+  });
+  const readTarget = [
+    "--path",
+    fixture.worktreeRoot,
+    "--branch",
+    "feature-current",
+    "--expect-compose-project",
+    "oldname--feature-current",
+  ];
+  const logs = await runCliWithCapturedOutput([
+    "logs",
+    ...readTarget,
+    "--json",
+    "--no-follow",
+    "api",
+  ]);
+  expect(logs.exitCode).toBe(1);
+  expect(JSON.parse(logs.stdout)).toMatchObject({
+    error: { message: expect.stringContaining("Compose project changed") },
+  });
+  const shell = await runCliWithCapturedOutput([
+    "exec",
+    ...readTarget,
+    "api",
+    "--",
+    "sh",
+  ]);
+  expect(shell.exitCode).toBe(1);
+  expect(shell.stderr).toContain("Compose project changed");
+  const detached = await runCliWithCapturedOutput([
+    "exec",
+    ...readTarget,
+    "--detach",
+    "api",
+    "--",
+    "sh",
+  ]);
+  expect(detached.exitCode).toBe(1);
+  expect(detached.stderr).toContain("requires foreground Compose exec");
+  const commands = (await readFile(fixture.dockerLogPath, "utf8"))
+    .trim()
+    .split("\n");
+  expect(commands.filter((command) => command.startsWith("stop "))).toEqual([
+    "stop -- api-one api-two",
+  ]);
+  expect(
+    commands.some((command) => command.includes("ps --all --no-trunc"))
+  ).toBe(true);
+  expect(commands.some((command) => command.endsWith(" down"))).toBe(false);
+  expect(commands.some((command) => command.includes("--force-recreate"))).toBe(
+    false
+  );
+}, 30_000);
+
+test("desktop Start pins the resolved name of a never-started Compose copy", async () => {
+  const fixture = await createWorktreeFixture();
+  await writeFile(
+    join(fixture.worktreeRoot, ".hack", "docker-compose.yml"),
+    'name: "${HACK_TEST_STACK_NAME:-demo}"\nservices:\n  api:\n    image: alpine:3.20\n'
+  );
+  await writeFile(
+    join(fixture.worktreeRoot, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "downsafe",
+      dev_host: "downsafe.hack",
+      compose: { startupTimeoutMs: 2500 },
+    })
+  );
+  await writeFile(fixture.dockerComposeRowsPath, "[]");
+  const result = await runCliWithCapturedOutput([
+    "up",
+    "--path",
+    fixture.worktreeRoot,
+    "--branch",
+    "feature-current",
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "demo--feature-current",
+    "--detach",
+    "--json",
+  ]);
+  expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+  const log = await readFile(fixture.dockerLogPath, "utf8");
+  expect(log).toMatch(/compose -p demo--feature-current .* up /);
+  expect(log).not.toContain("HACK_TEST_STACK_NAME");
+}, 20_000);
+
 test("detached linked worktree down still requires an explicit branch", async () => {
   const fixture = await createWorktreeFixture();
   runGit({ cwd: fixture.worktreeRoot, args: ["checkout", "--detach"] });
@@ -478,6 +682,7 @@ test("prune keeps a volume recreated during stop", async () => {
 });
 
 async function createWorktreeFixture(): Promise<{
+  readonly dockerComposeRowsPath: string;
   readonly dockerInspectPath: string;
   readonly dockerLogPath: string;
   readonly dockerRowsPath: string;
@@ -522,10 +727,12 @@ async function createWorktreeFixture(): Promise<{
 
   const binDir = join(tempDir, "bin");
   const dockerRowsPath = join(tempDir, "docker-rows.jsonl");
+  const dockerComposeRowsPath = join(tempDir, "compose-rows.json");
   const dockerInspectPath = join(tempDir, "docker-inspect.json");
   const dockerLogPath = join(tempDir, "docker.log");
   await mkdir(binDir, { recursive: true });
   await writeFile(dockerRowsPath, "");
+  await writeFile(dockerComposeRowsPath, "");
   await writeFile(dockerInspectPath, "[]\n");
   const dockerPath = join(binDir, "docker");
   await writeFile(
@@ -537,6 +744,9 @@ async function createWorktreeFixture(): Promise<{
       `  cat "${dockerRowsPath}"`,
       "  exit 0",
       "fi",
+      'if [ "$1" = compose ]; then case " $* " in *" -f - config --format json "*) grep -q HACK_TEST_STACK_NAME || exit 1; echo \'{"name":"demo"}\'; exit 0;; esac; fi',
+      `if [ "$1" = compose ]; then case " $* " in *" -p demo--feature-current "*" up -d "*) printf '[{"ID":"api-created","Service":"api","State":"running","Labels":"com.docker.compose.project.working_dir=%s"}]\\n' "$PWD" > "${dockerComposeRowsPath}";; esac; fi`,
+      `if [ "$1" = compose ] && [ -s "${dockerComposeRowsPath}" ]; then case " $* " in *" ps "*) cat "${dockerComposeRowsPath}"; exit 0;; esac; fi`,
       'if [ "$1" = "inspect" ]; then',
       `  cat "${dockerInspectPath}"`,
       "  exit 0",
@@ -573,6 +783,7 @@ async function createWorktreeFixture(): Promise<{
   process.env.PATH = `${binDir}:${originalPath ?? ""}`;
 
   return {
+    dockerComposeRowsPath,
     dockerInspectPath,
     dockerLogPath,
     dockerRowsPath,

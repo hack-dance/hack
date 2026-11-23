@@ -310,6 +310,17 @@ impl TerminalPanel {
         self.changed(cx);
     }
 
+    /// Append a background tab with no change to window focus.
+    pub fn add_tab_in_place(&mut self, view: Entity<TerminalView>, cx: &mut Context<Self>) {
+        let active = self.state.active_index();
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        self.state.add(view);
+        if let Some(active) = active {
+            self.state.activate(active);
+        }
+        self.changed(cx);
+    }
+
     pub fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.activate(index) {
             self.focus_active(window, cx);
@@ -357,11 +368,31 @@ impl TerminalPanel {
 
     /// Close one tab and end its session.
     pub fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab(index, true, window, cx);
+    }
+
+    /// End a retired tab's session without moving focus from another view.
+    pub fn close_in_place(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let had_focus = self
+            .tab(index)
+            .is_some_and(|tab| tab.read(cx).focus_handle(cx).contains_focused(window, cx));
+        self.close_tab(index, had_focus, window, cx);
+    }
+
+    fn close_tab(
+        &mut self,
+        index: usize,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(view) = self.state.close(index) else {
             return;
         };
         self.retire_view(&view, cx);
-        self.focus_active(window, cx);
+        if focus {
+            self.focus_active(window, cx);
+        }
         self.changed(cx);
     }
 

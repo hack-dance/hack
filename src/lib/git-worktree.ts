@@ -16,13 +16,14 @@ async function tryRealpath(path: string): Promise<string> {
 async function readGitPath(opts: {
   readonly repoRoot: string;
   readonly args: readonly string[];
+  readonly timeoutMs?: number;
 }): Promise<string | null> {
   let result: Awaited<ReturnType<typeof exec>>;
   try {
     // A hung git reads as unknown (null), never a wait without end.
     result = await exec(["git", "-C", opts.repoRoot, ...opts.args], {
       stdin: "ignore",
-      timeoutMs: 10_000,
+      timeoutMs: opts.timeoutMs ?? 10_000,
     });
   } catch {
     return null;
@@ -59,9 +60,11 @@ export async function resolveGitWorktreeDir(opts: {
  */
 export async function resolveGitRepositoryIdentity(opts: {
   readonly repoRoot: string;
+  readonly timeoutMs?: number;
 }): Promise<string | null> {
   return await readGitPath({
     repoRoot: opts.repoRoot,
+    timeoutMs: opts.timeoutMs,
     args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
   });
 }

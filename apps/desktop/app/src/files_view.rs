@@ -35,6 +35,11 @@ pub(crate) struct ProjectFiles {
 }
 
 impl HackApp {
+    pub(crate) fn open_project_files(&mut self, service: String, cx: &mut Context<Self>) {
+        self.set_tab(FILES_TAB, cx);
+        self.files.service = Some(service);
+    }
+
     pub(crate) fn project_files(
         &mut self,
         detail: &DetailView,
@@ -85,7 +90,7 @@ impl HackApp {
             .children(self.files.pane.iter().map(|(_, _, pane)| pane.clone()))
     }
 
-    fn files_service<'a>(&'a self, detail: &'a DetailView) -> Option<&'a String> {
+    pub(crate) fn files_service<'a>(&'a self, detail: &'a DetailView) -> Option<&'a String> {
         let services = &detail.services;
         self.files
             .service

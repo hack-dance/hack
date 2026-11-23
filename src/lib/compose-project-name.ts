@@ -1,8 +1,17 @@
+import { dirname } from "node:path";
 import { YAML } from "bun";
 import { readTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import type { ProjectConfig, ProjectContext } from "./project.ts";
 import { defaultProjectSlugFromPath } from "./project.ts";
+import { exec } from "./shell.ts";
+
+type ComposeProjectNameOptions = {
+  readonly project: Pick<ProjectContext, "composeFile" | "projectRoot">;
+  readonly cfg?: Pick<ProjectConfig, "name">;
+  /** Already parsed Compose name; null skips a file read when no name exists. */
+  readonly composeName?: string | null;
+};
 
 /**
  * Resolve the base Compose project name for a project's default instance.
@@ -12,12 +21,9 @@ import { defaultProjectSlugFromPath } from "./project.ts";
  * instance appends `--<branch slug>` to this base (see
  * {@link branchComposeProjectName}). The read is side-effect free.
  */
-export async function resolveComposeProjectName(opts: {
-  readonly project: Pick<ProjectContext, "composeFile" | "projectRoot">;
-  readonly cfg?: Pick<ProjectConfig, "name">;
-  /** Already parsed Compose name; null skips a file read when no name exists. */
-  readonly composeName?: string | null;
-}): Promise<string> {
+export async function resolveComposeProjectName(
+  opts: ComposeProjectNameOptions
+): Promise<string> {
   const composeName =
     opts.composeName === undefined
       ? await readComposeProjectName(opts.project.composeFile)
@@ -29,6 +35,69 @@ export async function resolveComposeProjectName(opts: {
   const derived = defaultProjectSlugFromPath(opts.project.projectRoot);
   const cfgName = (opts.cfg?.name ?? derived).trim();
   return cfgName.length > 0 ? cfgName : derived;
+}
+
+const COMPOSE_PROJECT_SLUG = /^[a-z0-9][a-z0-9_-]*$/;
+export const COMPOSE_PROJECT_NAME_TIMEOUT_MS = 1500;
+
+export function isComposeProjectName(name: string): boolean {
+  return COMPOSE_PROJECT_SLUG.test(name);
+}
+
+/**
+ * Resolve an interpolated name before the desktop can pin it with `-p`.
+ * Compose evaluates the name in the checkout's normal dotenv and shell
+ * environment. Only the name and a dummy service are parsed, so unrelated
+ * service configuration, env files and Docker availability do not affect it.
+ */
+export async function resolveDesktopComposeProjectName(
+  opts: ComposeProjectNameOptions & {
+    readonly env?: Readonly<Record<string, string>>;
+    readonly disableEnvFile?: boolean;
+  }
+): Promise<string | null> {
+  const composeName =
+    opts.composeName === undefined
+      ? await readComposeProjectName(opts.project.composeFile)
+      : opts.composeName;
+  if (!composeName?.includes("$")) {
+    return await resolveComposeProjectName({ ...opts, composeName });
+  }
+  const cwd = dirname(opts.project.composeFile);
+  const config = JSON.stringify({
+    name: composeName,
+    services: { probe: { image: "scratch" } },
+  });
+  try {
+    const result = await exec(
+      [
+        "docker",
+        "compose",
+        "--project-directory",
+        cwd,
+        ...(opts.disableEnvFile ? ["--env-file", "/dev/null"] : []),
+        "-f",
+        "-",
+        "config",
+        "--format",
+        "json",
+      ],
+      {
+        cwd,
+        env: opts.env ? { ...opts.env } : undefined,
+        stdin: new Blob([config]),
+        timeoutMs: COMPOSE_PROJECT_NAME_TIMEOUT_MS,
+        maxStdoutBytes: 4096,
+        maxStderrBytes: 4096,
+      }
+    );
+    const rendered: unknown =
+      result.exitCode === 0 ? JSON.parse(result.stdout) : null;
+    const name = isRecord(rendered) ? getString(rendered, "name") : null;
+    return name && isComposeProjectName(name) ? name : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Compose project name of a branch instance: `<base>--<branch slug>`. */

@@ -600,6 +600,34 @@ pub trait Source: Send + Sync {
         action: Action,
     ) -> Result<ActionOutcome, SourceError>;
 
+    /// Run a copy action bound to the Compose identity the app displayed.
+    fn act_on_copy(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        _compose_project: Option<&str>,
+        action: Action,
+    ) -> Result<ActionOutcome, SourceError> {
+        self.act(repo_root, native, branch, action)
+    }
+
+    /// Run a service-scoped lifecycle action on a Compose instance.
+    fn act_on_service(
+        &self,
+        _repo_root: &Path,
+        _branch: Option<&str>,
+        _compose_project: Option<&str>,
+        _service: &str,
+        _action: Action,
+    ) -> Result<LifecycleResult, SourceError> {
+        Err(SourceError::Cli {
+            code: "E_APP_SERVICE_ACTION".into(),
+            message: "Service actions are unavailable for this source.".into(),
+            failed: vec![],
+        })
+    }
+
     /// Last log lines for a project or one of its branch instances (no follow).
     ///
     /// # Errors
@@ -1849,7 +1877,7 @@ impl Source for LiveSource {
             .transpose()
             .map_err(|e| describe_error(&e))?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.runner
+        self.runner_for(false)
             .stream_logs(&with_branch(&args, branch), Some(repo_root))
             .map(|s| Box::new(s) as Box<dyn LogFeed>)
             .map_err(|e| e.to_string())
@@ -2146,13 +2174,30 @@ impl Source for LiveSource {
         branch: Option<&str>,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
+        self.act_on_copy(repo_root, native, branch, None, action)
+    }
+
+    fn act_on_copy(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        compose_project: Option<&str>,
+        action: Action,
+    ) -> Result<ActionOutcome, SourceError> {
         let branch = branch.map(validate_branch).transpose()?;
         // Actions run checkout-defined lifecycle commands as the user: run
         // only on a validated root, by its canonical path.
         let real = trusted_root(repo_root)?;
         let repo_root = real.as_path();
 
-        let args = with_branch(action.cli_args(), branch);
+        let mut args = with_branch(action.cli_args(), branch);
+        let expected = compose_project
+            .filter(|_| !native && action != Action::Open)
+            .map(|name| format!("--expect-compose-project={name}"));
+        if let Some(expected) = &expected {
+            args.extend(["--target", "local", expected.as_str()]);
+        }
         let runner = self.runner_for(native);
         Ok(match action {
             Action::Open => {
@@ -2161,6 +2206,53 @@ impl Source for LiveSource {
             // No app deadline: busy until the CLI exits (see LIFECYCLE_WARN_AFTER).
             _ => ActionOutcome::Lifecycle(runner.run_json_to_completion(&args, Some(repo_root))?),
         })
+    }
+
+    fn act_on_service(
+        &self,
+        repo_root: &Path,
+        branch: Option<&str>,
+        compose_project: Option<&str>,
+        service: &str,
+        action: Action,
+    ) -> Result<LifecycleResult, SourceError> {
+        let branch = branch.map(validate_branch).transpose()?;
+        let root = trusted_root(repo_root)?;
+        // `--service=<name>` always stays the value of the service selector.
+        let stop_option = format!("--service={service}");
+        let mut args = match action {
+            Action::Stop => vec![
+                "down",
+                "--json",
+                "--no-interactive",
+                "--target",
+                "local",
+                &stop_option,
+            ],
+            Action::Restart if !service.is_empty() && !service.starts_with('-') => {
+                vec![
+                    "restart",
+                    "--json",
+                    "--no-interactive",
+                    "--target",
+                    "local",
+                    service,
+                ]
+            }
+            _ => {
+                return Err(SourceError::Cli {
+                    code: "E_APP_SERVICE_ACTION".into(),
+                    message: "Invalid service action or service name.".into(),
+                    failed: vec![],
+                });
+            }
+        };
+        let expected = compose_project.map(|name| format!("--expect-compose-project={name}"));
+        if let Some(expected) = &expected {
+            args.push(expected);
+        }
+        let runner = self.runner_for(false);
+        Ok(runner.run_json_to_completion(&with_branch(&args, branch), Some(&root))?)
     }
 
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {

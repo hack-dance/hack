@@ -42,7 +42,7 @@ pub(super) struct Journal {
     aliases: BTreeMap<String, String>,
 }
 
-fn tag<P: BuildPool>(
+pub(super) fn tag<P: BuildPool>(
     pool: &P,
     lease: &P::Lease,
     id: &str,

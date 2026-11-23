@@ -83,12 +83,21 @@ the build read. Change any of them and the next `up` builds again, also after
 volumes are kept. `hack restart` checks the same inputs before it stops anything: a
 build that fails leaves the current project running, and a rebuilt image is what the
 restarted project runs. A changed download in a `RUN` step or changed cache mount
-contents do not trigger a rebuild. A changed base digest does. Use
-`hack up --refresh-images` to check base tags now or `hack up --offline` to use
-locally recorded selections even after they expire. `HACK_NATIVE_REBUILD=1` forces
-a build with the usual base tag freshness policy. After an `up` that built, native removes the
-older images of each build, keeping the current one, the one before it and any image
-a run still uses.
+contents do not trigger a rebuild. A changed base digest does. An unchanged build
+verifies its receipt from local state before acquiring any base. Ordinary tag expiry
+is checked in the background after readiness. Use `hack up --refresh-images` to
+check base tags during startup. `HACK_NATIVE_REBUILD=1` forces a build with the
+recorded selection.
+
+For a cold build, BuildKit fetches any missing base by digest during the solve. After
+readiness, native tries to retain the exact bases from current and previous builds,
+one at a time. It tags a matching local engine image when available and otherwise
+downloads and imports the base. It defers when startup, stop, build, or reclamation
+already holds the required locks. Retention has a 30-minute budget and logs failures
+without changing the startup result. `hack up --offline` can reuse an unchanged
+build. An edited build also needs its verified base loaded in the guest. After an
+`up` that built, native removes superseded build images while keeping the current
+and previous image and any image a run still uses.
 
 **Host aliases** (`extra_hosts` with `host-gateway`, or `internal.extra_hosts`).
 Native's VM has no route to your machine except through a binding to one host

@@ -298,9 +298,10 @@ fn run(
     canceled: &dyn Fn() -> bool,
 ) -> Result<BuildOutcome, CandidateError> {
     const BASE_ID: &str = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    pool.images
-        .borrow_mut()
-        .insert(BASE_ID.into(), serde_json::json!({"Id": BASE_ID}));
+    pool.images.borrow_mut().insert(
+        BASE_ID.into(),
+        serde_json::json!({"Id": BASE_ID, "Architecture": "arm64", "Os": "linux"}),
+    );
     let selected = inputs
         .images
         .iter()
@@ -2088,6 +2089,79 @@ fn a_dead_build_alias_is_swept_only_after_the_worker_releases_its_key() {
 }
 
 #[test]
+fn idle_retention_reuses_loaded_base_and_imports_an_absent_base_once() {
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    let base = BuildBase {
+        pinned_reference: format!("docker.io/library/alpine@{PIN}"),
+        source_digest: PIN.into(),
+        image_id: PIN.into(),
+    };
+    let build = image_fence(&fixture.candidate, libc::LOCK_SH).unwrap();
+    assert!(idle_retention_fence(&fixture.candidate).is_err());
+    drop(build);
+    let _idle = idle_retention_fence(&fixture.candidate).unwrap();
+    let _observer = image_fence(&fixture.candidate, libc::LOCK_SH).unwrap();
+    assert!(image_fence(&fixture.candidate, libc::LOCK_EX).is_err());
+
+    retain::retain_verified(&pool, &(), &base, || {
+        pool.images.borrow_mut().insert(
+            PIN.into(),
+            serde_json::json!({
+                "Id": PIN, "Architecture": "arm64", "Os": "linux",
+            }),
+        );
+        Ok(())
+    })
+    .unwrap();
+    retain::retain_verified(&pool, &(), &base, || panic!("loaded base imported twice")).unwrap();
+    assert_eq!(
+        pool.inspect(&(), &aliases::keeper(PIN).unwrap())
+            .unwrap()
+            .unwrap()["Id"],
+        PIN
+    );
+}
+
+#[test]
+fn an_unloaded_pin_goes_to_the_cold_client_and_an_offline_solve_refuses_it() {
+    let fixture = Fixture::new();
+    let mut inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    let pin = format!("docker.io/library/alpine@{PIN}");
+    let bases = BTreeMap::from([(
+        "alpine:3.20".into(),
+        BuildBase {
+            pinned_reference: pin.clone(),
+            source_digest: PIN.into(),
+            image_id: PIN.into(),
+        },
+    )]);
+    inputs.key = key_with_bases(&inputs.key, &bases).unwrap();
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    let deadline = Instant::now() + inputs.timeout;
+    inputs.tag_mode = super::super::image_policy::ImageTagMode::Offline;
+    assert_eq!(
+        run_with_bases(&fixture.candidate, &pool, &inputs, &never, &bases, deadline)
+            .unwrap_err()
+            .code,
+        "image_archive_offline_missing"
+    );
+    assert_eq!(fixture.calls(&inputs), 0);
+    inputs.tag_mode = super::super::image_policy::ImageTagMode::Normal;
+    run_with_bases(&fixture.candidate, &pool, &inputs, &never, &bases, deadline).unwrap();
+    let scratch = fixture.scratch(&inputs);
+    let bake: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
+    assert_eq!(
+        bake["target"]["build"]["contexts"]["alpine:3.20"],
+        format!("docker-image://{pin}")
+    );
+    assert!(fixture.receipt(&inputs).base_image_ids.contains(PIN));
+}
+
+#[test]
 fn a_verified_base_selects_the_build_key_and_only_a_local_worker_source() {
     let fixture = Fixture::new();
     let mut inputs = fixture.inputs(Policy::Missing);
@@ -2106,9 +2180,10 @@ fn a_verified_base_selects_the_build_key_and_only_a_local_worker_source() {
     inputs.key = key;
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    pool.images
-        .borrow_mut()
-        .insert(PIN.into(), serde_json::json!({"Id":PIN}));
+    pool.images.borrow_mut().insert(
+        PIN.into(),
+        serde_json::json!({"Id": PIN, "Architecture": "arm64", "Os": "linux"}),
+    );
     let outcome = run_with_bases(
         &fixture.candidate,
         &pool,

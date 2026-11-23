@@ -737,7 +737,7 @@ pub(super) fn load_cached(
     candidate: &Candidate,
     archive: &CachedArchive<'_>,
     policy: &ImagePolicy,
-    observer: &Observer<'_>,
+    (observer, existing_engine): (&Observer<'_>, Option<&Engine<'_>>),
     resolved_config: impl FnOnce() -> Result<String, CandidateError>,
 ) -> Result<ImageReceipt, CandidateError> {
     let guest = observer.guest();
@@ -754,6 +754,9 @@ pub(super) fn load_cached(
         || observer.image(archive.image),
         resolved_config,
         |file| {
+            if let Some(engine) = existing_engine {
+                return import(candidate, archive, Some(archive.pin), policy, file, engine);
+            }
             let engine = measure(Step::ImageImportConnect, None, |_| {
                 connect_for_import(
                     candidate,

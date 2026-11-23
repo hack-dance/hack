@@ -507,8 +507,10 @@ With it:
   not trigger a rebuild. Native checks base-image tags according to the image tag
   policy and rebuilds when the selected base digest changes. `hack up --offline`
   uses locally recorded selections even after they expire. `hack up --refresh-images`
-  checks the registry for current tags. `HACK_NATIVE_REBUILD=1` forces BuildKit to
-  run on `up` or `hack restart` and keeps the usual base tag freshness policy.
+  checks the registry for current tags. Ordinary expiry is checked after readiness.
+  `HACK_NATIVE_REBUILD=1` forces BuildKit to run with the recorded selection.
+  Cold solves let BuildKit fetch missing bases by digest. Background retention
+  tags a verified local base or downloads and loads it after readiness.
 - When an image is actually built, BuildKit reads a private copy of the included
   context, made and checked against the build key right before it runs, so edits during
   a build never reach the image. The copy keeps hard links as links and gives every

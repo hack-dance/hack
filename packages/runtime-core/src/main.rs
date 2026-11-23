@@ -120,6 +120,7 @@ Usage:
   hack-local runtime admit-image --reference <[registry/]repository[:tag][@sha256:digest]|sha256:image-id> --json [IMAGE-POLICY]
   hack-local runtime build-image --request <private-0600-request.json> --json
   hack-local runtime reclaim-build-images [--best-effort] --json
+  hack-local runtime retain-build-bases --json [IMAGE-POLICY]
   hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest|sha256:image-id> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
   hack-local runtime cache-image --reference REF [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
   hack-local runtime image-tag-status --json [REFERENCE...]
@@ -1344,6 +1345,12 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::image_build::build_image(
                 &discover_candidate(&requested)?,
                 Path::new(request),
+            )?)?;
+        }
+        ["runtime", "retain-build-bases", "--json", policy @ ..] => {
+            print_json(&hack_runtime_core::provider::image_build::retain::run(
+                &discover_candidate(&requested)?,
+                image_policy(policy)?,
             )?)?;
         }
         ["runtime", "reclaim-build-images", "--best-effort", "--json"] => {

@@ -196,12 +196,20 @@ fn scan_directory(
 /// The images build receipts protect, with why: per namespace and declaration, the
 /// most recent and the previous verified key (see the module documentation).
 #[derive(Default)]
-struct CurrentImages {
+pub(super) struct CurrentImages {
     builds: BTreeMap<String, Retained>,
     bases: BTreeSet<String>,
+    pub(super) inputs: BTreeSet<(String, String)>,
 }
 
-fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError> {
+impl CurrentImages {
+    fn add_bases(&mut self, receipt: Receipt) {
+        self.bases.extend(receipt.base_image_ids);
+        self.inputs.extend(receipt.base_pins);
+    }
+}
+
+pub(super) fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError> {
     let root = builds_root(candidate);
     let mut protected = CurrentImages::default();
     let namespaces = match fs::read_dir(&root) {
@@ -209,6 +217,7 @@ fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(protected),
         Err(_) => return Err(unprovable()),
     };
+    let mut visited = 0;
     for namespace in namespaces {
         let namespace = namespace.map_err(|_| unprovable())?.path();
         let name = namespace.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -220,9 +229,12 @@ fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError
             return Err(unprovable());
         }
         // Declaration to its verified keys' (sequence, image).
-        let mut declarations: BTreeMap<String, Vec<(u64, String, BTreeSet<String>)>> =
-            BTreeMap::new();
+        let mut declarations: BTreeMap<String, Vec<(u64, String, Receipt)>> = BTreeMap::new();
         for entry in fs::read_dir(&namespace).map_err(|_| unprovable())? {
+            visited += 1;
+            if visited > MAX_SCAN_ENTRIES {
+                return Err(unprovable());
+            }
             let path = entry.map_err(|_| unprovable())?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -233,15 +245,17 @@ fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError
             if receipt.phase != Phase::ContentIdVerified {
                 continue;
             }
-            let Some(id) = receipt.image_id else { continue };
-            match (receipt.declaration, receipt.sequence) {
+            let Some(id) = receipt.image_id.clone() else {
+                continue;
+            };
+            match (receipt.declaration.clone(), receipt.sequence) {
                 (Some(declaration), Some(sequence)) => declarations
                     .entry(declaration)
                     .or_default()
-                    .push((sequence, id, receipt.base_image_ids)),
+                    .push((sequence, id, receipt)),
                 _ => {
                     protected.builds.insert(id, Retained::Current);
-                    protected.bases.extend(receipt.base_image_ids);
+                    protected.add_bases(receipt);
                 }
             }
         }
@@ -252,7 +266,7 @@ fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError
                 .map(|(sequence, _, _)| *sequence)
                 .collect::<Vec<_>>();
             sequences.dedup();
-            for (sequence, id, bases) in keys {
+            for (sequence, id, receipt) in keys {
                 let reason = if Some(&sequence) == sequences.first() {
                     Retained::Current
                 } else if Some(&sequence) == sequences.get(1) {
@@ -261,7 +275,7 @@ fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError
                     continue;
                 };
                 // An image two keys share keeps its strongest reason.
-                protected.bases.extend(bases);
+                protected.add_bases(receipt);
                 let slot = protected.builds.entry(id).or_insert(reason);
                 *slot = (*slot).min(reason);
             }

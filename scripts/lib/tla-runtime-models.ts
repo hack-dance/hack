@@ -2810,6 +2810,23 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-build-base-scheduling",
+    module: "BaseScheduling",
+    states: 12,
+    invariant: "NoForegroundImport",
+    action: "Cold",
+    fields: ['phase = "solving"', "foregroundDownload = TRUE"],
+    additionalControls: [
+      {
+        name: "unsafe-overlap",
+        negative: true,
+        invariant: "OnlyIdleRetention",
+        action: "Stop",
+        fields: ['phase = "stopping"', "retention = TRUE"],
+      },
+    ],
+  },
+  {
     name: "native-build-alias",
     module: "BuildAlias",
     states: 23,

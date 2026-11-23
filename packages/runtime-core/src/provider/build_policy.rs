@@ -58,11 +58,7 @@ pub fn document<'a>(pinned: impl IntoIterator<Item = &'a str>) -> Result<Value, 
 pub(super) fn build_document<'a>(
     sources: impl IntoIterator<Item = &'a str>,
 ) -> Result<Value, CandidateError> {
-    let sources: Vec<_> = sources.into_iter().collect();
-    let aliases = sources
-        .iter()
-        .any(|source| super::image_build::aliases::allowed(source));
-    document_for(sources, aliases)
+    document_for(sources, true)
 }
 
 fn document_for<'a>(
@@ -71,13 +67,7 @@ fn document_for<'a>(
 ) -> Result<Value, CandidateError> {
     let mut allowed = BTreeSet::new();
     for reference in pinned {
-        if aliases {
-            if !super::image_build::aliases::allowed(reference) {
-                return Err(CandidateError::new(
-                    "native_build_base_image",
-                    "BuildKit requires an owned local base alias.",
-                ));
-            }
+        if aliases && super::image_build::aliases::allowed(reference) {
             allowed.insert(format!("docker-image://{reference}"));
             continue;
         }

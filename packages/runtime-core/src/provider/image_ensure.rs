@@ -741,7 +741,7 @@ fn acquire_selection(
                 policy,
                 platform,
                 observer,
-                cache,
+                (cache, None),
                 Some(tag),
             )
         })?,
@@ -751,7 +751,7 @@ fn acquire_selection(
             policy,
             platform,
             observer,
-            cache,
+            (cache, None),
             tag.as_ref(),
         )?,
     };
@@ -769,13 +769,32 @@ fn acquire_selection(
     Ok(ensured)
 }
 
+/// Retain an immutable build input under an already-held idle provider lease.
+pub(super) fn retain_build_image(
+    candidate: &Candidate,
+    pin: &str,
+    policy: &ImagePolicy,
+    engine: &engine::Engine<'_>,
+) -> Result<EnsuredImage, CandidateError> {
+    let observer = engine::Observer::connect(candidate)?;
+    confirm_selection(
+        candidate,
+        pin,
+        policy,
+        PlatformPolicy::Native,
+        Some(&observer),
+        (&ImageCache::default(), Some(engine)),
+        None,
+    )
+}
+
 fn confirm_selection(
     candidate: &Candidate,
     reference: &str,
     policy: &ImagePolicy,
     platform: PlatformPolicy,
     observer: Option<&engine::Observer<'_>>,
-    cache: &ImageCache,
+    (cache, existing_engine): (&ImageCache, Option<&engine::Engine<'_>>),
     tag: Option<&image_tag_store::TagResolution>,
 ) -> Result<EnsuredImage, CandidateError> {
     let requested_platform = platform;
@@ -930,7 +949,14 @@ fn confirm_selection(
                     recorded_config: selection.as_ref().map(|(_, config)| config.as_str()),
                     require_present: offline,
                 };
-                image_load::load_cached(candidate, &archive, policy, observer, config).map(|_| ())
+                image_load::load_cached(
+                    candidate,
+                    &archive,
+                    policy,
+                    (observer, existing_engine),
+                    config,
+                )
+                .map(|_| ())
             },
         )?
     };

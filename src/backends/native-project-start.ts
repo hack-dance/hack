@@ -9,6 +9,7 @@ import {
   withComposeServiceEnvFingerprints,
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
+import { appendLifecycleLogRecord } from "../lib/lifecycle-runtime.ts";
 import {
   isNativeDetachedOwnerProcess,
   nativeDetachedUpBranchDropped,
@@ -3288,6 +3289,30 @@ async function startNativeProjectAttempt(
           });
           let code = 1;
           let serveFailure: unknown;
+          let retentionTimer: ReturnType<typeof setTimeout> | undefined;
+          let retentionStopped = false;
+          const scheduleRetention = (attempt: number) => {
+            if (retentionStopped || controller.signal.aborted) {
+              return;
+            }
+            retentionTimer = setTimeout(
+              () => {
+                if (!controller.signal.aborted) {
+                  void retainReadyBuildBases({
+                    scope: opts.scope,
+                    run,
+                    runtime: opts.runtime,
+                    invoke: deps.invoke,
+                  }).then((deferred) => {
+                    if (deferred && attempt < 3) {
+                      scheduleRetention(attempt + 1);
+                    }
+                  });
+                }
+              },
+              attempt === 0 ? 2000 : 5000
+            ).unref();
+          };
           let nativeExitCode: string | undefined;
           let nativeProcessRefusals:
             | readonly NativeProcessRefusal[]
@@ -3503,6 +3528,9 @@ async function startNativeProjectAttempt(
                     httpsPort,
                   })
                 );
+                if (built.size > 0 && opts.imageTagMode !== "offline") {
+                  scheduleRetention(0);
+                }
                 // Superseded build images go once the new ones run; this never
                 // fails or delays the start (HACK-2533).
                 void reclaimNativeBuildImagesAfterRebuild({
@@ -3516,6 +3544,8 @@ async function startNativeProjectAttempt(
           } catch (error) {
             serveFailure = error;
           } finally {
+            retentionStopped = true;
+            clearTimeout(retentionTimer);
             await startupStatus.stop();
             delivery.payload?.fill(0);
             await stopWatching?.();
@@ -3673,6 +3703,48 @@ async function startNativeProjectAttempt(
     }
   }
 }
+async function retainReadyBuildBases(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: string;
+  readonly runtime: NativeRuntimeSelection;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<boolean> {
+  try {
+    const result = await opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.scope.projectRoot,
+      args: [
+        "runtime",
+        "retain-build-bases",
+        "--json",
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: 30 * 60_000 + 5000,
+    });
+    if (
+      isRecord(result) &&
+      Array.isArray(result.failures) &&
+      result.failures.length === 0
+    ) {
+      return result.deferred === true;
+    }
+  } catch {
+    // Maintenance failures are private lifecycle notes.
+  }
+  await appendLifecycleLogRecord({
+    projectDir: opts.scope.projectDir,
+    composeProject: opts.run,
+    record: {
+      timestamp: new Date().toISOString(),
+      service: "build-base-retention",
+      stream: "meta",
+      message:
+        "Background build base retention failed. The startup result is unaffected.",
+    },
+  }).catch(() => undefined);
+  return false;
+}
+
 /** A failed stop hook replaces the interrupted status, never a startup error. */
 function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   if (failure !== undefined && !failed) {

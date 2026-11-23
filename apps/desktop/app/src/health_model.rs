@@ -6,6 +6,7 @@ use std::time::Instant;
 use hack_desktop_core::{
     doctor::{DoctorRun, ProjectRef},
     setup::{self, Remedy, SafeAction, Status},
+    source::DaemonRecovery,
     terminal::{CommandAvailability, CommandControl, CommandControlSize},
 };
 
@@ -59,6 +60,24 @@ pub struct Repair {
 impl Repair {
     pub fn runnable(&self) -> bool {
         matches!(self.control.availability, CommandAvailability::Ready(_))
+    }
+}
+
+pub fn daemon_repair(action: DaemonRecovery, report: &setup::Report) -> Repair {
+    let (verb, label) = match action {
+        DaemonRecovery::Start => ("start", "hack daemon start"),
+        DaemonRecovery::Restart => ("restart", "hack daemon restart"),
+    };
+    Repair {
+        target: RepairTarget::Setup("daemon".into()),
+        control: control(
+            "repair-daemon".into(),
+            label,
+            report,
+            vec!["daemon".into(), verb.into()],
+            None,
+            false,
+        ),
     }
 }
 
@@ -152,6 +171,7 @@ pub fn project_repair(
     if !matches!(check.status.as_str(), "warn" | "error")
         || fix.kind != "safe"
         || fix.args != SCOPED_FIX
+        || !gitignore_needs_repair(&check.detail)
         || !root.is_absolute()
     {
         return None;
@@ -170,6 +190,22 @@ pub fn project_repair(
             Some(root),
             false,
         ),
+    })
+}
+
+/// The CLI currently advertises the same fix metadata for every Git-ignore
+/// finding, including permission and symlink refusals. Only the two repairable
+/// observations admit the fixed scoped argv above.
+fn gitignore_needs_repair(detail: &str) -> bool {
+    [".hack", ".dev"].into_iter().any(|dir| {
+        let Some(detail) = detail
+            .strip_prefix(dir)
+            .and_then(|detail| detail.strip_prefix("/.gitignore "))
+        else {
+            return false;
+        };
+        detail.starts_with("is missing.")
+            || detail.starts_with("lacks Hack's current managed block.")
     })
 }
 
@@ -298,6 +334,10 @@ pub struct FollowUps {
 impl FollowUps {
     /// Keep a dismissal only while the exact evidence is still present. A
     /// healthy observation removes it even when the same problem later recurs.
+    pub fn has_dismissals(&self) -> bool {
+        !self.dismissed.is_empty()
+    }
+
     pub fn retain(&mut self, present: &[(FollowUpKind, String)]) {
         self.dismissed
             .retain(|kind, evidence| present.contains(&(*kind, evidence.clone())));
@@ -421,7 +461,7 @@ mod tests {
         let scoped = DoctorCheck {
             id: "hack gitignore".into(),
             status: "warn".into(),
-            detail: "(run: hack doctor --fix)".into(),
+            detail: ".hack/.gitignore is missing. Run 'hack doctor --fix' to create it.".into(),
             fix: Some(DoctorCheckFix {
                 kind: "safe".into(),
                 args: SCOPED_FIX.map(str::to_owned).to_vec(),

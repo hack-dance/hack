@@ -128,6 +128,19 @@ impl HackApp {
         cx.notify();
     }
 
+    pub(crate) fn health_repairs_busy(&self) -> bool {
+        self.machine.busy() || self.health.queue.is_some() || self.doctor.is_loading()
+    }
+
+    #[cfg(hack_terminal)]
+    pub(crate) fn health_drawer_stop_requested(&mut self, id: &str) {
+        if let Some(queue) = &mut self.health.queue
+            && queue.current().control.id == id
+        {
+            queue.stopping = true;
+        }
+    }
+
     pub(crate) fn start_health_repairs(
         &mut self,
         repairs: Vec<Repair>,
@@ -135,12 +148,7 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !AVAILABLE
-            || !self.live
-            || self.machine.busy()
-            || self.health.queue.is_some()
-            || self.doctor.is_loading()
-        {
+        if !AVAILABLE || !self.live || self.health_repairs_busy() || (all && self.doctor.stale) {
             return;
         }
         let Some(queue) = RepairQueue::new(repairs, all) else {
@@ -228,7 +236,7 @@ impl HackApp {
                     if !this.setup.is_current(setup_generation) || this.health.queue.is_none() {
                         return;
                     }
-                    this.setup.finish(setup_generation, report.clone());
+                    this.setup_checked(setup_generation, report.clone(), cx);
                     let result = this.accept_health_report(generation, runs, report);
                     if result != Finish::Discarded {
                         this.finish_health_check(completion, result, window, cx);
@@ -279,9 +287,20 @@ impl HackApp {
         } else {
             None
         };
-        self.health.recent_failure = reason.clone();
-        self.command_checked(run, reason.map_or(Ok(()), Err), cx);
-        if queue.advance(&exit, confirmed && result == Finish::Applied) {
+        self.command_checked(run, reason.clone().map_or(Ok(()), Err), cx);
+        if result == Finish::AppliedStale {
+            self.maybe_auto_refresh(cx);
+            self.health.recent_failure = reason.or_else(|| {
+                (queue.index + 1 < queue.repairs.len()).then(|| {
+                    "Projects changed during the check. Remaining repairs were stopped.".into()
+                })
+            });
+            self.refresh_now_async(cx);
+            cx.notify();
+            return;
+        }
+        self.health.recent_failure = reason;
+        if queue.advance(&exit, confirmed) {
             // A repair can make another finding pass or change its action.
             // Only carry forward commands that are still offered by the new read.
             while queue
@@ -605,7 +624,11 @@ mod tests {
                         Status::NeedsAttention
                     },
                     detail: String::new(),
-                    remedy: Remedy::Admin(vec!["global".into(), command.into()]),
+                    remedy: if id == "trust" && self.home.join("changed-remedy").exists() {
+                        Remedy::Doc("https://example.invalid/certificates".into())
+                    } else {
+                        Remedy::Admin(vec!["global".into(), command.into()])
+                    },
                 }
             };
             Report {
@@ -633,7 +656,14 @@ mod tests {
 
     #[test]
     fn the_shared_drawer_waits_for_confirmation_before_the_next_repair() {
-        for (case, confirmed) in [("repaired", true), ("unchanged", false)] {
+        for case in [
+            "repaired",
+            "unchanged",
+            "failed",
+            "skipped",
+            "changed",
+            "stopped",
+        ] {
             let home =
                 std::env::temp_dir().join(format!("hack-repair-{}-{case}", std::process::id()));
             fs::create_dir(&home).unwrap();
@@ -645,16 +675,24 @@ mod tests {
 [ "$1" = global ] || exit 11
 printf '%s\n' "$2" >> "$HOME/order"
 case "$2" in
-  install) if [ ! -f "$HOME/leave-unchanged" ]; then : > "$HOME/routing"; fi ;;
+  install)
+    [ ! -f "$HOME/failed" ] || exit 9
+    if [ -f "$HOME/stopped" ]; then
+      trap ': > "$HOME/routing"; exit 0' INT
+      : > "$HOME/ready"
+      while :; do /bin/sleep 0.05; done
+    fi
+    [ -f "$HOME/unchanged" ] || : > "$HOME/routing"
+    if [ -f "$HOME/skipped" ]; then : > "$HOME/trust"; fi
+    if [ -f "$HOME/changed" ]; then : > "$HOME/changed-remedy"; fi
+    ;;
   trust) [ -f "$HOME/checked-routing" ] || exit 7; : > "$HOME/trust" ;;
 esac
 "#,
             )
             .unwrap();
             fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
-            if !confirmed {
-                fs::write(home.join("leave-unchanged"), "").unwrap();
-            }
+            fs::write(home.join(case), "").unwrap();
             let mut cx = HeadlessAppContext::with_platform(
                 Arc::new(gpui_kit::NoopTextSystem::new()),
                 Arc::new(hack_desktop_ui::icons::Assets),
@@ -686,8 +724,17 @@ esac
                 .unwrap();
 
             let deadline = Instant::now() + Duration::from_secs(15);
+            let mut interrupt_sent = false;
             loop {
-                cx.update(|cx| app.update(cx, |app, cx| app.settle_command_fixture(cx)));
+                cx.update(|cx| {
+                    app.update(cx, |app, cx| {
+                        app.settle_command_fixture(cx);
+                        if case == "stopped" && !interrupt_sent && home.join("ready").exists() {
+                            app.stop_drawer_command(cx);
+                            interrupt_sent = true;
+                        }
+                    })
+                });
                 cx.run_until_parked();
                 if cx.update(|cx| app.read(cx).health.queue.is_none()) {
                     break;
@@ -698,15 +745,42 @@ esac
             cx.update(|cx| {
                 let app = app.read(cx);
                 assert!(!app.machine.busy());
-                if confirmed {
-                    assert_eq!(order, "install\ntrust\n");
+                if case == "repaired" || case == "skipped" {
+                    let expected = if case == "repaired" {
+                        "install\ntrust\n"
+                    } else {
+                        "install\n"
+                    };
+                    assert_eq!(order, expected);
                     assert_eq!(app.health.confirmed.len(), 2);
                     assert!(app.health.recent_failure.is_none());
                     assert!(home.join("checked-trust").exists());
                 } else {
                     assert_eq!(order, "install\n");
                     assert!(app.health.recent_failure.is_some());
-                    assert!(app.panels.command.visible());
+                    if case != "changed" {
+                        assert!(app.panels.command.visible());
+                    }
+                    if case == "changed" {
+                        assert!(
+                            app.health
+                                .recent_failure
+                                .as_deref()
+                                .unwrap()
+                                .starts_with("A remaining check changed")
+                        );
+                    }
+                    if case == "stopped" {
+                        assert!(interrupt_sent);
+                        assert!(
+                            home.join("checked-routing").exists(),
+                            "interrupt trap exits successfully"
+                        );
+                        assert_eq!(
+                            app.health.recent_failure.as_deref(),
+                            Some("Repairs stopped.")
+                        );
+                    }
                 }
             });
             cx.update_window(window, |_, window, cx| {

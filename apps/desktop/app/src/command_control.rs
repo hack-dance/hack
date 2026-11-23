@@ -508,6 +508,15 @@ impl HackApp {
     }
 
     pub(crate) fn stop_drawer_command(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self
+            .panels
+            .command
+            .last
+            .as_ref()
+            .map(|run| run.props.id.clone())
+        {
+            self.health_drawer_stop_requested(&id);
+        }
         let drawer = &mut self.panels.command;
         drawer.menu = false;
         if drawer.last.as_ref().is_some_and(Run::running)

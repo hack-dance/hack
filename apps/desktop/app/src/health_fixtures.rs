@@ -190,7 +190,9 @@ fn doctor_runs() -> Vec<DoctorRun> {
                     DoctorCheck {
                         id: "hack gitignore".into(),
                         status: "warn".into(),
-                        detail: String::new(),
+                        detail:
+                            ".hack/.gitignore is missing. Run 'hack doctor --fix' to create it."
+                                .into(),
                         fix: Some(DoctorCheckFix {
                             kind: "safe".into(),
                             args: [

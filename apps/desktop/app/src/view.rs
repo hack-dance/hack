@@ -472,6 +472,9 @@ impl HackApp {
         self.doctor.targets_seen(current.as_deref());
         self.maybe_auto_refresh(cx);
         self.refresh_update_notice(cx);
+        if self.health.follow_ups.has_dismissals() {
+            crate::follow_up_view::reconcile(self, &self.model.list());
+        }
         cx.notify();
         true
     }
@@ -1743,6 +1746,7 @@ impl Render for HackApp {
         let follow_up = if self.pane == Pane::Project {
             crate::follow_up_view::render(self, &list, &ui, cx)
         } else {
+            crate::follow_up_view::reconcile(self, &list);
             None
         };
         let main: AnyElement = match &list.phase {

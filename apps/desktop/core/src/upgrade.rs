@@ -119,25 +119,31 @@ pub fn observe_update(checked: &crate::setup::Report) -> UpdateObservation {
     if !checked.cli_ready() {
         return UpdateObservation::NoNotice;
     }
-    match read() {
-        Some(UpdateReport {
-            available: Some(true),
-            latest: Some(version),
-            reason: None,
-        }) if !version.is_empty()
-            && version.len() <= 64
-            && version
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') =>
-        {
-            UpdateObservation::Available(version)
+    read().map_or(UpdateObservation::NoNotice, UpdateReport::observation)
+}
+
+impl UpdateReport {
+    fn observation(self) -> UpdateObservation {
+        match self {
+            UpdateReport {
+                available: Some(true),
+                latest: Some(version),
+                reason: None,
+            } if version.len() <= 64
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+                && crate::source::compare_versions(&version, &version).is_some() =>
+            {
+                UpdateObservation::Available(version)
+            }
+            UpdateReport {
+                available: None,
+                latest: None,
+                reason: Some(reason),
+            } if reason == "network-unavailable" => UpdateObservation::NetworkUnavailable,
+            _ => UpdateObservation::NoNotice,
         }
-        Some(UpdateReport {
-            available: None,
-            latest: None,
-            reason: Some(reason),
-        }) if reason == "network-unavailable" => UpdateObservation::NetworkUnavailable,
-        _ => UpdateObservation::NoNotice,
     }
 }
 
@@ -443,6 +449,31 @@ impl Rollback {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn release_observations_require_consistent_and_versioned_evidence() {
+        for (input, expected) in [
+            (
+                r#"{"available":true,"latest":"5.1.0-next.2","reason":null}"#,
+                super::UpdateObservation::Available("5.1.0-next.2".into()),
+            ),
+            (
+                r#"{"available":null,"latest":null,"reason":"network-unavailable"}"#,
+                super::UpdateObservation::NetworkUnavailable,
+            ),
+            (
+                r#"{"available":true,"latest":"not-a-version","reason":null}"#,
+                super::UpdateObservation::NoNotice,
+            ),
+            (
+                r#"{"available":true,"latest":"5.1.0","reason":"network-unavailable"}"#,
+                super::UpdateObservation::NoNotice,
+            ),
+        ] {
+            let report: super::UpdateReport = serde_json::from_str(input).unwrap();
+            assert_eq!(report.observation(), expected);
+        }
+    }
+
     use super::*;
 
     const CHECK: &str = include_str!("../tests/fixtures/upgrade/check-v2.json");

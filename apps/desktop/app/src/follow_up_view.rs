@@ -17,13 +17,16 @@ use hack_desktop_ui::{
 
 use crate::{
     doctor_view::Mark,
-    health_model::{FollowUpKind as Kind, Repair, RepairTarget, machine_repair, setup_card},
+    health_model::{
+        FollowUpKind as Kind, Repair, RepairTarget, daemon_repair, machine_repair, setup_card,
+    },
     view::HackApp,
 };
 
 #[derive(Clone)]
 pub enum Action {
     Run(Repair),
+    Recover(DaemonRecovery),
     Copy(CommandControl),
     Switch(Option<PathBuf>),
     Setup,
@@ -82,15 +85,13 @@ pub fn observed(app: &HackApp, list: &ListView) -> Vec<Notice> {
     let report = app.health_report();
     let mut notices = Vec::new();
     if list.banners.contains(&Banner::DaemonOff) {
-        let repair = setup_card(report, "daemon")
-            .and_then(|card| machine_repair(card, report))
-            .filter(|repair| repair.control.label == "hack daemon start" && repair.runnable());
+        let action = recovery_action(app, DaemonRecovery::Start);
         notices.push(Notice::new(
             Kind::DaemonDown,
             Mark::Error,
             "Hack service isn’t running",
             "Projects and URLs won’t update.",
-            repair.map_or(Action::Doctor, Action::Run),
+            action,
         ));
     }
     if let Some(versions) = &app.health.signals.wrong_cli {
@@ -137,7 +138,11 @@ pub fn observed(app: &HackApp, list: &ListView) -> Vec<Notice> {
             )
         } else {
             let action = if repair.runnable() {
-                Action::Run(repair)
+                if crate::health_commands::AVAILABLE {
+                    Action::Run(repair)
+                } else {
+                    Action::Copy(repair.control)
+                }
             } else {
                 Action::Doctor
             };
@@ -198,16 +203,13 @@ pub fn observed(app: &HackApp, list: &ListView) -> Vec<Notice> {
             Action::None,
         ));
     }
-    if let Some(notice) = diagnostic(app, list) {
-        notices.push(notice);
-    }
-    notices.sort_by_key(|notice| notice.kind);
-    notices
-}
-
-fn diagnostic(app: &HackApp, list: &ListView) -> Option<Notice> {
+    notices.extend(
+        list.banners
+            .iter()
+            .filter_map(|banner| diagnostic(app, list, banner)),
+    );
     if let Some(error) = app.recovery_error() {
-        return Some(Notice::new(
+        notices.push(Notice::new(
             Kind::CouldNotCheck,
             Mark::Error,
             "Couldn’t recover the Hack service",
@@ -215,26 +217,32 @@ fn diagnostic(app: &HackApp, list: &ListView) -> Option<Notice> {
             Action::Doctor,
         ));
     }
-    list.banners.iter().find_map(|banner| match banner {
+    notices.sort_by_key(|notice| notice.kind);
+    notices
+}
+
+fn recovery_action(app: &HackApp, want: DaemonRecovery) -> Action {
+    if app.model.daemon_recovery() != Some(want) {
+        return Action::Doctor;
+    }
+    let repair = daemon_repair(want, app.health_report());
+    if crate::health_commands::AVAILABLE && repair.runnable() {
+        Action::Run(repair)
+    } else {
+        Action::Recover(want)
+    }
+}
+
+fn diagnostic(app: &HackApp, list: &ListView, banner: &Banner) -> Option<Notice> {
+    match banner {
         Banner::DaemonMismatch {
             daemon,
             cli,
             update,
         } => {
-            let report = app.health_report();
             let action = match update {
                 UpdateSide::Cli => Action::Review,
-                UpdateSide::Daemon
-                    if app.model.daemon_recovery() == Some(DaemonRecovery::Restart) =>
-                {
-                    setup_card(report, "daemon")
-                        .and_then(|card| machine_repair(card, report))
-                        .filter(|repair| {
-                            repair.runnable() && repair.control.label == "hack daemon restart"
-                        })
-                        .map_or(Action::Doctor, Action::Run)
-                }
-                _ => Action::Doctor,
+                UpdateSide::Daemon => recovery_action(app, DaemonRecovery::Restart),
             };
             Some(Notice::new(
                 Kind::DaemonMismatch,
@@ -276,7 +284,30 @@ fn diagnostic(app: &HackApp, list: &ListView) -> Option<Notice> {
             Some(notice)
         }
         _ => None,
-    })
+    }
+}
+
+fn current_notices(app: &HackApp, list: &ListView) -> Vec<Notice> {
+    app.health
+        .fixture
+        .as_ref()
+        .and_then(|f| f.banner.clone())
+        .map_or_else(|| observed(app, list), |notice| vec![notice])
+}
+
+pub fn reconcile(app: &mut HackApp, list: &ListView) {
+    if app.health.follow_ups.has_dismissals() {
+        let notices = current_notices(app, list);
+        reconcile_notices(app, &notices);
+    }
+}
+
+fn reconcile_notices(app: &mut HackApp, notices: &[Notice]) {
+    let present: Vec<_> = notices
+        .iter()
+        .map(|notice| (notice.kind, notice.evidence.clone()))
+        .collect();
+    app.health.follow_ups.retain(&present);
 }
 
 pub fn render(
@@ -285,17 +316,8 @@ pub fn render(
     ui: &Ui,
     cx: &mut Context<HackApp>,
 ) -> Option<AnyElement> {
-    let notices = app
-        .health
-        .fixture
-        .as_ref()
-        .and_then(|f| f.banner.clone())
-        .map_or_else(|| observed(app, list), |notice| vec![notice]);
-    let present: Vec<_> = notices
-        .iter()
-        .map(|notice| (notice.kind, notice.evidence.clone()))
-        .collect();
-    app.health.follow_ups.retain(&present);
+    let notices = current_notices(app, list);
+    reconcile_notices(app, &notices);
     let notice = notices
         .iter()
         .find(|notice| app.health.follow_ups.visible(notice.kind, &notice.evidence))?;
@@ -303,12 +325,7 @@ pub fn render(
         div()
             .pt(space::S6)
             .px(space::S7)
-            .child(banner(
-                notice,
-                app.machine.busy() || app.health.queue.is_some(),
-                ui,
-                cx,
-            ))
+            .child(banner(notice, app.health_repairs_busy(), ui, cx))
             .into_any_element(),
     )
 }
@@ -385,6 +402,7 @@ fn button(
             },
             !busy && crate::health_commands::AVAILABLE,
         ),
+        Action::Recover(action) => (Glyph::Power, action.label(), !busy),
         Action::Copy(_) => (Glyph::Copy, "Copy", true),
         Action::Switch(_) => (Glyph::Restart, "Switch", !busy),
         Action::Setup => (Glyph::Stethoscope, "Finish setup", !busy),
@@ -402,12 +420,25 @@ fn button(
     if enabled {
         button = button.on_click(cx.listener(move |this, _, window, cx| match &action {
             Action::Run(repair) => {
-                this.start_health_repairs(vec![repair.clone()], false, window, cx)
+                let current = current_notices(this, &this.model.list());
+                if current.iter().any(|notice| {
+                    notice.kind == kind && matches!(&notice.action, Action::Run(offered)
+                        if offered.target == repair.target && offered.control.availability == repair.control.availability)
+                }) {
+                    this.start_health_repairs(vec![repair.clone()], false, window, cx);
+                }
             }
+            Action::Recover(action) if this.model.daemon_recovery() == Some(*action) => {
+                this.recover_daemon(*action, cx);
+            }
+            Action::Recover(_) => {}
             Action::Copy(command) => crate::health_commands::copy(command, cx),
             Action::Switch(Some(path)) => this.use_cli(path, window, cx),
             Action::Switch(None) | Action::Setup => this.open_setup(cx),
-            Action::Doctor => this.open_doctor(None, cx),
+            Action::Doctor => {
+                this.open_doctor(None, cx);
+                this.load_doctor(cx);
+            }
             Action::Review => {
                 this.open_upgrade(cx);
                 this.review_upgrade(cx);
@@ -418,4 +449,73 @@ fn button(
         }));
     }
     Some(button.into_any_element())
+}
+
+#[cfg(all(test, feature = "screenshots"))]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui_kit::{HeadlessAppContext, WindowOptions};
+    use hack_desktop_core::{fixtures::Fixture, source::FixtureSource};
+
+    use super::*;
+
+    #[test]
+    fn a_new_daemon_failure_takes_priority_and_recovers_with_a_cached_pass() {
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_kit::NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    show: false,
+                    ..WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    cx.new(|cx| {
+                        let mut app = HackApp::new(
+                            Arc::new(FixtureSource(Fixture::Running)),
+                            false,
+                            window,
+                            cx,
+                        );
+                        let mut setup = hack_desktop_core::setup_fixtures::load("ready").unwrap();
+                        setup.cli_program = Some("/usr/bin/hack".into());
+                        app.show_setup_now(setup);
+                        assert_eq!(
+                            setup_card(app.health_report(), "daemon").unwrap().status,
+                            Status::Passed
+                        );
+                        app.health.signals.update = Some("5.1.0".into());
+                        app.health.signals.offline = true;
+                        app.simulate_daemon_unavailable(false);
+
+                        let list = app.model.list();
+                        let notices = observed(&app, &list);
+                        assert_eq!(notices[0].kind, Kind::DaemonDown);
+                        assert!(matches!(
+                            notices[0].action,
+                            Action::Run(_) | Action::Recover(DaemonRecovery::Start)
+                        ));
+                        assert_eq!(notices.last().unwrap().kind, Kind::Offline);
+                        let evidence = notices[0].evidence.clone();
+                        app.health
+                            .follow_ups
+                            .dismiss(Kind::DaemonDown, evidence.clone());
+                        app.pane = crate::doctor_view::Pane::Doctor;
+                        app.refresh_now();
+                        let list = app.model.list();
+                        reconcile(&mut app, &list);
+                        assert!(app.health.follow_ups.visible(Kind::DaemonDown, &evidence));
+                        app
+                    })
+                },
+            )
+            .unwrap();
+        });
+    }
 }

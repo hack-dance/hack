@@ -493,6 +493,8 @@ links, manual commands and upgrades stay outside the queue.
 
 The probes do not use `hack global status`, which can start Docker. The update
 banner uses the CLI's read-only release check and opens the review when clicked.
+The wrong-CLI banner accepts version and replacement evidence as inputs. Its
+examples are fixtures until HACK-2597 supplies that evidence for live checks.
 The fixtures `h17-app-banner-dns`, `h18-banners-sheet`, `h19-doctor`,
 `h20-doctor-fix-all` and `h25-errors-sheet` render both themes.
 

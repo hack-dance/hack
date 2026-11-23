@@ -33,7 +33,8 @@ HACK_E2E_CLI_BIN=/absolute/path/to/hack-cli HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_D
 
 Each cohort starts all branches side by side, writes a distinct marker into each
 named volume, then reads the markers before and after retaining stop/start.
-The harness owns teardown. Record the package and source identity alongside the
+Containers use no network so the test does not consume a Docker subnet per
+branch. The harness owns teardown. Record the package and source identity alongside the
 result. Use the application benchmark protocol for storage plateau, CPU and
 memory, and qualify native separately on its own engine.
 

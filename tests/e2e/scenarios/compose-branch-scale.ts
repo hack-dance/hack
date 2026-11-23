@@ -27,6 +27,8 @@ export const composeBranchScaleScenario: Scenario = {
   web:
     image: oven/bun:1.4.4
     command: ["sleep", "infinity"]
+    network_mode: none
+    stop_grace_period: 1s
     volumes:
       - data:/data
 volumes:

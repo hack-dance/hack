@@ -256,6 +256,9 @@ pub struct RefusalDiagnostics {
     pub network_request: Option<NetworkRequestDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_component: Option<StateComponentDiagnostic>,
+    /// Normalized build base reference, without registry credentials or build arguments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_base_reference: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bridge_sockets: Option<BridgeSocketsDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -416,6 +419,18 @@ impl CandidateError {
             reason,
             command_may_have_run,
         });
+        self
+    }
+
+    pub(crate) fn with_build_base_reference(mut self, reference: String) -> Self {
+        if !reference.is_empty()
+            && reference.len() <= 512
+            && reference
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@-".contains(&byte))
+        {
+            self.refusals.get_or_insert_default().build_base_reference = Some(reference);
+        }
         self
     }
 

@@ -112,6 +112,13 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+**Build base registry refusal (`registry_image`).** Foreground and detached
+starts can report `Image unavailable: could not resolve build base` when the
+registry cannot resolve a Dockerfile base. Check the reported reason, restore
+registry access, then retry `hack up`. `Already present` lists images Hack
+confirmed in the running guest. It does not confirm that the named build base
+can be resolved offline.
+
 Since next.17, use
 `"$CANDIDATE" exec api -- /bin/sh` from a foreground terminal for a live shell.
 Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`

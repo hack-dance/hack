@@ -54,20 +54,21 @@ import {
 import { parseNativeHttpsSelection } from "../src/backends/native-project-start.ts";
 import { formatNativeStartupLogReport } from "../src/backends/native-startup-logs.ts";
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 const repository = resolve(import.meta.dir, "..");
 
 test("relay qualification requires all 256 valid downloads", () => {
   const run = (fault: string) =>
-    Bun.spawnSync([
+    spawnSyncBounded([
       "/bin/sh",
       "-c",
       `wget() {
         if [ "$cycle" -eq 256 ] && [ "$fault" = fetch ]; then return 1; fi
-        printf '%s' "$cycle" > "$5"
+        printf '%s\\n' "$cycle" > "$5"
       }
       sha256sum() {
-        n=$(cat "$1")
+        IFS= read -r n < "$1"
         if [ "$n" -eq 256 ] && [ "$fault" = digest ]; then
           printf 'invalid  %s\\n' "$1"
         else

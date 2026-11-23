@@ -1690,6 +1690,19 @@ test("a project-only save cannot expose an encrypted-store-only overlay", async 
   } finally {
     await rename(held, key);
   }
+  const combined = await cli({
+    ...f,
+    args: ["apply"],
+    patch: { base, changes: [selectBaseChoice, addEnvChoice] },
+  });
+  expect(combined.payload.error?.detail.issues[0]?.message).toContain(
+    "Resolve the conflicting project setting or legacy env input"
+  );
+  expect(JSON.stringify(combined.payload).includes(marker)).toBe(false);
+  expect((await readFile(f.projectPath, "utf8")) === f.original).toBe(true);
+  expect(await Bun.file(join(f.project, "hack.env.local.yaml")).exists()).toBe(
+    false
+  );
   const migrated = await cli({
     ...f,
     args: ["apply"],

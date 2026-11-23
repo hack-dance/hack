@@ -7,17 +7,21 @@ import {
   resolveProjectEnvLocalConfigPath,
 } from "./project-env-config.ts";
 
+export const PRIVATE_OVERLAY_MIGRATION_CONFLICT =
+  "Migration would expose a private overlay name. Resolve the conflicting project setting or legacy env input before retrying.";
+
 /** Probe known private filenames directly, including when a directory cannot be listed. */
-export async function privateOverlayFilesExist(opts: {
+export async function privateOverlayFileConflict(opts: {
   readonly projectDir: string;
   readonly inheritedDirs: readonly (string | null)[];
   readonly names: readonly string[];
   readonly planned?: Pick<ReadonlySet<string>, "has"> | null;
-}): Promise<boolean> {
+}): Promise<"existing" | "planned" | null> {
   const dirs = new Set([
     opts.projectDir,
     ...opts.inheritedDirs.filter((dir) => dir !== null),
   ]);
+  let plannedConflict = false;
   for (const envName of opts.names) {
     const selectable = parseEnvConfigSelection(envName) === envName;
     const paths = [
@@ -33,8 +37,7 @@ export async function privateOverlayFilesExist(opts: {
     }
     for (const path of paths) {
       if (
-        opts.planned?.has(path) ||
-        (await lstat(path).then(
+        await lstat(path).then(
           () => true,
           (error: unknown) => {
             // The legacy migrator discovers dotenv files by filename, including
@@ -48,11 +51,12 @@ export async function privateOverlayFilesExist(opts: {
             }
             throw error;
           }
-        ))
+        )
       ) {
-        return true;
+        return "existing";
       }
+      plannedConflict ||= opts.planned?.has(path) === true;
     }
   }
-  return false;
+  return plannedConflict ? "planned" : null;
 }

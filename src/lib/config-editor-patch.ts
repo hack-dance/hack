@@ -39,7 +39,10 @@ import {
   privateProjectOverlayNames,
   restoreConfigSource,
 } from "./config-editor-source.ts";
-import { privateOverlayFilesExist } from "./config-overlay-files.ts";
+import {
+  PRIVATE_OVERLAY_MIGRATION_CONFLICT,
+  privateOverlayFileConflict,
+} from "./config-overlay-files.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   applyEnvMigration,
@@ -80,6 +83,11 @@ const BASE_REV = /^[a-f0-9]{64}$/;
 const ENV_KEY = /^[A-Z_][A-Z0-9_]*$/;
 const SERVICE = /^[\w.-]+$/;
 const HOSTS = /[\s,]+/;
+const PRIVATE_OVERLAY_CONFLICT_MESSAGES = {
+  existing:
+    "Move or rename the env layer with a private filename before replacing this setting.",
+  planned: PRIVATE_OVERLAY_MIGRATION_CONFLICT,
+};
 const layerId = z.string().max(ENV_CONFIG_NAME_MAX_LENGTH + "3:".length);
 const serviceName = z.string().max(160).regex(SERVICE);
 
@@ -656,15 +664,14 @@ async function privateOverlayReplacementMessage(opts: {
       return "Remove the remaining private overlay reference before replacing this setting.";
     }
     try {
-      if (
-        await privateOverlayFilesExist({
-          projectDir: before.project.projectDir,
-          inheritedDirs: [inheritedEnvDir(before), inheritedEnvDir(after)],
-          names: removed,
-          planned: outputs,
-        })
-      ) {
-        return "Move or rename the env layer with a private filename before replacing this setting.";
+      const conflict = await privateOverlayFileConflict({
+        projectDir: before.project.projectDir,
+        inheritedDirs: [inheritedEnvDir(before), inheritedEnvDir(after)],
+        names: removed,
+        planned: outputs,
+      });
+      if (conflict) {
+        return PRIVATE_OVERLAY_CONFLICT_MESSAGES[conflict];
       }
       if (!outputs && (await legacyStoreMayContainOverlays(after))) {
         return "The legacy secret store may contain this overlay. Migrate the legacy env before replacing this setting.";
@@ -1311,7 +1318,7 @@ async function writePreparedLayer(
     if (
       layer.kind === "project" &&
       removedOverlayNames.length > 0 &&
-      ((await privateOverlayFilesExist({
+      ((await privateOverlayFileConflict({
         projectDir: snapshot.project.projectDir,
         inheritedDirs: [originalInheritedDir, inheritedEnvDir(snapshot)],
         names: removedOverlayNames,

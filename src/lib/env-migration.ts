@@ -5,7 +5,10 @@ import {
   hasPrivateOverlayValue,
   privateProjectOverlayNames,
 } from "./config-editor-source.ts";
-import { privateOverlayFilesExist } from "./config-overlay-files.ts";
+import {
+  PRIVATE_OVERLAY_MIGRATION_CONFLICT,
+  privateOverlayFileConflict,
+} from "./config-overlay-files.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   assertMigrationStorageOutsideWorkingTrees as assertOutsideWorkingTrees,
@@ -516,7 +519,7 @@ async function prepareConsistent(
       }))
     ) {
       throw new ClosedCliError(
-        "Migration would expose a private overlay name. Resolve the conflicting project setting or legacy env input before retrying. No migration files were changed."
+        `${PRIVATE_OVERLAY_MIGRATION_CONFLICT} No migration files were changed.`
       );
     }
   }
@@ -981,12 +984,14 @@ async function migrationExposesPrivateOverlay(opts: {
     ...opts.project,
     inheritLocal,
   });
-  return await privateOverlayFilesExist({
-    projectDir: opts.project.projectDir,
-    inheritedDirs: [primary],
-    names: removed,
-    planned: opts.planned,
-  });
+  return (
+    (await privateOverlayFileConflict({
+      projectDir: opts.project.projectDir,
+      inheritedDirs: [primary],
+      names: removed,
+      planned: opts.planned,
+    })) !== null
+  );
 }
 
 async function publishEntry(

@@ -17,6 +17,7 @@
 //!                                      (see `drive.rs`)
 //! ```
 
+mod changes_view;
 mod clipboard;
 mod doctor_view;
 #[cfg(hack_terminal)]
@@ -251,6 +252,9 @@ fn main() {
                             if !fixtures::opens_doctor(f) {
                                 app.show_project();
                             }
+                        }
+                        if f.name().starts_with("changes-") {
+                            app.show_changes_fixture(f.name());
                         }
                         if f.name().starts_with("env-") {
                             app.show_env_fixture(f.name(), window, cx);

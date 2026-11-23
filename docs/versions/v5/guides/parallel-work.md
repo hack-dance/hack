@@ -38,6 +38,10 @@ names refuses the branch start and names the label. After a Docker Compose
 `hack up`, Hack also warns when another running instance lists one of this
 instance's hosts; the native backend refuses such a collision instead.
 
+The desktop preview's **Changes** tab shows the selected checkout and its Git
+branch, with a **Not committed** badge when there are tracked or untracked
+changes under `.hack/`. Use **Check again** to refresh after editing files.
+
 ## What a branch instance still shares
 
 A separate branch instance does not isolate external databases, shared

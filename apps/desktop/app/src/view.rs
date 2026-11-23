@@ -124,6 +124,7 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) changes: crate::changes_view::ChangesPane,
     pub(crate) env: hack_desktop_core::env::EnvModel,
     /// The Env tab's open edit, if any (`env_view`).
     pub(crate) env_edit: Option<crate::env_view::EnvEdit>,
@@ -197,6 +198,7 @@ impl HackApp {
             source,
             logs,
             tab: 0,
+            changes: Default::default(),
             pane: Pane::Project,
             doctor: DoctorPane::default(),
             window_visible: true,
@@ -473,6 +475,7 @@ impl HackApp {
             // stream. Root/backend changes also change stream ownership.
             self.logs.model.set_service(None);
             self.reset_env_selection();
+            self.reset_changes(cx);
             if self.tab == 2 {
                 self.read_env(cx);
             }
@@ -899,6 +902,7 @@ impl HackApp {
         self.user_navigated();
         self.copied = None;
         self.reset_env_selection();
+        self.reset_changes(cx);
         if self.tab == 2 {
             self.read_env(cx);
         }
@@ -998,6 +1002,7 @@ impl HackApp {
         }
         if before != after {
             self.model.source_changed();
+            self.changes = Default::default();
             // A Start or Restart hackd still running belongs to the
             // previous installation: it must not block this one.
             self.machine.reset();
@@ -1494,7 +1499,12 @@ impl HackApp {
                     .child(div().flex_1())
                     .child(actions),
             )
-            .when(!compact, |col| col.child(url_row))
+            .when(!compact, |col| {
+                col.child(url_row).children(
+                    self.changes_badge(ui)
+                        .map(|badge| div().flex().child(badge)),
+                )
+            })
             .children(
                 d.always_on_note
                     .clone()
@@ -1619,9 +1629,10 @@ impl HackApp {
             .collect();
         // With the terminal panel, logs live in the panel's Logs tab.
         #[cfg(hack_terminal)]
-        let pills: &[(usize, &'static str)] = &[(0, "Services"), (2, "Env")];
+        let pills: &[(usize, &'static str)] = &[(0, "Services"), (2, "Env"), (4, "Changes")];
         #[cfg(not(hack_terminal))]
-        let pills: &[(usize, &'static str)] = &[(0, "Services"), (1, "Logs"), (2, "Env")];
+        let pills: &[(usize, &'static str)] =
+            &[(0, "Services"), (1, "Logs"), (2, "Env"), (4, "Changes")];
         let mut tabs = div().flex().items_center().gap(space::S2);
         for &(i, label) in pills {
             tabs = tabs.child(
@@ -1630,6 +1641,7 @@ impl HackApp {
             );
         }
         let body: AnyElement = match self.tab {
+            4 => self.changes_view(ui, cx).into_any_element(),
             1 if cfg!(not(hack_terminal)) => {
                 // The Logs tab scrolls inside its own virtualized list.
                 let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();

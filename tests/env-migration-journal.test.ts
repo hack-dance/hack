@@ -1067,6 +1067,15 @@ test("resumed migration checks private overlay filenames under the project lock"
     acceptTrackedChanges: false,
     repairCompose: false,
   };
+  const legacy = join(project.projectDir, `.env.${name}`);
+  await writeFile(legacy, "TOKEN=present\n");
+  const before = await projectFiles();
+  await expect(apply(options)).rejects.toThrow("private filename");
+  expect(await projectFiles()).toEqual(before);
+  expect(
+    await Bun.file(envMigrationJournalPath(project.projectRoot)).exists()
+  ).toBe(false);
+  await rm(legacy);
   await expect(
     apply({
       ...options,
@@ -1083,7 +1092,6 @@ test("resumed migration checks private overlay filenames under the project lock"
     })
   ).rejects.toThrow("synthetic interruption");
 
-  const legacy = join(project.projectDir, `.env.${name}`);
   const result = await withEnvLayerLock({
     layerPath: path,
     run: async () => {

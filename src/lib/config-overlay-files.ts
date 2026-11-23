@@ -12,7 +12,7 @@ export async function privateOverlayFilesExist(opts: {
   readonly projectDir: string;
   readonly inheritedDirs: readonly (string | null)[];
   readonly names: readonly string[];
-  readonly planned?: ReadonlyMap<string, string> | null;
+  readonly planned?: Pick<ReadonlySet<string>, "has"> | null;
 }): Promise<boolean> {
   const dirs = new Set([
     opts.projectDir,

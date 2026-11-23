@@ -1703,6 +1703,38 @@ test("a project-only save cannot expose an encrypted-store-only overlay", async 
   );
 });
 
+test("modern env layers allow correction of a private overlay despite an inaccessible legacy store", async () => {
+  const marker = "private-retired-store-fixture";
+  const f = await legacyOverlayFixture({
+    env: { defaultOverlay: `https://fixture:${marker}@example.invalid` },
+    controlPlane: {
+      secrets: {
+        backend: "encrypted_file",
+        storePlaintextInBackend: true,
+        encryptedFile: { path: "retired-store/legacy.json" },
+      },
+    },
+  });
+  await Promise.all([
+    writeFile(join(f.cwd, "retired-store"), ""),
+    writeFile(
+      join(f.project, "hack.env.default.yaml"),
+      env("  global:\n    MODE: modern")
+    ),
+  ]);
+  const patch = {
+    base: bases(await show(f.root, f.cwd)),
+    changes: [selectBaseChoice],
+  };
+  const validation = await cli({ ...f, args: ["validate"], patch });
+  expect(validation.payload.data.valid).toBe(true);
+  const saved = await cli({ ...f, args: ["apply"], patch });
+  expect(saved.payload.ok).toBe(true);
+  const next = await show(f.root, f.cwd);
+  expect(next.default_overlay).toBe("default");
+  expect(JSON.stringify(next).includes(marker)).toBe(false);
+});
+
 test("legacy migration errors redact private dotenv filenames", async () => {
   const marker = "private-dotenv-error-fixture";
   const authored = `https://fixture:${marker}@example.invalid`;

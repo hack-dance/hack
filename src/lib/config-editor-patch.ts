@@ -613,6 +613,14 @@ async function legacyStoreMayContainOverlays(
   if (!legacy.exists) {
     return false;
   }
+  if (
+    await projectEnvConfigExistsForMutation({
+      ...project,
+      inheritLocal: inheritedEnvDir(snapshot) !== null,
+    })
+  ) {
+    return false;
+  }
   const { active, storePath } = await resolveFileSecretStorePaths({
     projectDir: project.projectDir,
     strict: true,
@@ -633,14 +641,7 @@ async function legacyStoreMayContainOverlays(
     }
     throw error;
   });
-  return (
-    store !== null &&
-    (!store.isFile() || store.size > 0) &&
-    !(await projectEnvConfigExistsForMutation({
-      ...project,
-      inheritLocal: inheritedEnvDir(snapshot) !== null,
-    }))
-  );
+  return store !== null && (!store.isFile() || store.size > 0);
 }
 
 async function privateOverlayReplacementMessage(opts: {
@@ -685,7 +686,7 @@ async function privateOverlayReplacementMessage(opts: {
         return "Move or rename the env layer with a private filename before replacing this setting.";
       }
       if (!outputs && (await legacyStoreMayContainOverlays(after))) {
-        return "The legacy secret store may contain this overlay. Migrate the legacy env or move its overlay entries before replacing this setting.";
+        return "The legacy secret store may contain this overlay. Migrate the legacy env before replacing this setting.";
       }
     } catch {
       return "Could not verify the private env inputs before replacing this setting.";

@@ -496,9 +496,25 @@ async function prepareConsistent(
   ) {
     throw refuse();
   }
+  const config = prepared.files.find(({ kind }) => kind === "config");
   for (const source of sources) {
-    if (!same(source, (await readState(source.path)).state)) {
+    const current = await readState(source.path);
+    if (!same(source, current.state)) {
       throw refuse();
+    }
+    if (
+      config?.path === source.path &&
+      (await migrationExposesPrivateOverlay({
+        project,
+        path: config.path,
+        before: current.text,
+        after: prepared.payload(config.path),
+        planned: new Set(prepared.files.map(({ path }) => path)),
+      }))
+    ) {
+      throw new ClosedCliError(
+        "Move or rename the env layer with a private filename before migrating the project settings. No migration files were changed."
+      );
     }
   }
   return { prepared, sources };
@@ -928,26 +944,27 @@ async function publishStagingGuard(
 }
 
 /** The retained payload and locked original carry the same privacy check on resume. */
-async function assertMigrationOverlayNamesStayPrivate(opts: {
+async function migrationExposesPrivateOverlay(opts: {
   readonly project: EnvMigrationProject;
   readonly path: string;
   readonly before: string | null;
   readonly after: string;
-}): Promise<void> {
+  readonly planned?: ReadonlySet<string>;
+}): Promise<boolean> {
   if (opts.before === null) {
-    return;
+    return false;
   }
   const before: unknown = JSON.parse(opts.before);
   const after: unknown = JSON.parse(opts.after);
   if (!(isRecord(before) && isRecord(after))) {
-    return;
+    return false;
   }
   const remaining = privateProjectOverlayNames(after);
   const removed = [...privateProjectOverlayNames(before)].filter(
     (name) => !remaining.has(name)
   );
   if (removed.length === 0) {
-    return;
+    return false;
   }
   const inheritLocal = [before, after].some(
     (record) =>
@@ -958,15 +975,12 @@ async function assertMigrationOverlayNamesStayPrivate(opts: {
     ...opts.project,
     inheritLocal,
   });
-  if (
-    await privateOverlayFilesExist({
-      projectDir: opts.project.projectDir,
-      inheritedDirs: [primary],
-      names: removed,
-    })
-  ) {
-    throw new AtomicWriteConflictError();
-  }
+  return await privateOverlayFilesExist({
+    projectDir: opts.project.projectDir,
+    inheritedDirs: [primary],
+    names: removed,
+    planned: opts.planned,
+  });
 }
 
 async function publishEntry(
@@ -1037,13 +1051,16 @@ async function publishEntry(
         if (!same(original.state, entry.before)) {
           throw refuse();
         }
-        if (entry.kind === "config") {
-          await assertMigrationOverlayNamesStayPrivate({
+        if (
+          entry.kind === "config" &&
+          (await migrationExposesPrivateOverlay({
             project,
             path: entry.path,
             before: original.text,
             after: text,
-          });
+          }))
+        ) {
+          throw new AtomicWriteConflictError();
         }
         await publication?.validateDestination?.();
       },

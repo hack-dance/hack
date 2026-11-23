@@ -187,3 +187,20 @@ fn a_full_inventory_selects_only_removed_attempts_oldest_first() {
         ]
     );
 }
+
+/// HACK-2576 review: a removed run that a fresh start archived may still be mapped by
+/// its project's CLI, which confirms the removal by inspecting it. Inspection reads
+/// the active directory while it exists, else the archive; with neither it stays on
+/// the active path, so the existing "not found" refusals do not change.
+#[test]
+fn inspection_reads_an_archived_run_only_when_it_is_no_longer_active() {
+    let fixture = Fixture::new();
+    let run = "a".repeat(32);
+    let active = directory(&fixture.0, &run).unwrap();
+    let archived = path(&fixture.0, &run).unwrap();
+    assert_eq!(inspection_root(&fixture.0, &run).unwrap(), active);
+    fixture.receipt(&archived, "removed");
+    assert_eq!(inspection_root(&fixture.0, &run).unwrap(), archived);
+    fixture.receipt(&active, "removed");
+    assert_eq!(inspection_root(&fixture.0, &run).unwrap(), active);
+}

@@ -170,17 +170,24 @@ const ACTIVE_LIMIT: usize = 64;
 /// never touched. The caller holds the provider lease.
 pub(super) fn make_room(candidate: &Candidate, engine: &Engine<'_>) -> Result<(), CandidateError> {
     let (mut count, removed) = archivable(&candidate.state_root.join("run/graphs"))?;
+    let mut skipped = 0;
     for run in removed {
         if count < ACTIVE_LIMIT {
             break;
         }
         match archive_with(candidate, engine, &run) {
             Ok(_) => count -= 1,
-            // The archive's own bound is reported as it is; a run that fails the
-            // removal proof is left where it is.
-            Err(error) if error.code == "graph_archive_budget" => return Err(error),
-            Err(_) => {}
+            // A run that fails the removal proof stays where it is; any other error
+            // (the archive's own bound, the engine, the guest) is reported as it is.
+            Err(error) if error.code == "graph_archive_refused" => skipped += 1,
+            Err(error) => return Err(error),
         }
+    }
+    if count >= ACTIVE_LIMIT && skipped > 0 {
+        return Err(error(
+            "graph_retention_budget",
+            "64 graph attempts are retained and the removed ones among them could not be proven removed, so none was archived; inspect them with hack doctor --native-cleanup inspect.",
+        ));
     }
     Ok(())
 }
@@ -193,14 +200,18 @@ fn archivable(parent: &std::path::Path) -> Result<(usize, Vec<String>), Candidat
         return Ok((0, Vec::new()));
     }
     state::check_private_directory(parent)?;
-    let mut count = 0;
-    let mut removed = Vec::new();
-    for entry in fs::read_dir(parent)
+    // Below the bound no receipt is read.
+    let entries: Vec<_> = fs::read_dir(parent)
         .map_err(state::io)?
         .take(ACTIVE_LIMIT + 1)
-    {
-        let entry = entry.map_err(state::io)?;
-        count += 1;
+        .collect::<Result<_, _>>()
+        .map_err(state::io)?;
+    let count = entries.len();
+    if count < ACTIVE_LIMIT {
+        return Ok((count, Vec::new()));
+    }
+    let mut removed = Vec::new();
+    for entry in entries {
         let Some(run) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -218,9 +229,6 @@ fn archivable(parent: &std::path::Path) -> Result<(usize, Vec<String>), Candidat
                 .map_err(state::io)?;
             removed.push((modified, run));
         }
-    }
-    if count < ACTIVE_LIMIT {
-        return Ok((count, Vec::new()));
     }
     removed.sort();
     Ok((count, removed.into_iter().map(|(_, run)| run).collect()))

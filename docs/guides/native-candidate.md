@@ -1798,13 +1798,15 @@ refuses and points to `hack up`.
 The home's active graph inventory (`run/graphs`) holds at most 64 runs. Removed
 runs used to stay in it until an explicit `graph archive`, which no `hack` command
 ran, so every `down --remove-data` and every failed fresh start used a place for
-good, and the 65th fresh start refused for ever (HACK-2576). Now a fresh start that
-finds the inventory full archives removed runs itself, oldest first, under the
+good, and the 65th fresh start refused for ever (HACK-2576). Now a start (or a source
+job) that needs a new run and finds the inventory full archives removed runs itself, oldest first, under the
 provider lease it already holds and with the same proof `graph archive` uses (every
 owned resource absent, no pending journal). Runs that keep data are never archived;
 when they alone fill the inventory, `hack up` refuses with `graph_retention_budget`
 and says to remove the data of a project you no longer use. The archive keeps up to
-256 runs; past that the refusal is `graph_archive_budget`.
+256 runs; past that the refusal is `graph_archive_budget`. A project whose removed
+run was archived this way before its `hack down --remove-data` confirmed the removal
+still confirms it: inspection reads a removed run from the archive.
 For a shared-source graph that reconciliation does not select (live source, a
 carried cache scope, a pending source-device rebind or initializer cache release)
 and that was admitted with a retained compatibility contract, ordinary

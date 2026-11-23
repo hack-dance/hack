@@ -1,0 +1,25 @@
+---
+title: Shared command drawer
+---
+stateDiagram-v2
+    direction TB
+    [*] --> Ready
+    Ready --> Running : Run
+    Running --> Checking : Exit 0
+    Running --> Failed : Nonzero or launch error
+    Checking --> Closing : Check passed
+    Checking --> Failed : Check needs attention
+    Closing --> Closed : After 1.5 seconds
+    Failed --> Closed : Close drawer
+    Closed --> History : Show output
+    History --> Closed : Close drawer
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    class Closing ok
+    class Failed fail
+    class Checking wait
+    note right of Running
+        Closing hides the drawer.
+        The command keeps running.
+    end note

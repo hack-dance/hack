@@ -9,17 +9,14 @@ versions.
 
 ## Direct daemon and login services
 
-Run the direct and managed cases from separate copies of the clean v4.3.0
-baseline. Before replacing binaries, start v4.3.0 and verify that its daemon is
-serving. Use `hack daemon start` for the direct case and `hack daemon install`
-for the managed case. Capture `hack daemon status`, then capture the service PID
-and program with the applicable command:
+Run each case from a separate copy of the clean baseline. Verify the v4.3.0
+daemon is serving before replacing its binary. For the direct case on either
+host, use `hack daemon start` in a session without an installed Hack service.
+For the macOS managed case, run the v4.3.0 `hack daemon install` in a GUI login.
+Capture `hack daemon status` and, for launchd, the service PID and program:
 
 ```sh
-# macOS GUI login, managed case
 launchctl print "gui/$(id -u)/dance.hack.hackd"
-# Linux user session, managed case
-systemctl --user show hackd.service -p ActiveState -p MainPID -p ExecStart
 ```
 
 Install the candidate over the same installed path while v4.3.0 is still
@@ -27,10 +24,39 @@ running. Exercise the candidate's in-place update route as well when its release
 artifact is available through the update channel. Use `hack daemon start --json`
 and `hack daemon status --json` to confirm the daemon version matches the new CLI
 and the stale process is retired. Repeat start and verify that the healthy daemon
-keeps its PID. For the managed case, repeat the service inspection above and
-verify that the live PID is held by the intended manager at the new executable.
+keeps its PID. For launchd, repeat the inspection and verify that the manager
+owns the live PID at the new executable.
 A working direct fallback does not count as a managed-service pass. Restart the
 login session and check status again before uninstalling the test service.
+
+### Linux systemd
+
+The published v4.3.0 CLI has no Linux service-install command. Use two separate
+Linux snapshots with a working user manager:
+
+1. **Candidate service installation.** Install the candidate in its durable
+   location with no running daemon. Run `hack daemon install`, then
+   `hack daemon status --json` and the service inspection below. Verify the
+   candidate version, an active user unit and matching daemon and manager PIDs.
+   Log out and back in, check the service again, then run `hack daemon uninstall`.
+2. **Legacy service replacement.** With the published v4.3.0 installed, use
+   `systemctl --user edit --force --full hackd.service` to provision a fixture
+   unit. Give it a `[Service]` section with
+   `ExecStart=/absolute/v4/install/path/hack daemon start --foreground` using the
+   actual durable install path, and `Environment=PATH=/usr/bin:/bin`. Use an
+   unmarked unit and the normal login home. Run
+   `systemctl --user daemon-reload` and `systemctl --user start hackd.service`.
+   Record the v4.3.0 version, unit contents and PID. Replace the installed
+   binary at the same path with the candidate and run `hack daemon start --json`.
+   Verify the unit now owns the candidate PID, the prior PID is gone, the unit
+   file is byte-identical, and a second start keeps the candidate PID. Retire
+   the fixture with `systemctl --user stop hackd.service` and restore the VM snapshot.
+
+```sh
+systemctl --user show hackd.service -p ActiveState -p MainPID -p ExecStart
+```
+
+### Source regression tests
 
 Run the source regressions on both hosts before the real upgrade:
 
@@ -64,7 +90,7 @@ and verify resume and rollback. The historical upgrade fixture exercises
 compiled current source with synthetic v4 data. Save these results separately
 from the macOS dogfood run.
 
-For dogfood, follow the [Compose pilot](../versions/v5/guides/upgrade-from-v4.md#6-try-native-then-return-to-compose)
+For dogfood, follow the [Compose pilot](../versions/v5/guides/upgrade-from-v4.md#3-choose-the-version-and-installation-path)
 on a disposable copy of a v4.3.0 project with a linked worktree, managed env and
 data backed by a retained volume. Verify a synthetic application marker and the
 expected env keys in the primary and worktree under v4.3.0. Take a private backup of the project

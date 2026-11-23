@@ -83,6 +83,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture(f.name(), window, cx);
                             }
+                            if f == Fixture::Files {
+                                app.show_files_fixture(window, cx);
+                            }
                             if matches!(
                                 f,
                                 Fixture::DaemonDown | Fixture::DaemonMismatch | Fixture::HackdOff
@@ -106,6 +109,10 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             // output arrive, then draw again.
             #[cfg(hack_terminal)]
             cx.update_window(handle, |_, window, cx| {
+                if f == Fixture::Files {
+                    _app.update(cx, HackApp::toggle_panel);
+                    window.render_frame(cx);
+                }
                 _app.update(cx, |app, cx| app.settle_terminals(cx));
                 window.render_frame(cx);
                 window.render_frame(cx);

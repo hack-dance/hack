@@ -246,7 +246,7 @@ fn main() {
     gpui_kit::application()
         .with_assets(hack_desktop_ui::icons::Assets)
         .run(move |cx| {
-            gpui_kit::init(cx);
+            hack_desktop_ui::tokens::init(cx);
             gpui_kit::open_window(window_options(), cx, move |window, cx| {
                 Theme::change(theme_mode(mode), Some(window), cx);
                 let font = nerd_font(cx);
@@ -280,7 +280,7 @@ mod screenshots {
             Arc::new(hack_desktop_ui::icons::Assets),
             gpui_kit::platform::current_headless_renderer,
         );
-        cx.update(gpui_kit::init);
+        cx.update(hack_desktop_ui::tokens::init);
         let font = cx.update(|cx| super::nerd_font(cx));
         for mode in [Mode::Light, Mode::Dark] {
             for scene in super::scenes() {

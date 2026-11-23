@@ -72,6 +72,7 @@ pub(crate) fn capture(dir: &Path, cx: &mut HeadlessAppContext) {
 
 fn fixture(index: usize, window: &mut Window, cx: &mut Context<HackApp>) -> HackApp {
     let mut app = HackApp::new(crate::source_for(Some(Fixture::Empty)), false, window, cx);
+    app.use_default_terminal_look();
     let daemon = index == 0;
     let id = if daemon { "daemon" } else { "routing" };
     let mut report = setup_fixtures::load("partial").expect("setup fixture");
@@ -141,8 +142,11 @@ fn fixture(index: usize, window: &mut Window, cx: &mut Context<HackApp>) -> Hack
                     .expect("fixture card");
                 card.status = Status::Passed;
                 card.detail = "All 8 DNS pieces are set up.".into();
-                app.show_setup_now(checked);
-                app.command_checked(completion.run, Ok(()), cx);
+                // Deliver a synthetic fresh check through the actual Setup
+                // completion path used by the command control.
+                let generation = app.setup.begin();
+                app.setup_command_check = Some((completion.run, id.into()));
+                app.setup_checked(generation, checked, cx);
             }
         },
         window,
@@ -199,18 +203,18 @@ fn wait_for_frame(index: usize, app: &Entity<HackApp>, cx: &mut HeadlessAppConte
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gpui_kit::AnyWindowHandle;
     use std::sync::Arc;
 
-    fn open(index: usize) -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
+    pub(crate) fn open(index: usize) -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_kit::NoopTextSystem::new()),
             Arc::new(hack_desktop_ui::icons::Assets),
             || Ok(None),
         );
-        cx.update(gpui_kit::init);
+        cx.update(hack_desktop_ui::tokens::init);
         let (window, app) = cx
             .update(|cx| {
                 gpui_kit::open_window(
@@ -226,6 +230,44 @@ mod tests {
             .unwrap();
         wait_for_frame(index, &app, &mut cx);
         (cx, window, app)
+    }
+
+    pub(crate) fn assert_rendered_status(
+        cx: &mut HeadlessAppContext,
+        window: AnyWindowHandle,
+        id: &str,
+        sidebar: &str,
+        card: Option<&str>,
+    ) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find(id.to_owned()).label(), Some(sidebar));
+            if let Some(card) = card {
+                assert_eq!(window.find(("setup-status", 1_usize)).label(), Some(card));
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn the_rendered_hackd_dot_matches_the_off_card_despite_a_green_project_read() {
+        let (mut cx, window, app) = open(0);
+        cx.update(|cx| {
+            let app = app.read(cx);
+            assert_eq!(
+                app.hackd_tone_from_snapshot(),
+                Some(hack_desktop_core::machine::Tone::Ok)
+            );
+            let card = &app.setup.report.cards[1];
+            assert!(card.detail.contains("hackd off"));
+        });
+        assert_rendered_status(
+            &mut cx,
+            window,
+            "hackd",
+            "hackd: Needs attention",
+            Some("Needs attention"),
+        );
     }
 
     #[test]

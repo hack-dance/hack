@@ -1,10 +1,12 @@
 //! Design v1 tokens: type, spacing, radii, borders and colour, light and dark.
 //!
 //! Every value here is named in `apps/desktop/DESIGN-V1.md`; change both
-//! together. Components read tokens, never raw numbers or gpui-kit theme
-//! colours, so the window keeps one look whatever gpui-kit's defaults are.
+//! together. The dark palette also supplies gpui-kit's native components.
 
-use gpui_kit::{Hsla, Pixels, Rgba, px, rgb, rgba};
+use std::rc::Rc;
+
+use gpui_kit::component::{Theme, ThemeMode};
+use gpui_kit::{App, Hsla, Pixels, Rgba, SharedString, px, rgb, rgba};
 
 /// Light or dark. The app follows the system unless `--theme` says otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,11 +101,15 @@ pub const HAIRLINE: Pixels = px(0.5);
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub mode: Mode,
-    /// Window and detail pane.
+    pub window: Hsla,
+    /// Cards and detail pane.
     pub surface: Hsla,
-    /// Sidebar, title bar and status bar.
+    /// Sidebar and status bar.
     pub chrome: Hsla,
-    /// Hover, selected row, selected tab, log block, neutral pills.
+    pub raised: Hsla,
+    pub selection: Hsla,
+    pub attention: Hsla,
+    /// Hover, log block, neutral pills.
     pub surface_1: Hsla,
     /// Pressed or selected-and-hovered.
     pub surface_2: Hsla,
@@ -140,6 +146,14 @@ fn c(v: Rgba) -> Hsla {
 
 impl Palette {
     #[must_use]
+    pub fn title_bar(self) -> Hsla {
+        match self.mode {
+            Mode::Light => self.chrome,
+            Mode::Dark => self.window,
+        }
+    }
+
+    #[must_use]
     pub fn for_mode(mode: Mode) -> Self {
         match mode {
             Mode::Light => Self::light(),
@@ -151,8 +165,12 @@ impl Palette {
     pub fn light() -> Self {
         Self {
             mode: Mode::Light,
+            window: c(rgb(0xFFFFFF)),
             surface: c(rgb(0xFFFFFF)),
             chrome: c(rgb(0xF7F7F5)),
+            raised: c(rgb(0xEFEFEC)),
+            selection: c(rgb(0xEFEFEC)),
+            attention: c(rgb(0xEFEFEC)),
             surface_1: c(rgb(0xEFEFEC)),
             surface_2: c(rgb(0xE6E6E2)),
             border: c(rgba(0x0000_0017)),
@@ -200,55 +218,119 @@ impl Palette {
     pub fn dark() -> Self {
         Self {
             mode: Mode::Dark,
-            surface: c(rgb(0x1B1B1A)),
-            chrome: c(rgb(0x161615)),
-            surface_1: c(rgb(0x272725)),
-            surface_2: c(rgb(0x31312E)),
-            border: c(rgba(0xFFFF_FF14)),
-            border_strong: c(rgba(0xFFFF_FF26)),
-            text_primary: c(rgb(0xEDEDEA)),
-            text_secondary: c(rgb(0xA9A8A2)),
-            text_muted: c(rgb(0x7B7A75)),
-            accent: c(rgb(0x6EA2F5)),
+            window: c(rgb(0x090C10)),
+            surface: c(rgb(0x0D1117)),
+            chrome: c(rgb(0x06080A)),
+            raised: c(rgb(0x1C2026)),
+            selection: c(rgb(0x24272B)),
+            attention: c(rgb(0x21252B)),
+            surface_1: c(rgb(0x1A1E24)),
+            surface_2: c(rgb(0x23272D)),
+            border: c(rgb(0x2B3036)),
+            border_strong: c(rgb(0x2B3036)),
+            text_primary: c(rgb(0xE6EDF3)),
+            text_secondary: c(rgb(0xBFC5CB)),
+            text_muted: c(rgb(0x8B9197)),
+            accent: c(rgb(0xE6EDF3)),
             states: States {
                 running: StateColors {
-                    dot: c(rgb(0x2DB386)),
-                    bg: c(rgba(0x1D9E_7530)),
-                    fg: c(rgb(0x6FD3AE)),
+                    dot: c(rgb(0x3FB950)),
+                    bg: c(rgb(0x12221D)),
+                    fg: c(rgb(0x3FB950)),
                 },
                 busy: StateColors {
-                    dot: c(rgb(0x4C98E6)),
-                    bg: c(rgba(0x378A_DD30)),
-                    fg: c(rgb(0x8DBDF0)),
+                    dot: c(rgb(0xBFC5CB)),
+                    bg: c(rgb(0x1F2329)),
+                    fg: c(rgb(0xBFC5CB)),
                 },
                 degraded: StateColors {
-                    dot: c(rgb(0xF0A83C)),
-                    bg: c(rgba(0xEF9F_272E)),
-                    fg: c(rgb(0xF3C27A)),
+                    dot: c(rgb(0xD29922)),
+                    bg: c(rgb(0x211F18)),
+                    fg: c(rgb(0xD29922)),
                 },
                 failed: StateColors {
-                    dot: c(rgb(0xEC5D5C)),
-                    bg: c(rgba(0xE24B_4A30)),
-                    fg: c(rgb(0xF29A99)),
+                    dot: c(rgb(0xFF7B72)),
+                    bg: c(rgb(0x251C20)),
+                    fg: c(rgb(0xFF7B72)),
                 },
                 stopped: StateColors {
-                    dot: c(rgb(0x5E5D59)),
-                    bg: c(rgb(0x272725)),
-                    fg: c(rgb(0xA9A8A2)),
+                    dot: c(rgb(0x686D73)),
+                    bg: c(rgb(0x1A1E24)),
+                    fg: c(rgb(0x8B9197)),
                 },
                 unknown: StateColors {
-                    dot: c(rgb(0x7B7A75)),
-                    bg: c(rgb(0x272725)),
-                    fg: c(rgb(0xA9A8A2)),
+                    dot: c(rgb(0x686D73)),
+                    bg: c(rgb(0x1A1E24)),
+                    fg: c(rgb(0x8B9197)),
                 },
             },
         }
     }
 }
 
-/// Fallback terminal theme, used when the user has no Ghostty config. The
-/// panel is dark in both app modes (as in the approved mockup); a Ghostty
-/// theme replaces every value here.
+/// Initialize GPUI with the desktop app's dark palette for native components.
+pub fn init(cx: &mut App) {
+    gpui_kit::init(cx);
+
+    fn hex(color: Hsla) -> Option<SharedString> {
+        let color = color.to_rgb();
+        let byte = |value: f32| (value * 255.).round() as u8;
+        Some(
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                byte(color.r),
+                byte(color.g),
+                byte(color.b)
+            )
+            .into(),
+        )
+    }
+
+    let p = Palette::dark();
+    let mut config = Theme::global(cx).dark_theme.as_ref().clone();
+    config.name = "Merino Dark".into();
+    let colors = &mut config.colors;
+    colors.background = hex(p.window);
+    colors.foreground = hex(p.text_primary);
+    colors.title_bar = hex(p.title_bar());
+    colors.title_bar_border = hex(p.border);
+    colors.status_bar = hex(p.chrome);
+    colors.status_bar_border = hex(p.border);
+    colors.window_border = hex(p.border);
+    colors.border = hex(p.border);
+    colors.input = hex(p.border);
+    colors.caret = hex(p.accent);
+    colors.ring = hex(p.accent);
+    colors.selection = hex(p.selection);
+    colors.list_active = hex(p.selection);
+    colors.list_active_border = hex(p.border);
+    colors.list_hover = hex(p.surface_1);
+    colors.muted = hex(p.surface_1);
+    colors.muted_foreground = hex(p.text_muted);
+    colors.popover = hex(p.raised);
+    colors.popover_foreground = hex(p.text_primary);
+    colors.primary = hex(p.accent);
+    colors.primary_foreground = hex(p.surface);
+    colors.primary_hover = hex(p.text_secondary);
+    colors.primary_active = hex(p.text_muted);
+    colors.accent = hex(p.surface_1);
+    colors.accent_foreground = hex(p.text_primary);
+    colors.secondary = hex(p.surface);
+    colors.secondary_foreground = hex(p.text_secondary);
+    colors.secondary_hover = hex(p.surface_1);
+    colors.secondary_active = hex(p.surface_2);
+    colors.danger = hex(p.states.failed.dot);
+    colors.danger_foreground = hex(p.surface);
+    colors.scrollbar_thumb = hex(p.border);
+    colors.scrollbar_thumb_hover = hex(p.text_muted);
+    Theme::global_mut(cx).dark_theme = Rc::new(config);
+    if Theme::global(cx).is_dark() {
+        Theme::change(ThemeMode::Dark, None, cx);
+    }
+}
+
+/// Terminal panel chrome and the gallery's sample terminal colors. The live
+/// grid uses its own palette, including any user Ghostty overrides.
 #[derive(Debug, Clone, Copy)]
 pub struct TermPalette {
     pub bg: Hsla,
@@ -275,7 +357,30 @@ pub struct TermPalette {
 
 impl TermPalette {
     #[must_use]
-    pub fn fallback() -> Self {
+    pub fn for_mode(mode: Mode) -> Self {
+        if mode == Mode::Dark {
+            let p = Palette::dark();
+            return Self {
+                bg: p.surface,
+                fg: p.text_primary,
+                dim: p.text_muted,
+                strip: p.raised,
+                strip_border: p.border,
+                tab_fg: p.text_secondary,
+                green: p.states.running.fg,
+                bright_green: c(rgb(0x56D364)),
+                blue: c(rgb(0x58A6FF)),
+                magenta: c(rgb(0xBC8CFF)),
+                yellow: p.states.degraded.fg,
+                red: p.states.failed.fg,
+                cyan: c(rgb(0x39C5CF)),
+                cursor: c(rgb(0x2F81F7)),
+                badge_warn_bg: p.states.degraded.bg,
+                badge_warn_fg: p.states.degraded.fg,
+                badge_bg: p.surface_1,
+                badge_fg: p.text_secondary,
+            };
+        }
         Self {
             bg: c(rgb(0x1C1C1A)),
             fg: c(rgb(0xE8E6DC)),

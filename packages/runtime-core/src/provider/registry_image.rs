@@ -863,6 +863,7 @@ struct Fetch<'a> {
     stage: Stage,
     deadline: Instant,
     request_timeout: Duration,
+    next_idle_check: Instant,
 }
 
 impl<'a> Fetch<'a> {
@@ -906,7 +907,18 @@ impl<'a> Fetch<'a> {
             stage: Stage::Anonymous,
             deadline: Instant::now() + wait,
             request_timeout: REQUEST_TIMEOUT,
+            next_idle_check: Instant::now(),
         })
+    }
+
+    fn check_retention_idle(&mut self) -> Result<(), CandidateError> {
+        if let Some(root) = &self.policy.retention_root
+            && Instant::now() >= self.next_idle_check
+        {
+            super::image_build::check_retention_idle(root)?;
+            self.next_idle_check = Instant::now() + Duration::from_millis(250);
+        }
+        Ok(())
     }
 
     fn remaining(&self) -> Result<Duration, CandidateError> {
@@ -1094,6 +1106,7 @@ impl<'a> Fetch<'a> {
         timeout: Duration,
         retry: bool,
     ) -> Result<Response, CandidateError> {
+        self.check_retention_idle()?;
         loop {
             let response = self.send(url.clone(), timeout, retry)?;
             let status = response.status();
@@ -1424,6 +1437,7 @@ impl<'a> Fetch<'a> {
         let mut total = 0_u64;
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
+            self.check_retention_idle().map_err(LayerAttempt::Refused)?;
             let n = match response.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => n,

@@ -2089,6 +2089,26 @@ fn a_dead_build_alias_is_swept_only_after_the_worker_releases_its_key() {
 }
 
 #[test]
+fn protected_receipt_reuses_read_only_while_reclaim_holds_the_fence() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    fixture.client(&inputs, "ok");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    let before = fixture.receipt(&inputs).sequence;
+    let _reclaim = image_fence(&fixture.candidate, libc::LOCK_EX).unwrap();
+    assert!(
+        reuse_receipt(&fixture.candidate, &pool, &inputs, None)
+            .unwrap()
+            .unwrap()
+            .reused
+    );
+    assert_eq!(fixture.receipt(&inputs).sequence, before);
+    assert_eq!(fixture.calls(&inputs), 1);
+}
+
+#[test]
 fn idle_retention_reuses_loaded_base_and_imports_an_absent_base_once() {
     let fixture = Fixture::new();
     let pool = FakePool::new("pool-1");
@@ -2097,9 +2117,14 @@ fn idle_retention_reuses_loaded_base_and_imports_an_absent_base_once() {
         source_digest: PIN.into(),
         image_id: PIN.into(),
     };
+    let provider = state::Lock::acquire(&fixture.candidate.state_root.join("run/smolvm")).unwrap();
+    assert!(check_retention_idle(&fixture.candidate.state_root).is_err());
+    drop(provider);
     let build = image_fence(&fixture.candidate, libc::LOCK_SH).unwrap();
+    assert!(check_retention_idle(&fixture.candidate.state_root).is_err());
     assert!(idle_retention_fence(&fixture.candidate).is_err());
     drop(build);
+    check_retention_idle(&fixture.candidate.state_root).unwrap();
     let _idle = idle_retention_fence(&fixture.candidate).unwrap();
     let _observer = image_fence(&fixture.candidate, libc::LOCK_SH).unwrap();
     assert!(image_fence(&fixture.candidate, libc::LOCK_EX).is_err());

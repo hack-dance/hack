@@ -93,7 +93,9 @@ For a cold build, BuildKit fetches any missing base by digest during the solve. 
 readiness, native tries to retain the exact bases from current and previous builds,
 one at a time. It tags a matching local engine image when available and otherwise
 downloads and imports the base. It defers when startup, stop, build, or reclamation
-already holds the required locks. Retention has a 30-minute budget and logs failures
+already holds the required locks. Downloads stage outside the provider lease and
+stop when they observe a foreground operation. An admitted import keeps the provider
+lease until verification settles. Retention has a 30-minute budget and logs failures
 without changing the startup result. `hack up --offline` can reuse an unchanged
 build. An edited build also needs its verified base loaded in the guest. After an
 `up` that built, native removes superseded build images while keeping the current

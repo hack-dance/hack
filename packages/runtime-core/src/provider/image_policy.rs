@@ -68,7 +68,7 @@ pub struct ImagePolicy {
     pub tag_mode: ImageTagMode,
     pub(crate) short_tag_refresh: bool,
     pub(crate) build_deadline: Option<Instant>,
-    pub(super) opportunistic_locks: bool,
+    pub(super) retention_root: Option<PathBuf>,
     pub(crate) command_image_pin: Option<String>,
     /// Registries that are refused as local unless named here.
     pub local_registries: Vec<LocalRegistry>,
@@ -92,7 +92,7 @@ impl Default for ImagePolicy {
             tag_mode: ImageTagMode::Normal,
             short_tag_refresh: false,
             build_deadline: None,
-            opportunistic_locks: false,
+            retention_root: None,
             command_image_pin: None,
             local_registries: Vec::new(),
             docker_config: None,

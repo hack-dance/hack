@@ -2,6 +2,7 @@
 //! current and previous build inputs. Each visit takes a nonwaiting provider
 //! lease and checks the exclusive fence before admitting idle work. Its shared
 //! fence allows read-only receipt reuse while excluding reclaim and pool stop.
+//! Archive staging and registry resolution hold neither provider lease nor fence.
 use super::{
     BuildPool, LivePool, aliases, idle_retention_fence, image_fence, reclaim, select_build_base,
 };
@@ -38,13 +39,68 @@ pub(super) fn retain_verified<P: BuildPool>(
     import: impl FnOnce() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     let keeper = aliases::keeper(&base.image_id).expect("verified base content ID");
-    let present = pool.inspect(lease, &base.image_id)?.is_some_and(|image| {
-        image["Id"] == base.image_id && image["Os"] == "linux" && image["Architecture"] == "arm64"
-    });
+    let present = loaded(pool, lease, base)?;
     if !present {
         import()?;
     }
     aliases::tag(pool, lease, &base.image_id, &keeper)
+}
+
+fn loaded<P: BuildPool>(
+    pool: &P,
+    lease: &P::Lease,
+    base: &super::BuildBase,
+) -> Result<bool, CandidateError> {
+    Ok(pool.inspect(lease, &base.image_id)?.is_some_and(|image| {
+        image["Id"] == base.image_id && image["Os"] == "linux" && image["Architecture"] == "arm64"
+    }))
+}
+
+fn retain_pin(
+    pool: &LivePool<'_>,
+    policy: &ImagePolicy,
+    base: &super::BuildBase,
+    still_needed: impl Fn() -> Result<bool, CandidateError>,
+) -> Result<(), CandidateError> {
+    let candidate = pool.candidate;
+    let identity = {
+        let (lease, identity) = pool.try_lease()?;
+        let _idle = idle_retention_fence(candidate)?;
+        if !still_needed()? {
+            return Err(super::refusal(
+                "provider_busy",
+                "Background image retention deferred.",
+            ));
+        }
+        if loaded(pool, &lease, base)? {
+            return retain_verified(pool, &lease, base, || {
+                unreachable!("image checked under lease")
+            });
+        }
+        identity
+    };
+
+    // Network and host archive work do not reserve the engine. A foreground
+    // operation arriving during staging can take the provider lease.
+    image_ensure::cache(
+        candidate,
+        &base.pinned_reference,
+        policy,
+        PlatformPolicy::Native,
+    )?;
+
+    let (lease, current) = pool.try_lease()?;
+    let _idle = idle_retention_fence(candidate)?;
+    if current != identity || !still_needed()? {
+        return Err(super::refusal(
+            "provider_busy",
+            "Background image retention deferred.",
+        ));
+    }
+    retain_verified(pool, &lease, base, || {
+        image_ensure::retain_build_image(candidate, &base.pinned_reference, policy, &lease)
+            .map(|_| ())
+    })
 }
 
 pub fn run(
@@ -53,7 +109,7 @@ pub fn run(
 ) -> Result<RetentionReport, CandidateError> {
     policy.local_registries.clear();
     policy.tag_mode = ImageTagMode::Normal;
-    policy.opportunistic_locks = true;
+    policy.retention_root = Some(candidate.state_root.clone());
     let deadline = Instant::now() + BUDGET;
     policy.build_deadline = Some(deadline);
     let mut report = RetentionReport::default();
@@ -89,20 +145,21 @@ pub fn run(
             break;
         }
         let result = (|| {
-            let (lease, _) = pool.try_lease()?;
-            let _fence = idle_retention_fence(candidate)?;
-            // An intervening solve can retire a queued input between visits.
-            if !reclaim::current_images(candidate)?
-                .inputs
-                .contains(&(reference.clone(), pin.clone()))
             {
+                let (_lease, _) = pool.try_lease()?;
+                let _idle = idle_retention_fence(candidate)?;
+            }
+            let needed = || {
+                Ok(reclaim::current_images(candidate)?
+                    .inputs
+                    .contains(&(reference.clone(), pin.clone())))
+            };
+            if !needed()? {
                 return Ok(());
             }
             if !pins.contains(&pin) {
                 let (base, _) = select_build_base(candidate, &pin, &policy, None)?;
-                retain_verified(&pool, &lease, &base, || {
-                    image_ensure::retain_build_image(candidate, &pin, &policy, &lease).map(|_| ())
-                })?;
+                retain_pin(&pool, &policy, &base, needed)?;
                 pins.insert(pin.clone());
                 report.retained += 1;
             }
@@ -126,17 +183,9 @@ pub fn run(
                             "The refreshed build base proof differs from its selection.",
                         ));
                     }
-                    // Keep the previous selection usable offline until the
+                    // Keep the previous selection usable offline until its
                     // replacement has both a verified image and its keeper.
-                    retain_verified(&pool, &lease, &base, || {
-                        image_ensure::retain_build_image(
-                            candidate,
-                            &tag.pinned_reference,
-                            &policy,
-                            &lease,
-                        )
-                        .map(|_| ())
-                    })?;
+                    retain_pin(&pool, &policy, &base, needed)?;
                     pins.insert(tag.pinned_reference.clone());
                     report.retained += 1;
                     Ok(())

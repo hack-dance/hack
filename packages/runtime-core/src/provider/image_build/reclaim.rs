@@ -197,7 +197,7 @@ fn scan_directory(
 /// most recent and the previous verified key (see the module documentation).
 #[derive(Default)]
 pub(super) struct CurrentImages {
-    builds: BTreeMap<String, Retained>,
+    pub(super) builds: BTreeMap<String, Retained>,
     bases: BTreeSet<String>,
     pub(super) inputs: BTreeSet<(String, String)>,
 }

@@ -773,6 +773,15 @@ pub(super) fn image_fence(
 }
 
 /// Take the shared fence before asking for the provider lease.
+/// A staged background download yields to an admitted foreground operation.
+pub(super) fn check_retention_idle(state_root: &Path) -> Result<(), CandidateError> {
+    let _provider = state::Lock::acquire_existing(&state_root.join("run/smolvm"))?;
+    let fence = Flock::open(&state_root.join("run/image-builds/active.lock"))?;
+    Flock::try_lock(fence, libc::LOCK_EX)?
+        .ok_or_else(|| refusal("provider_busy", "Background image retention deferred."))?;
+    Ok(())
+}
+
 fn idle_retention_fence(candidate: &Candidate) -> Result<Flock, CandidateError> {
     let root = builds_root(candidate);
     state::private_directory(&root)?;
@@ -871,7 +880,7 @@ fn owned_image(
 fn reuse_verified(
     candidate: &Candidate,
     inputs: &Inputs,
-    path: &Path,
+    path: Option<&Path>,
     previous: &Receipt,
     observe: impl FnOnce(&str) -> Result<(PoolIdentity, Option<Value>), CandidateError>,
 ) -> Result<Option<BuildOutcome>, CandidateError> {
@@ -891,11 +900,13 @@ fn reuse_verified(
         {
             return Ok(None);
         }
-        let mut current = previous.clone();
-        current.provider_boot_id = identity.boot_id.clone();
-        current.declaration = Some(inputs.declaration.clone());
-        current.sequence = path.parent().map(next_sequence);
-        state::write(path, &current)?;
+        if let Some(path) = path {
+            let mut current = previous.clone();
+            current.provider_boot_id = identity.boot_id.clone();
+            current.declaration = Some(inputs.declaration.clone());
+            current.sequence = path.parent().map(next_sequence);
+            state::write(path, &current)?;
+        }
         return Ok(Some(reused(inputs, id, &previous.base_pins)));
     }
     Ok(None)
@@ -915,14 +926,32 @@ fn reuse_receipt<P: BuildPool>(
     if !path.try_exists().map_err(state::io)? {
         return Ok(None);
     }
-    let _fence = image_fence(candidate, libc::LOCK_SH)?;
-    let lock = Flock::open(&directory.join(format!("{}.lock", inputs.key)))?;
-    let Some(_lock) = Flock::try_lock(lock, libc::LOCK_EX)? else {
-        return Ok(None);
+    let fence = match image_fence(candidate, libc::LOCK_SH) {
+        Ok(fence) => Some(fence),
+        Err(error) if error.code == "provider_busy" => None,
+        Err(error) => return Err(error),
+    };
+    let _key = if fence.is_some() {
+        let lock = Flock::open(&directory.join(format!("{}.lock", inputs.key)))?;
+        let Some(lock) = Flock::try_lock(lock, libc::LOCK_EX)? else {
+            return Ok(None);
+        };
+        Some(lock)
+    } else {
+        None
     };
     let Some(previous) = read_receipt(&path)? else {
         return Ok(None);
     };
+    // Exclusive reclaim cannot remove its current or previous build images.
+    // Observe those read-only and leave receipt order unchanged.
+    if fence.is_none()
+        && !previous.image_id.as_ref().is_some_and(|id| {
+            reclaim::current_images(candidate).is_ok_and(|current| current.builds.contains_key(id))
+        })
+    {
+        return Ok(None);
+    }
     if let Some(expected) = expected
         && (expected.len() != previous.base_pins.len()
             || expected
@@ -941,9 +970,13 @@ fn reuse_receipt<P: BuildPool>(
     {
         return Ok(None);
     }
-    reuse_verified(candidate, inputs, &path, &previous, |id| {
-        pool.observe_build(id)
-    })
+    reuse_verified(
+        candidate,
+        inputs,
+        fence.is_some().then_some(path.as_path()),
+        &previous,
+        |id| pool.observe_build(id),
+    )
 }
 
 fn reuse_legacy<P: BuildPool>(
@@ -1043,9 +1076,11 @@ fn run_with_bases<P: BuildPool>(
                 "A build receipt does not match its path; no image was adopted or replaced.",
             ));
         }
-        if let Some(outcome) = reuse_verified(candidate, inputs, &receipt_path, previous, |id| {
-            Ok((identity.clone(), pool.inspect(&lease, id)?))
-        })? {
+        if let Some(outcome) =
+            reuse_verified(candidate, inputs, Some(&receipt_path), previous, |id| {
+                Ok((identity.clone(), pool.inspect(&lease, id)?))
+            })?
+        {
             // Recovery cannot invalidate the verified reuse decision.
             let _ = aliases::sweep(pool, &lease, &identity, &alias_path);
             return Ok(outcome);
@@ -2188,29 +2223,48 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
     };
     use super::image_policy::ImageTagMode;
     let tag_mode = policy.tag_mode;
-    if inputs.policy == Policy::Missing && tag_mode != ImageTagMode::Refresh {
-        let mut local = policy.clone();
-        local.tag_mode = ImageTagMode::Offline;
-        if let Ok(bases) = acquire_bases(
-            &inputs,
-            &prior_pins,
-            local,
-            |reference, policy| select_build_base(candidate, reference, policy, None),
-            deadline,
-        ) {
-            let key = key_with_bases(&inputs.key, &bases.selected)?;
-            let original = std::mem::replace(&mut inputs.key, key);
-            let reuse = reuse_receipt(candidate, &pool, &inputs, Some(&bases.selected))?;
-            inputs.key = original;
-            if let Some(mut outcome) = reuse {
-                outcome.base_selections = bases.selections;
-                return Ok(outcome);
+    let mut reuse = || -> Result<Option<BuildOutcome>, CandidateError> {
+        if inputs.policy == Policy::Missing && tag_mode != ImageTagMode::Refresh {
+            let mut local = policy.clone();
+            local.tag_mode = ImageTagMode::Offline;
+            if let Ok(bases) = acquire_bases(
+                &inputs,
+                &prior_pins,
+                local,
+                |reference, policy| select_build_base(candidate, reference, policy, None),
+                deadline,
+            ) {
+                let key = key_with_bases(&inputs.key, &bases.selected)?;
+                let original = std::mem::replace(&mut inputs.key, key);
+                let reuse = reuse_receipt(candidate, &pool, &inputs, Some(&bases.selected))?;
+                inputs.key = original;
+                if let Some(mut outcome) = reuse {
+                    outcome.base_selections = bases.selections;
+                    return Ok(Some(outcome));
+                }
+            } else if let Some(outcome) = reuse_legacy(candidate, &pool, &inputs)? {
+                return Ok(Some(outcome));
             }
-        } else if let Some(outcome) = reuse_legacy(candidate, &pool, &inputs)? {
+        }
+        Ok(None)
+    };
+    if let Some(outcome) = reuse()? {
+        return Ok(outcome);
+    }
+    let acquisition_fence = match image_fence(candidate, libc::LOCK_SH) {
+        Ok(fence) => Some(fence),
+        Err(error) if error.code == "provider_busy" => None,
+        Err(error) => return Err(error),
+    };
+    let _waited_fence = if acquisition_fence.is_none() {
+        let fence = wait_for_image_fence(candidate, &policy)?;
+        if let Some(outcome) = reuse()? {
             return Ok(outcome);
         }
-    }
-    let _acquisition_fence = wait_for_image_fence(candidate, &policy)?;
+        Some(fence)
+    } else {
+        None
+    };
     let observer = super::engine::Observer::connect(candidate)?;
     let BaseSelections {
         selected,

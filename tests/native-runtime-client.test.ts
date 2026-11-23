@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
+  NATIVE_BUILD_RETENTION_TIMEOUT_MS,
   NATIVE_EXIT_DRAIN_BOUND_MS,
   NativeRuntimeRequestError,
   nativeCodesReportRuntimeNotRunning,
@@ -1031,6 +1032,25 @@ await Bun.sleep(60_000);
   },
   CASE_TIMEOUT_MS
 );
+
+test("build retention admits its full budget through the native client", async () => {
+  const runtime = await fixture();
+  const args = ["runtime", "retain-build-bases", "--json"];
+  const request = { runtime, cwd: runtime.home, args };
+  const result = await invokeNativeRuntime({
+    ...request,
+    timeoutMs: NATIVE_BUILD_RETENTION_TIMEOUT_MS,
+  });
+  expect(result).toHaveProperty("args", expect.arrayContaining(args));
+  await expectCodedRefusal(
+    invokeNativeRuntime({
+      ...request,
+      timeoutMs: NATIVE_BUILD_RETENTION_TIMEOUT_MS + 1,
+    }),
+    "E_CONFIG_INVALID",
+    "input or time budget"
+  );
+});
 
 test("private-input and response bounds reject instead of truncating", async () => {
   const runtime = await fixture();

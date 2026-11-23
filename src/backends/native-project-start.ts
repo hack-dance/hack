@@ -218,6 +218,7 @@ import {
 } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_BUILD_RETENTION_TIMEOUT_MS,
   NATIVE_IDLE_POOL_NOTE,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
@@ -3290,9 +3291,9 @@ async function startNativeProjectAttempt(
           let code = 1;
           let serveFailure: unknown;
           let retentionTimer: ReturnType<typeof setTimeout> | undefined;
-          let retentionStopped = false;
+          const retention = new AbortController();
           const scheduleRetention = (attempt: number) => {
-            if (retentionStopped || controller.signal.aborted) {
+            if (retention.signal.aborted || controller.signal.aborted) {
               return;
             }
             retentionTimer = setTimeout(
@@ -3303,6 +3304,10 @@ async function startNativeProjectAttempt(
                     run,
                     runtime: opts.runtime,
                     invoke: deps.invoke,
+                    signal: AbortSignal.any([
+                      controller.signal,
+                      retention.signal,
+                    ]),
                   }).then((deferred) => {
                     if (deferred && attempt < 3) {
                       scheduleRetention(attempt + 1);
@@ -3544,7 +3549,7 @@ async function startNativeProjectAttempt(
           } catch (error) {
             serveFailure = error;
           } finally {
-            retentionStopped = true;
+            retention.abort();
             clearTimeout(retentionTimer);
             await startupStatus.stop();
             delivery.payload?.fill(0);
@@ -3706,6 +3711,7 @@ async function startNativeProjectAttempt(
 async function retainReadyBuildBases(opts: {
   readonly scope: NativeProjectRunScope;
   readonly run: string;
+  readonly signal: AbortSignal;
   readonly runtime: NativeRuntimeSelection;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<boolean> {
@@ -3719,7 +3725,8 @@ async function retainReadyBuildBases(opts: {
         "--json",
         ...nativeImagePolicyArgs(),
       ],
-      timeoutMs: 30 * 60_000 + 5000,
+      timeoutMs: NATIVE_BUILD_RETENTION_TIMEOUT_MS,
+      signal: opts.signal,
     });
     if (
       isRecord(result) &&
@@ -3730,6 +3737,9 @@ async function retainReadyBuildBases(opts: {
     }
   } catch {
     // Maintenance failures are private lifecycle notes.
+  }
+  if (opts.signal.aborted) {
+    return false;
   }
   await appendLifecycleLogRecord({
     projectDir: opts.scope.projectDir,

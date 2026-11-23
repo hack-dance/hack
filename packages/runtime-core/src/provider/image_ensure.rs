@@ -70,7 +70,7 @@ impl ImageCache {
         if let Some(lease) = &cache.lease {
             lease.verify_path(root)?;
         } else {
-            let lease = if policy.opportunistic_locks {
+            let lease = if policy.retention_root.is_some() {
                 state::Lock::acquire(root)?
             } else {
                 state::wait_for_image_lock(
@@ -886,13 +886,13 @@ fn confirm_selection(
             policy,
             platform,
             |reference, platform| {
-                if offline {
+                if offline || existing_engine.is_some() {
                     return Err(no_archive());
                 }
                 registry_image::pinned_platform(reference, policy, platform)
             },
             |reference, path, platform, limit| {
-                if offline {
+                if offline || existing_engine.is_some() {
                     return Err(no_archive());
                 }
                 let mut acquired = registry_image::acquire_with_disk_admission(
@@ -912,7 +912,7 @@ fn confirm_selection(
                         check_registry_config(receipt, *selected, config)?;
                         return Ok(config.clone());
                     }
-                    if offline {
+                    if offline || existing_engine.is_some() {
                         return Err(no_archive());
                     }
                     let proof = match acquired_proof.borrow_mut().take() {

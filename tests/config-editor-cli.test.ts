@@ -1428,9 +1428,11 @@ test("validation reads newly selected layers and honors an explicit selection", 
 test("an include-only Compose root permits project and env edits", async () => {
   const f = await fixture();
   const composeFile = join(f.project, "docker-compose.yml");
-  const root = "include:\n  - path: [services.yml]\n";
+  const root =
+    "include:\n  - path: [services.yml]\n    project_directory: .\n    env_file: [include.env]\n";
   await Promise.all([
     writeFile(composeFile, root),
+    writeFile(join(f.project, "include.env"), ""),
     writeFile(
       join(f.project, "services.yml"),
       "services:\n  api:\n    image: alpine\n"
@@ -1439,6 +1441,41 @@ test("an include-only Compose root permits project and env edits", async () => {
   const report = await show(f.root, f.main);
   expect(report.state).toBe("ready");
   expect(report.services).toEqual([]);
+  const optional = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["validate"],
+    patch: {
+      base: bases(report),
+      changes: [
+        {
+          layer: "2",
+          kind: "source",
+          text: "include:\n  - path: services.yml\n    project_directory: null\n    env_file: null\n",
+        },
+      ],
+    },
+  });
+  expect(optional.payload.data.valid).toBe(true);
+  for (const field of ["project_directory: []", "env_file: 12"]) {
+    const invalid = await cli({
+      root: f.root,
+      cwd: f.main,
+      args: ["validate"],
+      patch: {
+        base: bases(report),
+        changes: [
+          {
+            layer: "2",
+            kind: "source",
+            text: `include:\n  - path: services.yml\n    ${field}\n`,
+          },
+        ],
+      },
+    });
+    expect(invalid.payload.data.valid).toBe(false);
+    expect(invalid.payload.data.issues[0]?.code).toBe("E_CONFIG_PARSE");
+  }
   const patch = {
     base: bases(report),
     changes: [
@@ -1501,6 +1538,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
         "127.0.0.${OCTET:-1}:8080:80",
         "127.0.0.1:${PORT_MAPPING:-8080:80}",
         "127.0.0.1:${PUBLISHED_AND_COLON:-8080:}80",
+        "127.0.0.1:8080${SEPARATOR:-:}80${INSTANCE:-01}",
         "127${MIDDLE:-.0.}0.1:8080:80",
         ":8080:80",
         "[]:8080:80",
@@ -1543,6 +1581,7 @@ test("Compose ports and labels match runtime interpretation and sequence edits k
     "{published: 8081}",
     "'${PORT:-8080}:70000'",
     "'127.0.0.1:${PUBLISHED_AND_COLON:-8080:}70000'",
+    "'127.0.0.1:8080${SEPARATOR:-:}70000${INSTANCE:-01}'",
     "'${PORT'",
     "'invalid-host.${OCTET:-1}:8080:80'",
     "'[12345::${ADDR:-1}]:8080:80'",

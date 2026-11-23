@@ -22,6 +22,7 @@ const UPSTREAM = /^\{\{upstreams ([0-9]+)\}\}$/;
 const HOST_LABEL = /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i;
 const SERVICE_NAME = /^[\w.-]+$/;
 const ROUTE_LABEL = /^caddy(?:[._]|$)/;
+const PORT_MAX = 65_535;
 const PORT_RANGE = /^([\d*]+)(?:-([\d*]+))?$/;
 const PORT_NUMBER = /^[\d*]+$/;
 const IPV6_TEMPLATE = /^[a-f\d:.*]+$/i;
@@ -41,7 +42,7 @@ export const validPort = (port: unknown): port is number =>
   typeof port === "number" &&
   Number.isInteger(port) &&
   port >= 1 &&
-  port <= 65_535;
+  port <= PORT_MAX;
 
 export function validComposePort(value: unknown): boolean {
   if (typeof value !== "string") {
@@ -59,18 +60,7 @@ export function validComposePort(value: unknown): boolean {
   ) {
     return false;
   }
-  if (validPortMapping(mapping)) {
-    return true;
-  }
-  // A variable in the final component can also supply the separator between
-  // the published and target ports, for example 127.0.0.1:${PORT_MAPPING}.
-  const variable = mapping.lastIndexOf("*");
-  return (
-    variable > mapping.lastIndexOf(":") &&
-    validPortMapping(
-      `${mapping.slice(0, variable)}*:*${mapping.slice(variable + 1)}`
-    )
-  );
+  return validPortMapping(mapping) || validInterpolatedPortPair(mapping);
 }
 
 function validPortMapping(mapping: string): boolean {
@@ -78,7 +68,7 @@ function validPortMapping(mapping: string): boolean {
   const [target, published, ...address] = mapping.split(":").toReversed();
   const host = address.toReversed().join(":");
   return (
-    (host === "" || host === "[]" || validPortHost(host)) &&
+    validOptionalPortHost(host) &&
     (!published || validPortRange(published, true)) &&
     target !== undefined &&
     validPortRange(target) &&
@@ -88,6 +78,67 @@ function validPortMapping(mapping: string): boolean {
       portRangeSpan(target) === 0 ||
       portRangeSpan(target) === portRangeSpan(published))
   );
+}
+
+function validOptionalPortHost(host: string): boolean {
+  return host === "" || host === "[]" || validPortHost(host);
+}
+
+function validInterpolatedPortPair(mapping: string): boolean {
+  const separator = mapping.lastIndexOf(":");
+  const tail = mapping.slice(separator + 1);
+  if (
+    !(
+      tail.includes("*") &&
+      validOptionalPortHost(mapping.slice(0, Math.max(separator, 0)))
+    )
+  ) {
+    return false;
+  }
+  const published = new Set(portVariableSplits(tail, false));
+  for (const target of portVariableSplits(tail, true)) {
+    if (published.has(target)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** A split variable can supply the colon and digits on either side of it. */
+function* portVariableSplits(template: string, reverse: boolean) {
+  let minimum = 0;
+  let place = 1;
+  let hasVariable = false;
+  let hasRange = false;
+  const step = reverse ? -1 : 1;
+  for (
+    let index = reverse ? template.length - 1 : 0;
+    index >= 0 && index < template.length;
+    index += step
+  ) {
+    const token = template[index];
+    if (token === "*") {
+      hasVariable = true;
+      yield index;
+      continue;
+    }
+    if (token === "-") {
+      if (hasRange || (!hasVariable && minimum === 0)) {
+        return;
+      }
+      hasRange = true;
+      hasVariable = false;
+      minimum = 0;
+      place = 1;
+      continue;
+    }
+    const digit = template.charCodeAt(index) - 48;
+    minimum = reverse ? minimum + digit * place : minimum * 10 + digit;
+    if (digit < 0 || digit > 9 || minimum > PORT_MAX) {
+      return;
+    }
+    place = Math.min(place * 10, PORT_MAX + 1);
+  }
 }
 
 function validPortHost(value: string): boolean {
@@ -235,7 +286,7 @@ function validPortRange(value: string, allowZero = false): boolean {
 function validPortNumber(value: string, allowZero = false): boolean {
   return (
     PORT_NUMBER.test(value) &&
-    ((value.includes("*") && Number(value.replaceAll("*", "")) <= 65_535) ||
+    ((value.includes("*") && Number(value.replaceAll("*", "")) <= PORT_MAX) ||
       (allowZero && value === "0") ||
       validPort(Number(value)))
   );
@@ -333,7 +384,7 @@ export function parseComposeSource(text: string) {
     const compose: unknown = doc.toJS();
     const root = isRecord(compose) ? compose : {};
     const services = isRecord(root.services) ? root.services : null;
-    const includes = root.include;
+    const includes = root.include ?? undefined;
     const valid =
       (includes === undefined || validComposeIncludes(includes)) &&
       (services !== null ||
@@ -358,17 +409,26 @@ export function parseComposeSource(text: string) {
 }
 
 function validComposeIncludes(value: unknown): boolean {
+  return Array.isArray(value) && value.every(validComposeInclude);
+}
+
+function validComposeInclude(entry: unknown): boolean {
+  if (!isRecord(entry)) {
+    return nonemptyIncludePath(entry);
+  }
+  const { path, project_directory, env_file } = entry;
   return (
-    Array.isArray(value) &&
-    value.every(
-      (entry: unknown) =>
-        nonemptyIncludePath(entry) ||
-        (isRecord(entry) &&
-          (nonemptyIncludePath(entry.path) ||
-            (Array.isArray(entry.path) &&
-              entry.path.length > 0 &&
-              entry.path.every(nonemptyIncludePath))))
-    )
+    (nonemptyIncludePath(path) ||
+      (Array.isArray(path) &&
+        path.length > 0 &&
+        path.every(nonemptyIncludePath))) &&
+    (project_directory === undefined ||
+      project_directory === null ||
+      typeof project_directory === "string") &&
+    (env_file === undefined ||
+      env_file === null ||
+      nonemptyIncludePath(env_file) ||
+      (Array.isArray(env_file) && env_file.every(nonemptyIncludePath)))
   );
 }
 

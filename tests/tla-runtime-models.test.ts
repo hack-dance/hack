@@ -51,6 +51,7 @@ for (const model of contracts) {
       "Parse error",
       output.replace(`Invariant ${model.invariant}`, "Invariant Wrong"),
       output.replace(`<${model.action} `, "<Other "),
+      `${output}\nState 3: <Other line 2>\n${fields.join("\n")}`,
       `${header}\n${fields[0]}\nState 3: <Other line 2>\n${fields[1]}`,
     ]) {
       expect(

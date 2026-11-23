@@ -67,6 +67,7 @@ import { encodeNativeComposeStorageXattrResponse } from "../src/lib/native-compo
 import { runNativeComposeStorageXattrHelper } from "../src/lib/native-compose-storage-witness-xattr-helper.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { commandReaderFixture } from "./helpers/native-compose-storage-command-fixture.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const engineId = "d".repeat(64);
 const witnessRefusal =
@@ -142,7 +143,7 @@ async function fixture() {
     await mkdtemp(join(tmpdir(), "native-xattr-owner-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack", "hack.project.json"),
     JSON.stringify({ schema_version: 1, name: "xattr" })

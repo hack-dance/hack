@@ -1,0 +1,42 @@
+---
+title: Run mapping · another home's run
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> foreign
+    foreign --> check : home at recorded path?
+    state check <<choice>>
+    check --> records : [same identity]
+    check --> gone : [absent, file, other dir]
+    records --> released : [clean stop recorded]
+    records --> refused : [live, unproven]
+    gone --> scan : release --expect-selection
+    state scan <<choice>>
+    scan --> released : [no process of it]
+    scan --> refused : [process names path]
+    released --> [*]
+
+    note right of gone
+        Records went with the home.
+        Owner gone, selection digest
+        names the path's state.
+    end note
+    note right of released
+        Mapping, restart intent and
+        down hooks kept in an audit
+        file, then removed.
+    end note
+    note left of refused
+        Names each PID or what is
+        unproven. A moved home run
+        from its new path is not
+        seen: release again there.
+    end note
+
+    class released ok
+    class gone wait
+    class refused fail

@@ -459,7 +459,7 @@ fn capture_service_shell_reopen(
     use crate::service_view::ServiceTab;
     use crate::terminal::ServiceShellFixture;
     use hack_desktop_term::view::Status;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let fixture = ServiceShellFixture::new();
     cx.update_window(handle, |_, window, cx| {
@@ -480,19 +480,24 @@ fn capture_service_shell_reopen(
             let key = app.model.selected_key().expect("selected branch");
             let sessions = app.panels.by_key[&key].sessions.clone();
             let shell = sessions.read(cx).tab(active).expect("active shell").clone();
-            // Allow the full capture budget for PTY startup or exit drain.
             shell.update(cx, |shell, cx| {
-                let timeout = Duration::from_secs(5);
-                shell.settle(timeout, timeout, cx);
-                let frame = shell
-                    .emulator()
-                    .frame()
-                    .expect("read fixture terminal frame");
-                assert_eq!(
-                    frame.row_text(0).trim_end(),
-                    prompt,
-                    "{shot}: terminal text"
-                );
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let expects_exit = active == 1;
+                loop {
+                    let wait = deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50));
+                    shell.settle(wait, wait, cx);
+                    let ended = matches!(shell.status(), Status::Ended(_));
+                    let frame = shell
+                        .emulator()
+                        .frame()
+                        .expect("read fixture terminal frame");
+                    if ended == expects_exit && frame.row_text(0).trim_end() == prompt {
+                        break;
+                    }
+                    assert!(!ended && !wait.is_zero(), "{shot}: expected {prompt:?}");
+                }
             });
             window.render_frame(cx);
             let sessions = sessions.read(cx);
@@ -500,12 +505,6 @@ fn capture_service_shell_reopen(
             assert_eq!(sessions.active_index(), Some(active));
             let ended = sessions.tab(1).expect("original shell").read(cx);
             assert!(matches!(ended.status(), Status::Ended(_)));
-            if active == 2 {
-                assert_eq!(
-                    sessions.tab(active).unwrap().read(cx).status(),
-                    &Status::Running
-                );
-            }
         })
         .expect("exercise service shell reopen");
         let path = dir.join(format!("{shot}-{suffix}.png"));

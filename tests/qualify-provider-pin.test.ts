@@ -33,6 +33,7 @@ import {
   isExecutor,
   kernelProviderMemory,
   main,
+  matchesDevelopmentDiskBudget,
   nativeCaRoot,
   type Options,
   parseCpuTime,
@@ -55,6 +56,7 @@ import { formatNativeStartupLogReport } from "../src/backends/native-startup-log
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
 const repository = resolve(import.meta.dir, "..");
+
 const digest = `sha256:${"a".repeat(64)}`;
 const required = [
   "--hack",
@@ -75,6 +77,44 @@ const required = [
   `postgres@${digest}`,
 ];
 
+test("development disk probe distinguishes fresh, running and clean stopped pools", () => {
+  const gib = 1024 ** 3;
+  const probe = {
+    profile: "development",
+    host_supported: true,
+    disk_free_bytes: 57 * gib,
+    disk_budget_basis: "new-pool-storage-overlay-host-reserve",
+    minimum_disk_free_bytes: 58 * gib,
+  };
+  expect(matchesDevelopmentDiskBudget(probe, "fresh")).toBe(true);
+  expect(matchesDevelopmentDiskBudget(probe, "running")).toBe(false);
+
+  const running = {
+    ...probe,
+    disk_budget_basis: "verified-live-owned-pool-host-reserve",
+    minimum_disk_free_bytes: 16 * gib,
+  };
+  expect(matchesDevelopmentDiskBudget(running, "running")).toBe(true);
+  expect(matchesDevelopmentDiskBudget(running, "stopped")).toBe(false);
+
+  const stopped = {
+    ...running,
+    disk_budget_basis: "verified-stopped-owned-pool-host-reserve",
+  };
+  expect(matchesDevelopmentDiskBudget(stopped, "stopped")).toBe(true);
+  expect(
+    matchesDevelopmentDiskBudget(
+      { ...stopped, minimum_disk_free_bytes: 16 * gib - 1 },
+      "stopped"
+    )
+  ).toBe(false);
+  expect(
+    matchesDevelopmentDiskBudget(
+      { ...stopped, disk_free_bytes: null },
+      "stopped"
+    )
+  ).toBe(false);
+});
 function rustList(source: string, name: string): string[] {
   const start = source.indexOf(`const ${name}:`);
   const body = source.slice(start, source.indexOf("];", start));

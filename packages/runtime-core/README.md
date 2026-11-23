@@ -926,6 +926,12 @@ the HTTPS frontend, including startup, restart, recovery, the warm runs and the 
 samples. So qualify the baseline pin and the new pin with the same HTTPS options.
 `qualification.json` records `https: true` or `false` next to the measurements.
 
+The full run checks the Development disk budget before the first boot, while
+the owned pool is running, and after a clean runtime stop. It records the
+observed free bytes and requires the corresponding 58 GiB, 16 GiB and 16 GiB
+floors. To qualify admission near those floors, run on a dedicated test
+filesystem with the relevant amount of free space.
+
 ## Provider owner receipt compatibility
 
 The provider owner receipt is `<state root>/run/smolvm/owner.json`, the `Owner`

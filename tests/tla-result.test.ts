@@ -4,6 +4,7 @@ import {
   verifyBalloonReuseModelResult,
   verifyRestoreHistoryModelResult,
 } from "../scripts/lib/tla-result.ts";
+import { runtimeModels } from "../scripts/lib/tla-runtime-models.ts";
 
 describe("TLC admission evidence", () => {
   test("requires completed state exploration for the positive model", () => {
@@ -156,4 +157,34 @@ describe("TLC restore history evidence", () => {
       ).toBe(false);
     }
   });
+});
+
+test.each([
+  ["https-stopped", "ListenerExits", "stopped", "records"],
+  ["https-no-retire", "ListenerExits", "running", "live"],
+  ["https-archive", "TimeWaitEnds", "running", "records"],
+  ["https-archive", "ListenerExits", "running", "records"],
+  ["https-finish-bound", "ListenerExits", "running", "records"],
+])("accepts the %s dead end after %s frees the port", (name, action, pool, https) => {
+  const control = runtimeModels
+    .find((model) => model.name === "native-pool-stop")
+    ?.additionalControls.find((item) => item.name === name);
+  const output = [
+    "Error: Invariant NoDeadEnd is violated.",
+    "Error: The behavior up to this point is:",
+    `State 8: <${action} line 151 of module PoolStop>`,
+    `/\\ pool = "${pool}"`,
+    '/\\ run = "retained"',
+    `/\\ https = "${https}"`,
+    '/\\ port = "free"',
+    "/\\ fin = TRUE",
+  ].join("\n");
+  expect(control?.verify({ negative: true, exitCode: 12, output })).toBe(true);
+  expect(
+    control?.verify({
+      negative: true,
+      exitCode: 12,
+      output: output.replace('port = "free"', 'port = "listener"'),
+    })
+  ).toBe(false);
 });

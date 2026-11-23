@@ -62,6 +62,25 @@ function runtimeServiceEither(
   return { ...first, alternativeWitnesses };
 }
 
+// An occupied port still has a way forward in NoDeadEnd. Freeing it can
+// expose a stranded finalization when one recovery path is disabled.
+function freedHttpsPort(
+  action: "TimeWaitEnds" | "ListenerExits",
+  pool: "running" | "stopped",
+  https: "live" | "records"
+): ModelWitness {
+  return {
+    action,
+    fields: [
+      `pool = "${pool}"`,
+      `https = "${https}"`,
+      'port = "free"',
+      'run = "retained"',
+      "fin = TRUE",
+    ],
+  };
+}
+
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const laterIncompleteMissingLockStages = [
   "temp",
@@ -3049,6 +3068,7 @@ const contracts: readonly ModelContract[] = [
             action: "RecoverStopped",
             fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
           },
+          freedHttpsPort("ListenerExits", "running", "live"),
         ],
       },
       {
@@ -3066,6 +3086,8 @@ const contracts: readonly ModelContract[] = [
             action: "RecoverStopped",
             fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
           },
+          freedHttpsPort("TimeWaitEnds", "running", "records"),
+          freedHttpsPort("ListenerExits", "running", "records"),
         ],
       },
       {
@@ -3089,6 +3111,7 @@ const contracts: readonly ModelContract[] = [
             action: "OwnerRetire",
             fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
           },
+          freedHttpsPort("ListenerExits", "running", "records"),
         ],
       },
       {
@@ -3109,6 +3132,7 @@ const contracts: readonly ModelContract[] = [
             action: "PoolRecover",
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
+          freedHttpsPort("ListenerExits", "stopped", "records"),
         ],
       },
       {

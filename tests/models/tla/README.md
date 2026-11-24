@@ -671,8 +671,9 @@ notice (traffic drift or a watched listener exit) arms one attempt; attempts are
 single-flight; a refusal before the rebind journal re-arms after a bounded
 backoff; a completed rebind clears it; and a failure after the journal closes
 the schedule. The negative control removes the close guard (`EnforceClose =
-FALSE`) and must fail `NoReplayAfterUnconfirmed` at `Start` with a second attempt
-after an unconfirmed rebind.
+FALSE`) and must fail `NoReplayAfterUnconfirmed` when it starts another attempt
+after an unconfirmed rebind. Earlier attempts may have completed or refused
+before writing a journal.
 
 | Model operation | Source boundary |
 | --- | --- |

@@ -451,6 +451,31 @@ test("image batch detects two simultaneous imports at any job positions", () => 
   );
 });
 
+test("dependency refresh detects a replay after an earlier pre-effect retry", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "dependency-auto-refresh"
+  );
+  const output = tlaWitness({
+    invariant: "NoReplayAfterUnconfirmed",
+    action: "Start",
+    fields: [
+      "replayed = TRUE",
+      "unconfirmed = TRUE",
+      "closed = FALSE",
+      'journal = "none"',
+      "attempts = 3",
+      "retries = 1",
+    ],
+  });
+  const verify = (trace: string) =>
+    model?.verify({ negative: true, exitCode: 12, output: trace });
+  expect(verify(output)).toBe(true);
+  expect(
+    verify(output.replace("unconfirmed = TRUE", "unconfirmed = FALSE"))
+  ).toBe(false);
+  expect(verify(output.replace("attempts = 3", "attempts = 1"))).toBe(false);
+});
+
 test("previous-boot HTTPS publisher witness accepts only the two owner-archived stages", () => {
   const model = runtimeModels.find(
     (entry) => entry.name === "previous-boot-shared-https"

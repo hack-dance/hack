@@ -65,6 +65,12 @@ const stoppedHttpsWitnessFields = [
   'port = "free"',
   "pub = FALSE",
 ] as const;
+const unconfirmedRefreshReplayFields = [
+  "replayed = TRUE",
+  "unconfirmed = TRUE",
+  "closed = FALSE",
+  'journal = "none"',
+] as const;
 // TLC's two-worker search does not always report the shortest trace: a deeper
 // first violation can be checked first. Each multi-root-share control therefore
 // accepts exactly the first violations its model can reach, as complete states
@@ -609,12 +615,30 @@ const contracts: readonly ModelContract[] = [
           "binding = 1",
           "progress = 1",
         ],
+        alternativeWitnesses: [
+          [
+            "unsafeEffect = TRUE",
+            "active = FALSE",
+            "binding = 1",
+            "progress = 2",
+          ],
+          [
+            "unsafeEffect = TRUE",
+            "active = FALSE",
+            "binding = 1",
+            "progress = 3",
+          ],
+        ],
       },
       {
         name: "changed-binding",
         negative: true,
         invariant: "NoUnissuedEffect",
         fields: ["unsafeEffect = TRUE", "binding = 2", "progress = 1"],
+        alternativeWitnesses: [
+          ["unsafeEffect = TRUE", "binding = 2", "progress = 2"],
+          ["unsafeEffect = TRUE", "binding = 2", "progress = 3"],
+        ],
       },
       {
         name: "reserved-crash-reachable",
@@ -975,6 +999,50 @@ const contracts: readonly ModelContract[] = [
       'retirement = "live"',
       'phase = "complete"',
     ],
+    alternativeWitnesses: [
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {1, 2}",
+        'retirement = "intent"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {2}",
+        'retirement = "live"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {1}",
+        'retirement = "live"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {2}",
+        'retirement = "intent"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {1}",
+        'retirement = "intent"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {}",
+        'retirement = "live"',
+        'phase = "complete"',
+      ],
+    ],
     additionalControls: [
       {
         name: "unproved-absence",
@@ -1195,6 +1263,7 @@ const contracts: readonly ModelContract[] = [
         "bridge = FALSE",
         "unsafeCleanup = TRUE",
       ],
+      ['phase = "stopped"', "publisher = FALSE", "unsafeCleanup = TRUE"],
     ],
     additionalControls: [
       {
@@ -1223,6 +1292,14 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoSilentOrphan",
         fields: ['phase = "ready"', "frontend = FALSE", "owner = TRUE"],
+        alternativeWitnesses: [
+          ['phase = "publisher-down"', "frontend = FALSE", "owner = TRUE"],
+          [
+            'phase = "publisher-exit-pending"',
+            "frontend = FALSE",
+            "owner = TRUE",
+          ],
+        ],
       },
       {
         name: "group-signal",
@@ -1331,6 +1408,15 @@ const contracts: readonly ModelContract[] = [
       "published = TRUE",
       "unsafePublication = TRUE",
     ],
+    alternativeWitnesses: [
+      [
+        "intent = TRUE",
+        "complete = TRUE",
+        "retired = FALSE",
+        "published = TRUE",
+        "unsafePublication = TRUE",
+      ],
+    ],
     additionalControls: [
       {
         name: "unwitnessed-cleanup",
@@ -1355,6 +1441,15 @@ const contracts: readonly ModelContract[] = [
           "progress = 1",
           "unsafeCleanup = TRUE",
         ],
+        alternativeWitnesses: [
+          [
+            "intent = TRUE",
+            "selected = 1",
+            "version = 2",
+            "progress = 2",
+            "unsafeCleanup = TRUE",
+          ],
+        ],
       },
       {
         name: "unconfirmed-retirement",
@@ -1366,6 +1461,29 @@ const contracts: readonly ModelContract[] = [
           "progress = 0",
           "retired = TRUE",
           "unsafeRetirement = TRUE",
+        ],
+        alternativeWitnesses: [
+          [
+            "intent = TRUE",
+            "complete = FALSE",
+            "progress = 0",
+            "retired = TRUE",
+            "unsafeRetirement = TRUE",
+          ],
+          [
+            "intent = TRUE",
+            "complete = FALSE",
+            "progress = 1",
+            "retired = TRUE",
+            "unsafeRetirement = TRUE",
+          ],
+          [
+            "intent = TRUE",
+            "complete = FALSE",
+            "progress = 2",
+            "retired = TRUE",
+            "unsafeRetirement = TRUE",
+          ],
         ],
       },
     ],
@@ -2003,6 +2121,9 @@ const contracts: readonly ModelContract[] = [
       "running = TRUE",
       'setting = "unset"',
     ],
+    alternativeWitnesses: [
+      ["existing = FALSE", "asked = FALSE", "running = TRUE", 'setting = "on"'],
+    ],
     additionalControls: [
       {
         name: "legacy-unset-off",
@@ -2015,6 +2136,36 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoSurpriseDataLoss",
         fields: ["prevData = TRUE", "data = FALSE", 'setting = "off"'],
+        alternativeWitnesses: [
+          [
+            "prevData = TRUE",
+            "data = FALSE",
+            'setting = "unset"',
+            'last = "upFlag"',
+            "running = FALSE",
+          ],
+          [
+            "prevData = TRUE",
+            "data = FALSE",
+            'setting = "on"',
+            'last = "upFlag"',
+            "running = FALSE",
+          ],
+          [
+            "prevData = TRUE",
+            "data = FALSE",
+            'setting = "unset"',
+            'last = "install"',
+            "running = FALSE",
+          ],
+          [
+            "prevData = TRUE",
+            "data = FALSE",
+            'setting = "unset"',
+            'last = "up"',
+            "running = FALSE",
+          ],
+        ],
       },
       {
         // The first start does not save an existing home's choice: with its
@@ -2047,6 +2198,9 @@ const contracts: readonly ModelContract[] = [
     states: 298,
     invariant: "NoExitWithPendingHold",
     fields: ['phase = "flushing"', "snap = {}", "buffered = FALSE"],
+    alternativeWitnesses: [
+      ['phase = "flushing"', "snap = {}", "buffered = TRUE"],
+    ],
     additionalControls: [
       {
         name: "no-end",
@@ -2085,13 +2239,13 @@ const contracts: readonly ModelContract[] = [
     module: "AutoRefresh",
     states: 141,
     invariant: "NoReplayAfterUnconfirmed",
-    fields: [
-      "replayed = TRUE",
-      "unconfirmed = TRUE",
-      "closed = FALSE",
-      'journal = "none"',
-      "attempts = 2",
-    ],
+    fields: [...unconfirmedRefreshReplayFields, "attempts = 2"],
+    // Earlier attempts may complete or refuse before an unconfirmed refresh.
+    // The negative config allows up to five attempts.
+    alternativeWitnesses: [3, 4, 5].map((attempts) => [
+      ...unconfirmedRefreshReplayFields,
+      `attempts = ${attempts}`,
+    ]),
   },
   {
     name: "relay-lifecycle-barrier",
@@ -2104,6 +2258,22 @@ const contracts: readonly ModelContract[] = [
       "journal = TRUE",
       "ownerAlive = TRUE",
       "connections = {1, 2}",
+    ],
+    alternativeWitnesses: [
+      [
+        "unsafeCommit = TRUE",
+        'phase = "effect-started"',
+        "journal = TRUE",
+        "ownerAlive = TRUE",
+        "connections = {2}",
+      ],
+      [
+        "unsafeCommit = TRUE",
+        'phase = "effect-started"',
+        "journal = TRUE",
+        "ownerAlive = TRUE",
+        "connections = {1}",
+      ],
     ],
   },
   {
@@ -2207,6 +2377,14 @@ const contracts: readonly ModelContract[] = [
         'recorded = {"second"}',
         'child = [first |-> "absent", second |-> "gated"]',
       ],
+      [
+        'recorded = {"second"}',
+        'child = [first |-> "gated", second |-> "gated"]',
+      ],
+      [
+        'recorded = {"second"}',
+        'child = [first |-> "committed", second |-> "gated"]',
+      ],
     ],
     additionalControls: [
       {
@@ -2219,6 +2397,14 @@ const contracts: readonly ModelContract[] = [
         alternativeWitnesses: [
           [
             'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+            "recorded = {}",
+          ],
+          [
+            'child = [first |-> "gated", second |-> "uncommitted-bind"]',
+            "recorded = {}",
+          ],
+          [
+            'child = [first |-> "committed", second |-> "uncommitted-bind"]',
             "recorded = {}",
           ],
         ],
@@ -2240,6 +2426,10 @@ const contracts: readonly ModelContract[] = [
     states: 1008,
     invariant: "Safe",
     fields: ["retiredLive = TRUE", "alive = [a |-> TRUE, b |-> TRUE]"],
+    alternativeWitnesses: [
+      ["retiredLive = TRUE", "alive = [a |-> FALSE, b |-> TRUE]"],
+      ["retiredLive = TRUE", "alive = [a |-> TRUE, b |-> FALSE]"],
+    ],
     additionalControls: [
       {
         name: "no-probe",
@@ -2366,6 +2556,8 @@ const contracts: readonly ModelContract[] = [
         fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
         alternativeWitnesses: [
           ['session = "alive"', 'token = "b"', 'entry = "none"'],
+          ['session = "alive"', 'token = "a"', 'entry = "b"'],
+          ['session = "alive"', 'token = "b"', 'entry = "a"'],
         ],
       },
       {
@@ -2593,6 +2785,38 @@ const contracts: readonly ModelContract[] = [
             'receipt = [phase |-> "verified", image |-> 1, inc |-> 1]',
             "owner = <<0, 1, 0>>",
           ],
+          [
+            'receipt = [phase |-> "verified", image |-> 3, inc |-> 1]',
+            "owner = <<1, 0, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 3, inc |-> 1]',
+            "owner = <<0, 1, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 1, inc |-> 1]',
+            "owner = <<0, 0, 1>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 2, inc |-> 1]',
+            "owner = <<0, 0, 1>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 2, inc |-> 1]',
+            "owner = <<1, 0, 1>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 3, inc |-> 1]',
+            "owner = <<1, 1, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 2, inc |-> 2]',
+            "owner = <<2, 0, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 1, inc |-> 2]',
+            "owner = <<0, 2, 0>>",
+          ],
         ],
       },
       {
@@ -2610,6 +2834,10 @@ const contracts: readonly ModelContract[] = [
     states: 16,
     invariant: "Safe",
     fields: ["retired = <<1>>", "alive = 1"],
+    alternativeWitnesses: [
+      ["retired = <<1, 2>>", "alive = 1"],
+      ["retired = <<1, 2>>", "alive = 2"],
+    ],
   },
   {
     // HACK-2456: a pool that stops or dies under a live run. Positive: the
@@ -2644,6 +2872,7 @@ const contracts: readonly ModelContract[] = [
         // an extra `runtime up` and stop before the start (fault bound 3).
         alternativeWitnesses: [
           ['pool = "running"', "runBoot = 2", "boot = 4", 'owner = "dead"'],
+          ['pool = "running"', "runBoot = 1", "boot = 4", 'owner = "dead"'],
         ],
       },
       {
@@ -2664,6 +2893,9 @@ const contracts: readonly ModelContract[] = [
           "runBoot = 1",
           "boot = 3",
           "recovering = TRUE",
+        ],
+        alternativeWitnesses: [
+          ['pool = "running"', "runBoot = 2", "boot = 4", "recovering = TRUE"],
         ],
       },
       // The shared HTTPS owner (HACK-2456, seen on a real VM). `https` is this
@@ -3055,6 +3287,22 @@ const contracts: readonly ModelContract[] = [
           'guest = "present"',
           "verified = FALSE",
           "observed = TRUE",
+        ],
+        alternativeWitnesses: [
+          [
+            'phase = "ready"',
+            'receipt = "loading"',
+            'guest = "present"',
+            "verified = FALSE",
+            "observed = TRUE",
+          ],
+          [
+            'phase = "ready"',
+            'receipt = "none"',
+            'guest = "present"',
+            "verified = FALSE",
+            "observed = TRUE",
+          ],
         ],
       },
     ],

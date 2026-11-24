@@ -133,6 +133,8 @@ the closing line counts the routes still warming, and `--json` says
 `readiness: "warming"`. `up --wait` returns once every service is ready, as before.
 `up.after` hooks run at started: a hook that calls a project URL needs `--wait`.
 `hack exec` and `hack run` wait for ready on their own; `hack open` does not.
+A service that fails after `up` returned stops the run with its data retained;
+`hack ps` names it and why, and `ps --json` lists it in `failed`.
 A loopback port can accept connections as soon as its own service is ready.
 During startup, `hack ps` shows verified loopback publications, and
 `hack open <service>` can open a service with one verified loopback address.

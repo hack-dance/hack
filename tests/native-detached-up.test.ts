@@ -125,6 +125,8 @@ for (const mode of [
   "branch-dropped",
   "hot-reload-off",
   "hot-reload-unsafe",
+  "superseded-failure",
+  "superseded-failure-unsafe",
   "restart-action",
   "shell-names",
   "shell-names-empty",
@@ -179,13 +181,15 @@ for (const mode of [
               ? "Branch feature-a: service web label caddy drops 2 sites outside this project's route namespaces; they stay with the base instance.\n"
               : mode === "hot-reload-off"
                 ? `${renderNativeHotReloadNotice({ state: "off", reason: "large_share", limit: 100_000 })}\n`
-                : mode === "shell-names"
-                  ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
-                  : mode === "shell-names-empty"
-                    ? "Forwarding shell variables: (none).\n"
-                    : mode === "shell-names-root-dotenv"
-                      ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
-                      : ""
+                : mode === "superseded-failure"
+                  ? "The last start failed after up returned: api (and 1 more) not ready at 1970-01-01T00:00:01.000Z. Starting again.\n"
+                  : mode === "shell-names"
+                    ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
+                    : mode === "shell-names-empty"
+                      ? "Forwarding shell variables: (none).\n"
+                      : mode === "shell-names-root-dotenv"
+                        ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
+                        : ""
       );
       if (
         [
@@ -195,6 +199,8 @@ for (const mode of [
           "branch-dropped",
           "hot-reload-off",
           "hot-reload-unsafe",
+          "superseded-failure",
+          "superseded-failure-unsafe",
           "restart-action",
           "shell-names",
           "shell-names-empty",
@@ -296,6 +302,8 @@ for (const mode of [
             "branch-dropped",
             "hot-reload-off",
             "hot-reload-unsafe",
+            "superseded-failure",
+            "superseded-failure-unsafe",
             "restart-action",
             "shell-names",
             "shell-names-root-dotenv",

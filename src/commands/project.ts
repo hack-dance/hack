@@ -6936,6 +6936,18 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
         message: `All services ready · ${formatDuration(event.elapsedMs)}`,
       });
       return;
+    case "service-ready":
+      logger.success({
+        message: `${event.service} ready · ${formatDuration(event.elapsedMs)}`,
+      });
+      return;
+    case "service-failed":
+      logger.error({
+        message: event.service
+          ? `${event.label} ${event.reason} · hack logs ${event.service}`
+          : `the project ${event.reason} · hack ps --json`,
+      });
+      return;
     case "routes-not-answering":
       logger.warn({ message: event.detail });
       return;

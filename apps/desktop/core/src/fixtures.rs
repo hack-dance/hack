@@ -453,6 +453,7 @@ fn simple(name: &str, status: &str, backend: &str, always_on: bool) -> ProjectRo
             } else {
                 vec![]
             },
+            ..Default::default()
         }),
         autostart: always_on.then(|| Autostart {
             enabled: true,
@@ -609,6 +610,7 @@ pub fn project(f: Fixture) -> ProjectsPayload {
                 p.native = Some(crate::models::NativePs {
                     status: "runtime_not_running".into(),
                     items: vec![],
+                    ..Default::default()
                 });
             }
         }

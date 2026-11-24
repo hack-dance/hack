@@ -4173,6 +4173,8 @@ struct ReportingDriver {
     reports: bool,
     root: PathBuf,
     told: Vec<String>,
+    /// `--returned-at-started`.
+    returned: bool,
 }
 impl startup::Driver for ReportingDriver {
     fn validate_inputs(&self, _: &project::inputs::ExecutionInputs) -> Result<(), CandidateError> {
@@ -4203,6 +4205,9 @@ impl startup::Driver for ReportingDriver {
     fn reports_started(&self) -> bool {
         self.reports
     }
+    fn returned_at_started(&self) -> bool {
+        self.returned
+    }
     fn all_started(&mut self, run: &str) -> Result<(), CandidateError> {
         let on_disk: Receipt = state::read(&self.root.join("state.json"))?;
         self.told.push(format!("{run} {}", on_disk.phase));
@@ -4232,6 +4237,7 @@ fn without_report_started_every_service_started_changes_nothing_on_disk() {
             reports: false,
             root: root.clone(),
             told: Vec::new(),
+            returned: false,
         };
         record_all_started(&mut receipt, &root, Some(&mut driver)).unwrap();
         record_all_started(&mut receipt, &root, None).unwrap();
@@ -4260,6 +4266,7 @@ fn with_report_started_the_phase_is_saved_before_the_driver_is_told() {
         reports: true,
         root: root.clone(),
         told: Vec::new(),
+        returned: false,
     };
     record_all_started(&mut receipt, &root, Some(&mut driver)).unwrap();
     assert_eq!(
@@ -4281,6 +4288,7 @@ fn a_failed_started_save_fails_the_start_before_anyone_is_told() {
         reports: true,
         root: root.clone(),
         told: Vec::new(),
+        returned: false,
     };
     // The save cannot be written (its directory is gone): the start fails.
     let missing = root.join("missing");
@@ -4294,6 +4302,101 @@ fn a_failed_started_save_fails_the_start_before_anyone_is_told() {
     let retained: Receipt = state::read(&root.join("state.json")).unwrap();
     assert_eq!(retained.phase, "failed-retained");
     assert!(retained.started_from.is_none());
+}
+
+#[test]
+fn only_an_owner_whose_up_returned_at_started_records_a_failure_after_started() {
+    let (_fixture, root) = started_root();
+    let receipt = receipt_in(STARTED_OBSERVED, Some("preparing"));
+    let timeout = CandidateError::new("graph_timeout", "x");
+    let below = ["api".to_owned(), "worker".to_owned()];
+    // `up --wait` (started reported, `up` still waiting), or no owner: an ordinary
+    // startup failure, nothing recorded.
+    for returned in [None, Some(false)] {
+        let driver = returned.map(|returned| ReportingDriver {
+            reports: true,
+            root: root.clone(),
+            told: Vec::new(),
+            returned,
+        });
+        record_failure_after_started(
+            driver.as_ref().map(|d| d as &dyn startup::Driver),
+            &root,
+            &receipt,
+            &timeout,
+            &below,
+        );
+        assert!(!root.join(startup_failure::AFTER_STARTED).exists());
+        assert_eq!(startup_failure::after_started(&root, &receipt), None);
+    }
+    let driver = ReportingDriver {
+        reports: true,
+        root: root.clone(),
+        told: Vec::new(),
+        returned: true,
+    };
+    record_failure_after_started(Some(&driver), &root, &receipt, &timeout, &below);
+    let recorded = startup_failure::after_started(&root, &receipt).unwrap();
+    assert_eq!(recorded.service.as_deref(), Some("api"));
+    assert_eq!(recorded.services, below);
+}
+
+/// A crash right after a new start's receipt commits, before it clears the previous
+/// record. Restore and restart effects need an owned VM, so this replays the receipt
+/// each commits (restore: `restore_inputs`; restart: [`reserve_restart`]) beside the
+/// previous attempt's record, and reads it as `graph status` does.
+#[test]
+fn a_record_a_crash_left_beside_a_newer_attempt_is_not_reported() {
+    let (_fixture, root) = started_root();
+    let returned = ReportingDriver {
+        reports: true,
+        root: root.clone(),
+        told: Vec::new(),
+        returned: true,
+    };
+    let failed = CandidateError::new("graph_timeout", "x");
+    let previous = receipt_in(STARTED_OBSERVED, Some("preparing"));
+    let record = || {
+        record_failure_after_started(Some(&returned), &root, &previous, &failed, &["web".into()]);
+    };
+    let committed = |receipt: &Receipt| {
+        state::write(&root.join("state.json"), receipt).unwrap();
+        let on_disk: Receipt = state::read(&root.join("state.json")).unwrap();
+        startup_failure::after_started(&root, &on_disk)
+    };
+    record();
+    // The failed attempt itself, through its own cleanup, still reports it.
+    let mut stopped = previous.clone();
+    stopped.set_phase("stopped-data-retained");
+    stopped.resources.get_mut("container:web").unwrap().phase = "absent".into();
+    assert!(committed(&stopped).is_some());
+    // Restore: `restoring` commits with the prior containers replaced by fresh
+    // reservations; then the crash. Nor once it allocated (or failed before the clear).
+    let mut restoring = stopped.clone();
+    restoring.set_phase("restoring");
+    let web = restoring.resources.get_mut("container:web").unwrap();
+    web.id = None;
+    web.phase = "reserved".into();
+    assert_eq!(committed(&restoring), None);
+    restoring.resources.get_mut("container:web").unwrap().id = Some("9".repeat(64));
+    restoring.set_phase("failed-retained");
+    assert_eq!(committed(&restoring), None);
+    // Restart keeps its containers and so the generation: the record would still
+    // match after the `restarting` commit, which is why a restart removes it first
+    // (wiring checked in `startup_failure::tests`).
+    let mut restarting = previous.clone();
+    reserve_restart(&mut restarting);
+    assert_eq!(
+        startup_failure::attempt_generation(&restarting),
+        startup_failure::attempt_generation(&previous)
+    );
+    startup_failure::clear_after_started(&root).unwrap();
+    assert_eq!(committed(&restarting), None);
+    // A record of an earlier attempt with other containers is not reported either.
+    let mut earlier = previous.clone();
+    earlier.resources.get_mut("container:web").unwrap().id = Some("8".repeat(64));
+    record_failure_after_started(Some(&returned), &root, &earlier, &failed, &[]);
+    assert_eq!(committed(&restarting), None);
 }
 
 #[test]

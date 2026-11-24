@@ -527,3 +527,47 @@ fn pinned_dependency_check_rejects_invalid_selectors_before_observation() {
     );
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
 }
+
+#[test]
+fn returned_at_started_is_an_owner_flag_only_with_report_started_and_once() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    // An invalid branch is refused after every flag was accepted, so its own code
+    // shows the flags parsed.
+    let code = |action: &'static str, flags: &[&'static str]| {
+        let mut args = vec![action, "--run-id", RUN, "--branch", "Not-Canonical"];
+        args.extend_from_slice(flags);
+        command(&candidate, &args).unwrap_err().code
+    };
+    for action in ["serve", "serve-restore"] {
+        for flags in [
+            &["--report-started", "--returned-at-started"][..],
+            &["--returned-at-started", "--report-started"],
+        ] {
+            assert_eq!(code(action, flags), "invalid_branch", "{action} {flags:?}");
+        }
+        for flags in [
+            &["--returned-at-started"][..],
+            &[
+                "--report-started",
+                "--returned-at-started",
+                "--returned-at-started",
+            ],
+        ] {
+            assert_eq!(code(action, flags), "graph_arguments", "{action} {flags:?}");
+        }
+    }
+    for action in ["run", "restart", "restore", "inspect", "cleanup"] {
+        assert_eq!(
+            code(action, &["--report-started", "--returned-at-started"]),
+            "graph_arguments",
+            "{action}"
+        );
+        assert_eq!(
+            code(action, &["--returned-at-started"]),
+            "graph_arguments",
+            "{action}"
+        );
+    }
+    assert!(!candidate.state_root.exists());
+}

@@ -30,6 +30,7 @@ import {
   nativeDetachedUpProgress,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
+  nativeDetachedUpSupersededFailure,
   reportNativeImageDownloadWait,
   reportNativeImageWork,
   runNativeDetachedOwner,
@@ -121,6 +122,25 @@ async function publishFixturePoolRestart(fixtureMode: string): Promise<void> {
   });
 }
 
+/** A start that took over a run which failed after `up` returned hands its record to the launcher. */
+function publishFixtureSupersededFailure(fixtureMode: string): void {
+  if (fixtureMode === "superseded-failure") {
+    nativeDetachedUpSupersededFailure({
+      code: "graph_timeout",
+      service: "api",
+      services: ["api", "worker"],
+      at: 1,
+      reason: "not_ready",
+      generation: "0".repeat(64),
+    });
+  } else if (fixtureMode === "superseded-failure-unsafe") {
+    // Not a valid record (no code): the launcher prints nothing.
+    nativeDetachedUpSupersededFailure({
+      service: "synthetic-private-value",
+      at: 1,
+    });
+  }
+}
 /** HACK-2409: a detached owner hands the pool's hot-reload notice to the launcher. */
 function publishFixtureHotReload(fixtureMode: string): void {
   if (fixtureMode === "hot-reload-off") {
@@ -838,6 +858,7 @@ if (role === "channel-holder") {
       publishFixtureProfileNotice(mode);
       publishFixtureBranchDropped(mode);
       publishFixtureHotReload(mode);
+      publishFixtureSupersededFailure(mode);
       await publishFixturePoolRestart(mode);
       sendUnsafePrestartRefusals(mode);
       if (
@@ -848,6 +869,8 @@ if (role === "channel-holder") {
           "branch-dropped",
           "hot-reload-off",
           "hot-reload-unsafe",
+          "superseded-failure",
+          "superseded-failure-unsafe",
           "restart-action",
           "cancel-at-accept",
           "shell-names",

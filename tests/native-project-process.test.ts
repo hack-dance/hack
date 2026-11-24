@@ -138,6 +138,50 @@ test.each([
     await Bun.file(join(opts.projectRoot, "argv")).text()
   );
   expect(argv).toContain("--report-started");
+  // Only a start that returns at started records a later failure as after up.
+  expect(argv.includes("--returned-at-started")).toBe(!wait);
+});
+
+test.each([
+  false,
+  true,
+])("each service ready after started gets its own line, never under --wait (wait %s)", async (wait) => {
+  const line = (value: object) => JSON.stringify(value);
+  const opts = await fixture(`
+    console.log(${JSON.stringify(line({ kind: "graph_foreground_started", phase: "started-observed", run }))});
+    console.log(${JSON.stringify(line({ kind: "graph_foreground_service_ready", run, service: "slow" }))});
+    // A line for another run is ignored after started (under --wait, before
+    // ready, any foreign line is refused as the ready identity, as before).
+    ${wait ? "" : `console.log(${JSON.stringify(line({ kind: "graph_foreground_service_ready", run: "b".repeat(32), service: "other" }))});`}
+    await Bun.sleep(20);
+    console.log(${JSON.stringify(line({ kind: "graph_foreground_ready", run }))});
+    // After ready (a redelivery restore), a service line is not shown again.
+    console.log(${JSON.stringify(line({ kind: "graph_foreground_service_ready", run, service: "slow" }))});
+    await Bun.sleep(40);
+  `);
+  const events: string[] = [];
+  expect(
+    await serveNativeProjectGraph({
+      ...opts,
+      returnAtStarted: !wait,
+      onStarted: async () => {
+        events.push("started");
+      },
+      onReady: async () => {
+        events.push("onReady");
+      },
+      onAllReady: () => {
+        events.push("all-ready");
+      },
+      onServiceReady: (service) => {
+        events.push(`ready:${service}`);
+      },
+    })
+  ).toBe(0);
+  // Under --wait the service line before ready is swallowed: output as before.
+  expect(events).toEqual(
+    wait ? ["started", "onReady"] : ["onReady", "ready:slow", "all-ready"]
+  );
 });
 
 test("under --wait a ready frame without a started frame (or with another phase) is refused", async () => {

@@ -454,4 +454,44 @@ fn report_started_is_accepted_only_by_foreground_serve() {
         ));
         assert_eq!(code, expected, "{action}");
     }
+    // `--returned-at-started` rides on `--report-started`, once, on the same actions.
+    for (action, flags, expected) in [
+        (
+            "serve",
+            &["--report-started", "--returned-at-started"][..],
+            "normalized_compose_input",
+        ),
+        (
+            "serve-restore",
+            &["--returned-at-started", "--report-started"],
+            "normalized_compose_input",
+        ),
+        ("serve", &["--returned-at-started"], "graph_arguments"),
+        (
+            "serve-restore",
+            &[
+                "--report-started",
+                "--returned-at-started",
+                "--returned-at-started",
+            ],
+            "graph_arguments",
+        ),
+        (
+            "run",
+            &["--report-started", "--returned-at-started"],
+            "graph_arguments",
+        ),
+    ] {
+        let mut args = vec![
+            "--run-id",
+            &run,
+            "--expect-plan",
+            &plan,
+            "--ready",
+            "web=started",
+        ];
+        args.extend_from_slice(flags);
+        let code = error(fixture.invoke(&["graph", action], &args));
+        assert_eq!(code, expected, "{action} {flags:?}");
+    }
 }

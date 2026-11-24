@@ -12,7 +12,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  describeNativeFailureAfterStarted,
   type NativeLogLine,
+  type NativeProjectPsResult,
   nativeProjectAllLogs,
   nativeProjectLogServices,
   nativeProjectLogs,
@@ -263,6 +265,63 @@ test("ps reports a failure after started from the receipt, value-free, and drops
     ],
     [{ code: "Not a code", service: "web", at: 1 }, undefined],
     [{ code: "graph_timeout", service: "web/../x", at: 1 }, undefined],
+    // The closed reason, with an exit code only for `exited`.
+    [
+      {
+        code: "graph_service_failed",
+        service: "web",
+        at: 1,
+        reason: "exited",
+        exit_code: 3,
+      },
+      {
+        code: "graph_service_failed",
+        service: "web",
+        at: 1,
+        reason: "exited",
+        exitCode: 3,
+      },
+    ],
+    [
+      { code: "graph_timeout", service: "web", at: 1, reason: "not_ready" },
+      { code: "graph_timeout", service: "web", at: 1, reason: "not_ready" },
+    ],
+    // Every service below its goal at the deadline, in order.
+    [
+      {
+        code: "graph_timeout",
+        service: "api",
+        services: ["api", "worker"],
+        at: 1,
+        reason: "not_ready",
+      },
+      {
+        code: "graph_timeout",
+        service: "api",
+        services: ["api", "worker"],
+        at: 1,
+        reason: "not_ready",
+      },
+    ],
+    // A list with an invalid name is dropped whole.
+    [
+      {
+        code: "graph_timeout",
+        service: "api",
+        services: ["api", "a/b"],
+        at: 1,
+      },
+      { code: "graph_timeout", service: "api", at: 1 },
+    ],
+    // An unknown reason, or an exit code without `exited`, is dropped.
+    [
+      { code: "graph_timeout", at: 1, reason: "crashed" },
+      { code: "graph_timeout", at: 1 },
+    ],
+    [
+      { code: "graph_timeout", at: 1, reason: "unhealthy", exit_code: 1 },
+      { code: "graph_timeout", at: 1 },
+    ],
   ] as const) {
     const stopped = snapshot(false);
     stopped.receipt.phase = "stopped-data-retained";
@@ -272,7 +331,38 @@ test("ps reports a failure after started from the receipt, value-free, and drops
       invoke: async () => stopped,
     });
     expect(result.failure).toEqual(want);
+    // One field for scripts: the failed services.
+    let failed: readonly string[] | undefined;
+    if (want !== undefined) {
+      if ("services" in want) {
+        failed = want.services;
+      } else if ("service" in want) {
+        failed = [want.service];
+      } else {
+        failed = [];
+      }
+    }
+    expect(result.failed).toEqual(failed);
   }
+  expect(
+    [
+      { code: "graph_service_failed", at: 1, reason: "exited", exitCode: 1 },
+      { code: "graph_timeout", at: 1, reason: "not_ready" },
+      { code: "graph_service_failed", at: 1, reason: "unhealthy" },
+      { code: "graph_service_failed", at: 1, reason: "dead" },
+      { code: "graph_route_publisher", at: 1 },
+    ].map((failure) =>
+      describeNativeFailureAfterStarted(
+        failure as Parameters<typeof describeNativeFailureAfterStarted>[0]
+      )
+    )
+  ).toEqual([
+    "exited (1)",
+    "not ready",
+    "unhealthy",
+    "dead",
+    "graph_route_publisher",
+  ]);
 });
 
 test("ps never asks the owner of a warming run, and reports it as warming", async () => {
@@ -1122,6 +1212,42 @@ test("busy native ps keeps known port failures and the exact recovery command", 
       `retain data and stop with ${recoveryCommand}\n`
     );
     expect(chunks.join("")).not.toContain("0 services");
+  } finally {
+    stdout.mockRestore();
+  }
+});
+
+test("ps names a failure after started by its reason, and --json carries the failed services", async () => {
+  const chunks: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation(((
+    chunk: string | Uint8Array
+  ) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write);
+  const result: NativeProjectPsResult = {
+    backend: "native",
+    status: "observed",
+    run: run.run,
+    phase: "stopped-data-retained",
+    items: [],
+    failure: {
+      code: "graph_service_failed",
+      service: "api",
+      at: 1,
+      reason: "exited",
+      exitCode: 1,
+    },
+    failed: ["api"],
+  };
+  try {
+    await displayNativePs(result, false, { addresses: new Map() });
+    const text = chunks.join("");
+    expect(text).toContain("exited (1) after up returned");
+    expect(text).toContain("hack logs api");
+    chunks.length = 0;
+    await displayNativePs(result, true, { addresses: new Map() });
+    expect(JSON.parse(chunks.join("")).data.failed).toEqual(["api"]);
   } finally {
     stdout.mockRestore();
   }

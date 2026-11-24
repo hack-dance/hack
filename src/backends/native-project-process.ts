@@ -106,6 +106,23 @@ function ownerFrame(
   }
 }
 
+const READY_SERVICE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+/** The service of this run's `graph_foreground_service_ready` line, else null. */
+function serviceReadyFrame(line: string, run: string): string | null {
+  try {
+    const value: unknown = JSON.parse(line);
+    return isRecord(value) &&
+      value.kind === "graph_foreground_service_ready" &&
+      value.run === run &&
+      typeof value.service === "string" &&
+      READY_SERVICE.test(value.service)
+      ? value.service
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function serveNativeProjectGraph(
   opts: ProcessOptions & {
     readonly args: readonly string[];
@@ -127,10 +144,13 @@ export async function serveNativeProjectGraph(
     readonly onReady: () => Promise<void>;
     /** Every goal met and every route published, after a started return. */
     readonly onAllReady?: () => void;
+    /** After a started return, each service that becomes ready, once, until all are. */
+    readonly onServiceReady?: (service: string) => void;
   }
 ): Promise<number> {
   const started = opts.returnAtStarted === true;
   let startedSeen = false;
+  let allReadySeen = false;
   return await serveGraphProcess({
     ...opts,
     command: [
@@ -138,6 +158,9 @@ export async function serveNativeProjectGraph(
       opts.restore ? "serve-restore" : "serve",
       ...opts.args,
       "--report-started",
+      // Only a start that really returns at started records a later failure as
+      // "after up returned"; under --wait it is an ordinary startup failure.
+      ...(started ? ["--returned-at-started"] : []),
       "--run-id",
       opts.run,
       "--json",
@@ -154,6 +177,10 @@ export async function serveNativeProjectGraph(
       ? {}
       : {
           beforeReady: async (line: string) => {
+            // Under --wait the per-service lines are not shown: output is as before.
+            if (serviceReadyFrame(line, opts.run) !== null) {
+              return true;
+            }
             if (
               !ownerFrame(
                 line,
@@ -172,7 +199,15 @@ export async function serveNativeProjectGraph(
         }),
     onEvent: (line) => {
       if (started && ownerFrame(line, "graph_foreground_ready", opts.run)) {
+        allReadySeen = true;
         opts.onAllReady?.();
+        return;
+      }
+      const ready = serviceReadyFrame(line, opts.run);
+      if (ready !== null) {
+        if (started && !allReadySeen) {
+          opts.onServiceReady?.(ready);
+        }
         return;
       }
       const notice = nativePublisherExitNotice(line, opts.run);

@@ -311,6 +311,21 @@ impl Receipt {
     }
 }
 
+/// A failure in `started-observed` is a failure after `up` returned only when the
+/// owner says `up` returned there (`--returned-at-started`); otherwise (`up --wait`
+/// still waiting) it stays an ordinary startup failure and nothing is recorded.
+fn record_failure_after_started(
+    startup: Option<&(dyn startup::Driver + '_)>,
+    root: &std::path::Path,
+    receipt: &Receipt,
+    failure: &CandidateError,
+    below_goal: &[String],
+) {
+    if startup.is_some_and(|startup| startup.returned_at_started()) {
+        startup_failure::record_after_started(root, receipt, failure, below_goal);
+    }
+}
+
 /// `Session::record(AllStarted)`. Only a start whose driver reports it (`--report-
 /// started`) records the phase; any other start leaves the receipt untouched and saves
 /// nothing. Otherwise the phase is saved first, then the driver is told. A failed save
@@ -858,6 +873,9 @@ struct Session<'a, 's> {
     /// What each probed service's latest unhealthy observation found, for its failure's
     /// diagnostic (HACK-2416).
     probe_findings: BTreeMap<String, crate::ProbeFinding>,
+    /// At a readiness deadline: every service still below its goal, in execution
+    /// order (see [`Driver::below_goal_at_deadline`]). Empty otherwise.
+    below_goal: Vec<String>,
 }
 #[cfg(any(test, all(debug_assertions, target_os = "macos")))]
 pub(super) fn fault_pause(
@@ -888,6 +906,17 @@ impl Session<'_, '_> {
     #[cfg(test)]
     fn fault_pause(&self, point: &str) -> Result<(), CandidateError> {
         fault_pause(&self.root, &self.receipt.run, point)
+    }
+    /// Before a failure replaces the receipt's phase: keep the failure-after-started
+    /// record, only for an owner whose `up` returned at started.
+    fn record_after_started(&self, failure: &CandidateError) {
+        record_failure_after_started(
+            self.startup.as_deref(),
+            &self.root,
+            &self.receipt,
+            failure,
+            &self.below_goal,
+        );
     }
     // Pure create/inspect gate: explicit compiled inputs keep it testable without
     // constructing a provider lease or a live guest engine.
@@ -1144,6 +1173,9 @@ impl Driver for Session<'_, '_> {
         self.startup
             .as_ref()
             .is_some_and(|startup| startup.reports_started())
+    }
+    fn below_goal_at_deadline(&mut self, services: &[&str]) {
+        self.below_goal = services.iter().map(|&service| service.to_owned()).collect();
     }
 
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
@@ -1849,6 +1881,7 @@ fn run_inputs(
         environments,
         leases: BTreeMap::new(),
         launcher,
+        below_goal: Vec::new(),
     };
     session.save()?;
     let result = (|| {
@@ -1870,7 +1903,7 @@ fn run_inputs(
         )
     })();
     if let Err(failure) = result {
-        startup_failure::record_after_started(&session.root, &session.receipt, &failure);
+        session.record_after_started(&failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);
@@ -2331,7 +2364,7 @@ fn inspect_using(
     }
     let storage_references = storage::references(&receipt, journal_incomplete, &observations);
     let pending_cleanup = cleanup_diagnostics::pending(&receipt, &observations, journal_incomplete);
-    let failed_after_started = startup_failure::after_started(&root);
+    let failed_after_started = startup_failure::after_started(&root, &receipt);
     Ok(Snapshot {
         receipt,
         journal_incomplete,
@@ -2627,6 +2660,18 @@ fn contains_request(expected: &Value, actual: &Value) -> bool {
 }
 
 /// A receipt phase an explicit restart may start from: ready, or every service started.
+/// The receipt an in-place restart commits before any effect: its containers, and
+/// so its [`startup_failure::attempt_generation`], are kept.
+fn reserve_restart(receipt: &mut Receipt) {
+    receipt.set_phase("restarting");
+    for resource in receipt
+        .resources
+        .values_mut()
+        .filter(|r| r.kind == Kind::Container)
+    {
+        resource.phase = "restart-reserved".into();
+    }
+}
 fn restartable(receipt: &Receipt) -> bool {
     matches!(receipt.phase.as_str(), "ready-observed" | STARTED_OBSERVED)
 }
@@ -2756,14 +2801,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     source::verify_cache_scope(source.as_ref(), project_path)?;
     #[cfg(target_os = "macos")]
     source_device_rebind::verify_cache_scope_origin(candidate, &receipt)?;
-    receipt.set_phase("restarting");
-    for resource in receipt
-        .resources
-        .values_mut()
-        .filter(|r| r.kind == Kind::Container)
-    {
-        resource.phase = "restart-reserved".into();
-    }
+    reserve_restart(&mut receipt);
     let mut session = Session {
         startup: None,
         engine,
@@ -2779,13 +2817,17 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         environments: BTreeMap::new(),
         leases: BTreeMap::new(),
         launcher: None,
+        below_goal: Vec::new(),
     };
+    // A restart keeps its containers, and with them the attempt generation the
+    // record is bound to, so the previous start's record goes before the restarting
+    // receipt commits: a crash between the two cannot leave it beside this attempt.
+    // A crash after the removal leaves the previous receipt without it (diagnostic
+    // only); every check above already passed, so a refused restart keeps it.
+    startup_failure::clear_after_started(&session.root)?;
     session.save()?;
-    // The restarting receipt is committed: the previous start's record is superseded.
-    if let Err(failure) = startup_failure::clear_after_started(&session.root)
-        .and_then(|_| execution::run(&prepared.graph, &mut session, options.timeout))
-    {
-        startup_failure::record_after_started(&session.root, &session.receipt, &failure);
+    if let Err(failure) = execution::run(&prepared.graph, &mut session, options.timeout) {
+        session.record_after_started(&failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);

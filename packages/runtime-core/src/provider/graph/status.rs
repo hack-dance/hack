@@ -210,7 +210,11 @@ mod tests {
             &startup_failure::AfterStarted {
                 code: "graph_timeout".into(),
                 service: Some("web".into()),
+                services: vec!["web".into()],
                 at: 1,
+                reason: Some("not_ready".into()),
+                exit_code: None,
+                generation: startup_failure::attempt_generation(&receipt),
             },
         )
         .unwrap();
@@ -223,11 +227,34 @@ mod tests {
             serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
         assert_eq!(
             json["failed_after_started"],
-            json!({"code":"graph_timeout","service":"web","at":1})
+            json!({"code":"graph_timeout","service":"web","services":["web"],"at":1,
+                "reason":"not_ready","generation":startup_failure::attempt_generation(&receipt)})
         );
         assert!(json["receipt"].get("failed_after_started").is_none());
         // Invalid content is not reported and never fails the read.
         fs::write(root.join(startup_failure::AFTER_STARTED), b"{").unwrap();
+        let json =
+            serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
+        assert!(json.get("failed_after_started").is_none());
+        // Nor is a record another attempt left.
+        fs::remove_file(root.join(startup_failure::AFTER_STARTED)).unwrap();
+        let mut other = receipt.clone();
+        for resource in other.resources.values_mut() {
+            resource.id = None;
+        }
+        state::write(
+            &root.join(startup_failure::AFTER_STARTED),
+            &startup_failure::AfterStarted {
+                code: "graph_timeout".into(),
+                service: None,
+                services: Vec::new(),
+                at: 1,
+                reason: Some("not_ready".into()),
+                exit_code: None,
+                generation: startup_failure::attempt_generation(&other),
+            },
+        )
+        .unwrap();
         let json =
             serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
         assert!(json.get("failed_after_started").is_none());
@@ -240,7 +267,11 @@ mod tests {
                     &startup_failure::AfterStarted {
                         code: "graph_timeout".into(),
                         service: None,
+                        services: Vec::new(),
                         at: 2,
+                        reason: Some("not_ready".into()),
+                        exit_code: None,
+                        generation: startup_failure::attempt_generation(&receipt),
                     },
                 )
                 .unwrap();

@@ -109,6 +109,7 @@ pub fn begin(
         leases: BTreeMap::new(),
         probe_findings: BTreeMap::new(),
         launcher,
+        below_goal: Vec::new(),
     };
     session.record(Event::StartIntent { service: &service })?;
     session.start(&service)?;

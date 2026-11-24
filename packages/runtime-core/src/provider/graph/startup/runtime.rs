@@ -104,6 +104,13 @@ pub struct HostRelayRuntime {
     /// `graph serve --report-started`: print the `graph_foreground_started` line
     /// when every service has started.
     report_started: bool,
+    /// `--returned-at-started`: `up` returns at the started line, so a later failure
+    /// is recorded as a failure after started (see
+    /// [`super::Driver::returned_at_started`]). Never set without `report_started`.
+    returned_at_started: bool,
+    /// The started line was printed: from then on each service that becomes
+    /// ready (goal met, publication done) gets its own `graph_foreground_service_ready` line.
+    started_announced: bool,
     #[cfg(target_os = "macos")]
     pub(in crate::provider::graph) early_publications:
         Option<crate::provider::graph::foreground::publishers::EarlyPublications>,
@@ -670,6 +677,8 @@ impl HostRelayRuntime {
             startup_cancelled: None,
             startup_requests: None,
             report_started: false,
+            returned_at_started: false,
+            started_announced: false,
             #[cfg(target_os = "macos")]
             early_publications: None,
             rebind_unconfirmed: false,
@@ -680,6 +689,11 @@ impl HostRelayRuntime {
     /// phase (`--report-started`), for this owner's first start only.
     pub fn report_started(&mut self, enabled: bool) {
         self.report_started = enabled;
+    }
+    /// `--returned-at-started` (only with `--report-started`): `up` returned at the
+    /// started line, so a failure after it is recorded as one after started.
+    pub fn returned_at_started(&mut self, enabled: bool) {
+        self.returned_at_started = enabled;
     }
     /// Serve the owner's transport between the start loop's operations (see
     /// [`StartupRequests`]); `None` once the attempt has returned.
@@ -970,6 +984,24 @@ fn report_all_started(
         .map_err(|_| refused())
 }
 
+/// One service met its readiness goal after the started line (its publication, if
+/// any, is done): `graph_foreground_service_ready`, newline-terminated and flushed.
+fn report_service_ready(
+    out: &mut impl std::io::Write,
+    run: &str,
+    service: &str,
+) -> Result<(), CandidateError> {
+    let line = serde_json::json!({
+        "kind": "graph_foreground_service_ready",
+        "run": run,
+        "service": service,
+    });
+    serde_json::to_writer(&mut *out, &line).map_err(|_| refused())?;
+    writeln!(out)
+        .and_then(|()| out.flush())
+        .map_err(|_| refused())
+}
+
 /// Requests the foreground owner answers while its start loop runs: the loop calls
 /// [`StartupRequests::serve`] wherever it checks cancellation, between engine
 /// operations and never inside one. Final verification serves them too, between its
@@ -1025,6 +1057,9 @@ impl Driver for HostRelayRuntime {
         if let Some(publications) = &mut self.early_publications {
             publications.publish(engine, receipt, service, container_id)?;
         }
+        if self.started_announced {
+            report_service_ready(&mut std::io::stdout().lock(), &receipt.run, service)?;
+        }
         Ok(())
     }
 
@@ -1034,8 +1069,14 @@ impl Driver for HostRelayRuntime {
     fn reports_started(&self) -> bool {
         self.report_started
     }
+    fn returned_at_started(&self) -> bool {
+        self.returned_at_started
+    }
     fn all_started(&mut self, run: &str) -> Result<(), CandidateError> {
-        announce_started(&mut self.report_started, &mut std::io::stdout().lock(), run)
+        let armed = self.report_started;
+        announce_started(&mut self.report_started, &mut std::io::stdout().lock(), run)?;
+        self.started_announced |= armed;
+        Ok(())
     }
 
     fn process_services(&self) -> std::collections::BTreeSet<String> {
@@ -1916,6 +1957,19 @@ mod all_started_tests {
         assert_eq!(
             line,
             json!({"kind": "graph_foreground_started", "run": run, "phase": "started-observed"})
+        );
+    }
+    #[test]
+    fn a_service_ready_after_started_is_one_line_naming_the_service() {
+        let run = "a".repeat(32);
+        let mut out = Vec::new();
+        report_service_ready(&mut out, &run, "slow").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.ends_with('\n') && text.matches('\n').count() == 1);
+        let line: Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(
+            line,
+            json!({"kind": "graph_foreground_service_ready", "run": run, "service": "slow"})
         );
     }
     #[test]

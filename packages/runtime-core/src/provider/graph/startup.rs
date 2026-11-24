@@ -258,6 +258,13 @@ pub(super) trait Driver {
     fn all_started(&mut self, _run: &str) -> Result<(), CandidateError> {
         Ok(())
     }
+    /// Whether `up` returned when every service started (`--returned-at-started`,
+    /// only with `--report-started`). Only then is a failure in `started-observed`
+    /// recorded as a failure after started; under `up --wait` it is an ordinary
+    /// startup failure. Default: no.
+    fn returned_at_started(&self) -> bool {
+        false
+    }
 }
 
 /// Named routes rely on the engine-owned hosts file and the image resolver policy.

@@ -273,20 +273,6 @@ export async function explainUnconfirmedNativeDetachedStart(opts: {
 
 /** Read-only admission adapter; resolving the CLI's project and branch stays injected. */
 
-/** The last start failed after `up` returned: say so before starting again. */
-function noteFailureAfterStarted(
-  result: NativeProjectPsResult,
-  json: boolean
-): void {
-  if (!result.failure || json) {
-    return;
-  }
-  const { service, code, at } = result.failure;
-  process.stderr.write(
-    `The last start failed after up returned: ${service ?? "a service"} (${code}) at ${new Date(at * 1000).toISOString()}. Starting again.\n`
-  );
-}
-
 export async function answerNativeAlreadyRunning(opts: {
   readonly native: NativeRuntimeSelection;
   readonly json: boolean;
@@ -333,7 +319,6 @@ export async function answerNativeAlreadyRunning(opts: {
     });
     const state = classifyNativeAlreadyRunning(result);
     if (state.kind === "launch") {
-      noteFailureAfterStarted(result, opts.json);
       return null;
     }
     const saved = await loadNativeProjectRun(scope);

@@ -661,6 +661,7 @@ fn restore_inputs(
         environments,
         leases: BTreeMap::new(),
         launcher,
+        below_goal: Vec::new(),
     };
     // A fresh driver's prepare validates its prospective enrollment before its
     // first durable write. Keep the acknowledged stopped receipt authoritative
@@ -709,7 +710,7 @@ fn restore_inputs(
         execution::run(&prepared.graph, &mut session, options.timeout)
     })();
     if let Err(failure) = result {
-        super::startup_failure::record_after_started(&session.root, &session.receipt, &failure);
+        session.record_after_started(&failure);
         retain_restore_failure(
             &session.root,
             &mut session.receipt,

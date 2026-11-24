@@ -32,6 +32,12 @@ type FakeContainer = {
   labels: Record<string, string>;
   /** Null for an event-stream marker, which mounts nothing. */
   volume: string | null;
+  /**
+   * The volume the bind reached when the container was created. A bind
+   * keeps that directory even after the volume is removed and another is
+   * created under its name, as on Docker.
+   */
+  bound?: FakeVolume;
   readOnly: boolean;
   running: boolean;
   /** `{{json .Mounts}}` of a foreign container; helpers derive theirs. */
@@ -110,6 +116,11 @@ export class FakeEngine {
   /** Archive digests answered instead of the content's, per volume. */
   archiveDigestOverride: Record<string, string> = {};
 
+  /**
+   * Create a volume. Like Docker, it emits a volume `create` event on an
+   * open subscription. A test may pass `createdAt` to model Docker's
+   * one-second CreatedAt resolution (a same-second replacement).
+   */
   volume(name: string, volume: FakeVolume): this {
     births += 1;
     this.volumes.set(name, {
@@ -119,6 +130,7 @@ export class FakeEngine {
       sockets: 0,
       ...volume,
     });
+    this.events.volume("create", name);
     return this;
   }
 
@@ -130,13 +142,13 @@ export class FakeEngine {
   removeVolume(name: string): void {
     const volume = this.volumes.get(name);
     if (volume) {
-      this.detached.set(name, { ...volume, content: "", sockets: 0 });
+      // The local driver deletes the data under any bind holder.
+      volume.content = "";
+      volume.sockets = 0;
       this.volumes.delete(name);
+      this.events.volume("destroy", name);
     }
   }
-
-  /** Trees of removed volumes as a bind holder still sees them (empty). */
-  private readonly detached = new Map<string, FakeVolume>();
 
   /** `{{json .Mounts}}` of a container. */
   private mountsOf(held: FakeContainer): readonly unknown[] {
@@ -235,7 +247,7 @@ export class FakeEngine {
     const id = this.resolve(container);
     const held = id === null ? undefined : this.containers.get(id);
     const volume = held?.volume
-      ? (this.volumes.get(held.volume) ?? this.detached.get(held.volume))
+      ? (held.bound ?? this.volumes.get(held.volume))
       : undefined;
     this.onExec?.(container, args);
     return { held, volume };
@@ -399,6 +411,7 @@ export class FakeEngine {
         name,
         labels,
         volume,
+        bound: volume === null ? undefined : this.volumes.get(volume),
         readOnly: mount?.includes(",readonly") ?? true,
         running: false,
       });

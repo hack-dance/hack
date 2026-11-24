@@ -16,6 +16,8 @@ export class FakeDockerEvents {
   stopped = 0;
   /** False: start events are never delivered (the subscription is not live). */
   deliverStarts = true;
+  /** False: volume create/destroy events are dropped (only rechecks see it). */
+  deliverVolumeChanges = true;
   /** Called after each run's own events, e.g. to inject a foreign writer. */
   afterRun: ((argv: readonly string[]) => void) | null = null;
 
@@ -60,6 +62,18 @@ export class FakeDockerEvents {
       Type: "volume",
       Action: "mount",
       Actor: { ID: volume, Attributes: { container, destination: "/v" } },
+    });
+  }
+
+  /** A volume `create` or `destroy`; Docker names the volume in Actor.ID. */
+  volume(action: "create" | "destroy", name: string): void {
+    if (!this.deliverVolumeChanges) {
+      return;
+    }
+    this.emit({
+      Type: "volume",
+      Action: action,
+      Actor: { ID: name, Attributes: { driver: "local" } },
     });
   }
 

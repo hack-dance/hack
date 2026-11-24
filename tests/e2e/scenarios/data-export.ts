@@ -422,6 +422,8 @@ export const dataExportScenario: Scenario = {
         stage: "before-publish",
       });
       await recreateVolume({ ctx, project, volume: data });
+      await replacedWithinOneSecond({ ctx, fixture, project, volume: data });
+      await recreateVolume({ ctx, project, volume: data });
       await removedDuringExport({
         ctx,
         fixture,
@@ -460,9 +462,20 @@ async function removedDuringExport(opts: {
   let removed = false;
   let copied = false;
   const at = (argv: readonly string[]): boolean =>
-    opts.stage === "before-hold"
-      ? argv[1] === "create" && argv.includes("--mount")
-      : copied && argv[1] === "ps";
+    opts.stage === "before-publish"
+      ? copied && argv[1] === "ps"
+      : argv[1] === "create" && argv.includes("--mount");
+  const createdAt = async (): Promise<string> =>
+    (
+      await docker(ctx, [
+        "volume",
+        "inspect",
+        "--format",
+        "{{.CreatedAt}}",
+        data,
+      ])
+    ).stdout.trim();
+  let before = "";
   const racingDocker: DataBackupDocker = {
     ...real,
     capture: async (argv, captureOpts) => {
@@ -471,6 +484,7 @@ async function removedDuringExport(opts: {
       }
       if (!removed && at(argv)) {
         removed = true;
+        before = await createdAt();
         expectExit({
           result: await docker(ctx, ["volume", "rm", data]),
           codes: [0],
@@ -516,10 +530,118 @@ async function removedDuringExport(opts: {
       isRecord(raceRefusal.detail) &&
       raceRefusal.detail.reason === "volume_changed" &&
       listed.exitCode === 0 &&
+      // Export never creates one: only the test's own replacement exists.
       listed.stdout.trim() === "" &&
       leftInOut.every((entry) => entry.endsWith(".partial")),
-    message: `a volume removed ${opts.stage} should refuse, publish nothing and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()}, out: ${leftInOut.join(",")})`,
+    message: `a volume removed ${opts.stage} should refuse, publish nothing and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()}, out: ${leftInOut.join(",")}, createdAt before: ${before})`,
   });
+}
+
+/**
+ * The volume is removed and created again under its name, with the same
+ * labels, between validation and the hold, within the same second as its
+ * validated creation where the host allows: the hold then binds the new
+ * volume's directory (a local volume's Mountpoint is its name's path) and
+ * every identity field matches, so only Docker's destroy/create events can
+ * refuse. A wrapper creates the volume just after a second boundary right
+ * before export validates it, and replaces it at the hold's create. Up to
+ * three attempts aim for one second; every attempt must refuse.
+ */
+async function replacedWithinOneSecond(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly project: string;
+  readonly volume: string;
+}): Promise<void> {
+  const { ctx, fixture, project, volume } = opts;
+  const create = ["volume", "create", ...labels(project, "data"), volume];
+  const createdAt = async (): Promise<string> =>
+    (
+      await docker(ctx, [
+        "volume",
+        "inspect",
+        "--format",
+        "{{.CreatedAt}}",
+        volume,
+      ])
+    ).stdout.trim();
+  const pairs: string[] = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await docker(ctx, ["volume", "rm", volume]);
+    const real = createHostDataBackupDocker({ env: {}, cwd: fixture.hackDir });
+    let validated = "";
+    let replaced = "";
+    const racing: DataBackupDocker = {
+      ...real,
+      capture: async (argv, captureOpts) => {
+        if (
+          validated === "" &&
+          argv[1] === "volume" &&
+          argv.at(-1) === volume
+        ) {
+          await Bun.sleep(1005 - (Date.now() % 1000));
+          expectExit({
+            result: await docker(ctx, create),
+            codes: [0],
+            message: "create the volume right before validation",
+          });
+          validated = await createdAt();
+        }
+        if (
+          replaced === "" &&
+          argv[1] === "create" &&
+          argv.includes("--mount")
+        ) {
+          expectExit({
+            result: await docker(ctx, ["volume", "rm", volume]),
+            codes: [0],
+            message: "remove the validated volume",
+          });
+          expectExit({
+            result: await docker(ctx, create),
+            codes: [0],
+            message: "create it again under its name",
+          });
+          replaced = await createdAt();
+        }
+        return await real.capture(argv, captureOpts);
+      },
+    };
+    const refusal = await exportProjectData({
+      docker: racing,
+      composeArgs: dataComposeArgs({
+        composeFiles: [join(fixture.hackDir, "docker-compose.yml")],
+        composeProject: null,
+        cwd: fixture.hackDir,
+        env: {},
+      }),
+      project,
+      branch: null,
+      hackHome: ctx.hackHome,
+      outDir: join(ctx.tempRoot, `replaced-out-${attempt}`),
+      hackVersion: "e2e",
+    }).then(
+      () => null,
+      (error: unknown) => error
+    );
+    pairs.push(`${validated}/${replaced}`);
+    expect({
+      that:
+        replaced !== "" &&
+        refusal instanceof HackCliError &&
+        isRecord(refusal.detail) &&
+        refusal.detail.reason === "volume_changed",
+      message: `a volume replaced under its name before the hold should refuse (attempt ${attempt}, CreatedAt validated/replaced: ${validated}/${replaced}, refusal: ${String(refusal)})`,
+    });
+    if (validated === replaced) {
+      break;
+    }
+  }
+  // Which identity the replacement had, for the report.
+  console.log(
+    `replaced-within-one-second CreatedAt validated/replaced: ${pairs.join(", ")}`
+  );
+  await docker(ctx, ["volume", "rm", volume]);
 }
 
 /** Create the `data` volume again, with Compose's labels and one file. */

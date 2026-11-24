@@ -65,7 +65,8 @@ that cannot be inspected refuses too (`detail.reason: unchecked_running`).
 their names; stop the project with `hack down` and retry. Hack never stops anything for an export.
 
 Before its first check, the export subscribes to Docker's live event
-stream (`docker events`, volume `mount` and container `start` events, with no
+stream (`docker events`: volume `mount`, `create` and `destroy` and container
+`start` events, with no
 `--since`, so nothing depends on the engine's short event history). It proves
 the subscription live by creating and starting a no-op marker container
 (`hack-data-export-<random>-start`, no network, no logging) and waiting for
@@ -161,6 +162,15 @@ every copied volume immediately before the rename that publishes the
 backup. A volume that is gone, or replaced under the same name, refuses
 with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`) and leaves the
 copy in `<backup>.partial/`.
+
+An identity comparison alone is not enough: Docker reports a volume's
+`CreatedAt` to the second, so a volume removed and created again under the
+same name and labels within one second matches every field (checked on
+Docker 29.9.2), and the hold would bind the new volume's directory. The
+event subscription therefore also receives volume `destroy` and `create`
+events, and any destroy or create of a copied volume's name during the
+window refuses publication with `volume_changed`, whatever the timestamps
+say. Export creates no volume, so every such event is someone else's.
 
 On Docker Desktop and OrbStack the daemon runs in a VM, and the
 `Mountpoint` is a path inside that VM; the daemon resolves the bind there.

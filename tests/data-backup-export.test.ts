@@ -381,6 +381,58 @@ describe("exportProjectData", () => {
 });
 
 describe("binding to the validated volume", () => {
+  /**
+   * Remove `shop_db` and create it again within the same second: same name,
+   * labels, driver, Mountpoint and (CreatedAt has one-second resolution)
+   * CreatedAt, so it passes every identity comparison.
+   */
+  function replaceWithinOneSecond(fake: FakeEngine): void {
+    const old = fake.volumes.get("shop_db");
+    fake.removeVolume("shop_db");
+    fake.volume("shop_db", {
+      ...owned("db", "impostor"),
+      createdAt: old?.createdAt,
+    });
+  }
+
+  test("a same-second replacement before the hold is refused, though its identity matches", async () => {
+    const fake = engine({ only: "db" });
+    let replaced = false;
+    fake.onPs = () => {
+      if (!replaced) {
+        replaced = true;
+        replaceWithinOneSecond(fake);
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(error.message).toContain("Docker reported it");
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
+  test("a same-second replacement during the copy is refused, though its identity matches", async () => {
+    // An empty volume: the emptied tree under the bind digests the same
+    // before and after, and the identity recheck passes, so only Docker's
+    // destroy/create events show the replacement.
+    const fake = engine({ only: "db" });
+    const volume = fake.volumes.get("shop_db");
+    if (volume) {
+      volume.content = "";
+    }
+    let replaced = false;
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar") && !replaced) {
+        replaced = true;
+        replaceWithinOneSecond(fake);
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
   test("a volume removed after the hold, before the first digest, is not published empty", async () => {
     // Docker lets `docker volume rm` succeed under a bind hold and leaves
     // the helper an empty tree, so all three digests agree on nothing.
@@ -416,7 +468,14 @@ describe("binding to the validated volume", () => {
   });
 
   test("a volume removed, or replaced under its name, between the copy and the publish is refused", async () => {
-    for (const replace of [false, true]) {
+    // `reported`: Docker's destroy/create events arrive (the window refuses
+    // first); otherwise only the identity recheck before the rename sees it.
+    for (const [replace, reported] of [
+      [false, true],
+      [true, true],
+      [false, false],
+      [true, false],
+    ] as const) {
       const fake = engine({ only: "db" });
       // The last running check runs after every copy, before the publish.
       fake.runningFromCall = null;
@@ -430,13 +489,16 @@ describe("binding to the validated volume", () => {
       fake.onPs = () => {
         if (copied && !psAfterCopy) {
           psAfterCopy = true;
+          if (!reported) {
+            fake.events.deliverVolumeChanges = false;
+          }
           fake.removeVolume("shop_db");
           if (replace) {
             fake.volume("shop_db", owned("db", "rows-db"));
           }
         }
       };
-      const out = join(root, replace ? "replaced" : "removed");
+      const out = join(root, `${replace}-${reported}`);
       const error = await caught(
         exportProjectData(input(fake, { outDir: out }))
       );
@@ -445,7 +507,9 @@ describe("binding to the validated volume", () => {
         code: "E_PROJECT_RUNNING",
         detail: { key: "db", reason: "volume_changed" },
       });
-      expect(error.message).toContain("after it was copied");
+      expect(error.message).toContain(
+        reported ? "Docker reported it" : "after it was copied"
+      );
       // Not published: the manifest and tar stay in `.partial`.
       expect(await readdir(out)).toEqual(["20261123T140501Z.partial"]);
       expect(fake.volumes.has("shop_db")).toBe(replace);

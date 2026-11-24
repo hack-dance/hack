@@ -230,6 +230,24 @@ export async function requireUnchangedVolume(opts: {
   });
 }
 
+/**
+ * The refusal for a volume that Docker reported destroyed or created during
+ * the window: the same `volume_changed` as a failed identity recheck, which
+ * a replacement within one second (CreatedAt resolution) can pass.
+ */
+export function volumeReplacedError(opts: {
+  /** The Compose keys whose volumes changed, sorted. */
+  readonly keys: readonly string[];
+  /** What the refusal leaves behind, as a sentence. */
+  readonly consequence: string;
+}): HackCliError {
+  return new HackCliError({
+    code: "E_PROJECT_RUNNING",
+    message: `The volume for ${opts.keys.join(", ")} was removed or created again while it was in use (Docker reported it), so what was read may not be its data; ${opts.consequence} Make sure nothing removes or recreates the project's volumes, then retry.`,
+    detail: { key: opts.keys[0], reason: "volume_changed" },
+  });
+}
+
 export function sameVolumeIdentity(
   left: InspectedVolume,
   right: InspectedVolume

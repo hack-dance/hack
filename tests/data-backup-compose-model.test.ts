@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { dataComposeArgs } from "../src/commands/data.ts";
 import {
   resolveComposeRuntimeModel,
+  resolveRestartTarget,
   UNLISTABLE_LEGACY_ENV_REFUSAL,
   unrecordedEnvRefusalMessage,
 } from "../src/commands/project.ts";
@@ -409,3 +410,133 @@ test("a dotenv project with no overlay and no backend values uses its base witho
   });
   expect(model.env.VOL_SUFFIX).toBe("base");
 });
+
+/**
+ * A project whose Compose file has no `name:` and whose `.hack/` directory
+ * name differs from its Hack config name: Compose names the project after
+ * the directory (`hack`), as `hack up` launches it, not after the config
+ * name (`envshop`). The volume is unnamed, so its Docker name is
+ * `<Compose project>_data`.
+ */
+async function unnamedComposeProject(): Promise<string> {
+  const projectRoot = join(root, "dirbased");
+  const projectDir = join(projectRoot, ".hack");
+  await mkdir(join(projectDir, ".internal"), { recursive: true });
+  await writeFile(
+    join(projectDir, "hack.config.json"),
+    `${JSON.stringify({ name: "envshop", dev_host: "envshop.hack" })}\n`
+  );
+  await writeFile(
+    join(projectDir, "docker-compose.yml"),
+    [
+      "services:",
+      "  db:",
+      "    image: busybox",
+      "    environment:",
+      "      SUFFIX: ${VOL_SUFFIX}",
+      "    volumes: [data:/data]",
+      "volumes:",
+      "  data: {}",
+      "",
+    ].join("\n")
+  );
+  for (const [env, suffix] of [
+    ["default", "base"],
+    ["staging", "staging"],
+  ] as const) {
+    await writeFile(
+      join(projectDir, `hack.env.${env}.yaml`),
+      [
+        "version: 1",
+        `environment: ${env}`,
+        "secretsprovider: project_key",
+        "values:",
+        "  global:",
+        `    VOL_SUFFIX: "${suffix}"`,
+        "",
+      ].join("\n")
+    );
+  }
+  return projectRoot;
+}
+
+/** The record `hack up --env staging` leaves, keyed as next's up keys it. */
+async function recordLaunch(opts: {
+  readonly projectDir: string;
+  readonly base: string;
+  readonly branch: string | null;
+}): Promise<void> {
+  const { lifecycleComposeProject } = resolveRestartTarget({
+    baseProjectName: opts.base,
+    branch: opts.branch,
+  });
+  await upsertProjectRuntimeStateEntry({
+    projectDir: opts.projectDir,
+    entry: {
+      composeProject: lifecycleComposeProject,
+      envName: "staging",
+      launchComposeBase: opts.base,
+      envProjectName: "envshop",
+      updatedAt: "2026-11-24T00:00:00.000Z",
+    },
+  });
+}
+
+test.skipIf(!composeAvailable)(
+  "an unnamed Compose project under a differently named directory: the model reads the recorded selection and targets the directory-based volumes",
+  async () => {
+    const project = await fixtureProject(await unnamedComposeProject());
+    await recordLaunch({
+      projectDir: project.projectDir,
+      base: "hack",
+      branch: null,
+    });
+    const model = await resolveComposeRuntimeModel({
+      project,
+      branch: null,
+      envName: undefined,
+    });
+    // The recorded `staging` selection, found under the directory-based key.
+    expect(model.envSelection).toBe("staging");
+    expect(model.env.VOL_SUFFIX).toBe("staging");
+    const config = await createHostDataBackupDocker({
+      env: model.env,
+      cwd: model.cwd,
+    }).capture([...dataComposeArgs(model), "config", "--format", "json"]);
+    expect(config.exitCode).toBe(0);
+    const plan = planDeclaredVolumes(parseJsonText(config.stdout));
+    expect(plan.composeProject).toBe("hack");
+    expect(plan.declared.map((volume) => volume.name)).toEqual(["hack_data"]);
+  }
+);
+
+test.skipIf(!composeAvailable)(
+  "a branch instance of that project targets <configured base>--<branch> and its recorded selection",
+  async () => {
+    // A branch instance keeps the configured name as its base (next's
+    // naming): `hack up --branch feature` launches `envshop--feature`.
+    const project = await fixtureProject(await unnamedComposeProject());
+    await recordLaunch({
+      projectDir: project.projectDir,
+      base: "envshop",
+      branch: "feature",
+    });
+    const model = await resolveComposeRuntimeModel({
+      project,
+      branch: "feature",
+      envName: undefined,
+    });
+    expect(model.envSelection).toBe("staging");
+    expect(model.composeProject).toBe("envshop--feature");
+    const config = await createHostDataBackupDocker({
+      env: model.env,
+      cwd: model.cwd,
+    }).capture([...dataComposeArgs(model), "config", "--format", "json"]);
+    expect(config.exitCode).toBe(0);
+    const plan = planDeclaredVolumes(parseJsonText(config.stdout));
+    expect(plan.composeProject).toBe("envshop--feature");
+    expect(plan.declared.map((volume) => volume.name)).toEqual([
+      "envshop--feature_data",
+    ]);
+  }
+);

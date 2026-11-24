@@ -260,8 +260,10 @@ coverage or protection against arbitrary concurrent filesystem writers.
 
 The guest-execution model permits two successive execution IDs per incarnation, two
 incarnations, lost or delayed submissions, a half-open connection, host
-restart, inventory and result inspection. Three negative controls permit premature release, duplicate execution,
-and saving a running observation as a terminal outcome. Each violates its
-corresponding invariant. The positive run explores 3,900 distinct states. Weak fairness for child completion assumes the command eventually
+restart, inventory and result inspection. Five negative controls permit premature release, duplicate execution,
+saving a running observation, waiting for an inherited pipe at Release, and
+starting a new agent while an old process survives. KillCgroup represents the
+launcher killing the old cgroup and observing that it is empty. Each violates its
+corresponding invariant. The positive run explores 6,860 distinct states. Weak fairness for child completion assumes the command eventually
 terminates. Kernel scheduling, pipe throughput, multi-job capacity and
 provider socket isolation require implementation and VM tests.

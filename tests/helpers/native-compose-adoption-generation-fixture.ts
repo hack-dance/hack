@@ -768,13 +768,15 @@ else {
   }
 
   /** A published v3 adoption over reference-form generated overrides. */
-  async function publishedManagedAdoption(foreground?: "references" | "empty") {
+  async function publishedManagedAdoption(
+    foreground?: "references" | "empty" | "empty-omitted"
+  ) {
     Reflect.deleteProperty(process.env, "CI");
     Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
     await trackedManagedCheckout();
     const files = await managedGenerated();
     const projectDir = join(projectRoot, ".hack");
-    if (foreground === "empty") {
+    if (foreground === "empty" || foreground === "empty-omitted") {
       await writeOwnedFixture(
         join(projectDir, "hack.env.default.yaml"),
         JSON.stringify({
@@ -809,7 +811,10 @@ else {
       if (!alias) {
         throw new Error("Expected a synthetic foreground reference alias");
       }
-      container().configFiles = [...files.slice(0, -1), alias].join(",");
+      container().configFiles =
+        foreground === "empty-omitted"
+          ? files.slice(0, -1).join(",")
+          : [...files.slice(0, -1), alias].join(",");
       await save();
     }
     const binary = await managedEnvCompilerFixture(

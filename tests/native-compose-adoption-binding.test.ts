@@ -1285,6 +1285,9 @@ test("adoption accepts only a byte-identical foreground env alias in the canonic
     composeFiles,
     containers: [{ id: ID, name: "fixture-db-1", service: "db" }],
   });
+  container().configFiles = composeFile;
+  await save();
+  await refusal(observe());
   container().configFiles = [alias, composeFile].join(",");
   await save();
   await refusal(observe());

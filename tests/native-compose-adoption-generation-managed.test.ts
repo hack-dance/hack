@@ -183,6 +183,26 @@ test("an empty foreground env override can be adopted and rolled back", async ()
   expect(await readFile(files[2] ?? "", "utf8")).toBe("services: {}\n");
 });
 
+test("adoption accepts a restarted container that omitted the empty env override", async () => {
+  const files = await publishedManagedAdoption("empty-omitted");
+  const override = files[2] ?? "";
+  const aside = join(context.root, "moved-empty-override.yml");
+  const saved = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot: context.projectRoot,
+    mode: "saved",
+  });
+  try {
+    expect(await saved.loadActive()).toBeDefined();
+    await rename(override, aside);
+    await saved.rollback();
+  } finally {
+    await saved.close();
+  }
+  expect((await readReceipt()).publication.phase).toBe("rolled-back");
+  expect(await lstat(override).catch(() => null)).toBeNull();
+  expect(await readFile(aside, "utf8")).toBe("services: {}\n");
+});
+
 boundedTest(
   "rollback still binds the generated runtime override when the env override is released (HACK-1437)",
   async () => {

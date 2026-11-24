@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import {
   composeEnvOverridePath,
-  isEquivalentForegroundComposeEnvOverride,
+  isEquivalentRetainedComposeEnvOverride,
 } from "./compose-env-at-rest.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -577,8 +577,6 @@ function containerRows(
     readonly volumes: readonly LegacyComposeVerifiedVolume[];
     readonly network?: { readonly name: string; readonly id: string };
     readonly networks?: readonly LegacyComposeVerifiedNetwork[];
-    readonly composeFiles: readonly string[];
-    readonly equivalentConfigFiles?: string;
     readonly fileCandidate?: unknown;
     readonly ingress?: NativeComposeIngressBinding;
     readonly sourceBinds?: LegacyComposeSourceBindIntent["sourceBinds"];
@@ -610,9 +608,6 @@ function containerRows(
           (row.oneoff === "False" || row.oneoff === "false") &&
           typeof row.running === "boolean" &&
           row.workingDir === resolve(opts.root, ".hack") &&
-          typeof row.configFiles === "string" &&
-          (row.configFiles === opts.composeFiles.join(",") ||
-            row.configFiles === opts.equivalentConfigFiles) &&
           typeof row.id === "string" &&
           ID.test(row.id) &&
           typeof row.name === "string"
@@ -749,34 +744,40 @@ function containerRows(
 }
 
 /**
- * Keep the canonical ordered files and their runtime hash proof. A foreground
- * alias can replace only the generated env file and must have identical bytes.
+ * Keep the canonical ordered files and their runtime hash proof. Only the
+ * final generated env entry can be equivalent by alias or empty omission.
  */
-async function equivalentForegroundConfigFiles(opts: {
+async function assertContainerComposeFiles(opts: {
   readonly root: string;
   readonly composeFiles: readonly string[];
   readonly facts: readonly Record<string, unknown>[];
   readonly releasedReferenceDigest?: string;
-}): Promise<string | undefined> {
+}): Promise<void> {
   const { composeFiles, facts } = opts;
-  const projectDir = resolve(opts.root, ".hack");
-  if (composeFiles.at(-1) !== composeEnvOverridePath({ projectDir })) {
-    return undefined;
-  }
   const canonical = composeFiles.join(",");
-  const observed = facts.find(
-    (row) => row.configFiles !== canonical
-  )?.configFiles;
-  const prefix = `${composeFiles.slice(0, -1).join(",")},`;
-  if (typeof observed !== "string" || !observed.startsWith(prefix)) {
-    return undefined;
+  const alternatives = new Set(facts.map((row) => row.configFiles));
+  alternatives.delete(canonical);
+  if (alternatives.size === 0) {
+    return;
   }
-  const equivalent = await isEquivalentForegroundComposeEnvOverride({
-    projectDir,
-    observedPath: observed.slice(prefix.length),
-    releasedReferenceDigest: opts.releasedReferenceDigest,
-  });
-  return equivalent ? observed : undefined;
+  const projectDir = resolve(opts.root, ".hack");
+  requireValue(composeFiles.at(-1) === composeEnvOverridePath({ projectDir }));
+  const withoutEnv = composeFiles.slice(0, -1).join(",");
+  const prefix = `${withoutEnv},`;
+  for (const label of alternatives) {
+    requireValue(
+      typeof label === "string" &&
+        (label === withoutEnv || label.startsWith(prefix))
+    );
+    requireValue(
+      await isEquivalentRetainedComposeEnvOverride({
+        projectDir,
+        observedPath:
+          label === withoutEnv ? undefined : label.slice(prefix.length),
+        releasedReferenceDigest: opts.releasedReferenceDigest,
+      })
+    );
+  }
 }
 
 /**
@@ -1101,15 +1102,14 @@ async function inspectResources(
       ingress = await observeNativeComposeIngress({ signal: opts.signal });
       requireValue(ingress.engineId === engineId);
     }
+    await assertContainerComposeFiles({
+      root: opts.root,
+      composeFiles,
+      facts,
+      releasedReferenceDigest: opts.releasedReferenceDigest,
+    });
     const containers = containerRows(facts, {
       ...opts,
-      composeFiles,
-      equivalentConfigFiles: await equivalentForegroundConfigFiles({
-        root: opts.root,
-        composeFiles,
-        facts,
-        releasedReferenceDigest: opts.releasedReferenceDigest,
-      }),
       volumes,
       network: single?.network,
       networks: plural?.networks,

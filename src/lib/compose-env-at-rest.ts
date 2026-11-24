@@ -57,6 +57,9 @@ const REFUSAL =
   "Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted.";
 const MAX_REFERENCE_PROOF_BYTES = 1024 * 1024;
 const REFERENCE_DIGEST = /^[0-9a-f]{64}$/;
+const EMPTY_REFERENCE_DIGEST = createHash("sha256")
+  .update(EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE)
+  .digest("hex");
 
 /** Absolute path of the generated env override for a project directory. */
 export function composeEnvOverridePath(opts: {
@@ -219,21 +222,24 @@ function foregroundComposeEnvPath(opts: {
 
 /**
  * An attached start can label a container with a content-addressed alias
- * of its canonical generated override. Accept only the exact private file
- * with identical reference bytes so either path produces the same hash.
+ * of its canonical generated override. A full start can omit an empty
+ * override. Both cases must preserve Compose's service config hash.
  */
-export async function isEquivalentForegroundComposeEnvOverride(opts: {
+export async function isEquivalentRetainedComposeEnvOverride(opts: {
   readonly projectDir: string;
-  readonly observedPath: string;
+  readonly observedPath?: string;
   readonly releasedReferenceDigest?: string;
 }): Promise<boolean> {
-  const { releasedReferenceDigest } = opts;
+  const { observedPath, releasedReferenceDigest } = opts;
   // Rollback restores original sources using saved container and hash proofs.
   // It deliberately releases the env files themselves.
   if (releasedReferenceDigest !== undefined) {
+    if (observedPath === undefined) {
+      return releasedReferenceDigest === EMPTY_REFERENCE_DIGEST;
+    }
     return (
       REFERENCE_DIGEST.test(releasedReferenceDigest) &&
-      opts.observedPath ===
+      observedPath ===
         foregroundComposeEnvPath({ ...opts, digest: releasedReferenceDigest })
     );
   }
@@ -242,10 +248,13 @@ export async function isEquivalentForegroundComposeEnvOverride(opts: {
       ...fileOptions(composeEnvOverridePath(opts)),
       maxBytes: MAX_REFERENCE_PROOF_BYTES,
     });
+    if (observedPath === undefined) {
+      return canonical?.text === EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE;
+    }
     if (
       !canonical ||
       classifyComposeEnvOverrideText(canonical.text).kind !== "references" ||
-      opts.observedPath !==
+      observedPath !==
         foregroundComposeEnvPath({
           ...opts,
           digest: createHash("sha256").update(canonical.text).digest("hex"),
@@ -254,7 +263,7 @@ export async function isEquivalentForegroundComposeEnvOverride(opts: {
       return false;
     }
     const observed = await readReplaceablePrivateFile({
-      ...fileOptions(opts.observedPath),
+      ...fileOptions(observedPath),
       maxBytes: MAX_REFERENCE_PROOF_BYTES,
     });
     return (

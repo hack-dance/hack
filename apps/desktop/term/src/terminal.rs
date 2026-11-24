@@ -192,12 +192,20 @@ impl TerminalCore {
         let first = attempts
             .next()
             .ok_or_else(|| std::io::Error::other("a session plan needs one attempt"))?;
-        let emu = Emulator::new(EmulatorOptions {
+        let mut options = EmulatorOptions {
             cols: first.options.size.cols,
             rows: first.options.size.rows,
             ..EmulatorOptions::default()
-        })
-        .map_err(std::io::Error::other)?;
+        };
+        if matches!(first.kind, SessionKind::Command { .. }) {
+            options.scrollback_lines = 2_000;
+            options.scrollback_max_bytes = 4 << 20;
+        }
+        let mut emu = Emulator::new(options).map_err(std::io::Error::other)?;
+        if let SessionKind::Command { label, project, .. } = &first.kind {
+            let prompt = if *project { "$" } else { "~ $" };
+            emu.feed(format!("\x1b[2m{prompt} {label}\x1b[0m\r\n").as_bytes());
+        }
         let pty = Pty::spawn(&first.options)?;
         Ok(Self::with(
             emu,
@@ -322,6 +330,37 @@ impl TerminalCore {
         &self.status
     }
 
+    /// Exit information is final only after the last attempt's output drains.
+    pub fn exit_status(&self) -> Option<ExitInfo> {
+        if matches!(self.status, Status::Ended(_)) {
+            self.exit_seen.map(|(info, _)| info)
+        } else {
+            None
+        }
+    }
+
+    /// Password entry is a property of the current PTY. Only the terminal
+    /// reads the mode and looks for a prompt. No input is inspected.
+    pub fn waiting_for_password(&mut self) -> bool {
+        if !matches!(
+            self.kind,
+            SessionKind::Command {
+                expects_password: true,
+                ..
+            }
+        ) || !matches!(&self.backend, Backend::Pty(pty) if pty.echo_disabled())
+        {
+            return false;
+        }
+        let Ok(frame) = self.emu.frame() else {
+            return false;
+        };
+        frame.cursor.is_some_and(|(_, row)| {
+            let line = frame.row_text(usize::from(row)).to_ascii_lowercase();
+            line.ends_with(':') && line.contains("password")
+        })
+    }
+
     /// A message for the user about input that could not be delivered.
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
@@ -392,6 +431,20 @@ impl TerminalCore {
                             Some(info) => format!("process ended ({info})"),
                             None => "terminal closed".into(),
                         });
+                        if matches!(self.kind, SessionKind::Command { .. }) {
+                            let result = match info {
+                                Some(ExitInfo::Exited(code)) => format!("exit {code}"),
+                                Some(ExitInfo::Signaled(signal)) => format!("signal {signal}"),
+                                _ => "exit status unavailable".into(),
+                            };
+                            self.emu.feed(
+                                format!(
+                                    "\r\n\x1b[2m{result} · {:.1} s\x1b[0m\x1b[?25l\r\n",
+                                    self.started.elapsed().as_secs_f32()
+                                )
+                                .as_bytes(),
+                            );
+                        }
                         // End whatever is left of the session.
                         let ended = std::mem::replace(&mut self.backend, Backend::Closed);
                         self.retire(ended);

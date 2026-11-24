@@ -19,6 +19,7 @@ import {
   dataBackupHelperImage,
   dataBackupTimestamp,
 } from "../src/lib/data-backup-format.ts";
+import { TIMED_OUT_CREATE_LOOKUPS } from "../src/lib/data-backup-held-volume.ts";
 import { refuseRunning } from "../src/lib/data-backup-helper.ts";
 import { planDeclaredVolumes } from "../src/lib/data-backup-volumes.ts";
 import {
@@ -1871,5 +1872,159 @@ describe("a create whose outcome cannot be reconciled is reported, not hidden", 
     expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
     expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
     expect(fake.leftovers()).toEqual([]);
+  });
+});
+
+describe("a create that timed out is settled only by finding the container", () => {
+  /**
+   * The bind-hold create times out on the client. `land` says when the
+   * daemon registers it: never, or during the Nth lookup by name and nonce
+   * (the daemon still processing the request after the client gave up).
+   */
+  function timedOutCreate(
+    fake: FakeEngine,
+    opts: { readonly landAtLookup: number | null; readonly exitCode?: number }
+  ): { docker: DataBackupDocker; lookups: () => number } {
+    const real = fake.docker();
+    let pending: readonly string[] | null = null;
+    let lookups = 0;
+    return {
+      lookups: () => lookups,
+      docker: {
+        ...real,
+        capture: async (argv, captureOpts) => {
+          if (
+            pending === null &&
+            argv[1] === "create" &&
+            argv.some((arg) => arg.startsWith("type=bind,"))
+          ) {
+            pending = argv;
+            return {
+              exitCode: opts.exitCode ?? FAKE_TIMEOUT_EXIT,
+              stdout: "",
+              stderr:
+                opts.exitCode === undefined ? "" : "connection reset by peer",
+            };
+          }
+          if (
+            argv[2] === "inspect" &&
+            argv.some((arg) => arg.includes(".Config.Labels"))
+          ) {
+            lookups += 1;
+            if (pending !== null && lookups === opts.landAtLookup) {
+              await real.capture(pending, captureOpts);
+            }
+          }
+          return await real.capture(argv, captureOpts);
+        },
+      },
+    };
+  }
+
+  test('a timeout with an immediate "No such container" is reported as unknown', async () => {
+    const fake = engine({ only: "db" });
+    const { docker, lookups } = timedOutCreate(fake, { landAtLookup: null });
+    const error = await caught(exportProjectData({ ...input(fake), docker }));
+    expect(lookups()).toBe(TIMED_OUT_CREATE_LOOKUPS);
+    expect(error.detail).toMatchObject({
+      cleanup: { container: null, removed: false, outcome: "unknown" },
+    });
+    expect(error.message).toContain("io.hack.data-backup.nonce=");
+  });
+
+  test("a timeout where a later lookup finds the container removes it; not unknown", async () => {
+    const fake = engine({ only: "db" });
+    const { docker, lookups } = timedOutCreate(fake, { landAtLookup: 3 });
+    const error = await caught(exportProjectData({ ...input(fake), docker }));
+    expect(lookups()).toBe(3);
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
+    // Found by its nonce, tracked by ID and removed with confirmation.
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a create that failed without a timeout and is absent stays absent", async () => {
+    const fake = engine({ only: "db" });
+    const { docker, lookups } = timedOutCreate(fake, {
+      landAtLookup: null,
+      exitCode: 1,
+    });
+    const error = await caught(exportProjectData({ ...input(fake), docker }));
+    expect(lookups()).toBe(1);
+    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
+    expect(fake.leftovers()).toEqual([]);
+  });
+});
+
+describe("the unknown cleanup instruction targets the export's engine", () => {
+  /** A marker create Docker accepts while the response and lookup fail. */
+  function unreconciled(
+    fake: FakeEngine,
+    extra: Pick<DataBackupDocker, "engine" | "hackCleanupCommand">
+  ): DataBackupDocker {
+    const real = fake.docker();
+    let lost = false;
+    return {
+      ...real,
+      ...extra,
+      capture: async (argv, opts) => {
+        if (!lost && argv[1] === "create" && !argv.includes("--mount")) {
+          lost = true;
+          await real.capture(argv, opts);
+          return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
+        }
+        if (
+          argv[2] === "inspect" &&
+          argv.some((arg) => arg.includes(".Config.Labels"))
+        ) {
+          return { exitCode: 1, stdout: "", stderr: "error during connect" };
+        }
+        return await real.capture(argv, opts);
+      },
+    };
+  }
+
+  test("the refusal names hack data cleanup with the selection and the raw command on the same engine", async () => {
+    const fake = engine({ only: "db" });
+    const host = "tcp://10.0.0.5:2376";
+    const error = await caught(
+      exportProjectData({
+        ...input(fake),
+        docker: unreconciled(fake, {
+          engine: { host, context: null },
+          hackCleanupCommand: (nonce) =>
+            `hack data cleanup --env=staging --nonce=${nonce}`,
+        }),
+      })
+    );
+    const cleanup = (error.detail as { cleanup: Record<string, string> })
+      .cleanup;
+    const nonce = cleanup.label?.split("=")[1] ?? "";
+    expect(nonce).toMatch(/^[a-f0-9]{32}$/);
+    expect(cleanup.hackCommand).toBe(
+      `hack data cleanup --env=staging --nonce=${nonce}`
+    );
+    expect(cleanup.command).toStartWith(`DOCKER_HOST=${host} docker ps -aq`);
+    expect(error.message).toContain(cleanup.hackCommand ?? "");
+    expect(error.message).toContain(cleanup.command ?? "");
+  });
+
+  test("a DOCKER_HOST with userinfo reaches neither the text nor the JSON", async () => {
+    const fake = engine({ only: "db" });
+    // Not a credential: a recognizable stand-in.
+    const host = "ssh://deploy:canary-pass-31@build.example";
+    const error = await caught(
+      exportProjectData({
+        ...input(fake),
+        docker: {
+          ...unreconciled(fake, { engine: { host, context: null } }),
+          redactValues: [host],
+        },
+      })
+    );
+    const rendered = `${error.message}${JSON.stringify(error.detail)}`;
+    expect(rendered).toContain("outcome");
+    expect(rendered).not.toContain("canary-pass-31");
+    expect(error.message).toContain("with your managed DOCKER_HOST");
   });
 });

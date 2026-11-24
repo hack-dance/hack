@@ -216,6 +216,7 @@ describe("pull request diff", () => {
       cwd,
       env: fixtureGitEnv(),
       stdin: "ignore",
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -274,6 +275,7 @@ describe("pull request diff", () => {
           PR_DRAFT: "false",
           PR_FULL: "false",
         },
+        timeout: 15_000,
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -298,6 +300,7 @@ describe("pull request diff", () => {
           PR_DRAFT: "false",
           PR_FULL: "false",
         },
+        timeout: 15_000,
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -311,6 +314,7 @@ describe("pull request diff", () => {
     const missing = Bun.spawnSync([process.execPath, script], {
       cwd: repoRoot,
       env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -318,6 +322,7 @@ describe("pull request diff", () => {
     const push = Bun.spawnSync([process.execPath, script, "--event=push"], {
       cwd: repoRoot,
       env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -328,6 +333,13 @@ describe("pull request diff", () => {
 });
 
 describe("CI workflow wiring", () => {
+  test("only dispatches enable the Compose upgrade trial", async () => {
+    const { jobs } = await ciWorkflow();
+    expect(jobs["compose-upgrade-trial"]?.if).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.compose_upgrade_trial }}"
+    );
+  });
+
   test("the changes job exposes every scope output and checks out the merge parent", async () => {
     const changes = (await ciWorkflow()).jobs.changes;
     const keys = [...Object.keys(fullPushPlan()), "ci_evidence"].sort();

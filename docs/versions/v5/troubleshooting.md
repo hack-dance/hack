@@ -15,6 +15,8 @@ For a targeted repair, `hack doctor --fix --only 'hack gitignore' --yes --json -
 `hack doctor --fix --only 'polling watchers' --path <repo>` shows a diff that removes only the `CHOKIDAR_USEPOLLING: "true"` and `WATCHPACK_POLLING: "true"` lines old `hack init` generated, and writes nothing. Add `--yes` to apply it. It refuses an adopted project and any change that would alter more than those lines. With `--json`, `data.fix` adds `applied`, `removed` and `diff`. Plain `--fix` never runs it.
 
 Use `hack doctor --machine --json` for a machine-only audit. It returns the same `checks`, `summary` and `counts` in the envelope, tagged `data.schema: "hack.doctor.machine.v1"` (listed in the machine-readable output reference); plain `hack doctor --json` keeps `schema: 1`. It skips project discovery and project checks even from a broken project checkout, and inspects only global stores for secrets hygiene. It also omits the retained gateway checks, whose resolver reads registered project configurations. Every finding has machine scope; failed or unavailable observations remain warnings/errors. It runs bounded read-only probes, including `runtime status --json` from the native executor for the native backend, never starts Docker, hackd or a native runtime, and accepts no project selection, browser observation or repair flags. The selected backend and home still come from the same environment as ordinary Doctor.
+Use `hack doctor --disk` to report allocated and logical file bytes for the selected native home without starting its pool. Add `--json` for the Doctor report envelope. An incomplete scan is marked as a warning and its totals cover only the files observed. Run this as a standalone audit. Repair flags such as `--fix` cannot be combined with it. See [Local disk footprint](https://github.com/hack-dance/hack/blob/next/docs/reference/disk-footprint.md).
+
 
 Rows marked "since next.N" need that prerelease or a later one. An older
 installed bundle keeps its older behaviour. See the
@@ -57,6 +59,10 @@ installed bundle keeps its older behaviour. See the
 | `E_LIFECYCLE_FAILED` | A project hook failed before startup could finish; its own credentials or command may need repair. | Read the hook's message, fix that project dependency, then retry. Do not bypass the hook just to get a green start. |
 | Native `up`: `E_RECOVERY_REQUIRED` “This project's last native run has no confirmed shutdown …” (HACK-2456) | A recovery stopped the run with data kept but did not finish its shutdown, usually the shared HTTPS lease after the pool was stopped under a running project; or another start of this instance replaced it. | Run `hack down --recover`. It starts a stopped native runtime when it needs to, finishes the shutdown with data kept, and leaves the runtime running (run `runtime down` to stop it). Then run `hack up`. |
 | next.16 `E_STARTUP_INCOMPLETE` after a fast one-shot service finished | next.16 can misread a service that exits successfully in under a second. | Inspect `ps` and logs. If this is that known case and the services are up, rerun `up --detach`. Fixed in next.17. [Trial record](guides/upgrade-from-v4.md#known-problems-and-the-dogfood-record). |
+
+If native shutdown was interrupted during guest relay removal, repeat the same
+shutdown or recovery command. An empty relay allocation can be removed on retry
+when its recorded slot generation is stopped or discarded and its socket is gone.
 
 ## A store whose key is lost
 

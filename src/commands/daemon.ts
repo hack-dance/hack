@@ -769,18 +769,14 @@ async function handleRunningDaemonAtStart(opts: {
     });
     return 1;
   }
-  // Refuse before stopping when the start that follows would be refused:
-  // otherwise a running hackd is left stopped (HACK-2216). The launchd case
-  // was checked above (checkRunningLaunchdDaemon).
-  if (process.platform === "linux" && !opts.foreground) {
-    const refusal = await refuseSystemdStartBeforeReplacing({ paths });
-    if (refusal !== null) {
-      trace.manager = "systemd";
-      trace.blocked = refusal.blocked;
-      logger.warn({
-        message: `hackd (pid ${opts.pid}) is incompatible with this CLI, but it was not replaced, because hackd.service could not be started for this home afterwards: ${refusal.message}`,
-      });
-      return 1;
+  if (!opts.foreground) {
+    const blocked = await refuseReplacementBeforeStop({
+      paths,
+      trace,
+      launchdChecked: true,
+    });
+    if (blocked !== null) {
+      return blocked;
     }
   }
   logger.warn({ message: `Replacing incompatible hackd (pid ${opts.pid})` });
@@ -870,11 +866,7 @@ async function startReplacementDirectly(opts: {
   readonly paths: DaemonPaths;
 }): Promise<number> {
   const argv = executingDaemonArgv();
-  const servicePath = await directReplacementPath({
-    argv,
-    home: resolveUserHomeDir(),
-    platform: process.platform,
-  });
+  const servicePath = await readDirectReplacementPath(argv);
   if ("refused" in servicePath) {
     logger.error({
       message: `Not starting the replacement hackd directly: ${servicePath.refused}; hackd is stopped | Fix that directory, then run: hack daemon install`,
@@ -885,6 +877,14 @@ async function startReplacementDirectly(opts: {
     paths: opts.paths,
     argv,
     path: servicePath.path,
+  });
+}
+
+function readDirectReplacementPath(argv: readonly string[]) {
+  return directReplacementPath({
+    argv,
+    home: resolveUserHomeDir(),
+    platform: process.platform,
   });
 }
 
@@ -1465,38 +1465,62 @@ async function handleDaemonRestart({
 }
 
 /**
- * `hack daemon restart`: stop, then start, which also brings a stale login
- * service up to this CLI. `trace` reports the start half.
+ * Check the selected replacement route before stopping the running daemon.
+ * The actual start checks the route and PATH again before acting.
  */
-/**
- * Before `restart` stops this home's running hackd: the replacement checks
- * `start` uses (launchd: the loaded job must be this home's; systemd: the
- * unit's start after the stop must not be refused). Exit code (reported)
- * or null to go on.
- */
-async function refuseRestartBeforeStop(opts: {
+async function refuseReplacementBeforeStop(opts: {
   readonly paths: DaemonPaths;
   readonly trace: DaemonCommandTrace;
+  /** `start` already checked the loaded job in checkRunningLaunchdDaemon. */
+  readonly launchdChecked?: true;
+  /** `restart` may have read a stale pidfile that names an unrelated process. */
+  readonly unverifiedPid?: number;
 }): Promise<number | null> {
   const { paths, trace } = opts;
-  if (process.platform === "darwin") {
-    return await refuseLaunchdBeforeReplacing({
+  let managed = trace.manager === "launchd";
+  const onManagedStart = () => {
+    managed = true;
+  };
+  if (process.platform === "darwin" && !opts.launchdChecked) {
+    const blocked = await refuseLaunchdBeforeReplacing({
       paths,
       trace,
       waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+      onManagedStart,
     });
+    if (blocked !== null) {
+      return blocked;
+    }
   }
-  if (process.platform !== "linux") {
+  if (process.platform === "linux") {
+    const refusal = await refuseSystemdStartBeforeReplacing({
+      paths,
+      onManagedStart,
+    });
+    if (refusal !== null) {
+      trace.manager = "systemd";
+      trace.blocked = refusal.blocked;
+      logger.warn({
+        message: `Not replacing hackd: hackd.service could not be started for this home afterwards, so nothing was stopped: ${refusal.message}`,
+      });
+      return 1;
+    }
+  }
+  if (managed) {
     return null;
   }
-  const refusal = await refuseSystemdStartBeforeReplacing({ paths });
-  if (refusal === null) {
+  if (
+    opts.unverifiedPid !== undefined &&
+    !(await isHackDaemonProcess({ pid: opts.unverifiedPid }))
+  ) {
     return null;
   }
-  trace.manager = "systemd";
-  trace.blocked = refusal.blocked;
+  const servicePath = await readDirectReplacementPath(executingDaemonArgv());
+  if (!("refused" in servicePath)) {
+    return null;
+  }
   logger.warn({
-    message: `Not restarting hackd: hackd.service could not be started for this home afterwards, so nothing was stopped: ${refusal.message}`,
+    message: `Keeping the running hackd: its direct replacement cannot start with an unsafe PATH: ${servicePath.refused} | Fix that directory, then retry`,
   });
   return 1;
 }
@@ -1547,7 +1571,11 @@ async function restartDaemon(opts: {
     // The same eligibility checks `start` runs before replacing a running
     // daemon: refuse now, with nothing stopped, when the start after the
     // stop would be refused.
-    const blocked = await refuseRestartBeforeStop({ paths, trace });
+    const blocked = await refuseReplacementBeforeStop({
+      paths,
+      trace,
+      unverifiedPid: status.pid,
+    });
     if (blocked !== null) {
       return blocked;
     }

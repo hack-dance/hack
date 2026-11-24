@@ -76,6 +76,9 @@ A connection failure leaves the execution outcome uncertain. Reconnect, list
 and inspect the original handle. A previous Start can arrive after a new client
 observes Absent. Preserve terminal status across reconnects until the host
 records it and releases it. An incarnation change fences old handles.
+The host client returns `Error::StaleHandle` before sending a handle from a
+different boot or incarnation. This consumes no channel. An `Unknown` reply
+on a negotiated session is an observation received from the peer.
 
 V1 supplies buffered commands with bounded offset reads. Interactive input,
 PTY allocation and resize, output wakeups, file-change subscriptions, time sync,

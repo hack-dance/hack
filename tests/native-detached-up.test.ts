@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
@@ -352,6 +352,43 @@ for (const phase of ["static-preflight", "after-start"] as const) {
     }
   });
 }
+
+test("the detached CLI preserves the native authored attempt limit refusal", async () => {
+  const root = await fixtureRoot(
+    join(tmpdir(), "native-detached-attempt-limit-")
+  );
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "authored-attempt-limit"],
+    { env: fixtureEnv(root), stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+  );
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+      new Response(launcher.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_STARTUP_INCOMPLETE",
+        message: expect.stringContaining(
+          "native authored graph limit is 64 attempts"
+        ),
+        detail: { nativeCode: "native_graph_attempt_limit" },
+      },
+    });
+    expect(stdout).toContain("private environment records");
+    expect(stdout).toContain("hack doctor --native-cleanup inspect");
+    expect(stderr).toBe("");
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await removeFixture(root);
+  }
+});
 
 test("the detached owner gets only the command and its selection options", () => {
   expect(
@@ -781,3 +818,56 @@ for (const mode of ["slow-runtime", "images-ceiling", "images-wait-ceiling"]) {
     }
   }, 30_000);
 }
+
+test("startup timing records cross the detached owner and match the JSONL file", async () => {
+  const root = await fixtureRoot(join(tmpdir(), "native-detached-timing-"));
+  const runtime = join(root, "runtime");
+  await writeFile(
+    runtime,
+    `#!${process.execPath}
+import { writeSync } from "node:fs";
+const [fd, trace, parent, anchor] = process.argv[2].split("=")[1].split(":");
+for (const [index, step] of ["containers.started", "services.ready"].entries()) {
+  writeSync(Number(fd), JSON.stringify({
+    schema: "hack.timings/1", trace, parent, span: String(index + 1).repeat(16),
+    proc: "runtime", clock: "host", origin_unix_us: Date.now() * 1000,
+    origin_mono_us: Number(anchor), step, start_us: index * 1000, dur_us: 100,
+    outcome: "ok", attrs: {},
+  }) + "\\n");
+}
+`,
+    { mode: 0o700 }
+  );
+  const child = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "timings"],
+    {
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  try {
+    const stdout = await new Response(child.stdout).text();
+    expect(await new Response(child.stderr).text()).toBe("");
+    expect(await child.exited).toBe(0);
+    const records = JSON.parse(stdout).data.timings;
+    expect(records.map((r: { step: string }) => r.step)).toEqual([
+      "containers.started",
+      "services.ready",
+      "command.total",
+    ]);
+    expect(records[0].parent).toBe(records[2].span);
+    expect(records[1].trace).toBe(records[2].trace);
+    expect(
+      (await readFile(join(root, "timings.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+    ).toEqual(records);
+    process.kill(Number(await waitForFile(join(root, "owner.pid"))), 0);
+  } finally {
+    await stop(root);
+    await removeFixture(root);
+  }
+}, 10_000);

@@ -311,6 +311,7 @@ export async function resolveSystemdSummary(opts: {
  * missing program that read-only mode may not repair, and loaded files or
  * a program Hack cannot vouch for. Null when the start may go on (or does
  * not go through systemd at all, which starts hackd directly).
+ * `onManagedStart` observes selection of the service route before its trust checks.
  */
 export async function refuseSystemdStartBeforeReplacing(
   hooks: Pick<
@@ -322,7 +323,7 @@ export async function refuseSystemdStartBeforeReplacing(
     | "systemPathDirectories"
     | "cliVersion"
     | "trustUid"
-  >
+  > & { readonly onManagedStart?: () => void }
 ): Promise<{
   readonly message: string;
   readonly blocked:
@@ -362,6 +363,7 @@ export async function refuseSystemdStartBeforeReplacing(
   if (unitHome.kind === "unknown") {
     return { message: unitHome.message, blocked: "unproven-owner" };
   }
+  hooks.onManagedStart?.();
   // What the start would check before it reads the unit to rewrite or
   // retarget it, or reloads it (HACK-2216): never stop the running daemon
   // for a unit another account could have written.

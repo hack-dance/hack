@@ -1573,6 +1573,13 @@ refusal as `skipped`, and never delays or fails the start. Each removal deletes 
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 
+When explicit reclaim frees at least 256 MiB on the guest storage filesystem,
+it also attempts a discard on `/storage` while holding the same pool lease.
+A confirmed trim adds `trim.guest_bytes_freed` and `trim.seconds` to the JSON.
+The byte count measures guest free space gained during reclaim. Host allocation
+can fall by a different amount. A failed or interrupted trim does not undo
+reclaim. The automatic `--best-effort` path does not trim.
+
 ### Network tool packages
 
 Before startup, network-tool preparation additionally requires all four pinned
@@ -1843,7 +1850,19 @@ provider lease it already holds and with the same proof `graph archive` uses (ev
 owned resource absent, no pending journal). Runs that keep data are never archived;
 when they alone fill the inventory, `hack up` refuses with `graph_retention_budget`
 and says to remove the data of a project you no longer use. The archive keeps up to
-256 runs; past that the refusal is `graph_archive_budget`. A project whose removed
+256 runs; at that bound the oldest archived removed runs are exported (as
+`graph export` does, into the home's `exports/graphs`) and pruned (as `graph prune`
+does), and each keeps a consumed-ID tombstone so its run ID cannot start a fresh run
+again. The store keeps 4096 tombstones; at that bound the oldest tombstones of fully
+pruned runs go. That is safe because a tombstone only refuses a fresh start with
+that ID, the CLI makes every fresh run ID from 128 random bits at the start, and a
+restore needs the run's receipt, which pruning already removed. The export of a
+fully pruned run is diagnostics: it is kept seven days, and at most 256 of them,
+oldest first. An interrupted export or prune is resumed the next time. A removed run
+archived under an earlier guest incarnation is pruned the same way: it holds nothing,
+and its export, which proves every owned resource absent, is the evidence. Only runs
+that cannot be proven removed keep their place; if 256 of those fill the archive,
+`graph_archive_budget` refuses and says to inspect them. A project whose removed
 run was archived this way before its `hack down --remove-data` confirmed the removal
 still confirms it: inspection reads a removed run from the archive.
 For a shared-source graph that reconciliation does not select (live source, a
@@ -2562,6 +2581,22 @@ An owner that is ending can read for a moment as neither running nor exited (its
 process exited but is not yet reaped, or its publication is read mid-change); the
 runtime reports that as `graph_foreground_owner_uncertain`, and the same wait covers it. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
+A provider that dies while the pool record still says `running` (killed, crashed, or
+lost across a sleep) leaves the pool `process-exited` in `runtime status`, and
+`runtime down` refuses it (`process_identity_unavailable`). The run's detached start
+notices that its provider's process is gone and ends as for an ended boot, and
+`hack up` and `hack down` run `runtime recover` first (under the provider lease,
+with the recorded provider proven gone by its identity), say so in one line, and
+continue as after any pool stop (HACK-2579).
+
+Each such recovery moves the run's earlier completed recovery record aside as history
+(`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
+`interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the
+eight newest records of each kind: the next one removes the oldest record that is
+proven finished, under the recovery's own locks (HACK-2576). A file there that cannot
+be proven finished is never removed and does not count. Earlier versions refused the
+ninth recovery instead, and every later `up`, `down` and pool stop refused with the
+data intact; a home left that way recovers with a plain `hack up` on this version.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

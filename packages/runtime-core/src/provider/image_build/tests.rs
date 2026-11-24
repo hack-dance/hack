@@ -159,6 +159,9 @@ struct FakePool {
     leases: RefCell<u32>,
     resolve_error: bool,
     available: RefCell<u64>,
+    freed_by_prune: u64,
+    trims: RefCell<u32>,
+    trim_fails: bool,
     prunes: RefCell<Vec<u64>>,
     resolve_delay: Duration,
     resolve_deadlines: RefCell<Vec<Instant>>,
@@ -176,6 +179,9 @@ impl FakePool {
             leases: RefCell::new(0),
             resolve_error: false,
             available: RefCell::new(64 * GIB),
+            freed_by_prune: 0,
+            trims: RefCell::new(0),
+            trim_fails: false,
             prunes: RefCell::new(Vec::new()),
             resolve_delay: Duration::ZERO,
             resolve_deadlines: RefCell::new(Vec::new()),
@@ -251,6 +257,7 @@ impl BuildPool for FakePool {
     }
     fn prune_cache(&self, _: &(), max_used: u64) -> Result<u64, CandidateError> {
         self.prunes.borrow_mut().push(max_used);
+        *self.available.borrow_mut() += self.freed_by_prune;
         Ok(7)
     }
 }
@@ -1413,6 +1420,14 @@ fn cold_builds_need_free_storage_and_successful_builds_prune_the_cache() {
 }
 
 impl reclaim::ReclaimPool for FakePool {
+    fn trim(&self, _: &()) -> Result<(), CandidateError> {
+        *self.trims.borrow_mut() += 1;
+        if self.trim_fails {
+            Err(invalid("Trim interrupted."))
+        } else {
+            Ok(())
+        }
+    }
     fn build_images(&self, _: &()) -> Result<Vec<Value>, CandidateError> {
         Ok(self
             .images
@@ -1430,6 +1445,34 @@ impl reclaim::ReclaimPool for FakePool {
             self.images.borrow_mut().remove(image);
         }
         Ok(allowed)
+    }
+}
+
+#[test]
+fn explicit_reclaim_trims_only_after_enough_guest_space_is_freed() {
+    let fixture = Fixture::new();
+    for (freed, allowed, fails, expected) in [
+        (256 * 1024 * 1024 - 1, true, false, false),
+        (256 * 1024 * 1024, true, false, true),
+        (256 * 1024 * 1024, true, true, false),
+        (256 * 1024 * 1024, false, false, false),
+    ] {
+        let mut pool = FakePool::new("pool-1");
+        pool.freed_by_prune = freed;
+        pool.trim_fails = fails;
+        let report = if allowed {
+            reclaim::run(&fixture.candidate, &pool, true).unwrap()
+        } else {
+            reclaim::best_effort(&fixture.candidate, &pool).report
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json.get("trim").is_some(), expected);
+        if expected {
+            assert_eq!(json["trim"]["guest_bytes_freed"], freed);
+            assert!(json["trim"]["seconds"].as_f64().unwrap() >= 0.0);
+        }
+        assert_eq!(*pool.trims.borrow(), u32::from(expected || fails));
+        assert_eq!(report.cache_reclaimed_bytes, Some(7));
     }
 }
 
@@ -1467,12 +1510,14 @@ fn reclamation_keeps_current_referenced_in_use_and_foreign_images() {
     .unwrap()
     .unwrap();
     assert_eq!(
-        reclaim::run(&fixture.candidate, &pool).unwrap_err().code,
+        reclaim::run(&fixture.candidate, &pool, true)
+            .unwrap_err()
+            .code,
         "provider_busy"
     );
     drop(build);
 
-    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    let report = reclaim::run(&fixture.candidate, &pool, true).unwrap();
     assert_eq!(report.removed, vec![OLD.to_owned()]);
     assert_eq!(report.retained[IMAGE], reclaim::Retained::Current);
     assert_eq!(report.retained[KEPT], reclaim::Retained::Referenced);
@@ -1484,7 +1529,7 @@ fn reclamation_keeps_current_referenced_in_use_and_foreign_images() {
         .images
         .borrow_mut()
         .extend(pool.images.borrow().clone());
-    let report = reclaim::run(&fixture.candidate, &other).unwrap();
+    let report = reclaim::run(&fixture.candidate, &other, true).unwrap();
     assert!(report.removed.is_empty());
     assert!(
         report
@@ -1579,7 +1624,7 @@ fn context_edits_rebuild_and_ignored_edits_reuse() {
         .join(&inputs.namespace)
         .join(context::cache_name(&app));
     assert!(cache.exists());
-    assert!(reclaim::run(&fixture.candidate, &pool).is_ok());
+    assert!(reclaim::run(&fixture.candidate, &pool, true).is_ok());
 }
 
 #[test]
@@ -1902,7 +1947,7 @@ fn ten_edits_of_one_build_leave_its_current_and_previous_images() {
         serde_json::to_vec(&history).unwrap(),
     )
     .unwrap();
-    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    let report = reclaim::run(&fixture.candidate, &pool, true).unwrap();
     let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
     assert_eq!(
         left,
@@ -1915,7 +1960,7 @@ fn ten_edits_of_one_build_leave_its_current_and_previous_images() {
 
     // Without the reference, exactly the current and previous images remain.
     fs::remove_dir_all(fixture.candidate.state_root.join("run/graphs")).unwrap();
-    reclaim::run(&fixture.candidate, &pool).unwrap();
+    reclaim::run(&fixture.candidate, &pool, true).unwrap();
     let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
     assert_eq!(left, BTreeSet::from([numbered(9), numbered(10)]));
 
@@ -1930,7 +1975,7 @@ fn ten_edits_of_one_build_leave_its_current_and_previous_images() {
     fs::write(fixture.project.join("app/main.txt"), "edit 11").unwrap();
     let eleventh = fixture.inputs(Policy::Missing);
     build_as(&fixture, &pool, &eleventh, &numbered(11));
-    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    let report = reclaim::run(&fixture.candidate, &pool, true).unwrap();
     assert_eq!(report.removed, vec![numbered(10)]);
     let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
     assert_eq!(left, BTreeSet::from([numbered(9), numbered(11)]));
@@ -1969,7 +2014,7 @@ fn receipts_without_a_declaration_and_other_declarations_keep_their_images() {
     receipt.declaration = None;
     receipt.sequence = None;
     state::write(&path, &receipt).unwrap();
-    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    let report = reclaim::run(&fixture.candidate, &pool, true).unwrap();
     assert_eq!(report.retained[&numbered(1)], reclaim::Retained::Current);
     assert_eq!(report.retained[&numbered(2)], reclaim::Retained::Current);
     assert_eq!(report.retained[&numbered(3)], reclaim::Retained::Previous);

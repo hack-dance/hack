@@ -2580,6 +2580,18 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2576: one run's recovery history across repeated pool stops. Positive:
+    // the oldest proven finished record makes room, and files that cannot be
+    // proven finished are not counted. `negative` is the refusal at the bound
+    // (counting every file with the prefix), which strands the stopped run.
+    name: "recovery-archive-bound",
+    module: "ArchiveBound",
+    states: 75,
+    invariant: "AlwaysRecoverable",
+    action: "PoolStop",
+    fields: ['phase = "stopped"', 'intent = "complete"'],
+  },
+  {
     name: "publication",
     module: "Publication",
     states: 16,
@@ -3157,6 +3169,13 @@ const contracts: readonly ModelContract[] = [
           {
             action: "PoolRecover",
             fields: stoppedHttpsWitnessFields,
+          },
+          // The same stranded finalization, reported one step later: a `Listen`
+          // fault earlier in the trace leaves `ListenerExits` as the last enabled
+          // step, which `NoDeadEnd` counts as progress (seen on the B1 factory).
+          {
+            action: "ListenerExits",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
         ],
       },

@@ -5,16 +5,22 @@ import sys
 from pathlib import Path
 
 
-def validate(data: bytes) -> None:
-    if not 64 <= len(data) <= 2 * 1024 * 1024:
-        raise ValueError("relay ELF size exceeds the supported bound")
-    if data[:7] != b"\x7fELF\x02\x01\x01" or data[7] not in (0, 3):
-        raise ValueError("relay must be a little-endian ELF64 Linux executable")
+def validate_target(data: bytes, architecture: str) -> None:
+    if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01" or data[7] not in (0, 3):
+        raise ValueError("expected a little-endian ELF64 Linux executable")
     kind, machine, version = struct.unpack_from("<HHI", data, 16)
+    if kind not in (2, 3) or machine != {"aarch64": 183, "x86_64": 62}[architecture] or version != 1:
+        raise ValueError(f"guest executable must target Linux {architecture}")
+
+
+def validate(data: bytes, architecture: str = "aarch64") -> None:
+    if not 64 <= len(data) <= 2 * 1024 * 1024:
+        raise ValueError("guest ELF size exceeds the supported bound")
+    validate_target(data, architecture)
     phoff = struct.unpack_from("<Q", data, 32)[0]
     ehsize, phsize, count = struct.unpack_from("<HHH", data, 52)
-    if kind not in (2, 3) or machine != 183 or version != 1 or ehsize != 64:
-        raise ValueError("relay must target Linux ARM64")
+    if ehsize != 64:
+        raise ValueError(f"guest executable must target Linux {architecture}")
     if phsize != 56 or not 1 <= count <= 128 or phoff < 64 or phoff + count * phsize > len(data):
         raise ValueError("relay program headers are invalid")
     executable = False
@@ -44,12 +50,20 @@ def validate(data: bytes) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--storage-witness"):
-        sys.exit("Usage: verify-native-relay.py /path/to/guest-ELF [--storage-witness]")
-    label = "storage witness" if len(sys.argv) == 3 else "dependency relay"
+    architecture = "aarch64"
+    if len(sys.argv) == 5 and sys.argv[2] == "--guest-agent" and sys.argv[3] in ("aarch64", "x86_64"):
+        label = "agent"
+        architecture = sys.argv[3]
+    elif len(sys.argv) == 2 or (len(sys.argv) == 3 and sys.argv[2] == "--storage-witness"):
+        label = "storage witness" if len(sys.argv) == 3 else "dependency relay"
+    else:
+        sys.exit("Usage: verify-native-relay.py ELF [--storage-witness | --guest-agent ARCH PROVIDER_ELF]")
     try:
+        if label == "agent":
+            with Path(sys.argv[4]).open("rb") as provider:
+                validate_target(provider.read(64), architecture)
         with Path(sys.argv[1]).open("rb") as source:
-            validate(source.read(2 * 1024 * 1024 + 1))
+            validate(source.read(2 * 1024 * 1024 + 1), architecture)
     except (OSError, ValueError, struct.error) as error:
         sys.exit(f"Invalid native guest {label}: {error}")
-    print(f"Verified static Linux ARM64 {label}")
+    print(f"Verified static Linux {'ARM64' if architecture == 'aarch64' else architecture} {label}")

@@ -3,6 +3,7 @@ import { resolveNativeStartTimeoutSeconds } from "../backends/native-graph-start
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
 import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
+import { withCommandTimings } from "../lib/command-timings.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
@@ -47,6 +48,7 @@ import {
   refuseRemoteStart,
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
+import { printUpTimings } from "../lib/up-timings-output.ts";
 import {
   selectLifecycleAddress,
   writeLifecycleStopped,
@@ -275,6 +277,7 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import { runningComposeDirectAccess } from "../lib/compose-direct-access.ts";
 import {
   buildComposeDownFailure,
   countDistinctRunningServices,
@@ -790,6 +793,20 @@ const upOptions = [
   optProgress,
   optRefreshImages,
   optImageOffline,
+  defineOption({
+    name: "timings",
+    type: "boolean",
+    long: "--timings",
+    description: "Native backend: print the startup timeline to stderr",
+  } as const),
+  defineOption({
+    name: "timingsFile",
+    type: "string",
+    long: "--timings-file",
+    valueHint: "<file>",
+    description:
+      "Native backend: write startup timing records to a new JSONL file",
+  } as const),
   defineOption({
     name: "always",
     type: "boolean",
@@ -3819,6 +3836,7 @@ async function renderInternalComposeOverrideText(opts: {
     project: opts.project,
     composeFile: opts.project.composeFile,
     enabled: internal.dns,
+    cfg: opts.cfg,
     branch: opts.branch ?? null,
     devHost: opts.devHost ?? null,
     aliasHost: opts.aliasHost ?? null,
@@ -3864,6 +3882,7 @@ type InternalDnsSettings = {
 
 async function resolveInternalDnsSettings(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly composeFile: string;
   readonly enabled: boolean;
   readonly branch: string | null;
@@ -3876,7 +3895,10 @@ async function resolveInternalDnsSettings(opts: {
   }
 
   const addresses = await resolveGlobalIngressAddresses(opts.addresses);
-  warnUnreachableIngress(addresses);
+  if (!(addresses.coreDns && addresses.caddy)) {
+    const fallback = await describeDirectIngressAccess(opts);
+    warnUnreachableIngress(addresses, fallback);
+  }
   const dnsServer = addresses.coreDns;
   const caddyIp = addresses.caddy;
   const caddyHosts = await resolveCaddyHostsForBranch({
@@ -3890,17 +3912,48 @@ async function resolveInternalDnsSettings(opts: {
   return { dnsServer, caddyIp, caddyHosts };
 }
 
-function warnUnreachableIngress(addresses: IngressAddressResult): void {
+async function describeDirectIngressAccess(
+  opts: Parameters<typeof resolveInternalDnsSettings>[0]
+): Promise<string> {
+  const fallback =
+    "Publish a service port with Compose `ports:`, for example `127.0.0.1:8080:80`, then run `hack up`.";
+  // `recorded` (one-off `run`) makes no Docker call for the override; reading the
+  // running containers here would inspect every one of them on each run.
+  if (opts.addresses === "recorded") {
+    return fallback;
+  }
+  const base = await resolveComposeProjectName(opts);
+  const name = opts.branch ? `${base}--${opts.branch}` : base;
+  const runtime = await readRuntimeProjects({ includeGlobal: false });
+  const project = runtime.runtime.find((item) => item.project === name);
+  return (
+    runningComposeDirectAccess(
+      project
+        ? [...project.services.values()].flatMap(
+            (service) => service.containers
+          )
+        : [],
+      {
+        project: name,
+        checkout: opts.project.projectDir,
+        linux: process.platform === "linux",
+      }
+    ) ?? fallback
+  );
+}
+
+function warnUnreachableIngress(
+  addresses: IngressAddressResult,
+  fallback: string
+): void {
   if (!addresses.coreDns) {
     logger.warn({
-      message:
-        "CoreDNS is not reachable; internal DNS for *.hack is disabled. Run `hack global install` (or `hack global up`).",
+      message: `CoreDNS is not reachable; internal DNS for *.hack is disabled. ${fallback} For managed routing, run \`hack global install\` (or \`hack global up\`).`,
     });
   }
   if (!addresses.caddy) {
     logger.warn({
-      message:
-        "Caddy is not reachable; internal *.hack host mappings are disabled. Run `hack global install` (or `hack global up`).",
+      message: `Caddy is not reachable; internal *.hack host mappings are disabled. ${addresses.coreDns ? `${fallback} ` : ""}Run \`hack global install\` (or \`hack global up\`).`,
     });
   }
 }
@@ -7536,6 +7589,28 @@ function nativeImageTagMode(
 async function handleUp(
   input: Parameters<typeof handleUpUnlocked>[0]
 ): Promise<number> {
+  const { json, timings, timingsFile } = input.args.options;
+  if (timings || timingsFile !== undefined || json) {
+    const native = process.env.HACK_RUNTIME_BACKEND === "native";
+    if (!native && (timings || timingsFile !== undefined)) {
+      throw new CliUsageError(
+        "--timings and --timings-file require the native backend."
+      );
+    }
+    if (native && !isNativeDetachedOwnerProcess()) {
+      return await withCommandTimings(
+        timingsFile,
+        () => runUpWithAutostart(input),
+        timings && !json ? printUpTimings : undefined
+      );
+    }
+  }
+  return await runUpWithAutostart(input);
+}
+
+async function runUpWithAutostart(
+  input: Parameters<typeof handleUpUnlocked>[0]
+): Promise<number> {
   parseRequestedTarget({ raw: input.args.options.target });
   nativeImageTagMode(input.args.options);
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
@@ -7823,6 +7898,7 @@ const UP_RETRY_VALUE_OPTIONS = new Set([
   "--env",
   "--profile",
   "--target",
+  "--timings-file",
 ]);
 
 function printedUpRetry(argv: readonly string[]): string {
@@ -10468,6 +10544,8 @@ async function handleRestart({
           detach: false,
           always: false,
           refreshImages: false,
+          timings: false,
+          timingsFile: undefined,
           offline: false,
         },
       },

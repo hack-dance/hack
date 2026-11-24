@@ -150,6 +150,8 @@ mod export;
 pub use export::{Export, export};
 mod journal;
 mod retention;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod retired_history;
 mod storage;
 mod storage_inventory;
 pub use retention::{prune, reconcile_export};
@@ -1157,13 +1159,16 @@ impl Driver for Session<'_, '_> {
                         "Existing service intent cannot be replayed.",
                     ));
                 }
-                self.reserve(
-                    &key,
-                    if self.restarting {
-                        "start-intent"
-                    } else {
-                        "create-intent"
-                    },
+                // The durable intent write between a met gate and the create.
+                let phase = if self.restarting {
+                    "start-intent"
+                } else {
+                    "create-intent"
+                };
+                crate::timings::measure_candidate(
+                    crate::timings::Step::StartWaveRecord,
+                    None,
+                    |_| self.reserve(&key, phase),
                 )
             }
             Event::Started { service } => self.reserve(&format!("container:{service}"), "started"),
@@ -1246,7 +1251,11 @@ impl Driver for Session<'_, '_> {
                 "Container creation cannot be replayed.",
             ));
         }
-        if inspect_resource(&self.engine, &self.receipt, &resource)?.is_some() {
+        if crate::timings::measure_candidate(crate::timings::Step::ContainerInspect, None, |_| {
+            inspect_resource(&self.engine, &self.receipt, &resource)
+        })?
+        .is_some()
+        {
             return Err(error(
                 "graph_resource_exists",
                 "Fresh graph cannot adopt an existing container.",
@@ -1314,11 +1323,14 @@ impl Driver for Session<'_, '_> {
         }
         self.check_cancelled()?;
         let body = spec::stamped(&self.configs[service], &spec);
-        let value = self.engine.request(
-            Method::POST,
-            &format!("/v1.53/containers/create?name={}", resource.name),
-            Some(&body),
-        )?;
+        let value =
+            crate::timings::measure_candidate(crate::timings::Step::ContainerCreate, None, |_| {
+                self.engine.request(
+                    Method::POST,
+                    &format!("/v1.53/containers/create?name={}", resource.name),
+                    Some(&body),
+                )
+            })?;
         #[cfg(test)]
         self.fault_pause("after-create")?;
         let id = value["Id"]

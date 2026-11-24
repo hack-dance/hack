@@ -32,7 +32,6 @@ const SELF = "tests/sync-spawn-bound.test.ts";
 const KNOWN_UNBOUNDED: Readonly<Record<string, number>> = {
   "tests/background-command-journal.test.ts": 1,
   "tests/background-command-process.test.ts": 1,
-  "tests/ci-change-scope.test.ts": 5,
   "tests/compose-startup-phases.test.ts": 1,
   "tests/daemon-detach.test.ts": 1,
   "tests/docker-context.test.ts": 1,
@@ -64,7 +63,6 @@ const KNOWN_UNBOUNDED: Readonly<Record<string, number>> = {
   "tests/project-target-inspect.test.ts": 1,
   "tests/projects-registry-worktrees.test.ts": 1,
   "tests/projects-registry.test.ts": 1,
-  "tests/qualify-provider-pin.test.ts": 1,
   "tests/registry-touch-worktrees.test.ts": 1,
   "tests/run-exec-branch-default.test.ts": 1,
   "tests/session-list-stop-tmux.test.ts": 2,

@@ -1,0 +1,20 @@
+---
+title: ProjectRemoteSelection · Teardown hooks
+---
+stateDiagram-v2
+  direction TB
+  [*] --> starting
+  starting --> started: Started
+  starting --> crashed: Crash
+  started --> started: Switch
+  started --> crashed: Crash
+  started --> done: Teardown
+  crashed --> done: Teardown
+  class starting wait
+  class started live
+  class crashed fail
+  class done ok
+  note right of done
+    INV Hook uses started target.
+    INV Active labels win.
+  end note

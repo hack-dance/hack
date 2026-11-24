@@ -38,6 +38,9 @@ JSON findings and plan steps label their supplied action `safe`, `admin` or
 `manual`; severity stays separate. Only explicitly safe commands should be
 offered as Run. Host changes and decisions still need review.
 
+If a direct daemon replacement refuses its PATH, the existing daemon stays
+running. Review the flagged directory, then retry the replacement.
+
 1. **Back up before running v5 on the project.** Keep a private copy outside the
    checkout of `.hack/`, the root `.gitignore` and `.hack.secret.key`, and the
    global Hack configuration and project registry. Record files that were absent.

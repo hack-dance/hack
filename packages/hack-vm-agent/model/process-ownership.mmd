@@ -1,0 +1,9 @@
+stateDiagram-v2
+    [*] --> Reserved
+    Reserved --> Running: exec in new group
+    Running --> Pinned: observe exit
+    Pinned --> Released: kill group and reap
+    Released --> [*]
+    Running --> Crashed: agent exits
+    Crashed --> Empty: kill cgroup and verify
+    Empty --> NewIncarnation: restart agent

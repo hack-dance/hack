@@ -222,9 +222,10 @@ afterEach(async () => {
 });
 
 async function createFixture(foreground: string): Promise<Fixture> {
-  // Under /tmp: hackd's socket path must fit the platform's sun_path limit.
-  const root = await mkdtemp(join(await realpath("/tmp"), "hack-dsw-"));
-  const home = join(root, "home");
+  // Keep the home and its daemon socket within the caller's scratch, with
+  // short components to fit the platform's Unix socket path limit.
+  const root = await mkdtemp(join(await realpath(tmpdir()), "dsw-"));
+  const home = root;
   const bin = join(root, "bin");
   await mkdir(home, { recursive: true });
   await mkdir(bin, { recursive: true });
@@ -298,10 +299,37 @@ test.skipIf(process.platform === "win32")(
       api_compatible: true,
     });
     const pid = await readFile(
-      join(fixture.root, "home/.hack/daemon/hackd.pid"),
+      join(fixture.root, ".hack/daemon/hackd.pid"),
       "utf8"
     );
     expect(Number(pid.trim())).toBeGreaterThan(0);
+  },
+  90_000
+);
+
+test.skipIf(process.platform === "win32")(
+  "an unsafe direct replacement PATH leaves the running daemon and socket in place",
+  async () => {
+    fixture = await createFixture(":");
+    const start = await run(fixture, ["daemon", "start"]);
+    expect(start.exitCode, start.output).toBe(0);
+    const pidPath = join(fixture.root, ".hack/daemon/hackd.pid");
+    const pid = await readFile(pidPath, "utf8");
+
+    const unsafeBin = join(fixture.root, ".bun", "bin");
+    await mkdir(unsafeBin, { recursive: true });
+    await chmod(unsafeBin, 0o775);
+    const restart = await run(fixture, ["daemon", "restart", "--json"]);
+    expect(restart.exitCode).toBe(1);
+    expect(restart.output).toContain("Keeping the running hackd");
+    expect(restart.output).toContain("unsafe PATH");
+    expect(await readFile(pidPath, "utf8")).toBe(pid);
+    const status = await run(fixture, ["daemon", "status", "--json"]);
+    expect(JSON.parse(status.output)).toMatchObject({
+      pid: Number(pid.trim()),
+      status: "running",
+      api_compatible: true,
+    });
   },
   90_000
 );

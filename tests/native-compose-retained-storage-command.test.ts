@@ -104,9 +104,11 @@ async function storageFixture() {
 
 async function startAndStop() {
   const root = await storageFixture();
-  expect((await command(root)).code).toBe(0);
+  const started = await command(root);
+  expect(started.code, started.stdout + started.stderr).toBe(0);
   const volume = await retainedVolume(root);
-  expect((await command(root, ["down", "--json"])).code).toBe(0);
+  const stopped = await command(root, ["down", "--json"]);
+  expect(stopped.code, stopped.stdout + stopped.stderr).toBe(0);
   expect(await state(root)).toMatchObject({ stopped: true, pending: false });
   expect(await retainedVolume(root)).toEqual(volume);
   expect(await composeStarts(root)).toHaveLength(1);
@@ -119,7 +121,7 @@ test(
     const root = await storageFixture();
     expect(await Bun.file(join(root, "volumes")).exists()).toBe(false);
     const result = await command(root);
-    expect(result.code).toBe(0);
+    expect(result.code, result.stdout + result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       ok: true,
       data: { status: "ready" },
@@ -135,7 +137,7 @@ test(
   async () => {
     const { root, volume } = await startAndStop();
     const result = await command(root);
-    expect(result.code).toBe(0);
+    expect(result.code, result.stdout + result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       ok: true,
       data: { status: "ready" },

@@ -1101,10 +1101,17 @@ test("plain down refuses missing owner recovery proof without replaying cleanup"
 });
 
 test.each([
-  { enrollment: false, label: "ready owner" },
-  { enrollment: true, label: "legacy pending cleanup" },
+  { enrollment: false, label: "ready owner", phase: "ready-observed" },
+  // Every service started, some goal unmet: a real run with a mapping.
+  { enrollment: false, label: "started owner", phase: "started-observed" },
+  {
+    enrollment: true,
+    label: "legacy pending cleanup",
+    phase: "ready-observed",
+  },
 ])("down --recover stops $label selected by its exact receipt", async ({
   enrollment,
+  phase,
 }) => {
   const opts = await fixture();
   const events: string[] = [];
@@ -1131,7 +1138,7 @@ test.each([
           run.run,
           "--json",
         ]);
-        return ownerSelection("exited");
+        return ownerSelection("exited", phase);
       }
       if (request.args[1] === "recover-live-owner") {
         expect(request.args).toEqual([
@@ -1223,9 +1230,14 @@ test.each([
 
 test.each([
   {
-    name: "an owner that exited after its restore was admitted",
+    name: "an exited owner with an unproved failed start",
     selection: ownerSelection("exited", "failed-retained"),
-    text: "Run hack ps --json",
+    text: "fresh native home instructions",
+  },
+  {
+    name: "an exited owner with an unproved unfinished start",
+    selection: ownerSelection("exited", "preparing"),
+    text: "fresh native home instructions",
   },
   {
     name: "an unclassified publication",
@@ -1829,6 +1841,8 @@ for (const predecessor of [false, true]) {
 test.each([
   { phase: "ready-observed", original: null },
   { phase: "failed-retained", original: null },
+  { phase: "preparing", original: null },
+  { phase: "restoring", original: null },
   { phase: "cleanup-intent", original: "1".repeat(64) },
 ])("plain down resumes exact dead-owner cleanup after $phase without replaying the refused stop", async ({
   phase,
@@ -1852,7 +1866,11 @@ test.each([
         return {
           ...ownerSelection("exited", phase),
           live_owner_recovery: original,
-          failed_start_recoverable: phase === "failed-retained",
+          failed_start_recoverable: [
+            "failed-retained",
+            "preparing",
+            "restoring",
+          ].includes(phase),
         };
       }
       if (command === "recover-live-owner") {
@@ -1874,6 +1892,39 @@ test.each([
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
+test.each([
+  "preparing",
+  "restoring",
+])("down --recover selects the exact unfinished $phase receipt", async (phase) => {
+  const opts = await fixture();
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async ({ args }) => {
+      if (args[1] === "foreground-owner") {
+        return {
+          ...ownerSelection("exited", phase),
+          failed_start_recoverable: true,
+        };
+      }
+      if (args[1] === "recover-live-owner") {
+        expect(args).toContain(receiptSha);
+        recovered = true;
+        return {
+          run: run.run,
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      expect(args[1]).toBe("inspect");
+      return snapshot(recovered);
+    },
+  });
+  expect(result.status).toBe("stopped");
+});
+
 // HACK-2456: the pool stopped under a running project.
 function poolStoppedError() {
   return new NativeRuntimeRequestError({
@@ -1882,7 +1933,10 @@ function poolStoppedError() {
   });
 }
 
-test("down --recover on a stopped pool with a dead owner starts the pool once and recovers with data retained", async () => {
+test.each([
+  "ready-observed",
+  "started-observed",
+])("down --recover on a stopped pool with a dead owner starts the pool once and recovers with data retained (%s)", async (phase) => {
   const opts = await fixture();
   const calls: string[] = [];
   let pool = false;
@@ -1909,7 +1963,7 @@ test("down --recover on a stopped pool with a dead owner starts the pool once an
       }
       if (command === "foreground-owner") {
         return {
-          ...ownerSelection("exited"),
+          ...ownerSelection("exited", phase),
           dead_owner_recovery: pool ? "7".repeat(64) : null,
         };
       }
@@ -1943,6 +1997,151 @@ test("down --recover on a stopped pool with a dead owner starts the pool once an
     "inspect",
   ]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+// HACK-2572: right after the pool stopped, the run's detached owner is still exiting.
+test("down --recover waits for the owner of an ended pool boot to go, then recovers as before", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let pool = false;
+  let cleaned = false;
+  let owners = 0;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    poolBootEnded: async () => !pool,
+    endedBootOwnerWaitMs: 5000,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        owners += 1;
+        return owners <= 2
+          ? ownerSelection("running")
+          : {
+              ...ownerSelection("exited"),
+              dead_owner_recovery: pool ? "7".repeat(64) : null,
+            };
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      if (command === "recover-cleanup") {
+        cleaned = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (command === "retire-recovered-publisher") {
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+  // Two reads see the owner still running, the third sees it exited; then the
+  // pool is started once and the run recovered as for any dead owner.
+  expect(calls.slice(0, 5)).toEqual([
+    "inspect",
+    "foreground-owner",
+    "foreground-owner",
+    "foreground-owner",
+    "foreground-owner",
+  ]);
+  expect(calls.filter((call) => call === "up")).toHaveLength(1);
+  expect(calls).toContain("recover-cleanup");
+});
+
+// HACK-2572: the owner's end seen by the selection, point by point.
+for (const recover of [true, false]) {
+  test(`${recover ? "down --recover" : "plain down"} through the owner's end (running, uncertain, exited) recovers once`, async () => {
+    const opts = await fixture();
+    const calls: string[] = [];
+    const points = ["running", "uncertain", "uncertain"] as const;
+    let pool = false;
+    let cleaned = false;
+    let owners = 0;
+    const result = await nativeProjectDown({
+      ...opts,
+      ...(recover ? { recover: true } : {}),
+      poolBootEnded: async () => !pool,
+      endedBootOwnerWaitMs: 5000,
+      invoke: async (request) => {
+        const command = request.args[1]!;
+        calls.push(command);
+        if (command === "up") {
+          pool = true;
+          return { phase: "running" };
+        }
+        if (command === "foreground-owner") {
+          owners += 1;
+          const point = points[owners - 1];
+          return point
+            ? ownerSelection(point)
+            : {
+                ...ownerSelection("exited"),
+                dead_owner_recovery: pool ? "7".repeat(64) : null,
+              };
+        }
+        if (!pool) {
+          throw poolStoppedError();
+        }
+        if (!recover) {
+          // The retried plain down then takes its ordinary path on the running pool.
+          return snapshot(true);
+        }
+        if (command === "recover-cleanup") {
+          cleaned = true;
+          return { run: run.run, recovered: true, data_retained: true };
+        }
+        if (command === "retire-recovered-publisher") {
+          return { run: run.run, publisher_retired: true, data_retained: true };
+        }
+        return snapshot(cleaned);
+      },
+    });
+    expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+    // Three selections see the owner alive or ending; the pool is started once only
+    // after one sees it exited.
+    expect(calls.slice(0, 6)).toEqual([
+      "inspect",
+      "foreground-owner",
+      "foreground-owner",
+      "foreground-owner",
+      "foreground-owner",
+      "foreground-owner",
+    ]);
+    expect(calls.filter((call) => call === "up")).toHaveLength(1);
+    if (recover) {
+      expect(calls.filter((call) => call === "recover-cleanup")).toHaveLength(
+        1
+      );
+    }
+  });
+}
+
+test("down keeps its refusal at once when the stopped pool's owner is running but the boot is not proven ended", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  const error = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    poolBootEnded: async () => false,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "foreground-owner") {
+        return ownerSelection("running");
+      }
+      throw poolStoppedError();
+    },
+  }).catch((caught: unknown) => caught);
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "runtime_not_running"
+  );
+  expect(calls).not.toContain("up");
 });
 
 test("plain down on a stopped pool with a dead owner also starts the pool to recover", async () => {

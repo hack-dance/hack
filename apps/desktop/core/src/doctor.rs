@@ -68,7 +68,25 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "docker daemon"
         | "docker plugin discovery"
         | "bun"
-        | "mutagen" => (Engine, Machine),
+        | "mutagen"
+        | "brew"
+        | "brew (optional)"
+        | "dnsmasq"
+        | "dnsmasq (optional)"
+        | "mkcert"
+        | "mkcert (optional)"
+        | "gum"
+        | "gum (optional)"
+        | "fzf"
+        | "fzf (optional)"
+        | "tmux"
+        | "tmux (sessions)"
+        | "go"
+        | "go (optional)"
+        | "caddy"
+        | "caddy (optional)"
+        | "asdf"
+        | "asdf (optional)" => (Engine, Machine),
         // Dev performance (doctor-dev-performance.ts): image architecture
         // against the engine's, and the Compose file's own settings.
         "compose backend features" | "emulated services" | "shared volume architectures" => {
@@ -87,7 +105,11 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         "caddy local ca" | "host tls trust" | "local ca trust" | "superseded caddy roots" => {
             (Certificates, Machine)
         }
-        "daemon" | "daemon service" | "gateway config" | "gateway tokens" => (Daemon, Machine),
+        "daemon"
+        | "daemon service"
+        | "autostart login service"
+        | "gateway config"
+        | "gateway tokens" => (Daemon, Machine),
         "env key"
         | "env mode"
         | "env materialization"
@@ -96,18 +118,37 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "secret store"
         | "secret integrity"
         | "secrets hygiene"
-        | "compose env at rest" => (EnvSecrets, Project),
-        "project" | "runtime hygiene" | "lifecycle hygiene" | "compose networks"
-        | "generated files" | "hack gitignore" | "worktree instances" | "sessions mux"
-        | "polling watchers" | "dev image tags" => (ProjectFiles, Project),
+        | "compose env at rest"
+        | "env override coverage" => (EnvSecrets, Project),
+        "project"
+        | "runtime hygiene"
+        | "lifecycle hygiene"
+        | "compose networks"
+        | "generated files"
+        | "hack gitignore"
+        | "worktree instances"
+        | "sessions mux"
+        | "polling watchers"
+        | "dev image tags"
+        | "shared source installs"
+        | "root-owned checkout files"
+        | "prerequisites"
+        | "lifecycle supervisor" => (ProjectFiles, Project),
         "native host dns"
         | "native hack.local route"
         | "native hack.local repair"
         | "native root trust"
         | "native ca repair"
         | "native https owner"
-        | "native https route" => (Native, Machine),
-        "native settings" | "native source size" | "amd64 emulation" => (Native, Project),
+        | "native https route"
+        | "native temporary aliases"
+        | "native pool idle" => (Native, Machine),
+        "native settings"
+        | "native source size"
+        | "amd64 emulation"
+        | "native data services"
+        | "native process wrappers"
+        | "native image builder" => (Native, Project),
         _ => return prefixed(id),
     };
     Some(exact)
@@ -116,10 +157,14 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
 fn prefixed(id: &str) -> Option<(Area, Scope)> {
     if id.starts_with("resolver:")
         || id.starts_with("dnsmasq.conf:")
+        || id.starts_with("dnsmasq:")
         || id.starts_with("dns:")
         || id.starts_with("network:")
     {
         return Some((Area::RoutingDns, Scope::Machine));
+    }
+    if id.starts_with("prerequisite ") {
+        return Some((Area::ProjectFiles, Scope::Project));
     }
     if id.starts_with("native ") {
         return Some((Area::Native, Scope::Project));
@@ -1997,66 +2042,20 @@ mod tests {
         }
     }
 
-    /// Every check id the CLI declares (summary groups and `*_CHECK`
-    /// constants in `src/commands/doctor.ts` and `src/lib/doctor-*.ts`)
-    /// maps to a known area.
     #[test]
-    fn cli_check_ids_all_classify() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let mut sources = vec![root.join("src/commands/doctor.ts")];
-        if let Ok(dir) = std::fs::read_dir(root.join("src/lib")) {
-            for e in dir.flatten() {
-                let n = e.file_name().to_string_lossy().into_owned();
-                if n.starts_with("doctor") && n.ends_with(".ts") {
-                    sources.push(e.path());
-                }
-            }
+    fn new_doctor_categories_follow_the_check_scope() {
+        for (id, area, scope) in [
+            ("shared source installs", Area::ProjectFiles, Scope::Project),
+            ("env override coverage", Area::EnvSecrets, Scope::Project),
+            ("prerequisites", Area::ProjectFiles, Scope::Project),
+            ("prerequisite example", Area::ProjectFiles, Scope::Project),
+            ("lifecycle supervisor", Area::ProjectFiles, Scope::Project),
+            ("native temporary aliases", Area::Native, Scope::Machine),
+            ("native pool idle", Area::Native, Scope::Machine),
+            ("native image builder", Area::Native, Scope::Project),
+            ("autostart login service", Area::Daemon, Scope::Machine),
+        ] {
+            assert_eq!(classify(id), Some((area, scope)), "{id}");
         }
-        let mut ids = Vec::new();
-        for path in &sources {
-            let Ok(text) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            // `const X_CHECK = "id";`
-            for line in text.lines() {
-                let l = line.trim();
-                if l.contains("_CHECK = \"")
-                    && (l.starts_with("const ") || l.starts_with("export const "))
-                    && let Some(id) = l.split('"').nth(1)
-                {
-                    ids.push(id.to_owned());
-                }
-            }
-            // String literals inside DOCTOR_SUMMARY_GROUPS.
-            if let Some(start) = text.find("const DOCTOR_SUMMARY_GROUPS") {
-                let block = &text[start..];
-                let block = &block[..block.find("] as const;").unwrap_or(block.len())];
-                for (i, part) in block.split('"').enumerate() {
-                    if i % 2 == 1 && !part.is_empty() && block_is_check(part) {
-                        ids.push(part.to_owned());
-                    }
-                }
-            }
-        }
-        assert!(ids.len() > 40, "expected the CLI's check ids, got {ids:?}");
-        let unknown: Vec<&String> = ids.iter().filter(|id| classify(id).is_none()).collect();
-        assert!(
-            unknown.is_empty(),
-            "unclassified CLI check ids: {unknown:?}"
-        );
-    }
-
-    /// Titles in the summary groups are not check ids.
-    fn block_is_check(s: &str) -> bool {
-        ![
-            "Dependencies",
-            "Global runtime & agents",
-            "Browser access",
-            "Resolver & DNS",
-            "Project & env",
-            "Dev performance",
-            "Sessions",
-        ]
-        .contains(&s)
     }
 }

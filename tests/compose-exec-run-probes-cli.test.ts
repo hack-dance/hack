@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const CLI = resolve(import.meta.dir, "..", "index.ts");
@@ -207,6 +207,13 @@ test("run reads Docker once with no record, then never; the override lives in Ha
   const stored = await storedOverrides();
   expect(stored).toHaveLength(1);
   expect(stored[0]).toEndWith("@base.yml");
+  for (const path of [
+    stored[0] ?? "",
+    dirname(stored[0] ?? ""),
+    join(hackHome, "compose-overrides"),
+  ]) {
+    expect((await stat(path)).mode & 0o077).toBe(0);
+  }
   expect(await readFile(stored[0] ?? "", "utf8")).toContain("172.30.0.53");
   expect(await Bun.file(LEGACY()).exists()).toBe(false);
   // Compose gets the stored file by absolute path and an explicit project directory.

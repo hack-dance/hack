@@ -105,6 +105,7 @@ cat "$file" > seen-bake.json
 cat dockerfile/Dockerfile > seen-dockerfile
 cat dockerfile/Dockerfile.dockerignore > seen-dockerignore
 ls -A snapshot/context > seen-entries
+(cd snapshot/context && find . -print) > seen-tree
 case {mode} in
   ok) printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
   given) printf '{{"build":{{"containerimage.config.digest":"%s"}}}}' "$(cat image-id)" > "$meta" ;;
@@ -1624,6 +1625,131 @@ fn context_edits_rebuild_and_ignored_edits_reuse() {
         .join(context::cache_name(&app));
     assert!(cache.exists());
     assert!(reclaim::run(&fixture.candidate, &pool, true).is_ok());
+}
+
+#[test]
+fn hack_state_is_pruned_before_hashing_or_snapshotting() {
+    let fixture = Fixture::new();
+    let unrelated_key = fixture.inputs(Policy::Missing).key;
+    let hack = fixture.project.join(".hack");
+    let builds = builds_root(&fixture.candidate);
+    let private_paths = [
+        ".internal/branch-usage.json",
+        ".internal/lifecycle/project.log",
+        ".internal/native-runs/main.json.starting-first",
+        ".internal/compose.env.override.yml",
+        ".branch/compose.override.yml",
+        ".env",
+        ".env.state.json",
+        ".env.local",
+        "hack.env.local.yaml",
+        "hack.env.dev.local.yaml",
+        ".hack.env.dev.local.yaml.pending.tmp",
+        ".hack-staging/env.tmp",
+        "tickets/cache",
+    ];
+    for name in private_paths {
+        let path = hack.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "fixture").unwrap();
+    }
+    fs::write(fixture.project.join(".hack.secret.key"), "fixture").unwrap();
+    let nested = fixture.project.join("child/.hack/.internal");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("branch-usage.json"), "nested state").unwrap();
+    fs::write(hack.join(".env.example"), "example").unwrap();
+    fs::write(hack.join(".dockerignore"), "!**\n").unwrap();
+    fs::write(fixture.project.join(".dockerignore"), "!**\n").unwrap();
+    fs::create_dir_all(hack.join("src/.internal")).unwrap();
+    fs::write(hack.join("src/.internal/keep"), "source").unwrap();
+    fs::write(hack.join("Dockerfile"), "FROM scratch\nCOPY . /app\n").unwrap();
+
+    let request = |context: &str, dockerfile: &str| BuildRequest {
+        context: context.into(),
+        dockerfile: dockerfile.into(),
+        ..fixture.request(Policy::Missing)
+    };
+    let first = prepare(request(".hack", "Dockerfile"), &builds).unwrap();
+    let pool = FakePool::new("pool-1");
+    for (context, dockerfile) in [(".hack", "Dockerfile"), (".", ".hack/Dockerfile")] {
+        let inputs = prepare(request(context, dockerfile), &builds).unwrap();
+        pool.built(&inputs, "pool-1", serde_json::json!({}));
+        fixture.client(&inputs, "ok");
+        assert!(
+            !run(&fixture.candidate, &pool, &inputs, &never)
+                .unwrap()
+                .reused
+        );
+        let tree = fs::read_to_string(fixture.scratch(&inputs).join("seen-tree")).unwrap();
+        for name in private_paths.into_iter().chain([".hack.secret.key"]) {
+            assert!(!tree.lines().any(|line| line.ends_with(&format!("/{name}"))));
+        }
+        assert!(
+            tree.lines()
+                .any(|line| line.ends_with("/src/.internal/keep"))
+        );
+        assert!(tree.lines().any(|line| line.ends_with("/.env.example")));
+    }
+
+    fs::write(hack.join(private_paths[0]), "rewritten usage").unwrap();
+    fs::write(
+        hack.join(private_paths[1]),
+        "fixture\nappended lifecycle line",
+    )
+    .unwrap();
+    fs::remove_file(hack.join(private_paths[2])).unwrap();
+    fs::write(
+        hack.join(".internal/native-runs/main.json.starting-second"),
+        "12345",
+    )
+    .unwrap();
+    fs::write(
+        hack.join(".internal/native-runs/main.json"),
+        "new run record",
+    )
+    .unwrap();
+    let next = prepare(request(".hack", "Dockerfile"), &builds).unwrap();
+    assert_eq!(
+        first.key_input["context_sha256"],
+        next.key_input["context_sha256"]
+    );
+    assert_eq!(first.key, next.key);
+    pool.built(&next, "pool-1", serde_json::json!({}));
+    assert!(
+        run(&fixture.candidate, &pool, &next, &never)
+            .unwrap()
+            .reused
+    );
+    assert_eq!(fixture.calls(&first), 1);
+    assert_eq!(fixture.inputs(Policy::Missing).key, unrelated_key);
+}
+
+#[test]
+fn explicit_local_copy_of_private_state_has_an_actionable_error() {
+    let fixture = Fixture::new();
+    let builds = builds_root(&fixture.candidate);
+    let request = || BuildRequest {
+        context: ".".into(),
+        dockerfile: "app/Dockerfile".into(),
+        ..fixture.request(Policy::Missing)
+    };
+    for instruction in [
+        "COPY ./.hack/.internal/lifecycle/project.log /app",
+        "COPY [\"/.hack.secret.key\", \"/app\"]",
+        "COPY '.hack/.env' /app",
+    ] {
+        fs::write(
+            fixture.project.join("app/Dockerfile"),
+            format!("FROM scratch\n{instruction}\n"),
+        )
+        .unwrap();
+        let error = prepare(request(), &builds).unwrap_err();
+        assert_eq!(error.code, "native_build_copy_private");
+        assert!(error.message_fixed);
+        assert!(error.message.contains(
+            "Hack's own machine-local file or directory, which is never sent to a build"
+        ));
+    }
 }
 
 #[test]

@@ -14,7 +14,11 @@
  * shared HTTPS owner uses (`nativeHttpsPoolBootEnded`: another owner token, a
  * new boot id, or a stopped phase, written only after the provider is proven
  * gone), it allows `graceMs` for the start to finish on its own, then calls
- * `onEnded`. A pool that is only slow (starting, stopping, unreadable, or any
+ * `onEnded`. `graceMs` is read when the ended boot is seen: a start that is
+ * already ready has nothing left to finish (its services went with the guest),
+ * so it passes 0 and ends at once. A later `up` waits for this process to be
+ * proven gone before it recovers the run, so ending sooner only shortens that
+ * wait (HACK-2535 real-VM run: about 9 s of `up` after a pool stop). A pool that is only slow (starting, stopping, unreadable, or any
  * transitional phase) never proves an ended boot, so it never ends the start.
  *
  * Ending is the same as a crash of the start process, which the run's records
@@ -27,14 +31,15 @@ import {
   readNativePoolRecord,
 } from "./native-https-pool-boot.ts";
 
-export const NATIVE_START_POOL_CHECK_MS = 5000;
+export const NATIVE_START_POOL_CHECK_MS = 1000;
 export const NATIVE_START_POOL_GRACE_MS = 10_000;
 
 export function watchNativeStartPool(opts: {
   readonly home: string;
   readonly onEnded: () => void | Promise<void>;
   readonly checkMs?: number;
-  readonly graceMs?: number;
+  /** Read when the ended boot is seen; a ready start passes 0. */
+  readonly graceMs?: number | (() => number);
   /** Test seam: the pool record read; production reads `owner.json`. */
   readonly read?: (home: string) => Promise<unknown>;
 }): () => void {
@@ -60,11 +65,15 @@ export function watchNativeStartPool(opts: {
       return;
     }
     if (nativeHttpsPoolBootEnded(record, pool)) {
+      const graceMs =
+        typeof opts.graceMs === "function"
+          ? opts.graceMs()
+          : (opts.graceMs ?? NATIVE_START_POOL_GRACE_MS);
       grace = setTimeout(() => {
         if (!stopped) {
           void Promise.resolve(opts.onEnded()).catch(() => undefined);
         }
-      }, opts.graceMs ?? NATIVE_START_POOL_GRACE_MS);
+      }, graceMs);
       grace.unref?.();
     }
   };

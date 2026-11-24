@@ -21,8 +21,10 @@ import {
 import {
   loadNativeProjectRun,
   loadNativeRestartIntent,
+  loadNativeStartupRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  type NativeStartupRun,
   nativeProjectStartupPending,
 } from "./native-project-run.ts";
 import {
@@ -45,6 +47,7 @@ type Item = {
   readiness?: "started" | "healthy" | "completed";
 };
 type Options = {
+  readonly signal?: AbortSignal;
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly invoke?: typeof invokeNativeRuntime;
@@ -91,7 +94,7 @@ export type NativeProjectPsResult = {
 };
 function inspected(
   value: unknown,
-  expected: NativeProjectRun,
+  expected: NativeStartupRun & { readonly owner?: string },
   includeReadiness = false
 ): {
   items: Item[];
@@ -112,7 +115,7 @@ function inspected(
   const receipt = value.receipt;
   if (
     receipt.run !== expected.run ||
-    receipt.owner !== expected.owner ||
+    (expected.owner !== undefined && receipt.owner !== expected.owner) ||
     receipt.namespace !== expected.namespace ||
     receipt.plan_id !== expected.planId ||
     typeof receipt.phase !== "string" ||
@@ -145,9 +148,19 @@ function inspected(
   if (items.length > 32) {
     throw refused();
   }
+  const observedPorts = Array.isArray(value.startup_observed_ports)
+    ? new Set(value.startup_observed_ports)
+    : new Set();
   return {
     items,
-    ports: nativeDeclaredPorts(receipt.resources),
+    ports: nativeDeclaredPorts(receipt.resources).map((port) =>
+      observedPorts.has(port.port) &&
+      items.some(
+        (item) => item.service === port.service && item.state === "running"
+      )
+        ? { ...port, state: "observed" }
+        : port
+    ),
     phase: receipt.phase,
     foreground:
       receipt.relay_startup !== null && receipt.relay_startup !== undefined,
@@ -182,7 +195,7 @@ function containerItem(
 /** Presentation is lease-free; finite log inspection keeps its bounded lease retry. */
 async function inspect(
   opts: Options,
-  run: NativeProjectRun,
+  run: NativeStartupRun & { readonly owner?: string },
   statusOnly = false
 ) {
   return inspected(
@@ -192,6 +205,7 @@ async function inspect(
           cwd: opts.scope.projectRoot,
           args: ["graph", "status", "--run-id", run.run, "--json"],
           timeoutMs: 30_000,
+          signal: opts.signal,
         })
       : await inspectNativeProjectGraph({
           runtime: opts.runtime,
@@ -297,6 +311,10 @@ function ownerJournalChanged(owner: unknown): boolean {
 export async function nativeProjectPs(
   opts: Options
 ): Promise<NativeProjectPsResult> {
+  const early = await nativeStartupProjectPs(opts);
+  if (early) {
+    return early;
+  }
   const run = await loadNativeProjectRun(opts.scope);
   if (!run) {
     return {
@@ -325,6 +343,7 @@ export async function nativeProjectPs(
         cwd: opts.scope.projectRoot,
         args: ["graph", "owner-status", "--run-id", run.run, "--json"],
         timeoutMs: 15_000,
+        signal: opts.signal,
       });
       if (ownerJournalChanged(owner)) {
         return {
@@ -364,6 +383,37 @@ export async function nativeProjectPs(
     phase: snapshot.phase,
     ...(ports.length ? { ports } : {}),
   };
+}
+
+export async function nativeStartupProjectPs(
+  opts: Options
+): Promise<NativeProjectPsResult | null> {
+  const startup = await loadNativeStartupRun(opts.scope);
+  if (!startup) {
+    return null;
+  }
+  try {
+    const snapshot = await inspect(opts, startup, true);
+    if (
+      !(
+        snapshot.foreground &&
+        ["preparing", "restoring", "started-observed"].includes(snapshot.phase)
+      )
+    ) {
+      return null;
+    }
+    return {
+      backend: "native",
+      status: "observed",
+      run: startup.run,
+      phase: snapshot.phase,
+      items: snapshot.items,
+      ports: snapshot.ports.filter((port) => port.state === "observed"),
+    };
+  } catch {
+    // An advisory marker can predate native enrollment or race with teardown.
+    return null;
+  }
 }
 /** Read only the saved mapping, then let the lease-free runtime select its exact container. */
 export async function followNativeProjectLogs(

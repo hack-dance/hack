@@ -212,13 +212,17 @@ Directories and files are created private to your user (0700 and 0600).
 Everything is written into `<backup>.partial/`. Each tar is fsynced as it is
 written; the manifest is written last and fsynced, then the `.partial`
 directory is fsynced, one rename publishes `<backup>/`, and the parent
-directory is fsynced. The outcomes are:
+directory is fsynced. When the export created the parent itself (a new
+`--out` tree, or the first backup under Hack's home), the directory above
+each directory it created is fsynced too, deepest first, so the new path is
+durable as a whole. The outcomes are:
 
 - **Failure before the rename**: only `<backup>.partial/` exists. It is never
   a backup: Hack never reads, reuses or completes it, and you can delete it.
 - **Success**: `<backup>/` exists, its rename was flushed, and the command
   exits 0.
-- **Parent fsync failed after the rename**: `<backup>/` exists and is
+- **An fsync after the rename failed** (the parent, or the directory above
+  one the export created): `<backup>/` exists and is
   complete, but the command exits 1 with `backup at <path> is complete but
   its durability could not be confirmed` and `error.detail` `{published:
   true, durable: false}`. Use it once the file system is healthy, or export

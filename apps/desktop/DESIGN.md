@@ -244,18 +244,23 @@ Source: `hack doctor --json --path <root>` per registered project, plus
 `hack doctor --machine --json` for machine findings, on open and every 10
 minutes while visible. The project audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; the machine variant uses the same envelope with `data.schema: "hack.doctor.machine.v1"` (R7c). Checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a). Until the app switches to the machine variant, it still runs one plain `hack doctor --json` outside any project and de-duplicates machine checks.
 
-| Card part | Content |
-|---|---|
-| Group | Area: Engine, Routing and DNS, Certificates, Daemon, Env and secrets, Project files, Native |
-| Severity | `error` red, `warn` amber; `ok` collapsed into "12 checks passed" |
-| Affected | "Machine" or the projects it applies to |
-| One action | Run safe fix (R7b) · Open Terminal (admin) · Copy command · Open doc |
+Doctor shows checked time and groups rows as Machine, Projects and a collapsed
+list of passed checks. The machine rows come from the Setup report. Each row
+offers its observed repair, guide or recheck. The scoped Git ignore repair is
+runnable only when Doctor reports the known safe recipe for an exact checkout.
+Other project commands remain manual. Upgrade opens its review.
 
-Machine findings are de-duplicated by check `id` and shown once; project
-findings link from that project's header. Schema 1 supplies `area`, `scope` and
-`fix`; older CLI versions still need `core`'s known-ID mapping. Unknown checks
-appear under "Other" with only Copy and Open doc. No Run button appears without
-a `fix.kind: safe`.
+Fix all queues runnable repairs in display order. The shared drawer owns the
+active command. After an exit, Doctor reads fresh evidence and advances only
+after exit zero and a confirmed repair. A stop, failed command, or unconfirmed
+repair leaves the terminal output available. The app skips a queued check that
+already passes, and checks that a remaining action still matches before running
+it.
+
+The project pane shows one dismissible follow-up. A dismissal belongs to the
+current condition and clears when that condition changes or resolves. Release
+availability and offline update checks use the read-only R14 output. The
+banner and error sheets use fixtures.
 
 Browser observations and native hostname DNS/HTTPS route checks are project-scoped:
 each describes the selected exact target and must not be de-duplicated across projects.
@@ -266,7 +271,7 @@ each describes the selected exact target and must not be de-duplicated across pr
 
 | State | Source | Shown | Action |
 |---|---|---|---|
-| Update available | R14 (read-only, any install kind). `hack update --check` rejects Homebrew installs and candidate launchers, so it is not used | Chip "Hack vX available" | Review |
+| Update available | R14 via `hack update --check --json --observe` (read-only, any install kind) | Follow-up "Hack X is available" | Review in the Upgrade pane, with the target release and a copyable install command when R14 supplies one |
 | Checking | `hack upgrade check --json` (#790) | Spinner, then plan | none |
 | Blocked | `ready: false`. `blockers[]` / `incomplete[]` are `{scope,id,summary}`; the command or action comes from the matching finding (`machine[]` or `projects[].findings[]` by scope + id) | One card per blocker | Copy / Open Terminal; Run only with R17's `kind: safe`; Re-check |
 | Ready | `ready: true`, `plan[]` (`command` / `args` / `action`, `blocker`) | Ordered plan | Upgrade |

@@ -1690,6 +1690,14 @@ evidence reset, receipt publication and crash/retry. The two negative controls
 remove reset and fresh old-ID absence respectively. Source mapping, regression
 coverage and native proof limits are in `docs/reference/v5-model-coverage.md`.
 
+`shutdown-receipt/ShutdownReceipt.tla` checks the durable ID handoff from
+cleanup to restore after an unacknowledged create. The 16-state positive
+configuration separates the receipt and shutdown commits from deletion and
+allows cleanup to retry after each commit. The missing-receipt control fails
+`IdentifiableByRestore` at `WriteShutdown`. The reachability control reaches
+`Restore` after both IDs match and compute is absent. See the
+[source mapping and state chart](../../../docs/reference/v5-model-coverage.md#cleanup-identity-after-an-unacknowledged-create-hack-2628).
+
 ## Foreground port publisher shutdown
 
 `native-publisher-stop/PublisherStop.tla` bounds one graph and publisher, one

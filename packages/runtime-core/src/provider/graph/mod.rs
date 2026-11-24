@@ -286,6 +286,10 @@ pub struct Resource {
     pub key: String,
     pub name: String,
     pub id: Option<String>,
+    /// Cleanup verified and recorded the ID from an unacknowledged create.
+    /// Cleanup authorizations selected before that observation bound a missing ID.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_observed_create: bool,
     pub image: Option<String>,
     pub phase: String,
     /// The service's reviewed opt-in policy for running a `linux/amd64` image under Rosetta
@@ -294,6 +298,38 @@ pub struct Resource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amd64_emulation: Option<crate::project::Amd64Emulation>,
 }
+
+impl Resource {
+    fn has_unacknowledged_create(&self) -> bool {
+        // The execution driver records "uncertain" if the engine create call
+        // fails before returning the ID, including when its reply is lost.
+        self.kind == Kind::Container
+            && self.id.is_none()
+            && matches!(self.phase.as_str(), "create-intent" | "uncertain")
+    }
+
+    fn has_cleanup_observed_id(&self, graph_phase: &str) -> bool {
+        self.cleanup_observed_create
+            && self.kind == Kind::Container
+            && self.id.as_deref().is_some_and(|id| hex(id, 64))
+            && matches!(
+                (graph_phase, self.phase.as_str()),
+                (
+                    "cleanup-intent" | "reconciled-cleanup-only",
+                    "create-intent" | "uncertain" | "absent"
+                ) | ("stopped-data-retained" | "removed", "absent")
+            )
+    }
+
+    /// Cleanup may resolve a missing create ID once. It still must match a
+    /// known ID when checking a receipt-bound authorization or archive.
+    #[cfg(any(target_os = "macos", test))]
+    fn matches_cleanup_id(&self, current: &Self, graph_phase: &str) -> bool {
+        self.id == current.id
+            || (self.has_unacknowledged_create() && current.has_cleanup_observed_id(graph_phase))
+    }
+}
+
 /// The phases of a start in progress, before every service has started: fresh,
 /// restore and restart.
 pub(super) const START_PHASES: [&str; 3] = ["preparing", "restoring", "restarting"];
@@ -789,6 +825,7 @@ fn load_at(
             )
             || (r.phase == "released" && r.cache.is_none())
             || r.id.as_deref().is_some_and(|id| !hex(id, 64))
+            || (r.cleanup_observed_create && !r.has_cleanup_observed_id(&receipt.phase))
             || (r.kind == Kind::Container && !r.image.as_deref().is_some_and(image_id))
             || (r.kind != Kind::Container && r.image.is_some())
             || (r.kind == Kind::Volume && r.id.is_some())
@@ -2491,7 +2528,7 @@ fn cleanup_owned_fenced(
         slots
     };
     fence()?;
-    shutdown::stop_owned(engine, &receipt, root)?;
+    shutdown::stop_owned(engine, &mut receipt, root, &fence)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
         if kind == Kind::Volume && !remove_data {
             continue;

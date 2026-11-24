@@ -506,11 +506,18 @@ pub(super) fn cleanup_effect(
         .resources
         .iter()
         .map(|(key, resource)| {
+            // The cleanup grant selected this name with no acknowledged ID.
+            // Keep that selection stable across cleanup's durable observation.
+            let selected_id = if resource.has_cleanup_observed_id(&receipt.phase) {
+                None
+            } else {
+                resource.id.as_deref()
+            };
             json!([
                 key,
                 resource.kind,
                 resource.name,
-                resource.id,
+                selected_id,
                 resource.image
             ])
         })
@@ -736,6 +743,12 @@ fn inspect_cleanup_selected(
             remove_data,
             &(environment, bridge_selection),
         )?
+        || receipt.resources.iter().any(|(key, resource)| {
+            expected.resources.get(key).is_none_or(|previous| {
+                (resource.cleanup_observed_create || previous.cleanup_observed_create)
+                    && resource.id != previous.id
+            })
+        })
     {
         return Err(refused());
     }
@@ -1070,6 +1083,7 @@ mod tests {
             key: "web".into(),
             name: "owned-web".into(),
             id: Some("e".repeat(64)),
+            cleanup_observed_create: false,
             image: Some(format!("sha256:{}", "f".repeat(64))),
             phase: "started".into(),
             amd64_emulation: None,

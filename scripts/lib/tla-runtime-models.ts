@@ -439,6 +439,32 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "shutdown-receipt",
+    module: "ShutdownReceipt",
+    states: 16,
+    invariant: "IdentifiableByRestore",
+    action: "WriteShutdown",
+    fields: [
+      'phase = "ShutdownWritten"',
+      'receiptId = "none"',
+      'shutdownId = "original"',
+    ],
+    additionalControls: [
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverRestored",
+        action: "Restore",
+        fields: [
+          'phase = "Restored"',
+          'receiptId = "original"',
+          'shutdownId = "original"',
+          'compute = "absent"',
+        ],
+      },
+    ],
+  },
+  {
     name: "native-plan-reconcile",
     module: "Reconcile",
     states: 747_656,

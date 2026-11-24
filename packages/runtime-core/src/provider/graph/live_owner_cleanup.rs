@@ -176,23 +176,6 @@ fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     }
     initializer_cache::require_resolved(receipt)
 }
-fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
-    let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    {
-        // `started_from` is part of the phase (`Receipt::set_phase`).
-        let value = value.as_object_mut().ok_or_else(refused)?;
-        value.remove("phase");
-        value.remove("started_from");
-    }
-    for group in ["resources", "probes"] {
-        if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
-            for item in items.values_mut() {
-                item.as_object_mut().ok_or_else(refused)?.remove("phase");
-            }
-        }
-    }
-    Ok(value)
-}
 fn validate(
     intent: &Intent,
     receipt: &Receipt,
@@ -219,7 +202,7 @@ fn validate(
         || intent.original_sha256 != expected
         || digest(&intent.original)? != expected
         || !hex(&intent.foreground_sha256, 64)
-        || immutable(&intent.original)? != immutable(receipt)?
+        || !cleanup_enrollment::matches_cleanup_progress(&intent.original, receipt)?
         || intent
             .complete_sha256
             .as_deref()
@@ -1053,12 +1036,12 @@ mod tests {
         let value = receipt();
         let mut changed = value.clone();
         changed.phase = "cleanup-intent".into();
-        assert_eq!(immutable(&value).unwrap(), immutable(&changed).unwrap());
+        assert!(cleanup_enrollment::matches_cleanup_progress(&value, &changed).unwrap());
         changed.owner = "f".repeat(32);
-        assert_ne!(immutable(&value).unwrap(), immutable(&changed).unwrap());
+        assert!(!cleanup_enrollment::matches_cleanup_progress(&value, &changed).unwrap());
         changed = value.clone();
         changed.relay_startup.as_mut().unwrap().control_root = "/private/foreign".into();
-        assert_ne!(immutable(&value).unwrap(), immutable(&changed).unwrap());
+        assert!(!cleanup_enrollment::matches_cleanup_progress(&value, &changed).unwrap());
     }
     fn generation(number: u64, phase: &str) -> Receipt {
         let mut value = receipt();

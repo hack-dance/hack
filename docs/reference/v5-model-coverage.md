@@ -119,6 +119,7 @@ liveness/reachability controls have their own documented assumptions.
 | [native-status-start](../../tests/models/tla/native-status-start/StatusStart.tla) | 110 | 2 |
 | [native-publisher-stop](../../tests/models/tla/native-publisher-stop/PublisherStop.tla) | 168 | 7 |
 | [shutdown-rebase](../../tests/models/tla/shutdown-rebase/ShutdownRebase.tla) | 43 | 3 |
+| [shutdown-receipt](../../tests/models/tla/shutdown-receipt/ShutdownReceipt.tla) | 16 | 3 |
 | [native-plan-reconcile](../../tests/models/tla/native-plan-reconcile/Reconcile.tla) | 747,656 | 4 |
 | [native-cache-reconcile](../../tests/models/tla/native-cache-reconcile/CacheReconcile.tla) | 2,208 | 5 |
 | [pre-ready-retirement](../../tests/models/tla/pre-ready-retirement/Retirement.tla) | 10,965 | 8 |
@@ -217,6 +218,38 @@ the inspected immutable ID. Uncovered: real VM/foreground signals, external Dock
 writers, fsync failures, native publication retirement, boot rollover recovery,
 application flush behavior and live container absence. Linux portable checks do
 not qualify those macOS behaviors.
+
+### Cleanup identity after an unacknowledged create (HACK-2628)
+
+![Cleanup and restore after a lost create acknowledgement](../diagrams/shutdown-receipt.svg)
+([source](../diagrams/shutdown-receipt.mmd), [2× PNG](../diagrams/shutdown-receipt.png))
+
+Under the provider mutation lease, `cleanup_owned_fenced` commits
+`cleanup-intent`. `shutdown::stop_owned` verifies the name, labels and image,
+then requires the same immutable ID in its preflight and fresh terminal
+observations. `publish_stop` commits the observed ID to `state.json` before
+committing `shutdown.json`. Both writes sync pending bytes, rename, and sync
+the parent directory. Cleanup can then remove compute and commit
+`stopped-data-retained`. A retry before receipt publication re-observes the
+container by name. Once the receipt commits, retry uses the immutable ID. If
+removal already happened, retry keeps the committed stop record. Pending bytes
+from either shutdown write are retained for inspection and never used as
+identity evidence.
+
+`ShutdownReceipt` checks that a committed stop ID matches the receipt and
+that restore requires compute absence. TLC 1.7.4 on Java 17 explores 16 states
+with one graph, one original container ID, one possible replacement at the
+reserved name and repeatable crashes between actions. The missing-write
+control fails `IdentifiableByRestore` at `WriteShutdown`. A reachability
+control reaches `Restore` with matching IDs and absent compute.
+
+Linux tests exercise publication before each rename, the gap between the
+commits, and retry after deletion. They verify that the retained volume
+record survives and that `rebase_stopped_with` accepts the observed ID and
+refuses a mismatched ID. The model assumes serialized managed writers,
+atomic durable file commits and authoritative engine observations. It
+leaves real filesystem durability, provider loss, operation enrollment
+and data continuity on a live VM to implementation and native tests.
 
 ### Upgrade apply recovery (HACK-2220)
 

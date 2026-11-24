@@ -30,7 +30,7 @@ mod map;
 #[cfg(feature = "screenshots")]
 pub(crate) mod screenshots;
 
-pub(crate) const TAB: usize = 5;
+pub(crate) const TAB: usize = 7;
 const STATE_ACTION_WIDTH: gpui_kit::Pixels = px(136.);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]

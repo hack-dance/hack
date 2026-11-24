@@ -107,12 +107,15 @@ pub struct Palette {
     /// Sidebar and status bar.
     pub chrome: Hsla,
     pub raised: Hsla,
-    pub selection: Hsla,
     pub attention: Hsla,
     /// Hover, log block, neutral pills.
     pub surface_1: Hsla,
-    /// Pressed or selected-and-hovered.
+    /// Pressed.
     pub surface_2: Hsla,
+    /// Selected navigation and file rows.
+    pub selection: Hsla,
+    /// Read-only file preview body.
+    pub preview_surface: Hsla,
     pub border: Hsla,
     pub border_strong: Hsla,
     pub text_primary: Hsla,
@@ -173,6 +176,7 @@ impl Palette {
             attention: c(rgb(0xEFEFEC)),
             surface_1: c(rgb(0xEFEFEC)),
             surface_2: c(rgb(0xE6E6E2)),
+            preview_surface: c(rgb(0xEFEFEC)),
             border: c(rgba(0x0000_0017)),
             border_strong: c(rgba(0x0000_002E)),
             text_primary: c(rgb(0x1C1C1A)),
@@ -226,6 +230,7 @@ impl Palette {
             attention: c(rgb(0x21252B)),
             surface_1: c(rgb(0x1A1E24)),
             surface_2: c(rgb(0x23272D)),
+            preview_surface: c(rgb(0x1E2329)),
             border: c(rgb(0x2B3036)),
             border_strong: c(rgb(0x2B3036)),
             text_primary: c(rgb(0xE6EDF3)),

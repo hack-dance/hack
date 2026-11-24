@@ -5,6 +5,7 @@ use crate::CandidateError;
 #[cfg(target_os = "macos")]
 pub(crate) use incarnation::birth;
 pub(crate) use incarnation::incarnation_gone;
+pub(crate) use incarnation::provider_gone;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
@@ -344,6 +345,13 @@ struct Record {
     users: (u32, u32),
 }
 
+#[cfg(target_os = "macos")]
+impl Record {
+    fn zombie_or_foreign(&self, user: u32) -> bool {
+        self.zombie || (self.users.0 != user && self.users.1 != user)
+    }
+}
+
 /// One raw observation of a process, gathered only as far as needed.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Default)]
@@ -413,6 +421,18 @@ fn observe_process(pid: i32) -> Observation {
             ..Observation::default()
         };
     }
+    let (record, record_error) = process_record(pid);
+    Observation {
+        path: None,
+        path_error,
+        signal_error,
+        record,
+        record_error,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_record(pid: i32) -> (Option<Record>, i32) {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
     // SAFETY: libproc receives a correctly sized writable proc_bsdshortinfo buffer. A nonzero
     // `arg` also finds zombies, which otherwise fail with ESRCH while still answering the signal
@@ -426,8 +446,7 @@ fn observe_process(pid: i32) -> Observation {
             std::mem::size_of::<libc::proc_bsdshortinfo>() as i32,
         )
     };
-    let (record, record_error) = if read as usize == std::mem::size_of::<libc::proc_bsdshortinfo>()
-    {
+    if read as usize == std::mem::size_of::<libc::proc_bsdshortinfo>() {
         // SAFETY: the buffer was zero-initialized, and a full-size read filled it.
         let info = unsafe { info.assume_init() };
         let record = Record {
@@ -438,14 +457,8 @@ fn observe_process(pid: i32) -> Observation {
         (Some(record), 0)
     } else {
         // The process table (`ps`, via sysctl) reports every process.
-        (process_table(pid), errno())
-    };
-    Observation {
-        path: None,
-        path_error,
-        signal_error,
-        record,
-        record_error,
+        let error = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        (process_table(pid), error)
     }
 }
 
@@ -538,9 +551,8 @@ fn classify(
     let Some(record) = &observation.record else {
         return Executes::Unknown;
     };
-    if record.zombie
-        // Another user's process cannot open this user's private provider state.
-        || (record.users.0 != user && record.users.1 != user)
+    // Another user's process cannot open this user's private provider state.
+    if record.zombie_or_foreign(user)
         // The path is unreadable when the executable was removed or replaced, or while the
         // process exits; the provider always runs under its own exec-time name.
         || !exec_name_matches(&record.name, binary)
@@ -585,8 +597,9 @@ pub fn executable_running(_binary: &Path) -> Result<bool, CandidateError> {
 /// with other arguments do not count: a shared frontend binary also runs the CLI that
 /// asks the question.
 ///
-/// A process of `binary` whose arguments cannot be read is observed again for a short
-/// bounded interval, then refuses as uncertain; it never counts as absent.
+/// Legacy owner records have no PID. Read arguments only for live, same-user
+/// processes that could execute this binary. If a candidate's arguments stay
+/// unreadable after bounded re-observation, its absence remains unproven.
 #[cfg(target_os = "macos")]
 pub fn invocation_running(
     binary: &Path,
@@ -594,61 +607,128 @@ pub fn invocation_running(
 ) -> Result<bool, CandidateError> {
     use std::os::unix::ffi::OsStrExt;
     const ATTEMPTS: u32 = 40;
-    let uncertain = || {
+    let unavailable = || {
         CandidateError::new(
-            "stop_uncertain",
-            "Cannot establish that a recorded helper process exited.",
+            "process_identity_unavailable",
+            "Cannot inspect the process list for the recorded helper.",
         )
     };
     let expected: Vec<&[u8]> = arguments.iter().map(|value| value.as_bytes()).collect();
     let canonical = std::fs::canonicalize(binary).ok();
     // SAFETY: a null buffer asks libproc only for the current process count.
     let estimate = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    let capacity = usize::try_from(estimate).map_err(|_| uncertain())? + 64;
+    let capacity = usize::try_from(estimate).map_err(|_| unavailable())? + 64;
     let mut pids = vec![0_i32; capacity];
-    let bytes = i32::try_from(capacity * std::mem::size_of::<i32>()).map_err(|_| uncertain())?;
+    let bytes = i32::try_from(capacity * std::mem::size_of::<i32>()).map_err(|_| unavailable())?;
     // SAFETY: the buffer is writable for `bytes` bytes of pid_t values.
     let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
-    let count = usize::try_from(count).map_err(|_| uncertain())?;
+    let count = usize::try_from(count).map_err(|_| unavailable())?;
     if count == 0 || count >= capacity {
-        return Err(uncertain());
+        return Err(unavailable());
     }
-    let this = i32::try_from(std::process::id()).map_err(|_| uncertain())?;
+    let this = i32::try_from(std::process::id()).map_err(|_| unavailable())?;
     // SAFETY: geteuid has no preconditions and cannot fail.
     let user = unsafe { libc::geteuid() };
     for &pid in &pids[..count] {
-        if pid <= 0 || pid == this {
+        if pid <= 1 || pid == this {
             continue;
         }
-        let observe = || match classify(&observe_process(pid), binary, canonical.as_deref(), user) {
-            Executes::No => Executes::No,
-            executes => match process_arguments(pid) {
-                Some(found) => {
-                    if invocation_matches(&found, &expected) {
-                        Executes::Yes
-                    } else if executes == Executes::Yes {
-                        Executes::No
-                    } else {
-                        Executes::Unknown
-                    }
+        let mut last = Invocation::IdentityUnreadable;
+        let observe = || {
+            let mut process = observe_process(pid);
+            if process
+                .path
+                .as_deref()
+                .is_some_and(|path| path == binary || canonical.as_deref() == Some(path))
+            {
+                // A readable path does not establish ownership. In particular,
+                // another user can run the same system binary.
+                process.record = process_record(pid).0;
+            }
+            last = classify_invocation(
+                &process,
+                binary,
+                canonical.as_deref(),
+                user,
+                &expected,
+                || process_arguments(pid),
+                || matches!(alive(pid), Ok(false)),
+            );
+            match last {
+                Invocation::Running => Executes::Yes,
+                Invocation::Other => Executes::No,
+                Invocation::IdentityUnreadable | Invocation::ArgumentsUnreadable => {
+                    Executes::Unknown
                 }
-                // Gone between the two reads: nothing to prove.
-                None if !alive(pid).unwrap_or(true) => Executes::No,
-                None => Executes::Unknown,
-            },
+            }
         };
-        if settle(observe, ATTEMPTS, |_| std::time::Duration::from_millis(5)).map_err(|_| {
-            CandidateError::new(
+        if settle(observe, ATTEMPTS, |_| std::time::Duration::from_millis(5)).map_err(|_| match last {
+            Invocation::ArgumentsUnreadable => CandidateError::new(
                 "stop_uncertain",
                 format!(
-                    "Cannot establish that a recorded helper process exited. Process {pid}: arguments unreadable."
+                    "Cannot establish that a recorded helper process exited. Possible helper process {pid}: arguments unreadable."
                 ),
-            )
+            ),
+            _ => CandidateError::new(
+                "process_identity_unavailable",
+                format!("Cannot rule out process {pid} as the recorded helper: identity unreadable."),
+            ),
         })? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    Running,
+    Other,
+    IdentityUnreadable,
+    ArgumentsUnreadable,
+}
+
+#[cfg(target_os = "macos")]
+fn classify_invocation(
+    observation: &Observation,
+    binary: &Path,
+    canonical: Option<&Path>,
+    user: u32,
+    expected: &[&[u8]],
+    read_arguments: impl FnOnce() -> Option<Vec<Vec<u8>>>,
+    gone: impl FnOnce() -> bool,
+) -> Invocation {
+    if observation.signal_error == Some(libc::ESRCH)
+        || observation
+            .path
+            .as_deref()
+            .is_some_and(|path| path != binary && canonical != Some(path))
+    {
+        return Invocation::Other;
+    }
+    let Some(record) = &observation.record else {
+        return if gone() {
+            Invocation::Other
+        } else {
+            Invocation::IdentityUnreadable
+        };
+    };
+    if record.zombie_or_foreign(user)
+        || (observation.path.is_none()
+            && !exec_name_matches(&record.name, binary)
+            && !canonical.is_some_and(|path| exec_name_matches(&record.name, path)))
+    {
+        return Invocation::Other;
+    }
+    // With an unreadable path and a plausible exec name, an exact argv match is
+    // enough to block archival. A readable, different argv rules the owner out.
+    match read_arguments() {
+        Some(found) if invocation_matches(&found, expected) => Invocation::Running,
+        Some(_) => Invocation::Other,
+        None if gone() => Invocation::Other,
+        None => Invocation::ArgumentsUnreadable,
+    }
 }
 
 /// `pid`'s argument vector from the kernel (`KERN_PROCARGS2`), or `None` when it cannot
@@ -872,11 +952,112 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn invocation_ignores_unreadable_arguments_of_a_foreign_process() {
+        let binary = Path::new("/bin/sleep");
+        let foreign = Observation {
+            path: Some(binary.to_path_buf()),
+            record: Some(Record {
+                zombie: false,
+                name: b"sleep".to_vec(),
+                users: (0, 0),
+            }),
+            ..Observation::default()
+        };
+        let reads = std::cell::Cell::new(0);
+        let unreadable = || {
+            reads.set(reads.get() + 1);
+            None
+        };
+        assert_eq!(
+            classify_invocation(&foreign, binary, None, 502, &[b"37.25"], unreadable, || {
+                false
+            }),
+            Invocation::Other,
+        );
+        assert_eq!(reads.get(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_possible_owner_has_uncertain_arguments() {
+        let binary = Path::new("/opt/bin/hack");
+        let canonical = Some(Path::new("/opt/bin/hack-frontend"));
+        let own_record = |name: &[u8]| Record {
+            zombie: false,
+            name: name.to_vec(),
+            users: (502, 502),
+        };
+        let unrelated = Observation {
+            record: Some(own_record(b"sleep")),
+            ..Observation::default()
+        };
+        let possible_owner = Observation {
+            record: Some(own_record(b"hack-frontend")),
+            ..Observation::default()
+        };
+        let expected: &[&[u8]] = &[b"--owner", b"/private/project/configuration.json"];
+        let inspect = |observation: &Observation| {
+            classify_invocation(
+                observation,
+                binary,
+                canonical,
+                502,
+                expected,
+                || None,
+                || false,
+            )
+        };
+        assert_eq!(inspect(&unrelated), Invocation::Other);
+        assert_eq!(
+            inspect(&Observation::default()),
+            Invocation::IdentityUnreadable
+        );
+        assert_eq!(inspect(&possible_owner), Invocation::ArgumentsUnreadable);
+        assert_eq!(
+            classify_invocation(
+                &possible_owner,
+                binary,
+                canonical,
+                502,
+                expected,
+                || None,
+                || true
+            ),
+            Invocation::Other,
+        );
+        assert_eq!(
+            classify_invocation(
+                &possible_owner,
+                binary,
+                canonical,
+                502,
+                expected,
+                || Some(vec![b"hack".to_vec(), b"up".to_vec()]),
+                || false,
+            ),
+            Invocation::Other,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn native_invocation_running_matches_only_the_exact_arguments() {
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg("37.25")
-            .spawn()
-            .unwrap();
+        struct Sleep(std::process::Child);
+        impl Drop for Sleep {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Sleep(
+            std::process::Command::new("/bin/sleep")
+                .arg("37.25")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         let mut seen = false;
         for _ in 0..200 {
             if invocation_running(Path::new("/bin/sleep"), &["37.25".as_ref()]).unwrap() {
@@ -886,8 +1067,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let other = invocation_running(Path::new("/bin/sleep"), &["37.5".as_ref()]).unwrap();
-        child.kill().unwrap();
-        child.wait().unwrap();
+        drop(child);
         assert!(seen, "the exact invocation was not observed");
         assert!(!other, "another invocation of the same executable matched");
         assert!(!invocation_running(Path::new("/bin/sleep"), &["37.25".as_ref()]).unwrap());

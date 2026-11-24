@@ -27,6 +27,8 @@ export type ProjectRuntimeStateEntry = {
    * Absent in state written before this field existed.
    */
   readonly composeProfiles?: readonly string[];
+  /** Started target names, binding digests, and selection sources for teardown hooks. */
+  readonly remoteTargets?: Readonly<Record<string, string>>;
 };
 
 type ProjectRuntimeStateFile = {
@@ -223,12 +225,20 @@ function parseProjectRuntimeStateEntry(
       )
     : null;
 
+  const remoteTargets = isRecord(value.remoteTargets)
+    ? Object.fromEntries(
+        Object.entries(value.remoteTargets).flatMap(([name, target]) =>
+          typeof target === "string" ? [[name, target]] : []
+        )
+      )
+    : undefined;
   return {
     composeProject,
     envName,
     updatedAt,
     ...(envFingerprint ? { envFingerprint } : {}),
     ...(composeProfiles ? { composeProfiles } : {}),
+    ...(remoteTargets ? { remoteTargets } : {}),
   };
 }
 

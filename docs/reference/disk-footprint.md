@@ -6,6 +6,16 @@ on macOS, or on another machine. The native backend also has host-side runtime s
 and stores engine data inside its provider disks. Count guest files and engine
 objects as attribution within those disks when measuring host space.
 
+## Measure the selected native home
+
+Run `hack native disk-usage` for host file totals, or add `--json` for the
+same measurements in a script. Use `hack doctor --disk` for the same totals in
+a standalone diagnostic report. The command leaves a stopped pool stopped.
+Allocated bytes are file blocks reported by the filesystem. Hard links are counted
+once, while APFS clones may share some of the reported blocks. A partial scan is
+marked incomplete. Guest data already lives in the host backing disks and is
+included there. The report does not estimate how many blocks a cleanup would free.
+
 ## State managed by Hack
 
 | Location | Writer and owner | Growth bound | Cleanup and interrupted operations |
@@ -29,7 +39,22 @@ objects as attribution within those disks when measuring host space.
 | Native images and BuildKit cache | [Image import](../../packages/runtime-core/src/provider/image_load.rs), [build](../../packages/runtime-core/src/provider/image_build.rs) and [reclaim](../../packages/runtime-core/src/provider/image_build/reclaim.rs) in the guest engine. | Best-effort post-build cache target of 4 GiB. The target bounds private build cache unused by any retained image, including the current and previous images. No aggregate image bound found. | Image reclamation uses retained references. Failed or interrupted pruning can leave extra engine data. |
 | Native graph containers, persistent volumes, networks and graph receipts | [Graph runtime](../../packages/runtime-core/src/provider/graph/mod.rs), with host journals and guest resources. | No aggregate graph or retained-volume bound. | Down and recovery retain data by default. A crash can leave resources attached to prior receipts. |
 
+### Native build base retention
+
+After a native `hack up` reaches readiness, Hack can retain exact build bases
+as guest engine images and stage missing images in the host image archive cache.
+The guest cost is the retained layers that the engine cannot share with other
+images. In one 11-service project, retaining two bases added 1.06 GiB of engine
+image data. Reclaim checks the current and previous verified build generations
+and protects images still referenced by services or tag records.
+
+Set `HACK_NATIVE_BUILD_RETENTION=0` in the environment that launches `hack up`
+to disable automatic retention. This also disables background build-base tag
+refresh for that invocation. Existing images and archives remain on disk until
+their normal cleanup runs.
+
 ## Temporary paths
+
 
 | Location | Owner | Growth bound | Cleanup and interrupted operations |
 | --- | --- | --- | --- |
@@ -41,10 +66,15 @@ objects as attribution within those disks when measuring host space.
 
 ## Additional host storage
 
+Use `hack-local runtime disk-usage --scope image-archives --json` to measure
+the native host image archive store separately from other provider artifacts.
+The report includes file sizes and allocated bytes. It does not identify which
+archives can be removed.
+
 | Location | Writer and owner | Growth bound | Cleanup and interrupted operations |
 | --- | --- | --- | --- |
 | Prerelease channel `versions/<version>` | [Channel installer](../../scripts/installer/channel.ts). A receipt binds each bundle and its per-version CLI and native homes. | The selection reader accepts at most 256 registered versions. This is a validation limit. Retained versions can contain their own VM disks. | Installer recovery preserves published versions and their homes. An interrupted install can leave an unselected version for validation. |
-| Daemon files and service logs | [Daemon paths](../../src/daemon/paths.ts) and [daemon logger](../../src/daemon/logger.ts). The owner is the selected home or the host service manager for its own journal. | The daemon writer caps its own file at 5 MiB. Service stdout and stderr have separate destinations and retention. | A crash can leave a PID file or socket. The presence of either is insufficient proof of a running daemon. |
+| Daemon files and service logs | [Daemon paths](../../src/daemon/paths.ts) and [daemon logger](../../src/daemon/logger.ts). The owner is the selected home or the host service manager for its own journal. | The daemon writer caps its own regular, singly linked file at 5 MiB. Service stdout and stderr have separate destinations and retention. | A crash can leave a PID file or socket. The presence of either is insufficient proof of a running daemon. |
 | Managed synchronization tool | [Tool installer](../../src/lib/mutagen.ts) writes the executable and agent bundle under the selected Hack home. | Fixed installed paths. Download staging can accumulate after interruption. | Normal installation removes the temporary download directory. Installed tools remain available across project stops. |
 | Dependency cache metadata and volumes | [Dependency cache writer](../../src/lib/dependency-cache.ts) keeps project metadata in `.hack/.internal`. The selected engine stores the actual volume. | No aggregate byte limit established for the volumes. | Explicit eligible cache pruning goes through the [volume removal path](../../src/lib/disposable-cache-volumes.ts). Cache metadata and volumes can survive a crashed run. |
 | Native image-import receipts | [Image import](../../packages/runtime-core/src/provider/image_load.rs) writes managed records under `run/image-loads`. | No aggregate retention limit established. | The import protocol uses these records to identify validated and interrupted imports. |

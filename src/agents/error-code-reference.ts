@@ -100,6 +100,10 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning: "A remote declaration is invalid.",
     readFirst: "`hack config validate --json`",
   },
+  E_REMOTE_START_UNSUPPORTED: {
+    meaning: "The command cannot start services for a project with remotes.",
+    readFirst: "`hack up --help`",
+  },
   E_UNKNOWN_REMOTE_TARGET: {
     meaning: "A remote names a default target that does not exist.",
     readFirst: "`hack config validate --json`",

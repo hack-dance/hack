@@ -210,6 +210,7 @@ pub(super) struct Targets {
     port_endpoints: BTreeMap<String, GuestEndpoint>,
     /// Container main process, keyed by service.
     pids: BTreeMap<String, u32>,
+    pending_ports: bool,
 }
 
 impl Targets {
@@ -227,11 +228,22 @@ impl Targets {
     }
 }
 
-pub(super) fn inspect_targets(
+#[cfg(test)]
+fn inspect_targets(
     candidate: &Candidate,
     engine: &impl Inspection,
     run: &str,
     services: &std::collections::BTreeSet<&str>,
+) -> Result<Targets, CandidateError> {
+    inspect_targets_scoped(candidate, engine, run, services, None)
+}
+
+fn inspect_targets_scoped(
+    candidate: &Candidate,
+    engine: &impl Inspection,
+    run: &str,
+    services: &std::collections::BTreeSet<&str>,
+    ready_service: Option<(&str, &str)>,
 ) -> Result<Targets, CandidateError> {
     let (receipt, root) = load_at(directory(candidate, run)?, run, engine.incarnation())?;
     let mut targets = Targets {
@@ -239,10 +251,26 @@ pub(super) fn inspect_targets(
         endpoints: BTreeMap::new(),
         port_endpoints: BTreeMap::new(),
         pids: BTreeMap::new(),
+        pending_ports: false,
     };
     let receipt = &targets.receipt;
-    // Same admission as inspect_using's endpoints: a committed, ready graph.
-    if receipt.phase != "ready-observed"
+    // The startup lease holder may inspect exactly the generation reported
+    // ready by its scheduler. Standalone publishers still require a ready graph.
+    let admitted = match ready_service {
+        Some((service, id)) => {
+            // A start that returned at started (`started-observed`) still
+            // publishes each service as it becomes ready.
+            matches!(super::start_phase(receipt), "preparing" | "restoring")
+                && services.len() == 1
+                && services.contains(service)
+                && receipt
+                    .resources
+                    .get(&format!("container:{service}"))
+                    .is_some_and(|r| r.id.as_deref() == Some(id) && r.phase == "started")
+        }
+        None => receipt.phase == "ready-observed",
+    };
+    if !admitted
         || root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
         || startup::require_dependency_rebind_complete(&root, receipt).is_err()
@@ -273,6 +301,20 @@ pub(super) fn inspect_targets(
             continue;
         };
         let observation = probes::observe(engine, receipt, service, &value)?;
+        targets.pending_ports |= ready_service.is_some()
+            && !resource.loopback_ports.is_empty()
+            && observation
+                == (Observation::Running {
+                    health: Health::Starting,
+                });
+        if ready_service.is_some()
+            && !receipt
+                .readiness
+                .get(*service)
+                .is_some_and(|goal| observation.satisfies(*goal))
+        {
+            continue;
+        }
         if !matches!(observation, Observation::Running { .. })
             || endpoint_network(receipt, &value, &networks)?.is_none()
         {
@@ -584,6 +626,71 @@ struct Observed<'a> {
     boot_id: &'a str,
 }
 
+/// Reserve and start only the service named by the scheduler's ready event.
+/// The scheduler keeps its provider lease throughout inspection and mutation.
+#[cfg(target_os = "macos")]
+pub(super) fn admit_ready_service(
+    engine: &Engine<'_>,
+    run: &str,
+    service: &str,
+    container_id: &str,
+    route: Option<RouteSlot>,
+) -> Result<Vec<(u8, Assignment)>, CandidateError> {
+    let candidate = engine.guest().candidate();
+    let scope = Some((service, container_id));
+    let mut targets =
+        inspect_targets_scoped(candidate, engine, run, &BTreeSet::from([service]), scope)?;
+    if targets.pending_ports {
+        return Err(error(
+            "bridge_endpoint_pending",
+            "A published port waits for its container's healthcheck; no ports were reserved.",
+        ));
+    }
+    let key = format!("container:{service}");
+    targets.receipt.resources.retain(|name, _| name == &key);
+    let requested = BTreeMap::from_iter(route.map(|slot| (service.to_owned(), slot)));
+    let capacity = engine.guest().bridge_intent().ok_or_else(invalid)?.slots;
+    let reserved = reserve_all(
+        candidate,
+        load_store(candidate, engine, false)?,
+        &requested,
+        capacity,
+        &Observed {
+            receipt: &targets.receipt,
+            endpoints: &targets.endpoints,
+            port_endpoints: &targets.port_endpoints,
+            observations: &BTreeMap::new(),
+            boot_id: engine.guest().boot_id(),
+        },
+    )?;
+    let selected = reserved
+        .routes
+        .values()
+        .chain(reserved.ports.values())
+        .map(|route| (route.slot, route.assignment.reservation.as_str()))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (digest, input) = relay::payload()?;
+    start_selected(
+        candidate,
+        engine,
+        &LeasedRelays {
+            candidate,
+            engine,
+            input: &input,
+        },
+        &mut load_store(candidate, engine, false)?,
+        StartSelection {
+            run,
+            selected: &selected,
+            ready_service: scope,
+        },
+        &digest,
+    )
+}
+
 #[cfg(any(test, target_os = "macos"))]
 fn reserve_all(
     candidate: &Candidate,
@@ -871,8 +978,11 @@ pub(in crate::provider::graph) fn start_bridges(
             input: &input,
         },
         &mut store,
-        run,
-        selected,
+        StartSelection {
+            run,
+            selected,
+            ready_service: None,
+        },
         &digest,
     )
 }
@@ -921,15 +1031,28 @@ impl RelayGuest for LeasedRelays<'_, '_> {
 ///
 /// A refusal after step 4 leaves every intent recorded for the caller's cleanup,
 /// exactly as a refused single start did.
+struct StartSelection<'a> {
+    run: &'a str,
+    selected: &'a [(u8, &'a str)],
+    ready_service: Option<(&'a str, &'a str)>,
+}
+
 fn start_selected(
     candidate: &Candidate,
     inspection: &impl Inspection,
     guest: &impl RelayGuest,
     store: &mut Store,
-    run: &str,
-    selected: &[(u8, &str)],
+    selection: StartSelection<'_>,
     digest: &str,
 ) -> Result<Vec<(u8, Assignment)>, CandidateError> {
+    let StartSelection {
+        run,
+        selected,
+        ready_service,
+    } = selection;
+    let inspect = |services: &std::collections::BTreeSet<&str>| {
+        inspect_targets_scoped(candidate, inspection, run, services, ready_service)
+    };
     let mut picked = BTreeMap::new();
     for (slot, reservation) in selected {
         let a = store
@@ -958,7 +1081,7 @@ fn start_selected(
             .map(|(slot, _)| *slot)
             .collect::<Vec<_>>()
     };
-    let fenced = inspect_targets(candidate, inspection, run, &services)?;
+    let fenced = inspect(&services)?;
     if !stale(&fenced).is_empty() {
         return Err(error(
             "bridge_generation_stale",
@@ -977,7 +1100,7 @@ fn start_selected(
             "Cannot establish target process identity.",
         ));
     }
-    if !stale(&inspect_targets(candidate, inspection, run, &services)?).is_empty() {
+    if !stale(&inspect(&services)?).is_empty() {
         return Err(error(
             "bridge_generation_stale",
             "Endpoint changed during target verification.",
@@ -1013,7 +1136,7 @@ fn start_selected(
         .map(|slot| (*slot, &store.slots[slot]))
         .collect::<Vec<_>>();
     guest.start_relays(&launched)?;
-    let changed = stale(&inspect_targets(candidate, inspection, run, &services)?);
+    let changed = stale(&inspect(&services)?);
     for slot in picked.keys().filter(|slot| !changed.contains(slot)) {
         store.slots.get_mut(slot).expect("picked slot").phase = "running".into();
     }
@@ -1123,8 +1246,7 @@ pub fn publish_bridge(
     hostnames: &[String],
 ) -> Result<(), CandidateError> {
     let engine = connect_waiting(candidate)?;
-    let upstream =
-        publication_upstream(candidate, &engine, run, slot, reservation, port, hostnames)?;
+    let upstream = publication_upstream(&engine, run, slot, reservation, port, hostnames, None)?;
     super::super::publication::launch(
         candidate,
         super::super::publication::Launch {
@@ -1140,15 +1262,16 @@ pub fn publish_bridge(
 }
 
 /// Revalidate the exact frontend and relay under the caller's provider lease.
-fn publication_upstream(
-    candidate: &Candidate,
+pub(super) fn publication_upstream(
     engine: &Engine<'_>,
     run: &str,
     slot: u8,
     reservation: &str,
     port: Option<u16>,
     hostnames: &[String],
+    ready_service: Option<(&str, &str)>,
 ) -> Result<std::path::PathBuf, CandidateError> {
+    let candidate = engine.guest().candidate();
     let store = load_store(candidate, engine, false)?;
     let a = store
         .slots
@@ -1162,11 +1285,12 @@ fn publication_upstream(
                     .is_some_and(|r| r.transport == relay::Transport::ReservationV1)
         })
         .ok_or_else(invalid)?;
-    let targets = inspect_targets(
+    let targets = inspect_targets_scoped(
         candidate,
         engine,
         run,
         &std::collections::BTreeSet::from([a.service.as_str()]),
+        ready_service,
     )?;
     if !targets.current(a, engine.guest().boot_id())
         || relay::operate(engine, slot, a, "inspect", None)? != "running"

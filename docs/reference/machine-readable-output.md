@@ -114,6 +114,7 @@ success behavior stays covered by command-specific suites.
 | `hack global up --json` | Envelope; versioned `data.schema`: `hack.global-up.v1` |
 | `hack host ps --json` | Legacy bare object (no `data` envelope) |
 | `hack logs --json` | NDJSON logs; finite native modes may return a legacy snapshot object |
+| `hack native disk-usage --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack native recover --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `builder`, `files`, `probe`; recover: the runtime status, such as `phase`) |
 | `hack native setup --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `builder`, `files`, `probe`; recover: the runtime status, such as `phase`) |
 | `hack native temp-aliases --json` | Legacy bare object (no `data` envelope) |

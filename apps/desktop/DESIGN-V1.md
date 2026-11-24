@@ -99,6 +99,7 @@ Detail content is inset 20 left and right; the sidebar list 6.
 | `attention` | `#EFEFEC` | `#21252B` | Running command box |
 | `surface_1` | `#EFEFEC` | `#1A1E24` | Hover, panel handle, neutral pill |
 | `surface_2` | `#E6E6E2` | `#23272D` | Pressed |
+| `preview_surface` | `#EFEFEC` | `#1E2329` | Read-only file preview body |
 | `border` | black 9% | `#2B3036` | Hairlines |
 | `border_strong` | black 18% | `#2B3036` | Button and field outlines |
 | `text_primary` | `#1C1C1A` | `#E6EDF3` | |

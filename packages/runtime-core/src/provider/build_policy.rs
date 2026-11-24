@@ -52,8 +52,25 @@ fn rule(action: &str, identifier: String, match_type: &str) -> Value {
 /// reference pinned by digest; it is normalized the way BuildKit's `llb.Image`
 /// normalizes it, so the allow rule equals the source identifier exactly.
 pub fn document<'a>(pinned: impl IntoIterator<Item = &'a str>) -> Result<Value, CandidateError> {
+    document_for(pinned, false)
+}
+
+pub(super) fn build_document<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+) -> Result<Value, CandidateError> {
+    document_for(sources, true)
+}
+
+fn document_for<'a>(
+    pinned: impl IntoIterator<Item = &'a str>,
+    aliases: bool,
+) -> Result<Value, CandidateError> {
     let mut allowed = BTreeSet::new();
     for reference in pinned {
+        if aliases && super::image_build::aliases::allowed(reference) {
+            allowed.insert(format!("docker-image://{reference}"));
+            continue;
+        }
         match normalize(reference) {
             Ok(ImageReference::Named(named))
                 if named.digest.is_some() && named.docker_hub_repository().is_some() =>

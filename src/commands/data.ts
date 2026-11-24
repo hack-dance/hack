@@ -1,4 +1,4 @@
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { formatNativeSourceBytes } from "../backends/native-project-source-size.ts";
 import { buildComposeArgs } from "../backends/runtime-backend.ts";
 import type { CommandHandlerFor } from "../cli/command.ts";
@@ -24,7 +24,8 @@ import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { scopedHackCommand } from "../lib/printed-shell-command.ts";
 import { readProjectConfig } from "../lib/project.ts";
 import {
-  resolveComposeProcessEnv,
+  type ComposeRuntimeModel,
+  resolveComposeRuntimeModel,
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
 } from "./project.ts";
@@ -96,19 +97,18 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
     project,
     cfg: await readProjectConfig(project),
   });
+  // Exactly the Compose invocation `hack up` builds for this instance (files,
+  // project name, project directory and managed env, which can select the
+  // engine), with every profile active so a profile-gated service's volume
+  // is seen too.
+  const model = await resolveComposeRuntimeModel({
+    project,
+    branch,
+    envName: resolveRequestedEnvName({ envOption: args.options.env }),
+  });
   const result = await exportProjectData({
-    // The managed env `hack up` gives Compose: it can select the engine.
-    docker: createHostDataBackupDocker({
-      env: await resolveComposeProcessEnv({
-        project,
-        envName: resolveRequestedEnvName({ envOption: args.options.env }),
-      }),
-    }),
-    composeArgs: buildComposeArgs({
-      composeFiles: [project.composeFile],
-      composeProject: branch ? `${base}--${branch}` : null,
-      cwd: dirname(project.composeFile),
-    }),
+    docker: createHostDataBackupDocker({ env: model.env, cwd: model.cwd }),
+    composeArgs: dataComposeArgs(model),
     project: base,
     branch,
     hackHome: resolveGlobalHackDir(),
@@ -141,6 +141,16 @@ export function socketNote(count: number): string {
   return count === 0
     ? ""
     : `, ${count} socket${count === 1 ? "" : "s"} not copied`;
+}
+
+/** Compose argv for a data command: the instance's model, all profiles on. */
+export function dataComposeArgs(model: ComposeRuntimeModel): string[] {
+  return buildComposeArgs({
+    composeFiles: model.composeFiles,
+    composeProject: model.composeProject,
+    profiles: ["*"],
+    cwd: model.cwd,
+  });
 }
 
 /** Text summary: each copied volume, each skipped one with its reason, the path. */

@@ -22,8 +22,13 @@ needs the Compose backend: with `HACK_RUNTIME_BACKEND=native` it refuses with
 
 ## What it backs up
 
-Hack reads the resolved Compose model (`docker compose config`, with the same
-files and project name `hack up` uses) and takes its top-level named volumes.
+Hack reads the resolved Compose model with exactly the invocation `hack up`
+builds for the instance: the same Compose files (the base or branch files,
+Hack's stored internal override, the dependency-cache, local-directories and
+runtime metadata overrides, and the env override), project name, project
+directory and managed env (so env-interpolated names resolve as they do at
+startup), with every profile active (`--profile '*'`) so a profile-gated
+service's volume is included. It takes the model's top-level named volumes.
 Compose leaves out a declared volume that no service uses, so that one is not
 listed. Each volume key maps to its Docker volume name: the volume's `name:`,
 or `<compose project>_<key>`.

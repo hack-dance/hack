@@ -77,11 +77,15 @@ function utf8(latin1: string): string {
  */
 export function createHostDataBackupDocker(opts: {
   readonly env: Readonly<Record<string, string>>;
+  /** Working directory for every call: the project's Compose directory. */
+  readonly cwd?: string;
 }): DataBackupDocker {
   const env = { ...opts.env };
+  const cwd = opts.cwd;
   return {
     async capture(argv, captureOpts) {
       const result = await exec(argv, {
+        cwd,
         env,
         stdin: "ignore",
         ...(captureOpts?.unbounded ? {} : { timeoutMs: METADATA_TIMEOUT_MS }),
@@ -101,7 +105,7 @@ export function createHostDataBackupDocker(opts: {
       let bytes = 0;
       let proc: ReturnType<typeof spawnPiped> | undefined;
       try {
-        proc = spawnPiped(argv, env);
+        proc = spawnPiped(argv, env, cwd);
         const errors = proc.stderr;
         const stderr = (async () => {
           let text = "";
@@ -143,6 +147,7 @@ export function createHostDataBackupDocker(opts: {
     },
     watch(argv, onLine) {
       const proc = Bun.spawn([...argv], {
+        cwd,
         env: childEnvironment(process.env, env),
         stdin: "ignore",
         stdout: "pipe",
@@ -221,9 +226,11 @@ async function eachChunk(
 
 function spawnPiped(
   argv: readonly string[],
-  env: Readonly<Record<string, string>>
+  env: Readonly<Record<string, string>>,
+  cwd: string | undefined
 ) {
   return Bun.spawn([...argv], {
+    cwd,
     env: childEnvironment(process.env, env),
     stdin: "ignore",
     stdout: "pipe",

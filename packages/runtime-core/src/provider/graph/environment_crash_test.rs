@@ -80,6 +80,34 @@ fn environment_crash_child() {
     .unwrap();
     panic!("fault helper unexpectedly completed");
 }
+/// The helper child's stdout and stderr, kept in one file next to its fixture so a
+/// failure can show why the child exited (the helper's values are synthetic).
+fn child_log(path: &Path) -> Result<(Stdio, Stdio), CandidateError> {
+    let file = fs::File::create(path).map_err(state::io)?;
+    let other = file.try_clone().map_err(state::io)?;
+    Ok((Stdio::from(file), Stdio::from(other)))
+}
+/// Print the helper child's output when the attempt it served failed.
+fn report_child<T, E: std::fmt::Debug>(
+    outcome: &std::thread::Result<Result<T, E>>,
+    log: &Path,
+    context: &str,
+) {
+    let failed = match outcome {
+        Ok(Ok(_)) => false,
+        Ok(Err(error)) => {
+            eprintln!("{context}: {error:?}");
+            true
+        }
+        Err(_) => true,
+    };
+    if failed {
+        eprintln!(
+            "--- helper child output ({context}) ---\n{}--- end ---",
+            fs::read_to_string(log).unwrap_or_else(|error| format!("(unreadable: {error})\n"))
+        );
+    }
+}
 struct OwnedChild(Option<Child>);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
@@ -107,6 +135,7 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
         (true, "after-start"),
     ] {
         let fixture = tests::Fixture::new();
+        let log = fixture.0.join("helper-child.log");
         let run = format!(
             "{:032x}",
             std::time::SystemTime::now()
@@ -125,6 +154,7 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
                     execute(&candidate, &fixture.0, &run, false)?;
                     cleanup(&candidate, &run, false)?;
                 }
+                let output = child_log(&log)?;
                 let child = Command::new(std::env::current_exe().map_err(state::io)?)
                     .args([
                         "--ignored",
@@ -139,8 +169,8 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
                     )
                     .env("HACK_LOCAL_GRAPH_FAULT", point)
                     .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stdout(output.0)
+                    .stderr(output.1)
                     .spawn()
                     .map_err(state::io)?;
                 let mut child = OwnedChild(Some(child));
@@ -234,6 +264,8 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
             },
         ));
         let cleaned = cleanup(&candidate, &run, true);
+        report_child(&outcome, &log, &format!("restore={restore} point={point}"));
+        report_child(&outcome, &log, "cleanup-after-remove");
         outcome.unwrap()?;
         cleaned?;
         cleanup(&candidate, &run, true)?;
@@ -250,6 +282,7 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let fixture = tests::Fixture::new();
+    let log = fixture.0.join("helper-child.log");
     let run = format!(
         "{:032x}",
         std::time::SystemTime::now()
@@ -265,6 +298,7 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<(), CandidateError> {
             execute(&candidate, &fixture.0, &run, false)?;
+            let output = child_log(&log)?;
             let child = Command::new(std::env::current_exe().map_err(state::io)?)
                 .args([
                     "--ignored",
@@ -276,8 +310,8 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
                 .env("HACK_LOCAL_GRAPH_ACTION", "cleanup")
                 .env("HACK_LOCAL_GRAPH_FAULT", "cleanup-after-remove")
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(output.0)
+                .stderr(output.1)
                 .spawn()
                 .map_err(state::io)?;
             let mut child = OwnedChild(Some(child));
@@ -354,6 +388,7 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let fixture = tests::Fixture::new();
+    let log = fixture.0.join("helper-child.log");
     let run = format!(
         "{:032x}",
         std::time::SystemTime::now()
@@ -385,6 +420,7 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
                 .join(format!("{slot}.json"));
             let original = fs::read(&source).map_err(state::io)?;
             cleanup(&candidate, &run, true)?;
+            let output = child_log(&log)?;
             let mut child = OwnedChild(Some(
                 Command::new(std::env::current_exe().map_err(state::io)?)
                     .args([
@@ -396,8 +432,8 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
                     .env("HACK_LOCAL_GRAPH_ACTION", "archive")
                     .env("HACK_LOCAL_GRAPH_RUN", &run)
                     .env("HACK_LOCAL_GRAPH_FAULT", "archive-after-environment-move")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stdout(output.0)
+                    .stderr(output.1)
                     .spawn()
                     .map_err(state::io)?,
             ));
@@ -496,5 +532,6 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
     if root.exists() {
         cleanup(&candidate, &run, true)?;
     }
+    report_child(&outcome, &log, "archive-after-environment-move");
     outcome.unwrap()
 }

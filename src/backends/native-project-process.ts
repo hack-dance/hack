@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError } from "../lib/cli-result.ts";
+import { startupTimingSpawn } from "../lib/command-timings.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { NativeProcessRefusal } from "../lib/native-process-wrappers.ts";
 import {
@@ -349,7 +350,7 @@ async function serveGraphProcess(
       environment[key] = value;
     }
   }
-  const child = Bun.spawn(
+  const child = startupTimingSpawn(
     [
       opts.runtime.binary,
       "--candidate-root",

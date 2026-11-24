@@ -32,7 +32,6 @@ const SELF = "tests/sync-spawn-bound.test.ts";
 const KNOWN_UNBOUNDED: Readonly<Record<string, number>> = {
   "tests/background-command-journal.test.ts": 1,
   "tests/background-command-process.test.ts": 1,
-  "tests/ci-change-scope.test.ts": 5,
   "tests/compose-startup-phases.test.ts": 1,
   "tests/daemon-detach.test.ts": 1,
   "tests/docker-context.test.ts": 1,

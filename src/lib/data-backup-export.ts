@@ -52,6 +52,8 @@ export type DataExportInput = {
   readonly downCommand?: string;
   /** Bound for each event-stream marker (default 30 s). */
   readonly markerTimeoutMs?: number;
+  /** fsync of a directory; a test seam for the post-rename durability path. */
+  readonly syncDirectory?: (path: string) => Promise<void>;
 };
 
 export type DataExportResult = {
@@ -185,7 +187,13 @@ async function exportWithin(opts: {
     volumes,
     skipped,
   };
-  await publishBackup({ partial, backup, parent, manifest });
+  await publishBackup({
+    partial,
+    backup,
+    parent,
+    manifest,
+    syncDirectory: input.syncDirectory ?? syncPath,
+  });
   return { backup, manifest };
 }
 
@@ -264,12 +272,20 @@ async function copyVolume(opts: {
   };
 }
 
-/** Manifest last, fsync, then one rename: a reader sees a whole backup or none. */
+/**
+ * Manifest last; fsync the manifest and the `.partial` directory (each tar
+ * was fsynced as it was written); one rename publishes; then fsync the
+ * parent. A failure before the rename leaves only `.partial`. A failed
+ * parent fsync after it is a distinct outcome: the backup is complete and
+ * visible, but its durability is unconfirmed (`detail.published: true,
+ * durable: false`).
+ */
 async function publishBackup(opts: {
   readonly partial: string;
   readonly backup: string;
   readonly parent: string;
   readonly manifest: DataBackupManifest;
+  readonly syncDirectory: (path: string) => Promise<void>;
 }): Promise<void> {
   const manifestPath = join(opts.partial, DATA_BACKUP_MANIFEST);
   await fsStep({ path: manifestPath, operation: "write" }, async () => {
@@ -279,11 +295,19 @@ async function publishBackup(opts: {
       { flag: "wx", mode: 0o600 }
     );
     await syncPath(manifestPath);
-    await syncPath(opts.partial);
+    await opts.syncDirectory(opts.partial);
   });
   await refuseExisting(opts.backup);
-  await fsStep({ path: opts.backup, operation: "write" }, async () => {
-    await rename(opts.partial, opts.backup);
-    await syncPath(opts.parent);
-  });
+  await fsStep({ path: opts.backup, operation: "write" }, () =>
+    rename(opts.partial, opts.backup)
+  );
+  try {
+    await opts.syncDirectory(opts.parent);
+  } catch {
+    throw new HackCliError({
+      code: "E_UNEXPECTED",
+      message: `The backup at ${opts.backup} is complete but its durability could not be confirmed: the rename that published it could not be flushed to disk. Check the file system, then use the backup or export again.`,
+      detail: { backup: opts.backup, published: true, durable: false },
+    });
+  }
 }

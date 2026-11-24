@@ -120,12 +120,23 @@ Directories and files are created private to your user (0700 and 0600).
 `--json` prints the standard envelope with `data.schema` `hack.data-export.v1`,
 `data.backup` (the backup path) and `data.manifest`.
 
-## Atomicity
+## Atomicity and durability
 
-Everything is written into `<backup>.partial/`. The manifest is written last,
-the files and directory are fsynced, and the directory is renamed to
-`<backup>/`. An interrupted or failed export leaves only the `.partial`
-directory. It is never a backup: Hack never reads, reuses or completes it, and
-you can delete it. Each run uses a new timestamp; if the target or its
-`.partial` already exists (two runs in the same second), the export refuses
-with `E_PATH_CONFLICT` instead of writing into it.
+Everything is written into `<backup>.partial/`. Each tar is fsynced as it is
+written; the manifest is written last and fsynced, then the `.partial`
+directory is fsynced, one rename publishes `<backup>/`, and the parent
+directory is fsynced. The outcomes are:
+
+- **Failure before the rename**: only `<backup>.partial/` exists. It is never
+  a backup: Hack never reads, reuses or completes it, and you can delete it.
+- **Success**: `<backup>/` exists, its rename was flushed, and the command
+  exits 0.
+- **Parent fsync failed after the rename**: `<backup>/` exists and is
+  complete, but the command exits 1 with `backup at <path> is complete but
+  its durability could not be confirmed` and `error.detail` `{published:
+  true, durable: false}`. Use it once the file system is healthy, or export
+  again.
+
+Each run uses a new timestamp; if the target or its `.partial` already
+exists (two runs in the same second), the export refuses with
+`E_PATH_CONFLICT` instead of writing into it.

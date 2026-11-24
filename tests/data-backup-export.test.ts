@@ -620,6 +620,32 @@ describe("exportProjectData", () => {
     ]);
   });
 
+  test("a parent fsync failure after the rename is reported as published but not durable", async () => {
+    const out = join(root, "out");
+    const backup = join(out, "20261123T140501Z");
+    const synced: string[] = [];
+    const error = await caught(
+      exportProjectData(
+        input(baseState(), {
+          outDir: out,
+          syncDirectory: (path) => {
+            synced.push(path);
+            return path === out
+              ? Promise.reject(Object.assign(new Error("io"), { code: "EIO" }))
+              : Promise.resolve();
+          },
+        })
+      )
+    );
+    expect(error.message).toBe(
+      `The backup at ${backup} is complete but its durability could not be confirmed: the rename that published it could not be flushed to disk. Check the file system, then use the backup or export again.`
+    );
+    expect(error.detail).toEqual({ backup, published: true, durable: false });
+    // .partial was synced before the rename, the parent after it.
+    expect(synced).toEqual([`${backup}.partial`, out]);
+    expect(await readdir(out)).toEqual(["20261123T140501Z"]);
+  });
+
   test("refuses an existing target directory", async () => {
     const out = join(root, "out");
     await exportProjectData(input(baseState(), { outDir: out }));

@@ -1381,6 +1381,10 @@ fn start_pool_observed(
         ));
     }
     let dependencies = dependency_request.initial();
+    // The request's own count is validated before any headroom raises it.
+    if let Some(intent) = bridge_request.initial() {
+        super::BridgeIntent::new(intent.slots)?;
+    }
     let requested = bridge_request.initial_with_headroom(dependencies);
     let request = running_start::StartRequest {
         bridges: bridge_request,

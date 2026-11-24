@@ -828,20 +828,35 @@ mod tests {
         let mut started = receipt();
         started.phase = "preparing".into();
         mark_started(&mut started).unwrap();
+        assert_eq!(started.phase, STARTED_OBSERVED);
         recoverable_settled(&started).unwrap();
         let fixture = super::super::tests::Fixture::new();
         state::write(&fixture.0.join("state.json"), &started).unwrap();
         relay::verify_receipt(&fixture.0, &started).unwrap();
         let mut moved = started.clone();
+        moved.set_phase("preparing");
+        state::write(&fixture.0.join("state.json"), &moved).unwrap();
+        assert!(relay::verify_receipt(&fixture.0, &started).is_err());
         moved.set_phase("cleanup-intent");
-        let _ = fs::remove_file(fixture.0.join("state.json"));
         state::write(&fixture.0.join("state.json"), &moved).unwrap();
         relay::verify_receipt(&fixture.0, &started).unwrap();
-        // A start still in progress stays unrecoverable here.
-        for phase in ["preparing", "restoring", "restarting"] {
-            let mut value = receipt();
-            value.phase = phase.into();
-            assert!(recoverable_settled(&value).is_err(), "{phase}");
+        let mut restarting = receipt();
+        restarting.phase = "restarting".into();
+        assert!(recoverable_settled(&restarting).is_err());
+    }
+
+    #[test]
+    fn unfinished_start_recovery_requires_an_enrolled_relay_receipt() {
+        let fixture = super::super::tests::Fixture::new();
+        for phase in ["preparing", "restoring"] {
+            let mut enrolled = receipt();
+            enrolled.phase = phase.into();
+            recoverable_settled(&enrolled).unwrap();
+            assert!(failed_start_recoverable(&fixture.0, &enrolled));
+
+            enrolled.relay_startup = None;
+            assert!(recoverable_settled(&enrolled).is_err(), "{phase}");
+            assert!(!failed_start_recoverable(&fixture.0, &enrolled));
         }
     }
     #[test]

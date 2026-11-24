@@ -2719,7 +2719,7 @@ fn down_observed(
         return Ok(initial);
     }
     let lock = state::Lock::acquire(&root(candidate))?;
-    // Builds take their shared fence only under this lease, so none can start after this.
+    // The provider lease prevents a build from being admitted after this check.
     super::image_build::require_no_active_build(candidate)?;
     if let Some(idle) = idle {
         idle()?;
@@ -2961,7 +2961,7 @@ fn stop_silent_guest(candidate: &Candidate, owner: &mut Owner) -> Result<(), Can
 /// (`run/image-builds/active.lock`), so the lease alone does not prove the engine is idle.
 /// The fence is a `flock`: it is released when the build's processes exit, including on
 /// SIGKILL, so a refusal lasts only while a build process is alive. Callers hold the
-/// operation lease, under which no new build can take the fence.
+/// operation lease, which prevents new build admission.
 fn require_no_build_for_silent_stop(candidate: &Candidate) -> Result<(), CandidateError> {
     super::image_build::require_no_active_build(candidate).map_err(|error| {
         if error.code == "provider_busy" {

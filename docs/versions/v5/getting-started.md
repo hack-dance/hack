@@ -124,6 +124,10 @@ When the project declares remotes, `hack ps` shows the observed target or
 the variable name. Start the whole project with `hack up`. Use `hack down`
 followed by `hack up` to restart it.
 
+The desktop preview shows those descriptors on the registered project's
+**Services** tab. It shows the environment variable name for an
+environment-backed address and marks each target as unchecked.
+
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
 have no URL. Sign in or load a page that reads data to check the app itself.

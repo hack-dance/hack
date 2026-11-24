@@ -13,7 +13,10 @@ hack data export --out ~/backups --json
 ```
 
 `--path`, `--project`, `--branch` and `--env` select the project, instance
-and env overlay like other project commands. Every Docker call (Compose, the
+and env overlay like other project commands. Without `--env`, the env
+selection the instance was last started with is used, as `hack down` does
+(else the configured default), so a volume name or engine that depends on
+that overlay resolves as it did at startup. Every Docker call (Compose, the
 volume and container reads and the helper runs) gets the same managed Compose
 env `hack up` gives the project, so a project that selects its engine with a
 managed `DOCKER_HOST` or `DOCKER_CONTEXT` is read on that engine. The command

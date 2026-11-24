@@ -110,6 +110,18 @@ Some things still need the CLI: creating an overlay
 key for one run (`--key-file`, `--key-env`). The app shows these as inactive
 buttons that name the command. See [Share environment and secrets](share-environment.md).
 
+## Follow-up banners and Doctor
+
+The project pane shows the highest-priority follow-up. Dismiss it until the
+check changes or the app relaunches. Open **Doctor** to see machine and project
+checks, or **Check again** to refresh the results.
+
+In a build with the terminal panel, **Run** opens that panel. **Fix all** runs
+available repairs one at a time and checks each result before continuing. It
+stops when a repair fails, a check cannot confirm it, or you choose **Stop**.
+Enter a password only at the system prompt in the terminal. Use **Review** for
+an available upgrade.
+
 ## The upgrade review pane
 
 The **Upgrade** row opens the same review the CLI gives you before a v4 to v5

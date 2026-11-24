@@ -2584,6 +2584,7 @@ mod machine_status_render_tests {
         );
         let warn = DoctorRun::machine(Ok(DoctorReport {
             checks: vec![DoctorCheck {
+                native_pool: None,
                 id: "resolver:hack".into(),
                 status: "warn".into(),
                 detail: "Resolver missing".into(),

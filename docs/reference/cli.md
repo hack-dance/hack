@@ -1824,6 +1824,7 @@ hack native <subcommand> [options]
 | `hack native setup` | Download and prepare the pinned native runtime for this home |
 | `hack native recover` | Recover this home's native runtime after an interrupted or failed start |
 | `hack native temp-aliases` | List dangling native provider HOME aliases |
+| `hack native disk-usage` | Show host disk usage for the selected native home |
 
 ### Options
 
@@ -1899,6 +1900,27 @@ List old aliases whose native home is gone, or remove them with --fix.
 | `--json` | Output JSON (machine-readable) |
 | `--fix` | Remove verified dangling aliases |
 | `--include-unverified-volumes` | With --fix, include aliases whose volume may be unmounted |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack native disk-usage`
+
+Show host disk usage for the selected native home
+
+### Usage
+
+```bash
+hack native disk-usage [options]
+```
+
+Report allocated and logical file bytes without starting the pool. The scan can be incomplete. Guest usage and reclaimable bytes are unavailable in this view.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

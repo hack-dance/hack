@@ -517,7 +517,12 @@ quiescent. Atomic renames and durable intent/completion writes are abstractions,
 not fsync proofs. The native implementation is in
 `packages/runtime-core/src/provider/shared_https_recovery.rs`; explicit v3
 frontend selection is in `src/backends/native-project-recovery.ts` and
-`src/backends/native-https-owner.ts`. This model covers the present-socket path
+`src/backends/native-https-owner.ts`. The v1 endpoint has no PID. The macOS
+invocation scan in `provider/identity.rs` excludes foreign users, zombies and
+different executables before reading arguments. Missing identity evidence and
+unreadable arguments of a possible owner both block recovery. The injected
+identity tests cover that boundary, which the eligibility flag abstracts.
+This model covers the present-socket path
 with two moves. The both-absent socket/parent variant has one owner move and
 requires separate concrete absence, process and port regression controls.
 The implementation also refuses completed replay while a newer shared owner is

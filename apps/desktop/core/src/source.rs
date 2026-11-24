@@ -557,6 +557,14 @@ pub trait Source: Send + Sync {
         Err("Usage is unavailable for this source".into())
     }
 
+    /// One machine-wide, Compose-only sample, with per-container counters.
+    ///
+    /// # Errors
+    /// The CLI could not read usage or its output could not be parsed.
+    fn stats_sample(&self) -> Result<crate::stats::StatsReport, String> {
+        Err("Usage is unavailable for this source".into())
+    }
+
     /// The services of one instance whose image architecture differs from
     /// the engine's (`hack ps --json --path <root> [--branch <name>]`).
     ///
@@ -2069,6 +2077,25 @@ impl Source for LiveSource {
             )
             .map_err(|e| e.to_string())?;
         crate::usage::UsageReport::from_value(v)
+    }
+
+    fn stats_sample(&self) -> Result<crate::stats::StatsReport, String> {
+        let value: serde_json::Value = self
+            .runner_for(false)
+            .fixed()
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_json(
+                &["usage", "--json", "--details", "--no-host"],
+                None,
+                Self::USAGE,
+            )
+            .map_err(|e| e.to_string())?;
+        if value.get("runtime_ok").and_then(serde_json::Value::as_bool) != Some(true)
+            || value.get("error").is_some()
+        {
+            return Err("Container usage is unavailable".into());
+        }
+        serde_json::from_value(value).map_err(|e| e.to_string())
     }
 
     fn emulated_services(
@@ -5736,7 +5763,13 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
             r#"#!/bin/sh
 printf '%s %s\n' "$HACK_RUNTIME_BACKEND" "$*" >> "$HACK_HOME/calls"
 case "$1" in
-  usage) echo '{"ok":true,"data":{"schema":"hack.usage.by-service.v1","project":"shop","services":[{"composeProject":"shop","service":"api","containers":1,"cpuPercent":1.5,"memUsedBytes":1048576,"memLimitBytes":null}]}}' ;;
+  usage)
+    if [ "$3" = "--details" ]; then
+      echo '{"runtime_ok":true,"containers":[{"containerId":"aaaaaaaaaaaa","project":"shop","service":"api","netInputBytes":1000,"configuredMemoryLimitBytes":67108864}]}'
+    else
+      echo '{"ok":true,"data":{"schema":"hack.usage.by-service.v1","project":"shop","services":[{"composeProject":"shop","service":"api","containers":1,"cpuPercent":1.5,"memUsedBytes":1048576,"memLimitBytes":null}]}}'
+    fi
+    ;;
   ps) echo '{"ok":true,"data":{"items":[{"Service":"api","emulated":true},{"Service":"db"}]}}' ;;
 esac
 "#,
@@ -5754,6 +5787,12 @@ esac
         let root = Path::new("/work/shop");
         let report = src.service_usage(root).unwrap();
         assert_eq!(report.for_instance("shop")["api"].cpu_percent, Some(1.5));
+        let stats = src.stats_sample().unwrap();
+        assert_eq!(stats.containers[0].net_input_bytes, Some(1000));
+        assert_eq!(
+            stats.containers[0].configured_memory_limit_bytes,
+            Some(67_108_864)
+        );
         let base = src.emulated_services(root, None).unwrap();
         assert_eq!(base, std::collections::BTreeSet::from(["api".to_owned()]));
         src.emulated_services(root, Some("preview")).unwrap();
@@ -5767,6 +5806,7 @@ esac
             calls.lines().collect::<Vec<_>>(),
             vec![
                 "compose usage --json --by-service --path /work/shop",
+                "compose usage --json --details --no-host",
                 "compose ps --json --path /work/shop",
                 "compose ps --json --branch preview --path /work/shop",
             ]

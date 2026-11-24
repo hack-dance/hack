@@ -954,3 +954,134 @@ describe("drivers and the import lock", () => {
     expect(result.volumes[0]?.target).toBe("created");
   });
 });
+
+describe("each target's identity is rechecked: Docker cannot pin a volume", () => {
+  test("an existing empty target removed during the read-only check is never written or recreated", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.volume("shop_db", { labels: OWNED("db"), content: "" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("-quit")) {
+        fake.removeVolume("shop_db");
+      }
+    };
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.detail).toEqual({
+      conflicts: [{ key: "db", reason: "changed" }],
+    });
+    expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+    expect(await journal("db")).toBeNull();
+  });
+
+  test("a matching target removed while it is verified refuses instead of reporting it verified", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    await importProjectData(input(fake, dir));
+    // Removed under the read-only hold: the digest of the emptied tree
+    // could still be taken; the recheck refuses.
+    fake.onExec = (_container, args) => {
+      if (args.includes("-e")) {
+        fake.removeVolume("shop_db");
+      }
+    };
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.detail).toEqual({
+      conflicts: [{ key: "db", reason: "changed" }],
+    });
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+  });
+
+  test("a target removed during the restore is not marked complete or recreated", async () => {
+    // Docker lets the removal succeed under the bind; the extract then
+    // lands in a deleted directory whose digest still matches the backup.
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.onExec = (_container, args) => {
+      if (args.includes("-xpf")) {
+        fake.removeVolume("shop_db");
+      }
+    };
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(error.message).toContain("while it was being restored");
+    expect((await journal("db"))?.state).toBe("started");
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+  });
+
+  test("a target removed, or replaced, after the restore and before completion is not marked complete", async () => {
+    for (const replace of [false, true]) {
+      const dir = await writeBackup({
+        keys: ["db"],
+        name: replace ? "replaced" : "removed",
+      });
+      const fake = engine();
+      let restored = false;
+      fake.onExec = (_container, args) => {
+        if (args.includes("-xpf")) {
+          restored = true;
+        }
+      };
+      let removed = false;
+      fake.onPs = () => {
+        if (restored && !removed) {
+          removed = true;
+          fake.removeVolume("shop_db");
+          if (replace) {
+            fake.volume("shop_db", { labels: OWNED("db"), content: "rows-db" });
+          }
+        }
+      };
+      const hackHome = join(root, replace ? "h-replace" : "h-remove");
+      const error = await caught(
+        importProjectData(input(fake, dir, { hackHome }))
+      );
+      expect({ replace, code: error.code, detail: error.detail }).toEqual({
+        replace,
+        code: "E_PROJECT_RUNNING",
+        detail: { key: "db", reason: "volume_changed" },
+      });
+      expect(error.message).toContain("after it was restored");
+      const state = await readDataImportJournal(
+        dataImportJournalPath({ hackHome, composeProject: PROJECT, key: "db" })
+      );
+      expect(state?.state).toBe("started");
+    }
+  });
+
+  test("a container already running with a bind of an existing target's Mountpoint refuses before any write", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.volume("shop_db", { labels: OWNED("db"), content: "" });
+    const id = fake.runningContainer("pre-existing", [
+      {
+        Type: "bind",
+        Source: "/var/lib/docker/volumes/shop_db/_data/sub",
+        Destination: "/x",
+      },
+    ]);
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ running: [id.slice(0, 12)] });
+    // No hold and no write (only the event-stream start marker ran).
+    expect(
+      fake.calls.some(
+        (argv) => argv[1] === "create" && argv.includes("--mount")
+      )
+    ).toBeFalse();
+    expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
+    expect(await journal("db")).toBeNull();
+  });
+
+  test("a running container with unrelated binds does not trip on a target that does not exist yet", async () => {
+    // Absent targets are matched by name only: they have no Mountpoint.
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.runningContainer("unrelated", [
+      { Type: "bind", Source: "/srv/app", Destination: "/app" },
+    ]);
+    const result = await importProjectData(input(fake, dir));
+    expect(result.volumes[0]?.outcome).toBe("restored");
+  });
+});

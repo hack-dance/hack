@@ -370,7 +370,15 @@ Before any write it checks, in order:
    refuses, and a start that cannot be inspected refuses with
    `detail.reason: unchecked_start` (retry if it was unrelated). Containers
    are tracked and removed by ID and reported by short ID only. Each
-   refusal leaves the journal unfinished.
+   refusal leaves the journal unfinished. Both running checks also inspect
+   every running container for a bind of an existing target's
+   `Mountpoint` (a target that does not exist yet is matched by name).
+   As for export, Hack cannot pin a target against removal, so it rechecks
+   each target's identity after every read-only hold (a mismatch refuses
+   as `changed`, before any write), after its restore and digest, and for
+   every target immediately before any journal is marked complete (a
+   mismatch refuses with `volume_changed` and leaves the journal
+   unfinished). Import never creates a volume except an absent target.
 5. **Targets.** A backed-up key that is no longer declared here, or is
    `external` here, is skipped and reported. For each other key the target is
    its Docker volume (`name:` or `<compose project>_<key>`):

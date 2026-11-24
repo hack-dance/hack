@@ -33,6 +33,8 @@ import {
   inspectVolume,
   plainLocalVolume,
   planDeclaredVolumes,
+  requireUnchangedVolume,
+  type WatchedVolume,
 } from "./data-backup-volumes.ts";
 import {
   type DataImportJournal,
@@ -145,6 +147,8 @@ type Context = {
    * or created by this import), for the window's foreign-start check.
    */
   readonly mountpoints: Map<string, string>;
+  /** The identity of each target once validated or created, by Docker name. */
+  readonly identities: Map<string, InspectedVolume>;
   readonly now: () => Date;
 };
 
@@ -213,6 +217,7 @@ export async function importProjectData(
             deadlines,
             helpers,
             mountpoints: new Map(),
+            identities: new Map(),
             now: input.now ?? (() => new Date()),
           },
           selected,
@@ -242,11 +247,35 @@ async function importWithin(
 ): Promise<readonly DataImportVolume[]> {
   const { input, plan } = context;
   const stopCommand = input.downCommand ?? "hack down";
-  const volumeNames = selected.map((entry) => entry.name);
+  // The Mountpoint of every target that exists, before any hold, so the
+  // first running check can see a container binding it. Reads only.
+  for (const entry of selected) {
+    const existing = await inspectVolume({
+      docker: input.docker,
+      name: entry.name,
+    });
+    if (existing !== null) {
+      context.mountpoints.set(entry.name, existing.mountpoint);
+    }
+  }
+  const watched = (): WatchedVolume[] =>
+    selected.flatMap((entry) => {
+      const mountpoint = context.mountpoints.get(entry.name);
+      return mountpoint === undefined ? [] : [{ name: entry.name, mountpoint }];
+    });
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
-    volumeNames,
+    // An absent target is still checked by name (a container that would
+    // create it by mounting it).
+    volumes: [
+      ...watched(),
+      ...selected
+        .filter((entry) => !context.mountpoints.has(entry.name))
+        .map((entry) => ({ name: entry.name, mountpoint: "" })),
+    ],
+    exclude: context.helpers.created,
+    timeoutMs: context.deadlines.commandMs,
     stopCommand,
     command: "import",
     lead: "The project is running, so its volumes cannot be restored safely; nothing was changed.",
@@ -266,7 +295,9 @@ async function importWithin(
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
-    volumeNames,
+    volumes: watched(),
+    exclude: context.helpers.created,
+    timeoutMs: context.deadlines.commandMs,
     stopCommand,
     command: "import",
     lead: "A container started during the import, so the restore is not marked complete; rerunning hack data import after stopping it replaces its own copy.",
@@ -277,16 +308,7 @@ async function importWithin(
   );
   // Every target's Mountpoint is known by now: inspected, or created and
   // restored above.
-  const mounts = (
-    await monitor.finish(
-      selected.flatMap((entry) => {
-        const mountpoint = context.mountpoints.get(entry.name);
-        return mountpoint === undefined
-          ? []
-          : [{ name: entry.name, mountpoint }];
-      })
-    )
-  ).map((mount) => ({
+  const mounts = (await monitor.finish(watched())).map((mount) => ({
     ...mount,
     volume: keyOf.get(mount.volume) ?? mount.volume,
   }));
@@ -298,6 +320,22 @@ async function importWithin(
         "the restore is not marked complete; rerunning hack data import replaces its own copy.",
       stopCommand,
     });
+  }
+  // Immediately before any target is marked complete: every target is
+  // still the volume validated (or created) and written.
+  for (const target of targets) {
+    const identity = context.identities.get(target.name);
+    if (identity !== undefined) {
+      await requireUnchangedVolume({
+        docker: input.docker,
+        name: target.name,
+        key: target.volume.key,
+        identity,
+        when: "after it was restored",
+        consequence:
+          "the restore is not marked complete; rerunning hack data import replaces its own copy.",
+      });
+    }
   }
   for (const target of targets) {
     if (target.kind !== "verified-complete") {
@@ -446,7 +484,22 @@ async function existingIsEmpty(
       changed: changedTarget(entry.volume.key),
       consequence: "nothing was changed.",
     },
-    (held) => isEmpty(context, held, entry.volume.key)
+    async (held) => {
+      const empty = await isEmpty(context, held, entry.volume.key);
+      // A removal under the bind leaves an empty tree: recheck the volume.
+      await requireUnchangedVolume({
+        docker: context.input.docker,
+        name: entry.name,
+        key: entry.volume.key,
+        identity,
+        when: "while it was being checked",
+        consequence: "nothing was changed.",
+        // Nothing was written yet: the same conflict as a target replaced
+        // after validation.
+        refusal: changedTarget(entry.volume.key),
+      });
+      return empty;
+    }
   );
 }
 
@@ -469,7 +522,21 @@ async function existingMatches(
       changed: changedTarget(entry.volume.key),
       consequence: "nothing was changed.",
     },
-    (held) => held.treeDigest("nothing was changed.")
+    async (held) => {
+      const digest = await held.treeDigest("nothing was changed.");
+      await requireUnchangedVolume({
+        docker: context.input.docker,
+        name: entry.name,
+        key: entry.volume.key,
+        identity,
+        when: "while it was being checked",
+        consequence: "nothing was changed.",
+        // Nothing was written yet: the same conflict as a target replaced
+        // after validation.
+        refusal: changedTarget(entry.volume.key),
+      });
+      return digest;
+    }
   );
   return (
     tree.digest === entry.volume.contentDigest &&
@@ -522,6 +589,7 @@ async function classifyTarget(
     return { key, reason: "unsupported_driver" };
   }
   context.mountpoints.set(entry.name, inspected.mountpoint);
+  context.identities.set(entry.name, inspected);
   const target = { ...entry, journalPath, identity: inspected };
   const journal = await readDataImportJournal(journalPath);
   const sameRestore =
@@ -699,6 +767,7 @@ async function restoreTarget(
     throw changedTarget(key)();
   }
   context.mountpoints.set(target.name, identity.mountpoint);
+  context.identities.set(target.name, identity);
   const recoverable = target.kind !== "empty";
   const partialNote = recoverable
     ? `the volume for ${key} may hold a partial copy; rerunning hack data import replaces it.`
@@ -751,7 +820,18 @@ async function restoreTarget(
         consequence: partialNote,
         redactValues: context.input.docker.redactValues,
       });
-      return await held.treeDigest(partialNote);
+      const restored = await held.treeDigest(partialNote);
+      // A removal under the bind would leave the restore in a deleted
+      // directory: the volume must still be the one written.
+      await requireUnchangedVolume({
+        docker: context.input.docker,
+        name: target.name,
+        key,
+        identity,
+        when: "while it was being restored",
+        consequence: `the restore is not marked complete; ${partialNote}`,
+      });
+      return restored;
     }
   );
   if (

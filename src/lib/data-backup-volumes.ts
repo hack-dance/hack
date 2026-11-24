@@ -250,10 +250,15 @@ export async function requireUnchangedVolume(opts: {
   readonly when: string;
   /** What the refusal leaves behind, as a sentence. */
   readonly consequence: string;
+  /** The caller's own refusal instead of the default `volume_changed`. */
+  readonly refusal?: () => HackCliError;
 }): Promise<void> {
   const now = await inspectVolume({ docker: opts.docker, name: opts.name });
   if (now !== null && sameVolumeIdentity(opts.identity, now)) {
     return;
+  }
+  if (opts.refusal) {
+    throw opts.refusal();
   }
   throw new HackCliError({
     code: "E_PROJECT_RUNNING",
@@ -400,7 +405,11 @@ export async function runningContainers(opts: {
   return [...found].sort();
 }
 
-/** A volume a data command protects: its Docker name and inspected Mountpoint. */
+/**
+ * A volume a data command protects: its Docker name and inspected
+ * Mountpoint. An empty Mountpoint is a target that does not exist yet: it is
+ * matched by name only.
+ */
 export type WatchedVolume = {
   readonly name: string;
   readonly mountpoint: string;
@@ -439,7 +448,11 @@ export function mountsReachingVolumes(opts: {
         reached.add(volume.name);
         continue;
       }
-      if (typeof mount.Source !== "string" || mount.Source === "") {
+      if (
+        volume.mountpoint === "" ||
+        typeof mount.Source !== "string" ||
+        mount.Source === ""
+      ) {
         continue;
       }
       const source = normalizedDaemonPath(mount.Source);

@@ -149,9 +149,17 @@ Before any change it checks, in order:
    instance's Compose project. To restore into a branch instance or a renamed
    project, pass `--from-project <backup's compose project>`; a missing or
    different value refuses with `E_USAGE`.
-3. **Running containers.** As for export: `E_PROJECT_RUNNING` when a
-   container of the instance, or any container mounting a target, runs.
-4. **Targets.** A backed-up key that is no longer declared here, or is
+3. **One import at a time.** The import holds
+   `$HACK_HOME/data-imports/<compose project>/.lock` for its whole run. A
+   second import of the same project refuses with `E_LOCKED` after a
+   one-second bound instead of waiting; a lock left by a process that no
+   longer exists is reclaimed.
+4. **Running containers and writers.** As for export: the live event
+   subscription is proven before the first running-container check, and
+   `E_PROJECT_RUNNING` refuses when a container of the instance, or any
+   container mounting a target, runs, or when anything but this run's
+   helpers mounts a target during the import.
+5. **Targets.** A backed-up key that is no longer declared here, or is
    `external` here, is skipped and reported. For each other key the target is
    its Docker volume (`name:` or `<compose project>_<key>`):
 
@@ -161,6 +169,7 @@ Before any change it checks, in order:
 | Exists, labeled for this project and key, empty | Used as it is |
 | Exists, labeled for this project and key, with data | Refused (`not_empty`), unless it is this import's own interrupted copy (below) |
 | Labels name another project or key, or none | Refused (`foreign`); never mounted or changed |
+| Declared with a driver other than `local` or with `driver_opts`, or existing with such a driver or options | Refused (`unsupported_driver`): import restores into plain local volumes only for now, so data never lands in an unintended backing store such as an NFS mount |
 
 Any refusal names every conflicting volume in one `E_DATA_TARGET_CONFLICT`
 (`error.detail.conflicts`) and changes nothing. Move the volume aside, or back
@@ -168,8 +177,13 @@ it up with `hack data export`, then rerun. Compose accepts a volume created by
 import as its own: it carries the same labels Compose writes, and Compose does
 not require its config-hash label.
 
-Then, per target: the journal records `started`; an absent target is
-created; the tar is streamed into the pinned helper (`--rm`, `--network none`,
+Then, per target: an absent target is created, and because
+`docker volume create` returns an existing volume of that name unchanged,
+Hack inspects the result and requires this backup's
+`io.hack.data-backup.source` label, the expected Compose labels, a plain
+local driver without options and an empty tree; anything else (a volume that
+appeared meanwhile) refuses as `changed` before anything is written. The
+journal then records `started`; the tar is streamed into the pinned helper (`--rm`, `--network none`,
 read-only root, `no-new-privileges`, the volume read-write at `/v`) running
 `tar --numeric-owner -xpf - -C /v`; and the helper computes the same
 `hack.tree-digest.v1` digest as export. A digest or entry count that differs

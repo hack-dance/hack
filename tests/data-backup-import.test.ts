@@ -17,6 +17,7 @@ import {
 import {
   dataImportJournalPath,
   readDataImportJournal,
+  withDataImportLock,
   writeDataImportJournal,
 } from "../src/lib/data-import-journal.ts";
 import { FakeDockerEvents } from "./helpers/data-backup-events.ts";
@@ -27,6 +28,8 @@ const NOW = new Date("2026-11-24T10:00:00.000Z");
 
 type FakeVolume = {
   labels: Record<string, string>;
+  driver?: string;
+  options?: Record<string, string> | null;
   /** The volume's contents, as one string; "" is empty. */
   content: string;
 };
@@ -42,6 +45,8 @@ type FakeState = {
   calls: string[][];
   psCalls: number;
   events: FakeDockerEvents;
+  /** Runs just before `docker volume create`, e.g. a racing creator. */
+  beforeCreate?: (name: string) => void;
 };
 
 const sha = (text: string): string =>
@@ -84,7 +89,12 @@ function fakeDocker(state: FakeState): DataBackupDocker {
         return Promise.resolve(
           volume
             ? ok(
-                JSON.stringify({ name, driver: "local", labels: volume.labels })
+                JSON.stringify({
+                  name,
+                  driver: volume.driver ?? "local",
+                  options: volume.options ?? null,
+                  labels: volume.labels,
+                })
               )
             : {
                 exitCode: 1,
@@ -94,10 +104,15 @@ function fakeDocker(state: FakeState): DataBackupDocker {
         );
       }
       if (args[0] === "volume" && args[1] === "create") {
-        state.volumes.set(argv.at(-1) ?? "", {
-          labels: labelsFrom(args.slice(2)),
-          content: "",
-        });
+        const name = argv.at(-1) ?? "";
+        state.beforeCreate?.(name);
+        // Like Docker: an existing volume of that name is returned unchanged.
+        if (!state.volumes.has(name)) {
+          state.volumes.set(name, {
+            labels: labelsFrom(args.slice(2)),
+            content: "",
+          });
+        }
         return Promise.resolve(ok(`${argv.at(-1)}\n`));
       }
       if (args[0] === "ps") {
@@ -609,5 +624,133 @@ describe("running refusal", () => {
     const error = await caught(importProjectData(input(state, dir)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect((await journal("db"))?.state).toBe("started");
+  });
+});
+
+describe("races, drivers and the import lock", () => {
+  test("a volume created by someone else between the check and the create is never written", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    for (const [labels, content] of [
+      [{}, ""],
+      [
+        {
+          "com.docker.compose.project": "other",
+          "com.docker.compose.volume": "db",
+        },
+        "theirs",
+      ],
+      // Our Compose labels but not this backup's source label.
+      [
+        {
+          "com.docker.compose.project": PROJECT,
+          "com.docker.compose.volume": "db",
+        },
+        "",
+      ],
+    ] as const) {
+      const state = baseState();
+      state.beforeCreate = (name) => {
+        state.volumes.set(name, { labels: { ...labels }, content });
+      };
+      const error = await caught(importProjectData(input(state, dir)));
+      expect(error.code).toBe("E_DATA_TARGET_CONFLICT");
+      expect(error.detail).toEqual({
+        conflicts: [{ key: "db", name: "shop_db", reason: "changed" }],
+      });
+      expect(state.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
+      expect(state.volumes.get("shop_db")).toEqual({
+        labels: { ...labels },
+        content,
+      });
+      expect(await journal("db")).toBeNull();
+    }
+  });
+
+  test("declared driver_opts or a non-local driver refuse before any change", async () => {
+    const dir = await writeBackup({ keys: ["db", "cache"] });
+    const state = baseState({
+      model: model({
+        db: { name: "shop_db", driver_opts: { type: "nfs", o: "addr=x" } },
+        cache: { name: "shop_cache", driver: "rexray" },
+      }),
+    });
+    const error = await caught(importProjectData(input(state, dir)));
+    expect(error.code).toBe("E_DATA_TARGET_CONFLICT");
+    expect(error.message).toContain("plain local volumes only");
+    expect(error.detail).toEqual({
+      conflicts: [
+        { key: "db", name: "shop_db", reason: "unsupported_driver" },
+        { key: "cache", name: "shop_cache", reason: "unsupported_driver" },
+      ],
+    });
+    expect(effects(state)).toEqual([]);
+    expect(state.volumes.size).toBe(0);
+  });
+
+  test("an existing target with driver options refuses", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const state = baseState({
+      volumes: new Map<string, FakeVolume>([
+        [
+          "shop_db",
+          {
+            labels: {
+              "com.docker.compose.project": PROJECT,
+              "com.docker.compose.volume": "db",
+            },
+            options: { type: "nfs" },
+            content: "",
+          },
+        ],
+      ]),
+    });
+    const error = await caught(importProjectData(input(state, dir)));
+    expect(error.detail).toEqual({
+      conflicts: [{ key: "db", name: "shop_db", reason: "unsupported_driver" }],
+    });
+    expect(effects(state)).toEqual([]);
+  });
+
+  test("a second import of the same project refuses while the first holds the lock", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const state = baseState();
+    let error: HackCliError | undefined;
+    await withDataImportLock({
+      hackHome: join(root, "home"),
+      composeProject: PROJECT,
+      run: async () => {
+        error = await caught(
+          importProjectData(input(state, dir, { lockTimeoutMs: 50 }))
+        );
+      },
+    });
+    expect(error?.code).toBe("E_LOCKED");
+    expect(error?.message).toContain("Another hack data import");
+    expect(state.calls.some((argv) => argv[1] === "run")).toBeFalse();
+    expect(state.volumes.size).toBe(0);
+    // Released: the next import proceeds.
+    const result = await importProjectData(input(state, dir));
+    expect(result.volumes[0]?.target).toBe("created");
+  });
+
+  test("a foreign mount during the restore keeps the journal unfinished", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const events = new FakeDockerEvents();
+    events.afterRun = (argv) => {
+      if (argv.includes("-xpf")) {
+        events.mount("shop_db", "f".repeat(64));
+        events.start("f".repeat(64), "adhoc-writer");
+      }
+    };
+    const state = baseState({ events });
+    const error = await caught(importProjectData(input(state, dir)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({
+      mounts: [
+        { volume: "shop_db", container: "f".repeat(64), name: "adhoc-writer" },
+      ],
+    });
+    expect((await journal("db"))?.state).toBe("started");
+    expect(events.open).toBeFalse();
   });
 });

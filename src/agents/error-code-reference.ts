@@ -172,7 +172,7 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
   },
   E_DATA_TARGET_CONFLICT: {
     meaning:
-      "A volume `hack data import` would restore into already holds data, or its labels name another project or key; Hack never overwrites or touches it, and nothing was changed. `error.detail.conflicts` names each volume and why.",
+      "A volume `hack data import` would restore into already holds data, its labels name another project or key, it is not a plain local volume, or it was replaced while the import created it; Hack never overwrites or touches it, and nothing was written to it. `error.detail.conflicts` names each volume and why.",
     readFirst: "`docker volume inspect <volume from the message>`",
   },
   E_RECOVERY_REQUIRED: {

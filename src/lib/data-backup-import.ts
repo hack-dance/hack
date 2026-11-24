@@ -19,15 +19,18 @@ import {
   COMPOSE_PROJECT_LABEL,
   COMPOSE_VOLUME_LABEL,
   composeOwnsVolume,
+  type DeclaredVolume,
   type DeclaredVolumePlan,
   dockerReadError,
   inspectVolume,
+  plainLocalVolume,
   planDeclaredVolumes,
 } from "./data-backup-volumes.ts";
 import {
   type DataImportJournal,
   dataImportJournalPath,
   readDataImportJournal,
+  withDataImportLock,
   writeDataImportJournal,
 } from "./data-import-journal.ts";
 
@@ -48,6 +51,8 @@ export type DataImportInput = {
   readonly downCommand?: string;
   /** Bound for each event-stream marker (default 30 s). */
   readonly markerTimeoutMs?: number;
+  /** Bound for taking the per-project import lock (default 1 s). */
+  readonly lockTimeoutMs?: number;
 };
 
 /** How a target was prepared before extraction. */
@@ -83,10 +88,22 @@ type Target = {
   readonly kind: DataImportTargetKind;
 };
 
+/** A backed-up key that is still a declared, non-external volume here. */
+type SelectedTarget = {
+  readonly volume: DataBackupVolume;
+  readonly name: string;
+  readonly declared: DeclaredVolume;
+};
+
 export type DataTargetConflict = {
   readonly key: string;
   readonly name: string;
-  readonly reason: "foreign" | "not_empty" | "already_imported";
+  readonly reason:
+    | "foreign"
+    | "not_empty"
+    | "already_imported"
+    | "unsupported_driver"
+    | "changed";
 };
 
 /**
@@ -119,6 +136,22 @@ export async function importProjectData(
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
   requireSourceProject({ backup, plan, fromProject: input.fromProject });
   const { selected, skipped } = selectTargets({ backup, plan });
+  return await withDataImportLock({
+    hackHome: input.hackHome,
+    composeProject: plan.composeProject,
+    timeoutMs: input.lockTimeoutMs,
+    run: () => importLocked({ input, backup, plan, selected, skipped }),
+  });
+}
+
+async function importLocked(opts: {
+  readonly input: DataImportInput;
+  readonly backup: VerifiedBackup;
+  readonly plan: DeclaredVolumePlan;
+  readonly selected: readonly SelectedTarget[];
+  readonly skipped: readonly DataImportSkipped[];
+}): Promise<DataImportResult> {
+  const { input, backup, plan, selected, skipped } = opts;
   const helperNames = new Set<string>();
   // Subscribe and prove coverage before the first running-container check.
   const monitor = await startMountMonitor({
@@ -153,10 +186,7 @@ async function importWithin(opts: {
   readonly input: DataImportInput;
   readonly backup: VerifiedBackup;
   readonly plan: DeclaredVolumePlan;
-  readonly selected: readonly {
-    readonly volume: DataBackupVolume;
-    readonly name: string;
-  }[];
+  readonly selected: readonly SelectedTarget[];
   readonly monitor: MountMonitor;
   readonly helperNames: Set<string>;
 }): Promise<readonly DataImportVolume[]> {
@@ -256,22 +286,19 @@ function selectTargets(opts: {
   readonly backup: VerifiedBackup;
   readonly plan: DeclaredVolumePlan;
 }): {
-  readonly selected: readonly {
-    readonly volume: DataBackupVolume;
-    readonly name: string;
-  }[];
+  readonly selected: readonly SelectedTarget[];
   readonly skipped: readonly DataImportSkipped[];
 } {
   const declared = new Map(
-    opts.plan.declared.map((entry) => [entry.key, entry.name])
+    opts.plan.declared.map((entry) => [entry.key, entry])
   );
   const external = new Set(opts.plan.external.map((entry) => entry.key));
-  const selected: { volume: DataBackupVolume; name: string }[] = [];
+  const selected: SelectedTarget[] = [];
   const skipped: DataImportSkipped[] = [];
   for (const volume of opts.backup.manifest.volumes) {
-    const name = declared.get(volume.key);
-    if (name !== undefined) {
-      selected.push({ volume, name });
+    const entry = declared.get(volume.key);
+    if (entry !== undefined) {
+      selected.push({ volume, name: entry.name, declared: entry });
     } else {
       skipped.push({
         key: volume.key,
@@ -320,16 +347,17 @@ async function prepareTargets(opts: {
   readonly docker: DataBackupDocker;
   readonly backup: VerifiedBackup;
   readonly plan: DeclaredVolumePlan;
-  readonly selected: readonly {
-    readonly volume: DataBackupVolume;
-    readonly name: string;
-  }[];
+  readonly selected: readonly SelectedTarget[];
   readonly hackHome: string;
   readonly helperName: () => string;
 }): Promise<readonly Target[]> {
   const targets: Target[] = [];
   const conflicts: DataTargetConflict[] = [];
-  for (const { volume, name } of opts.selected) {
+  for (const { volume, name, declared } of opts.selected) {
+    if (!plainLocalVolume(declared)) {
+      conflicts.push({ key: volume.key, name, reason: "unsupported_driver" });
+      continue;
+    }
     const journalPath = dataImportJournalPath({
       hackHome: opts.hackHome,
       composeProject: opts.plan.composeProject,
@@ -349,6 +377,10 @@ async function prepareTargets(opts: {
       })
     ) {
       conflicts.push({ key: volume.key, name, reason: "foreign" });
+      continue;
+    }
+    if (!plainLocalVolume(inspected)) {
+      conflicts.push({ key: volume.key, name, reason: "unsupported_driver" });
       continue;
     }
     if (
@@ -390,6 +422,10 @@ function conflictError(conflicts: readonly DataTargetConflict[]): HackCliError {
         return `${conflict.name} exists but its labels name another project or key, so Hack does not touch it`;
       case "already_imported":
         return `${conflict.name} already holds a completed restore of this backup`;
+      case "unsupported_driver":
+        return `${conflict.name} is declared or created with a driver other than plain \`local\` or with driver_opts, and hack data import restores into plain local volumes only for now`;
+      case "changed":
+        return `${conflict.name} appeared or changed while this import was creating it (it is not the empty volume with this backup's labels that Hack created), so Hack wrote nothing to it`;
       default:
         return `${conflict.name} already holds data`;
     }
@@ -437,7 +473,46 @@ async function writeJournal(opts: {
   });
 }
 
-/** Create or wipe, extract, digest; the journal is `started` throughout. */
+/**
+ * After `docker volume create`, the volume must carry this backup's source
+ * label and the expected Compose labels, be a plain local volume, and be
+ * empty. Anything else was there before (or appeared meanwhile) and refuses
+ * with `E_DATA_TARGET_CONFLICT` before anything is written.
+ */
+async function requireCreatedTarget(opts: {
+  readonly docker: DataBackupDocker;
+  readonly backup: VerifiedBackup;
+  readonly composeProject: string;
+  readonly target: Target;
+  readonly helperName: () => string;
+}): Promise<void> {
+  const { target } = opts;
+  const inspected = await inspectVolume({
+    docker: opts.docker,
+    name: target.name,
+  });
+  const ours =
+    inspected !== null &&
+    inspected.labels[DATA_IMPORT_SOURCE_LABEL] === opts.backup.id &&
+    composeOwnsVolume({
+      volume: inspected,
+      composeProject: opts.composeProject,
+      key: target.volume.key,
+    }) &&
+    plainLocalVolume(inspected) &&
+    (await volumeIsEmpty({
+      docker: opts.docker,
+      name: target.name,
+      helperName: opts.helperName,
+    }));
+  if (!ours) {
+    throw conflictError([
+      { key: target.volume.key, name: target.name, reason: "changed" },
+    ]);
+  }
+}
+
+/** Create or wipe, extract, digest; the journal is `started` from the first write. */
 async function restoreTarget(opts: {
   readonly docker: DataBackupDocker;
   readonly backup: VerifiedBackup;
@@ -449,7 +524,6 @@ async function restoreTarget(opts: {
 }): Promise<DataImportVolume> {
   const { target, docker } = opts;
   const name = target.name;
-  await writeJournal({ ...opts, state: "started", now: opts.now() });
   const recoverable = target.kind !== "empty";
   const partialNote = recoverable
     ? `the target ${name} may hold a partial copy; rerunning hack data import replaces it.`
@@ -475,7 +549,13 @@ async function restoreTarget(opts: {
         command: "docker volume create",
       });
     }
-  } else if (target.kind === "replaced-partial") {
+    // `docker volume create` returns an existing volume of that name
+    // unchanged: prove this one is ours and empty before any write.
+    await requireCreatedTarget(opts);
+  }
+  // Before any write: a rerun recognizes this target from here on.
+  await writeJournal({ ...opts, state: "started", now: opts.now() });
+  if (target.kind === "replaced-partial") {
     const wiped = await docker.capture(
       [
         ...dataBackupHelperArgv({

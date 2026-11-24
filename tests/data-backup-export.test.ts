@@ -235,13 +235,15 @@ describe("planDeclaredVolumes", () => {
       model({
         web: {},
         db: { name: "custom" },
+        nfs: { driver: "local", driver_opts: { type: "nfs" } },
         shared: { external: true, name: "shared-net-data" },
       })
     );
     expect(plan.composeProject).toBe(PROJECT);
     expect(plan.declared).toEqual([
-      { key: "db", name: "custom" },
-      { key: "web", name: "shop_web" },
+      { key: "db", name: "custom", driver: "local", driverOpts: false },
+      { key: "nfs", name: "shop_nfs", driver: "local", driverOpts: true },
+      { key: "web", name: "shop_web", driver: "local", driverOpts: false },
     ]);
     expect(plan.external).toEqual([
       { key: "shared", name: "shared-net-data", reason: "external" },

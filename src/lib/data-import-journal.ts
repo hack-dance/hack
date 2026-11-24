@@ -1,8 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { HackCliError } from "./cli-result.ts";
 import { fsStep, parseJsonText, syncPath } from "./data-backup-helper.ts";
 import { isRecord } from "./guards.ts";
+import {
+  ProjectsRegistryLockTimeoutError,
+  withProjectsRegistryLock,
+} from "./projects-registry-lock.ts";
 
 /**
  * Per-volume journal of `hack data import`, at
@@ -91,4 +96,47 @@ export async function writeDataImportJournal(opts: {
     await rename(temporary, opts.path);
     await syncPath(directory);
   });
+}
+
+/** Bound for taking the import lock; a live holder refuses instead of waiting. */
+const IMPORT_LOCK_WAIT_MS = 1000;
+
+/**
+ * Run `run` holding the per-project import lock,
+ * `$HACK_HOME/data-imports/<compose project>/.lock`, so two imports of one
+ * project never overlap. It is the repository's cooperative owner-file lock:
+ * a lock left by a process that no longer exists is reclaimed, a live holder
+ * refuses with `E_LOCKED` after a short bound.
+ */
+export async function withDataImportLock<T>(opts: {
+  readonly hackHome: string;
+  readonly composeProject: string;
+  readonly run: () => Promise<T>;
+  readonly timeoutMs?: number;
+}): Promise<T> {
+  const directory = join(
+    opts.hackHome,
+    DATA_IMPORTS_DIR_NAME,
+    opts.composeProject
+  );
+  const lockPath = join(directory, ".lock");
+  await fsStep({ path: directory, operation: "create_directory" }, () =>
+    mkdir(directory, { recursive: true, mode: 0o700 })
+  );
+  try {
+    return await withProjectsRegistryLock({
+      lockPath,
+      timeoutMs: opts.timeoutMs ?? IMPORT_LOCK_WAIT_MS,
+      label: "data import",
+      run: opts.run,
+    });
+  } catch (error: unknown) {
+    if (error instanceof ProjectsRegistryLockTimeoutError) {
+      throw new HackCliError({
+        code: "E_LOCKED",
+        message: `Another hack data import of Compose project ${opts.composeProject} is running (lock ${lockPath}); nothing was changed. Retry when it finishes.`,
+      });
+    }
+    throw error;
+  }
 }

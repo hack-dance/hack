@@ -15,11 +15,40 @@ export const COMPOSE_VOLUME_LABEL = "com.docker.compose.volume";
 const PROJECT_LABEL = COMPOSE_PROJECT_LABEL;
 const VOLUME_LABEL = COMPOSE_VOLUME_LABEL;
 const VOLUME_FORMAT =
-  '{"name":{{json .Name}},"driver":{{json .Driver}},"labels":{{json .Labels}}}';
+  '{"name":{{json .Name}},"driver":{{json .Driver}},"options":{{json .Options}},"labels":{{json .Labels}}}';
 const NO_SUCH_VOLUME = /no such volume/i;
 
 /** A declared, non-external volume of the resolved model, not yet inspected. */
-export type DeclaredVolume = { readonly key: string; readonly name: string };
+export type DeclaredVolume = {
+  readonly key: string;
+  readonly name: string;
+  /** The declared driver; `local` when the model names none. */
+  readonly driver: string;
+  /** Whether the model declares `driver_opts` (for example an NFS mount). */
+  readonly driverOpts: boolean;
+};
+
+/** Whether a declared or inspected volume is a plain `local` volume. */
+export function plainLocalVolume(opts: {
+  readonly driver: string;
+  readonly driverOpts: boolean;
+}): boolean {
+  return opts.driver === "local" && !opts.driverOpts;
+}
+
+function hasEntries(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
+function declaredDriver(definition: Record<string, unknown>): {
+  readonly driver: string;
+  readonly driverOpts: boolean;
+} {
+  return {
+    driver: typeof definition.driver === "string" ? definition.driver : "local",
+    driverOpts: hasEntries(definition.driver_opts),
+  };
+}
 
 /** A declared volume whose Docker labels prove this Compose project owns it. */
 export type OwnedVolume = DeclaredVolume & {
@@ -84,7 +113,7 @@ export function planDeclaredVolumes(model: unknown): DeclaredVolumePlan {
     if (name === null) {
       return invalidModel("a volume name is not a plain name");
     }
-    declared.push({ key, name });
+    declared.push({ key, name, ...declaredDriver(definition) });
   }
   return { composeProject, declared, external };
 }
@@ -118,6 +147,8 @@ function parseInspect(stdout: string): unknown {
 export type InspectedVolume = {
   readonly name: string;
   readonly driver: string;
+  /** Whether the volume was created with driver options. */
+  readonly driverOpts: boolean;
   readonly labels: Readonly<Record<string, unknown>>;
 };
 
@@ -156,6 +187,7 @@ export async function inspectVolume(opts: {
   return {
     name: opts.name,
     driver: value.driver,
+    driverOpts: hasEntries(value.options),
     labels: isRecord(value.labels) ? value.labels : {},
   };
 }
@@ -192,7 +224,7 @@ export async function classifyDeclaredVolumes(opts: {
       name: volume.name,
     });
     if (inspected === null) {
-      skipped.push({ ...volume, reason: "absent" });
+      skipped.push({ key: volume.key, name: volume.name, reason: "absent" });
       continue;
     }
     if (
@@ -202,7 +234,7 @@ export async function classifyDeclaredVolumes(opts: {
         key: volume.key,
       })
     ) {
-      skipped.push({ ...volume, reason: "foreign" });
+      skipped.push({ key: volume.key, name: volume.name, reason: "foreign" });
       continue;
     }
     owned.push({

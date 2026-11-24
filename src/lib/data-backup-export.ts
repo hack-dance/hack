@@ -1,8 +1,13 @@
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
+import {
+  type DataBackupDeadlines,
+  resolveDataBackupDeadlines,
+} from "./data-backup-deadlines.ts";
 import type { DataBackupDocker } from "./data-backup-docker.ts";
 import {
+  DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
   DATA_BACKUP_MANIFEST,
   DATA_BACKUP_PARTIAL_SUFFIX,
   DATA_BACKUP_SCHEMA,
@@ -11,17 +16,16 @@ import {
   type DataBackupManifest,
   type DataBackupVolume,
   dataBackupHelperImage,
+  dataBackupNameSha256,
   dataBackupTimestamp,
 } from "./data-backup-format.ts";
+import { requireStep, withHeldVolume } from "./data-backup-held-volume.ts";
 import {
-  dataBackupHelperArgv,
   fsStep,
-  helperContainerName,
-  helperFailure,
   parseJsonText,
+  parseTreeDigest,
   refuseRunning,
   syncPath,
-  treeDigest,
 } from "./data-backup-helper.ts";
 import {
   foreignMountError,
@@ -52,6 +56,10 @@ export type DataExportInput = {
   readonly downCommand?: string;
   /** Bound for each event-stream marker (default 30 s). */
   readonly markerTimeoutMs?: number;
+  /** Bounds for Docker calls; default from the environment overrides. */
+  readonly deadlines?: DataBackupDeadlines;
+  /** fsync of a directory; a test seam for the post-rename durability path. */
+  readonly syncDirectory?: (path: string) => Promise<void>;
 };
 
 export type DataExportResult = {
@@ -113,6 +121,7 @@ async function exportWithin(opts: {
   readonly helperNames: Set<string>;
 }): Promise<DataExportResult> {
   const { input, now, plan, monitor, helperNames } = opts;
+  const deadlines = input.deadlines ?? resolveDataBackupDeadlines();
   const stopCommand = input.downCommand ?? "hack down";
   const { owned, skipped } = await classifyDeclaredVolumes({
     docker: input.docker,
@@ -151,6 +160,7 @@ async function exportWithin(opts: {
         volume,
         partial,
         helperNames,
+        deadlines,
       })
     );
   }
@@ -163,7 +173,11 @@ async function exportWithin(opts: {
     lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
   });
   // Stop and drain the subscription, then decide.
-  const mounts = await monitor.finish(volumeNames);
+  const keyOf = new Map(owned.map((volume) => [volume.name, volume.key]));
+  const mounts = (await monitor.finish(volumeNames)).map((mount) => ({
+    ...mount,
+    volume: keyOf.get(mount.volume) ?? mount.volume,
+  }));
   if (mounts.length > 0) {
     throw foreignMountError({
       mounts,
@@ -185,7 +199,13 @@ async function exportWithin(opts: {
     volumes,
     skipped,
   };
-  await publishBackup({ partial, backup, parent, manifest });
+  await publishBackup({
+    partial,
+    backup,
+    parent,
+    manifest,
+    syncDirectory: input.syncDirectory ?? syncPath,
+  });
   return { backup, manifest };
 }
 
@@ -199,77 +219,118 @@ async function refuseExisting(path: string): Promise<void> {
   }
 }
 
-/** Copy one owned volume: a tar stream to `<key>.tar`, then its tree digest. */
+/**
+ * Copy one owned volume through one held helper container: digest the
+ * tree, stream the tar to `<key>.tar`, digest the tree again, then digest
+ * the archive itself (streamed back in). Publication requires source digest
+ * before == source digest after == archive digest.
+ */
 async function copyVolume(opts: {
   readonly docker: DataBackupDocker;
   readonly volume: OwnedVolume;
   readonly partial: string;
   readonly helperNames: Set<string>;
+  readonly deadlines: DataBackupDeadlines;
 }): Promise<DataBackupVolume> {
-  const { volume } = opts;
-  const name = (): string => {
-    const helper = helperContainerName("export");
-    opts.helperNames.add(helper);
-    return helper;
-  };
+  const { volume, deadlines } = opts;
   const consequence = `no backup was published; the incomplete copy is in ${opts.partial}.`;
   const file = `${volume.key}.tar`;
   const path = join(opts.partial, file);
-  const tar = await fsStep({ path, operation: "write" }, () =>
-    opts.docker.streamToFile({
-      argv: [
-        ...dataBackupHelperArgv({
-          name: name(),
-          volume: volume.name,
-          readOnly: true,
-          entrypoint: "tar",
-          purpose: "export",
-        }),
-        "--numeric-owner",
-        "-cpf",
-        "-",
-        "-C",
-        "/v",
-        ".",
-      ],
-      path,
-    })
-  );
-  if (tar.exitCode !== 0) {
-    throw helperFailure({
+  return await withHeldVolume(
+    {
+      docker: opts.docker,
       volume: volume.name,
-      action: "copy",
-      result: tar,
+      label: volume.key,
+      identity: volume.identity,
+      readOnly: true,
+      purpose: "export",
+      deadlines,
+      helperNames: opts.helperNames,
       consequence,
-    });
-  }
-  const tree = await treeDigest({
-    docker: opts.docker,
-    name: name(),
-    volume: volume.name,
-    purpose: "export",
-    consequence,
-  });
-  return {
-    key: volume.key,
-    name: volume.name,
-    driver: volume.driver,
-    labels: volume.labels,
-    file,
-    tarBytes: tar.bytes,
-    tarSha256: tar.sha256,
-    entries: tree.entries,
-    excludedSockets: tree.excludedSockets,
-    contentDigest: tree.digest,
-  };
+      changed: () =>
+        new HackCliError({
+          code: "E_PROJECT_RUNNING",
+          message: `The volume for ${volume.key} was removed, replaced or relabeled after it was validated, so it was not read; ${consequence} If Docker recreated it empty while mounting it, that empty volume is left as it is.`,
+          detail: { key: volume.key, reason: "volume_changed" },
+        }),
+    },
+    async (held) => {
+      const before = await held.treeDigest(consequence);
+      const tar = requireStep({
+        result: await fsStep({ path, operation: "write" }, () =>
+          held.execToFile(
+            ["tar", "--numeric-owner", "-cpf", "-", "-C", "/v", "."],
+            path
+          )
+        ),
+        label: volume.key,
+        action: "copy",
+        timeoutMs: deadlines.stepMs,
+        consequence,
+      });
+      const after = await held.treeDigest(consequence);
+      if (before.digest !== after.digest || before.entries !== after.entries) {
+        throw new HackCliError({
+          code: "E_PROJECT_RUNNING",
+          message: `The volume for ${volume.key} changed while it was being copied (its tree digest before and after the copy differ), so the copy is not consistent; ${consequence} Make sure nothing writes to the project's volumes, then retry.`,
+          detail: { key: volume.key, reason: "source_changed" },
+        });
+      }
+      // The archive itself must hold exactly that tree.
+      const archive = parseTreeDigest({
+        stdout: requireStep({
+          result: await held.execFromFile(
+            ["bun", "-e", DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT],
+            path
+          ),
+          label: volume.key,
+          action: "verify the archive of",
+          timeoutMs: deadlines.stepMs,
+          consequence,
+        }).stdout,
+        label: volume.key,
+        consequence,
+      });
+      if (
+        archive.digest !== before.digest ||
+        archive.entries !== before.entries
+      ) {
+        throw new HackCliError({
+          code: "E_UNEXPECTED",
+          message: `The archive of volume ${volume.key} does not hold the tree that was copied (the archive digest differs from the source digest), so it was not published; ${consequence} Check the disk the backup is written to, then retry.`,
+          detail: { key: volume.key, reason: "archive_mismatch" },
+        });
+      }
+      return {
+        key: volume.key,
+        nameSha256: dataBackupNameSha256(volume.name),
+        driver: volume.driver,
+        labels: volume.labels,
+        file,
+        tarBytes: tar.bytes,
+        tarSha256: tar.sha256,
+        entries: before.entries,
+        excludedSockets: before.excludedSockets,
+        contentDigest: before.digest,
+      };
+    }
+  );
 }
 
-/** Manifest last, fsync, then one rename: a reader sees a whole backup or none. */
+/**
+ * Manifest last; fsync the manifest and the `.partial` directory (each tar
+ * was fsynced as it was written); one rename publishes; then fsync the
+ * parent. A failure before the rename leaves only `.partial`. A failed
+ * parent fsync after it is a distinct outcome: the backup is complete and
+ * visible, but its durability is unconfirmed (`detail.published: true,
+ * durable: false`).
+ */
 async function publishBackup(opts: {
   readonly partial: string;
   readonly backup: string;
   readonly parent: string;
   readonly manifest: DataBackupManifest;
+  readonly syncDirectory: (path: string) => Promise<void>;
 }): Promise<void> {
   const manifestPath = join(opts.partial, DATA_BACKUP_MANIFEST);
   await fsStep({ path: manifestPath, operation: "write" }, async () => {
@@ -279,11 +340,19 @@ async function publishBackup(opts: {
       { flag: "wx", mode: 0o600 }
     );
     await syncPath(manifestPath);
-    await syncPath(opts.partial);
+    await opts.syncDirectory(opts.partial);
   });
   await refuseExisting(opts.backup);
-  await fsStep({ path: opts.backup, operation: "write" }, async () => {
-    await rename(opts.partial, opts.backup);
-    await syncPath(opts.parent);
-  });
+  await fsStep({ path: opts.backup, operation: "write" }, () =>
+    rename(opts.partial, opts.backup)
+  );
+  try {
+    await opts.syncDirectory(opts.parent);
+  } catch {
+    throw new HackCliError({
+      code: "E_UNEXPECTED",
+      message: `The backup at ${opts.backup} is complete but its durability could not be confirmed: the rename that published it could not be flushed to disk. Check the file system, then use the backup or export again.`,
+      detail: { backup: opts.backup, published: true, durable: false },
+    });
+  }
 }

@@ -15,7 +15,7 @@ export const COMPOSE_VOLUME_LABEL = "com.docker.compose.volume";
 const PROJECT_LABEL = COMPOSE_PROJECT_LABEL;
 const VOLUME_LABEL = COMPOSE_VOLUME_LABEL;
 const VOLUME_FORMAT =
-  '{"name":{{json .Name}},"driver":{{json .Driver}},"options":{{json .Options}},"labels":{{json .Labels}}}';
+  '{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"driver":{{json .Driver}},"mountpoint":{{json .Mountpoint}},"options":{{json .Options}},"labels":{{json .Labels}}}';
 const NO_SUCH_VOLUME = /no such volume/i;
 
 /** A declared, non-external volume of the resolved model, not yet inspected. */
@@ -52,6 +52,8 @@ function declaredDriver(definition: Record<string, unknown>): {
 
 /** A declared volume whose Docker labels prove this Compose project owns it. */
 export type OwnedVolume = DeclaredVolume & {
+  /** The validated inspection every later read must match. */
+  readonly identity: InspectedVolume;
   readonly driver: string;
   readonly labels: {
     readonly "com.docker.compose.project": string;
@@ -107,7 +109,7 @@ export function planDeclaredVolumes(model: unknown): DeclaredVolumePlan {
         ? rawName
         : null;
     if (definition.external === true || isRecord(definition.external)) {
-      external.push({ key, name, reason: "external" });
+      external.push({ key, reason: "external" });
       continue;
     }
     if (name === null) {
@@ -146,7 +148,12 @@ function parseInspect(stdout: string): unknown {
 /** What `docker volume inspect` proves about one volume. */
 export type InspectedVolume = {
   readonly name: string;
+  /** Birth fact; with driver, mountpoint, options and labels, its identity. */
+  readonly createdAt: string;
   readonly driver: string;
+  readonly mountpoint: string;
+  /** Driver options, canonical JSON (`null` when none). */
+  readonly options: string;
   /** Whether the volume was created with driver options. */
   readonly driverOpts: boolean;
   readonly labels: Readonly<Record<string, unknown>>;
@@ -176,20 +183,59 @@ export async function inspectVolume(opts: {
     !(
       isRecord(value) &&
       value.name === opts.name &&
-      typeof value.driver === "string"
+      typeof value.createdAt === "string" &&
+      typeof value.driver === "string" &&
+      typeof value.mountpoint === "string"
     )
   ) {
     throw new HackCliError({
       code: "E_UNEXPECTED",
-      message: `docker volume inspect returned unreadable output for ${opts.name}; nothing was changed.`,
+      message:
+        "docker volume inspect returned unreadable output for a declared volume; nothing was changed.",
     });
   }
   return {
     name: opts.name,
+    createdAt: value.createdAt,
     driver: value.driver,
+    mountpoint: value.mountpoint,
+    options: canonicalJson(value.options ?? null),
     driverOpts: hasEntries(value.options),
     labels: isRecord(value.labels) ? value.labels : {},
   };
+}
+
+function canonicalJson(value: unknown): string {
+  if (isRecord(value)) {
+    return JSON.stringify(
+      Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((key) => [key, value[key]])
+      )
+    );
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * Whether two inspections describe the same volume: equal birth time,
+ * driver, mountpoint, options and Compose ownership labels. A volume that
+ * was removed and recreated under the same name differs in CreatedAt.
+ */
+export function sameVolumeIdentity(
+  left: InspectedVolume,
+  right: InspectedVolume
+): boolean {
+  return (
+    left.name === right.name &&
+    left.createdAt === right.createdAt &&
+    left.driver === right.driver &&
+    left.mountpoint === right.mountpoint &&
+    left.options === right.options &&
+    left.labels[PROJECT_LABEL] === right.labels[PROJECT_LABEL] &&
+    left.labels[VOLUME_LABEL] === right.labels[VOLUME_LABEL]
+  );
 }
 
 /** Whether Compose's own labels name this project and key. */
@@ -224,7 +270,7 @@ export async function classifyDeclaredVolumes(opts: {
       name: volume.name,
     });
     if (inspected === null) {
-      skipped.push({ key: volume.key, name: volume.name, reason: "absent" });
+      skipped.push({ key: volume.key, reason: "absent" });
       continue;
     }
     if (
@@ -234,11 +280,12 @@ export async function classifyDeclaredVolumes(opts: {
         key: volume.key,
       })
     ) {
-      skipped.push({ key: volume.key, name: volume.name, reason: "foreign" });
+      skipped.push({ key: volume.key, reason: "foreign" });
       continue;
     }
     owned.push({
       ...volume,
+      identity: inspected,
       driver: inspected.driver,
       labels: {
         [PROJECT_LABEL]: opts.plan.composeProject,

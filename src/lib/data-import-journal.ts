@@ -16,7 +16,8 @@ import {
  * `started` before the target is created or filled, `complete` once the
  * restored tree matched the manifest digest, `failed` when it did not. A
  * rerun treats a non-empty target as its own interrupted import only when the
- * journal is not complete, names the same backup and target, and the volume
+ * journal is not complete, names the same backup and target (by the sha256
+ * of its Docker name, which can carry env values), and the volume
  * carries the matching `io.hack.data-backup.source` label. Writes are
  * atomic: a temp file, fsync, rename, then fsync of the directory.
  */
@@ -30,7 +31,8 @@ export type DataImportJournal = {
   readonly backupId: string;
   readonly backup: string;
   readonly key: string;
-  readonly target: string;
+  /** sha256 of the target's Docker name (names can carry env values). */
+  readonly targetSha256: string;
   readonly state: DataImportJournalState;
   readonly updatedAt: string;
 };
@@ -63,7 +65,7 @@ export async function readDataImportJournal(
       typeof value.backupId === "string" &&
       typeof value.backup === "string" &&
       typeof value.key === "string" &&
-      typeof value.target === "string" &&
+      typeof value.targetSha256 === "string" &&
       typeof value.state === "string" &&
       STATES.includes(value.state) &&
       typeof value.updatedAt === "string"

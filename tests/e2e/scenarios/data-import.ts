@@ -39,7 +39,6 @@ type Envelope = {
     };
     readonly volumes?: readonly {
       readonly key: string;
-      readonly name: string;
       readonly target: string;
       readonly contentDigest: string;
     }[];
@@ -108,7 +107,7 @@ export const dataImportScenario: Scenario = {
         that:
           imported.data?.schema === "hack.data-import.v1" &&
           imported.data.volumes?.[0]?.target === "created" &&
-          imported.data.volumes[0].name === volumeA &&
+          imported.data.volumes[0].key === KEY &&
           imported.data.volumes[0].contentDigest === backup1.digest,
         message: "import should create the target and verify its digest",
       });
@@ -129,7 +128,9 @@ export const dataImportScenario: Scenario = {
         first.name,
       ]);
       expect({
-        that: intoSecond.data?.volumes?.[0]?.name === volumeB,
+        that:
+          intoSecond.data?.volumes?.[0]?.key === KEY &&
+          (await docker(ctx, ["volume", "inspect", volumeB])).exitCode === 0,
         message:
           "--from-project should restore into the second project's volume",
       });
@@ -195,7 +196,7 @@ export const dataImportScenario: Scenario = {
           backupId: id,
           backup: backup2.path,
           key: KEY,
-          target: volumeA,
+          targetSha256: createHash("sha256").update(volumeA).digest("hex"),
           state: "started",
         },
         now: new Date(),

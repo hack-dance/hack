@@ -3,10 +3,13 @@ import { open } from "node:fs/promises";
 import { childEnvironment } from "./child-environment.ts";
 import { exec } from "./shell.ts";
 
-/** Bound for model and metadata reads; helper copies have no time limit. */
-const METADATA_TIMEOUT_MS = 120_000;
+/** Default bound for a capture that names none (model and metadata reads). */
+const DEFAULT_CAPTURE_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_STDERR_BYTES = 16_384;
+
+/** Exit code a stream reports when its bound ran out and the client was killed. */
+export const DATA_BACKUP_TIMEOUT_EXIT = 124;
 
 export type DataBackupProcessResult = {
   readonly exitCode: number;
@@ -22,29 +25,35 @@ export type DataBackupStreamResult = {
 };
 
 /**
- * The only Docker effects of a data export or import, injected so tests run without an
- * engine. Every argv is complete (it starts with `docker`).
+ * The only Docker effects of a data export or import, injected so tests run
+ * without an engine. Every argv is complete (it starts with `docker`). Every
+ * call is bounded: a run past its bound kills the client and reports
+ * {@link DATA_BACKUP_TIMEOUT_EXIT}; the daemon-side container is the
+ * caller's to remove (see data-backup-held-volume.ts).
  */
 export interface DataBackupDocker {
-  /** Run a bounded read and capture its UTF-8 output. */
+  /** Run `argv` and capture its UTF-8 output. */
   capture(
     argv: readonly string[],
-    opts?: { readonly unbounded?: boolean }
+    opts?: { readonly timeoutMs?: number }
   ): Promise<DataBackupProcessResult>;
   /**
    * Run `argv` and stream its stdout into a new file at `path` (created
    * exclusively, mode 0600, fsynced before return), hashing the bytes as they
-   * pass. The file is left in place on failure.
+   * pass. The file is left in place on failure. A failed write kills the
+   * client and rethrows.
    */
   streamToFile(opts: {
     readonly argv: readonly string[];
     readonly path: string;
+    readonly timeoutMs: number;
   }): Promise<DataBackupStreamResult>;
-  /** Run `argv` with the file at `path` as its stdin (a tar stream to extract). */
+  /** Run `argv` with the file at `path` as its stdin, capturing its output. */
   streamFromFile(opts: {
     readonly argv: readonly string[];
     readonly path: string;
-  }): Promise<{ readonly exitCode: number; readonly stderr: string }>;
+    readonly timeoutMs: number;
+  }): Promise<DataBackupProcessResult>;
   /**
    * Start a long-running `argv` (a `docker events` subscription) and call
    * `onLine` for each complete stdout line, in order.
@@ -73,23 +82,56 @@ function utf8(latin1: string): string {
   return Buffer.from(latin1, "latin1").toString("utf8");
 }
 
+type Spawned = ReturnType<typeof Bun.spawn>;
+
+/** Kill `proc` with SIGKILL after `timeoutMs`; `fired()` tells whether it did. */
+function deadline(proc: Spawned, timeoutMs: number) {
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+    proc.kill("SIGKILL");
+  }, timeoutMs);
+  return {
+    fired: () => fired,
+    clear: () => clearTimeout(timer),
+  };
+}
+
 /**
  * The real Docker client. Every subprocess (Compose, `docker volume`, `ps`,
- * `events` and the helper runs) gets `env`, the project's managed Compose
- * env, over the inherited one, so a project that selects its engine with a
- * managed DOCKER_HOST or DOCKER_CONTEXT is read on that engine. Hack key
- * material is stripped as for every child.
+ * `events`, `create`, `exec` and `rm`) gets `env`, the project's managed
+ * Compose env, over the inherited one, so a project that selects its engine
+ * with a managed DOCKER_HOST or DOCKER_CONTEXT is read on that engine, and
+ * runs in `cwd`. Hack key material is stripped as for every child.
  */
 export function createHostDataBackupDocker(opts: {
   readonly env: Readonly<Record<string, string>>;
+  /** Working directory for every call: the project's Compose directory. */
+  readonly cwd?: string;
+  /** Bound for a capture that names none (metadata reads). */
+  readonly captureTimeoutMs?: number;
 }): DataBackupDocker {
   const env = { ...opts.env };
+  const cwd = opts.cwd;
+  const captureTimeoutMs = opts.captureTimeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS;
+  const spawn = (
+    argv: readonly string[],
+    stdin: "ignore" | Blob
+  ): Bun.Subprocess<"ignore" | Blob, "pipe", "pipe"> =>
+    Bun.spawn([...argv], {
+      cwd,
+      env: childEnvironment(process.env, env),
+      stdin,
+      stdout: "pipe",
+      stderr: "pipe",
+    }) as Bun.Subprocess<"ignore" | Blob, "pipe", "pipe">;
   return {
     async capture(argv, captureOpts) {
       const result = await exec(argv, {
+        cwd,
         env,
         stdin: "ignore",
-        ...(captureOpts?.unbounded ? {} : { timeoutMs: METADATA_TIMEOUT_MS }),
+        timeoutMs: captureOpts?.timeoutMs ?? captureTimeoutMs,
         maxStdoutBytes: MAX_CAPTURE_BYTES,
         maxStderrBytes: MAX_STDERR_BYTES,
         forwardSignals: true,
@@ -100,13 +142,15 @@ export function createHostDataBackupDocker(opts: {
         stderr: utf8(result.stderr),
       };
     },
-    async streamToFile({ argv, path }) {
+    async streamToFile({ argv, path, timeoutMs }) {
       const file = await open(path, "wx", 0o600);
       const hash = createHash("sha256");
       let bytes = 0;
-      let proc: ReturnType<typeof spawnPiped> | undefined;
+      let proc: ReturnType<typeof spawn> | undefined;
+      let bound: ReturnType<typeof deadline> | undefined;
       try {
-        proc = spawnPiped(argv, env);
+        proc = spawn(argv, "ignore");
+        bound = deadline(proc, timeoutMs);
         const stderr = boundedText(proc.stderr);
         await eachChunk(proc.stdout, async (chunk) => {
           hash.update(chunk);
@@ -120,34 +164,44 @@ export function createHostDataBackupDocker(opts: {
         const exitCode = await proc.exited;
         await file.sync();
         return {
-          exitCode,
+          exitCode: bound.fired() ? DATA_BACKUP_TIMEOUT_EXIT : exitCode,
           stderr: await stderr,
           bytes,
           sha256: hash.digest("hex"),
         };
       } catch (error: unknown) {
-        // A failed write (a full disk) must not leave the helper streaming.
+        // A failed write (a full disk) must not leave the client streaming.
         if (proc && proc.exitCode === null) {
           proc.kill("SIGKILL");
           await proc.exited;
         }
         throw error;
       } finally {
+        bound?.clear();
         await file.close();
       }
     },
-    async streamFromFile({ argv, path }) {
-      const proc = Bun.spawn([...argv], {
-        env: childEnvironment(process.env, env),
-        stdin: Bun.file(path),
-        stdout: "ignore",
-        stderr: "pipe",
-      });
-      const stderr = await boundedText(proc.stderr);
-      return { exitCode: await proc.exited, stderr };
+    async streamFromFile({ argv, path, timeoutMs }) {
+      const proc = spawn(argv, Bun.file(path));
+      const bound = deadline(proc, timeoutMs);
+      try {
+        const [stdout, stderr, exitCode] = await Promise.all([
+          boundedText(proc.stdout, MAX_CAPTURE_BYTES),
+          boundedText(proc.stderr),
+          proc.exited,
+        ]);
+        return {
+          exitCode: bound.fired() ? DATA_BACKUP_TIMEOUT_EXIT : exitCode,
+          stdout,
+          stderr,
+        };
+      } finally {
+        bound.clear();
+      }
     },
     watch(argv, onLine) {
       const proc = Bun.spawn([...argv], {
+        cwd,
         env: childEnvironment(process.env, env),
         stdin: "ignore",
         stdout: "pipe",
@@ -206,19 +260,6 @@ export function createHostDataBackupDocker(opts: {
   };
 }
 
-async function boundedText(
-  stream: ReadableStream<Uint8Array>
-): Promise<string> {
-  let text = "";
-  await eachChunk(stream, (chunk) => {
-    if (text.length < MAX_STDERR_BYTES) {
-      text += Buffer.from(chunk).toString("utf8");
-    }
-    return Promise.resolve();
-  });
-  return text.slice(0, MAX_STDERR_BYTES);
-}
-
 async function eachChunk(
   stream: ReadableStream<Uint8Array>,
   onChunk: (chunk: Uint8Array) => Promise<void>
@@ -237,14 +278,20 @@ async function eachChunk(
   }
 }
 
-function spawnPiped(
-  argv: readonly string[],
-  env: Readonly<Record<string, string>>
-) {
-  return Bun.spawn([...argv], {
-    env: childEnvironment(process.env, env),
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
+/** Read `stream` to the end, keeping at most `limit` bytes of text. */
+async function boundedText(
+  stream: ReadableStream<Uint8Array>,
+  limit = MAX_STDERR_BYTES
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  let kept = 0;
+  await eachChunk(stream, (chunk) => {
+    if (kept < limit) {
+      const part = Buffer.from(chunk).subarray(0, limit - kept);
+      chunks.push(part);
+      kept += part.byteLength;
+    }
+    return Promise.resolve();
   });
+  return Buffer.concat(chunks).toString("utf8");
 }

@@ -43,8 +43,8 @@ function verifiedVolume(path: string, value: unknown): DataBackupVolume {
       isRecord(value) &&
       typeof value.key === "string" &&
       DATA_BACKUP_VOLUME_NAME.test(value.key) &&
-      typeof value.name === "string" &&
-      DATA_BACKUP_VOLUME_NAME.test(value.name) &&
+      typeof value.nameSha256 === "string" &&
+      SHA256_HEX.test(value.nameSha256) &&
       typeof value.driver === "string" &&
       value.file === `${value.key}.tar` &&
       count(value.tarBytes, 0) &&
@@ -61,7 +61,7 @@ function verifiedVolume(path: string, value: unknown): DataBackupVolume {
   }
   return {
     key: value.key,
-    name: value.name,
+    nameSha256: value.nameSha256,
     driver: value.driver,
     labels: {
       "com.docker.compose.project": String(

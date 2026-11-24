@@ -3,7 +3,6 @@ import { open } from "node:fs/promises";
 import { HackCliError } from "./cli-result.ts";
 import type { DataBackupDocker } from "./data-backup-docker.ts";
 import {
-  DATA_BACKUP_DIGEST_SCRIPT,
   DATA_BACKUP_TREE_DIGEST,
   dataBackupHelperImage,
 } from "./data-backup-format.ts";
@@ -12,9 +11,10 @@ import { closedFileWriteError, type FileWriteOperation } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 
 /**
- * Shared pieces of `hack data export` and `hack data import`: the helper
- * container argv, the in-helper tree digest, the running refusal and the
- * closed filesystem step wrapper.
+ * Shared pieces of `hack data export` and `hack data import`: helper names
+ * and failures, the tree-digest parser, the running refusal and the closed
+ * filesystem step wrapper. The held helper container is in
+ * data-backup-held-volume.ts.
  */
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
@@ -61,46 +61,9 @@ export function helperContainerName(purpose: HelperPurpose): string {
 }
 
 /**
- * `docker run` of the pinned helper with one volume at `/v`: removed on exit,
- * no network, read-only root file system, no privilege gain. `readOnly`
- * mounts the volume read-only; `stdin` keeps stdin open for a tar stream.
- * `name` comes from {@link helperContainerName}.
+ * A failed helper run, classified as an engine problem when it is one.
+ * `volume` is the Compose key: resolved Docker names are never printed.
  */
-export function dataBackupHelperArgv(opts: {
-  readonly name: string;
-  readonly volume: string;
-  readonly readOnly: boolean;
-  readonly entrypoint: string;
-  readonly purpose: HelperPurpose;
-  readonly stdin?: boolean;
-  readonly extra?: readonly string[];
-}): string[] {
-  return [
-    "docker",
-    "run",
-    "--rm",
-    "--name",
-    opts.name,
-    "--network",
-    "none",
-    "--pull",
-    "missing",
-    "--read-only",
-    "--security-opt",
-    "no-new-privileges",
-    "--label",
-    `io.hack.data-backup=${opts.purpose}`,
-    ...(opts.stdin ? ["--interactive"] : []),
-    ...(opts.extra ?? []),
-    "--volume",
-    `${opts.volume}:/v${opts.readOnly ? ":ro" : ""}`,
-    "--entrypoint",
-    opts.entrypoint,
-    dataBackupHelperImage(),
-  ];
-}
-
-/** A failed helper run, classified as an engine problem when it is one. */
 export function helperFailure(opts: {
   readonly volume: string;
   readonly action: string;
@@ -126,43 +89,14 @@ export type TreeDigest = {
   readonly digest: string;
 };
 
-/** The {@link DATA_BACKUP_TREE_DIGEST} of one volume, read-only in the helper. */
-export async function treeDigest(opts: {
-  readonly docker: DataBackupDocker;
-  readonly name: string;
-  readonly volume: string;
-  readonly purpose: HelperPurpose;
+/** Parse a helper's {@link DATA_BACKUP_TREE_DIGEST} output, closed. */
+export function parseTreeDigest(opts: {
+  readonly stdout: string;
+  /** The Compose key, used in messages instead of the Docker name. */
+  readonly label: string;
   readonly consequence: string;
-}): Promise<TreeDigest> {
-  const result = await opts.docker.capture(
-    [
-      ...dataBackupHelperArgv({
-        name: opts.name,
-        volume: opts.volume,
-        readOnly: true,
-        entrypoint: "bun",
-        purpose: opts.purpose,
-        extra: [
-          "--tmpfs",
-          "/tmp",
-          "--env",
-          "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
-        ],
-      }),
-      "-e",
-      DATA_BACKUP_DIGEST_SCRIPT,
-    ],
-    { unbounded: true }
-  );
-  if (result.exitCode !== 0) {
-    throw helperFailure({
-      volume: opts.volume,
-      action: "digest",
-      result,
-      consequence: opts.consequence,
-    });
-  }
-  const tree = parseJsonText(result.stdout.trim());
+}): TreeDigest {
+  const tree = parseJsonText(opts.stdout.trim());
   if (
     !(
       isRecord(tree) &&
@@ -179,7 +113,7 @@ export async function treeDigest(opts: {
   ) {
     throw new HackCliError({
       code: "E_UNEXPECTED",
-      message: `The backup helper returned an unreadable digest for volume ${opts.volume}; ${opts.consequence}`,
+      message: `The backup helper returned an unreadable digest for volume ${opts.label}; ${opts.consequence}`,
     });
   }
   return {

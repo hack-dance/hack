@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,170 +8,66 @@ import {
   requireComposeBackendForData,
 } from "../src/commands/data.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
-import type {
-  DataBackupDocker,
-  DataBackupProcessResult,
-} from "../src/lib/data-backup-docker.ts";
+import type { DataBackupDocker } from "../src/lib/data-backup-docker.ts";
 import {
   type DataExportInput,
   exportProjectData,
 } from "../src/lib/data-backup-export.ts";
 import {
+  DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
   DATA_BACKUP_DIGEST_SCRIPT,
   dataBackupHelperImage,
   dataBackupTimestamp,
 } from "../src/lib/data-backup-format.ts";
 import { planDeclaredVolumes } from "../src/lib/data-backup-volumes.ts";
-import { FakeDockerEvents } from "./helpers/data-backup-events.ts";
+import {
+  COMPOSE,
+  FAKE_TIMEOUT_EXIT,
+  FakeEngine,
+  type FakeVolume,
+} from "./helpers/data-backup-fake-engine.ts";
 
 const PROJECT = "shop";
-const COMPOSE = ["docker", "compose", "-f", "/p/.hack/docker-compose.yml"];
 const NOW = new Date("2026-11-23T14:05:01.250Z");
 const PINNED =
   "oven/bun@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4";
+const DEADLINES = { commandMs: 1000, stepMs: 60_000 };
+const sha = (text: string | Buffer): string =>
+  createHash("sha256").update(text).digest("hex");
 
-type FakeVolume = {
-  readonly driver?: string;
-  readonly labels: Record<string, string> | null;
-};
-
-type FakeState = {
-  model: unknown;
-  volumes: Record<string, FakeVolume>;
-  /** `docker ps --filter <filter>` → names, per call index of that filter. */
-  running: Record<string, string[]>;
-  /** Running names reported only from the Nth `ps` round on (0-based). */
-  runningFromRound?: { round: number; filter: string; names: string[] };
-  failTarFor?: string;
-  /** The live event stream every `docker run` reports to. */
-  events: FakeDockerEvents;
-  /** Called on each `docker ps`, e.g. to inject a mount right after a check. */
-  onPs?: () => void;
-  calls: string[][];
-  /** Helper runs seen, in order (markers included). */
-  helpers?: { id: string; name: string; volume: string }[];
-};
-
-function helperRun(state: FakeState, argv: readonly string[]): string {
-  state.helpers ??= [];
-  const name = argv[argv.indexOf("--name") + 1] ?? "";
-  const volume = argv.includes("--volume") ? mountedVolume(argv) : "";
-  const id = state.events.run(argv);
-  state.helpers.push({ id, name, volume });
-  return volume;
-}
-
-function ok(stdout = ""): DataBackupProcessResult {
-  return { exitCode: 0, stdout, stderr: "" };
-}
-
-function owned(key: string, project = PROJECT): FakeVolume {
+function owned(key: string, content: string, project = PROJECT): FakeVolume {
   return {
     labels: {
       "com.docker.compose.project": project,
       "com.docker.compose.volume": key,
     },
+    content,
   };
-}
-
-function fakeDocker(state: FakeState): DataBackupDocker {
-  let psCalls = 0;
-  return {
-    capture(argv) {
-      state.calls.push([...argv]);
-      const args = argv.slice(1);
-      if (argv.slice(0, COMPOSE.length).join(" ") === COMPOSE.join(" ")) {
-        return Promise.resolve(ok(JSON.stringify(state.model)));
-      }
-      if (args[0] === "volume" && args[1] === "inspect") {
-        const name = argv.at(-1) ?? "";
-        const volume = state.volumes[name];
-        if (!volume) {
-          return Promise.resolve({
-            exitCode: 1,
-            stdout: "",
-            stderr: `Error response from daemon: get ${name}: no such volume`,
-          });
-        }
-        return Promise.resolve(
-          ok(
-            JSON.stringify({
-              name,
-              driver: volume.driver ?? "local",
-              labels: volume.labels,
-            })
-          )
-        );
-      }
-      if (args[0] === "ps") {
-        state.onPs?.();
-        const filter = args[args.indexOf("--filter") + 1] ?? "";
-        const late = state.runningFromRound;
-        const round = Math.floor(psCalls / psFilterCount(state));
-        psCalls += 1;
-        const names = [
-          ...(state.running[filter] ?? []),
-          ...(late && late.filter === filter && round >= late.round
-            ? late.names
-            : []),
-        ];
-        return Promise.resolve(ok(names.map((n) => `${n}\n`).join("")));
-      }
-      if (args[0] === "run") {
-        const volume = helperRun(state, argv);
-        if (argv.includes("true")) {
-          return Promise.resolve(ok());
-        }
-        return Promise.resolve(
-          ok(
-            `${JSON.stringify({
-              algorithm: "hack.tree-digest.v1",
-              entries: 3,
-              excludedSockets: volume === "shop_db" ? 1 : 0,
-              digest: createHash("sha256").update(volume).digest("hex"),
-            })}\n`
-          )
-        );
-      }
-      return Promise.resolve({ exitCode: 99, stdout: "", stderr: "" });
-    },
-    async streamToFile({ argv, path }) {
-      state.calls.push([...argv]);
-      const volume = helperRun(state, argv);
-      const bytes = Buffer.from(`tar of ${volume}`);
-      await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
-      if (state.failTarFor === volume) {
-        return { exitCode: 2, stderr: "tar: boom", bytes: 1, sha256: "x" };
-      }
-      return {
-        exitCode: 0,
-        stderr: "",
-        bytes: bytes.byteLength,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-      };
-    },
-    streamFromFile: () => Promise.reject(new Error("export never extracts")),
-    watch: (argv, onLine) => state.events.watch(argv, onLine),
-  };
-}
-
-/** One ps round = the project filter plus one per owned volume. */
-function psFilterCount(state: FakeState): number {
-  return (
-    1 +
-    Object.entries(state.volumes).filter(
-      ([, volume]) => volume.labels?.["com.docker.compose.project"] === PROJECT
-    ).length
-  );
-}
-
-function mountedVolume(argv: readonly string[]): string {
-  const mount = argv[argv.indexOf("--volume") + 1] ?? "";
-  return mount.slice(0, mount.indexOf(":"));
 }
 
 function model(volumes: Record<string, unknown>): unknown {
   return { name: PROJECT, services: {}, volumes };
+}
+
+function engine(opts: { readonly only?: "db" } = {}): FakeEngine {
+  const fake = new FakeEngine();
+  if (opts.only === "db") {
+    fake.model = model({ db: { name: "shop_db" } });
+    fake.volume("shop_db", { ...owned("db", "rows"), sockets: 1 });
+    return fake;
+  }
+  fake.model = model({
+    db: { name: "shop_db" },
+    cache: { name: "custom-cache" },
+    shared: { name: "team-shared", external: true },
+    later: { name: "shop_later" },
+    hijacked: { name: "other_thing" },
+  });
+  fake.volume("shop_db", { ...owned("db", "rows"), sockets: 1 });
+  fake.volume("custom-cache", owned("cache", "blobs"));
+  fake.volume("other_thing", owned("thing", "theirs", "other"));
+  fake.volume("team-shared", owned("shared", "team", "team"));
+  return fake;
 }
 
 let root: string;
@@ -182,39 +78,18 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function input(state: FakeState, extra: Partial<DataExportInput> = {}) {
+function input(fake: FakeEngine, extra: Partial<DataExportInput> = {}) {
   return {
-    docker: fakeDocker(state),
+    docker: fake.docker(),
     composeArgs: COMPOSE,
     project: PROJECT,
     branch: null,
     hackHome: join(root, "home"),
     hackVersion: "9.9.9",
     now: () => NOW,
+    deadlines: DEADLINES,
     ...extra,
   } satisfies DataExportInput;
-}
-
-function baseState(overrides: Partial<FakeState> = {}): FakeState {
-  return {
-    model: model({
-      db: { name: "shop_db" },
-      cache: { name: "custom-cache" },
-      shared: { name: "team-shared", external: true },
-      later: { name: "shop_later" },
-      hijacked: { name: "other_thing" },
-    }),
-    volumes: {
-      shop_db: owned("db"),
-      "custom-cache": owned("cache"),
-      other_thing: owned("thing", "other"),
-      "team-shared": owned("shared", "team"),
-    },
-    running: {},
-    calls: [],
-    events: new FakeDockerEvents(),
-    ...overrides,
-  };
 }
 
 async function caught(promise: Promise<unknown>): Promise<HackCliError> {
@@ -228,6 +103,13 @@ async function caught(promise: Promise<unknown>): Promise<HackCliError> {
   }
   throw new Error("expected a HackCliError");
 }
+
+const partialDir = (): string =>
+  join(root, "home", "data-backups", PROJECT, "20261123T140501Z.partial");
+
+/** Every `docker create` a run issued. */
+const creates = (fake: FakeEngine): string[][] =>
+  fake.calls.filter((argv) => argv[1] === "create");
 
 describe("planDeclaredVolumes", () => {
   test("maps keys to Docker names, sorts them and skips external volumes", () => {
@@ -245,9 +127,7 @@ describe("planDeclaredVolumes", () => {
       { key: "nfs", name: "shop_nfs", driver: "local", driverOpts: true },
       { key: "web", name: "shop_web", driver: "local", driverOpts: false },
     ]);
-    expect(plan.external).toEqual([
-      { key: "shared", name: "shared-net-data", reason: "external" },
-    ]);
+    expect(plan.external).toEqual([{ key: "shared", reason: "external" }]);
   });
 
   test("a model without volumes declares none", () => {
@@ -270,8 +150,8 @@ describe("planDeclaredVolumes", () => {
 
 describe("exportProjectData", () => {
   test("backs up only owned volumes and reports external, foreign and absent ones", async () => {
-    const state = baseState();
-    const result = await exportProjectData(input(state));
+    const fake = engine();
+    const result = await exportProjectData(input(fake));
     const backup = join(
       root,
       "home",
@@ -284,9 +164,6 @@ describe("exportProjectData", () => {
       "cache.tar",
       "db.tar",
       "manifest.json",
-    ]);
-    expect(await readdir(join(root, "home", "data-backups", PROJECT))).toEqual([
-      "20261123T140501Z",
     ]);
     const manifest = JSON.parse(
       await readFile(join(backup, "manifest.json"), "utf8")
@@ -302,15 +179,10 @@ describe("exportProjectData", () => {
       helperImage: PINNED,
       digestAlgorithm: "hack.tree-digest.v1",
     });
-    expect(manifest.volumes.map((v: { key: string }) => v.key)).toEqual([
-      "cache",
-      "db",
-    ]);
-    const db = manifest.volumes[1];
     const tar = await readFile(join(backup, "db.tar"));
-    expect(db).toEqual({
+    expect(manifest.volumes[1]).toEqual({
       key: "db",
-      name: "shop_db",
+      nameSha256: sha("shop_db"),
       driver: "local",
       labels: {
         "com.docker.compose.project": PROJECT,
@@ -318,29 +190,27 @@ describe("exportProjectData", () => {
       },
       file: "db.tar",
       tarBytes: tar.byteLength,
-      tarSha256: createHash("sha256").update(tar).digest("hex"),
+      tarSha256: sha(tar),
       entries: 3,
       excludedSockets: 1,
-      contentDigest: createHash("sha256").update("shop_db").digest("hex"),
+      contentDigest: sha("rows"),
     });
     expect(manifest.skipped).toEqual([
-      { key: "hijacked", name: "other_thing", reason: "foreign" },
-      { key: "later", name: "shop_later", reason: "absent" },
-      { key: "shared", name: "team-shared", reason: "external" },
+      { key: "hijacked", reason: "foreign" },
+      { key: "later", reason: "absent" },
+      { key: "shared", reason: "external" },
     ]);
-    // Foreign and external volumes are never mounted; external is never inspected.
-    const mounted = state.calls
-      .filter((argv) => argv[1] === "run" && argv.includes("--volume"))
-      .map(mountedVolume);
-    expect(new Set(mounted)).toEqual(new Set(["shop_db", "custom-cache"]));
+    // Only owned volumes are held; external is never even inspected.
     expect(
-      state.calls.some((argv) => argv.includes("team-shared"))
-    ).toBeFalse();
+      creates(fake).map((argv) => argv[argv.indexOf("--volume") + 1])
+    ).toEqual(["custom-cache:/v:ro", "shop_db:/v:ro"]);
+    expect(fake.calls.some((argv) => argv.includes("team-shared"))).toBeFalse();
+    expect(fake.leftovers()).toEqual([]);
     expect(renderDataExportText(result)).toBe(
       [
         "Backed up 2 volumes:",
-        `  cache  ${"tar of custom-cache".length} B  3 entries`,
-        `  db  ${"tar of shop_db".length} B  3 entries, 1 socket not copied`,
+        `  cache  ${"tar:blobs".length} B  3 entries`,
+        `  db  ${"tar:rows".length} B  3 entries, 1 socket not copied`,
         "Skipped:",
         "  hijacked  labels name another project, not read",
         "  later  not created yet, nothing to back up",
@@ -351,41 +221,32 @@ describe("exportProjectData", () => {
     );
   });
 
-  test("a volume labeled for this project but another key is foreign", async () => {
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("cache") },
-    });
-    const result = await exportProjectData(input(state));
-    expect(result.manifest.volumes).toEqual([]);
-    expect(result.manifest.skipped).toEqual([
-      { key: "db", name: "shop_db", reason: "foreign" },
-    ]);
-  });
-
-  test("every helper is network-less, read-only and uses the pinned image", async () => {
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("db") },
-    });
-    await exportProjectData(input(state));
-    const runs = state.calls.filter(
-      (argv) => argv[1] === "run" && argv.includes("--volume")
-    );
-    expect(runs).toHaveLength(2);
-    for (const argv of runs) {
-      expect(argv.slice(0, 3)).toEqual(["docker", "run", "--rm"]);
-      expect(argv[argv.indexOf("--name") + 1]).toMatch(
-        /^hack-data-export-[a-f0-9]{24}$/
-      );
-      expect(argv[argv.indexOf("--network") + 1]).toBe("none");
-      expect(argv).toContain("--read-only");
-      expect(argv[argv.indexOf("--volume") + 1]).toBe("shop_db:/v:ro");
-      expect(argv).toContain(PINNED);
-    }
+  test("each volume is held by one logless, network-less, read-only helper and read through exec", async () => {
+    const fake = engine({ only: "db" });
+    await exportProjectData(input(fake));
+    const [create] = creates(fake);
+    expect(create?.slice(0, 2)).toEqual(["docker", "create"]);
+    const name = create?.[create.indexOf("--name") + 1] ?? "";
+    expect(name).toMatch(/^hack-data-export-[a-f0-9]{24}$/);
+    expect(create?.[create.indexOf("--network") + 1]).toBe("none");
+    expect(create?.[create.indexOf("--log-driver") + 1]).toBe("none");
+    expect(create).toContain("--read-only");
+    expect(create).toContain("no-new-privileges");
+    expect(create?.[create.indexOf("--volume") + 1]).toBe("shop_db:/v:ro");
+    expect(create?.slice(-2)).toEqual([PINNED, "infinity"]);
     expect(dataBackupHelperImage()).toBe(PINNED);
-    const [tar, digest] = runs;
-    expect(tar?.slice(tar.indexOf(PINNED) + 1)).toEqual([
+    const execs = fake.calls.filter((argv) => argv[1] === "exec");
+    expect(execs.map((argv) => argv.slice(2, 5))).toEqual([
+      [name, "bun", "-e"],
+      [name, "tar", "--numeric-owner"],
+      [name, "bun", "-e"],
+      ["--interactive", name, "bun"],
+    ]);
+    // The last reads the archive from stdin with the archive digest script.
+    expect(execs[3]?.at(-1)).toBe(DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT);
+    expect(execs[0]?.at(-1)).toBe(DATA_BACKUP_DIGEST_SCRIPT);
+    expect(execs[1]?.slice(3)).toEqual([
+      "tar",
       "--numeric-owner",
       "-cpf",
       "-",
@@ -393,223 +254,370 @@ describe("exportProjectData", () => {
       "/v",
       ".",
     ]);
-    expect(digest?.at(-1)).toBe(DATA_BACKUP_DIGEST_SCRIPT);
+    // Removed and confirmed gone.
+    expect(fake.calls).toContainEqual(["docker", "rm", "--force", name]);
+    expect(fake.leftovers()).toEqual([]);
+    // Markers log nothing either.
+    for (const argv of fake.calls.filter((a) => a[1] === "run")) {
+      expect(argv[argv.indexOf("--log-driver") + 1]).toBe("none");
+    }
   });
 
-  test("refuses while a project container runs and writes nothing", async () => {
-    const state = baseState({
-      running: {
-        [`label=com.docker.compose.project=${PROJECT}`]: ["shop-web-1"],
-      },
+  test("resolved Docker names never reach the manifest, JSON or text output", async () => {
+    const secret = "s3cr3t-tok3n-9f8e7d";
+    const fake = new FakeEngine();
+    fake.model = model({
+      db: { name: `shop_db-${secret}` },
+      shared: { name: `team-${secret}`, external: true },
+      gone: { name: `shop_gone-${secret}` },
+      other: { name: `other-${secret}` },
     });
+    fake.volume(`shop_db-${secret}`, owned("db", "rows"));
+    fake.volume(`other-${secret}`, owned("thing", "x", "elsewhere"));
+    const result = await exportProjectData(input(fake));
+    const manifest = await readFile(
+      join(result.backup, "manifest.json"),
+      "utf8"
+    );
+    for (const text of [
+      manifest,
+      JSON.stringify(result),
+      renderDataExportText(result),
+    ]) {
+      expect(text).not.toContain(secret);
+    }
+    expect(result.manifest.volumes[0]?.nameSha256).toBe(
+      sha(`shop_db-${secret}`)
+    );
+    expect(result.manifest.skipped).toEqual([
+      { key: "gone", reason: "absent" },
+      { key: "other", reason: "foreign" },
+      { key: "shared", reason: "external" },
+    ]);
+
+    // Nor does a failure message.
+    const failing = new FakeEngine();
+    failing.model = model({ db: { name: `shop_db-${secret}` } });
+    failing.volume(`shop_db-${secret}`, owned("db", "rows"));
+    failing.tarExit[`shop_db-${secret}`] = 2;
     const error = await caught(
-      exportProjectData(input(state, { downCommand: "hack down --branch=x" }))
+      exportProjectData(input(failing, { outDir: join(root, "fail") }))
+    );
+    expect(
+      `${error.message}${JSON.stringify(error.detail ?? null)}`
+    ).not.toContain(secret);
+  });
+
+  test("a volume labeled for this project but another key is foreign", async () => {
+    const fake = new FakeEngine();
+    fake.model = model({ db: { name: "shop_db" } });
+    fake.volume("shop_db", owned("cache", "x"));
+    const result = await exportProjectData(input(fake));
+    expect(result.manifest.volumes).toEqual([]);
+    expect(result.manifest.skipped).toEqual([{ key: "db", reason: "foreign" }]);
+    expect(creates(fake)).toEqual([]);
+  });
+});
+
+describe("binding to the validated volume", () => {
+  test("a volume replaced after validation is refused and the helper removed", async () => {
+    const fake = engine({ only: "db" });
+    // Between the ownership check and the hold, the volume is removed and
+    // another one created under the same name with the same labels.
+    let swapped = false;
+    fake.onPs = () => {
+      if (!swapped) {
+        swapped = true;
+        fake.volumes.delete("shop_db");
+        fake.volume("shop_db", owned("db", "impostor"));
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toMatchObject({ key: "db", reason: "volume_changed" });
+    expect(fake.calls.some((argv) => argv[1] === "exec")).toBeFalse();
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a volume removed after validation is refused, not copied empty", async () => {
+    const fake = engine({ only: "db" });
+    let removed = false;
+    fake.onPs = () => {
+      if (!removed) {
+        removed = true;
+        fake.volumes.delete("shop_db");
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.detail).toMatchObject({ reason: "volume_changed" });
+    expect(error.message).toContain("recreated it empty");
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a tree that changes between the digests before and after the copy is not published", async () => {
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        const volume = fake.volumes.get("shop_db");
+        if (volume) {
+          volume.content = "rows-changed";
+        }
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "source_changed" });
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+    expect(fake.leftovers()).toEqual([]);
+  });
+});
+
+describe("the archive must match the source", () => {
+  test("an archive whose digest differs from the source is not published", async () => {
+    const fake = engine({ only: "db" });
+    fake.archiveDigestOverride.shop_db = "0".repeat(64);
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_UNEXPECTED");
+    expect(error.detail).toEqual({ key: "db", reason: "archive_mismatch" });
+    expect(error.message).toContain("archive digest differs");
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("an archive the helper cannot parse is not published", async () => {
+    const fake = engine({ only: "db" });
+    const docker = fake.docker();
+    const failing = {
+      ...docker,
+      streamFromFile: () =>
+        Promise.resolve({ exitCode: 3, stdout: "", stderr: "bad header" }),
+    };
+    const error = await caught(
+      exportProjectData({ ...input(fake), docker: failing })
+    );
+    expect(error.message).toContain("verify the archive of volume db");
+    expect(fake.leftovers()).toEqual([]);
+  });
+});
+
+describe("deadlines and cleanup", () => {
+  test("a stalled tar times out and the helper container is removed", async () => {
+    const fake = engine({ only: "db" });
+    fake.tarExit.shop_db = FAKE_TIMEOUT_EXIT;
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.detail).toEqual({ reason: "step_timeout", timeoutMs: 60_000 });
+    expect(error.message).toContain("HACK_DATA_STEP_TIMEOUT_MS");
+    expect(fake.calls.some((argv) => argv[1] === "rm")).toBeTrue();
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a full disk while writing the tar removes the helper container", async () => {
+    const fake = engine({ only: "db" });
+    fake.tarThrows.shop_db = Object.assign(new Error("no space"), {
+      code: "ENOSPC",
+    });
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_NO_SPACE");
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a removal Docker cannot confirm is reported, not claimed", async () => {
+    const fake = engine({ only: "db" });
+    fake.onExec = (container) => {
+      fake.rmFails.add(container);
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    const [container] = fake.leftovers();
+    expect(container).toMatch(/^hack-data-export-/);
+    expect(error.message).toContain(`docker rm -f ${container}`);
+    expect(error.detail).toEqual({ cleanup: { container, removed: false } });
+    // Nothing was published.
+    expect(await readdir(join(root, "home", "data-backups", PROJECT))).toEqual([
+      "20261123T140501Z.partial",
+    ]);
+
+    // On a failure path the refusal keeps its code and gains the cleanup note.
+    const failing = engine({ only: "db" });
+    failing.tarExit.shop_db = FAKE_TIMEOUT_EXIT;
+    failing.onExec = (name) => failing.rmFails.add(name);
+    const timeout = await caught(
+      exportProjectData(input(failing, { outDir: join(root, "t") }))
+    );
+    expect(timeout.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(timeout.detail).toMatchObject({
+      reason: "step_timeout",
+      cleanup: { removed: false },
+    });
+  });
+});
+
+describe("running containers and the live event fence", () => {
+  test("refuses while a project container runs and writes nothing", async () => {
+    const fake = engine();
+    fake.running[`label=com.docker.compose.project=${PROJECT}`] = [
+      "shop-web-1",
+    ];
+    const error = await caught(
+      exportProjectData(input(fake, { downCommand: "hack down --branch=x" }))
     );
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.message).toContain("`hack down --branch=x`");
     expect(error.detail).toEqual({ running: ["shop-web-1"] });
-    expect(
-      state.calls.some((argv) => argv[1] === "run" && argv.includes("--volume"))
-    ).toBeFalse();
-    expect(state.events.open).toBeFalse();
+    expect(creates(fake)).toEqual([]);
+    expect(fake.events.open).toBeFalse();
     expect(await readdir(root)).toEqual([]);
   });
 
   test("refuses while another container mounts an owned volume", async () => {
-    const state = baseState({
-      running: { "volume=shop_db": ["adhoc-debug"] },
-    });
-    const error = await caught(exportProjectData(input(state)));
+    const fake = engine();
+    fake.running["volume=shop_db"] = ["adhoc-debug"];
+    const error = await caught(exportProjectData(input(fake)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.detail).toEqual({ running: ["adhoc-debug"] });
   });
 
   test("a container that starts during the copy keeps the backup unpublished", async () => {
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("db") },
-      runningFromRound: {
-        round: 1,
-        filter: `label=com.docker.compose.project=${PROJECT}`,
-        names: ["shop-web-1"],
-      },
-    });
-    const error = await caught(exportProjectData(input(state)));
+    const fake = engine({ only: "db" });
+    // Calls 0-1: the first check (project + volume); from call 2: the last.
+    fake.runningFromCall = {
+      call: 2,
+      filter: `label=com.docker.compose.project=${PROJECT}`,
+      names: ["shop-web-1"],
+    };
+    const error = await caught(exportProjectData(input(fake)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.message).toContain("20261123T140501Z.partial");
-    const parent = join(root, "home", "data-backups", PROJECT);
-    expect(await readdir(parent)).toEqual(["20261123T140501Z.partial"]);
-    expect(await readdir(join(parent, "20261123T140501Z.partial"))).toEqual([
-      "db.tar",
-    ]);
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
   });
 
   test("a short-lived writer that mounts during the copy keeps the backup unpublished", async () => {
-    const events = new FakeDockerEvents();
-    // While the tar helper runs, another container mounts the volume and is
-    // gone again before any ps check (a --rm writer).
-    events.afterRun = (argv) => {
-      if (argv.includes("tar")) {
-        events.mount("shop_db", "f".repeat(64));
-        events.start("f".repeat(64), "adhoc-writer");
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        fake.events.mount("shop_db", "f".repeat(64));
+        fake.events.start("f".repeat(64), "adhoc-writer");
         // A mount of an unrelated volume is ignored.
-        events.mount("other", "e".repeat(64));
+        fake.events.mount("other", "e".repeat(64));
       }
     };
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("db") },
-      events,
-    });
-    const error = await caught(exportProjectData(input(state)));
+    const error = await caught(exportProjectData(input(fake)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.message).toContain("ffffffffffff");
     expect(error.detail).toEqual({
       mounts: [
-        { volume: "shop_db", container: "f".repeat(64), name: "adhoc-writer" },
+        { volume: "db", container: "f".repeat(64), name: "adhoc-writer" },
       ],
     });
-    const parent = join(root, "home", "data-backups", PROJECT);
-    expect(await readdir(parent)).toEqual(["20261123T140501Z.partial"]);
-    expect(events.open).toBeFalse();
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+    expect(fake.events.open).toBeFalse();
   });
 
   test("a mount between the first running check and the first copy is seen", async () => {
-    const events = new FakeDockerEvents();
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("db") },
-      events,
-    });
+    const fake = engine({ only: "db" });
     let injected = false;
-    state.onPs = () => {
+    fake.onPs = () => {
       if (!injected) {
         injected = true;
-        // Arrives after this check reads nothing running, before any copy.
         queueMicrotask(() => {
-          events.mount("shop_db", "b".repeat(64));
-          events.start("b".repeat(64), "early-writer");
+          fake.events.mount("shop_db", "b".repeat(64));
+          fake.events.start("b".repeat(64), "early-writer");
         });
       }
     };
-    const error = await caught(exportProjectData(input(state)));
-    expect(error.code).toBe("E_PROJECT_RUNNING");
+    const error = await caught(exportProjectData(input(fake)));
     expect(error.detail).toEqual({
       mounts: [
-        { volume: "shop_db", container: "b".repeat(64), name: "early-writer" },
+        { volume: "db", container: "b".repeat(64), name: "early-writer" },
       ],
     });
     // The subscription was live before that check: the start marker ran first.
-    const first = state.calls.findIndex((argv) => argv[1] === "run");
-    const ps = state.calls.findIndex((argv) => argv[1] === "ps");
-    expect(first).toBeLessThan(ps);
+    const marker = fake.calls.findIndex((argv) => argv[1] === "run");
+    const ps = fake.calls.findIndex((argv) => argv[1] === "ps");
+    expect(marker).toBeLessThan(ps);
   });
 
   test("a mount by a container whose start was never seen is foreign", async () => {
-    const events = new FakeDockerEvents();
-    events.afterRun = (argv) => {
-      if (argv.includes("tar")) {
-        events.mount("shop_db", "d".repeat(64));
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        fake.events.mount("shop_db", "d".repeat(64));
       }
     };
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("db") },
-      events,
-    });
-    const error = await caught(exportProjectData(input(state)));
-    expect(error.code).toBe("E_PROJECT_RUNNING");
+    const error = await caught(exportProjectData(input(fake)));
     expect(error.detail).toEqual({
-      mounts: [{ volume: "shop_db", container: "d".repeat(64), name: null }],
+      mounts: [{ volume: "db", container: "d".repeat(64), name: null }],
     });
   });
 
   test("an event stream that ends before it is stopped refuses publication", async () => {
-    const events = new FakeDockerEvents();
-    events.afterRun = (argv) => {
-      if (argv.includes("tar")) {
-        events.end();
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        fake.events.end();
       }
     };
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("db") },
-      events,
-    });
-    const error = await caught(exportProjectData(input(state)));
+    const error = await caught(exportProjectData(input(fake)));
     expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
     expect(error.message).toContain("lost its watch");
-    const parent = join(root, "home", "data-backups", PROJECT);
-    expect(await readdir(parent)).toEqual(["20261123T140501Z.partial"]);
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
   });
 
   test("copying starts only after the start marker proves the stream live", async () => {
-    const events = new FakeDockerEvents();
-    events.deliverStarts = false;
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("db") },
-      events,
-    });
+    const fake = engine({ only: "db" });
+    fake.events.deliverStarts = false;
     const error = await caught(
-      exportProjectData(input(state, { markerTimeoutMs: 20 }))
+      exportProjectData(input(fake, { markerTimeoutMs: 20 }))
     );
     expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
     expect(error.message).toContain("start marker");
-    // Only the marker ran; no helper read the volume.
-    expect(
-      state.calls.filter(
-        (argv) => argv[1] === "run" && argv.includes("--volume")
-      )
-    ).toEqual([]);
-    expect(events.open).toBeFalse();
+    expect(creates(fake)).toEqual([]);
+    expect(fake.events.open).toBeFalse();
   });
 
-  test("mounts by this run's own helpers publish; markers bracket the copy", async () => {
-    const state = baseState({
-      model: model({ db: { name: "shop_db" } }),
-      volumes: { shop_db: owned("db") },
-    });
-    await exportProjectData(input(state));
-    const names = (state.helpers ?? []).map((helper) => helper.name);
-    expect(names).toHaveLength(4);
-    expect(new Set(names).size).toBe(4);
-    expect(names[0]).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
-    expect(names[3]).toMatch(/^hack-data-export-[a-f0-9]{24}-end$/);
-    expect(state.events.watches).toBe(1);
-    expect(state.events.open).toBeFalse();
-    expect(state.calls.some((argv) => argv[1] === "events")).toBeFalse();
+  test("our own held helper's mount publishes; markers bracket the copy", async () => {
+    const fake = engine({ only: "db" });
+    await exportProjectData(input(fake));
+    const markers = fake.calls
+      .filter((argv) => argv[1] === "run")
+      .map((argv) => argv[argv.indexOf("--name") + 1]);
+    expect(markers).toHaveLength(2);
+    expect(markers[0]).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
+    expect(markers[1]).toMatch(/^hack-data-export-[a-f0-9]{24}-end$/);
+    expect(fake.events.watches).toBe(1);
+    expect(fake.events.open).toBeFalse();
+    expect(fake.calls.some((argv) => argv[1] === "events")).toBeFalse();
   });
+});
 
+describe("publication", () => {
   test("a failure mid-way leaves only the partial directory; a rerun never reuses it", async () => {
     const out = join(root, "out");
-    const state = baseState({ failTarFor: "shop_db" });
-    const error = await caught(
-      exportProjectData(input(state, { outDir: out }))
-    );
+    const fake = engine();
+    fake.tarExit.shop_db = 2;
+    const error = await caught(exportProjectData(input(fake, { outDir: out })));
     expect(error.code).toBe("E_UNEXPECTED");
-    expect(error.message).toContain("shop_db");
+    expect(error.message).toContain("volume db");
+    expect(error.message).not.toContain("shop_db");
     expect(await readdir(out)).toEqual(["20261123T140501Z.partial"]);
     // cache (sorted first) was copied; the failed db tar is left; no manifest.
     expect(
       (await readdir(join(out, "20261123T140501Z.partial"))).sort()
     ).toEqual(["cache.tar", "db.tar"]);
+    expect(fake.leftovers()).toEqual([]);
 
     // Same second: the partial directory is refused, not reused.
-    const retry = baseState();
+    const retry = engine();
     const conflict = await caught(
       exportProjectData(input(retry, { outDir: out }))
     );
     expect(conflict.code).toBe("E_PATH_CONFLICT");
-    // No helper read a volume; only the event-stream marker ran.
-    expect(
-      retry.calls.some((argv) => argv[1] === "run" && argv.includes("--volume"))
-    ).toBeFalse();
+    expect(creates(retry)).toEqual([]);
 
     // A later run takes a new timestamp and publishes beside the leftover.
     const later = new Date(NOW.getTime() + 1000);
     const result = await exportProjectData(
-      input(baseState(), { outDir: out, now: () => later })
+      input(engine(), { outDir: out, now: () => later })
     );
     expect(result.backup).toBe(join(out, "20261123T140502Z"));
     expect((await readdir(out)).sort()).toEqual([
@@ -618,11 +626,37 @@ describe("exportProjectData", () => {
     ]);
   });
 
+  test("a parent fsync failure after the rename is reported as published but not durable", async () => {
+    const out = join(root, "out");
+    const backup = join(out, "20261123T140501Z");
+    const synced: string[] = [];
+    const error = await caught(
+      exportProjectData(
+        input(engine(), {
+          outDir: out,
+          syncDirectory: (path) => {
+            synced.push(path);
+            return path === out
+              ? Promise.reject(Object.assign(new Error("io"), { code: "EIO" }))
+              : Promise.resolve();
+          },
+        })
+      )
+    );
+    expect(error.message).toBe(
+      `The backup at ${backup} is complete but its durability could not be confirmed: the rename that published it could not be flushed to disk. Check the file system, then use the backup or export again.`
+    );
+    expect(error.detail).toEqual({ backup, published: true, durable: false });
+    // .partial was synced before the rename, the parent after it.
+    expect(synced).toEqual([`${backup}.partial`, out]);
+    expect(await readdir(out)).toEqual(["20261123T140501Z"]);
+  });
+
   test("refuses an existing target directory", async () => {
     const out = join(root, "out");
-    await exportProjectData(input(baseState(), { outDir: out }));
+    await exportProjectData(input(engine(), { outDir: out }));
     const error = await caught(
-      exportProjectData(input(baseState(), { outDir: out }))
+      exportProjectData(input(engine(), { outDir: out }))
     );
     expect(error.code).toBe("E_PATH_CONFLICT");
     expect(await readdir(out)).toEqual(["20261123T140501Z"]);
@@ -644,7 +678,7 @@ describe("exportProjectData", () => {
       },
     };
     const error = await caught(
-      exportProjectData({ ...input(baseState()), docker })
+      exportProjectData({ ...input(engine()), docker })
     );
     expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
   });

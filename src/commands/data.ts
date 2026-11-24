@@ -1,4 +1,4 @@
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { formatNativeSourceBytes } from "../backends/native-project-source-size.ts";
 import { buildComposeArgs } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
@@ -14,6 +14,7 @@ import {
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { resolveDataBackupDeadlines } from "../lib/data-backup-deadlines.ts";
 import { createHostDataBackupDocker } from "../lib/data-backup-docker.ts";
 import {
   type DataExportResult,
@@ -28,7 +29,8 @@ import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { scopedHackCommand } from "../lib/printed-shell-command.ts";
 import { readProjectConfig } from "../lib/project.ts";
 import {
-  resolveComposeProcessEnv,
+  type ComposeRuntimeModel,
+  resolveComposeRuntimeModel,
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
 } from "./project.ts";
@@ -135,20 +137,27 @@ async function resolveDataContext(opts: {
     project,
     cfg: await readProjectConfig(project),
   });
+  // Refuse a malformed deadline override before anything runs.
+  const deadlines = resolveDataBackupDeadlines();
+  // Exactly the Compose invocation `hack up` builds for this instance (files,
+  // project name, project directory and managed env, which can select the
+  // engine), with every profile active so a profile-gated service's volume
+  // is seen too.
+  const model = await resolveComposeRuntimeModel({
+    project,
+    branch,
+    envName: resolveRequestedEnvName({ envOption: opts.options.env }),
+  });
   return {
     base,
     branch,
+    deadlines,
     docker: createHostDataBackupDocker({
-      env: await resolveComposeProcessEnv({
-        project,
-        envName: resolveRequestedEnvName({ envOption: opts.options.env }),
-      }),
+      env: model.env,
+      cwd: model.cwd,
+      captureTimeoutMs: deadlines.commandMs,
     }),
-    composeArgs: buildComposeArgs({
-      composeFiles: [project.composeFile],
-      composeProject: branch ? `${base}--${branch}` : null,
-      cwd: dirname(project.composeFile),
-    }),
+    composeArgs: dataComposeArgs(model),
     hackHome: resolveGlobalHackDir(),
     downCommand: scopedHackCommand("down", {
       path: opts.options.path,
@@ -170,6 +179,7 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
   });
   const result = await exportProjectData({
     docker: context.docker,
+    deadlines: context.deadlines,
     composeArgs: context.composeArgs,
     project: context.base,
     branch: context.branch,
@@ -205,6 +215,7 @@ const handleImport: CommandHandlerFor<typeof importSpec> = async ({
   });
   const result = await importProjectData({
     docker: context.docker,
+    deadlines: context.deadlines,
     composeArgs: context.composeArgs,
     backupPath: resolve(ctx.cwd, args.positionals.backupDir),
     fromProject: args.options.fromProject,
@@ -238,7 +249,7 @@ export function renderDataImportText(result: DataImportResult): string {
   ];
   for (const volume of result.volumes) {
     lines.push(
-      `  ${volume.key} -> ${volume.name}  ${how[volume.target]}  ${volume.entries} entr${volume.entries === 1 ? "y" : "ies"} verified${socketNote(volume.excludedSockets)}`
+      `  ${volume.key}  ${how[volume.target]}  ${volume.entries} entr${volume.entries === 1 ? "y" : "ies"} verified${socketNote(volume.excludedSockets)}`
     );
   }
   if (result.skipped.length > 0) {
@@ -257,6 +268,16 @@ export function socketNote(count: number): string {
   return count === 0
     ? ""
     : `, ${count} socket${count === 1 ? "" : "s"} not copied`;
+}
+
+/** Compose argv for a data command: the instance's model, all profiles on. */
+export function dataComposeArgs(model: ComposeRuntimeModel): string[] {
+  return buildComposeArgs({
+    composeFiles: model.composeFiles,
+    composeProject: model.composeProject,
+    profiles: ["*"],
+    cwd: model.cwd,
+  });
 }
 
 /** Text summary: each copied volume, each skipped one with its reason, the path. */

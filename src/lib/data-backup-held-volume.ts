@@ -40,6 +40,12 @@ const CONTAINER_ID = /^[0-9a-f]{64}$/;
  * another container, an ID cannot.
  */
 const HELPER_NONCE_LABEL = "io.hack.data-backup.nonce";
+/**
+ * How the local driver refuses a reference to a missing volume (a `type`
+ * option without `device`): the volume was removed after validation.
+ */
+const MISSING_REFERENCED_VOLUME =
+  /missing required option: "?device"?|no such volume/i;
 /** Docker's refusal of a bind whose source path does not exist. */
 const MISSING_BIND =
   /bind source path does not exist|no such file or directory/i;
@@ -554,12 +560,15 @@ function requireCreated(opts: {
  * network, no logging, the run's nonce label), tracked by the ID its create
  * returned. While it exists Docker refuses to remove the volume, `--force`
  * included ("volume is in use"; checked on Docker 29.9.2); it starts
- * nothing and emits no mount event. Docker creates a missing named volume
- * when such a container is created, so a caller must take a reference only
- * after validating the volume, and treat a create event for the name in its
- * window, or a changed identity after the reference exists, as a refusal.
- * Hack never removes a volume: only the reference containers, by ID, with
- * removal confirmed.
+ * nothing and emits no mount event. Docker would create a missing named
+ * volume for a plain volume mount; the reference therefore names the local
+ * driver with a `type` option and no `device`, options the driver uses only
+ * to create a volume and refuses ("missing required option"), so a missing
+ * name refuses instead of being created while an existing volume is
+ * referenced unchanged (checked on Docker 29.9.2). A caller still rechecks
+ * identity once the reference exists: a volume replaced under its name in
+ * between is referenced as it now is. Hack never removes or creates a
+ * volume here: only the reference containers, by ID, with removal confirmed.
  */
 export type VolumeReferencesOptions = {
   readonly docker: DataBackupDocker;
@@ -577,7 +586,11 @@ export class VolumeReferences {
   }
 
   /** Take a reference to the volume `name` (a Docker name, never printed). */
-  async add(name: string): Promise<void> {
+  async add(
+    name: string,
+    /** The refusal when the volume no longer exists (it was removed). */
+    missing: () => HackCliError
+  ): Promise<void> {
     const { docker, deadlines, helpers, purpose } = this.opts;
     const { created, printed, container } = await createTracked({
       docker,
@@ -595,7 +608,11 @@ export class VolumeReferences {
         "--label",
         `io.hack.data-backup=${purpose}`,
         "--mount",
-        `type=volume,src=${name},dst=/v,volume-nocopy`,
+        // The driver options are used only to create a volume, which a
+        // `type` without `device` makes the local driver refuse: a missing
+        // name is refused instead of created, while an existing volume is
+        // referenced unchanged (checked on Docker 29.9.2).
+        `type=volume,src=${name},dst=/v,volume-nocopy,volume-driver=local,volume-opt=type=none`,
         "--entrypoint",
         "true",
         dataBackupHelperImage(),
@@ -611,13 +628,17 @@ export class VolumeReferences {
       created,
       printed,
       checkCreate: (result) => {
-        if (result.exitCode !== 0) {
-          throw dockerReadError({
-            result,
-            command: "docker create",
-            redactValues: docker.redactValues,
-          });
+        if (result.exitCode === 0) {
+          return;
         }
+        if (MISSING_REFERENCED_VOLUME.test(result.stderr)) {
+          throw missing();
+        }
+        throw dockerReadError({
+          result,
+          command: "docker create",
+          redactValues: docker.redactValues,
+        });
       },
     });
   }

@@ -533,9 +533,16 @@ export class FakeEngine {
       let volume: string | null = null;
       let references: string | undefined;
       if (mount?.startsWith("type=volume,")) {
-        // A reference by name: Docker creates a missing named volume.
+        // A reference by name. Docker creates a missing named volume, unless
+        // the mount names driver options the local driver refuses to create
+        // with (a `type` without `device`), as Hack's reference does.
         references = /src=([^,]+)/.exec(mount)?.[1] ?? "";
         if (!this.volumes.has(references)) {
+          if (mount.includes("volume-opt=type=")) {
+            return fail(
+              `Error response from daemon: create ${references}: missing required option: "device"`
+            );
+          }
           this.volume(references, { labels: {}, content: "" });
         }
       } else if (mount !== null) {

@@ -131,6 +131,7 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "polling watchers"
         | "dev image tags"
         | "shared source installs"
+        | "root-owned checkout files"
         | "prerequisites"
         | "lifecycle supervisor" => (ProjectFiles, Project),
         "native host dns"

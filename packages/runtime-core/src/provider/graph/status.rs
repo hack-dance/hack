@@ -77,6 +77,22 @@ fn inspect_with(
     stable(&directory(candidate, run)?, || {
         observer.verify()?;
         let snapshot = inspect_using(candidate, observer, run)?;
+        #[cfg(target_os = "macos")]
+        let snapshot = {
+            let mut snapshot = snapshot;
+            if matches!(
+                snapshot.receipt.phase.as_str(),
+                "preparing" | "restoring" | super::STARTED_OBSERVED
+            ) {
+                snapshot.startup_observed_ports = super::super::publication::observed_run_ports(
+                    candidate,
+                    &snapshot.receipt.owner,
+                    run,
+                )
+                .unwrap_or_default();
+            }
+            snapshot
+        };
         observer.verify()?;
         if snapshot.journal_incomplete {
             return Err(changed());

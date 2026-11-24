@@ -506,11 +506,18 @@ pub(super) fn cleanup_effect(
         .resources
         .iter()
         .map(|(key, resource)| {
+            // The cleanup grant selected this name with no acknowledged ID.
+            // Keep that selection stable across cleanup's durable observation.
+            let selected_id = if resource.has_cleanup_observed_id(&receipt.phase) {
+                None
+            } else {
+                resource.id.as_deref()
+            };
             json!([
                 key,
                 resource.kind,
                 resource.name,
-                resource.id,
+                selected_id,
                 resource.image
             ])
         })
@@ -736,6 +743,12 @@ fn inspect_cleanup_selected(
             remove_data,
             &(environment, bridge_selection),
         )?
+        || receipt.resources.iter().any(|(key, resource)| {
+            expected.resources.get(key).is_none_or(|previous| {
+                (resource.cleanup_observed_create || previous.cleanup_observed_create)
+                    && resource.id != previous.id
+            })
+        })
     {
         return Err(refused());
     }
@@ -1070,6 +1083,7 @@ mod tests {
             key: "web".into(),
             name: "owned-web".into(),
             id: Some("e".repeat(64)),
+            cleanup_observed_create: false,
             image: Some(format!("sha256:{}", "f".repeat(64))),
             phase: "started".into(),
             amd64_emulation: None,
@@ -1077,6 +1091,84 @@ mod tests {
         let value = json!({"Id":resource.id,"Image":resource.image,"State":{"Running":true,"StartedAt":"2026-09-17T00:00:00Z"}});
         (receipt, resource, value)
     }
+    #[test]
+    fn cleanup_grant_preserves_unacknowledged_id_and_binds_acknowledged_id() {
+        let (mut original, mut resource, _) = fixture();
+        let observed_id = resource.id.take();
+        resource.phase = "create-intent".into();
+        original.set_phase("preparing");
+        original.resources.insert("container:web".into(), resource);
+        let inventory = json!([]);
+        let grant = cleanup_effect(&original, "boot", false, &inventory).unwrap();
+
+        let mut current = original.clone();
+        current.set_phase("cleanup-intent");
+        let resource = current.resources.get_mut("container:web").unwrap();
+        resource.id = observed_id;
+        resource.cleanup_observed_create = true;
+        assert_eq!(
+            cleanup_effect(&current, "boot", false, &inventory).unwrap(),
+            grant
+        );
+
+        current.set_phase("stopped-data-retained");
+        current.resources.get_mut("container:web").unwrap().phase = "absent".into();
+        assert_eq!(
+            cleanup_effect(&current, "boot", false, &inventory).unwrap(),
+            grant
+        );
+        current
+            .resources
+            .get_mut("container:web")
+            .unwrap()
+            .cleanup_observed_create = false;
+        let known_grant = cleanup_effect(&current, "boot", false, &inventory).unwrap();
+        assert_ne!(known_grant, grant);
+        current.resources.get_mut("container:web").unwrap().id = Some("9".repeat(64));
+        assert_ne!(
+            cleanup_effect(&current, "boot", false, &inventory).unwrap(),
+            known_grant
+        );
+    }
+
+    #[test]
+    fn cleanup_confirmation_compares_observed_ids_even_when_grants_match() {
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let candidate = &fixture.candidate;
+        let engine = Engine::receipt_only_fixture(candidate).unwrap();
+        let boot = engine.guest().boot_id();
+        let mut expected = fixture.receipt();
+        expected
+            .resources
+            .get_mut("container:web")
+            .unwrap()
+            .cleanup_observed_create = true;
+        let environment =
+            environment::cleanup_inventory(candidate, &engine, &expected, &fixture.graph())
+                .unwrap();
+        let bridges = serde_json::from_value(json!({
+            "version":1,"owner":expected.owner,"boot":boot,"run":expected.run,
+            "plan":expected.plan_id,"capacity":0,"serial":0,"selected":{}
+        }))
+        .unwrap();
+        let path = fixture.graph().join("state.json");
+        let check =
+            || inspect_cleanup(candidate, &engine, &expected, false, &environment, &bridges);
+        state::write(&path, &expected).unwrap();
+        // The receipt check passed and the first engine verification refused the fixture.
+        assert_eq!(check().unwrap_err().code, "process_identity_unavailable");
+
+        let mut disk = expected.clone();
+        disk.resources.get_mut("container:web").unwrap().id = Some("9".repeat(64));
+        let inventory = (&environment, &bridges);
+        assert_eq!(
+            cleanup_effect(&disk, boot, false, &inventory).unwrap(),
+            cleanup_effect(&expected, boot, false, &inventory).unwrap()
+        );
+        state::write(&path, &disk).unwrap();
+        assert_eq!(check().unwrap_err().code, refused().code);
+    }
+
     #[test]
     fn retained_container_restart_and_new_boot_invalidate_service_identity() {
         let (receipt, resource, mut value) = fixture();

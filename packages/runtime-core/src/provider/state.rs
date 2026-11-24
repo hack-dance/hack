@@ -8,6 +8,8 @@ use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+
 pub fn io(error: std::io::Error) -> CandidateError {
     CandidateError::new("provider_state", error.to_string())
 }
@@ -154,6 +156,7 @@ impl Lock {
     }
 
     /// Retry acquisition without creating the lock file.
+    #[cfg(target_os = "macos")]
     pub fn acquire_existing_waiting(root: &Path, wait: Duration) -> Result<Self, CandidateError> {
         wait_for_acquisition(
             Instant::now() + wait,
@@ -224,6 +227,38 @@ pub(super) fn wait_for_acquisition<T>(
             result => return result,
         }
     }
+}
+
+/// Report a contended image lock after two seconds, then clear its progress line.
+pub(super) fn wait_for_image_lock<T>(
+    wait: Duration,
+    subject: &str,
+    acquire: impl FnMut() -> Result<T, CandidateError>,
+) -> Result<T, CandidateError> {
+    let started = Instant::now();
+    let mut reported = false;
+    let result = wait_for_acquisition(
+        started + wait,
+        || {
+            if !reported
+                && started.elapsed() >= Duration::from_secs(2)
+                && matches!(
+                    std::env::var("HACK_INTERNAL_REPORT_IMAGE_WAIT").as_deref(),
+                    Ok("1" | "batch")
+                )
+            {
+                eprintln!("hack.image-wait:begin {subject}");
+                reported = true;
+            }
+            Ok(())
+        },
+        acquire,
+        acquisition_expired,
+    );
+    if reported {
+        eprintln!("hack.image-wait:end {subject}");
+    }
+    result
 }
 
 /// Apply a flock operation to a borrowed descriptor. Closing it releases the lock.
@@ -317,25 +352,49 @@ fn holder_message(file: &File) -> &'static str {
 }
 
 pub fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, CandidateError> {
-    read_bounded(path, 1024 * 1024)
+    read_bounded(path, MAX_RECEIPT_BYTES)
 }
 
 pub fn read_bounded<T: serde::de::DeserializeOwned>(
     path: &Path,
     limit: u64,
 ) -> Result<T, CandidateError> {
+    read_receipt(open_receipt(path).map_err(io)?, limit, false)
+}
+
+/// Read an immutable receipt published by rename. The opened inode remains a
+/// complete snapshot if a subsequent rename removes its last directory link.
+/// Only read-only observers of these receipts may accept an unlinked inode.
+pub(super) fn read_committed<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    limit: u64,
+) -> Result<Option<T>, CandidateError> {
+    match open_receipt(path) {
+        Ok(file) => read_receipt(file, limit, true).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io(error)),
+    }
+}
+
+fn open_receipt(path: &Path) -> std::io::Result<File> {
     // Non-blocking open, so a FIFO (or other special file) at a receipt path is refused by
     // the regular-file check below instead of waiting for a writer. It has no effect on reads
     // of a regular file.
-    let mut f = OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
-        .map_err(io)?;
-    let m = f.metadata().map_err(io)?;
+}
+
+fn read_receipt<T: serde::de::DeserializeOwned>(
+    mut file: File,
+    limit: u64,
+    allow_unlinked: bool,
+) -> Result<T, CandidateError> {
+    let m = file.metadata().map_err(io)?;
     if !m.is_file()
         || m.len() > limit
-        || m.nlink() != 1
+        || !(m.nlink() == 1 || (allow_unlinked && m.nlink() == 0))
         || m.uid() != unsafe { libc::geteuid() }
         || m.mode() & 0o077 != 0
     {
@@ -345,7 +404,7 @@ pub fn read_bounded<T: serde::de::DeserializeOwned>(
         ));
     }
     let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut f)
+    std::io::Read::by_ref(&mut file)
         .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(io)?;
@@ -374,19 +433,29 @@ pub(crate) fn write_before_rename(
     value: &impl Serialize,
     before_rename: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
-    let temporary = path.with_extension("pending");
+    write_with_pending(path, &path.with_extension("pending"), value, before_rename)
+}
+
+/// Atomically publish state using a caller-owned pending sibling. Use a separate
+/// name only when the caller has a distinct recovery rule for interrupted bytes.
+pub(crate) fn write_with_pending(
+    path: &Path,
+    temporary: &Path,
+    value: &impl Serialize,
+    before_rename: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| CandidateError::new("invalid_receipt", e.to_string()))?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&temporary)
+        .open(temporary)
         .map_err(io)?;
     file.write_all(&bytes).map_err(io)?;
     file.sync_all().map_err(io)?;
     before_rename()?;
-    fs::rename(&temporary, path).map_err(io)?;
+    fs::rename(temporary, path).map_err(io)?;
     File::open(path.parent().expect("receipt parent"))
         .map_err(io)?
         .sync_all()
@@ -547,7 +616,16 @@ const FRESH_ALIAS_ATTEMPTS: usize = 4;
 
 impl Owner {
     pub fn load(candidate: &Candidate) -> Result<Self, CandidateError> {
-        Self::load_with_short_home(candidate, false, false)
+        Self::load_with_short_home(candidate, false, false, read)
+    }
+
+    /// A hostname lookup compares the owner token across committed snapshots.
+    /// A sibling's owner-receipt rewrite can unlink an already open snapshot.
+    pub(super) fn load_for_hostname_lookup(candidate: &Candidate) -> Result<Self, CandidateError> {
+        Self::load_with_short_home(candidate, false, false, |path| {
+            read_committed(path, MAX_RECEIPT_BYTES)?
+                .ok_or_else(|| io(std::io::ErrorKind::NotFound.into()))
+        })
     }
 
     /// Explicit recovery may inspect a missing temporary alias, never a replaced one.
@@ -555,20 +633,21 @@ impl Owner {
     pub(super) fn load_for_short_home_recovery(
         candidate: &Candidate,
     ) -> Result<Self, CandidateError> {
-        Self::load_with_short_home(candidate, true, false)
+        Self::load_with_short_home(candidate, true, false, read)
     }
 
     /// Only for [`Owner::restore_released_short_home`] under the pool lock: a clean stop
     /// whose alias path another entry holds loads, so it can move to a fresh alias. The
     /// returned receipt's alias must not be used until that restore succeeds.
     pub(super) fn load_for_alias_restore(candidate: &Candidate) -> Result<Self, CandidateError> {
-        Self::load_with_short_home(candidate, false, true)
+        Self::load_with_short_home(candidate, false, true, read)
     }
 
     fn load_with_short_home(
         candidate: &Candidate,
         allow_missing: bool,
         allow_squatted: bool,
+        read_owner: impl FnOnce(&Path) -> Result<Self, CandidateError>,
     ) -> Result<Self, CandidateError> {
         let root = candidate.state_root.join("run/smolvm");
         reject_aliased_state(&root)?;
@@ -582,7 +661,7 @@ impl Owner {
                 "Provider owner update is pending or unobservable; HOME alias was not restored.",
             ));
         }
-        let owner: Self = read(&root.join("owner.json"))?;
+        let owner = read_owner(&root.join("owner.json"))?;
         owner.network.validate()?;
         super::project_share::validate_set(
             owner.project_share.as_ref(),
@@ -1200,13 +1279,38 @@ mod tests {
         let link = root.join("owner.json");
         std::os::unix::fs::symlink(&foreign, &link).unwrap();
         assert!(read::<serde_json::Value>(&link).is_err());
+        assert!(read_committed::<serde_json::Value>(&link, 1024).is_err());
         fs::remove_file(&link).unwrap();
         fs::hard_link(&foreign, &link).unwrap();
         assert!(matches!(read::<serde_json::Value>(&link),Err(e) if e.code == "foreign_state"));
+        assert!(read_committed::<serde_json::Value>(&link, 1024).is_err());
         assert_eq!(
             fs::read_to_string(&foreign).unwrap(),
             "{\n  \"owner\": \"foreign\"\n}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn committed_receipt_keeps_the_open_snapshot_across_atomic_replacement() {
+        let root = fixture();
+        let path = root.join("receipt.json");
+        let before = serde_json::json!({"revision": 1});
+        let after = serde_json::json!({"revision": 2});
+        assert_eq!(
+            read_committed::<serde_json::Value>(&path, 1024).unwrap(),
+            None
+        );
+        write(&path, &before).unwrap();
+        let opened = open_receipt(&path).unwrap();
+        write(&path, &after).unwrap();
+        assert_eq!(opened.metadata().unwrap().nlink(), 0);
+        let legacy = read_receipt::<serde_json::Value>(opened.try_clone().unwrap(), 1024, false);
+        assert_eq!(legacy.unwrap_err().code, "foreign_state");
+        assert_eq!(
+            read_receipt::<serde_json::Value>(opened, 1024, true).unwrap(),
+            before
+        );
+        assert_eq!(read_committed(&path, 1024).unwrap(), Some(after));
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

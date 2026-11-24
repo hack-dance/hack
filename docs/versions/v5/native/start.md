@@ -128,13 +128,21 @@ launchers if requested. After an uncertain outcome, inspect
 `"$CANDIDATE" exec-sessions` and follow the
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
-Native `up --detach` and `up --json` wait for the background owner to report ready.
+Native `up`, `up --detach` and `up --json` return once every container has started;
+the closing line counts the routes still warming, and `--json` says
+`readiness: "warming"`. `up --wait` returns once every service is ready, as before.
+`up.after` hooks run at started: a hook that calls a project URL needs `--wait`.
+`hack exec` and `hack run` wait for ready on their own; `hack open` does not.
 A loopback port can accept connections as soon as its own service is ready.
 During startup, `hack ps` shows verified loopback publications, and
 `hack open <service>` can open a service with one verified loopback address.
 Other services can still be starting. If the start fails or is cancelled,
 the owner retires the ports it has already published. HTTPS addresses still
 depend on the HTTPS frontend being ready.
+Once HTTPS is ready for a project, starting or stopping another project in the
+same native home leaves its routes available.
+Text output reports each build as it finishes, including its service names,
+outcome and elapsed time. Build output stays with foreground `hack up`.
 See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
 separate detached and graph readiness limits. If detached startup times out,
 run `down` next. It waits up to two minutes for a pending owner and stops what
@@ -157,6 +165,13 @@ run without transferring the old run’s data.
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
 [cleanup reference](full-reference.md#manual-candidate-upgrade-and-rollback).
+
+If startup was interrupted just after creating a container, cleanup records
+the container it verified before removing it. Once cleanup finishes with data
+retained, `hack up` can restore the run with its existing named volumes.
+This applies when cleanup records the ID. Runs already stopped with a missing
+container ID still refuse restore. Earlier builds cannot read receipts that
+contain the new cleanup observation field. Native homes are per version.
 
 After installing a newer version, its native home is new, but the project still
 records its last run in the old one. If you did not stop the project with the old

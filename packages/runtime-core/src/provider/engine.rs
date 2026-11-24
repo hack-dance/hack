@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+pub(in crate::provider) mod changes;
 #[cfg(any(target_os = "macos", test))]
 mod exec_io;
 pub(in crate::provider) mod inspection;
@@ -287,6 +288,20 @@ pub(super) struct Engine<'a> {
 }
 
 impl<'a> Engine<'a> {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn receipt_only_fixture(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        Ok(Self {
+            guest: OwnedGuest::receipt_only_fixture(candidate)?,
+            transport: Transport::new(
+                &candidate.state_root.join("no-test-engine.sock"),
+                Duration::from_secs(1),
+            )?,
+            cleanup_only: true,
+            #[cfg(feature = "native-config-plan")]
+            tool_lifetime: super::guest_tool::Lifetime::default(),
+        })
+    }
+
     #[cfg(feature = "native-config-plan")]
     pub(in crate::provider) fn tool_lifetime(&self) -> &super::guest_tool::Lifetime {
         &self.tool_lifetime
@@ -413,7 +428,7 @@ impl<'a> Engine<'a> {
         self.logs_with_tail(id, "all")
     }
     /// Bounded per-stream tail for callers that keep the streams apart. Built from
-    /// the same whole-line, newest-first selection as [`Self::logs_tail_lines`];
+    /// the same whole-line, newest-first selection as `logs_tail_lines`;
     /// each stream also stays within [`LOG_STREAM_BUDGET`] (see [`stream_tail`]).
     #[cfg(all(feature = "native-config-plan", any(target_os = "macos", test)))]
     pub(super) fn logs_tail(
@@ -427,7 +442,9 @@ impl<'a> Engine<'a> {
         stream_tail(&self.logs_bytes(id, &tail.to_string())?)
     }
     /// Bounded tail in engine order, which interleaves stdout and stderr by time.
-    /// Whole lines are kept newest first; see [`LogTail`].
+    /// Whole lines are kept newest first; see [`LogTail`]. macOS reads lease-free
+    /// through `Observer::logs_tail_lines` instead.
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn logs_tail_lines(&self, id: &str, tail: u16) -> Result<LogTail, CandidateError> {
         if !(1..=1000).contains(&tail) {
             return Err(failure("Container log tail must be from 1 to 1000."));
@@ -679,6 +696,29 @@ impl<'a> Observer<'a> {
         let value = self.transport.request(Method::GET, path, None)?;
         self.guest.verify()?;
         Ok(value)
+    }
+
+    /// The lease-free twin of `Engine::logs_tail_lines`, for finite snapshots.
+    #[cfg(target_os = "macos")]
+    pub(super) fn logs_tail_lines(&self, id: &str, tail: u16) -> Result<LogTail, CandidateError> {
+        if !(1..=1000).contains(&tail)
+            || id.len() != 64
+            || !id.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(failure("Invalid container log identity."));
+        }
+        let path = format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail={tail}");
+        self.guest.verify()?;
+        let bytes = self.transport.request_bytes(Method::GET, &path, None)?;
+        self.guest.verify()?;
+        decode_log_lines(&bytes)
+    }
+
+    pub(super) fn identity_document(&self) -> Result<Value, CandidateError> {
+        self.guest.verify()?;
+        let result = self.transport.request(Method::GET, "/v1.53/info", None);
+        self.guest.verify()?;
+        result
     }
 
     /// Fixed read-only image endpoint. Recheck ownership on both success and

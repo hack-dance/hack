@@ -6,9 +6,10 @@ repository, so teammates and agents use the same definition.
 
 In the desktop preview, **Resources** lists observed containers and their
 attached image, named volumes and networks by project and branch. Open a
-project for its normal lifecycle actions, or open **Doctor** for cleanup
-guidance and the native-pool state. Detached resources and disk usage
-require a broader Hack inventory report.
+project for its normal lifecycle actions, open its Compose logs, or go to
+**Doctor** for cleanup guidance and the native-pool state. The Resources pane
+is read-only. Detached resources and disk usage require a broader Hack
+inventory report.
 
 ## Project, instance and branch instance
 

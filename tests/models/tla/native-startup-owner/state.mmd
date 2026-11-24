@@ -1,0 +1,61 @@
+---
+title: Owner · started to ready
+---
+stateDiagram-v2
+  direction TB
+  [*] --> serving : Serve
+  state started_at <<choice>>
+  serving --> started_at : Started [containers started]
+  started_at --> warming : [WaitForReady = FALSE]
+  started_at --> starting : [WaitForReady = TRUE]
+  state "warming · up returned" as warming
+  state "starting · up --wait" as starting
+  warming --> ready : Ready [pub = committed]
+  starting --> ready : Ready, then up returns
+  warming --> failed : Fail (PR C)
+  starting --> failed : Fail
+  ready --> failed : Fail (PR C)
+  warming --> stopped : accept + cancel, DownStop
+  ready --> stopped : accept + cancel, DownStop
+  starting --> stopped : accept + cancel, DownStop
+  stopped --> serving : restart: a new run
+  state "failed (PR C)" as failed
+  failed --> [*] : retained or recorded
+  note right of warming
+    up returns here, in order:
+    PublishMapping, Bookkeep,
+    Notify, OwnerAccept, Return
+    INV NoReturnWithoutMapping
+    INV NoPrematureReturn
+  end note
+  note right of stopped
+    DownRequest queues the stop,
+    even mid-publication. Owner:
+    AcceptStop, between passes and
+    never mid-publication, cancels
+    the wait. Frontend: its own
+    FrontendCancel (abort) ends the
+    started chain. DownStop needs
+    both, in either order.
+    INV DownCancelsWait: no Ready
+    INV DownHooksOnce: hooks once
+    INV NoHalfPublicationAfterStop
+    INV StoppedOwnerNotWaiting
+    INV StoppedFrontendCancelled
+  end note
+  note left of starting
+    --wait: mapping saved here too;
+    bookkeeping and return wait
+    for Ready
+    INV NoReturnWithoutMapping
+  end note
+  classDef live stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef ok stroke-width:1.6px
+  classDef fail stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class serving live
+  class warming,starting wait
+  class ready ok
+  class failed fail
+  class stopped idle

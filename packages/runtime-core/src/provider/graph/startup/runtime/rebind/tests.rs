@@ -351,6 +351,47 @@ fn receipt() -> Receipt {
     )
     .unwrap()
 }
+
+#[test]
+fn cleanup_archive_accepts_first_observed_id_and_refuses_known_id_change() {
+    let fixture = crate::provider::graph::tests::Fixture::new();
+    let mut original = receipt();
+    original.set_phase("failed-retained");
+    original.resources.insert(
+        "container:web".into(),
+        serde_json::from_value(json!({
+            "kind":"container","key":"web","name":"owned-web",
+            "id":null,"image":null,"phase":"uncertain"
+        }))
+        .unwrap(),
+    );
+    let mut cleaned = original.clone();
+    cleaned.set_phase("stopped-data-retained");
+    let resource = cleaned.resources.get_mut("container:web").unwrap();
+    resource.phase = "absent".into();
+    resource.id = Some("a".repeat(64));
+    assert_eq!(
+        archive_after_cleanup(&fixture.0, &original, &cleaned, "old-boot")
+            .unwrap_err()
+            .code,
+        rejected().code
+    );
+    cleaned
+        .resources
+        .get_mut("container:web")
+        .unwrap()
+        .cleanup_observed_create = true;
+    archive_after_cleanup(&fixture.0, &original, &cleaned, "old-boot").unwrap();
+
+    original.resources.get_mut("container:web").unwrap().id = Some("b".repeat(64));
+    assert_eq!(
+        archive_after_cleanup(&fixture.0, &original, &cleaned, "old-boot")
+            .unwrap_err()
+            .code,
+        rejected().code
+    );
+}
+
 #[test]
 fn terminal_identity_uses_real_resource_key_and_refuses_unexpected_or_failed_exit() {
     let mut receipt = receipt();

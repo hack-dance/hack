@@ -286,6 +286,10 @@ pub struct Resource {
     pub key: String,
     pub name: String,
     pub id: Option<String>,
+    /// Cleanup verified and recorded the ID from an unacknowledged create.
+    /// Cleanup authorizations selected before that observation bound a missing ID.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_observed_create: bool,
     pub image: Option<String>,
     pub phase: String,
     /// The service's reviewed opt-in policy for running a `linux/amd64` image under Rosetta
@@ -294,6 +298,38 @@ pub struct Resource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amd64_emulation: Option<crate::project::Amd64Emulation>,
 }
+
+impl Resource {
+    fn has_unacknowledged_create(&self) -> bool {
+        // The execution driver records "uncertain" if the engine create call
+        // fails before returning the ID, including when its reply is lost.
+        self.kind == Kind::Container
+            && self.id.is_none()
+            && matches!(self.phase.as_str(), "create-intent" | "uncertain")
+    }
+
+    fn has_cleanup_observed_id(&self, graph_phase: &str) -> bool {
+        self.cleanup_observed_create
+            && self.kind == Kind::Container
+            && self.id.as_deref().is_some_and(|id| hex(id, 64))
+            && matches!(
+                (graph_phase, self.phase.as_str()),
+                (
+                    "cleanup-intent" | "reconciled-cleanup-only",
+                    "create-intent" | "uncertain" | "absent"
+                ) | ("stopped-data-retained" | "removed", "absent")
+            )
+    }
+
+    /// Cleanup may resolve a missing create ID once. It still must match a
+    /// known ID when checking a receipt-bound authorization or archive.
+    #[cfg(any(target_os = "macos", test))]
+    fn matches_cleanup_id(&self, current: &Self, graph_phase: &str) -> bool {
+        self.id == current.id
+            || (self.has_unacknowledged_create() && current.has_cleanup_observed_id(graph_phase))
+    }
+}
+
 /// The phases of a start in progress, before every service has started: fresh,
 /// restore and restart.
 pub(super) const START_PHASES: [&str; 3] = ["preparing", "restoring", "restarting"];
@@ -392,6 +428,10 @@ pub struct Snapshot {
     /// Presentation only; native recovery selection still validates all evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_cleanup: Option<cleanup_diagnostics::PendingCleanup>,
+    /// A start that failed after `started-observed`, read from its own run-directory
+    /// file; see [`startup_failure::AfterStarted`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_after_started: Option<startup_failure::AfterStarted>,
     #[cfg(target_os = "macos")]
     pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
@@ -785,6 +825,7 @@ fn load_at(
             )
             || (r.phase == "released" && r.cache.is_none())
             || r.id.as_deref().is_some_and(|id| !hex(id, 64))
+            || (r.cleanup_observed_create && !r.has_cleanup_observed_id(&receipt.phase))
             || (r.kind == Kind::Container && !r.image.as_deref().is_some_and(image_id))
             || (r.kind != Kind::Container && r.image.is_some())
             || (r.kind == Kind::Volume && r.id.is_some())
@@ -983,6 +1024,15 @@ impl Session<'_, '_> {
         }
         Ok(())
     }
+    /// The start loop's wait between passes: woken by an engine event for one of
+    /// this run's containers, else the whole pass interval (see `engine::changes`).
+    fn engine_changes(&self) -> crate::provider::engine::changes::EngineChanges {
+        use crate::provider::engine::changes::EngineChanges;
+        self.engine.guest().engine_socket().map_or_else(
+            |_| EngineChanges::sleeping(),
+            |socket| EngineChanges::follow(&socket, &self.receipt.run),
+        )
+    }
     fn save(&self) -> Result<(), CandidateError> {
         state::write(&self.root.join("state.json"), &self.receipt)
     }
@@ -1165,6 +1215,12 @@ impl Driver for Session<'_, '_> {
                 } else {
                     "create-intent"
                 };
+                // A fresh service with managed values stages them right after this
+                // write: its durable attachment marker goes in the same write
+                // instead of a second one (see `start`).
+                if !self.restarting && self.environments.contains_key(service) {
+                    self.receipt.environment_attached = true;
+                }
                 crate::timings::measure_candidate(
                     crate::timings::Step::StartWaveRecord,
                     None,
@@ -1285,19 +1341,32 @@ impl Driver for Session<'_, '_> {
         let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
-            self.receipt.environment_attached = true;
-            self.save()?;
+            // The marker is durable before any bound intent. It is normally already
+            // in this service's start-intent write; only a caller that skipped it
+            // pays a write of its own here.
+            if !self.receipt.environment_attached {
+                self.receipt.environment_attached = true;
+                crate::timings::measure_candidate(
+                    crate::timings::Step::StartWaveRecord,
+                    None,
+                    |_| self.save(),
+                )?;
+            }
             let (uid, gid) = launcher::identity(&self.configs[service])?;
-            let lease = pending.with_identity(uid, gid).stage_bound(
-                self.engine.guest(),
-                Some(super::environment_recovery::GraphBinding {
-                    run: self.receipt.run.clone(),
-                    container: resource.name.clone(),
-                }),
-            )?;
-            #[cfg(test)]
-            self.fault_pause("after-environment-stage")?;
-            let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+            let (lease, path) =
+                crate::timings::measure_candidate(crate::timings::Step::EnvStage, None, |_| {
+                    let lease = pending.with_identity(uid, gid).stage_bound(
+                        self.engine.guest(),
+                        Some(super::environment_recovery::GraphBinding {
+                            run: self.receipt.run.clone(),
+                            container: resource.name.clone(),
+                        }),
+                    )?;
+                    #[cfg(test)]
+                    self.fault_pause("after-environment-stage")?;
+                    let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+                    Ok((lease, path))
+                })?;
             let files = lease.file_mounts();
             let wraps = lease.wraps_process();
             self.leases.insert(service.into(), lease);
@@ -1859,13 +1928,16 @@ fn run_inputs(
             )?;
         }
         session.create_resources(false)?;
-        execution::run(
+        let changes = session.engine_changes();
+        execution::run_with_wait(
             &prepared.graph,
             &mut session,
             admission_deadline.saturating_duration_since(std::time::Instant::now()),
+            |interval| changes.wait(interval),
         )
     })();
     if let Err(failure) = result {
+        startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);
@@ -1972,6 +2044,24 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "dead_owner_recovery_complete": predecessor_complete,
         "dead_owner_recovery_error": predecessor_error,
     }))
+}
+
+/// Whether `run` belongs to a foreground relay owner, so its cleanup goes to that
+/// owner. Read with the provider lease when it is free, as before; while the lease is
+/// held (`provider_busy`, for example by a start loop still warming), the receipt is
+/// read without it: the owner, which holds the lease, then performs the cleanup, and
+/// no second lease is taken.
+#[cfg(target_os = "macos")]
+pub fn foreground_owned(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
+    match inspect(candidate, run) {
+        Ok(snapshot) => Ok(snapshot.receipt.relay_startup.is_some()),
+        Err(error) if error.code == "provider_busy" => {
+            let owner = state::Owner::load(candidate)?;
+            let (receipt, _) = load_at(directory(candidate, run)?, run, &owner.token)?;
+            Ok(receipt.relay_startup.is_some())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Read-only recovery inspection; historical ready phase is not a current health assertion.
@@ -2308,10 +2398,12 @@ fn inspect_using(
     }
     let storage_references = storage::references(&receipt, journal_incomplete, &observations);
     let pending_cleanup = cleanup_diagnostics::pending(&receipt, &observations, journal_incomplete);
+    let failed_after_started = startup_failure::after_started(&root);
     Ok(Snapshot {
         receipt,
         journal_incomplete,
         pending_cleanup,
+        failed_after_started,
         #[cfg(target_os = "macos")]
         interrupted_start_cleanup_incomplete,
         observations,
@@ -2331,6 +2423,7 @@ pub fn cleanup(
     let (receipt, root) = load(candidate, &engine, run)?;
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
     let receipt = cleanup_owned(candidate, &engine, receipt, &root, remove_data)?;
+    explicit_cleanup_done(&root);
     // The cleaned receipt is committed and ordinary cleanup binds no relay effect identity to
     // its environment inventory, so history is compacted under the same lease. A refusal keeps
     // the records for the next cleanup, restore or archive; it never reports this cleanup failed.
@@ -2374,10 +2467,32 @@ pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Receipt,
     }
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
     let receipt = cleanup_owned(candidate, &engine, receipt, &root, true)?;
+    explicit_cleanup_done(&root);
     if let Some(containers) = environment::bound_containers(&receipt) {
         environment::compact_history(candidate, &engine, &receipt.run, &containers);
     }
     Ok(receipt)
+}
+
+/// `graph clear-failure-after-started`: remove a stopped run's failure-after-started
+/// record under the same provider lease `graph cleanup` takes, so it never races a
+/// start. See [`startup_failure::clear_stopped`] for what it refuses.
+pub fn clear_failure_after_started(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<Value, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    let cleared = startup_failure::clear_stopped(&root, &receipt)?;
+    Ok(json!({"run": run, "cleared": cleared}))
+}
+
+/// After an explicit cleanup (`graph cleanup`, which `hack down` calls) committed:
+/// remove the failure-after-started record. The owner's own cleanup after a failure
+/// does not call this, so it keeps the record. Diagnostic only: a failed removal
+/// never reports the committed cleanup failed.
+pub(super) fn explicit_cleanup_done(root: &std::path::Path) {
+    let _ = startup_failure::clear_after_started(root);
 }
 
 // The caller retains the VM mutation lease through this entire effect and any
@@ -2443,7 +2558,7 @@ fn cleanup_owned_fenced(
         slots
     };
     fence()?;
-    shutdown::stop_owned(engine, &receipt, root)?;
+    shutdown::stop_owned(engine, &mut receipt, root, &fence)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
         if kind == Kind::Volume && !remove_data {
             continue;
@@ -2733,7 +2848,14 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         launcher: None,
     };
     session.save()?;
-    if let Err(failure) = execution::run(&prepared.graph, &mut session, options.timeout) {
+    let changes = session.engine_changes();
+    // The restarting receipt is committed: the previous start's record is superseded.
+    if let Err(failure) = startup_failure::clear_after_started(&session.root).and_then(|_| {
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
+    }) {
+        startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);

@@ -3,6 +3,7 @@ import {
   nativeComposeCompletedOneoff,
   nativeComposeOnFailureServices,
   nativeComposeRunDependenciesReady,
+  nativeComposeStartupJobFailed,
   nativeComposeWorkloadsReady,
 } from "../src/lib/native-compose-completion.ts";
 import type {
@@ -125,6 +126,36 @@ test("one canonical instance per selected workload is required", () => {
     )
   ).toBe(false);
 });
+test("only a canonical non-restarting job with a verified nonzero exit ends startup", () => {
+  const exited = container("init", { exitCode: 17 });
+  const failed = (containers: readonly NativeComposeContainerObservation[]) =>
+    nativeComposeStartupJobFailed(
+      document,
+      observation(containers),
+      generation
+    );
+  expect(failed([exited])).toBe(true);
+  for (const other of [
+    container("init"),
+    { ...exited, oneoff: true },
+    { ...exited, name: "alternate" },
+    { ...exited, generationId: "a".repeat(32) },
+    { ...exited, state: "created" as const },
+    container("web", { state: "exited", exitCode: 17 }),
+  ]) {
+    expect(failed([other])).toBe(false);
+  }
+  expect(failed([exited, { ...exited, id: "e".repeat(64) }])).toBe(false);
+  const retrying = {
+    services: {
+      init: { ...document.services.init, restart: "on-failure:2" },
+    },
+  };
+  expect(
+    nativeComposeStartupJobFailed(retrying, observation([exited]), generation)
+  ).toBe(false);
+});
+
 test("run readiness checks its actual dependencies without requiring a canonical target", () => {
   expect(
     nativeComposeWorkloadsReady(

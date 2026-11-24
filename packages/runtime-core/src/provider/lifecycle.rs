@@ -335,7 +335,9 @@ fn startup_admission_lease(
     earlier: &impl admission::Earlier,
     observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
 ) -> Result<(state::Lock, admission::Leased), CandidateError> {
-    let lock = startup_lease(root, wait)?;
+    let lock = crate::timings::measure(crate::timings::Step::VmStartupLease, None, |_| {
+        startup_lease(root, wait)
+    })?;
     let leased = admission::recheck_after_lease(profile, opened, clock, earlier, observe)?;
     Ok((lock, leased))
 }
@@ -441,6 +443,25 @@ fn operating_observation(
 }
 
 impl<'a> OwnedGuest<'a> {
+    /// A receipt-only test guest. Any attempt to inspect or mutate the engine
+    /// fails verification because the fixture carries no provider process.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn receipt_only_fixture(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        let root = root(candidate);
+        let lock = state::Lock::acquire_existing(&root)?;
+        let mut owner = Owner::load(candidate)?;
+        owner.process = None;
+        let directory = fs::symlink_metadata(&root).map_err(io)?;
+        Ok(Self {
+            candidate,
+            owner,
+            _lock: lock,
+            lease_root: (directory.dev(), directory.ino()),
+            allocation_allowed: false,
+            guard: None,
+        })
+    }
+
     pub(super) fn candidate(&self) -> &'a Candidate {
         self.candidate
     }
@@ -2717,7 +2738,7 @@ fn down_observed(
         return Ok(initial);
     }
     let lock = state::Lock::acquire(&root(candidate))?;
-    // Builds take their shared fence only under this lease, so none can start after this.
+    // The provider lease prevents a build from being admitted after this check.
     super::image_build::require_no_active_build(candidate)?;
     if let Some(idle) = idle {
         idle()?;
@@ -2959,7 +2980,7 @@ fn stop_silent_guest(candidate: &Candidate, owner: &mut Owner) -> Result<(), Can
 /// (`run/image-builds/active.lock`), so the lease alone does not prove the engine is idle.
 /// The fence is a `flock`: it is released when the build's processes exit, including on
 /// SIGKILL, so a refusal lasts only while a build process is alive. Callers hold the
-/// operation lease, under which no new build can take the fence.
+/// operation lease, which prevents new build admission.
 fn require_no_build_for_silent_stop(candidate: &Candidate) -> Result<(), CandidateError> {
     super::image_build::require_no_active_build(candidate).map_err(|error| {
         if error.code == "provider_busy" {

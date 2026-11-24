@@ -199,13 +199,28 @@ struct Batch {
 
 #[test]
 fn early_port_waits_for_its_healthcheck_and_refuses_a_stale_ready_id() {
+    early_port_waits_for_its_healthcheck("preparing", None);
+}
+
+/// `hack up` now returns at started (with and without `--wait`, the owner reports
+/// started): the receipt is `started-observed` while a slow service warms, and its
+/// port is still deferred while its healthcheck starts, then published once ready.
+#[test]
+fn after_started_a_slow_port_is_deferred_then_published_not_refused() {
+    for from in ["preparing", "restoring"] {
+        early_port_waits_for_its_healthcheck(super::super::STARTED_OBSERVED, Some(from));
+    }
+}
+
+fn early_port_waits_for_its_healthcheck(phase: &str, started_from: Option<&str>) {
     let fixture = super::super::tests::Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();
     let root = directory(&candidate, RUN).unwrap();
     state::private_directory(root.parent().unwrap()).unwrap();
     state::private_directory(&root).unwrap();
     let mut receipt = receipt();
-    receipt.phase = "preparing".into();
+    receipt.phase = phase.into();
+    receipt.started_from = started_from.map(Into::into);
     state::write(&root.join("state.json"), &receipt).unwrap();
     let guest = Guest::new(Candidate::discover(&fixture.0).unwrap());
     let services = BTreeSet::from(["api"]);

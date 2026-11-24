@@ -14,6 +14,8 @@ pub struct LogFollowOptions<'a> {
     pub from_start: bool,
     pub native: bool,
     pub selection_only: bool,
+    /// `--no-follow`: print the selected service's existing output and stop.
+    pub no_follow: bool,
     pub expected_container: Option<&'a str>,
 }
 impl LogFollowOptions<'_> {
@@ -115,7 +117,7 @@ fn imported(candidate: &Candidate, options: &LogFollowOptions<'_>) -> Result<(),
             return Err(changed());
         }
         require_ready(
-            receipt.phase == "ready-observed",
+            follows_phase(&receipt.phase),
             receipt.readiness.contains_key(options.service),
         )?;
         Ok(receipt)
@@ -161,6 +163,7 @@ fn imported(candidate: &Candidate, options: &LogFollowOptions<'_>) -> Result<(),
             tail: options.tail,
             since: crate::provider::graph::log_follow::since(options, &generation)?,
             timestamps: options.timestamps,
+            follow: !options.no_follow,
         },
         || {
             observer.guest().verify()?;
@@ -208,6 +211,14 @@ pub(super) fn write_selection(
         .write_all(b"\n")
         .and_then(|_| output.flush())
         .map_err(|_| changed())
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// The graph phases whose services' logs can be followed: ready, and (with
+/// `--report-started`) every service started while some are still warming, when a
+/// slow service's output is what a user wants to read.
+pub(super) fn follows_phase(phase: &str) -> bool {
+    matches!(phase, "ready-observed" | super::STARTED_OBSERVED)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -263,6 +274,20 @@ mod tests {
         require_ready(true, true).unwrap();
     }
     #[test]
+    fn logs_follow_a_ready_or_warming_graph_only() {
+        assert!(follows_phase("ready-observed") && follows_phase("started-observed"));
+        for phase in [
+            "preparing",
+            "restoring",
+            "restarting",
+            "failed-retained",
+            "cleanup-intent",
+            "stopped-data-retained",
+        ] {
+            assert!(!follows_phase(phase), "{phase}");
+        }
+    }
+    #[test]
     fn zero_tail_selects_only_new_lines() {
         let options = LogFollowOptions {
             run: &"a".repeat(32),
@@ -276,6 +301,7 @@ mod tests {
             from_start: false,
             native: false,
             selection_only: false,
+            no_follow: false,
             expected_container: None,
         };
         options.validate().unwrap();

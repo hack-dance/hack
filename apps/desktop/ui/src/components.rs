@@ -144,7 +144,7 @@ pub fn project_row(
         .rounded(radius::CONTROL)
         .cursor_pointer()
         .when(selected, |d| d.bg(p.selection))
-        .hover(move |d| d.bg(if selected { p.selection } else { p.surface_1 }))
+        .when(!selected, |d| d.hover(move |d| d.bg(p.surface_1)))
         .child(dot(status, ui))
         .child(
             div()
@@ -191,7 +191,7 @@ pub fn branch_row(
         .rounded(radius::CONTROL)
         .cursor_pointer()
         .when(selected, |d| d.bg(p.selection))
-        .hover(move |d| d.bg(if selected { p.selection } else { p.surface_1 }))
+        .when(!selected, |d| d.hover(move |d| d.bg(p.surface_1)))
         .child(icon(Glyph::Branch, size::ICON, p.text_muted))
         .child(dot(status, ui))
         .child(

@@ -95,10 +95,11 @@ Detail content is inset 20 left and right; the sidebar list 6.
 | `surface` | `#FFFFFF` | `#0D1117` | Cards and controls |
 | `chrome` | `#F7F7F5` | `#06080A` | Sidebar, status bar |
 | `raised` | `#EFEFEC` | `#1C2026` | Menus and tooltips |
-| `selection` | `#EFEFEC` | `#24272B` | Selected rows and tabs |
+| `selection` | `#EFEFEC` | `#24272B` | Selected navigation and tabs, selected file row in dark mode |
 | `attention` | `#EFEFEC` | `#21252B` | Running command box |
 | `surface_1` | `#EFEFEC` | `#1A1E24` | Hover, panel handle, neutral pill |
-| `surface_2` | `#E6E6E2` | `#23272D` | Pressed |
+| `surface_2` | `#E6E6E2` | `#23272D` | Pressed, selected file row in light mode |
+| `preview_surface` | `#EFEFEC` | `#1E2329` | Read-only file preview body |
 | `border` | black 9% | `#2B3036` | Hairlines |
 | `border_strong` | black 18% | `#2B3036` | Button and field outlines |
 | `text_primary` | `#1C1C1A` | `#E6EDF3` | |
@@ -106,7 +107,7 @@ Detail content is inset 20 left and right; the sidebar list 6.
 | `text_muted` | `#8B8A85` | `#8B9197` | Captions, table header, timestamps |
 | `accent` | `#2F6FDB` | `#E6EDF3` | Switch on, focus ring |
 
-The dark palette is Merino Dark. GPUI components such as the search field,
+The dark palette uses Merino Dark from the HACK-2595 desktop frames. GPUI components such as the search field,
 title bar, tooltips and scrollbars use the same palette. The dark title bar uses
 the window color.
 

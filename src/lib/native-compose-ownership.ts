@@ -533,9 +533,12 @@ export async function waitNativeComposeStartupOwned(opts: {
 }): Promise<NativeComposeOwnershipObservation | null> {
   const selected = startupSelection(opts.ownership, opts.restartingServices);
   const signal = opts.ownership.signal;
+  // Storage proof exclusions can add fractional milliseconds. Docker probes
+  // take whole milliseconds and must stay within the original start deadline.
+  const deadline = Math.floor(opts.deadline);
   let retriedTimeout = false;
   const acquire = () => {
-    const remaining = opts.deadline - Date.now();
+    const remaining = deadline - Date.now();
     if (remaining <= 0) {
       probeRefused("E_NATIVE_COMPOSE_PROBE_TIMEOUT", "timeout");
     }
@@ -560,7 +563,7 @@ export async function waitNativeComposeStartupOwned(opts: {
         retriedTimeout ||
         nativeComposeProbeFailure(error) !== "timeout" ||
         signal?.aborted ||
-        Date.now() >= opts.deadline
+        Date.now() >= deadline
       ) {
         throw error;
       }
@@ -570,23 +573,23 @@ export async function waitNativeComposeStartupOwned(opts: {
   };
   let transient = false;
   const state = await waitNativeComposeReady({
-    deadline: opts.deadline,
+    deadline,
     signal,
     observe: async () => {
       const result = opts.settleNetworkMembers
         ? await waitForNativeComposeNetworkMembers({
             read,
-            deadline: opts.deadline,
+            deadline,
             signal,
           })
         : await read();
-      checkInterruption(signal, Date.now() >= opts.deadline);
+      checkInterruption(signal, false);
       transient = result.restarting && result.transient;
       if (result.restarting) {
         return null;
       }
       opts.observed?.(result.observation);
-      return result.observation;
+      return Date.now() < deadline ? result.observation : null;
     },
     ready: opts.ready,
   });

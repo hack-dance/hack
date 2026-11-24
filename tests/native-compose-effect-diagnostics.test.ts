@@ -158,10 +158,20 @@ test("optional issuance and translation preserve primitive/proxy failure precede
 });
 
 test.each([
-  ["issued", "E_RECOVERY_REQUIRED"],
-  ["forged", "E_RECOVERY_REQUIRED"],
-  ["probe timeout", "E_COMPOSE_FAILED"],
-] as const)("public native command maps %s to %s and retains only issued diagnostics", async (kind, code) => {
+  ["issued", DIAGNOSTIC, "E_CONFIG_INVALID"],
+  ["forged", DIAGNOSTIC, "E_CONFIG_INVALID"],
+  [
+    "issued",
+    { stage: "compose-readiness", reason: "probe-timeout" },
+    "E_RECOVERY_REQUIRED",
+  ],
+  [
+    "forged",
+    { stage: "compose-readiness", reason: "probe-timeout" },
+    "E_CONFIG_INVALID",
+  ],
+  ["probe timeout", DIAGNOSTIC, "E_COMPOSE_FAILED"],
+] as const)("public native command maps %s %j to %s and retains only issued diagnostics", async (kind, diagnostic, code) => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-effect-diagnostic-"))
   );
@@ -173,10 +183,10 @@ test.each([
           "E_NATIVE_COMPOSE_UNCERTAIN"
         );
   if (kind === "issued") {
-    attachNativeComposeEffectRefusal(error, DIAGNOSTIC);
+    attachNativeComposeEffectRefusal(error, diagnostic);
   } else {
     Object.assign(error, {
-      detail: { native_compose_effect_refusal: DIAGNOSTIC },
+      detail: { native_compose_effect_refusal: diagnostic },
       cause: "private-canary",
     });
   }
@@ -208,7 +218,7 @@ test.each([
         code,
         message: error.message,
         ...(kind === "issued"
-          ? { detail: { native_compose_effect_refusal: DIAGNOSTIC } }
+          ? { detail: { native_compose_effect_refusal: diagnostic } }
           : {}),
       },
     });

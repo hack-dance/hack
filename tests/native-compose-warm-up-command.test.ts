@@ -60,7 +60,7 @@ test("a restart after readiness cannot pass strict finalization", async () => {
   expect(JSON.parse(result.stdout)).toMatchObject({
     ok: false,
     error: {
-      code: "E_RECOVERY_REQUIRED",
+      code: "E_CONFIG_INVALID",
       detail: {
         native_compose_effect_refusal: {
           stage: "effect-finalization",

@@ -111,7 +111,7 @@ for (const mode of ["once", "always"] as const) {
       expect(replay.code, replay.stderr + replay.stdout).toBe(1);
       expect(JSON.parse(replay.stdout)).toMatchObject({
         ok: false,
-        error: { code: "E_RECOVERY_REQUIRED" },
+        error: { code: "E_CONFIG_INVALID" },
       });
       await rm(fault);
       expect(await state(root)).toMatchObject({ pending: true });

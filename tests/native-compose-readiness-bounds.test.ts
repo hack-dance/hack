@@ -275,6 +275,48 @@ async function expectNoEngineMutation(): Promise<void> {
 }
 
 test(
+  "startup accepts a fractional deadline from excluded storage time",
+  async () => {
+    await serve(["member", "member"]);
+    const result = await waitNativeComposeStartupOwned({
+      ownership: options,
+      restartingServices: ON_FAILURE,
+      deadline: Date.now() + 30_000.5,
+      ready: () => true,
+    });
+    expect(result?.containers).toHaveLength(2);
+    expect(await inspects()).toBe(4);
+  },
+  TEST_TIMEOUT_MS
+);
+
+test(
+  "an owned observation published at the deadline cannot report readiness",
+  async () => {
+    await serve(["member", "member"]);
+    const deadline = Date.now() + 30_000;
+    const now = spyOn(Date, "now");
+    try {
+      await expect(
+        waitNativeComposeStartupOwned({
+          ownership: options,
+          restartingServices: ON_FAILURE,
+          deadline,
+          ready: () => true,
+          observed: () => {
+            now.mockReturnValue(deadline);
+          },
+        })
+      ).resolves.toBeNull();
+      expect(await inspects()).toBe(4);
+    } finally {
+      now.mockRestore();
+    }
+  },
+  TEST_TIMEOUT_MS
+);
+
+test(
   "the virtual readiness clock makes exactly the chosen number of in-loop observations",
   async () => {
     // Harness control: an owned, never-ready observation polls until the virtual deadline.

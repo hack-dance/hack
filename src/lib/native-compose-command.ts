@@ -2671,11 +2671,15 @@ function nativeComposeCommandFailureCode(
   error:
     | NativeComposeGenerationError
     | NativeComposeOwnershipError
-    | NativeComposeBuildError
+    | NativeComposeBuildError,
+  diagnostic: NativeComposeEffectRefusal | undefined
 ): HackCliError["code"] {
   switch (error.code) {
     case "E_NATIVE_COMPOSE_UNCERTAIN":
-      return "E_RECOVERY_REQUIRED";
+      return diagnostic?.stage === "compose-readiness" &&
+        diagnostic.reason === "probe-timeout"
+        ? "E_RECOVERY_REQUIRED"
+        : "E_CONFIG_INVALID";
     case "E_NATIVE_COMPOSE_PROBE_TIMEOUT":
       return "E_COMPOSE_FAILED";
     default:
@@ -2717,7 +2721,7 @@ function throwNativeComposeCommandError(error: unknown): never {
   ) {
     const diagnostic = nativeComposeEffectRefusal(error);
     throw new HackCliError({
-      code: nativeComposeCommandFailureCode(error),
+      code: nativeComposeCommandFailureCode(error, diagnostic),
       message: error.message,
       ...(diagnostic
         ? { detail: { native_compose_effect_refusal: diagnostic } }

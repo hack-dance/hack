@@ -2242,7 +2242,7 @@ impl Source for LiveSource {
         } else {
             args.push("--dry-run");
         }
-        self.runner_for(false)
+        self.runner
             .run_schema_json(&args, Some(&root), Self::READ, "hack.service-add.v1")
             .map_err(|error| match error {
                 RunError::Cli(error) => format!("{} ({})", error.message, error.code),

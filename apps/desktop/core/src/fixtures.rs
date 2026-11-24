@@ -52,6 +52,7 @@ pub enum Fixture {
     /// instances (`hack up --branch <name>`) run.
     Branches,
     CatalogNative,
+    CatalogNativeSaved,
     CatalogAll,
     CatalogEmpty,
     CatalogPreview,
@@ -97,7 +98,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 60] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -128,6 +129,7 @@ impl Fixture {
         Self::NeedsAttention,
         Self::Branches,
         Self::CatalogNative,
+        Self::CatalogNativeSaved,
         Self::CatalogAll,
         Self::CatalogEmpty,
         Self::CatalogPreview,
@@ -192,6 +194,7 @@ impl Fixture {
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
             Self::CatalogNative => "catalog-native",
+            Self::CatalogNativeSaved => "catalog-native-saved",
             Self::CatalogAll => "catalog-all",
             Self::CatalogEmpty => "catalog-empty",
             Self::CatalogPreview => "catalog-preview",
@@ -529,9 +532,15 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             }];
             r
         }
-        Fixture::CatalogNative => {
+        Fixture::CatalogNative | Fixture::CatalogNativeSaved => {
             let mut row = storefront(vec![], "stopped");
             row.backend = Some("native".into());
+            if f == Fixture::CatalogNative {
+                row.input_diagnostic = Some(crate::models::InputDiagnostic {
+                    code: crate::models::NATIVE_PROJECT_CODE.into(),
+                    message: "This project declares native workloads.".into(),
+                });
+            }
             row
         }
         Fixture::Remotes => {

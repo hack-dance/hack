@@ -10,7 +10,10 @@ import {
   writeTextFileAtomicIfChanged,
 } from "../lib/fs.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
-import { assertLegacyProjectDirectory } from "../lib/project-input-selection.ts";
+import {
+  assertLegacyProjectDirectory,
+  ProjectInputSelectionError,
+} from "../lib/project-input-selection.ts";
 import { resolveProjectForArgs } from "./project.ts";
 
 const addSpec = defineCommand({
@@ -52,23 +55,33 @@ const addSpec = defineCommand({
   subcommands: [],
 } as const);
 
-const addCommand = withHandler(addSpec, async ({ ctx, args }) => {
-  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+function authoredCatalogRefusal(error: unknown): never {
+  if (
+    error instanceof ProjectInputSelectionError &&
+    error.code === "E_NATIVE_PROJECT_UNSUPPORTED"
+  ) {
     throw new HackCliError({
       code: "E_NATIVE_PROJECT_UNSUPPORTED",
-      message: "The service catalog edits Compose projects.",
+      message:
+        "This project uses .hack/hack.project.json. Add the service to its workloads, then use hack config validate and hack up.",
     });
   }
+  throw error;
+}
+
+const addCommand = withHandler(addSpec, async ({ ctx, args }) => {
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
     touchRegistration: false,
-  });
+  }).catch(authoredCatalogRefusal);
   const { composeFile, projectRoot } = project;
   const directory = await realpath(projectRoot);
   const validatePath = async () => {
-    await assertLegacyProjectDirectory({ projectDir: project.projectDir });
+    await assertLegacyProjectDirectory({
+      projectDir: project.projectDir,
+    }).catch(authoredCatalogRefusal);
     const actual = await realpath(composeFile);
     const file = relative(projectRoot, composeFile);
     if (

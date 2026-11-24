@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use gpui_kit::{ClipboardItem, Context, Entity, div, prelude::*};
 use hack_desktop_core::{
+    models::NATIVE_PROJECT_CODE,
     service_catalog::{CatalogEdit, Recipe, recipes},
     source::ServiceActionTarget,
     state::Action,
@@ -61,7 +62,7 @@ impl HackApp {
     pub(crate) fn show_catalog_edit_fixture(&mut self, fixture: &str) {
         let saved = match fixture {
             "catalog-diff" => false,
-            "catalog-saved" => true,
+            "catalog-saved" | "catalog-native-saved" => true,
             _ => return,
         };
         let Some((_, recipe)) = search("redis").next() else {
@@ -80,8 +81,8 @@ impl HackApp {
     }
 
     fn catalog_target(&self, recipe: &'static Recipe) -> Option<EditTarget> {
-        let (root, native) = self.selected_root()?;
-        (!native).then_some(EditTarget {
+        let (root, _) = self.selected_root()?;
+        Some(EditTarget {
             root,
             cli_epoch: self.model.source_epoch(),
             recipe: &recipe.name,
@@ -95,7 +96,9 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         if self.machine.busy()
-            || self.selected_root() != Some((target.root.clone(), false))
+            || !self
+                .selected_root()
+                .is_some_and(|(root, _)| root == target.root)
             || self.model.source_epoch() != target.cli_epoch
             || matches!(self.catalog.edit, Some((_, EditState::Pending { .. })))
         {
@@ -114,7 +117,9 @@ impl HackApp {
             let _ = this.update(cx, |this, cx| {
                 let state = EditState::finished(saving, result);
                 if matches!(state, EditState::Saved(_))
-                    && this.selected_root() == Some((target.root.clone(), false))
+                    && this
+                        .selected_root()
+                        .is_some_and(|(root, _)| root == target.root)
                 {
                     this.reset_changes(cx);
                     this.refresh_now_async(cx);
@@ -134,11 +139,15 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = ui.p;
-        if detail.backend != "compose" {
-            return div().text_color(p.text_secondary).child(
-                "This catalog previews Compose services. Add native services in the project’s authored configuration.",
-            );
+        if self.model.selected_row().is_some_and(|row| {
+            row.input_diagnostic
+                .is_some_and(|diagnostic| diagnostic.code == NATIVE_PROJECT_CODE)
+        }) {
+            return div()
+                .text_color(p.text_secondary)
+                .child("Add workloads to .hack/hack.project.json for this project.");
         }
+        let native = detail.backend == "native";
         let query = self
             .catalog
             .input
@@ -217,7 +226,8 @@ impl HackApp {
                 )
             }
             Some(EditState::Saved(report)) => {
-                let can_start = editable
+                let can_start = !native
+                    && editable
                     && self
                         .model
                         .snapshot()
@@ -276,6 +286,11 @@ impl HackApp {
         };
         body.child(options)
             .children(status.map(|text| div().text_color(p.text_secondary).child(text)))
+            .when(native && matches!(edit, Some(EditState::Saved(_))), |body| {
+                body.child(div().text_color(p.text_secondary).child(
+                    "Native starts the whole project. Use hack up in a terminal. If the project is already running, stop it first to load the change.",
+                ))
+            })
             .when(!recipe.env_names.is_empty(), |body| {
                 body.child(div().text_color(p.text_secondary).child(format!(
                     "Set {} in Env under the {} service scope before starting.",

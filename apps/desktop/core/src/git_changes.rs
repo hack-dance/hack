@@ -59,6 +59,7 @@ impl Changes {
         let runner = runner
             .clone()
             .with_env("GIT_OPTIONAL_LOCKS", "0")
+            .with_env("GIT_CONFIG_NOSYSTEM", "1")
             .with_env("LC_ALL", "C");
         let (entries, _, code) = runner
             .run_raw(

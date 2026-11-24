@@ -64,7 +64,7 @@ test("service add previews and updates a Compose file on the native backend", as
     const save = await cli(["--expect-revision", data.revision]);
     expect(save.exitCode).toBe(0);
     expect(JSON.parse(save.stdout).data.saved).toBe(true);
-    const saved = `${source}  "cache":\n    image: redis:7-alpine\n`;
+    const saved = `${source}  "cache":\n    image: redis:7-alpine\n    volumes:\n      - cache-data:/data\nvolumes:\n  cache-data: {}\n`;
     expect(await readFile(file, "utf8")).toBe(saved);
 
     const start = await runCli({

@@ -73,7 +73,7 @@ impl HackApp {
         };
         let report = CatalogEdit {
             file: ".hack/docker-compose.yml".into(),
-            diff: "--- a/.hack/docker-compose.yml\n+++ b/.hack/docker-compose.yml\n@@ -4,0 +5,2 @@\n+  redis:\n+    image: redis:7-alpine\n".into(),
+            diff: "--- a/.hack/docker-compose.yml\n+++ b/.hack/docker-compose.yml\n@@ -4,0 +5,6 @@\n+  redis:\n+    image: redis:7-alpine\n+    volumes:\n+      - redis-data:/data\n+volumes:\n+  redis-data: {}\n".into(),
             revision: "fixture".into(),
             saved,
         };
@@ -190,7 +190,7 @@ impl HackApp {
                     cx.notify();
                 }))
             }));
-        let snippet = recipe.snippet();
+        let snippet = recipe.compose_snippet();
         let target = self.catalog_target(recipe);
         let edit = self
             .catalog
@@ -349,6 +349,15 @@ mod tests {
         {
             yaml.push_str(&recipe.snippet());
             yaml.push('\n');
+        }
+        yaml.push_str("volumes:\n");
+        for recipe in recipes()
+            .iter()
+            .filter(|recipe| !recipe.env_names.is_empty())
+        {
+            for suffix in recipe.volumes.keys() {
+                yaml.push_str(&format!("  {}-{suffix}: {{}}\n", recipe.name));
+            }
         }
         assert_eq!(yaml, include_str!("../fixtures/catalog-credentials.yaml"));
     }

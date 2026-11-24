@@ -1,21 +1,50 @@
 [
-  { "name": "redis", "image": "redis:7-alpine", "env_names": [] },
+  {
+    "name": "redis",
+    "image": "redis:7-alpine",
+    "env_names": [],
+    "volumes": {
+      "data": "/data"
+    }
+  },
   {
     "name": "postgres",
     "image": "postgres:17-alpine",
-    "env_names": ["POSTGRES_PASSWORD"]
+    "env_names": ["POSTGRES_PASSWORD"],
+    "volumes": {
+      "data": "/var/lib/postgresql/data"
+    }
   },
   {
     "name": "mysql",
     "image": "mysql:8.4",
-    "env_names": ["MYSQL_ROOT_PASSWORD"]
+    "env_names": ["MYSQL_ROOT_PASSWORD"],
+    "volumes": {
+      "data": "/var/lib/mysql"
+    }
   },
-  { "name": "mongodb", "image": "mongo:8", "env_names": [] },
+  {
+    "name": "mongodb",
+    "image": "mongo:8",
+    "env_names": [],
+    "volumes": {
+      "db": "/data/db",
+      "configdb": "/data/configdb"
+    }
+  },
   {
     "name": "minio",
     "image": "minio/minio",
     "command": "server /data",
-    "env_names": ["MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"]
+    "env_names": ["MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"],
+    "volumes": {
+      "data": "/data"
+    }
   },
-  { "name": "mailpit", "image": "axllent/mailpit", "env_names": [] }
+  {
+    "name": "mailpit",
+    "image": "axllent/mailpit",
+    "env_names": [],
+    "volumes": {}
+  }
 ]

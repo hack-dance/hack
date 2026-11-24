@@ -136,7 +136,8 @@ that file and run `hack config validate`.
 
 Review the saved file in **Changes** and commit it when
 you're ready. For PostgreSQL, MySQL, and MinIO, set the listed variables in the
-Env tab under the matching service scope before starting.
+Env tab under the matching service scope before starting. Catalog services
+with image-declared storage use named Compose volumes.
 
 The desktop preview shows those descriptors on the registered project's
 **Services** tab. It shows the environment variable name for an

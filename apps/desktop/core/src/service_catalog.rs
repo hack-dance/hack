@@ -1,6 +1,6 @@
 //! Shared catalog recipes and the CLI service-add result.
 
-use std::sync::OnceLock;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 use serde::Deserialize;
 
@@ -10,6 +10,7 @@ pub struct Recipe {
     pub image: String,
     pub command: Option<String>,
     pub env_names: Vec<String>,
+    pub volumes: BTreeMap<String, String>,
 }
 
 impl Recipe {
@@ -23,6 +24,24 @@ impl Recipe {
             yaml.push_str("\n    environment:");
             for name in &self.env_names {
                 yaml.push_str(&format!("\n      {name}: null"));
+            }
+        }
+        if !self.volumes.is_empty() {
+            yaml.push_str("\n    volumes:");
+            for (suffix, path) in &self.volumes {
+                yaml.push_str(&format!("\n      - {}-{suffix}:{path}", self.name));
+            }
+        }
+        yaml
+    }
+
+    #[must_use]
+    pub fn compose_snippet(&self) -> String {
+        let mut yaml = format!("services:\n{}", self.snippet());
+        if !self.volumes.is_empty() {
+            yaml.push_str("\nvolumes:");
+            for suffix in self.volumes.keys() {
+                yaml.push_str(&format!("\n  {}-{suffix}: {{}}", self.name));
             }
         }
         yaml

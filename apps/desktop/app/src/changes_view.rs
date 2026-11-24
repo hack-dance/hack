@@ -1,5 +1,5 @@
 use gpui_kit::{Context, Div, Task, div, prelude::*};
-use hack_desktop_core::git_changes::{ChangedFile, Changes};
+use hack_desktop_core::git_changes::{ChangedFile, Changes, REFUSED};
 use hack_desktop_ui::{
     components::{StyledExt as _, Ui, action_button, pill},
     icons::Glyph,
@@ -134,7 +134,7 @@ impl HackApp {
         self.tab = 6;
         self.changes.result = match name {
             "changes-loading" => None,
-            "changes-error" => Some(Err("Git status could not be read")),
+            "changes-error" => Some(Err(REFUSED)),
             _ => Some(Ok(Changes {
                 branch: "feature/search".into(),
                 checkout: "storefront-search".into(),

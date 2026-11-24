@@ -54,11 +54,14 @@ the exact recorded command PID/birth or a matching guard, including a zombie.
 Only unrecorded members, or legacy receipts without a surviving matching guard, report
 unknown without signals. Descendants alone may require manual recovery when both recorded processes are gone.
 Stop attempts to capture verified members before signaling even a live guard;
-a failed capture does not prevent that healthy guard from handling shutdown. If that guard
-is lost during stop, recovery prefers a fresh capture and falls back to those
+a failed capture does not prevent that healthy guard from handling shutdown. Stop
+allows a live guard ten seconds for its five-second TERM grace, KILL confirmation,
+and scheduling and publication delays. If the guard is lost during stop,
+recovery prefers a fresh capture and falls back to those
 admitted identities, rechecking each before TERM/KILL. Each recovered target gets
 its own five-second TERM grace and two-second confirmation bound. Recovery begins
-at most once per target; late guard loss can extend stop to roughly fourteen seconds. Descendants forked after the capture are never
+at most once per target. Late guard loss can extend the combined waits to roughly
+seventeen seconds. Descendants forked after the capture are never
 signalled: once no captured member is left, stop waits until the target's own deadline for them to
 exit and reports unknown only if they are still alive. A failed or expired target does not abandon other admitted
 targets: stop drives them to their own outcomes before returning unknown. A receipt that
@@ -76,7 +79,7 @@ receipt, also when it fails. Such a failed request exits nonzero and carries a `
 | `reason` | `outcome` | Meaning |
 |---|---|---|
 | `invalid-request` | `refused` | The control frame or root was rejected; nothing was read or changed. |
-| `stop-lock-wait-expired` | `unknown` | Another stop or a launch held `.stop.lock` for the whole wait (sixteen seconds); this request acted on nothing. |
+| `stop-lock-wait-expired` | `unknown` | Another stop or a launch held `.stop.lock` for the whole wait (nineteen seconds). This request acted on nothing. |
 | `foreign-live-process` | `unknown` | A receipt from another owner token still has live members. |
 | `foreign-unknown-process` | `unknown` | A receipt from another owner token has live members that no witness ties to it. A census, inspection or boot-ID failure while checking that receipt is `io-error` instead. Nothing is signalled or retired in either case. |
 | `stop-incomplete` | `unknown` | Stop could not confirm that every member is gone. |
@@ -86,10 +89,10 @@ receipt, also when it fails. Such a failed request exits nonzero and carries a `
 | `retire-failed` | `unknown` | Stop could not durably retire the owner token; nothing was signalled. The retirement marker may already exist, so a later `run` with that token can be refused. |
 | `io-error` | `unknown` | Any other local failure. |
 
-A successful reply has no `reason`. The sixteen-second stop-lock wait exceeds the
-timers of a stop that recovers after late guard loss (about fourteen seconds), so a
-waiter normally gets its own outcome; admission and census work run outside those
-timers, which is why an expired wait still returns its own receipt.
+A successful reply has no `reason`. The nineteen-second stop-lock wait exceeds the
+combined guard and recovery waits of seventeen seconds. Admission and census work
+can add time, so an expired lock wait still returns its own receipt. The CLI's
+forty-second request timeout allows for both waits and the framed reply.
 
 The reply's `processes`, `liveProcessNames` and `unknownProcessNames` are a snapshot
 read after the stop lock is released. Another stop or launch can run in between, so
@@ -160,7 +163,7 @@ The bounds below limit each wait, not the total duration of a request:
 | Lock | Held by | Held across a blocking call? | Who waits, and the bound |
 |---|---|---|---|
 | `.instance.lock` | The project supervisor (`run` or `serve`), for its lifetime | Yes, its whole run | Another `run` or `serve` for the root: up to 10 s, then refused. Guards, `add`, `stop` and `status` never take it. |
-| `.stop.lock` | `run` or `serve` from admission until its ready receipt; `add` while it admits one command; each new guard (inherited on fd 2) until it publishes and detaches, or through its cleanup if a step before detaching fails (five seconds plus the KILL confirmation); `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. `status` waits up to 16 s only when the lock file exists (it never creates it), with the same framed answer on expiry. `add` waits up to 16 s; its forwarder reads the reply for up to 26 s. A launch (`run` or `serve`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` writes each guard's plan and reads its receipt with a 10 s deadline each, then rolls back (up to seven seconds more). The project supervisor's signal-triggered stop also waits up to 16 s, then tries again on its next loop pass. |
+| `.stop.lock` | `run` or `serve` from admission until its ready receipt; `add` while it admits one command; each new guard (inherited on fd 2) until it publishes and detaches, or through its cleanup if a step before detaching fails (five seconds plus the KILL confirmation); `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 19 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. `status` waits up to 19 s only when the lock file exists (it never creates it), with the same framed answer on expiry. `add` waits up to 19 s, and its forwarder reads the reply for up to 29 s. A launch (`run` or `serve`) waits up to 19 s, then exits nonzero without a ready receipt and starts nothing. `run` writes each guard's plan and reads its receipt with a 10 s deadline each, then rolls back (up to seven seconds more). The project supervisor's signal-triggered stop also waits up to 19 s, then tries again on its next loop pass. |
 | `<name>.lock` | The guard of that command, for its lifetime | Yes | Only a new guard for the same command name: up to 10 s, then refused. Never a sibling, `stop` or `status`. |
 | Receipts, retirement marker, `lifecycle.log` | No lock | No | Receipts are replaced atomically; a reader that races a replacement reads the complete version it opened. Log records are single appends (above). |
 
@@ -178,10 +181,9 @@ command line `/proc/self/exe guard` and the short name `exe`, not
 `hack-lifecycle-supervisor`; confirm it with `readlink /proc/<pid>/exe`, which names
 the supervisor binary.
 
-`status` takes only the bounded stop-lock wait above. `stop` handles each target separately: a frozen live guard costs
-its own target the five-second grace plus the two-second confirmation bound (and the
-same again if the guard is lost), then that target reports `unknown` while the others
-complete.
+`status` takes only the bounded stop-lock wait above. `stop` handles each target
+separately. A live guard that stays frozen exhausts its ten-second wait and its
+target contributes an `unknown` outcome while the other targets finish.
 
 All descriptors the supervisor opens are close-on-exec. The command receives only
 its intended standard descriptors: null stdin, piped stdout and stderr. On macOS,
@@ -218,7 +220,7 @@ fixture or test supervisor process survives the suites.
 | Running | Stop with exact owner, boot and start identity | TERM authored session members | Stopping | `stop_after_caller_closed` |
 | Stopping | No non-zombie members remain | Reap child; retain terminal evidence | Exited | `stop_after_caller_closed` |
 | Stopping | Five-second grace expires, identity still matches | KILL authored session members, keeping the guard alive | KillPending | `term_ignoring_command_is_killed_after_grace` |
-| KillPending | Census confirms no live members | Guard reaps and releases command lock | Exited | `term_ignoring_command_is_killed_after_grace` |
+| KillPending | Census confirms no live members | Guard reaps and releases command lock | Exited | `term_ignoring_command_is_killed_after_grace`, `stop_confirms_kill_after_guard_is_delayed_past_old_budget` |
 | Stopping/KillPending | Confirmation deadline expires with live members | Retain identity and command lock; report uncertainty | StopUnknown | `unresponsive_guard_stop_remains_unknown` |
 | Running | Project supervisor dies | Guard and durable identity remain | Running/recoverable | `supervisor_kill_then_recover_stop` |
 | Recoverable | Another start sees held command lock or live old identity | Refuse duplicate; preserve original | Recoverable | `supervisor_kill_then_recover_stop` |

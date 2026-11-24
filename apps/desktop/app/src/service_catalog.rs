@@ -28,10 +28,8 @@ impl Recipe {
         if !self.env_names.is_empty() {
             yaml.push_str("\n    environment:");
             for name in self.env_names {
-                // Compose resolves the project variable after the user sets it.
-                yaml.push_str(&format!(
-                    "\n      {name}: ${{{name}:?Set {name} in Hack env}}"
-                ));
+                // Hack supplies service-scoped values in its generated override.
+                yaml.push_str(&format!("\n      {name}: null"));
             }
         }
         yaml
@@ -165,6 +163,12 @@ impl HackApp {
                 div().text_color(p.text_secondary)
                     .child("Add this entry under services: in your Compose file, then start the project. The Hack CLI does not edit services yet."),
             )
+            .when(!recipe.env_names.is_empty(), |body| {
+                body.child(div().text_color(p.text_secondary).child(format!(
+                    "Set the listed variables in Env under the {} service scope before starting.",
+                    recipe.name
+                )))
+            })
             .child(
                 div().px(space::S5).py(space::S4).bg(p.surface_1)
                     .font_family(ui.mono.clone()).type_step(text::MONO)
@@ -186,13 +190,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_includes_image_aliases_and_previews_only_env_references() {
+    fn search_includes_image_aliases() {
         let (_, mongo) = search("mongo").next().unwrap();
         assert_eq!(mongo.name, "mongodb");
-        let yaml = search("postgres").next().unwrap().1.snippet();
-        assert!(yaml.starts_with("  postgres:\n    image: postgres:17-alpine"));
-        assert!(yaml.contains("${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Hack env}"));
         assert!(search("unlisted").next().is_none());
         assert_eq!(search("").count(), 6);
+    }
+    #[test]
+    fn credential_snippets_match_the_compose_fixture() {
+        let mut yaml = String::from("services:\n");
+        for recipe in RECIPES.iter().filter(|recipe| !recipe.env_names.is_empty()) {
+            yaml.push_str(&recipe.snippet());
+            yaml.push('\n');
+        }
+        assert_eq!(yaml, include_str!("../fixtures/catalog-credentials.yaml"));
     }
 }

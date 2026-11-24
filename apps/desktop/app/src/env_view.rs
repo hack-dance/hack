@@ -5,10 +5,10 @@
 //! value with the existing clipboard lifetime.
 
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, Entity, IntoElement, ParentElement, SharedString, Styled,
-    Window, div, prelude::*, px,
+    Subscription, Window, div, prelude::*, px,
 };
 use hack_desktop_core::env::{
     EnvRow, EnvView, KeyState, REVEAL_FOR, Revealed, ValueKey, ValueState, key_line,
@@ -45,6 +45,14 @@ pub(crate) struct EnvEdit {
     /// Save stores only text the user typed, never an empty field, so an
     /// unchanged Save never blanks the value.
     pub ready: bool,
+    prefill: Option<EditorPrefill>,
+}
+
+struct EditorPrefill {
+    key: ValueKey,
+    window: gpui_kit::AnyWindowHandle,
+    touched: bool,
+    _changes: Subscription,
 }
 
 impl HackApp {
@@ -90,6 +98,7 @@ impl HackApp {
     /// List names in the selected overlay and scope.
     pub(crate) fn read_env(&mut self, cx: &mut Context<Self>) {
         let generation = self.env.begin();
+        self.clear_hidden_prefill(cx);
         let Some((root, native)) = self.selected_root() else {
             return;
         };
@@ -182,11 +191,13 @@ impl HackApp {
             ValueState::Shown { .. } | ValueState::Reading
         ) {
             self.env.hide(&key);
+            self.clear_hidden_prefill(cx);
             cx.notify();
             return;
         }
         let generation = self.env.generation();
         let token = self.env.start_reveal(key.clone());
+        self.clear_hidden_prefill(cx);
         self.read_value(
             row,
             move |this, result, cx| {
@@ -212,12 +223,48 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REVEAL_FOR).await;
             let _ = this.update(cx, |this, cx| {
-                if this.env.expire() {
-                    cx.notify();
-                }
+                this.expire_env_values(cx);
             });
         })
         .detach();
+    }
+
+    fn expire_env_values(&mut self, cx: &mut Context<Self>) {
+        if self.env.expire() {
+            cx.notify();
+        }
+        self.clear_hidden_prefill(cx);
+    }
+
+    fn clear_hidden_prefill(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.env_edit.as_mut() else {
+            return;
+        };
+        let Some(prefill) = edit
+            .prefill
+            .take_if(|prefill| !matches!(self.env.value(&prefill.key), ValueState::Shown { .. }))
+        else {
+            return;
+        };
+        if !prefill.touched {
+            edit.ready = false;
+        }
+        let value = edit.value.clone();
+        cx.notify();
+        // The focus callback can already be inside a window update.
+        cx.defer(move |cx| {
+            let _ = cx.update_window(prefill.window, |_, window, cx| {
+                value.update(cx, |state, cx| {
+                    // Reset history so undo cannot restore the expired prefill.
+                    let replacement = if prefill.touched {
+                        state.value()
+                    } else {
+                        "".into()
+                    };
+                    state.set_value(replacement, window, cx);
+                });
+            });
+        });
     }
 
     /// Copy a revealed value and clear it after the existing clipboard lifetime.
@@ -275,25 +322,41 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         let secret = row.is_some_and(EnvRow::is_secret);
-        let current =
-            row.filter(|_| !secret)
-                .and_then(|row| match self.env.value(&self.value_key(row)) {
-                    ValueState::Shown { value, .. } => Some(value.expose().to_owned()),
-                    _ => None,
-                });
+        let current = row.filter(|_| !secret).and_then(|row| {
+            let key = self.value_key(row);
+            match self.env.value(&key) {
+                ValueState::Shown { value, .. } => Some((key, value)),
+                _ => None,
+            }
+        });
         let ready = secret || row.is_none_or(|r| r.missing) || current.is_some();
         let value = cx.new(|cx| {
             let mut state = InputState::new(window, cx)
                 .masked(secret)
                 .placeholder(if secret { "New secret value" } else { "Value" });
-            if let Some(current) = current {
-                state.set_value(current, window, cx);
+            if let Some((_, revealed)) = &current {
+                state.set_value(revealed.expose(), window, cx);
             }
             state
         });
         let name = row
             .is_none()
             .then(|| cx.new(|cx| InputState::new(window, cx).placeholder("NAME")));
+        let prefill = current.map(|(key, _)| EditorPrefill {
+            key,
+            window: window.window_handle(),
+            touched: false,
+            _changes: cx.subscribe(&value, |this, _, event: &InputEvent, _| {
+                if matches!(event, InputEvent::Change)
+                    && let Some(prefill) = this
+                        .env_edit
+                        .as_mut()
+                        .and_then(|edit| edit.prefill.as_mut())
+                {
+                    prefill.touched = true;
+                }
+            }),
+        });
         self.env_edit = Some(EnvEdit {
             key: row.map(|r| r.key.clone()),
             secret,
@@ -314,6 +377,7 @@ impl HackApp {
             busy: false,
             error: row.and_then(EnvRow::write_blocked),
             ready,
+            prefill,
         });
         self.env_saved = None;
         cx.notify();
@@ -592,6 +656,7 @@ impl HackApp {
         if self.env.hide_revealed() {
             cx.notify();
         }
+        self.clear_hidden_prefill(cx);
     }
 
     pub(crate) fn env_tab(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1215,6 +1280,89 @@ mod tests {
             command,
             "hack env add APP_MODE --value-stdin --env staging --service global"
         );
+    }
+
+    fn prefilled_editor() -> (
+        HeadlessAppContext,
+        gpui_kit::AnyWindowHandle,
+        Entity<HackApp>,
+        EnvRow,
+    ) {
+        let (mut cx, window, app) = app_window();
+        let plain = row(&mut cx, &app, "APP_MODE");
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&plain, cx)));
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| a.open_env_edit(Some(&plain), window, cx));
+        })
+        .unwrap();
+        (cx, window, app, plain)
+    }
+
+    fn assert_prefill_cleared(cx: &mut HeadlessAppContext, app: &Entity<HackApp>) {
+        cx.update(|cx| {
+            let edit = app.read(cx).env_edit.as_ref().unwrap();
+            assert!(edit.value.read(cx).value().is_empty());
+            assert!(!HackApp::edit_can_save(edit, cx));
+        });
+    }
+
+    #[test]
+    fn expiry_clears_an_untouched_plaintext_prefill() {
+        let (mut cx, _, app, plain) = prefilled_editor();
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let key = a.value_key(&plain);
+                let ValueState::Shown { value, at } = a.env.value(&key) else {
+                    panic!("fixture value is revealed");
+                };
+                a.env.set_value(
+                    a.env.generation(),
+                    key,
+                    ValueState::Shown {
+                        value,
+                        at: at - REVEAL_FOR,
+                    },
+                );
+                a.expire_env_values(cx);
+            })
+        });
+        assert_prefill_cleared(&mut cx, &app);
+    }
+
+    #[test]
+    fn the_eye_clears_an_untouched_plaintext_prefill() {
+        let (mut cx, _, app, plain) = prefilled_editor();
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&plain, cx)));
+        assert_prefill_cleared(&mut cx, &app);
+    }
+
+    #[test]
+    fn focus_loss_clears_an_untouched_plaintext_prefill() {
+        let (mut cx, window, app, _) = prefilled_editor();
+        cx.update_window(window, |_, _, cx| {
+            app.update(cx, |a, cx| a.hide_env_values(cx));
+        })
+        .unwrap();
+        assert_prefill_cleared(&mut cx, &app);
+    }
+
+    #[test]
+    fn typed_replacement_survives_when_the_reveal_ends() {
+        let (mut cx, window, app, _) = prefilled_editor();
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| {
+                a.env_edit.as_ref().unwrap().value.update(cx, |state, cx| {
+                    state.replace_all("fake-typed-replacement", window, cx);
+                });
+            });
+        })
+        .unwrap();
+        cx.update(|cx| app.update(cx, |a, cx| a.hide_env_values(cx)));
+        cx.update(|cx| {
+            let edit = app.read(cx).env_edit.as_ref().unwrap();
+            assert_eq!(edit.value.read(cx).value(), "fake-typed-replacement");
+            assert!(HackApp::edit_can_save(edit, cx));
+        });
     }
 
     #[test]

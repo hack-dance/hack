@@ -5,7 +5,6 @@ use crate::{
     project::execution::{Condition, Observation},
 };
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "macos", test))]
 use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +33,103 @@ impl Failure {
                 .resources
                 .get(&format!("container:{}", self.service))
                 .is_some_and(|resource| resource.kind == Kind::Container)
+    }
+}
+/// Why a start failed after it reported `started-observed`, when its frontend may
+/// be gone: the error code, the failed service when known, and when (Unix seconds).
+/// Value-free. Kept in its own run-directory file ([`AFTER_STARTED`]), not in the
+/// receipt, which an older runtime parses strictly; the owner's own cleanup keeps
+/// it, and an explicit cleanup or the next start removes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AfterStarted {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    pub at: u64,
+}
+impl AfterStarted {
+    pub(super) fn valid(&self) -> bool {
+        (1..=64).contains(&self.code.len())
+            && self
+                .code
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_')
+            && self.service.as_ref().is_none_or(|service| {
+                (1..=128).contains(&service.len())
+                    && service
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            })
+    }
+}
+/// The [`AfterStarted`] file, next to `state.json`.
+pub(super) const AFTER_STARTED: &str = "failed-after-started.json";
+/// `state::write`'s temporary for [`AFTER_STARTED`].
+const AFTER_STARTED_PENDING: &str = "failed-after-started.pending";
+/// Record `failure` for a receipt still in `started-observed`; call before the
+/// failed phase replaces it. The recorded startup failure names the service first.
+/// Diagnostic only: a failed write never obstructs the failure's own handling.
+pub(super) fn record_after_started(root: &Path, receipt: &Receipt, failure: &CandidateError) {
+    // A stop (signal or `hack down`) is not a failure.
+    if receipt.phase != super::STARTED_OBSERVED || failure.code == "graph_cancelled" {
+        return;
+    }
+    let service = (receipt.startup_failure.as_ref().map(|f| f.service.as_str()))
+        .or(failure.service.as_deref())
+        .map(str::to_owned);
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let recorded = AfterStarted {
+        code: failure.code.into(),
+        service,
+        at,
+    };
+    if recorded.valid() {
+        // An interrupted earlier write may have left the temporary behind.
+        let _ = remove(&root.join(AFTER_STARTED_PENDING))
+            .and_then(|_| super::state::write(&root.join(AFTER_STARTED), &recorded));
+    }
+}
+/// The recorded failure after started, for lease-free status. A missing, unsafe,
+/// oversized or invalid file reads as none; it is never an error.
+pub(super) fn after_started(root: &Path) -> Option<AfterStarted> {
+    super::state::read_bounded::<AfterStarted>(&root.join(AFTER_STARTED), 4096)
+        .ok()
+        .filter(AfterStarted::valid)
+}
+/// Remove the record (and a leftover temporary). Called by a new start once it
+/// supersedes the previous one, and by an explicit cleanup; never by the owner's
+/// own cleanup after a failure, which keeps it.
+/// True when there was a record.
+pub(super) fn clear_after_started(root: &Path) -> Result<bool, CandidateError> {
+    let cleared = remove(&root.join(AFTER_STARTED))?;
+    remove(&root.join(AFTER_STARTED_PENDING))?;
+    Ok(cleared)
+}
+/// `graph clear-failure-after-started`, which `hack down` calls for a run it finds
+/// already stopped: only a stopped run with data retained, or a removed one, with a
+/// committed journal. The caller holds the provider lease, so no start races it.
+/// Idempotent; a refusal removes nothing, and a removal error is an error.
+pub(super) fn clear_stopped(root: &Path, receipt: &Receipt) -> Result<bool, CandidateError> {
+    let pending = root.join("state.pending");
+    if !["stopped-data-retained", "removed"].contains(&receipt.phase.as_str())
+        || pending.exists()
+        || pending.is_symlink()
+    {
+        return Err(error(
+            "graph_failure_record_not_stopped",
+            "The graph is not stopped (or its journal is uncertain); the failure record was kept.",
+        ));
+    }
+    clear_after_started(root)
+}
+fn remove(path: &Path) -> Result<bool, CandidateError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(super::state::io(error)),
     }
 }
 pub(super) fn record(
@@ -113,6 +209,210 @@ fn refused() -> CandidateError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn started_receipt() -> Receipt {
+        serde_json::from_value(serde_json::json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),
+            "plan_id":"d".repeat(64),"phase":"started-observed","started_from":"preparing",
+            "readiness":{"web":"healthy"},"resources":{"container:web":{"key":"web","kind":"container",
+            "name":format!("hkg-{}-container-0", "a".repeat(32)),"id":"e".repeat(64),"phase":"started",
+            "image":format!("sha256:{}", "f".repeat(64))}}}))
+        .unwrap()
+    }
+    fn private_root() -> (super::super::tests::Fixture, std::path::PathBuf) {
+        let fixture = super::super::tests::Fixture::new();
+        let root = fixture.0.join("run");
+        super::super::state::private_directory(&root).unwrap();
+        (fixture, root)
+    }
+    #[test]
+    fn a_failure_after_started_is_recorded_beside_the_receipt_not_in_it() {
+        let (_fixture, root) = private_root();
+        let mut receipt = started_receipt();
+        record_after_started(
+            &root,
+            &receipt,
+            &CandidateError::new("graph_cancelled", "stopped"),
+        );
+        assert_eq!(after_started(&root), None);
+        record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
+        record_after_started(
+            &root,
+            &receipt,
+            &CandidateError::new("graph_service_failed", "x"),
+        );
+        let recorded = after_started(&root).unwrap();
+        assert_eq!(recorded.code, "graph_service_failed");
+        assert_eq!(recorded.service.as_deref(), Some("web"));
+        assert!(recorded.at > 0);
+        // The receipt an older runtime parses strictly carries no new field.
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert!(json.get("failed_after_started").is_none());
+        // Failed, then the owner's own cleanup: still there, and only once.
+        receipt.set_phase("failed-retained");
+        record_after_started(&root, &receipt, &CandidateError::new("graph_timeout", "x"));
+        receipt.set_phase("stopped-data-retained");
+        assert_eq!(after_started(&root).as_ref(), Some(&recorded));
+        assert!(!root.join(AFTER_STARTED_PENDING).exists());
+        // Without a recorded service the error's own service is used.
+        let mut timed_out = started_receipt();
+        timed_out.startup_failure = None;
+        record_after_started(
+            &root,
+            &timed_out,
+            &CandidateError::new("graph_timeout", "x"),
+        );
+        assert_eq!(after_started(&root).unwrap().service, None);
+        timed_out.startup_failure = None;
+        let invalid = AfterStarted {
+            code: "Not value-free".into(),
+            service: None,
+            at: 1,
+        };
+        assert!(!invalid.valid());
+    }
+    #[test]
+    fn an_invalid_or_oversized_record_reads_as_none() {
+        let (_fixture, root) = private_root();
+        let path = root.join(AFTER_STARTED);
+        for bytes in [
+            b"not json".to_vec(),
+            br#"{"code":"Not value-free","at":1}"#.to_vec(),
+            br#"{"code":"graph_timeout","at":1,"extra":true}"#.to_vec(),
+            format!(
+                r#"{{"code":"graph_timeout","at":1,"service":"{}"}}"#,
+                " ".repeat(8192)
+            )
+            .into_bytes(),
+        ] {
+            let _ = std::fs::remove_file(&path);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+                .unwrap();
+            assert_eq!(after_started(&root), None);
+        }
+        // A file other users may write is not evidence either.
+        std::fs::write(&path, br#"{"code":"graph_timeout","at":1}"#).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        assert_eq!(after_started(&root), None);
+    }
+    #[test]
+    fn clearing_removes_the_record_and_a_leftover_temporary() {
+        let (_fixture, root) = private_root();
+        clear_after_started(&root).unwrap();
+        let mut receipt = started_receipt();
+        record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
+        // A write interrupted before its rename left the temporary behind.
+        std::fs::write(root.join(AFTER_STARTED_PENDING), b"interrupted").unwrap();
+        record_after_started(&root, &receipt, &CandidateError::new("graph_timeout", "x"));
+        assert!(after_started(&root).is_some());
+        std::fs::write(root.join(AFTER_STARTED_PENDING), b"interrupted").unwrap();
+        clear_after_started(&root).unwrap();
+        assert_eq!(after_started(&root), None);
+        assert!(!root.join(AFTER_STARTED).exists());
+        assert!(!root.join(AFTER_STARTED_PENDING).exists());
+    }
+    #[test]
+    fn clearing_a_stopped_run_refuses_any_other_phase_and_is_idempotent() {
+        let (_fixture, root) = private_root();
+        let mut receipt = started_receipt();
+        record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
+        record_after_started(&root, &receipt, &CandidateError::new("graph_timeout", "x"));
+        for phase in [
+            "preparing",
+            "restoring",
+            "restarting",
+            "started-observed",
+            "ready-observed",
+            "failed-retained",
+            "cleanup-intent",
+        ] {
+            receipt.set_phase(phase);
+            let refused = clear_stopped(&root, &receipt).unwrap_err();
+            assert_eq!(refused.code, "graph_failure_record_not_stopped", "{phase}");
+            assert!(after_started(&root).is_some(), "{phase}");
+        }
+        receipt.set_phase("stopped-data-retained");
+        std::fs::write(root.join("state.pending"), b"uncertain").unwrap();
+        assert!(clear_stopped(&root, &receipt).is_err());
+        assert!(after_started(&root).is_some());
+        std::fs::remove_file(root.join("state.pending")).unwrap();
+        assert!(clear_stopped(&root, &receipt).unwrap());
+        assert_eq!(after_started(&root), None);
+        assert!(!clear_stopped(&root, &receipt).unwrap());
+        receipt.set_phase("removed");
+        assert!(!clear_stopped(&root, &receipt).unwrap());
+    }
+    /// Wiring guard. Cleanup and the start paths need an owned VM, so their effects are
+    /// proven natively; this fails if a removal is dropped or moved into the cleanup the
+    /// owner shares with its own failure handling.
+    #[test]
+    fn explicit_cleanup_and_the_next_start_remove_the_record_but_owner_cleanup_keeps_it() {
+        fn body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let from = source.find(start).expect("function start");
+            let to = from + source[from..].find(end).expect("function end");
+            &source[from..to]
+        }
+        let module = include_str!("mod.rs");
+        for (start, end) in [
+            ("pub fn cleanup(", "pub fn remove_retained_data("),
+            (
+                "pub fn remove_retained_data(",
+                "pub(super) fn explicit_cleanup_done(",
+            ),
+        ] {
+            let explicit = body(module, start, end);
+            let committed = explicit.find("cleanup_owned(").expect("cleanup effect");
+            let removed = explicit
+                .find("explicit_cleanup_done(&root)")
+                .expect("explicit cleanup removes the record");
+            assert!(committed < removed, "{start}");
+        }
+        let shared = body(
+            module,
+            "fn cleanup_owned(",
+            "pub(super) fn startup_compatible(",
+        );
+        assert!(!shared.contains("explicit_cleanup_done"));
+        assert!(!shared.contains("clear_after_started"));
+        let foreground = include_str!("foreground.rs");
+        let request = body(
+            foreground,
+            "if let Some(remove_data) = request.remove_data {",
+            "let status = ",
+        );
+        assert!(request.contains("super::explicit_cleanup_done(&root)"));
+        assert_eq!(foreground.matches("explicit_cleanup_done").count(), 1);
+        let retained = include_str!("foreground/retained_data.rs");
+        assert!(retained.contains("graph::explicit_cleanup_done(&root)"));
+        for source in [
+            include_str!("host_relay.rs"),
+            include_str!("foreground/publishers.rs"),
+        ] {
+            assert!(!source.contains("explicit_cleanup_done"));
+            assert!(!source.contains("clear_after_started"));
+        }
+        // The next start clears it once its receipt supersedes the previous one.
+        let restart = body(module, "receipt.set_phase(\"restarting\");", "mod tests;");
+        assert!(
+            restart.find("session.save()?;").unwrap()
+                < restart.find("clear_after_started(&session.root)").unwrap()
+        );
+        let restore = body(
+            include_str!("restore.rs"),
+            "fn restore_inputs(",
+            "fn retain_restore_failure(",
+        );
+        let prepared = restore.find("driver.prepare(").unwrap();
+        let cleared = restore.find("clear_after_started(&session.root)").unwrap();
+        let allocated = restore.find("session.create_resources(true)").unwrap();
+        assert!(prepared < cleared && cleared < allocated);
+        let one_off = include_str!("one_off/runtime.rs");
+        assert!(
+            one_off.find("receipt.set_phase(\"restoring\");").unwrap()
+                < one_off.find("clear_after_started(&root)").unwrap()
+        );
+    }
     use serde_json::json;
 
     fn receipt() -> Receipt {

@@ -275,3 +275,173 @@ test("hack data export prints no managed DOCKER_HOST in text or JSON when the en
   // The stub saw the managed endpoint, so the refusal really quoted it.
   expect(await readFile(log, "utf8")).toContain(PRIVATE_ENDPOINT_MARKER);
 });
+
+async function runDataCli(opts: {
+  readonly cwd: string;
+  readonly args: readonly string[];
+  readonly bin: string;
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<{ exitCode: number; output: string; stdout: string }> {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "..", "index.ts"),
+      ...opts.args,
+    ],
+    {
+      cwd: opts.cwd,
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${opts.bin}:/usr/bin:/bin`,
+          HACK_NO_INTERACTIVE: "1",
+          ...opts.env,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, output: `${stdout}\n${stderr}`, stdout };
+}
+
+async function shopProject(opts: {
+  readonly envFiles: Readonly<Record<string, readonly string[]>>;
+}): Promise<string> {
+  const projectRoot = join(root, "repo");
+  const hackDir = join(projectRoot, ".hack");
+  await mkdir(hackDir, { recursive: true });
+  await writeFile(
+    join(hackDir, "docker-compose.yml"),
+    "name: shop\nservices: {}\nvolumes:\n  db: {}\n"
+  );
+  for (const [env, values] of Object.entries(opts.envFiles)) {
+    await writeFile(
+      join(hackDir, `hack.env.${env}.yaml`),
+      [
+        "version: 1",
+        `environment: ${env}`,
+        "secretsprovider: project_key",
+        "values:",
+        "  global:",
+        ...values.map((line) => `    ${line}`),
+        "",
+      ].join("\n")
+    );
+  }
+  return projectRoot;
+}
+
+/** A one-volume backup of Compose project `shop`, as export writes it. */
+async function shopBackup(): Promise<string> {
+  const sha = (text: string): string =>
+    new Bun.CryptoHasher("sha256").update(text).digest("hex");
+  const dir = join(root, "backups", "20261124T090000Z");
+  await mkdir(dir, { recursive: true });
+  const bytes = "tar bytes";
+  await writeFile(join(dir, "db.tar"), bytes);
+  await writeFile(
+    join(dir, "manifest.json"),
+    `${JSON.stringify({
+      schema: "hack.data-backup.v1",
+      project: "shop",
+      branch: null,
+      composeProjectSha256: sha("shop"),
+      createdAt: "2026-11-24T09:00:00.000Z",
+      hackVersion: "9.9.9",
+      helperImage: "oven/bun@sha256:x",
+      digestAlgorithm: "hack.tree-digest.v1",
+      volumes: [
+        {
+          key: "db",
+          nameSha256: sha("shop_db"),
+          driver: "local",
+          labelsSha256: {
+            "com.docker.compose.project": sha("shop"),
+            "com.docker.compose.volume": sha("db"),
+          },
+          file: "db.tar",
+          tarBytes: bytes.length,
+          tarSha256: sha(bytes),
+          entries: 2,
+          excludedSockets: 0,
+          contentDigest: "a".repeat(64),
+        },
+      ],
+      skipped: [],
+    })}\n`
+  );
+  return dir;
+}
+
+test("hack data import prints no managed DOCKER_HOST in text or JSON when the engine is unreachable", async () => {
+  const { bin, log } = await stubBin();
+  const managedHost = `unix://${root}/${PRIVATE_ENDPOINT_MARKER}.sock`;
+  const projectRoot = await shopProject({
+    envFiles: { default: [`DOCKER_HOST: "${managedHost}"`] },
+  });
+  const backup = await shopBackup();
+  for (const failAt of ["compose", "volume inspect"]) {
+    for (const json of [false, true]) {
+      const result = await runDataCli({
+        cwd: projectRoot,
+        args: ["data", "import", backup, ...(json ? ["--json"] : [])],
+        bin,
+        env: { DATA_STUB_LOG: log, DATA_STUB_FAIL: failAt },
+      });
+      expect({ failAt, json, ok: result.exitCode === 0 }).toEqual({
+        failAt,
+        json,
+        ok: false,
+      });
+      expect(result.output).toContain(
+        "Cannot connect to the Docker daemon at [REDACTED]"
+      );
+      expect({
+        failAt,
+        json,
+        leaked: result.output.includes(PRIVATE_ENDPOINT_MARKER),
+      }).toEqual({ failAt, json, leaked: false });
+    }
+  }
+  expect(await readFile(log, "utf8")).toContain(PRIVATE_ENDPOINT_MARKER);
+});
+
+test("without --env or a recorded selection, export and import refuse before any Docker call when the project has overlays", async () => {
+  const { bin, log } = await stubBin();
+  const projectRoot = await shopProject({
+    envFiles: { default: ['VOL: "base"'], staging: ['VOL: "staging"'] },
+  });
+  const backup = await shopBackup();
+  for (const args of [
+    ["data", "export", "--json"],
+    ["data", "import", backup, "--json"],
+  ]) {
+    const result = await runDataCli({
+      cwd: projectRoot,
+      args,
+      bin,
+      env: { DATA_STUB_LOG: log },
+    });
+    expect({ args, exitCode: result.exitCode === 0 }).toEqual({
+      args,
+      exitCode: false,
+    });
+    const envelope = JSON.parse(result.stdout) as {
+      ok: boolean;
+      error: { code: string; message: string };
+    };
+    expect(envelope.ok).toBeFalse();
+    expect(envelope.error.code).toBe("E_USAGE");
+    expect(envelope.error.message).toBe(
+      "This project has environment overlays (staging); the environment `hack up` used is no longer recorded. Pass --env <name> (or --env base for base layers only)."
+    );
+  }
+  expect(await readFile(log, "utf8")).toBe("");
+});

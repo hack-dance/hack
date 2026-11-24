@@ -174,7 +174,11 @@ export async function importProjectData(
     "json",
   ]);
   if (config.exitCode !== 0) {
-    throw dockerReadError({ result: config, command: "docker compose config" });
+    throw dockerReadError({
+      result: config,
+      command: "docker compose config",
+      redactValues: input.docker.redactValues,
+    });
   }
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
   requireSourceProject({ backup, plan, input });
@@ -400,6 +404,7 @@ async function isEmpty(
     action: "inspect",
     timeoutMs: context.deadlines.stepMs,
     consequence: "nothing was changed.",
+    redactValues: context.input.docker.redactValues,
   });
   return result.stdout.trim() === "";
 }
@@ -587,6 +592,7 @@ async function readComposeVersion(docker: DataBackupDocker): Promise<string> {
     throw dockerReadError({
       result: { ...result, exitCode: result.exitCode || 1 },
       command: "docker compose version",
+      redactValues: docker.redactValues,
     });
   }
   return match[1];
@@ -639,7 +645,11 @@ async function createTarget(
     target.name,
   ]);
   if (created.exitCode !== 0) {
-    throw dockerReadError({ result: created, command: "docker volume create" });
+    throw dockerReadError({
+      result: created,
+      command: "docker volume create",
+      redactValues: docker.redactValues,
+    });
   }
   const inspected = await inspectVolume({ docker, name: target.name });
   if (
@@ -707,6 +717,7 @@ async function restoreTarget(
           action: "clear the earlier partial import in",
           timeoutMs: context.deadlines.stepMs,
           consequence: partialNote,
+          redactValues: context.input.docker.redactValues,
         });
       }
       const extracted = await held.execFromFile(
@@ -722,6 +733,7 @@ async function restoreTarget(
         action: "restore",
         timeoutMs: context.deadlines.stepMs,
         consequence: partialNote,
+        redactValues: context.input.docker.redactValues,
       });
       return await held.treeDigest(partialNote);
     }

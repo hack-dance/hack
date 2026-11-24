@@ -732,6 +732,37 @@ describe("running refusal and the event fence", () => {
   });
 });
 
+describe("helper names are never trusted", () => {
+  test("a container reusing a removed marker's name and mounting a target is refused", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.onExec = (_container, args) => {
+      if (args.includes("-xpf")) {
+        // The start marker was removed before the restore; its name is free.
+        const reused =
+          fake.calls
+            .filter((argv) => argv[1] === "create" && !argv.includes("--mount"))
+            .map((argv) => argv[argv.indexOf("--name") + 1])[0] ?? "";
+        expect(reused).toMatch(/^hack-data-import-[a-f0-9]{24}-start$/);
+        fake.events.start("9".repeat(64), reused);
+        fake.events.mount("shop_db", "9".repeat(64));
+      }
+    };
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({
+      mounts: [
+        {
+          volume: "db",
+          container: "9".repeat(64),
+          name: expect.stringMatching(/-start$/),
+        },
+      ],
+    });
+    expect((await journal("db"))?.state).toBe("started");
+  });
+});
+
 describe("drivers and the import lock", () => {
   test("declared driver_opts or a non-local driver refuse before any change", async () => {
     const dir = await writeBackup({ keys: ["db", "cache"] });

@@ -27,9 +27,10 @@ export type ProjectRemoteAddress =
   | { readonly kind: "hostname"; readonly hostname: string }
   | { readonly kind: "env_ref"; readonly name: string };
 
-interface ProjectRemoteTarget {
+export interface ProjectRemoteTarget {
   readonly address: ProjectRemoteAddress;
   readonly port: number;
+  readonly confirm: boolean;
   readonly via?: "aws-ssm";
   readonly requires: readonly string[];
 }
@@ -37,7 +38,8 @@ interface ProjectRemoteTarget {
 export interface SelectedProjectRemote extends ProjectRemoteTarget {
   readonly remote: string;
   readonly target: string;
-  readonly envNames: readonly string[];
+  readonly targets: ReadonlyMap<string, ProjectRemoteTarget>;
+  readonly bindings: Readonly<Record<string, string>>;
 }
 
 export interface ProjectPrerequisiteConfig {
@@ -326,12 +328,18 @@ function parseRemoteTarget(opts: {
     }
   }
   const via = validateVia(entry.via, tools);
-  return { address, port: entry.port, requires: names, via };
+  return {
+    address,
+    port: entry.port,
+    confirm: entry.confirm === true,
+    requires: names,
+    via,
+  };
 }
 
-function remoteEnvNames(value: unknown): readonly string[] {
-  const bindings = entries(value, "E_INVALID_REMOTE");
-  for (const [name, template] of bindings) {
+function remoteEnvBindings(value: unknown): Readonly<Record<string, string>> {
+  const bindings: Record<string, string> = Object.create(null);
+  for (const [name, template] of entries(value, "E_INVALID_REMOTE")) {
     if (
       !ENV_NAME.test(name) ||
       typeof template !== "string" ||
@@ -340,8 +348,9 @@ function remoteEnvNames(value: unknown): readonly string[] {
     ) {
       fail("E_INVALID_REMOTE", "Invalid remote environment mapping.");
     }
+    bindings[name] = template;
   }
-  return bindings.map(([name]) => name);
+  return bindings;
 }
 
 function selectedPrerequisites(
@@ -372,11 +381,19 @@ function selectedPrerequisites(
         `Remote ${remote} has no target named ${config.default}.`
       );
     }
+    if (selected.confirm) {
+      fail(
+        "E_INVALID_REMOTE",
+        `Remote ${remote} cannot default to a target that requires confirmation.`
+      );
+    }
+    const bindings = remoteEnvBindings(config.env);
     return {
       remote,
       target: config.default,
       ...selected,
-      envNames: remoteEnvNames(config.env),
+      targets: references,
+      bindings,
     };
   });
 }

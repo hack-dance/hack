@@ -979,12 +979,13 @@ function watchStartDeadline(opts: {
   readonly child: ReturnType<typeof spawn>;
   readonly limits: NativeDetachedStartLimits;
   readonly heartbeatStaleMs: number | undefined;
+  readonly now: (phase?: NativeDetachedStartPhase) => number;
   readonly expire: (error: HackCliError | NativeImageBlocker) => void;
 }): ReturnType<typeof setInterval> {
   // One monotonic clock: a wall clock change must not move either limit.
   const deadline = new NativeDetachedStartDeadline({
     limits: opts.limits,
-    now: performance.now(),
+    now: opts.now(),
     heartbeatStaleMs: opts.heartbeatStaleMs,
   });
   let waiting: NativeImageBlockerDetail | undefined;
@@ -1004,12 +1005,12 @@ function watchStartDeadline(opts: {
       value.kind === "progress" &&
       isNativeDetachedStartPhase(value.phase)
     ) {
-      deadline.observe(value.phase, performance.now());
+      deadline.observe(value.phase, opts.now(value.phase));
     }
   });
   return setInterval(
     () => {
-      const now = performance.now();
+      const now = opts.now();
       const expiry = deadline.check(now);
       if (expiry) {
         opts.expire(
@@ -1067,6 +1068,8 @@ export async function startNativeDetachedUp(opts: {
   readonly limits?: NativeDetachedStartLimits;
   /** How long image work may go without a heartbeat (tests shorten it). */
   readonly heartbeatStaleMs?: number;
+  /** Synthetic process fixtures can drive the clock from owner phase reports. */
+  readonly deadlineNow?: (phase?: NativeDetachedStartPhase) => number;
   /** How long a timed-out launch waits for its owner to exit (tests shorten it). */
   readonly unwindMs?: number;
 }): Promise<number> {
@@ -1218,6 +1221,7 @@ export async function startNativeDetachedUp(opts: {
     child,
     limits,
     heartbeatStaleMs: opts.heartbeatStaleMs,
+    now: opts.deadlineNow ?? (() => performance.now()),
     expire: (error) => {
       if (!(committed || failed)) {
         failed = true;

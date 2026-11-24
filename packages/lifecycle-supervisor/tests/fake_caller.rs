@@ -547,6 +547,87 @@ fn parent_pid(pid: i32) -> Option<i32> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn process_has_open_file(pid: i32, file: &fs::Metadata) -> bool {
+    fs::read_dir(format!("/proc/{pid}/fd"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|fd| fs::metadata(fd.path()).ok())
+        .any(|metadata| metadata.dev() == file.dev() && metadata.ino() == file.ino())
+}
+
+#[cfg(target_os = "macos")]
+fn process_has_open_file(pid: i32, file: &fs::Metadata) -> bool {
+    use std::mem::{MaybeUninit, size_of};
+
+    // Darwin sys/proc_info.h ABI for PROC_PIDFDVNODEINFO, which libc does not
+    // expose. Only the vnode stat is used below.
+    const PROC_PIDFDVNODEINFO: i32 = 1;
+    #[repr(C)]
+    struct ProcFileInfo {
+        open_flags: u32,
+        status: u32,
+        offset: libc::off_t,
+        file_type: i32,
+        guard_flags: u32,
+    }
+    #[repr(C)]
+    struct VnodeFdInfo {
+        file: ProcFileInfo,
+        vnode: libc::vnode_info,
+    }
+
+    // SAFETY: a null buffer with size zero asks libproc for the list size.
+    let bytes =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if bytes <= 0 {
+        return false;
+    }
+    let mut fds = vec![
+        MaybeUninit::<libc::proc_fdinfo>::uninit();
+        bytes as usize / size_of::<libc::proc_fdinfo>()
+    ];
+    // SAFETY: the buffer is writable for its supplied byte length.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            size_of_val(fds.as_slice()) as i32,
+        )
+    };
+    if written <= 0 {
+        return false;
+    }
+    fds.into_iter()
+        .take(written as usize / size_of::<libc::proc_fdinfo>())
+        // SAFETY: we only consume complete records written by libproc.
+        .map(|fd| unsafe { fd.assume_init() })
+        .filter(|fd| fd.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32)
+        .any(|fd| {
+            let mut info = MaybeUninit::<VnodeFdInfo>::zeroed();
+            let size = size_of::<VnodeFdInfo>() as i32;
+            // SAFETY: the output buffer has the size and layout for this flavor.
+            let written = unsafe {
+                libc::proc_pidfdinfo(
+                    pid,
+                    fd.proc_fd,
+                    PROC_PIDFDVNODEINFO,
+                    info.as_mut_ptr().cast(),
+                    size,
+                )
+            };
+            if written != size {
+                return false;
+            }
+            // SAFETY: libproc wrote a complete vnode record.
+            let stat = unsafe { info.assume_init() }.vnode.vi_stat;
+            stat.vst_dev == file.dev() as u32 && stat.vst_ino == file.ino()
+        })
+}
+
 fn command(root: &Path, action: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"));
     command
@@ -960,11 +1041,64 @@ fn term_ignoring_command_is_killed_after_grace() {
         start.elapsed() >= Duration::from_secs(5),
         "TERM grace was shortened"
     );
-    assert!(
-        start.elapsed() < Duration::from_secs(7),
-        "stop exceeded its confirmation budget"
-    );
     assert!(wait(&mut caller, TIMEOUT).success());
+    let state = f.state("worker");
+    assert_eq!(state["phase"], "killed", "{state}");
+    assert_eq!(state["signal"], libc::SIGKILL, "{state}");
+}
+
+#[test]
+fn stop_confirms_kill_after_guard_is_delayed_past_old_budget() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "wrapper-term-child")]);
+    f.await_log("fixture-ready");
+    eventually(|| f.root.join("wrapper-child-ready").exists().then_some(()));
+    let state = f.state("worker");
+    let guard = identity(pid(&state, "guardPid")).expect("guard identity");
+    let command_pid = pid(&state, "commandPid");
+    let command_birth = process_birth(command_pid).expect("wrapper birth");
+    let descendant = f
+        .log()
+        .lines()
+        .find_map(|line| {
+            line.split("wrapper-child ")
+                .nth(1)
+                .and_then(|pid| pid.parse::<i32>().ok())
+                .and_then(identity)
+        })
+        .expect("TERM-ignoring descendant identity");
+    f.owned.borrow_mut().push(descendant.clone());
+
+    let mut stop = command(&f.root, "stop").spawn().unwrap();
+    send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    // The wrapper's exit proves the guard started its grace and sent TERM.
+    eventually(|| {
+        (process_birth(command_pid) != Some(command_birth) || process_is_zombie(command_pid))
+            .then_some(())
+    });
+    // SAFETY: the fixture owns this guard, which is still supervising its
+    // TERM-ignoring descendant. Fixture teardown also handles a frozen guard.
+    assert!(identity(guard.pid).as_ref() == Some(&guard));
+    assert_eq!(unsafe { libc::kill(guard.pid, libc::SIGSTOP) }, 0);
+    eventually(|| process_is_stopped(guard.pid).then_some(()));
+    assert_eq!(f.state("worker")["phase"], "stopping");
+    // Keep the guard unscheduled past the old request budget, then give it
+    // time to escalate and publish confirmed absence within the new budget.
+    thread::sleep(Duration::from_millis(7_250));
+    assert!(identity(guard.pid).as_ref() == Some(&guard));
+    assert_eq!(unsafe { libc::kill(guard.pid, libc::SIGCONT) }, 0);
+
+    let receipt = receive(stop.stdout.as_mut().unwrap());
+    assert!(wait(&mut stop, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "stopped", "{receipt}");
+    assert_eq!(receipt["liveProcessNames"], json!([]), "{receipt}");
+    assert_eq!(receipt["unknownProcessNames"], json!([]), "{receipt}");
+    assert!(wait(&mut caller, TIMEOUT).success());
+    assert_eq!(f.state("worker")["phase"], "killed");
+    assert!(
+        identity(descendant.pid).as_ref() != Some(&descendant) || process_is_zombie(descendant.pid),
+        "TERM-ignoring descendant survived"
+    );
 }
 
 #[test]
@@ -1455,50 +1589,61 @@ fn supervisor_and_guard_prepublication_crashes_keep_stop_admission_leased() {
     f.await_log("fixture-ready");
     let first = f.state("first");
     f.remember(&json!({"processes":[first.clone()]}));
+    let first_guard_pid = pid(&first, "guardPid");
+    let worker_lock = lock.metadata().unwrap();
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.root.join(".stop.lock"))
+        .unwrap();
+    let lease_file = lease.metadata().unwrap();
+    // A session leader can exist before the caller sends the launch frame.
+    // Wait for the second guard to open its command lock while still holding
+    // the inherited stop lease. Our command lock keeps it before publication.
     let guard = eventually(|| {
-        census()
-            .into_iter()
-            .find(|p| {
-                p.pid != pid(&first, "guardPid")
-                    && p.session == p.pid
-                    && parent_pid(p.pid) == Some(caller.id() as i32)
-            })
-            .map(|p| p.pid)
+        census().into_iter().find(|p| {
+            p.pid != first_guard_pid
+                && p.session == p.pid
+                && parent_pid(p.pid) == Some(caller.id() as i32)
+                && process_has_open_file(p.pid, &worker_lock)
+                && process_has_open_file(p.pid, &lease_file)
+        })
     });
-    // Linux additionally observes the exact fd-2 inode. Both platforms prove
-    // the lease behavior by a blocked stop after owner death below.
-    #[cfg(target_os = "linux")]
-    {
-        eventually(|| {
-            fs::read_link(format!("/proc/{guard}/exe"))
-                .ok()
-                .filter(|p| {
-                    p.file_name()
-                        .is_some_and(|n| n == "hack-lifecycle-supervisor")
-                })
-        });
-        let lease_inode = fs::metadata(f.root.join(".stop.lock")).unwrap().ino();
-        eventually(|| {
-            fs::metadata(format!("/proc/{guard}/fd/2"))
-                .ok()
-                .filter(|metadata| metadata.ino() == lease_inode)
-        });
-    }
-    let guard_identity = identity(guard).unwrap();
-    f.owned.borrow_mut().push(guard_identity.clone());
+    f.owned.borrow_mut().push(guard.clone());
     caller.kill().unwrap();
     caller.wait().unwrap();
+    // A fresh open file description must still contend after the caller dies.
+    // SAFETY: flock only borrows this live descriptor.
+    let acquired = unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    let lock_error = std::io::Error::last_os_error();
+    assert_eq!(acquired, -1, "stop lease released on caller death");
+    assert_eq!(lock_error.kind(), std::io::ErrorKind::WouldBlock);
     let mut stop = command(&f.root, "stop").spawn().unwrap();
     send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
-    thread::sleep(Duration::from_millis(150));
-    assert!(
-        stop.try_wait().unwrap().is_none(),
+    eventually(|| {
+        assert!(
+            stop.try_wait().unwrap().is_none(),
+            "stop passed an unpublished guard"
+        );
+        process_has_open_file(stop.id() as i32, &lease_file).then_some(())
+    });
+    // Stop has reached admission. Its receipt pipe must stay silent while the
+    // guard holds the lease, including if stop exits without sending a frame.
+    let mut reply = libc::pollfd {
+        fd: stop.stdout.as_ref().unwrap().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll borrows one live, writable descriptor record.
+    assert_eq!(
+        unsafe { libc::poll(&mut reply, 1, 150) },
+        0,
         "stop passed an unpublished guard"
     );
     assert!(!f.root.join("worker.json").exists());
     // SAFETY: captured direct guard is still blocked on our fixture lock.
-    assert!(identity(guard).as_ref() == Some(&guard_identity));
-    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
+    assert!(identity(guard.pid).as_ref() == Some(&guard));
+    assert_eq!(unsafe { libc::kill(guard.pid, libc::SIGKILL) }, 0);
     assert!(wait(&mut stop, TIMEOUT).success());
     drop(lock);
     let (mut next, _) = f.start_generation(
@@ -1891,14 +2036,14 @@ fn stop_waiting_past_lock_bound_reports_unknown_without_acting() {
     let start = Instant::now();
     let mut stop = command(&f.root, "stop").spawn().unwrap();
     send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
-    // The frame arrives only after the sixteen-second wait; the reader's own
+    // The frame arrives only after the nineteen-second wait. The reader's own
     // timeout is shorter, so start reading part of the way through.
     thread::sleep(Duration::from_secs(10));
     let receipt = receive(stop.stdout.as_mut().unwrap());
     assert!(!wait(&mut stop, TIMEOUT).success(), "{receipt}");
     assert_eq!(receipt["outcome"], "unknown");
     assert_eq!(receipt["reason"], "stop-lock-wait-expired");
-    assert!(start.elapsed() >= Duration::from_secs(16));
+    assert!(start.elapsed() >= Duration::from_secs(19));
     assert!(
         identity(worker.pid).as_ref() == Some(&worker),
         "stop acted while waiting"

@@ -315,6 +315,12 @@ pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, 
     operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 
+/// Serialize a host cache retention decision with every graph state mutation,
+/// including when archive acquisition runs with the guest stopped.
+pub(super) fn graph_inventory_lease(candidate: &Candidate) -> Result<state::Lock, CandidateError> {
+    startup_lease(&root(candidate), STARTUP_LEASE_WAIT)
+}
+
 /// Returning the mutation lease requires a fresh Development admission sample under it,
 /// taken no sooner than the admission window after the start's first sample, or after an
 /// earlier recorded sample of this home that `earlier` finds usable (`admission::opening`).
@@ -329,7 +335,9 @@ fn startup_admission_lease(
     earlier: &impl admission::Earlier,
     observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
 ) -> Result<(state::Lock, admission::Leased), CandidateError> {
-    let lock = startup_lease(root, wait)?;
+    let lock = crate::timings::measure(crate::timings::Step::VmStartupLease, None, |_| {
+        startup_lease(root, wait)
+    })?;
     let leased = admission::recheck_after_lease(profile, opened, clock, earlier, observe)?;
     Ok((lock, leased))
 }
@@ -1021,7 +1029,9 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         }
     });
     let alive = if let Some(process) = &owner.process {
-        let alive = identity::alive(process.pid)?;
+        // HACK-2579: a killed provider whose parent has not reaped it (a zombie), or a
+        // reused pid, is gone too; status then reports `process-exited`.
+        let alive = !identity::provider_gone(process)?;
         if alive {
             verify_live(candidate, &owner)?;
         }
@@ -1670,7 +1680,7 @@ fn start_pool_observed(
         ));
     }
     if let Some(process) = &owner.process {
-        if identity::alive(process.pid)? {
+        if !identity::provider_gone(process)? {
             return Err(CandidateError::new(
                 "process_identity_mismatch",
                 "Previous PID is still alive; refusing restart or adoption.",
@@ -2662,7 +2672,7 @@ fn observed_stopped(owner: &Owner) -> Result<bool, CandidateError> {
     }
     match &owner.process {
         None => Ok(true),
-        Some(process) => Ok(!identity::alive(process.pid)?),
+        Some(process) => identity::provider_gone(process),
     }
 }
 
@@ -2709,7 +2719,7 @@ fn down_observed(
         return Ok(initial);
     }
     let lock = state::Lock::acquire(&root(candidate))?;
-    // Builds take their shared fence only under this lease, so none can start after this.
+    // The provider lease prevents a build from being admitted after this check.
     super::image_build::require_no_active_build(candidate)?;
     if let Some(idle) = idle {
         idle()?;
@@ -2951,7 +2961,7 @@ fn stop_silent_guest(candidate: &Candidate, owner: &mut Owner) -> Result<(), Can
 /// (`run/image-builds/active.lock`), so the lease alone does not prove the engine is idle.
 /// The fence is a `flock`: it is released when the build's processes exit, including on
 /// SIGKILL, so a refusal lasts only while a build process is alive. Callers hold the
-/// operation lease, under which no new build can take the fence.
+/// operation lease, which prevents new build admission.
 fn require_no_build_for_silent_stop(candidate: &Candidate) -> Result<(), CandidateError> {
     super::image_build::require_no_active_build(candidate).map_err(|error| {
         if error.code == "provider_busy" {
@@ -3050,10 +3060,11 @@ sync"#,
     // this is cooperative same-user ownership, not hostile-process containment.
     identity::terminate(process, &binary(candidate))?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while identity::alive(process.pid)? && Instant::now() < deadline {
+    // A provider that exited but is not yet reaped (a zombie) is gone too (HACK-2579).
+    while !identity::provider_gone(process)? && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    if identity::alive(process.pid)? {
+    if !identity::provider_gone(process)? {
         return Err(CandidateError::new(
             "stop_uncertain",
             "Provider remains alive after TERM; no force-kill or false stopped receipt.",
@@ -3173,7 +3184,7 @@ fn finish_stopped(
     if owner
         .process
         .as_ref()
-        .map(|p| identity::alive(p.pid))
+        .map(|p| identity::provider_gone(p).map(|gone| !gone))
         .transpose()?
         .unwrap_or(true)
     {
@@ -3366,7 +3377,7 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         interrupted::recover(candidate, &mut owner, &lock)?;
         return status(candidate);
     };
-    if identity::alive(process.pid)? {
+    if !identity::provider_gone(process)? {
         // A live provider is stopped here only when its identity verifies and its guest
         // agent stopped responding; a responsive guest is stopped cleanly by `down`.
         // Refuse first, without probing, while a build is admitted.
@@ -3435,10 +3446,11 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
         return Err(io(std::io::Error::last_os_error()));
     }
     let deadline = Instant::now() + Duration::from_secs(15);
-    while identity::alive(recorded.pid)? && Instant::now() < deadline {
+    // A provider that exited but is not yet reaped (a zombie) is gone too (HACK-2579).
+    while !identity::provider_gone(recorded)? && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    if identity::alive(recorded.pid)? {
+    if !identity::provider_gone(recorded)? {
         return Err(CandidateError::new(
             "fixture_kill",
             "Owned VM remains alive after kill control.",
@@ -3490,10 +3502,7 @@ mod tests {
     fn observation_treats_only_a_stopped_pool_without_a_live_provider_as_not_running() {
         // `ObservedGuest::connect` answers `runtime_not_running` exactly when this holds,
         // before any identity comparison; otherwise `verify` keeps `runtime_changed`.
-        let owner = |phase: &str, process: Option<i32>| -> Owner {
-            let process = process.map(|pid| {
-                json!({"pid": pid, "start_micros": 1, "uid": 0, "executable": "/fixture/smolvm"})
-            });
+        let owner = |phase: &str, process: Option<&identity::ProcessIdentity>| -> Owner {
             serde_json::from_value(json!({
                 "version": 1, "checkout": "/fixture", "token": "fixture", "machine": "fixture",
                 "short_home": "/fixture", "created": true, "phase": phase,
@@ -3502,13 +3511,25 @@ mod tests {
             }))
             .unwrap()
         };
+        let live_pid = i32::try_from(std::process::id()).unwrap();
+        #[cfg(target_os = "macos")]
+        let live = identity::observe(live_pid).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let live = identity::ProcessIdentity {
+            pid: live_pid,
+            start_micros: 1,
+            uid: 0,
+            executable: "/fixture/smolvm".into(),
+        };
         let dead = {
             let mut child = std::process::Command::new("true").spawn().unwrap();
             let pid = i32::try_from(child.id()).unwrap();
             child.wait().unwrap();
-            pid
+            identity::ProcessIdentity {
+                pid,
+                ..live.clone()
+            }
         };
-        let live = i32::try_from(std::process::id()).unwrap();
         for phase in [
             "stopped",
             "stopped-before-engine",
@@ -3518,12 +3539,22 @@ mod tests {
         ] {
             assert!(observed_stopped(&owner(phase, None)).unwrap(), "{phase}");
             assert!(
-                observed_stopped(&owner(phase, Some(dead))).unwrap(),
+                observed_stopped(&owner(phase, Some(&dead))).unwrap(),
                 "{phase}"
             );
+            #[cfg(target_os = "macos")]
+            {
+                // A live PID with a different birth belongs to a replacement process.
+                let mut reused = live.clone();
+                reused.start_micros -= 1;
+                assert!(
+                    observed_stopped(&owner(phase, Some(&reused))).unwrap(),
+                    "{phase}"
+                );
+            }
             // A live recorded provider is not stopped, whatever the phase says.
             assert!(
-                !observed_stopped(&owner(phase, Some(live))).unwrap(),
+                !observed_stopped(&owner(phase, Some(&live))).unwrap(),
                 "{phase}"
             );
         }

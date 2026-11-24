@@ -134,6 +134,8 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) changes: crate::changes_view::ChangesPane,
+    pub(crate) catalog: crate::service_catalog::ServiceCatalog,
     pub(crate) service_pane: crate::service_view::ServicePane,
     pub(crate) service_focus: gpui_kit::FocusHandle,
     pub(crate) copies: crate::copies_view::CopiesPane,
@@ -209,11 +211,23 @@ impl HackApp {
             }
         })
         .detach();
+        let catalog_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search images"));
+        cx.subscribe(&catalog_input, |_: &mut HackApp, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         let mut this = Self {
             model: AppModel::new(),
             source,
             logs,
             tab: 0,
+            changes: Default::default(),
+            catalog: crate::service_catalog::ServiceCatalog {
+                input: catalog_input,
+                selected: 0,
+            },
             service_pane: Default::default(),
             service_focus: cx.focus_handle(),
             copies: Default::default(),
@@ -458,6 +472,7 @@ impl HackApp {
             self.clear_selected_service();
             self.logs.model.set_service(None);
             self.reset_env_selection();
+            self.reset_changes(cx);
             self.refresh_copies_if_open(cx);
             if self.tab == 2 {
                 self.read_env(cx);
@@ -509,6 +524,12 @@ impl HackApp {
         // The CLI does not report a running overlay per instance yet (R22).
         self.env.running = (name == "env-running").then(|| "staging".to_owned());
         self.read_env(cx);
+        if name == "env-revealed"
+            && let hack_desktop_core::env::EnvView::Report(r) = &self.env.view
+            && let Some(row) = r.vars.iter().find(|v| v.key == "APP_MODE").cloned()
+        {
+            self.toggle_reveal(&row, cx);
+        }
         // The editor open on a secret: an empty masked field and the command.
         if name == "env-edit"
             && let hack_desktop_core::env::EnvView::Report(r) = &self.env.view
@@ -516,6 +537,24 @@ impl HackApp {
         {
             self.open_env_edit(Some(&row), window, cx);
         }
+    }
+
+    /// Synthetic search and preview states.
+    pub(crate) fn show_catalog_fixture(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab = 5;
+        let query = match name {
+            "catalog-empty" => "unlisted",
+            "catalog-all" => "",
+            _ => "postgres",
+        };
+        self.catalog
+            .input
+            .update(cx, |input, cx| input.set_value(query, window, cx));
     }
 
     /// Fixtures: mark an action as in flight without running it.
@@ -916,6 +955,7 @@ impl HackApp {
         self.user_navigated();
         self.copied = None;
         self.reset_env_selection();
+        self.reset_changes(cx);
         if self.tab == 2 {
             self.read_env(cx);
         }
@@ -1036,6 +1076,7 @@ impl HackApp {
         if before != after {
             self.clear_selected_service();
             self.model.source_changed();
+            self.changes = Default::default();
             self.action_started.clear();
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
@@ -1465,7 +1506,12 @@ impl HackApp {
                     .child(div().flex_1())
                     .child(actions),
             )
-            .when(!compact, |col| col.child(url_row))
+            .when(!compact, |col| {
+                col.child(url_row).children(
+                    self.changes_badge(ui)
+                        .map(|badge| div().flex().child(badge)),
+                )
+            })
             .children(
                 d.always_on_note
                     .clone()
@@ -1539,6 +1585,60 @@ impl HackApp {
         )
     }
 
+    fn remote_targets(d: &DetailView, ui: &Ui) -> Option<gpui_kit::Div> {
+        if d.remotes.is_empty() {
+            return None;
+        }
+        let p = ui.p;
+        Some(
+            div()
+                .pt(space::S6)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .pb(space::S3)
+                        .type_step(text::SMALL_STRONG)
+                        .text_color(p.text_secondary)
+                        .child("Remote targets"),
+                )
+                .children(d.remotes.iter().map(|remote| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space::S2)
+                        .py(space::S4)
+                        .hairline_t(p.border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(space::S3)
+                                .child(
+                                    div()
+                                        .type_step(text::BODY_STRONG)
+                                        .child(remote.service.clone()),
+                                )
+                                .child(neutral_pill(remote.target.clone(), ui))
+                                .child(neutral_pill(remote.probe.clone(), ui)),
+                        )
+                        .child(
+                            div()
+                                .type_step(text::MONO)
+                                .font_family(ui.mono.clone())
+                                .text_color(p.text_secondary)
+                                .child(remote.address_label()),
+                        )
+                        .child(
+                            div()
+                                .type_step(text::SMALL)
+                                .text_color(p.text_secondary)
+                                .child(remote.state.clone()),
+                        )
+                })),
+        )
+    }
+
     fn detail(
         &mut self,
         d: &DetailView,
@@ -1595,6 +1695,8 @@ impl HackApp {
             (2, "Env"),
             (3, "Copies"),
             (crate::files_view::FILES_TAB, "Files"),
+            (6, "Changes"),
+            (5, "Add service"),
         ];
         #[cfg(not(hack_terminal))]
         let pills: &[(usize, &'static str)] = &[
@@ -1603,6 +1705,8 @@ impl HackApp {
             (2, "Env"),
             (3, "Copies"),
             (crate::files_view::FILES_TAB, "Files"),
+            (6, "Changes"),
+            (5, "Add service"),
         ];
         let mut tabs = div().flex().items_center().gap(space::S2);
         for &(i, label) in pills {
@@ -1615,6 +1719,16 @@ impl HackApp {
             tabs = tabs.child(self.project_files_picker(d, cx));
         }
         let body: AnyElement = match self.tab {
+            5 => div()
+                .id("service-catalog")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px(space::S8)
+                .pb(space::S5)
+                .child(self.service_catalog(d, ui, cx))
+                .into_any_element(),
+            6 => self.changes_view(ui, cx).into_any_element(),
             crate::files_view::FILES_TAB => {
                 self.project_files(d, ui, window, cx).into_any_element()
             }
@@ -1658,6 +1772,7 @@ impl HackApp {
                             }))
                     })
                 })
+                .children(Self::remote_targets(d, ui))
                 .into_any_element(),
         };
         #[cfg(hack_terminal)]

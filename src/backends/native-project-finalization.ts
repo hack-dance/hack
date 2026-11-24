@@ -4,10 +4,13 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
+  readFile,
   realpath,
   rename,
   rmdir,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
@@ -214,6 +217,13 @@ async function selected(
   ) {
     throw refused();
   }
+  const scoped = await scopeDirectory(scope, create);
+  const root = join(scoped.root, run.run);
+  await directory(root, create);
+  return { root, hash: scoped.hash };
+}
+/** This scope's lifetime directory (one subdirectory per run). */
+async function scopeDirectory(scope: NativeProjectRunScope, create: boolean) {
   const home = await realpath(scope.nativeHome);
   const identity = {
     home,
@@ -226,12 +236,7 @@ async function selected(
     .digest("hex");
   await directory(home, false);
   let root = home;
-  for (const component of [
-    ".hack-local",
-    "frontend-finalization",
-    hash,
-    run.run,
-  ]) {
+  for (const component of [".hack-local", "frontend-finalization", hash]) {
     root = join(root, component);
     await directory(root, create);
   }
@@ -322,13 +327,55 @@ async function write(root: string, name: string, token: unknown) {
     await unlink(temporary).catch(() => undefined);
   }
 }
+/** A lock left by a holder that is gone: its recorded frontend exited, or it
+ * crashed between creating the lock and recording itself (older than 30 s). */
+async function staleLock(lock: string): Promise<boolean> {
+  let holder: unknown;
+  try {
+    holder = JSON.parse(await readFile(join(lock, "holder.json"), "utf8"));
+  } catch {
+    const info = await lstat(lock).catch(() => null);
+    return info !== null && Date.now() - info.mtimeMs > 30_000;
+  }
+  return (
+    isRecord(holder) &&
+    Number.isSafeInteger(holder.pid) &&
+    (holder.birth === undefined || isNativeFrontendBirth(holder.birth)) &&
+    (await nativeFrontendGone({
+      pid: holder.pid as number,
+      ...(holder.birth === undefined ? {} : { birth: holder.birth as string }),
+    }))
+  );
+}
+async function removeLock(lock: string): Promise<void> {
+  await unlink(join(lock, "holder.json")).catch(() => undefined);
+  await rmdir(lock);
+}
+/** One operation per lifetime directory. The holder is recorded inside the lock,
+ * so a lock left by a crash is taken over once its holder is proven gone. */
 async function locked<T>(root: string, fn: () => Promise<T>): Promise<T> {
   const lock = join(root, "operation.lock");
-  await mkdir(lock, { mode: 0o700 });
   try {
+    await mkdir(lock, { mode: 0o700 });
+  } catch (error) {
+    if (
+      !(isRecord(error) && error.code === "EEXIST" && (await staleLock(lock)))
+    ) {
+      throw error;
+    }
+    await removeLock(lock);
+    await mkdir(lock, { mode: 0o700 });
+  }
+  try {
+    const birth = await captureNativeFrontendBirth();
+    await writeFile(
+      join(lock, "holder.json"),
+      JSON.stringify({ pid: process.pid, ...(birth ? { birth } : {}) }),
+      { mode: 0o600, flag: "wx" }
+    );
     return await fn();
   } finally {
-    await rmdir(lock);
+    await removeLock(lock);
   }
 }
 function matches(
@@ -344,8 +391,31 @@ function matches(
     token.planId === run.planId
   );
 }
+/** `next` is `prior` with its HTTPS lease added by the same frontend: version 2
+ * to 3, same attempt, pid, birth and run. A `down` that captured `prior` accepts it. */
+export function nativeFinalizationLeaseAdded(
+  prior: NativeProjectFinalizationToken,
+  next: NativeProjectFinalizationToken
+): boolean {
+  return (
+    prior.version === 2 &&
+    next.version === 3 &&
+    prior.attempt === next.attempt &&
+    prior.pid === next.pid &&
+    JSON.stringify(prior.birth ?? null) ===
+      JSON.stringify(next.birth ?? null) &&
+    prior.scope === next.scope &&
+    prior.run === next.run &&
+    prior.owner === next.owner &&
+    prior.namespace === next.namespace &&
+    prior.planId === next.planId
+  );
+}
 /** Register a fresh frontend lifetime before publishing its graph mapping. An old
  * incomplete lifetime refuses replacement, even when restoring the same graph run.
+ * One exception: this same frontend (pid and birth) may add its HTTPS lease to the
+ * lifetime it registered for this run, keeping its attempt (version 2 to 3), so the
+ * lifetime can exist before the mapping and the lease is recorded on it later.
  */
 export async function beginNativeProjectFinalization(opts: {
   readonly scope: NativeProjectRunScope;
@@ -402,6 +472,17 @@ export async function beginNativeProjectFinalization(opts: {
     const prior = await read(join(root, "active.json"));
     const completed = await read(join(root, "completed.json"));
     const recovered = await read(join(root, "recovered.json"));
+    const leaseAdded =
+      prior !== null &&
+      prior !== undefined &&
+      matches(prior, hash, opts.run) &&
+      nativeFinalizationLeaseAdded(prior, token) &&
+      !(completed && same(prior, completed)) &&
+      !(recovered && same(prior, recovered));
+    if (leaseAdded) {
+      await write(root, "active.json", token);
+      return;
+    }
     if (
       (prior &&
         !(
@@ -490,6 +571,56 @@ export async function recoverNativeProjectFinalization(opts: {
     }
     await write(root, "recovered.json", opts.token);
   });
+}
+/**
+ * The run of this scope's one frontend lifetime that registered itself but never
+ * published its mapping: its frontend is gone and it was neither completed nor
+ * recovered (a crash between `active.json` and the mapping). `down` acts on it as
+ * on a mapped run, and its recovery record retires it. Null when there is none or
+ * more than one.
+ */
+export async function orphanNativeProjectLifetime(
+  scope: NativeProjectRunScope
+): Promise<NativeProjectRun | null> {
+  let parent: string;
+  let hash: string;
+  try {
+    ({ root: parent, hash } = await scopeDirectory(scope, false));
+  } catch {
+    return null;
+  }
+  const found: NativeProjectRun[] = [];
+  for (const name of await readdir(parent).catch(() => [] as string[])) {
+    if (!HEX32.test(name)) {
+      continue;
+    }
+    const root = join(parent, name);
+    const active = await read(join(root, "active.json")).catch(() => null);
+    if (!active || active.scope !== hash || active.run !== name) {
+      continue;
+    }
+    const completed = await read(join(root, "completed.json")).catch(
+      () => null
+    );
+    const recovered = await read(join(root, "recovered.json")).catch(
+      () => null
+    );
+    if (
+      (completed && same(active, completed)) ||
+      (recovered && same(active, recovered)) ||
+      active.version === 1 ||
+      !(await nativeFrontendGone(active))
+    ) {
+      continue;
+    }
+    found.push({
+      run: active.run,
+      owner: active.owner,
+      namespace: active.namespace,
+      planId: active.planId,
+    });
+  }
+  return found.length === 1 ? (found[0] ?? null) : null;
 }
 /** Capture while the caller still holds the saved active mapping, before cleanup. */
 export async function captureNativeProjectFinalization(opts: {

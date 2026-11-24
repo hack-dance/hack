@@ -189,6 +189,7 @@ pub struct DetailView {
     pub actions: Vec<Action>,
     pub busy: bool,
     pub services: Vec<ServiceView>,
+    pub remotes: Vec<crate::models::RemoteStatus>,
     /// Services to offer a shell in: the running services of the last read
     /// that reported this instance's runtime. A failed read, a read with the
     /// engine down or a row without runtime keeps the previous list, so the
@@ -977,6 +978,13 @@ impl AppModel {
                 .unwrap_or_default(),
             shells_stale: self.last_error.is_some()
                 || self.shells.get(&key).is_some_and(|(_, stale)| *stale),
+            // The daemon only reports authored targets from the registered checkout.
+            // Branch instance rows and stale or native observations carry none.
+            remotes: if self.last_error.is_none() && !row.is_native() {
+                row.remotes
+            } else {
+                vec![]
+            },
             services,
             last_error: self.action_errors.get(&key).cloned(),
             state: st,
@@ -1025,6 +1033,37 @@ fn describe(e: &SourceError) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remotes_are_descriptor_only_and_belong_to_the_registered_checkout() {
+        let mut snap = crate::fixtures::snapshot(crate::fixtures::Fixture::Running).unwrap();
+        let row = snap
+            .projects
+            .projects
+            .iter_mut()
+            .find(|r| r.name == "storefront")
+            .unwrap();
+        row.remotes = serde_json::from_str(
+            r#"[{
+            "kind":"remote","service":"db","target":"staging","state":"declared",
+            "probe":"not checked","address":{"kind":"env_ref","name":"DB_HOST",
+            "port":5432,"value":"fixture-value"}
+        }]"#,
+        )
+        .unwrap();
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snap)));
+        model.apply(Event::Select("storefront".into()));
+        let detail = model.detail().unwrap();
+        assert_eq!(detail.remotes[0].address_label(), "$DB_HOST:5432");
+        assert_eq!(detail.remotes[0].probe, "not checked");
+        assert!(!format!("{detail:?}").contains("fixture-value"));
+        model.apply(Event::SelectInstance(InstanceKey {
+            project: "storefront".into(),
+            branch: Some("fix-login".into()),
+        }));
+        assert!(model.detail().unwrap().remotes.is_empty());
+    }
+
     #[test]
     fn service_actions_preserve_other_failures_and_the_observed_instance_state() {
         let mut model = AppModel::new();

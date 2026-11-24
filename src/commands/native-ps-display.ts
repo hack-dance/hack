@@ -122,6 +122,7 @@ function displayNativeServiceRows(
   }
 ): void {
   const output = createTextOutput();
+  const starting = result.phase === "preparing" || result.phase === "restoring";
   const portServices = new Set(result.ports?.map((port) => port.service));
   for (const item of result.items) {
     portServices.delete(item.service);
@@ -131,7 +132,14 @@ function displayNativeServiceRows(
       service: item.service,
       container: item.container,
       exitCode: item.exitCode,
-      state: psServiceState(item),
+      state:
+        result.readiness === "warming" &&
+        item.state === "running" &&
+        item.readiness === "healthy" &&
+        item.health !== "healthy" &&
+        item.health !== "unhealthy"
+          ? "warming"
+          : psServiceState(item),
     })),
     ...[...portServices].map((service) => ({
       service,
@@ -144,7 +152,7 @@ function displayNativeServiceRows(
     return {
       ...row,
       address: null,
-      addresses: ps.addresses.get(row.service),
+      addresses: starting ? undefined : ps.addresses.get(row.service),
       ports:
         ports
           ?.map((port) => `127.0.0.1:${port.port} (${port.state})`)
@@ -181,6 +189,18 @@ function displayNativeServiceRows(
       `${reason} · retain data and stop with ${ps.recoveryCommand ?? "hack down"}`,
       "faint"
     );
+  }
+  if (result.failure) {
+    // A start that failed after `up` returned (it returns at started): findable here.
+    const { service, code, at } = result.failure;
+    output.line();
+    output.blocker({
+      thing: service ?? "project",
+      problem: `failed after up returned · ${code}`,
+      which: new Date(at * 1000).toISOString(),
+      needs: "see why it did not become ready",
+      command: service ? `hack logs ${service}` : "hack ps --json",
+    });
   }
 }
 

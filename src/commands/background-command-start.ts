@@ -22,6 +22,7 @@ import {
   hackReexecEnvironment,
 } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
+import { warnComposeBuildPrivacy } from "../lib/compose-build-privacy.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
 import { selectNativeComposeProject } from "../lib/native-compose-selection.ts";
@@ -212,6 +213,13 @@ export async function startComposeBackgroundCommand(opts: {
           disableTty: true,
           containerName: container?.name,
         });
+  if (opts.compose.operation === "run") {
+    await warnComposeBuildPrivacy({
+      ...opts.compose.options,
+      services: [options.service],
+      argv: buildComposeArgs(options),
+    });
+  }
   return await startBackgroundCommand({
     request: opts.request,
     operation: opts.compose.operation,

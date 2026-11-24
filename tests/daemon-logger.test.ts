@@ -1,6 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  mkdtemp,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -68,4 +76,20 @@ test("a write failure does not prevent later diagnostics", async () => {
   logger.info({ message: "recovered" });
   await logger.flush();
   expect(await Bun.file(logPath).text()).toEndWith("recovered\n");
+});
+
+test.each([
+  ["symbolic", symlink],
+  ["hard", link],
+] as const)("preserves an oversized file reached through a %s link at the log path", async (_kind, makeLink) => {
+  const { logPath, logger } = await fixture();
+  const target = join(dirname(logPath), "keep");
+  const original = Buffer.alloc(DAEMON_LOG_MAX_BYTES + 1, 0x61);
+  await writeFile(target, original);
+  await makeLink(target, logPath);
+  logger.warn({ message: "would normally truncate before appending" });
+  await logger.flush();
+  expect(
+    Buffer.from(await Bun.file(target).arrayBuffer()).equals(original)
+  ).toBe(true);
 });

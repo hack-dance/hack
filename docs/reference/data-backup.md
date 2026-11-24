@@ -143,6 +143,18 @@ mountpoint, options and Compose labels, and the container's mount must be
 that directory. A volume replaced or relabeled in between refuses the same
 way and is not read.
 
+Hack cannot pin a volume against removal. A bind of its `Mountpoint` is not
+a Docker volume reference, so `docker volume rm` succeeds while the helper
+holds it: on Docker 29.9.2 the removal exits 0, `docker volume inspect` then
+fails, and the helper's `/v` is left an empty tree. Every digest taken after
+such a removal agrees on that empty tree. Hack therefore rechecks the
+volume's identity (by inspect only; it never creates a volume) right after
+the hold, again after the copy and the second digest, and once more for
+every copied volume immediately before the rename that publishes the
+backup. A volume that is gone, or replaced under the same name, refuses
+with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`) and leaves the
+copy in `<backup>.partial/`.
+
 On Docker Desktop and OrbStack the daemon runs in a VM, and the
 `Mountpoint` is a path inside that VM; the daemon resolves the bind there.
 That has not been checked on macOS yet.

@@ -122,6 +122,22 @@ export class FakeEngine {
     return this;
   }
 
+  /**
+   * `docker volume rm` as Docker does it while a helper holds a bind of the
+   * Mountpoint (checked on Docker 29.9.2): the removal succeeds, inspect then
+   * fails, and the holder keeps a mount whose tree is now empty.
+   */
+  removeVolume(name: string): void {
+    const volume = this.volumes.get(name);
+    if (volume) {
+      this.detached.set(name, { ...volume, content: "", sockets: 0 });
+      this.volumes.delete(name);
+    }
+  }
+
+  /** Trees of removed volumes as a bind holder still sees them (empty). */
+  private readonly detached = new Map<string, FakeVolume>();
+
   /** IDs of the containers that still exist. */
   leftovers(): string[] {
     return [...this.containers.keys()];
@@ -183,7 +199,9 @@ export class FakeEngine {
   private exec(container: string, args: readonly string[]) {
     const id = this.resolve(container);
     const held = id === null ? undefined : this.containers.get(id);
-    const volume = held?.volume ? this.volumes.get(held.volume) : undefined;
+    const volume = held?.volume
+      ? (this.volumes.get(held.volume) ?? this.detached.get(held.volume))
+      : undefined;
     this.onExec?.(container, args);
     return { held, volume };
   }

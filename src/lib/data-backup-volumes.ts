@@ -198,6 +198,37 @@ function canonicalJson(value: unknown): string {
  * driver, mountpoint, options and Compose ownership labels. A volume that
  * was removed and recreated under the same name differs in CreatedAt.
  */
+/**
+ * Inspect `name` again and refuse unless it is still the volume `identity`
+ * describes (same CreatedAt, driver, Mountpoint, options and Compose
+ * labels). Docker cannot pin a volume against removal: a bind of its
+ * Mountpoint is no volume reference, so `docker volume rm` succeeds while a
+ * helper holds it and leaves the helper an empty tree. A data command
+ * therefore rechecks identity at each point that matters. Only reads: it
+ * never creates a volume.
+ */
+export async function requireUnchangedVolume(opts: {
+  readonly docker: DataBackupDocker;
+  readonly name: string;
+  /** The Compose key, used in messages. */
+  readonly key: string;
+  readonly identity: InspectedVolume;
+  /** When the check runs, as a phrase ("after it was copied"). */
+  readonly when: string;
+  /** What the refusal leaves behind, as a sentence. */
+  readonly consequence: string;
+}): Promise<void> {
+  const now = await inspectVolume({ docker: opts.docker, name: opts.name });
+  if (now !== null && sameVolumeIdentity(opts.identity, now)) {
+    return;
+  }
+  throw new HackCliError({
+    code: "E_PROJECT_RUNNING",
+    message: `The volume for ${opts.key} was ${now === null ? "removed" : "removed, replaced or relabeled"} ${opts.when}, so what was read may not be its data; ${opts.consequence} Make sure nothing removes or recreates the project's volumes, then retry.`,
+    detail: { key: opts.key, reason: "volume_changed" },
+  });
+}
+
 export function sameVolumeIdentity(
   left: InspectedVolume,
   right: InspectedVolume

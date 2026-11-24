@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { dataComposeArgs } from "../../../src/commands/data.ts";
 import { HackCliError } from "../../../src/lib/cli-result.ts";
@@ -404,7 +404,45 @@ export const dataExportScenario: Scenario = {
         result: raced,
       });
 
-      await removedBeforeHold({ ctx, fixture, project, volume: data });
+      // Removed after every copy, right before the publish: Docker allows
+      // the removal (a bind is no volume reference), so only the identity
+      // recheck before the rename can refuse.
+      await removedDuringExport({
+        ctx,
+        fixture,
+        project,
+        volume: data,
+        stage: "before-publish",
+      });
+      for (const argv of [
+        ["volume", "create", ...labels(project, "data"), data],
+        [
+          "run",
+          "--rm",
+          "--network",
+          "none",
+          "--volume",
+          `${data}:/v`,
+          "--entrypoint",
+          "sh",
+          HELPER,
+          "-c",
+          "echo again >/v/a.txt",
+        ],
+      ]) {
+        expectExit({
+          result: await docker(ctx, argv),
+          codes: [0],
+          message: `docker ${argv.slice(0, 2).join(" ")} should succeed`,
+        });
+      }
+      await removedDuringExport({
+        ctx,
+        fixture,
+        project,
+        volume: data,
+        stage: "before-hold",
+      });
     } finally {
       await docker(ctx, ["rm", "--force", runner, writer]);
       await docker(ctx, ["volume", "rm", data, foreign, external, scratch]);
@@ -413,16 +451,19 @@ export const dataExportScenario: Scenario = {
 };
 
 /**
- * The volume is removed between validation and the hold: export refuses and
- * Docker creates nothing, since the hold binds the Mountpoint and never
- * mounts the volume by name. A wrapper around the real engine removes the
- * volume right before the helper's create.
+ * The volume is removed during the export: export refuses and Docker
+ * creates nothing, since the hold binds the Mountpoint and never mounts the
+ * volume by name. A wrapper around the real engine removes the volume right
+ * before the helper's create (`before-hold`), or after every copy, at the
+ * last running check (`before-publish`), where only the identity recheck
+ * before the rename can see it.
  */
-async function removedBeforeHold(opts: {
+async function removedDuringExport(opts: {
   readonly ctx: ScenarioContext;
   readonly fixture: MonorepoFixture;
   readonly project: string;
   readonly volume: string;
+  readonly stage: "before-hold" | "before-publish";
 }): Promise<void> {
   const { ctx, fixture, project } = opts;
   const data = opts.volume;
@@ -431,20 +472,29 @@ async function removedBeforeHold(opts: {
     cwd: fixture.hackDir,
   });
   let removed = false;
+  let copied = false;
+  const at = (argv: readonly string[]): boolean =>
+    opts.stage === "before-hold"
+      ? argv[1] === "create" && argv.includes("--mount")
+      : copied && argv[1] === "ps";
   const racingDocker: DataBackupDocker = {
     ...real,
-    capture: async (argv, opts) => {
-      if (!removed && argv[1] === "create" && argv.includes("--mount")) {
+    capture: async (argv, captureOpts) => {
+      if (argv[1] === "exec") {
+        copied = true;
+      }
+      if (!removed && at(argv)) {
         removed = true;
         expectExit({
           result: await docker(ctx, ["volume", "rm", data]),
           codes: [0],
-          message: "remove the validated volume before the hold",
+          message: `remove the validated volume (${opts.stage})`,
         });
       }
-      return await real.capture(argv, opts);
+      return await real.capture(argv, captureOpts);
     },
   };
+  const outDir = join(ctx.tempRoot, `race-out-${opts.stage}`);
   let raceRefusal: unknown = null;
   try {
     await exportProjectData({
@@ -458,7 +508,7 @@ async function removedBeforeHold(opts: {
       project,
       branch: null,
       hackHome: ctx.hackHome,
-      outDir: join(ctx.tempRoot, "race-out"),
+      outDir,
       hackVersion: "e2e",
     });
   } catch (error: unknown) {
@@ -471,6 +521,8 @@ async function removedBeforeHold(opts: {
     "--filter",
     `name=^${data}$`,
   ]);
+  // Nothing was published: at most the `.partial` directory is left.
+  const leftInOut = await readdir(outDir).catch(() => [] as string[]);
   expect({
     that:
       removed &&
@@ -478,8 +530,9 @@ async function removedBeforeHold(opts: {
       isRecord(raceRefusal.detail) &&
       raceRefusal.detail.reason === "volume_changed" &&
       listed.exitCode === 0 &&
-      listed.stdout.trim() === "",
-    message: `a volume removed before the hold should refuse and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()})`,
+      listed.stdout.trim() === "" &&
+      leftInOut.every((entry) => entry.endsWith(".partial")),
+    message: `a volume removed ${opts.stage} should refuse, publish nothing and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()}, out: ${leftInOut.join(",")})`,
   });
 }
 

@@ -380,6 +380,77 @@ describe("exportProjectData", () => {
 });
 
 describe("binding to the validated volume", () => {
+  test("a volume removed after the hold, before the first digest, is not published empty", async () => {
+    // Docker lets `docker volume rm` succeed under a bind hold and leaves
+    // the helper an empty tree, so all three digests agree on nothing.
+    const fake = engine({ only: "db" });
+    let removed = false;
+    fake.onExec = () => {
+      if (!removed) {
+        removed = true;
+        fake.removeVolume("shop_db");
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(error.message).toContain("was removed while it was being copied");
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+    // Export never creates a volume.
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a volume removed during the copy refuses publication", async () => {
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        fake.removeVolume("shop_db");
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+  });
+
+  test("a volume removed, or replaced under its name, between the copy and the publish is refused", async () => {
+    for (const replace of [false, true]) {
+      const fake = engine({ only: "db" });
+      // The last running check runs after every copy, before the publish.
+      fake.runningFromCall = null;
+      let copied = false;
+      fake.onExec = (_container, args) => {
+        if (args.includes("--interactive") || args.includes("-e")) {
+          copied = true;
+        }
+      };
+      let psAfterCopy = false;
+      fake.onPs = () => {
+        if (copied && !psAfterCopy) {
+          psAfterCopy = true;
+          fake.removeVolume("shop_db");
+          if (replace) {
+            fake.volume("shop_db", owned("db", "rows-db"));
+          }
+        }
+      };
+      const out = join(root, replace ? "replaced" : "removed");
+      const error = await caught(
+        exportProjectData(input(fake, { outDir: out }))
+      );
+      expect({ replace, code: error.code, detail: error.detail }).toEqual({
+        replace,
+        code: "E_PROJECT_RUNNING",
+        detail: { key: "db", reason: "volume_changed" },
+      });
+      expect(error.message).toContain("after it was copied");
+      // Not published: the manifest and tar stay in `.partial`.
+      expect(await readdir(out)).toEqual(["20261123T140501Z.partial"]);
+      expect(fake.volumes.has("shop_db")).toBe(replace);
+    }
+  });
+
   test("a volume replaced after validation is refused and the helper removed", async () => {
     const fake = engine({ only: "db" });
     // Between the ownership check and the hold, the volume is removed and

@@ -43,6 +43,7 @@ import {
   type OwnedVolume,
   plainLocalInspected,
   planDeclaredVolumes,
+  requireUnchangedVolume,
 } from "./data-backup-volumes.ts";
 
 export type DataExportInput = {
@@ -249,6 +250,20 @@ async function exportWithin(opts: {
     manifest,
     createdDirs,
     syncDirectory: input.syncDirectory ?? syncPath,
+    // Immediately before the rename: every copied volume is still the one
+    // validated and read.
+    beforeRename: async () => {
+      for (const volume of owned) {
+        await requireUnchangedVolume({
+          docker: input.docker,
+          name: volume.name,
+          key: volume.key,
+          identity: volume.identity,
+          when: "after it was copied",
+          consequence: `the backup was not published; the incomplete copy is in ${partial}, which you can delete.`,
+        });
+      }
+    },
   });
   return { backup, manifest };
 }
@@ -332,6 +347,16 @@ async function copyVolume(opts: {
         redactValues: opts.docker.redactValues,
       });
       const after = await held.treeDigest(consequence);
+      // A removal under the bind empties the tree the helper sees; both
+      // digests could agree on that empty tree.
+      await requireUnchangedVolume({
+        docker: opts.docker,
+        name: volume.name,
+        key: volume.key,
+        identity: volume.identity,
+        when: "while it was being copied",
+        consequence,
+      });
       if (before.digest !== after.digest || before.entries !== after.entries) {
         throw new HackCliError({
           code: "E_PROJECT_RUNNING",
@@ -404,6 +429,8 @@ async function publishBackup(opts: {
   /** Directories this export created, deepest first. */
   readonly createdDirs: readonly string[];
   readonly syncDirectory: (path: string) => Promise<void>;
+  /** The last check before the rename; a refusal leaves `.partial`. */
+  readonly beforeRename: () => Promise<void>;
 }): Promise<void> {
   const manifestPath = join(opts.partial, DATA_BACKUP_MANIFEST);
   await fsStep({ path: manifestPath, operation: "write" }, async () => {
@@ -416,6 +443,7 @@ async function publishBackup(opts: {
     await opts.syncDirectory(opts.partial);
   });
   await refuseExisting(opts.backup);
+  await opts.beforeRename();
   await fsStep({ path: opts.backup, operation: "write" }, () =>
     rename(opts.partial, opts.backup)
   );

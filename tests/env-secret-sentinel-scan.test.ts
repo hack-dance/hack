@@ -48,9 +48,11 @@ import {
  * sentinel, and the Compose env override exists with references.
  *
  * Isolation: private HOME/HACK_HOME/Docker client config (privateCliEnv), a
- * `docker` shim first on PATH that only records its argv and fails, so no real
- * engine, OrbStack, keychain or client configuration is reached. Sentinels are
- * random per run and are never printed; failures report paths and forms only.
+ * `docker` shim first on PATH that records argv, identifies a synthetic
+ * daemon, and reports an empty project for `compose ps`. Other calls fail
+ * locally, so no real engine, OrbStack, keychain or client configuration is
+ * reached. Sentinels are random per run and are never printed; failures
+ * report paths and forms only.
  */
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
@@ -254,6 +256,13 @@ beforeAll(async () => {
     [
       "#!/bin/sh",
       `for arg in "$@"; do printf '%s\\n' "$arg" >> '${join(root, "logs", "docker-argv.log")}'; done`,
+      'if [ "$*" = "info --format {{.ID}}" ]; then',
+      "  printf '%s\\n' sentinel-scan-daemon",
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "compose" ]; then',
+      '  case " $* " in *" ps "*) exit 0 ;; esac',
+      "fi",
       "echo 'docker shim: no engine' >&2",
       "exit 1",
       "",
@@ -512,6 +521,7 @@ test("no sentinel or key appears in CLI output or captured child argv", async ()
     "utf8"
   );
   expect(dockerArgv).toContain("compose");
+  expect(dockerArgv).toContain("network\nls\n");
   expect(findHits(dockerArgv, needles)).toEqual([]);
 });
 
@@ -641,7 +651,7 @@ test("secret values reach child environments only for runtime delivery", async (
   const shimDir = join(root, "shim");
   const unexpected: string[] = [];
   let execDeliveries = 0;
-  let composeDeliveries = 0;
+  let composeUpDeliveries = 0;
   for (const record of records) {
     const argv = Array.isArray(record.argv)
       ? record.argv.map((part) => String(part))
@@ -665,7 +675,9 @@ test("secret values reach child environments only for runtime delivery", async (
       continue;
     }
     if (basename(program) === "docker" && argv[1] === "compose") {
-      composeDeliveries += 1;
+      if (argv.includes("up")) {
+        composeUpDeliveries += 1;
+      }
       continue;
     }
     unexpected.push(`${record.via} ${basename(program)} ${argv[1] ?? ""}`);
@@ -673,5 +685,5 @@ test("secret values reach child environments only for runtime delivery", async (
   expect(unexpected).toEqual([]);
   expect(execDeliveries).toBe(2);
   // The value-free override resolves only through the Compose client env.
-  expect(composeDeliveries).toBeGreaterThan(0);
+  expect(composeUpDeliveries).toBeGreaterThan(0);
 });

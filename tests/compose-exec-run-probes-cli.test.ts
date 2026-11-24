@@ -38,7 +38,7 @@ case " $* " in
     exit 1 ;;
   *" ps "*)
     if [ "\${STUB_API_STOPPED:-}" = "1" ]; then exit 0; fi
-    printf '%s\\n' '{"ID":"c1","Service":"api","Name":"shop-api-1","State":"running","Status":"Up","ExitCode":0}'
+    printf '{"ID":"c1","Service":"api","Name":"shop-api-1","State":"running","Status":"Up","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n' "$PWD"
     exit 0 ;;
   *" exec "*)
     if [ "\${STUB_API_STOPPED:-}" = "1" ]; then

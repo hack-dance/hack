@@ -201,6 +201,7 @@ fn doctor_runs() -> Vec<DoctorRun> {
                         ..passed("project")
                     },
                     DoctorCheck {
+                        native_pool: None,
                         id: "hack gitignore".into(),
                         status: "warn".into(),
                         detail:

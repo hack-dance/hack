@@ -124,6 +124,10 @@ When the project declares remotes, `hack ps` shows the observed target or
 the variable name. Start the whole project with `hack up`. Use `hack down`
 followed by `hack up` to restart it.
 
+The desktop preview shows those descriptors on the registered project's
+**Services** tab. It shows the environment variable name for an
+environment-backed address and marks each target as unchecked.
+
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
 have no URL. Sign in or load a page that reads data to check the app itself.
@@ -285,7 +289,9 @@ Machine-wide autostart progress is exposed locally, not through the unsupported 
 Lifecycle host processes can opt into `lifecycle.runner: "supervisor"` when the
 Rust supervisor executable is installed alongside the CLI. The default stays
 `"mux"`. This mode has no terminal: use noninteractive commands and
-`hack logs -f <name>` to watch output. See the
+`hack logs -f <name>` to watch output. On stop, commands get five seconds to
+respond to TERM. Hack gives the supervisor extra time to confirm they exited on
+a busy host. See the
 [lifecycle runner implementation contract](https://github.com/hack-dance/hack/blob/next/docs/lifecycle-supervisor.md) for prerequisites and
 recovery behavior.
 

@@ -158,11 +158,16 @@ async function exportWithin(opts: {
       detail: { keys: unsupported, reason: "unsupported_driver" },
     });
   }
-  const volumeNames = owned.map((volume) => volume.name);
+  const watched = owned.map((volume) => ({
+    name: volume.name,
+    mountpoint: volume.identity.mountpoint,
+  }));
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
-    volumeNames,
+    volumes: watched,
+    exclude: helpers.created,
+    timeoutMs: deadlines.commandMs,
     stopCommand,
     command: "export",
     lead: "The project is running, so its volumes cannot be copied consistently; nothing was backed up.",
@@ -204,21 +209,16 @@ async function exportWithin(opts: {
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
-    volumeNames,
+    volumes: watched,
+    exclude: helpers.created,
+    timeoutMs: deadlines.commandMs,
     stopCommand,
     command: "export",
     lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
   });
   // Stop and drain the subscription, then decide.
   const keyOf = new Map(owned.map((volume) => [volume.name, volume.key]));
-  const mounts = (
-    await monitor.finish(
-      owned.map((volume) => ({
-        name: volume.name,
-        mountpoint: volume.identity.mountpoint,
-      }))
-    )
-  ).map((mount) => ({
+  const mounts = (await monitor.finish(watched)).map((mount) => ({
     ...mount,
     volume: keyOf.get(mount.volume) ?? mount.volume,
   }));

@@ -138,6 +138,40 @@ export class FakeEngine {
   /** Trees of removed volumes as a bind holder still sees them (empty). */
   private readonly detached = new Map<string, FakeVolume>();
 
+  /** `{{json .Mounts}}` of a container. */
+  private mountsOf(held: FakeContainer): readonly unknown[] {
+    if (held.mounts !== undefined) {
+      return held.mounts;
+    }
+    return held.volume === null
+      ? []
+      : [
+          {
+            Type: "bind",
+            Source: `/var/lib/docker/volumes/${held.volume}/_data`,
+            Destination: "/v",
+            RW: !held.readOnly,
+          },
+        ];
+  }
+
+  /**
+   * A container that is already running when the run starts (no start
+   * event), with `mounts` as `docker container inspect` reports them.
+   */
+  runningContainer(name: string, mounts: readonly unknown[]): string {
+    const id = fakeContainerId();
+    this.containers.set(id, {
+      name,
+      labels: {},
+      volume: null,
+      readOnly: true,
+      running: true,
+      mounts,
+    });
+    return id;
+  }
+
   /** IDs of the containers that still exist. */
   leftovers(): string[] {
     return [...this.containers.keys()];
@@ -157,10 +191,11 @@ export class FakeEngine {
   }
 
   /**
-   * A container someone else creates and starts outside the run, with
-   * `mounts` as `docker container inspect` reports them. Like a bind, it
-   * emits only its start event. Returns null, as Docker refuses, when the
-   * name is taken.
+   * A short-lived container someone else creates and starts outside the
+   * run: it emits its start event (like a bind, no mount event) and exits at
+   * once, so no running check lists it, but it still exists and can be
+   * inspected, with `mounts` as `docker container inspect` reports them.
+   * Returns null, as Docker refuses, when the name is taken.
    */
   createForeign(name: string, mounts: readonly unknown[] = []): string | null {
     if (this.resolve(name) !== null) {
@@ -172,7 +207,7 @@ export class FakeEngine {
       labels: {},
       volume: null,
       readOnly: true,
-      running: true,
+      running: false,
       mounts,
     });
     this.events.start(id, name);
@@ -299,6 +334,15 @@ export class FakeEngine {
       }
       return ok(`${name}\n`);
     }
+    if (args[0] === "ps" && args.includes("--quiet")) {
+      // Every running container, by full ID.
+      return ok(
+        [...this.containers]
+          .filter(([, container]) => container.running)
+          .map(([id]) => `${id}\n`)
+          .join("")
+      );
+    }
     if (args[0] === "ps") {
       this.onPs?.();
       const filter = args[args.indexOf("--filter") + 1] ?? "";
@@ -377,6 +421,31 @@ export class FakeEngine {
       this.events.afterRun?.(["docker", "start", id]);
       return ok(`${ref}\n`);
     }
+    if (
+      args[0] === "container" &&
+      args[1] === "inspect" &&
+      args.includes("{{.Id}} {{json .Mounts}}")
+    ) {
+      // Batched: one line per container Docker knows; a missing one fails
+      // the call after printing the others, as Docker does.
+      const refs = args.slice(args.indexOf("--format") + 2);
+      const lines: string[] = [];
+      let missing = false;
+      for (const ref of refs) {
+        const id = this.resolve(ref);
+        const held = id === null ? undefined : this.containers.get(id);
+        if (id === null || !held) {
+          missing = true;
+          continue;
+        }
+        lines.push(`${id} ${JSON.stringify(this.mountsOf(held))}\n`);
+      }
+      return {
+        exitCode: missing ? 1 : 0,
+        stdout: lines.join(""),
+        stderr: missing ? "Error: No such container" : "",
+      };
+    }
     if (args[0] === "container" && args[1] === "inspect") {
       const ref = argv.at(-1) ?? "";
       const id = this.resolve(ref);
@@ -385,19 +454,7 @@ export class FakeEngine {
         return fail(`Error: No such container: ${ref}`);
       }
       if (argv.includes("{{json .Mounts}}")) {
-        if (held.mounts !== undefined) {
-          return ok(`${JSON.stringify(held.mounts)}\n`);
-        }
-        return ok(
-          `${JSON.stringify([
-            {
-              Type: "bind",
-              Source: `/var/lib/docker/volumes/${held.volume}/_data`,
-              Destination: "/v",
-              RW: !held.readOnly,
-            },
-          ])}\n`
-        );
+        return ok(`${JSON.stringify(this.mountsOf(held))}\n`);
       }
       const format = argv[argv.indexOf("--format") + 1] ?? "";
       const nonce = /index \.Config\.Labels "([^"]+)"/.exec(format)?.[1];

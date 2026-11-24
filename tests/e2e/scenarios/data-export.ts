@@ -84,6 +84,7 @@ export const dataExportScenario: Scenario = {
     const runner = `${project}-web-1`;
     const scratch = `${project}-restore`;
     const writer = `${project}-writer`;
+    const holder = `${project}-bind-holder`;
     await Bun.write(
       join(fixture.hackDir, "docker-compose.yml"),
       [
@@ -327,6 +328,7 @@ export const dataExportScenario: Scenario = {
         codes: [0],
         message: "remove the stand-in project container",
       });
+      await bindHolderRefuses({ ctx, fixture, out, volume: data, holder });
 
       // A short-lived writer that starts and exits while a copy helper runs:
       // no `docker ps` check can see it, the live event subscription does.
@@ -414,28 +416,7 @@ export const dataExportScenario: Scenario = {
         volume: data,
         stage: "before-publish",
       });
-      for (const argv of [
-        ["volume", "create", ...labels(project, "data"), data],
-        [
-          "run",
-          "--rm",
-          "--network",
-          "none",
-          "--volume",
-          `${data}:/v`,
-          "--entrypoint",
-          "sh",
-          HELPER,
-          "-c",
-          "echo again >/v/a.txt",
-        ],
-      ]) {
-        expectExit({
-          result: await docker(ctx, argv),
-          codes: [0],
-          message: `docker ${argv.slice(0, 2).join(" ")} should succeed`,
-        });
-      }
+      await recreateVolume({ ctx, project, volume: data });
       await removedDuringExport({
         ctx,
         fixture,
@@ -444,7 +425,7 @@ export const dataExportScenario: Scenario = {
         stage: "before-hold",
       });
     } finally {
-      await docker(ctx, ["rm", "--force", runner, writer]);
+      await docker(ctx, ["rm", "--force", runner, writer, holder]);
       await docker(ctx, ["volume", "rm", data, foreign, external, scratch]);
     }
   },
@@ -533,6 +514,98 @@ async function removedDuringExport(opts: {
       listed.stdout.trim() === "" &&
       leftInOut.every((entry) => entry.endsWith(".partial")),
     message: `a volume removed ${opts.stage} should refuse, publish nothing and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()}, out: ${leftInOut.join(",")})`,
+  });
+}
+
+/** Create the `data` volume again, with Compose's labels and one file. */
+async function recreateVolume(opts: {
+  readonly ctx: ScenarioContext;
+  readonly project: string;
+  readonly volume: string;
+}): Promise<void> {
+  for (const argv of [
+    ["volume", "create", ...labels(opts.project, "data"), opts.volume],
+    [
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--volume",
+      `${opts.volume}:/v`,
+      "--entrypoint",
+      "sh",
+      HELPER,
+      "-c",
+      "echo again >/v/a.txt",
+    ],
+  ]) {
+    expectExit({
+      result: await docker(opts.ctx, argv),
+      codes: [0],
+      message: `docker ${argv.slice(0, 2).join(" ")} should succeed`,
+    });
+  }
+}
+
+/**
+ * A container already running with a read-only bind of the volume's
+ * Mountpoint (Hack's own hold technique) is not found by
+ * `docker ps --filter volume=`; the inspection of every running container
+ * refuses the export, naming it by short ID.
+ */
+async function bindHolderRefuses(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly out: string;
+  readonly volume: string;
+  readonly holder: string;
+}): Promise<void> {
+  const { ctx } = opts;
+  const mountpoint = await docker(ctx, [
+    "volume",
+    "inspect",
+    "--format",
+    "{{.Mountpoint}}",
+    opts.volume,
+  ]);
+  const started = await docker(ctx, [
+    "run",
+    "--detach",
+    "--network",
+    "none",
+    "--name",
+    opts.holder,
+    "--mount",
+    `type=bind,src=${mountpoint.stdout.trim()},dst=/x,readonly`,
+    "--entrypoint",
+    "sleep",
+    HELPER,
+    "300",
+  ]);
+  expectExit({
+    result: started,
+    codes: [0],
+    message: "a container binding the volume's Mountpoint should start",
+  });
+  const refused = await ctx.cli({
+    args: ["data", "export", "--json", "--out", opts.out],
+    cwd: opts.fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  const refusal = extractJsonObject<ExportPayload>({ text: refused.stdout });
+  expect({
+    that:
+      refused.exitCode === 1 &&
+      refusal?.error?.code === "E_PROJECT_RUNNING" &&
+      JSON.stringify(refusal.error.detail) ===
+        JSON.stringify({ running: [started.stdout.trim().slice(0, 12)] }),
+    message: "a running container binding the Mountpoint should refuse",
+    result: refused,
+  });
+  expectExit({
+    result: await docker(ctx, ["rm", "--force", opts.holder]),
+    codes: [0],
+    message: "remove the bind holder",
   });
 }
 

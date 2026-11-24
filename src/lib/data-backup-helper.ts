@@ -6,7 +6,13 @@ import {
   DATA_BACKUP_TREE_DIGEST,
   dataBackupHelperImage,
 } from "./data-backup-format.ts";
-import { dockerReadError, runningContainers } from "./data-backup-volumes.ts";
+import {
+  containersReachingVolumes,
+  dockerReadError,
+  runningContainerIds,
+  runningContainers,
+  type WatchedVolume,
+} from "./data-backup-volumes.ts";
 import { closedFileWriteError, type FileWriteOperation } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 
@@ -127,26 +133,62 @@ export function parseTreeDigest(opts: {
 
 /**
  * Refuse with `E_PROJECT_RUNNING` while a container of the Compose project,
- * or any container mounting one of `volumeNames`, runs. Never stops anything.
+ * or any container using one of `volumes`, runs. Never stops anything.
+ *
+ * `docker ps --filter volume=` sees only volume mounts by name, so every
+ * other running container (except this run's own, by ID) is inspected too,
+ * in one bounded call: a bind whose Source is a watched Mountpoint, a path
+ * inside it or a directory above it uses that volume as surely as a volume
+ * mount does (Hack's own helpers use exactly that technique). A running
+ * container that cannot be inspected refuses closed
+ * (`detail.reason: unchecked_running`).
+ *
  * `detail.running` lists short container IDs, never names: a name can carry
  * interpolated env values (`container_name: db-${TOKEN}`).
  */
 export async function refuseRunning(opts: {
   readonly docker: DataBackupDocker;
   readonly composeProject: string;
-  readonly volumeNames: readonly string[];
+  readonly volumes: readonly WatchedVolume[];
+  /** IDs of the containers this run created: never inspected or refused. */
+  readonly exclude: ReadonlySet<string>;
+  /** Bound for the batched inspect. */
+  readonly timeoutMs: number;
   readonly stopCommand: string;
   /** First sentence: what the refusal means for this command. */
   readonly lead: string;
   readonly command: "export" | "import";
 }): Promise<void> {
-  const running = await runningContainers(opts);
-  if (running.length === 0) {
-    return;
-  }
-  throw new HackCliError({
-    code: "E_PROJECT_RUNNING",
-    message: `${opts.lead} Stop it with \`${opts.stopCommand}\`, then retry. Hack never stops containers for an ${opts.command}.`,
-    detail: { running },
+  const listed = await runningContainers({
+    docker: opts.docker,
+    composeProject: opts.composeProject,
+    volumeNames: opts.volumes.map((volume) => volume.name),
   });
+  const reach = await containersReachingVolumes({
+    docker: opts.docker,
+    containers: await runningContainerIds({
+      docker: opts.docker,
+      exclude: opts.exclude,
+    }),
+    volumes: opts.volumes,
+    timeoutMs: opts.timeoutMs,
+  });
+  const running = [
+    ...new Set([...listed, ...reach.mounts.map((mount) => mount.container)]),
+  ].sort();
+  const stop = `Stop it with \`${opts.stopCommand}\`, then retry. Hack never stops containers for an ${opts.command}.`;
+  if (running.length > 0) {
+    throw new HackCliError({
+      code: "E_PROJECT_RUNNING",
+      message: `${opts.lead} ${stop}`,
+      detail: { running },
+    });
+  }
+  if (reach.unchecked.length > 0) {
+    throw new HackCliError({
+      code: "E_PROJECT_RUNNING",
+      message: `A running container (${reach.unchecked.join(", ")}) could not be checked (it was gone or could not be inspected), so Hack cannot prove it does not use the project's volumes; nothing was ${opts.command === "export" ? "published" : "marked complete"}. If nothing else should be using them, retry.`,
+      detail: { unchecked: reach.unchecked, reason: "unchecked_running" },
+    });
+  }
 }

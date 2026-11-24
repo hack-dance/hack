@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import { dockerEngineFailureError } from "./compose-ps-result.ts";
 import type {
@@ -365,4 +366,157 @@ export async function runningContainers(opts: {
     }
   }
   return [...found].sort();
+}
+
+/** A volume a data command protects: its Docker name and inspected Mountpoint. */
+export type WatchedVolume = {
+  readonly name: string;
+  readonly mountpoint: string;
+};
+
+/** A Docker-side path, lexically normalized without a trailing slash. */
+function normalizedDaemonPath(path: string): string {
+  const normal = posix.normalize(path);
+  return normal.length > 1 && normal.endsWith("/")
+    ? normal.slice(0, -1)
+    : normal;
+}
+
+/** Whether `path` is `root` or inside it. */
+function within(path: string, root: string): boolean {
+  return root === "/" || path === root || path.startsWith(`${root}/`);
+}
+
+/**
+ * Watched volumes a container's mounts reach: a volume mount by name, or
+ * any mount whose Source is a watched Mountpoint, inside one or above one.
+ * Paths are the daemon's own (they may live in a VM), so they are compared
+ * lexically after normalization.
+ */
+export function mountsReachingVolumes(opts: {
+  readonly mounts: readonly unknown[];
+  readonly volumes: readonly WatchedVolume[];
+}): string[] {
+  const reached = new Set<string>();
+  for (const mount of opts.mounts) {
+    if (!isRecord(mount)) {
+      continue;
+    }
+    for (const volume of opts.volumes) {
+      if (mount.Type === "volume" && mount.Name === volume.name) {
+        reached.add(volume.name);
+        continue;
+      }
+      if (typeof mount.Source !== "string" || mount.Source === "") {
+        continue;
+      }
+      const source = normalizedDaemonPath(mount.Source);
+      const mountpoint = normalizedDaemonPath(volume.mountpoint);
+      if (within(source, mountpoint) || within(mountpoint, source)) {
+        reached.add(volume.name);
+      }
+    }
+  }
+  return [...reached].sort();
+}
+
+/** Format of one batched inspect line: the full ID, then the Mounts JSON. */
+const ID_AND_MOUNTS = "{{.Id}} {{json .Mounts}}";
+
+/**
+ * Inspect `containers` (full IDs) in one bounded call and report which
+ * watched volumes each reaches (see {@link mountsReachingVolumes}), by
+ * short ID. A container Docker does not answer for (it is gone, or the
+ * inspect failed) is `unchecked`: what it mounts is unknown, and callers
+ * refuse closed. An engine failure is thrown as one.
+ */
+export async function containersReachingVolumes(opts: {
+  readonly docker: DataBackupDocker;
+  readonly containers: readonly string[];
+  readonly volumes: readonly WatchedVolume[];
+  readonly timeoutMs: number;
+}): Promise<{
+  readonly mounts: readonly { volume: string; container: string }[];
+  readonly unchecked: readonly string[];
+}> {
+  if (opts.containers.length === 0) {
+    return { mounts: [], unchecked: [] };
+  }
+  const result = await opts.docker.capture(
+    [
+      "docker",
+      "container",
+      "inspect",
+      "--format",
+      ID_AND_MOUNTS,
+      ...opts.containers,
+    ],
+    { timeoutMs: opts.timeoutMs }
+  );
+  if (result.exitCode !== 0 && result.stdout.trim() === "") {
+    const engine = dockerEngineFailureError({
+      result,
+      command: "docker container inspect",
+      redactValues: opts.docker.redactValues,
+    });
+    if (engine) {
+      throw engine;
+    }
+  }
+  const answered = new Map<string, readonly unknown[]>();
+  for (const line of result.stdout.split("\n")) {
+    const space = line.indexOf(" ");
+    if (space <= 0) {
+      continue;
+    }
+    let mounts: unknown;
+    try {
+      mounts = JSON.parse(line.slice(space + 1));
+    } catch {
+      continue;
+    }
+    if (Array.isArray(mounts)) {
+      answered.set(line.slice(0, space), mounts);
+    }
+  }
+  const mounts: { volume: string; container: string }[] = [];
+  const unchecked: string[] = [];
+  for (const container of opts.containers) {
+    const seen = answered.get(container);
+    if (seen === undefined) {
+      unchecked.push(container.slice(0, 12));
+      continue;
+    }
+    for (const volume of mountsReachingVolumes({
+      mounts: seen,
+      volumes: opts.volumes,
+    })) {
+      mounts.push({ volume, container: container.slice(0, 12) });
+    }
+  }
+  return { mounts, unchecked };
+}
+
+/**
+ * Every running container's full ID, except `exclude` (this run's own),
+ * from `docker ps --quiet --no-trunc`.
+ */
+export async function runningContainerIds(opts: {
+  readonly docker: DataBackupDocker;
+  readonly exclude: ReadonlySet<string>;
+}): Promise<readonly string[]> {
+  const result = await opts.docker.capture([
+    "docker",
+    "ps",
+    "--quiet",
+    "--no-trunc",
+  ]);
+  if (result.exitCode !== 0) {
+    throw dockerReadError({
+      result,
+      command: "docker ps",
+      redactValues: opts.docker.redactValues,
+    });
+  }
+  return names(result.stdout).filter((id) => !opts.exclude.has(id));
 }

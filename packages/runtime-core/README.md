@@ -918,6 +918,11 @@ With `--keep-going`, recorded and thrown step failures both settle owned process
 before advancing; unconfirmed cleanup skips later steps. Restart keeps the previous
 foreground tracked through replacement failure and its bounded exit wait.
 
+The mount-socket step verifies a 64 KiB transfer in each direction, then opens
+256 successive connections through one running relay and checks every
+download's digest. The step repeats the bidirectional transfer after restart.
+Look for the 256-connection check in the qualification evidence.
+
 `--caddy`, `--caddy-sha256` and `--https-port` together select native HTTPS. They also
 route the fixture's `web` service at `web.provider-qual.hack.local`. The web and
 database step then fetches that route with `curl`, resolved to loopback and trusting

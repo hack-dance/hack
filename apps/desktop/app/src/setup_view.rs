@@ -8,6 +8,8 @@
 //! global trust`) run in the embedded terminal where available. Skips last for
 //! this session only and never satisfy a check.
 
+#[cfg(all(test, feature = "screenshots", hack_terminal))]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, IntoElement, ParentElement, SharedString, Styled, div,
     prelude::*, px,
@@ -18,10 +20,32 @@ use hack_desktop_ui::components::{
     StyledExt as _, Ui, action_button, empty_pane, pill, primary_button,
 };
 use hack_desktop_ui::icons::Glyph;
+use hack_desktop_ui::status::Status as DotStatus;
 use hack_desktop_ui::tokens::{radius, space, text};
 
 use crate::doctor_view::Pane;
 use crate::view::HackApp;
+
+pub(crate) fn evidence_status(status: Status) -> (DotStatus, &'static str) {
+    match status {
+        Status::Passed => (DotStatus::Running, "Passed"),
+        Status::NeedsAttention => (DotStatus::Degraded, "Needs attention"),
+        Status::Unknown => (DotStatus::Unknown, "Unknown"),
+    }
+}
+
+pub(crate) fn routing_evidence(report: &hack_desktop_core::setup::Report) -> Option<Status> {
+    report
+        .cards
+        .iter()
+        .filter(|card| card.id == "routing" || card.id.starts_with("dns:"))
+        .map(|card| card.status)
+        .max_by_key(|status| match status {
+            Status::Passed => 0,
+            Status::Unknown => 1,
+            Status::NeedsAttention => 2,
+        })
+}
 
 impl HackApp {
     /// Fixtures and screenshots: show setup with a canned report.
@@ -447,12 +471,12 @@ fn card(
     let pane = &app.setup;
     let p = ui.p;
     let skipped = pane.skipped.contains(&c.id);
-    let (label, colors) = match (c.status, skipped) {
-        (_, true) => ("Skipped for now", p.states.unknown),
-        (Status::Passed, false) => ("Passed", p.states.running),
-        (Status::NeedsAttention, false) => ("Needs attention", p.states.degraded),
-        (Status::Unknown, false) => ("Unknown", p.states.unknown),
+    let (status, label) = if skipped {
+        (DotStatus::Unknown, "Skipped for now")
+    } else {
+        evidence_status(c.status)
     };
+    let colors = status.colors(&p);
     let cli = pane.report.cli_ready();
     let mut actions = div().flex().items_center().gap(space::S3);
     let mut command_line: Option<String> = None;
@@ -607,7 +631,17 @@ fn card(
                         .child(c.title.clone()),
                 )
                 .child(div().flex_1())
-                .child(pill(label, colors.bg, colors.fg)),
+                .child(
+                    pill(label, colors.bg, colors.fg)
+                        .id(("setup-status", i))
+                        .role(gpui_kit::Role::Label)
+                        .aria_label(label)
+                        .map(|pill| {
+                            #[cfg(all(test, feature = "screenshots", hack_terminal))]
+                            let pill = pill.test_support();
+                            pill
+                        }),
+                ),
         )
         .when(!c.detail.is_empty(), |d| {
             d.child(

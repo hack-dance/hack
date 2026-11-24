@@ -428,7 +428,49 @@ impl From<RunError> for CopiesError {
     }
 }
 
+use crate::config::{
+    ConfigError, ConfigPatch, ConfigReport, ConfigSaved, ConfigTarget, ConfigValidation, run_config,
+};
+
 pub trait Source: Send + Sync {
+    fn config_show(
+        &self,
+        _root: &Path,
+        _target: &ConfigTarget,
+    ) -> Result<ConfigReport, ConfigError> {
+        Err(ConfigError::unavailable())
+    }
+
+    fn config_validate(
+        &self,
+        _root: &Path,
+        _target: &ConfigTarget,
+        _patch: &ConfigPatch,
+    ) -> Result<ConfigValidation, ConfigError> {
+        Err(ConfigError::unavailable())
+    }
+
+    fn config_apply(
+        &self,
+        _root: &Path,
+        _target: &ConfigTarget,
+        _patch: &ConfigPatch,
+    ) -> Result<ConfigSaved, ConfigError> {
+        Err(ConfigError::unavailable())
+    }
+
+    fn config_restart(
+        &self,
+        root: &Path,
+        target: &ConfigTarget,
+    ) -> Result<ActionOutcome, SourceError> {
+        self.act(root, false, target.branch.as_deref(), Action::Restart)
+    }
+
+    fn config_init_command(&self) -> Result<crate::terminal::CommandSpec, String> {
+        Err("The Hack CLI is unavailable.".into())
+    }
+
     /// Preview a catalog edit, or save the exact revision previously previewed.
     ///
     /// # Errors
@@ -2251,6 +2293,73 @@ impl Source for LiveSource {
         Self::read_native_ps(&Self::native_runner(&self.runner.fixed()), repo_root)
     }
 
+    fn config_show(&self, root: &Path, target: &ConfigTarget) -> Result<ConfigReport, ConfigError> {
+        if root.is_absolute() && root.is_dir() && !cli_selects_exactly(root) {
+            return Ok(ConfigReport::default());
+        }
+        let root = trusted_root(root).map_err(|_| ConfigError::unavailable())?;
+        run_config(self.runner_for(false), &root, target, "show", None)
+    }
+
+    fn config_validate(
+        &self,
+        root: &Path,
+        target: &ConfigTarget,
+        patch: &ConfigPatch,
+    ) -> Result<ConfigValidation, ConfigError> {
+        let root = env_root(root).ok_or_else(ConfigError::unavailable)?;
+        run_config(
+            self.runner_for(false),
+            &root,
+            target,
+            "validate",
+            Some(patch),
+        )
+    }
+
+    fn config_apply(
+        &self,
+        root: &Path,
+        target: &ConfigTarget,
+        patch: &ConfigPatch,
+    ) -> Result<ConfigSaved, ConfigError> {
+        let root = env_root(root).ok_or_else(ConfigError::unavailable)?;
+        run_config(self.runner_for(false), &root, target, "apply", Some(patch))
+    }
+
+    fn config_restart(
+        &self,
+        root: &Path,
+        target: &ConfigTarget,
+    ) -> Result<ActionOutcome, SourceError> {
+        let Some(overlay) = target.overlay.as_deref() else {
+            return self.act(root, false, target.branch.as_deref(), Action::Restart);
+        };
+        let branch = target.branch.as_deref().map(validate_branch).transpose()?;
+        let root = trusted_root(root)?;
+        let mut args = with_branch(Action::Restart.cli_args(), branch);
+        args.extend(["--env", overlay]);
+        Ok(ActionOutcome::Lifecycle(
+            self.runner_for(false)
+                .run_json_to_completion(&args, Some(&root))?,
+        ))
+    }
+
+    fn config_init_command(&self) -> Result<crate::terminal::CommandSpec, String> {
+        let runner = self.runner_for(false);
+        let program = runner
+            .resolve_program()
+            .map_err(|_| "The Hack CLI is unavailable.")?;
+        let context = crate::execution::ExecutionContext::capture(&runner)?;
+        context.bind(&crate::terminal::CommandSpec {
+            program: program
+                .to_str()
+                .ok_or("The Hack CLI path is unavailable.")?
+                .into(),
+            args: vec!["init".into()],
+        })
+    }
+
     fn copies(&self, root: &Path, native: bool) -> Result<CopiesReport, CopiesError> {
         let root = trusted_root(root).map_err(|error| CopiesError {
             reason: describe_error(&error),
@@ -2485,6 +2594,28 @@ pub fn parse_log_tail(out: &str, err: &str, code: Option<i32>) -> Result<Vec<Log
 /// # Errors
 /// `E_APP_UNTRUSTED_ROOT` with the reason.
 pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
+    trusted_checkout(root, true)
+}
+
+/// Init starts from a checkout before a Hack project marker exists.
+pub fn trusted_init_root(root: &Path) -> Result<PathBuf, SourceError> {
+    let root = trusted_checkout(root, false)?;
+    let repo = root
+        .ancestors()
+        .find(|ancestor| ancestor.join("package.json").exists() || ancestor.join(".git").exists());
+    if repo.is_some_and(|repo| repo != root) {
+        return Err(SourceError::Cli {
+            code: "E_APP_UNTRUSTED_ROOT".into(),
+            message:
+                "Hack init would configure a parent repository. Select that repository to continue."
+                    .into(),
+            failed: vec![],
+        });
+    }
+    Ok(root)
+}
+
+fn trusted_checkout(root: &Path, require_config: bool) -> Result<PathBuf, SourceError> {
     use std::os::unix::fs::MetadataExt;
     let refuse = |why: String| SourceError::Cli {
         code: "E_APP_UNTRUSTED_ROOT".into(),
@@ -2538,7 +2669,7 @@ pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
         Ok(())
     };
     // The CLI must select exactly this root (see `discoverProjectInputs`).
-    if !cli_selects_exactly(&real) {
+    if require_config && !cli_selects_exactly(&real) {
         return Err(refuse(
             "the project folder is not the project the CLI would select from it".into(),
         ));
@@ -5063,6 +5194,25 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
     }
 
     #[test]
+    fn init_checkout_cannot_resolve_to_a_parent_repository() {
+        if !host_temp_is_trustworthy() {
+            return;
+        }
+        let root = base("init-root");
+        let checkout = root.join("checkout");
+        let child = checkout.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(checkout.join("package.json"), "{}").unwrap();
+        assert!(untrusted(trusted_init_root(&child)));
+        assert_eq!(
+            trusted_init_root(&checkout).unwrap(),
+            checkout.canonicalize().unwrap()
+        );
+        assert!(untrusted(trusted_root(&checkout)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn trusted_root_refuses_unsafe_or_ambiguous_roots() {
         use std::os::unix::fs::PermissionsExt;
         let set = |p: &Path, m: u32| {
@@ -5675,7 +5825,7 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
         let hack = dir.join("hack");
         crate::test_support::script(
             &hack,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HACK_HOME/argv\"\nif [ \"$1\" = logs ]; then echo '{\"type\":\"start\"}'; echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 0; fi\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"url\":\"https://fix-login.storefront.hack\",\"services\":{\"failed\":[]}}}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HACK_HOME/argv\"\nprintf '%s\\n' \"$HACK_RUNTIME_BACKEND\" > \"$HACK_HOME/backend\"\nif [ \"$1\" = logs ]; then echo '{\"type\":\"start\"}'; echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 0; fi\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"url\":\"https://fix-login.storefront.hack\",\"services\":{\"failed\":[]}}}'\n",
         );
         hack
     }
@@ -5745,6 +5895,29 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
             }
             src.act(&p, false, None, Action::Start).unwrap();
             assert!(!argv(&b).iter().any(|a| a == "--branch"));
+            let native = LiveSource::new(
+                fixture_runner(&hack).with_env("HACK_RUNTIME_BACKEND", "native"),
+                None,
+            );
+            for overlay in [Some("qa"), Some("default"), None] {
+                native
+                    .config_restart(
+                        &p,
+                        &ConfigTarget {
+                            branch: Some("fix-login".into()),
+                            overlay: overlay.map(str::to_owned),
+                        },
+                    )
+                    .unwrap();
+                let got = argv(&b);
+                assert_eq!(got[..3], ["restart", "--branch", "fix-login"]);
+                let passed = got.windows(2).find(|args| args[0] == "--env");
+                assert_eq!(passed.map(|args| args[1].as_str()), overlay);
+                assert_eq!(
+                    std::fs::read_to_string(b.join("backend")).unwrap().trim(),
+                    "compose"
+                );
+            }
         } else {
             eprintln!("skipped actions: temp dir ancestors are not private on this host");
         }

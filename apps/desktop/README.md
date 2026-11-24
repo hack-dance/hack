@@ -825,6 +825,23 @@ Screenshots: [overlays, running](screenshots/env-running-light.png),
 [required missing](screenshots/env-missing-light.png),
 [long](screenshots/env-long-dark.png).
 
+## Project Config
+
+Select Config on a Compose project. Map shows how its routes, dependencies
+and env values resolve. Viewing as and Env select one checkout and overlay.
+Edit, Env layers and Source share a pending patch. Save validates and writes
+the selected files. A file changed by another editor shows Reload in the
+save dock. Route changes offer a restart and env-only changes apply at the
+next start. The Worktrees toggles show the effective branch and inheritance
+settings, including camelCase keys in existing project files.
+To override an inherited Env layers value with an empty string, open the
+target cell, clear the input, and press Enter.
+
+The native screenshot harness uses synthetic projects and values. Build with
+`bash scripts/build.sh --features screenshots`, then run
+`target/debug/hack-desktop --config-screenshots <dir>` for the light and dark
+Config frames.
+
 ## Process-cleanup tests
 
 The supported desktop test command uses the repository-pinned nextest release

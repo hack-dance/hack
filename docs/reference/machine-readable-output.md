@@ -83,9 +83,11 @@ success behavior stays covered by command-specific suites.
 | `hack commands read --json` | NDJSON events / terminal event, not a single envelope |
 | `hack commands show --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack config adopt --json` | Legacy bare object (no `data` envelope) |
+| `hack config apply --json` | Envelope; versioned `data.schema`: `hack.config.v1` |
 | `hack config import --json` | Legacy bare object (no `data` envelope) |
 | `hack config plan --json` | Native compiler protocol object (`transport_version`, `ok`, result / diagnostics) |
-| `hack config validate --json` | Native compiler protocol object (`transport_version`, `ok`, result / diagnostics) |
+| `hack config show --json` | Envelope; versioned `data.schema`: `hack.config.v1` |
+| `hack config validate --json` | Envelope with `data.schema: hack.config.v1` for a Compose patch on stdin when `--file`, `--profile` and `--domain` are omitted. Otherwise a file validation object with `transport_version` |
 | `hack daemon install --json` | Envelope; versioned `data.schema`: `hack.daemon-install.v1` |
 | `hack daemon restart --json` | Envelope; versioned `data.schema`: `hack.daemon-restart.v1` |
 | `hack daemon start --json` | Envelope; versioned `data.schema`: `hack.daemon-start.v1` |
@@ -180,6 +182,80 @@ success behavior stays covered by command-specific suites.
 | `hack update --json --check --observe` | Envelope; `data.schema: hack.update-check.v1` |
 | `hack doctor --json --machine` | Envelope; `data.schema: hack.doctor.machine.v1` |
 <!-- json-inventory:end -->
+
+## Compose Config patches
+
+`hack config show --json [--path <checkout>] [--branch <branch>] [--env <overlay>]`
+reads one Compose checkout and overlay without starting a runtime. Omit
+`--env` to use the configured default. Use `--env default` for base layers.
+A branch name matching a linked worktree selects that checkout. A branch
+instance without its own worktree resolves against the requested checkout.
+
+The payload contains `project`, `services`, `env`, `layers`, `issues` and
+`state` (`ready`, `invalid` or `missing`). Every layer has an `id`, path,
+kind, ownership, writability and a revision. The base files use IDs `1`
+through `6`. Named env overlays use IDs such as `3:qa`, `4:qa` and
+`5:qa`. Route `from` and env `winning` fields reference those IDs.
+Env rows identify the stored scope. To resolve a service, use layers in
+the reported order and apply global before the service within each layer.
+Explicit unsets remove earlier values. The host scope applies only to host
+commands. Secure entries are emitted as markers. Source can be redacted
+or withheld. Use the Env layers grid or the existing env writer to edit
+env values.
+
+The default overlay uses the same names as `--env`. Use `default` to select
+base layers. `default_overlay` reports the resolved project default, including
+legacy keys, independently of the selected `overlay`. It is `"default"` for
+base layers and `"[redacted]"` when the authored value contains credentials.
+A missing checkout or malformed project settings report `null`. A failure
+to read the file returns an `E_PERMISSION` error envelope.
+When an existing env layer or legacy dotenv filename was derived from a private
+setting, move or rename that file before replacing the setting in Config.
+If a legacy encrypted store could still supply the overlay, migrate the env
+before replacing the setting.
+During implicit migration, affected private overlays use `3:[redacted]` or
+`5:[redacted]` in `changed`. Migration diagnostics redact known private overlay
+names.
+Config honors the env migration journal for the selected checkout and any
+inherited layers. On the first env write to a project
+with a legacy contract, apply migrates that contract through the same
+path as `hack env add`. Validation checks the patch against declared legacy
+dotenv inputs and project settings without decrypting the legacy store. Apply
+checks the complete migration and records the patch's file revisions in the
+migration journal so rollback can restore the original files and remove newly
+created layers.
+
+Pass the same checkout and overlay flags to `config validate --json` and
+`config apply --json`. Omit `--file`, `--profile` and `--domain` when validating
+a patch. Read revisions from a fresh `show` and send the patch on stdin.
+Each revision identifies the resolved checkout, layer file and its
+contents or absence. The minimum base includes every edited layer. Additional
+revisions can protect inputs the client used to prepare the patch.
+
+```json
+{
+  "base": { "1": "<revision from config show>" },
+  "changes": [
+    { "layer": "1", "kind": "project", "path": "internal.dns", "value": true }
+  ]
+}
+```
+
+Changes can set a project field, a simple route (`service`, `sites`,
+`port`), a service field (`service`, `field`, `value`), an env entry
+(`scope`, `key`, `value`, optional `secret`), or replace editable
+`source` (`text`). Use a null env value to unset the entry through the
+same writer as `hack env unset`. Secrets submitted by clients must use
+`secret: true` and travel on stdin.
+
+Validation returns `valid`, `issues` and safe source `previews`. An issue
+has a layer ID, path segments, a one-based line when available, a code and
+message. Apply rejects invalid changes and returns `E_CONFLICT` for a stale
+revision or `E_LAYER_READ_ONLY` for an inherited or generated layer.
+Files are committed individually. If a later write fails after an earlier
+one committed, `error.detail.changed` identifies the committed layers.
+Reload before retrying. A successful apply reports changed layers and
+whether to offer a restart. The caller starts or restarts services separately.
 
 ## Additive fields
 

@@ -23,6 +23,7 @@ mod changes_view;
 mod clipboard;
 #[cfg(hack_terminal)]
 mod command_control;
+mod config_view;
 mod copies_view;
 mod doctor_view;
 #[cfg(hack_terminal)]
@@ -61,6 +62,7 @@ pub(crate) struct Args {
     pub fixture: Option<Fixture>,
     pub logs_fixture: Option<hack_desktop_core::logs::fixtures::LogsFixture>,
     pub theme: Option<ThemeMode>,
+    pub config_screenshots: Option<std::path::PathBuf>,
     pub screenshots: Option<std::path::PathBuf>,
     pub service_screenshots: Option<std::path::PathBuf>,
     pub command_screenshots: Option<std::path::PathBuf>,
@@ -78,7 +80,7 @@ pub(crate) struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir> | --command-screenshots <dir>] [--drive <steps> [--hidden]]"
+        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir> | --command-screenshots <dir> | --config-screenshots <dir>] [--drive <steps> [--hidden]]"
     );
     std::process::exit(2)
 }
@@ -89,6 +91,7 @@ fn parse_args() -> Args {
         logs_fixture: None,
         theme: None,
         screenshots: None,
+        config_screenshots: None,
         service_screenshots: None,
         command_screenshots: None,
         sequence: None,
@@ -143,6 +146,9 @@ fn parse_args() -> Args {
                     Some("dark") => ThemeMode::Dark,
                     _ => usage(),
                 });
+            }
+            "--config-screenshots" => {
+                a.config_screenshots = Some(it.next().unwrap_or_else(|| usage()).into())
             }
             "--screenshots" => a.screenshots = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--service-screenshots" => {
@@ -225,6 +231,11 @@ fn main() {
         std::process::exit(2);
     }
     #[cfg(feature = "screenshots")]
+    if let Some(dir) = &args.config_screenshots {
+        config_view::screenshots::run(dir);
+        return;
+    }
+    #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.sequence {
         screenshots::sequence(dir);
         return;
@@ -253,14 +264,18 @@ fn main() {
         }
     }
     #[cfg(not(feature = "screenshots"))]
-    if args.screenshots.is_some() || args.sequence.is_some() || args.service_screenshots.is_some() {
-        eprintln!("--screenshots and --sequence need a build with --features screenshots");
+    if args.screenshots.is_some()
+        || args.sequence.is_some()
+        || args.config_screenshots.is_some()
+        || args.service_screenshots.is_some()
+    {
+        eprintln!("Screenshot options need a build with --features screenshots");
         std::process::exit(2);
     }
     gpui_kit::application()
         .with_assets(hack_desktop_ui::icons::Assets)
         .run(move |cx| {
-            theme::init(cx);
+            hack_desktop_ui::tokens::init(cx);
             #[cfg(all(feature = "screenshots", target_os = "linux"))]
             if args.fixture.is_some() || args.logs_fixture.is_some() {
                 theme::capture_fonts(cx);

@@ -600,9 +600,12 @@ function isLocalInheritanceDisabledByEnv(): boolean {
 export async function resolvePrimaryLocalProjectDir(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
+  readonly inheritLocal?: boolean;
 }): Promise<string | null> {
   if (
-    !shouldInheritPrimaryLocalInputs({ inheritLocal: true }) ||
+    !shouldInheritPrimaryLocalInputs({
+      inheritLocal: opts.inheritLocal ?? true,
+    }) ||
     isLocalInheritanceDisabledByEnv()
   ) {
     return null;
@@ -621,15 +624,17 @@ export async function resolvePrimaryLocalProjectDir(opts: {
   if (!marker?.isFile()) {
     return null;
   }
-  const cfg = await readProjectConfig({
-    ...opts,
-    projectDirName: name,
-    composeFile: resolve(opts.projectDir, "docker-compose.yml"),
-    envFile: resolve(opts.projectDir, ".env"),
-    configFile: resolve(opts.projectDir, "hack.config.json"),
-  });
-  if (cfg.worktree?.inheritLocal === false) {
-    return null;
+  if (opts.inheritLocal === undefined) {
+    const cfg = await readProjectConfig({
+      ...opts,
+      projectDirName: name,
+      composeFile: resolve(opts.projectDir, "docker-compose.yml"),
+      envFile: resolve(opts.projectDir, ".env"),
+      configFile: resolve(opts.projectDir, "hack.config.json"),
+    });
+    if (cfg.worktree?.inheritLocal === false) {
+      return null;
+    }
   }
   const primaryRoot = await resolveVerifiedPrimaryWorktreeRoot({
     projectRoot: opts.projectRoot,
@@ -699,6 +704,7 @@ async function assertProjectConfigReadable(opts: {
 export async function hasPrimaryLocalInputs(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
+  readonly inheritLocal?: boolean;
 }): Promise<boolean> {
   const primaryDir = await resolvePrimaryLocalProjectDir(opts);
   if (primaryDir === null) {

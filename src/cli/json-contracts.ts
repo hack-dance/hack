@@ -1,3 +1,5 @@
+import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
+
 /** Canonical --json inventory. New command paths require an explicit shape decision. */
 export const JSON_COMMAND_SHAPES = {
   "global install": "schema-envelope",
@@ -56,7 +58,9 @@ export const JSON_COMMAND_SHAPES = {
   "env backend status": "legacy-object",
   "env backend use": "legacy-object",
   "host ps": "legacy-object",
-  "config validate": "transport",
+  "config show": "schema-envelope",
+  "config apply": "schema-envelope",
+  "config validate": "config-validation",
   "config plan": "transport",
   "config import": "legacy-object",
   "config adopt": "legacy-object",
@@ -118,6 +122,8 @@ export const SCHEMA_JSON_VARIANTS = [
   { command: "service add", flags: [], schema: "hack.service-add.v1" },
   { command: "env overlay add", flags: [], schema: "hack.env-overlays.v1" },
   { command: "env overlay list", flags: [], schema: "hack.env-overlays.v1" },
+  { command: "config show", flags: [], schema: MACHINE_SCHEMAS.config },
+  { command: "config apply", flags: [], schema: MACHINE_SCHEMAS.config },
   {
     command: "projects",
     flags: ["--observe"],

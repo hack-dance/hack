@@ -34,6 +34,10 @@ fn main() {
             "pretty_logs_keep_the_clis_colours_and_styles",
             pretty_logs_keep_the_clis_colours_and_styles,
         ),
+        (
+            "selection_background_covers_find_highlights",
+            selection_background_covers_find_highlights,
+        ),
     ]);
 }
 
@@ -114,10 +118,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{TempHome, sh_source};
+use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AppContext as _, Bounds, HeadlessAppContext, WindowBounds, WindowOptions, px, size,
 };
+use hack_desktop_term::emulator::TermTheme;
 use hack_desktop_term::glyphs::{self, BundledSymbols};
 use hack_desktop_term::stream::StreamSource;
 use hack_desktop_term::view::{GridMetrics, TermFont, TerminalView};
@@ -284,6 +290,16 @@ fn capture_sized(
     dump: &str,
     (width, height): (f32, f32),
 ) -> Option<Capture> {
+    capture_with_view(text, font, dump, (width, height), |_, _| {})
+}
+
+fn capture_with_view(
+    text: &str,
+    font: Option<TermFont>,
+    dump: &str,
+    (width, height): (f32, f32),
+    prepare: impl FnOnce(&mut TerminalView, &mut gpui_kit::Context<TerminalView>),
+) -> Option<Capture> {
     let required = std::env::var_os("HACK_TERM_REQUIRE_RENDERER").is_some_and(|v| v == "1");
     let home = TempHome::new();
     let log = home.path().join("glyphs.log");
@@ -323,6 +339,7 @@ fn capture_sized(
     cx.update(|cx| {
         view.update(cx, |v, cx| {
             v.settle(Duration::from_millis(100), Duration::from_secs(20), cx);
+            prepare(v, cx);
         });
     });
     cx.update_window(window, |_, w, cx| w.render_frame(cx))
@@ -357,6 +374,37 @@ fn capture_sized(
         fallback,
         frame,
     })
+}
+
+fn selection_background_covers_find_highlights() {
+    let Some(shot) = capture_with_view(
+        " MMMM  MMMM\n",
+        None,
+        "selection-and-find.png",
+        (560., 120.),
+        |view, cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+            assert_eq!(view.search("MMMM", cx).total, 2);
+            view.emulator().select_start(1, 0);
+            view.emulator().select_to(4, 0);
+            cx.notify();
+        },
+    ) else {
+        return;
+    };
+    assert_eq!(shot.frame.matches.len(), 2, "both matches are visible");
+    assert_eq!(shot.frame.selection[0], Some((1, 4)));
+    let color = TermTheme::DARK.selection_bg;
+    let selected = [color.r, color.g, color.b];
+    let overlap = shot.cells(1, 0, 4).all_ink(selected);
+    assert!(
+        (0.01..0.5).contains(&overlap),
+        "selected text should have visible ink on the selection background ({overlap})"
+    );
+    assert!(
+        shot.cells(7, 0, 4).all_ink(shot.background()) > 0.8,
+        "the unselected match should retain its Find highlight"
+    );
 }
 
 /// How a sample is expected to be drawn.

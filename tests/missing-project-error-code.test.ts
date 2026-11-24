@@ -40,6 +40,14 @@ type Expectation =
   | { readonly kind: "line"; readonly argv: Argv }
   /** The target-inspect E_PROJECT_NOT_FOUND envelope, which adds a detail. */
   | { readonly kind: "target-envelope"; readonly argv: Argv }
+  /** A command with its own JSON result for a missing project. */
+  | {
+      readonly kind: "json-result";
+      readonly argv: Argv;
+      readonly code: 0 | 1;
+      readonly result: unknown;
+      readonly stdin?: string;
+    }
   /** A documented exception: exact stdout and stderr. */
   | {
       readonly kind: "exception";
@@ -142,6 +150,46 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
   "config set": {
     kind: "line",
     argv: ["config", "set", "name", "x", "-p", "DIR"],
+  },
+  "config show": {
+    kind: "json-result",
+    argv: ["config", "show", "-p", "DIR", "--json"],
+    code: 0,
+    result: {
+      ok: true,
+      data: {
+        schema: "hack.config.v1",
+        state: "missing",
+        project: {},
+        services: [],
+        env: [],
+        issues: [],
+        layers: [],
+        branch: null,
+        overlay: null,
+        default_overlay: null,
+        overlays: [],
+        checkout: null,
+        writable: false,
+      },
+    },
+  },
+  "config apply": {
+    kind: "json-result",
+    argv: ["config", "apply", "-p", "DIR", "--json"],
+    code: 1,
+    stdin: JSON.stringify({
+      base: { "1": "0".repeat(64) },
+      changes: [{ layer: "1", kind: "project", path: "name", value: "x" }],
+    }),
+    result: {
+      ok: false,
+      error: {
+        code: "E_CONFLICT",
+        message:
+          "The selected checkout is no longer available. Reload before saving.",
+      },
+    },
   },
   "env list": {
     kind: "envelope",
@@ -327,6 +375,7 @@ async function emptyProject() {
 async function cli(opts: {
   readonly root: string;
   readonly args: readonly string[];
+  readonly stdin?: string;
   /** Working directory; defaults to the fixture root. */
   readonly cwd?: string;
 }) {
@@ -338,7 +387,7 @@ async function cli(opts: {
         root: opts.root,
         env: { HACK_NO_INTERACTIVE: "1", HACK_LOGGER: "console" },
       }),
-      stdin: "ignore",
+      stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]),
       stdout: "pipe",
       stderr: "pipe",
       timeout: 20_000,
@@ -367,10 +416,18 @@ for (const [name, expectation] of Object.entries(COMMANDS)) {
       const result = await cli({
         root,
         args: expectation.argv.map((token) => (token === "DIR" ? dir : token)),
+        stdin:
+          expectation.kind === "json-result" ? expectation.stdin : undefined,
       });
-      expect(result.code).toBe(1);
+      expect(result.code).toBe(
+        expectation.kind === "json-result" ? expectation.code : 1
+      );
       expect(result.stderr).not.toMatch(STACK_FRAME);
       switch (expectation.kind) {
+        case "json-result":
+          expect(JSON.parse(result.stdout)).toEqual(expectation.result);
+          expect(result.stderr).toBe("");
+          break;
         case "target-envelope":
           expect(JSON.parse(result.stdout)).toMatchObject({
             ok: false,

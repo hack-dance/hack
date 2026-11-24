@@ -216,7 +216,14 @@ export async function resolveEffectiveProjectName(
   ctx: ProjectContext
 ): Promise<string> {
   const cfg = await readProjectConfig(ctx);
-  const derived = defaultProjectSlugFromPath(ctx.projectRoot);
+  return projectNameForConfig(cfg, ctx.projectRoot);
+}
+
+export function projectNameForConfig(
+  cfg: ProjectConfig,
+  projectRoot: string
+): string {
+  const derived = defaultProjectSlugFromPath(projectRoot);
   const raw = (cfg.name ?? derived).trim();
   return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
 }
@@ -225,19 +232,30 @@ export async function readProjectDevHost(
   ctx: ProjectContext
 ): Promise<string | null> {
   const cfg = await readProjectConfig(ctx);
-  if (cfg.devHost) {
-    return cfg.devHost;
-  }
+  return cfg.devHost ?? (await readLegacyProjectDevHost(ctx));
+}
 
+export async function readLegacyProjectDevHost(
+  ctx: ProjectContext
+): Promise<string | null> {
   // Legacy fallback: older scaffolds wrote DEV_HOST into `.hack/.env`.
   const envText = await readTextFile(ctx.envFile);
-  if (!envText) {
+  return legacyProjectDevHost(envText);
+}
+
+export function legacyProjectDevHost(envText: string | null): string | null {
+  if (envText === null) {
     return null;
   }
 
   const env = parseDotEnv(envText);
   const host = env.DEV_HOST;
   return typeof host === "string" && host.length > 0 ? host : null;
+}
+
+/** Routing namespace used by base instances without a configured hostname. */
+export function defaultProjectDevHost(projectRoot: string): string {
+  return `${defaultProjectSlugFromPath(projectRoot)}.${DEFAULT_PROJECT_TLD}`;
 }
 
 export async function readProjectDefaultEnvConfig(opts: {
@@ -251,7 +269,17 @@ export async function readProjectDefaultEnvConfig(opts: {
     envFile: resolve(opts.projectDir, PROJECT_ENV_FILENAME),
     configFile: resolve(opts.projectDir, PROJECT_CONFIG_FILENAME),
   });
-  return config.env?.defaultOverlay ?? config.defaultEnvConfig ?? null;
+  return resolveProjectDefaultEnvOverlay(config);
+}
+
+export function resolveProjectDefaultEnvOverlay(
+  config: ProjectConfig
+): string | null {
+  return (
+    parseEnvConfigSelection(
+      config.env?.defaultOverlay ?? config.defaultEnvConfig
+    ) ?? null
+  );
 }
 
 export interface ProjectConfig {
@@ -690,6 +718,23 @@ function parseProjectConfigToml(opts: {
   return parseProjectConfigRecord(parsed, opts.path);
 }
 
+/** Return the authored overlay settings before normalization. */
+export function readAuthoredProjectOverlaySettings(
+  value: Record<string, unknown>
+) {
+  const envConfig = getRecord(value, "env");
+  return {
+    legacy: [
+      getString(value, "defaultEnvConfig"),
+      getString(value, "default_env_config"),
+    ],
+    current: [
+      envConfig ? getString(envConfig, "defaultOverlay") : undefined,
+      envConfig ? getString(envConfig, "default_overlay") : undefined,
+    ],
+  } as const;
+}
+
 /** Parse an already bounded configuration observation without additional file reads. */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Project config parsing keeps schema migration and legacy compatibility explicit in one parser.
 export function parseProjectConfigRecord(
@@ -715,13 +760,9 @@ export function parseProjectConfigRecord(
     : undefined;
   const name = getString(value, "name");
   const devHost = getString(value, "dev_host");
-  const envConfig = getRecord(value, "env");
-  const defaultEnvConfigRaw =
-    getString(value, "defaultEnvConfig") ??
-    getString(value, "default_env_config");
-  const envDefaultOverlayRaw =
-    (envConfig ? getString(envConfig, "defaultOverlay") : undefined) ??
-    (envConfig ? getString(envConfig, "default_overlay") : undefined);
+  const { legacy, current } = readAuthoredProjectOverlaySettings(value);
+  const defaultEnvConfigRaw = legacy[0] ?? legacy[1];
+  const envDefaultOverlayRaw = current[0] ?? current[1];
   const logs = parseLogsConfig(getRecord(value, "logs"));
   const oauth = parseOauthConfig(getRecord(value, "oauth"));
   const parsedOpen = parseOpenConfig(getRecord(value, "open"));

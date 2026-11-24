@@ -623,6 +623,9 @@ impl HackApp {
             },
         );
         self.open_tab(&d, NewTab::Logs, window, cx);
+        if matches!(self.tab, 1 | crate::config_view::TAB) {
+            self.set_state(&d.key, PanelState::Collapsed, cx);
+        }
     }
 
     /// Reopen Logs after a target change, or follow once a copy starts.
@@ -662,6 +665,12 @@ impl HackApp {
                 GhosttyLook::load(&ConfigEnv::from_process(), cx.theme().is_dark())
             })
             .clone()
+    }
+
+    /// Keep the native evidence independent of machine-local Ghostty settings.
+    #[cfg(feature = "screenshots")]
+    pub(crate) fn use_default_terminal_look(&mut self) {
+        self.panels.look = Some(GhosttyLook::default());
     }
 
     fn panel_logs_follow(&self, detail: &DetailView) -> bool {
@@ -1061,6 +1070,12 @@ impl HackApp {
         }
     }
 
+    pub(crate) fn collapse_detail_terminal(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.model.selected_key() {
+            self.set_state(&key, PanelState::Collapsed, cx);
+        }
+    }
+
     pub(crate) fn toggle_visible_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_service().is_some() && self.service_pane.tab != ServiceTab::Terminal {
             self.set_service_tab(ServiceTab::Terminal, window, cx);
@@ -1359,7 +1374,7 @@ impl HackApp {
         ui: &Ui,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut t = TermPalette::fallback();
+        let mut t = TermPalette::for_mode(ui.p.mode);
         if docked {
             t.strip = ui.p.chrome;
             t.bg = ui.p.surface;
@@ -1765,12 +1780,15 @@ impl HackApp {
             return div().into_any_element();
         };
         let state = panel.state;
+        if matches!(self.tab, 1 | crate::config_view::TAB) && state == PanelState::Collapsed {
+            return div().into_any_element();
+        }
         let sessions = panel.sessions.clone();
         let strip = self.strip(d, panel, false, ui, cx).into_any_element();
         let surface = div()
             .flex_1()
             .min_h_0()
-            .bg(TermPalette::fallback().bg)
+            .bg(TermPalette::for_mode(ui.p.mode).bg)
             .child(sessions)
             .into_any_element();
         let base = div().flex().flex_col().min_h_0().relative();

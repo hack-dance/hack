@@ -50,6 +50,11 @@ in the Stats charts while the app is open.
 When the CLI does not report something, the app shows a dash and says why. It
 does not invent a value.
 
+The `hackd` and **Routing and DNS** sidebar indicators follow the checks shown
+in Setup. When a command finishes, the indicator updates with the result of the
+fresh check. Dark mode uses Merino Dark. Your Ghostty configuration can override
+the embedded terminal's look.
+
 The app samples running Compose services every five seconds, including while
 you view another pane. For a stopped service, its recent samples age out of
 the chart. Network rates need two samples with the same known container

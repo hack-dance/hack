@@ -47,6 +47,7 @@ pub(crate) struct CommandCompletion {
 }
 
 type OnExit = Box<dyn FnOnce(&mut HackApp, CommandCompletion, &mut Context<HackApp>)>;
+type ResolveDirectory = fn(&CommandControl, &CommandSpec) -> Result<Option<PathBuf>, String>;
 
 #[derive(Default)]
 pub(crate) struct Drawer {
@@ -74,6 +75,7 @@ struct Run {
     id: CommandRunId,
     props: CommandControl,
     spec: CommandSpec,
+    resolve_directory: ResolveDirectory,
     phase: Phase,
     waiting_for_password: bool,
     fallback: Option<String>,
@@ -138,6 +140,16 @@ fn command_directory(
             .map_err(|e| format!("Could not use the checked project directory: {e:?}"));
     }
     Ok(checked_home(spec).map(Path::to_owned))
+}
+
+fn init_directory(props: &CommandControl, _: &CommandSpec) -> Result<Option<PathBuf>, String> {
+    let root = props.cwd.as_deref().ok_or("The checkout is unavailable.")?;
+    hack_desktop_core::source::trusted_init_root(root)
+        .map(Some)
+        .map_err(|error| match error {
+            hack_desktop_core::source::SourceError::Cli { message, .. } => message,
+            _ => "The checkout is unavailable.".into(),
+        })
 }
 
 fn command_options(spec: &CommandSpec, cwd: Option<PathBuf>) -> Result<PtyOptions, String> {
@@ -220,13 +232,26 @@ impl HackApp {
         if !self.live {
             return false;
         }
-        self.start_drawer_command(props, Box::new(on_exit), window, cx)
+        self.start_drawer_command(props, Box::new(on_exit), command_directory, window, cx)
+    }
+
+    pub(crate) fn run_init_in_drawer(
+        &mut self,
+        props: CommandControl,
+        on_exit: impl FnOnce(&mut Self, CommandCompletion, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.live {
+            self.start_drawer_command(props, Box::new(on_exit), init_directory, window, cx);
+        }
     }
 
     fn start_drawer_command(
         &mut self,
         props: CommandControl,
         on_exit: OnExit,
+        resolve_directory: ResolveDirectory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -238,7 +263,7 @@ impl HackApp {
         };
         self.user_navigated();
         let spec = spec.clone();
-        let directory = command_directory(&props, &spec);
+        let directory = resolve_directory(&props, &spec);
         let core = directory
             .clone()
             .and_then(|cwd| command_core(&props, &spec, cwd));
@@ -252,6 +277,7 @@ impl HackApp {
             id,
             props,
             spec,
+            resolve_directory,
             phase: Phase::Running,
             waiting_for_password: false,
             fallback: None,
@@ -557,6 +583,7 @@ impl HackApp {
         let id = run.id;
         let spec = run.spec.clone();
         let props = run.props.clone();
+        let resolve_directory = run.resolve_directory;
         cx.spawn(async move |app, cx| {
             let result = cx
                 .background_executor()
@@ -566,7 +593,7 @@ impl HackApp {
                     } else {
                         Platform::Linux
                     };
-                    let cwd = command_directory(&props, &spec)?;
+                    let cwd = resolve_directory(&props, &spec)?;
                     Script::create_in(&std::env::temp_dir(), &spec, cwd.as_deref())?.open(
                         platform,
                         linux_adapter().as_deref(),
@@ -758,7 +785,7 @@ pub(crate) fn render_with_run(
                 .px(px(8.))
                 .rounded(radius::PANEL)
                 .hairline(p.border)
-                .when(running, |r| r.bg(p.surface_1))
+                .when(running, |r| r.bg(p.attention))
                 .child(command)
         })
         .child(run)
@@ -1128,7 +1155,7 @@ fn command_menu(
         .shadow_lg()
         .rounded(radius::PANEL)
         .hairline(p.border)
-        .bg(p.surface_1)
+        .bg(p.raised)
         .type_step(text::SMALL)
         .on_mouse_down_out(cx.listener(|app, _, _, cx| {
             if app.panels.command.menu {
@@ -1174,7 +1201,7 @@ fn command_menu(
 
 #[cfg(feature = "screenshots")]
 #[path = "command_screenshots.rs"]
-mod screenshots;
+pub(crate) mod screenshots;
 #[cfg(feature = "screenshots")]
 pub(crate) use screenshots::capture;
 

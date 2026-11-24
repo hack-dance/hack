@@ -6,7 +6,7 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
-import { optEnv, optJson, optPath } from "../cli/options.ts";
+import { optBranch, optEnv, optJson, optPath } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
   NATIVE_GRAPH_ADMISSION_CODE,
@@ -23,13 +23,14 @@ import {
 import { validateNativeProject } from "../lib/native-project-validation.ts";
 import { readProjectConfigInDirectory } from "../lib/project.ts";
 import { discoverProjectInputs } from "../lib/project-input-selection.ts";
+import { validateConfigEditorStdin } from "./config-editor.ts";
 
 const spec = defineCommand({
   name: "validate",
   summary: "Validate project configuration without starting workloads",
   group: "Project",
   description:
-    "Uses the matching bundled Rust compiler. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.",
+    "Reads a Compose config patch on stdin with --json when --file, --profile and --domain are omitted. Otherwise checks the on-disk configuration, using the matching bundled Rust compiler for native projects. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode decrypts env secrets, writes state, or starts workloads.",
   options: [
     defineOption({
       name: "file",
@@ -54,6 +55,7 @@ const spec = defineCommand({
       description: "Select the generated native routing domain suffix",
     } as const),
     optPath,
+    optBranch,
     optEnv,
     optJson,
   ],
@@ -65,6 +67,15 @@ export const configValidateCommand = withHandler(
   spec,
   async ({ ctx, args }) => {
     const file = args.options.file;
+    const patch = await validatePatchWhenRequested(ctx.cwd, args.options);
+    if (patch !== null) {
+      return patch;
+    }
+    if (args.options.branch !== undefined) {
+      throw new CliUsageError(
+        "--branch requires a JSON config patch on stdin."
+      );
+    }
     if (file !== undefined && !file.trim()) {
       throw new CliUsageError("Native file paths must not be empty.");
     }
@@ -155,6 +166,29 @@ export const configValidateCommand = withHandler(
     }
   }
 );
+
+async function validatePatchWhenRequested(
+  cwd: string,
+  options: {
+    readonly json?: boolean;
+    readonly file?: string;
+    readonly profile?: string;
+    readonly domain?: string;
+    readonly path?: string;
+    readonly env?: string;
+    readonly branch?: string;
+  }
+): Promise<number | null> {
+  if (
+    !options.json ||
+    options.file !== undefined ||
+    options.profile !== undefined ||
+    options.domain !== undefined
+  ) {
+    return null;
+  }
+  return await validateConfigEditorStdin({ cwd, ...options });
+}
 
 async function validateComposeConfiguration(
   startDir: string,

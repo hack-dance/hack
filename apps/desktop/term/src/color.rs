@@ -13,6 +13,10 @@ impl Rgb {
         Self { r, g, b }
     }
 
+    pub const fn from_u32(hex: u32) -> Self {
+        Self::new((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+    }
+
     /// `0xRRGGBB`.
     pub fn to_u32(self) -> u32 {
         (u32::from(self.r) << 16) | (u32::from(self.g) << 8) | u32::from(self.b)

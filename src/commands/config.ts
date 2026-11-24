@@ -18,6 +18,7 @@ import {
   DEFAULT_DOMAIN_CONFIG_KEY,
   parseDefaultDomain,
 } from "../lib/default-domain.ts";
+import { withEnvLayerLock } from "../lib/env-layer-lock.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import {
   LOGGING_ENABLED_CONFIG_KEY,
@@ -36,6 +37,7 @@ import {
 import { parseSessionsMuxMode } from "../mux/mux-config.ts";
 import { logger } from "../ui/logger.ts";
 import { configAdoptCommand } from "./config-adopt.ts";
+import { configApplyCommand, configShowCommand } from "./config-editor.ts";
 import { configImportCommand } from "./config-import.ts";
 import { configPlanCommand } from "./config-plan.ts";
 import { configValidateCommand } from "./config-validate.ts";
@@ -177,6 +179,24 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
     return 1;
   }
 
+  const write = () => updateConfigValue(project, parsedKey, value);
+  if (project.scope === "global") {
+    return await write();
+  }
+  await assertLegacyProjectDirectory({
+    projectDir: project.project.projectDir,
+  });
+  return await withEnvLayerLock({
+    layerPath: project.project.configFile,
+    run: write,
+  });
+};
+
+async function updateConfigValue(
+  project: ConfigTarget,
+  parsedKey: readonly string[],
+  value: unknown
+): Promise<number> {
   const read = await readConfigJsonForSet({ target: project });
   if (!read.ok) {
     logger.error({ message: read.error });
@@ -211,14 +231,16 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
     message: result.changed ? `Updated ${read.path}` : "No changes needed.",
   });
   return 0;
-};
+}
 
 export const configCommand = defineCommand({
   ...configSpec,
   subcommands: [
     withHandler(configGetSpec, handleConfigGet),
     withHandler(configSetSpec, handleConfigSet),
+    configShowCommand,
     configValidateCommand,
+    configApplyCommand,
     configPlanCommand,
     configImportCommand,
     configAdoptCommand,

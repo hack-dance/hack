@@ -14,20 +14,26 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
+import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
 import {
   applyEnvMigration,
   cleanupEnvMigration,
   type EnvMigrationProject,
   envMigrationJournalPath,
   migrateLegacyEnvForCommand,
+  prepareImplicitEnvMigration,
   previewEnvCleanup,
   previewEnvMigration,
   recordEnvMigrationProjectRun,
   rollbackEnvMigration,
+  withEnvMigrationConfigEdits,
 } from "../src/lib/env-migration.ts";
 import { migrationDigest } from "../src/lib/env-migration-files.ts";
 import { stageMigrationPayloads } from "../src/lib/env-migration-payloads.ts";
 import { envMigrationSnapshots } from "../src/lib/env-migration-snapshot.ts";
+import { assertEnvMigrationReadable } from "../src/lib/env-migration-state.ts";
+import { AtomicWriteConflictError } from "../src/lib/fs.ts";
+import { normalizeEnvConfigName } from "../src/lib/project.ts";
 import {
   LegacyEnvCleanupError,
   resolveProjectEnvConfig,
@@ -713,6 +719,133 @@ test("later Compose repair accepts layer additions and tighter modes, invalidate
   expect(await Bun.file(join(project.projectDir, ".env")).exists()).toBe(false);
 });
 
+test("a prepared implicit migration reports committed bytes and keeps an interrupted publication recoverable", async () => {
+  const plan = await prepareImplicitEnvMigration(project);
+  const receipts: { path: string; sha256: string | null }[] = [];
+  const snapshots = fixtureEnvSnapshots(root);
+  await expect(
+    applyEnvMigration({
+      project: plan.project,
+      plan,
+      snapshots,
+      acceptTrackedChanges: false,
+      repairCompose: false,
+      onPublished: (file) => {
+        if (file.path.endsWith(".yaml")) {
+          receipts.push(file);
+        }
+      },
+      hooks: {
+        boundary: async ({ phase }) => {
+          if (phase === "published" && receipts.length > 0) {
+            throw new Error(
+              "synthetic interruption before recording the write"
+            );
+          }
+        },
+      },
+    })
+  ).rejects.toThrow("synthetic interruption");
+  const committed = receipts[0];
+  if (!committed) {
+    throw new Error("Expected one committed env layer.");
+  }
+  expect(committed.sha256).toBe(
+    migrationDigest(await readFile(committed.path))
+  );
+  await expect(assertEnvMigrationReadable(project)).rejects.toThrow(
+    "unfinished"
+  );
+  await expect(prepareImplicitEnvMigration(project)).rejects.toBeInstanceOf(
+    AtomicWriteConflictError
+  );
+  const resumed = await applyEnvMigration({
+    project,
+    snapshots,
+    acceptTrackedChanges: false,
+    repairCompose: false,
+  });
+  expect(resumed.status).toBe("applied");
+  await expect(assertEnvMigrationReadable(project)).resolves.toBeUndefined();
+});
+
+test("cleanup and rollback recover an interrupted Config save and remove its new env layer", async () => {
+  const snapshots = envMigrationSnapshots();
+  const path = join(project.projectDir, "hack.config.json");
+  const overlay = join(project.projectDir, "hack.env.new.local.yaml");
+  const ignore = join(project.projectDir, ".gitignore");
+  await writeFile(join(project.projectDir, ".env"), "");
+  await writeFile(join(project.projectDir, ".env.qa"), "");
+  const before = await readFile(path, "utf8");
+  const plan = await prepareImplicitEnvMigration(project, {
+    edits: [
+      { path, text: before },
+      { path: overlay, text: null },
+    ],
+    writesLocalEnv: true,
+  });
+  expect(plan.prepared.files.some(({ kind }) => kind === "local_layer")).toBe(
+    false
+  );
+  expect(plan.prepared.files.some(({ path }) => path === ignore)).toBe(true);
+  const migration = await applyEnvMigration({
+    project,
+    snapshots,
+    acceptTrackedChanges: false,
+    repairCompose: false,
+    plan,
+  });
+  if (!migration.manifestPath) {
+    throw new Error("Expected a migration snapshot");
+  }
+  const after = '{"name":"renamed"}\n';
+  const overlayText = "version: 1\nenvironment: new\nvalues: {}\n";
+  await expect(
+    withEnvMigrationConfigEdits({
+      project,
+      manifestPath: migration.manifestPath,
+      run: async ({ prepare, commit }) => {
+        await prepare({
+          path: overlay,
+          before: null,
+          after: overlayText,
+          mode: 0o600,
+        });
+        await writeFile(overlay, overlayText, { mode: 0o600 });
+        await commit(overlay);
+        await prepare({
+          path,
+          before,
+          after,
+          mode: (await lstat(path)).mode & 0o777,
+        });
+        await writeFile(path, after);
+        throw new Error("interrupted after rename");
+      },
+    })
+  ).rejects.toThrow("interrupted after rename");
+  const renamed = { ...project, projectName: "renamed" };
+  await recordEnvMigrationProjectRun(renamed);
+  const cleanup = { project: renamed, snapshots, acceptTrackedChanges: false };
+  await writeFile(overlay, `${overlayText}# edited after start\n`);
+  await expect(cleanupEnvMigration(cleanup)).rejects.toThrow(
+    "Env layers changed"
+  );
+  await writeFile(overlay, overlayText);
+  await writeFile(path, '{"name":"edited-later"}\n');
+  await expect(cleanupEnvMigration(cleanup)).rejects.toThrow("input changed");
+  await writeFile(path, after);
+  expect((await cleanupEnvMigration(cleanup)).status).toBe("cleaned");
+  await rollbackEnvMigration({
+    project: renamed,
+    snapshots,
+    manifestPath: migration.manifestPath,
+  });
+  expect(await readFile(path, "utf8")).toBe(before);
+  expect(await Bun.file(overlay).exists()).toBe(false);
+  expect(await Bun.file(ignore).exists()).toBe(false);
+}, 30_000);
+
 test("later Compose repair refuses damaged originals before changing the completed journal", async () => {
   const composePath = join(project.projectDir, "docker-compose.yml");
   await writeFile(
@@ -910,6 +1043,96 @@ test("rollback restores original bytes and refuses a later user edit", async () 
     manifestPath: result.manifestPath,
   });
   expectRestored(await projectFiles(), before);
+});
+
+test("resumed migration checks private overlay filenames under the project lock", async () => {
+  const marker = "recovery-private-overlay-fixture";
+  const authored = `https://fixture:${marker}@example.invalid`;
+  const name = normalizeEnvConfigName(authored) ?? "invalid";
+  const path = join(project.projectDir, "hack.config.json");
+  const original = JSON.stringify({
+    name: "journal",
+    env: { defaultOverlay: authored },
+    defaultEnvConfig: "qa",
+  });
+  await writeFile(path, original);
+  const plan = await prepareImplicitEnvMigration(project);
+  const projectIndex = plan.prepared.files.findIndex(
+    (file) => file.path === path
+  );
+  expect(projectIndex).toBeGreaterThanOrEqual(0);
+  const options = {
+    project,
+    snapshots: fixtureEnvSnapshots(root),
+    acceptTrackedChanges: false,
+    repairCompose: false,
+  };
+  const expectRefusalBeforePublication = async () => {
+    const before = await projectFiles();
+    await expect(apply(options)).rejects.toThrow(
+      "Migration would expose a private overlay name"
+    );
+    expect(await projectFiles()).toEqual(before);
+    expect(
+      await Bun.file(envMigrationJournalPath(project.projectRoot)).exists()
+    ).toBe(false);
+  };
+  await writeFile(
+    path,
+    JSON.stringify({
+      name: "journal",
+      env: { defaultOverlay: authored },
+      defaultEnvConfig: name,
+    })
+  );
+  await expectRefusalBeforePublication();
+  await writeFile(path, original);
+  const legacy = join(project.projectDir, `.env.${name}`);
+  await writeFile(legacy, "TOKEN=present\n");
+  await expectRefusalBeforePublication();
+  await rm(legacy);
+  await expect(
+    apply({
+      ...options,
+      plan,
+      hooks: {
+        boundary: async ({ phase, index }) => {
+          if (phase === "before_publish" && index === projectIndex) {
+            throw new Error(
+              "synthetic interruption before project publication"
+            );
+          }
+        },
+      },
+    })
+  ).rejects.toThrow("synthetic interruption");
+
+  const result = await withEnvLayerLock({
+    layerPath: path,
+    run: async () => {
+      const { promise: reachedWrite, resolve: release } =
+        Promise.withResolvers<void>();
+      const resume = apply({
+        ...options,
+        hooks: {
+          boundary: async ({ phase, index }) => {
+            if (phase === "before_publish" && index === projectIndex) {
+              release();
+            }
+          },
+        },
+      });
+      await Promise.race([reachedWrite, resume]);
+      await writeFile(legacy, "TOKEN=late\n");
+      return { resume };
+    },
+  });
+  await expect(result.resume).rejects.toBeInstanceOf(AtomicWriteConflictError);
+  expect((await readFile(path, "utf8")) === original).toBe(true);
+  await rm(legacy);
+  const migrated = await apply(options);
+  expect(migrated.status).toBe("applied");
+  expect((await readFile(path, "utf8")).includes(marker)).toBe(false);
 });
 
 test("a partial publication refuses implicit commands before they can use incomplete layers", async () => {

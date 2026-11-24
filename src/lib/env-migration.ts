@@ -1,6 +1,14 @@
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
+import {
+  hasPrivateOverlayValue,
+  privateProjectOverlayNames,
+} from "./config-editor-source.ts";
+import {
+  PRIVATE_OVERLAY_MIGRATION_CONFLICT,
+  privateOverlayFileConflict,
+} from "./config-overlay-files.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
   assertMigrationStorageOutsideWorkingTrees as assertOutsideWorkingTrees,
@@ -23,6 +31,7 @@ import {
   migrationJournalPath,
   withEnvMigrationVerification,
 } from "./env-migration-state.ts";
+import { AtomicWriteConflictError } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
   ensurePrivateDirectory,
@@ -32,6 +41,7 @@ import {
   PRIVATE_STAGING_DIRNAME,
   preparePrivateStaging,
 } from "./private-staging.ts";
+import { parseProjectConfigRecord } from "./project.ts";
 import {
   acquireLegacyEnvCleanupContext,
   assertLegacyEnvMigrationDelivery,
@@ -50,12 +60,15 @@ import {
   resolveProjectEnvSharedKeyLocation,
 } from "./project-env-config.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
+import { resolvePrimaryLocalProjectDir } from "./worktree-local-config.ts";
 
 export const ENV_MIGRATION_VERSION = 1 as const;
 const FILE_LIMIT = 32 * 1024 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
 const PAYLOAD_NAME = /^[0-9]+\.payload$/;
 const ENV_KEY = /^[A-Z_][A-Z0-9_]*$/;
+const CONFIG_ENV_LAYER =
+  /^hack\.env\.[a-z0-9][a-z0-9-]{0,127}(?:\.local)?\.yaml$/;
 
 export type EnvMigrationProject = {
   readonly projectRoot: string;
@@ -88,6 +101,12 @@ type Publication = EnvMigrationFileState & {
   readonly done: boolean;
 };
 
+type ConfigPublication = {
+  readonly before: EnvMigrationFileState;
+  readonly after: EnvMigrationFileState;
+  readonly committed: boolean;
+};
+
 type Journal = {
   readonly version: 1;
   readonly kind: "hack-env-migration";
@@ -101,6 +120,8 @@ type Journal = {
     | "rolled_back"
     | "rolling_back";
   readonly sources: readonly EnvMigrationFileState[];
+  /** Expected before and after revisions of files in the initiating Config save. */
+  readonly configEdits?: readonly ConfigPublication[];
   readonly writes: readonly Publication[];
   readonly removable: readonly string[];
   readonly overlayNames: readonly string[];
@@ -223,6 +244,33 @@ function validState(
   );
 }
 
+function isMigrationConfigEditPath(
+  project: EnvMigrationProject,
+  path: string
+): boolean {
+  return (
+    path === join(project.projectDir, "hack.config.json") ||
+    path === join(project.projectDir, "docker-compose.yml") ||
+    (dirname(path) === project.projectDir &&
+      CONFIG_ENV_LAYER.test(basename(path)))
+  );
+}
+
+function validConfigPublication(
+  entry: unknown,
+  project: EnvMigrationProject
+): entry is ConfigPublication {
+  return (
+    isRecord(entry) &&
+    validState(entry.before) &&
+    validState(entry.after) &&
+    entry.before.path === entry.after.path &&
+    entry.after.sha256 !== null &&
+    typeof entry.committed === "boolean" &&
+    isMigrationConfigEditPath(project, entry.after.path)
+  );
+}
+
 function validPublication(entry: unknown, path: string): entry is Publication {
   return (
     validState(entry) &&
@@ -281,6 +329,7 @@ async function readJournal(
       isRecord(raw.project) &&
       raw.project.projectRoot === project.projectRoot &&
       raw.project.projectDir === project.projectDir &&
+      typeof raw.project.projectName === "string" &&
       typeof raw.manifestPath === "string" &&
       isAbsolute(raw.manifestPath) &&
       [
@@ -293,6 +342,11 @@ async function readJournal(
       ].includes(String(raw.state)) &&
       Array.isArray(raw.sources) &&
       raw.sources.every(validState) &&
+      (raw.configEdits === undefined ||
+        (Array.isArray(raw.configEdits) &&
+          raw.configEdits.every((entry) =>
+            validConfigPublication(entry, project)
+          ))) &&
       (raw.composeRepair === undefined ||
         ["deferred", "applying", "complete"].includes(
           String(raw.composeRepair)
@@ -373,8 +427,67 @@ type Preparation = {
   readonly sources: readonly EnvMigrationFileState[];
 };
 
+export type ImplicitEnvMigrationPlan = Preparation & {
+  readonly project: EnvMigrationProject;
+};
+
+/** Preflight immutable migration payloads as part of a larger validated edit. */
+export async function prepareImplicitEnvMigration(
+  input: EnvMigrationProject,
+  {
+    edits = [],
+    writesLocalEnv = false,
+    inheritLocal,
+  }: {
+    readonly edits?: readonly {
+      readonly path: string;
+      readonly text: string | null;
+    }[];
+    readonly writesLocalEnv?: boolean;
+    readonly inheritLocal?: boolean;
+  } = {}
+): Promise<ImplicitEnvMigrationPlan> {
+  const project = await canonicalProject(input);
+  assertFreshMigration(
+    await readJournal(envMigrationJournalPath(project.projectRoot), project)
+  );
+  const plan = await prepareConsistent({
+    ...project,
+    repairCompose: false,
+    writesLocalEnv,
+    inheritLocal,
+  });
+  await assertEnvMigrationConsent(
+    project,
+    plan.prepared.files.map((file) => file.path),
+    false
+  );
+  const sources = new Map(plan.sources.map((file) => [file.path, file]));
+  for (const edit of edits) {
+    if (!isMigrationConfigEditPath(project, edit.path)) {
+      throw new AtomicWriteConflictError();
+    }
+    const observed = await readState(edit.path);
+    if (observed.text !== edit.text) {
+      throw new AtomicWriteConflictError();
+    }
+    sources.set(edit.path, sources.get(edit.path) ?? observed.state);
+  }
+  return { ...plan, sources: [...sources.values()], project };
+}
+
+function assertFreshMigration(journal: Journal | null): void {
+  if (journal && journal.state !== "rolled_back") {
+    throw new AtomicWriteConflictError();
+  }
+}
+
 async function prepareConsistent(
-  project: EnvMigrationProject & { readonly repairCompose?: boolean }
+  project: EnvMigrationProject & {
+    readonly repairCompose?: boolean;
+    readonly writesLocalEnv?: boolean;
+    readonly inheritLocal?: boolean;
+  }
 ): Promise<Preparation> {
   // Discover the complete inventory before the pass whose immutable payloads
   // will be published. A changed inventory or input refuses before consent.
@@ -389,9 +502,25 @@ async function prepareConsistent(
   ) {
     throw refuse();
   }
+  const config = prepared.files.find(({ kind }) => kind === "config");
   for (const source of sources) {
-    if (!same(source, (await readState(source.path)).state)) {
+    const current = await readState(source.path);
+    if (!same(source, current.state)) {
       throw refuse();
+    }
+    if (
+      config?.path === source.path &&
+      (await migrationExposesPrivateOverlay({
+        project,
+        path: config.path,
+        before: current.text,
+        after: prepared.payload(config.path),
+        planned: new Set(prepared.files.map(({ path }) => path)),
+      }))
+    ) {
+      throw new ClosedCliError(
+        `${PRIVATE_OVERLAY_MIGRATION_CONFLICT} No migration files were changed.`
+      );
     }
   }
   return { prepared, sources };
@@ -529,8 +658,8 @@ export async function previewEnvCleanup(
   return { ...preview, files };
 }
 
-async function assertConsent(
-  project: EnvMigrationProject,
+export async function assertEnvMigrationConsent(
+  project: Pick<EnvMigrationProject, "projectRoot">,
   paths: readonly string[],
   accept: boolean
 ): Promise<void> {
@@ -565,22 +694,47 @@ async function assertSources(
     const publication = journal.writes.find(
       (entry) => entry.path === source.path
     );
+    const edited = revised
+      ? undefined
+      : journal.configEdits?.find((entry) => entry.after.path === source.path);
     const write =
-      revised && publication?.kind !== "compose" ? undefined : publication;
+      edited || (revised && publication?.kind !== "compose")
+        ? undefined
+        : publication;
     if (
       allowLayerChanges &&
-      (publication?.kind === "layer" || publication?.kind === "local_layer")
+      (publication?.kind === "layer" ||
+        publication?.kind === "local_layer" ||
+        (dirname(source.path) === journal.project.projectDir &&
+          CONFIG_ENV_LAYER.test(basename(source.path))))
     ) {
       continue;
     }
     if (
-      !matchesMigrationSource({ current, source, write, allowTighterModes })
+      !matchesMigrationSource({
+        current,
+        source: configEditRevision(edited, current) ?? source,
+        write,
+        allowTighterModes,
+      })
     ) {
       throw new ClosedCliError(
         `Env migration input changed: ${JSON.stringify(source.path)}. Keep the legacy files and snapshot. To restore originals while retaining later edits privately, use hack env migrate --rollback-manifest ${JSON.stringify(journal.manifestPath)} --preserve-changes (values omitted).`
       );
     }
   }
+}
+
+function configEditRevision(
+  edit: ConfigPublication | undefined,
+  current: EnvMigrationFileState
+): EnvMigrationFileState | undefined {
+  if (!edit) {
+    return undefined;
+  }
+  return !edit.committed && same(current, edit.before)
+    ? edit.before
+    : edit.after;
 }
 
 function matchesMigrationSource({
@@ -695,6 +849,7 @@ async function prepareDeferredComposeRepair(
   project: EnvMigrationProject,
   journal: Journal
 ): Promise<Preparation | null> {
+  const legacy = { ...project, projectName: journal.project.projectName };
   const composeFile = join(project.projectDir, "docker-compose.yml");
   const before = (await readState(composeFile)).state;
   const references = await inspectLegacyComposeEnvFileReferences({
@@ -712,7 +867,7 @@ async function prepareDeferredComposeRepair(
     allowLayerChanges: true,
     allowTighterModes: true,
   });
-  const preparation = await prepareConsistent(project);
+  const preparation = await prepareConsistent(legacy);
   if (
     preparation.prepared.files.some(
       (file) =>
@@ -727,7 +882,7 @@ async function prepareDeferredComposeRepair(
     throw refuse();
   }
   await assertLegacyEnvMigrationDelivery({
-    ...project,
+    ...legacy,
     overlayNames: preparation.prepared.overlayNames,
   });
   return preparation;
@@ -747,7 +902,7 @@ async function extendComposeRepair(
     return completed;
   }
   const { prepared, sources } = preparation;
-  await assertConsent(
+  await assertEnvMigrationConsent(
     project,
     prepared.files.map((file) => file.path),
     accept
@@ -794,11 +949,62 @@ async function publishStagingGuard(
   }
 }
 
+/** The retained payload and locked original carry the same privacy check on resume. */
+async function migrationExposesPrivateOverlay(opts: {
+  readonly project: EnvMigrationProject;
+  readonly path: string;
+  readonly before: string | null;
+  readonly after: string;
+  readonly planned?: ReadonlySet<string>;
+}): Promise<boolean> {
+  if (opts.before === null) {
+    return false;
+  }
+  const before: unknown = JSON.parse(opts.before);
+  const after: unknown = JSON.parse(opts.after);
+  if (!(isRecord(before) && isRecord(after))) {
+    return false;
+  }
+  const remaining = privateProjectOverlayNames(after);
+  const removed = [...privateProjectOverlayNames(before)].filter(
+    (name) => !remaining.has(name)
+  );
+  if (removed.length === 0) {
+    return false;
+  }
+  if (hasPrivateOverlayValue(after, new Set(removed))) {
+    return true;
+  }
+  const inheritLocal = [before, after].some(
+    (record) =>
+      parseProjectConfigRecord(record, opts.path).worktree?.inheritLocal !==
+      false
+  );
+  const primary = await resolvePrimaryLocalProjectDir({
+    ...opts.project,
+    inheritLocal,
+  });
+  return (
+    (await privateOverlayFileConflict({
+      projectDir: opts.project.projectDir,
+      inheritedDirs: [primary],
+      names: removed,
+      planned: opts.planned,
+    })) !== null
+  );
+}
+
 async function publishEntry(
   project: EnvMigrationProject,
-  entry: Publication
+  entry: Publication,
+  publication?: {
+    readonly validateDestination?: () => Promise<void>;
+    readonly onPublished?: (file: EnvMigrationFileState) => void;
+  }
 ): Promise<void> {
+  await publication?.validateDestination?.();
   const run = async () => {
+    await publication?.validateDestination?.();
     if (entry.kind === "key") {
       await assertMigrationProjectEnvKeyPrivate({
         ...project,
@@ -835,12 +1041,14 @@ async function publishEntry(
     }
     if (entry.kind === "staging_guard") {
       await publishStagingGuard(entry, payload.text);
+      publication?.onPublished?.(entry);
       return;
     }
+    const text = payload.text;
     await replacePrivateFileAtomic({
       path: entry.path,
       directories: [dirname(entry.path)],
-      text: payload.text,
+      text,
       mode: entry.mode ?? 0o600,
       refusal: refuse,
       beforeRename: async () => {
@@ -850,10 +1058,24 @@ async function publishEntry(
             keyPath: entry.path,
           });
         }
-        if (!same((await readState(entry.path)).state, entry.before)) {
+        const original = await readState(entry.path);
+        if (!same(original.state, entry.before)) {
           throw refuse();
         }
+        if (
+          entry.kind === "config" &&
+          (await migrationExposesPrivateOverlay({
+            project,
+            path: entry.path,
+            before: original.text,
+            after: text,
+          }))
+        ) {
+          throw new AtomicWriteConflictError();
+        }
+        await publication?.validateDestination?.();
       },
+      afterRename: () => publication?.onPublished?.(entry),
     });
     if (!same((await readState(entry.path)).state, entry)) {
       throw refuse();
@@ -904,11 +1126,26 @@ export async function applyEnvMigration(input: {
   readonly snapshots: EnvMigrationSnapshots;
   readonly hooks?: EnvMigrationHooks;
   readonly repairCompose?: boolean;
+  readonly plan?: ImplicitEnvMigrationPlan;
+  readonly validateDestination?: () => Promise<void>;
+  readonly onPublished?: (file: EnvMigrationFileState) => void;
 }) {
+  await input.validateDestination?.();
   const project = await canonicalProject(input.project);
+  if (
+    input.plan &&
+    (input.plan.project.projectRoot !== project.projectRoot ||
+      input.plan.project.projectDir !== project.projectDir ||
+      input.plan.project.projectName !== project.projectName)
+  ) {
+    throw new AtomicWriteConflictError();
+  }
   const path = envMigrationJournalPath(project.projectRoot);
   await assertOutsideWorkingTrees(path, project);
   const existing = await readJournal(path, project);
+  if (input.plan) {
+    assertFreshMigration(existing);
+  }
   assertApplyJournalState(existing);
   await input.hooks?.beforeLock?.();
   if (
@@ -945,10 +1182,10 @@ export async function applyEnvMigration(input: {
       },
     });
   }
-  let preparation: Preparation | null = null;
-  if (needsComposeRepair(existing, input.repairCompose)) {
+  let preparation: Preparation | null = input.plan ?? null;
+  if (!preparation && needsComposeRepair(existing, input.repairCompose)) {
     preparation = await prepareDeferredComposeRepair(project, existing);
-  } else if (!existing || existing.state === "rolled_back") {
+  } else if (!preparation && (!existing || existing.state === "rolled_back")) {
     preparation = await prepareConsistent({
       ...project,
       repairCompose: input.repairCompose,
@@ -959,7 +1196,7 @@ export async function applyEnvMigration(input: {
     : (existing?.writes
         .filter((entry) => !entry.done)
         .map((entry) => entry.path) ?? []);
-  await assertConsent(project, changed, input.acceptTrackedChanges);
+  await assertEnvMigrationConsent(project, changed, input.acceptTrackedChanges);
   if (
     preparation &&
     (!existing || existing.state === "rolled_back") &&
@@ -978,7 +1215,11 @@ export async function applyEnvMigration(input: {
     lockPath: `${path}.lock`,
     label: "env migration",
     run: async () => {
+      await input.validateDestination?.();
       const retained = await readJournal(path, project);
+      if (input.plan) {
+        assertFreshMigration(retained);
+      }
       assertApplyJournalState(retained);
       const retain = retainedPayloads(retained);
       await purgeMigrationPayloads({
@@ -1008,7 +1249,7 @@ export async function applyEnvMigration(input: {
           input.acceptTrackedChanges
         );
       }
-      await assertConsent(
+      await assertEnvMigrationConsent(
         project,
         journal.writes
           .filter((entry) => !entry.done)
@@ -1023,6 +1264,7 @@ export async function applyEnvMigration(input: {
         };
       }
       await input.hooks?.boundary?.({ phase: "prepared", index: -1 });
+      await input.validateDestination?.();
       await assertSources(journal);
       // A retained journal is not proof that its original rollback bytes
       // survived the interruption. Admit them before any further publication.
@@ -1036,6 +1278,7 @@ export async function applyEnvMigration(input: {
           run: () =>
             assertLegacyEnvMigrationDelivery({
               ...project,
+              projectName: journal.project.projectName,
               overlayNames: journal.overlayNames,
             }),
         });
@@ -1048,7 +1291,7 @@ export async function applyEnvMigration(input: {
         if (journal.composeRepairSources) {
           await assertSources(journal);
         }
-        await publishEntry(project, entry);
+        await publishEntry(project, entry, input);
         await input.hooks?.boundary?.({ phase: "published", index });
         await input.snapshots.recordAfter({
           manifestPath: journal.manifestPath,
@@ -1303,7 +1546,7 @@ async function cleanupLocked(
     journal.store && journal.removable.includes(journal.store.path)
       ? await prepareLegacyEnvCleanupConfig(project)
       : null;
-  await assertConsent(
+  await assertEnvMigrationConsent(
     project,
     [...journal.removable, ...(repair ? [repair.path] : [])],
     input.acceptTrackedChanges
@@ -1318,6 +1561,7 @@ async function cleanupLocked(
   });
   const context = await acquireLegacyEnvCleanupContext({
     ...project,
+    projectName: journal.project.projectName,
     overlayNames: journal.overlayNames,
     paths: journal.sources
       .filter(
@@ -1427,6 +1671,105 @@ async function cleanupLocked(
   };
 }
 
+export type MigrationConfigWrite = {
+  readonly path: string;
+  readonly before: string | null;
+  readonly after: string;
+  readonly mode: number;
+};
+
+type MigrationConfigEdits = {
+  readonly prepare: (write: MigrationConfigWrite) => Promise<void>;
+  readonly commit: (path: string) => Promise<void>;
+};
+
+/** Hold the migration lock across Config writes so cleanup and rollback see either side of a recorded intent. */
+export async function withEnvMigrationConfigEdits<T>(input: {
+  readonly project: EnvMigrationProject;
+  readonly manifestPath: string;
+  readonly run: (edits: MigrationConfigEdits) => Promise<T>;
+}): Promise<T> {
+  const { project } = input;
+  const path = envMigrationJournalPath(project.projectRoot);
+  return await withProjectsRegistryLock({
+    lockPath: `${path}.lock`,
+    label: "env migration",
+    run: async () => {
+      const initial = await readJournal(path, project);
+      if (
+        !initial ||
+        initial.state !== "complete" ||
+        initial.manifestPath !== input.manifestPath ||
+        initial.configEdits !== undefined ||
+        initial.composeRepairSources !== undefined
+      ) {
+        throw new AtomicWriteConflictError();
+      }
+      let journal: Journal = initial;
+      const publishIntent = async (intent: ConfigPublication) => {
+        journal = {
+          ...journal,
+          validated: undefined,
+          configEdits: [
+            ...(journal.configEdits ?? []).filter(
+              (entry) => entry.after.path !== intent.after.path
+            ),
+            intent,
+          ],
+        };
+        await writeMetadata(path, journal);
+      };
+      return await input.run({
+        prepare: async (write) => {
+          const intent = await prepareMigrationConfigWrite(journal, write);
+          await publishIntent(intent);
+        },
+        commit: async (target) => {
+          const intent = journal.configEdits?.find(
+            (entry) => entry.after.path === target
+          );
+          if (
+            !(intent && same((await readState(target)).state, intent.after))
+          ) {
+            throw new AtomicWriteConflictError();
+          }
+          await publishIntent({ ...intent, committed: true });
+        },
+      });
+    },
+  });
+}
+
+async function prepareMigrationConfigWrite(
+  journal: Journal,
+  write: MigrationConfigWrite
+): Promise<ConfigPublication> {
+  const original = journal.sources.find((entry) => entry.path === write.path);
+  if (
+    !(original && isMigrationConfigEditPath(journal.project, write.path)) ||
+    journal.configEdits?.some((entry) => entry.after.path === write.path)
+  ) {
+    throw new AtomicWriteConflictError();
+  }
+  const expected =
+    journal.writes.find((entry) => entry.path === write.path) ?? original;
+  const current = await readState(write.path);
+  if (!same(current.state, expected) || current.text !== write.before) {
+    throw new AtomicWriteConflictError();
+  }
+  const bytes = Buffer.from(write.after);
+  return {
+    before: current.state,
+    after: {
+      path: write.path,
+      sha256: digest(bytes),
+      size: bytes.length,
+      mode: write.mode,
+    },
+    committed: false,
+  };
+}
+
 /** Called only by successful full-project startup paths, never by preview or env resolution. */
 export async function recordEnvMigrationProjectRun(
   input: EnvMigrationProject
@@ -1445,12 +1788,20 @@ export async function recordEnvMigrationProjectRun(
       if (!journal || journal.state !== "complete") {
         return;
       }
-      const validated = await Promise.all(
+      const layerPaths = new Set(
         journal.writes
           .filter(
             (entry) => entry.kind === "layer" || entry.kind === "local_layer"
           )
-          .map(async (entry) => (await readState(entry.path)).state)
+          .map((entry) => entry.path)
+      );
+      for (const edit of journal.configEdits ?? []) {
+        if (CONFIG_ENV_LAYER.test(basename(edit.after.path))) {
+          layerPaths.add(edit.after.path);
+        }
+      }
+      const validated = await Promise.all(
+        [...layerPaths].map(async (path) => (await readState(path)).state)
       );
       await writeMetadata(path, { ...journal, validated });
     },
@@ -1521,8 +1872,17 @@ async function rollbackLocked(
       (journal.state === "cleaning" &&
         journal.removable.includes(source.path) &&
         current.sha256 === null);
+    const publication = journal.writes.find(
+      (write) => write.path === source.path
+    );
+    const edited = configEditRevision(
+      journal.configEdits?.find((entry) => entry.after.path === source.path),
+      current
+    );
     let expected =
-      journal.writes.find((write) => write.path === source.path) ??
+      (publication?.kind === "compose"
+        ? publication
+        : (edited ?? publication)) ??
       journal.composeRepairSources?.find(
         (entry) => entry.path === source.path
       ) ??

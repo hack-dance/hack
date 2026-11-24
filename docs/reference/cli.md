@@ -1121,7 +1121,9 @@ hack config <subcommand> [options]
 | --- | --- |
 | `hack config get <key>` | Read a value from hack.config.json |
 | `hack config set <key> <value>` | Update a value in hack.config.json |
+| `hack config show` | Show Compose project config, layers, routes and env provenance |
 | `hack config validate` | Validate project configuration without starting workloads |
+| `hack config apply` | Apply a validated Compose project config patch from stdin |
 | `hack config plan` | Inspect native environment binding completeness without decrypting or starting workloads |
 | `hack config import` | Preview a bounded legacy config and Compose conversion without writes |
 | `hack config adopt` | Explicitly adopt a stopped, verified existing Compose instance |
@@ -1189,6 +1191,28 @@ hack config set <key> <value> [options]
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
 
+## `hack config show`
+
+Show Compose project config, layers, routes and env provenance
+
+### Usage
+
+```bash
+hack config show [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
 ## `hack config validate`
 
 Validate project configuration without starting workloads
@@ -1199,7 +1223,7 @@ Validate project configuration without starting workloads
 hack config validate [options]
 ```
 
-Uses the matching bundled Rust compiler. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.
+Reads a Compose config patch on stdin with --json when --file, --profile and --domain are omitted. Otherwise checks the on-disk configuration, using the matching bundled Rust compiler for native projects. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode decrypts env secrets, writes state, or starts workloads.
 
 ### Options
 
@@ -1209,6 +1233,29 @@ Uses the matching bundled Rust compiler. Without --file, discovers a Compose or 
 | `--profile <names>` | Comma-separated declared native profiles |
 | `--domain <suffix>` | Select the generated native routing domain suffix |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack config apply`
+
+Apply a validated Compose project config patch from stdin
+
+### Usage
+
+```bash
+hack config apply [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

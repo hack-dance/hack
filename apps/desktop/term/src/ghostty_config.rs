@@ -164,6 +164,10 @@ pub struct GhosttyLook {
     pub font_size_pt: Option<f32>,
     pub background: Option<Rgb>,
     pub foreground: Option<Rgb>,
+    pub cursor_color: Option<Rgb>,
+    pub cursor_text: Option<Rgb>,
+    pub selection_background: Option<Rgb>,
+    pub selection_foreground: Option<Rgb>,
     /// Palette entries the config sets, by index 0 to 255.
     pub palette: BTreeMap<u8, Rgb>,
     pub cursor_style: Option<CursorShape>,
@@ -221,6 +225,10 @@ struct Raw {
     font_size_pt: Option<Option<f32>>,
     background: Option<Option<Rgb>>,
     foreground: Option<Option<Rgb>>,
+    cursor_color: Option<Option<Rgb>>,
+    cursor_text: Option<Option<Rgb>>,
+    selection_background: Option<Option<Rgb>>,
+    selection_foreground: Option<Option<Rgb>>,
     /// An empty `palette =` was seen: drop every entry from before it,
     /// including a theme's. `palette` holds the entries set after it.
     palette_reset: bool,
@@ -244,6 +252,18 @@ impl Raw {
         }
         if let Some(v) = self.foreground {
             look.foreground = v;
+        }
+        if let Some(v) = self.cursor_color {
+            look.cursor_color = v;
+        }
+        if let Some(v) = self.cursor_text {
+            look.cursor_text = v;
+        }
+        if let Some(v) = self.selection_background {
+            look.selection_background = v;
+        }
+        if let Some(v) = self.selection_foreground {
+            look.selection_foreground = v;
         }
         if self.palette_reset {
             look.palette.clear();
@@ -282,6 +302,10 @@ impl Raw {
             }
             "background" => set_color(&mut self.background, value),
             "foreground" => set_color(&mut self.foreground, value),
+            "cursor-color" => set_color(&mut self.cursor_color, value),
+            "cursor-text" => set_color(&mut self.cursor_text, value),
+            "selection-background" => set_color(&mut self.selection_background, value),
+            "selection-foreground" => set_color(&mut self.selection_foreground, value),
             "palette" if empty => {
                 self.palette_reset = true;
                 self.palette.clear();
@@ -712,12 +736,14 @@ not a setting line
         let (_home, env) = fixture(&[
             (
                 ".config/ghostty/config",
-                "theme = My Theme\nforeground = #ffffff\npalette = 1=#ff0000\n",
+                "theme = My Theme\nforeground = #ffffff\npalette = 1=#ff0000\n\
+                 cursor-color = #123456\nselection-background = #abcdef\nselection-foreground =\n",
             ),
             (
                 ".config/ghostty/themes/My Theme",
                 "background = #101010\nforeground = #c0c0c0\npalette = 1=#aa0000\n\
-                 palette = 2=#00aa00\ncursor-style = underline\n\
+                 palette = 2=#00aa00\ncursor-style = underline\ncursor-color = #aa4400\n\
+                 cursor-text = #eeddcc\nselection-background = #111111\nselection-foreground = #cccccc\n\
                  theme = Other\nconfig-file = ../config-evil\n",
             ),
             (".config/ghostty/config-evil", "font-size = 99\n"),
@@ -727,6 +753,10 @@ not a setting line
         assert_eq!(look.foreground, Some(rgb("ffffff")), "the user's wins");
         assert_eq!(look.palette[&1], rgb("ff0000"), "the user's wins");
         assert_eq!(look.palette[&2], rgb("00aa00"), "from the theme");
+        assert_eq!(look.cursor_color, Some(rgb("123456")));
+        assert_eq!(look.cursor_text, Some(rgb("eeddcc")));
+        assert_eq!(look.selection_background, Some(rgb("abcdef")));
+        assert_eq!(look.selection_foreground, None);
         assert_eq!(look.cursor_style, Some(CursorShape::Underline));
         assert_eq!(look.font_size_pt, None, "a theme cannot include files");
     }

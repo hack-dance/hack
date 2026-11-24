@@ -228,9 +228,12 @@ Historical remote guides are excluded from the supported documentation.
   - `tui` without a terminal refuses for that reason first.
   - `env get` never prints a failure reason, since its output is raw values: it prints one fixed
     line on stderr, with or without `--json`.
-  - `config validate`, `plan`, `import` and `adopt` read native configuration and keep their own
-    refusals: `E_NATIVE_PROJECT_UNSUPPORTED` for `validate`/`plan`, a refused preview for
-    `import --dry-run`, and `E_CONFIG_INVALID` for `adopt`.
+  - `config show --json` reports `state: "missing"` in a success envelope. `config validate` and
+    `config apply` in Compose patch mode return `E_CONFLICT` for a missing checkout. Patch mode
+    requires `--json` and a patch on stdin. For validation, omit `--file`, `--profile` and `--domain`.
+  - `config validate` in file validation mode and `config plan` return
+    `E_NATIVE_PROJECT_UNSUPPORTED`. `config import --dry-run` returns a refused preview and
+    `config adopt` returns `E_CONFIG_INVALID`.
   - `init`, `doctor`, `crash-capture`, and the `setup`, `mcp` and `agent` commands do not need a
     project.
 

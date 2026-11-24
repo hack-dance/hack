@@ -54,6 +54,15 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning: "A Hack configuration file could not be parsed.",
     readFirst: "`hack doctor --json`",
   },
+  E_CONFLICT: {
+    meaning: "A project config layer changed after it was read.",
+    readFirst:
+      "Run hack config show --json again before preparing a new patch.",
+  },
+  E_LAYER_READ_ONLY: {
+    meaning: "The selected project config layer cannot be edited.",
+    readFirst: "Check the layer’s writable flag and edit an authored layer.",
+  },
   E_CONFIG_INVALID: {
     meaning:
       "Project configuration or saved runtime input did not pass validation.",

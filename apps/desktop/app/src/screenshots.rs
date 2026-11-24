@@ -22,7 +22,7 @@ fn fixture_context() -> HeadlessAppContext {
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(|cx| {
-        crate::theme::init(cx);
+        hack_desktop_ui::tokens::init(cx);
         #[cfg(target_os = "linux")]
         crate::theme::capture_fonts(cx);
     });
@@ -391,7 +391,7 @@ pub fn sequence(dir: &Path) {
         Arc::new(hack_desktop_ui::icons::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
-    cx.update(gpui_kit::init);
+    cx.update(hack_desktop_ui::tokens::init);
     cx.update(crate::view::bind_keys);
     cx.update(|cx| Theme::change(ThemeMode::Dark, None, cx));
     let f = Fixture::Running;

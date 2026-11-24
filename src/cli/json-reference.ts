@@ -1,3 +1,4 @@
+import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import type { AnyCommandSpec, CliSpec } from "./command.ts";
 import { JSON_COMMAND_SHAPES, SCHEMA_JSON_VARIANTS } from "./json-contracts.ts";
 
@@ -33,6 +34,7 @@ const SHAPES: Record<
   logs: "NDJSON logs; finite native modes may return a legacy snapshot object",
   transport:
     "Native compiler protocol object (`transport_version`, `ok`, result / diagnostics)",
+  "config-validation": `Envelope with \`data.schema: ${MACHINE_SCHEMAS.config}\` for a Compose patch on stdin when \`--file\`, \`--profile\` and \`--domain\` are omitted. Otherwise a file validation object with \`transport_version\``,
   "error-only": "Retired: usage-error envelope, no success payload",
   "runtime-passthrough":
     "Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `builder`, `files`, `probe`; recover: the runtime status, such as `phase`)",

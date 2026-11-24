@@ -15,6 +15,8 @@ use gpui_kit::component::{
     ActiveTheme, Sizable as _,
     input::{Input, InputEvent, InputState},
 };
+#[cfg(all(test, feature = "screenshots", hack_terminal))]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, KeyBinding, ParentElement,
     Render, Styled, Task, Window, div, prelude::*, px,
@@ -26,6 +28,7 @@ use hack_desktop_core::source::{
 };
 
 use crate::doctor_view::Pane;
+use crate::setup_view::{evidence_status, routing_evidence};
 use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 
 use hack_desktop_core::source::target_keys;
@@ -134,6 +137,7 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) config: crate::config_view::ConfigPane,
     pub(crate) sidebar_menu: Option<String>,
     pub(crate) changes: crate::changes_view::ChangesPane,
     pub(crate) catalog: crate::service_catalog::ServiceCatalog,
@@ -227,6 +231,7 @@ impl HackApp {
             source,
             logs,
             tab: 0,
+            config: Default::default(),
             sidebar_menu: None,
             changes: Default::default(),
             catalog: crate::service_catalog::ServiceCatalog {
@@ -501,6 +506,7 @@ impl HackApp {
             self.reset_env_selection();
             self.reset_changes(cx);
             self.refresh_copies_if_open(cx);
+            self.sync_config_tab(cx);
             if self.tab == 2 {
                 self.read_env(cx);
             }
@@ -1082,6 +1088,7 @@ impl HackApp {
             self.refresh_now();
         }
         self.refresh_copies_if_open(cx);
+        self.sync_config_tab(cx);
         // A service filter belongs to one project: reset it on every
         // project change, whichever tab is open.
         self.logs.model.set_service(None);
@@ -1099,8 +1106,13 @@ impl HackApp {
             return;
         }
         self.tab = to;
+        #[cfg(hack_terminal)]
+        if matches!(to, 1 | crate::config_view::TAB) {
+            self.collapse_detail_terminal(cx);
+        }
         self.files = Default::default();
         self.refresh_copies_if_open(cx);
+        self.sync_config_tab(cx);
         self.env_edit = None;
         self.env.begin();
         if to == 1 {
@@ -1179,6 +1191,7 @@ impl HackApp {
         if before != after {
             self.clear_selected_service();
             self.model.source_changed();
+            self.config.switch_cli(after.map(|install| install.path));
             self.changes = Default::default();
             self.action_started.clear();
             self.copies = Default::default();
@@ -1213,6 +1226,9 @@ impl HackApp {
             }
             #[cfg(hack_terminal)]
             self.close_all_terminals(window, cx);
+            if self.pane == Pane::Project {
+                self.sync_config_tab(cx);
+            }
         }
         let _ = window;
         self.refresh_now_async(cx);
@@ -1240,11 +1256,16 @@ impl HackApp {
         .detach();
     }
 
-    fn title_bar(&self, ui: &Ui) -> impl IntoElement {
+    fn title_bar(&self, ui: &Ui, projects_open: bool) -> impl IntoElement {
         let p = ui.p;
+        let background = if projects_open {
+            p.chrome
+        } else {
+            p.title_bar()
+        };
         gpui_kit::component::TitleBar::new()
             .h(size::TITLE_BAR)
-            .bg(p.chrome)
+            .bg(background)
             .border_color(p.border)
             .child(
                 div()
@@ -1316,6 +1337,8 @@ impl HackApp {
             }
             Phase::Empty | Phase::CliMissing | Phase::Error { .. } => {}
         }
+        let routing = self.routing_status();
+        let hackd = self.hackd_sidebar_status();
         let machine = div()
             .flex_none()
             .flex()
@@ -1328,29 +1351,31 @@ impl HackApp {
                     "routing",
                     Glyph::Globe,
                     "Routing and DNS",
-                    dot(self.routing_status().unwrap_or(Status::Unknown), ui),
+                    dot(routing, ui),
                     ui,
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
+                .aria_label(format!(
+                    "Routing and DNS: {}",
+                    machine_status_label(routing)
+                ))
+                .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx)))
+                .map(|row| {
+                    #[cfg(all(test, feature = "screenshots", hack_terminal))]
+                    let row = row.test_support();
+                    row
+                }),
             )
-            .child({
-                let tone = self
-                    .hackd_card()
-                    .map(|c| c.tone)
-                    .or_else(|| self.hackd_tone_from_snapshot());
-                machine_row(
-                    "hackd",
-                    Glyph::Power,
-                    "hackd",
-                    dot(
-                        tone.map_or(Status::Unknown, crate::machine_view::status_of),
-                        ui,
-                    ),
-                    ui,
-                )
-                .when(self.pane == Pane::Hackd, |d| d.bg(p.surface_1))
-                .on_click(cx.listener(|this, _, _, cx| this.open_hackd(cx)))
-            })
+            .child(
+                machine_row("hackd", Glyph::Power, "hackd", dot(hackd, ui), ui)
+                    .aria_label(format!("hackd: {}", machine_status_label(hackd)))
+                    .when(self.pane == Pane::Hackd, |d| d.bg(p.selection))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_hackd(cx)))
+                    .map(|row| {
+                        #[cfg(all(test, feature = "screenshots", hack_terminal))]
+                        let row = row.test_support();
+                        row
+                    }),
+            )
             .child(
                 machine_row(
                     "upgrade",
@@ -1359,12 +1384,12 @@ impl HackApp {
                     dot(self.upgrade_status(), ui),
                     ui,
                 )
-                .when(self.pane == Pane::Upgrade, |d| d.bg(p.surface_1))
+                .when(self.pane == Pane::Upgrade, |d| d.bg(p.selection))
                 .on_click(cx.listener(|this, _, _, cx| this.open_upgrade(cx))),
             )
             .child(
                 machine_row("resources", Glyph::Container, "Resources", div(), ui)
-                    .when(self.pane == Pane::Resources, |d| d.bg(p.surface_1))
+                    .when(self.pane == Pane::Resources, |d| d.bg(p.selection))
                     .on_click(cx.listener(|this, _, _, cx| this.show_resources(cx))),
             )
             .child(
@@ -1375,7 +1400,7 @@ impl HackApp {
                     self.doctor_trailing(list, ui),
                     ui,
                 )
-                .when(self.pane == Pane::Doctor, |d| d.bg(p.surface_1))
+                .when(self.pane == Pane::Doctor, |d| d.bg(p.selection))
                 .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
             );
         div()
@@ -1408,17 +1433,66 @@ impl HackApp {
         cx.notify();
     }
 
-    /// Routing and DNS: from the last completed Doctor run when there is
-    /// one, else from Doctor checks in the snapshot. `None` (a ring) until
-    /// either has reported.
-    fn routing_status(&self) -> Option<Status> {
-        if let DoctorStateView::Loaded(v) = &self.doctor.result {
-            return routing_from_doctor(v);
+    fn hackd_sidebar_status(&self) -> Status {
+        if self.pane == Pane::Setup
+            && let Some(card) = self
+                .setup
+                .report
+                .cards
+                .iter()
+                .find(|card| card.id == "daemon")
+        {
+            return evidence_status(card.status).0;
         }
-        let checks = &self.model.snapshot()?.doctor.as_ref()?.checks;
-        hack_desktop_ui::window::routing_status(
-            checks.iter().map(|c| (c.id.as_str(), c.status.as_str())),
-        )
+        self.hackd_card()
+            .map(|card| card.tone)
+            .or_else(|| self.hackd_tone_from_snapshot())
+            .map_or(Status::Unknown, crate::machine_view::status_of)
+    }
+
+    /// Setup owns its visible cards and dots. Elsewhere use the newest
+    /// current report, ordered by read start so a slow older Doctor run
+    /// cannot replace a post-command Setup check.
+    fn routing_status(&self) -> Status {
+        let setup = routing_evidence(&self.setup.report).map(|s| evidence_status(s).0);
+        if self.pane == Pane::Setup
+            && let Some(status) = setup
+        {
+            return status;
+        }
+
+        let now = Instant::now();
+        let setup = setup.zip(self.setup.observed_at).filter(|_| {
+            self.setup.checked_at.is_some_and(|at| {
+                now.saturating_duration_since(at) < hack_desktop_core::setup::RECHECK_EVERY
+            })
+        });
+        let doctor = self.doctor.fresh_observation(now);
+        if let Some((status, start)) = setup
+            && doctor.is_none_or(|other| start >= other)
+        {
+            return status;
+        }
+        if doctor.is_some() {
+            return match &self.doctor.result {
+                DoctorStateView::Loaded(view) => routing_from_doctor(view),
+                _ => None,
+            }
+            .unwrap_or(Status::Unknown);
+        }
+        self.model
+            .snapshot()
+            .filter(|_| self.model.project_list_readable())
+            .and_then(|snapshot| snapshot.doctor.as_ref())
+            .and_then(|report| {
+                hack_desktop_ui::window::routing_status(
+                    report
+                        .checks
+                        .iter()
+                        .map(|c| (c.id.as_str(), c.status.as_str())),
+                )
+            })
+            .unwrap_or(Status::Unknown)
     }
 
     /// The Doctor row's trailing mark (see [`doctor_mark`]).
@@ -1641,7 +1715,11 @@ impl HackApp {
                             .child(t)
                     }))
                     .child(div().flex_1())
-                    .child(actions),
+                    .child(if self.tab == crate::config_view::TAB && !compact {
+                        self.config_checkout_picker(cx)
+                    } else {
+                        actions.into_any_element()
+                    }),
             )
             .when(!compact, |col| {
                 col.child(url_row).children(
@@ -1832,6 +1910,7 @@ impl HackApp {
                 (1, "Logs"),
                 (2, "Env"),
                 (3, "Copies"),
+                (crate::config_view::TAB, "Config"),
                 (6, "Changes"),
                 (5, "Add service"),
                 (crate::files_view::FILES_TAB, "Files"),
@@ -1867,6 +1946,7 @@ impl HackApp {
             tabs = tabs.child(self.project_files_picker(d, cx));
         }
         let body: AnyElement = match self.tab {
+            crate::config_view::TAB => self.config_view(ui, window, cx),
             5 => div()
                 .id("service-catalog")
                 .flex_1()
@@ -2007,6 +2087,17 @@ impl HackApp {
     }
 }
 
+fn machine_status_label(status: Status) -> &'static str {
+    match status {
+        Status::Running => "Passed",
+        Status::Degraded => "Needs attention",
+        Status::Failed => "Failed",
+        Status::Unknown => "Unknown",
+        Status::Busy => "In progress",
+        Status::Stopped => "Off",
+    }
+}
+
 impl HackApp {
     #[cfg(hack_terminal)]
     fn stats_tab_open(&self) -> bool {
@@ -2120,11 +2211,11 @@ impl Render for HackApp {
             _ if self.pane == Pane::ErrorsSheet => {
                 crate::health_fixtures::errors(self, &ui, window, cx)
             }
-            // Setup applies whatever the project list shows, a missing CLI
-            // included.
             _ if self.pane == Pane::Resources => crate::resources_view::render(self, &ui, cx),
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),
+            // Setup applies whatever the project list shows, a missing CLI
+            // included.
             _ if self.pane == Pane::Setup => crate::setup_view::render(self, &ui, cx),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
@@ -2227,10 +2318,10 @@ impl Render for HackApp {
             .size_full()
             .flex()
             .flex_col()
-            .bg(if projects_open { p.chrome } else { p.surface })
+            .bg(if projects_open { p.chrome } else { p.window })
             .text_color(p.text_primary)
             .font_family(ui.font.clone())
-            .child(self.title_bar(&ui))
+            .child(self.title_bar(&ui, projects_open))
             .child(
                 div()
                     .flex_1()
@@ -2467,6 +2558,111 @@ mod tests {
         assert_eq!(
             doctor_mark(&never, &m.list()),
             DoctorMark::Dot(Status::Unknown)
+        );
+    }
+}
+
+#[cfg(all(test, feature = "screenshots", hack_terminal))]
+mod machine_status_render_tests {
+    use super::*;
+    use crate::command_control::screenshots::tests::{assert_rendered_status, open};
+    use hack_desktop_core::models::{DoctorCheck, DoctorReport};
+    use hack_desktop_core::{
+        doctor::{DoctorRun, Finish},
+        setup::Status,
+    };
+
+    #[test]
+    fn rendered_dns_tracks_a_fresh_setup_check_and_rejects_older_and_stale_reads() {
+        let (mut cx, window, app) = open(1);
+        assert_rendered_status(
+            &mut cx,
+            window,
+            "routing",
+            "Routing and DNS: Needs attention",
+            Some("Needs attention"),
+        );
+        let warn = DoctorRun::machine(Ok(DoctorReport {
+            checks: vec![DoctorCheck {
+                native_pool: None,
+                id: "resolver:hack".into(),
+                status: "warn".into(),
+                detail: "Resolver missing".into(),
+                fix: None,
+            }],
+            ..Default::default()
+        }));
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let older_doctor = a.doctor.begin(Some(&[]));
+                let stale_setup = a.setup.begin();
+                let generation = a.setup.begin();
+                let before = a.setup.report.clone();
+                let mut after = before.clone();
+                after.cards[1].status = Status::Passed;
+                a.setup_checked(generation, after, cx);
+                a.setup_checked(stale_setup, before, cx);
+                assert_eq!(
+                    a.doctor.finish(
+                        older_doctor,
+                        std::slice::from_ref(&warn),
+                        Some(&[]),
+                        Instant::now()
+                    ),
+                    Finish::Applied
+                );
+            })
+        });
+        assert_rendered_status(
+            &mut cx,
+            window,
+            "routing",
+            "Routing and DNS: Passed",
+            Some("Passed"),
+        );
+
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.show_project();
+                cx.notify();
+            })
+        });
+        assert_rendered_status(&mut cx, window, "routing", "Routing and DNS: Passed", None);
+
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let newer_doctor = a.doctor.begin(None);
+                assert_eq!(
+                    a.doctor.finish(
+                        newer_doctor,
+                        std::slice::from_ref(&warn),
+                        Some(&[]),
+                        Instant::now()
+                    ),
+                    Finish::AppliedStale
+                );
+                cx.notify();
+            })
+        });
+        assert_rendered_status(&mut cx, window, "routing", "Routing and DNS: Passed", None);
+
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let newer_doctor = a.doctor.begin(Some(&[]));
+                assert_eq!(
+                    a.doctor
+                        .finish(newer_doctor, &[warn], Some(&[]), Instant::now()),
+                    Finish::Applied
+                );
+                cx.notify();
+            })
+        });
+        assert_rendered_status(
+            &mut cx,
+            window,
+            "routing",
+            "Routing and DNS: Needs attention",
+            None,
         );
     }
 }

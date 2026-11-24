@@ -19,6 +19,7 @@ export const MACHINE_SCHEMAS = {
   daemonInstall: "hack.daemon-install.v1",
   doctorMachine: "hack.doctor.machine.v1",
   envOverlays: "hack.env-overlays.v1",
+  config: "hack.config.v1",
 } as const;
 
 export function machineSuccess<T extends object>(opts: {

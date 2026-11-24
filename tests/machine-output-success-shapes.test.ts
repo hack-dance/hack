@@ -29,6 +29,7 @@ type Case = {
 
 const CASES: readonly Case[] = [
   { command: "version" },
+  { command: "config show" },
   { command: "activity" },
   { command: "projects", flags: ["--observe"] },
   { command: "global status", flags: ["--observe"] },

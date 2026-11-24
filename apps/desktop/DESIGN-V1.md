@@ -89,15 +89,16 @@ Detail content is inset 20 left and right; the sidebar list 6.
 
 ## Colour
 
-The dark desktop palette uses Merino Dark from the HACK-2595 frames.
-
 | Token | Light | Dark | Used for |
 |---|---|---|---|
-| `surface` | `#FFFFFF` | `#0D1117` | Detail pane |
-| `chrome` | `#F7F7F5` | `#090C10` | Title bar, sidebar, status bar |
+| `window` | `#FFFFFF` | `#090C10` | Window background outside Projects, native dark title bar |
+| `surface` | `#FFFFFF` | `#0D1117` | Cards and controls |
+| `chrome` | `#F7F7F5` | `#06080A` | Title bar, sidebar, status bar |
+| `raised` | `#EFEFEC` | `#1C2026` | Menus and tooltips |
+| `selection` | `#EFEFEC` | `#24272B` | Selected navigation, tabs, selected file row in dark mode |
+| `attention` | `#EFEFEC` | `#21252B` | Running command box |
 | `surface_1` | `#EFEFEC` | `#1A1E24` | Hover, panel handle, neutral pill |
 | `surface_2` | `#E6E6E2` | `#1C2026` | Pressed and raised surfaces, selected file row in light mode |
-| `selection` | `#EFEFEC` | `#24272B` | Selected navigation, selected file row in dark mode |
 | `preview_surface` | `#EFEFEC` | `#1E2329` | Read-only file preview body |
 | `border` | black 9% | `#2B3036` | Hairlines |
 | `border_strong` | black 18% | `#2B3036` | Button and field outlines |
@@ -105,6 +106,10 @@ The dark desktop palette uses Merino Dark from the HACK-2595 frames.
 | `text_secondary` | `#5C5B57` | `#BFC5CB` | URL, stopped names, inactive tabs |
 | `text_muted` | `#8B8A85` | `#8B9197` | Captions, table header, timestamps |
 | `accent` | `#2F6FDB` | `#E6EDF3` | Switch on, focus ring |
+
+The dark palette is Merino Dark. GPUI components such as the search field,
+tooltips and scrollbars use the same palette. The Projects pane uses its own
+Builtin Light and Merino Dark accents for the tree and copy pane.
 
 State colours (dot / pill background / pill text):
 
@@ -278,21 +283,13 @@ above the strip when the panel is docked, below it when maximized.
 
 Closing a tab, or the window, ends that tab's whole process session.
 
-Terminal look: the user's Ghostty config when it exists (font family and
-size, theme or palette, cursor style, padding), mapped onto the component.
-Without one, the fallback terminal theme (`TermPalette::fallback`), dark in
-both app modes as in the approved mockup, 12.5 / 19 in the app's mono font:
+Terminal look: the user's Ghostty config overrides the terminal's default
+font, padding, palette, foreground, background, cursor and selection settings
+where provided. In dark mode the grid defaults to Merino Dark, with
+`#0D1117` background, `#E6EDF3` foreground and `#2F81F7` cursor. The terminal
+panel chrome uses the app palette. Its controls never inherit the user's
+Ghostty colors. The light grid follows the light GPUI theme by default.
 
-| Token | Value | | Token | Value |
-|---|---|---|---|---|
-| `bg` | `#1C1C1A` | | `green` | `#5DCAA5` |
-| `fg`, `cursor` | `#E8E6DC` | | `bright_green` | `#97C459` |
-| `dim` | `#8B8A85` | | `blue` | `#85B7EB` |
-| `strip` | `#2A2A28` | | `magenta` | `#AFA9EC` |
-| `strip_border` | `#3A3A37` | | `yellow` | `#EF9F27` |
-| `tab_fg` | `#B4B2A9` | | `red` | `#F07B7A` |
-| `badge_warn_bg` / `_fg` | `#633806` / `#FAC775` | | `cyan` | `#6CCFD9` |
-| `badge_bg` / `_fg` | `#3A3A37` / `#D3D1C7` | | | |
 
 Prompt themes (zsh, oh-my-zsh, starship) come from the real shell in a
 real PTY (`TERM`, `COLORTERM=truecolor`); tmux is not involved.

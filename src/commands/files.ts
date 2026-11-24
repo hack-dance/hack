@@ -12,6 +12,7 @@ import { readProjectConfig } from "../lib/project.ts";
 import { readServiceFiles } from "../lib/service-files.ts";
 import { TARGET_SERVICE_PATTERN } from "../lib/target-inspect.ts";
 import {
+  assertSavedDockerEngine,
   optExpectComposeProject,
   resolveComposeCommandTarget,
   resolveEffectiveBranchForCommand,
@@ -94,6 +95,13 @@ async function runFiles(
       readOnly: true,
       serviceNames: [service],
     }));
+  if (args.options.expectComposeProject !== undefined) {
+    await assertSavedDockerEngine({
+      projectDir: project.projectDir,
+      lifecycleComposeProject: target.lifecycle.lifecycleComposeProject,
+      env,
+    });
+  }
   const result = await readServiceFiles({
     operation,
     project,

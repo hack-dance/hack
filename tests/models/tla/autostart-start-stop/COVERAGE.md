@@ -81,6 +81,9 @@ New launch records retain a digest of Docker connection settings. Stop and
 Restart compare the settings they will pass to Docker before cleanup or
 recreation. Restart keeps its value-free reference file paired with its env
 through each Compose attempt and lets sibling hooks finish before claiming it.
+When supplied by the engine, a bounded daemon ID observation also distinguishes
+replacements behind the same endpoint. Start rechecks the original launch after
+hooks, and bound readers check the selected connection before accessing services.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

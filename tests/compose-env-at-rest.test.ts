@@ -168,7 +168,7 @@ test("a Compose operation holds its reference file against another writer", asyn
   const writer = writeComposeEnvOverride({ projectDir, text: second });
   try {
     expect(
-      await Promise.race([writer, Bun.sleep(150).then(() => null)])
+      await Promise.race([writer, Bun.sleep(10_250).then(() => null)])
     ).toBeNull();
     expect(await readFile(path, "utf8")).toBe(first);
   } finally {
@@ -176,7 +176,7 @@ test("a Compose operation holds its reference file against another writer", asyn
     await Promise.all([operation, writer]);
   }
   expect(await readFile(path, "utf8")).toBe(second);
-});
+}, 30_000);
 
 test("writer leaves a value-free 0600 file and tightens an existing loose mode", async () => {
   const rendered = renderComposeEnvReferenceOverride({

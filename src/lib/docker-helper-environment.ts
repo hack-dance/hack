@@ -4,6 +4,7 @@ import { open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { childEnvironment } from "./child-environment.ts";
 import { getString, isRecord } from "./guards.ts";
+import { exec } from "./shell.ts";
 
 /** Only platform and Docker transport settings are inputs to inspect/logs/events. */
 const DOCKER_HELPER_NAMES: ReadonlySet<string> = new Set([
@@ -170,4 +171,33 @@ export function dockerHelperRunEnvironment(
     env: dockerHelperEnvironment(overrides),
     unsetEnvKeys: Object.keys(process.env),
   };
+}
+
+const DOCKER_DAEMON_ID = /^[a-zA-Z0-9:-]{4,160}$/;
+
+/** A bounded read of the responding daemon's ID, independent of socket or context names. */
+export async function readDockerDaemonIdentity(opts: {
+  readonly env: Readonly<Record<string, string>>;
+  readonly cwd: string;
+}): Promise<string | null> {
+  const result = await exec(["docker", "info", "--format", "{{.ID}}"], {
+    cwd: opts.cwd,
+    ...dockerHelperRunEnvironment(opts.env),
+    stdin: "ignore",
+    timeoutMs: 1500,
+    maxStdoutBytes: 1024,
+    maxStderrBytes: 1024,
+  }).catch(() => null);
+  const id = result?.exitCode === 0 ? result.stdout.trim() : "";
+  return DOCKER_DAEMON_ID.test(id) && id !== "null" ? id : null;
+}
+
+export function dockerDaemonIdentityFingerprint(
+  id: string,
+  launchId: string
+): string {
+  return createHmac("sha256", launchId)
+    .update("hack.docker-daemon-id.v1\0")
+    .update(id)
+    .digest("hex");
 }

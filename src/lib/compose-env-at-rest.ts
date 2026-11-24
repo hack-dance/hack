@@ -6,6 +6,7 @@ import {
   type ComposeEnvOverrideContent,
   classifyComposeEnvOverrideText,
 } from "./compose-managed-env.ts";
+import { COMPOSE_ENV_OVERRIDE_WAIT_MS } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import {
   inspectLegacyComposeAdoptionSelectionDetail,
@@ -16,6 +17,7 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { withTerminationAbort } from "./project-shared-helpers.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
 /**
@@ -148,7 +150,9 @@ export async function writeComposeEnvOverride(opts: {
   /** Clock for the stale-aside age check; tests only, no authority. */
   readonly now?: () => number;
 }): Promise<string> {
-  return await withComposeEnvOverride({ ...opts, run: async (path) => path });
+  return await withTerminationAbort((signal) =>
+    withComposeEnvOverride({ ...opts, signal, run: async (path) => path })
+  );
 }
 
 /**
@@ -159,6 +163,7 @@ export async function withComposeEnvOverride<T>(opts: {
   readonly projectDir: string;
   readonly text: string;
   readonly now?: () => number;
+  readonly signal?: AbortSignal;
   readonly run: (path: string) => Promise<T>;
 }): Promise<T> {
   if (classifyComposeEnvOverrideText(opts.text).kind !== "references") {
@@ -176,6 +181,8 @@ export async function withComposeEnvOverride<T>(opts: {
   return await withProjectsRegistryLock({
     lockPath: `${path}.lock`,
     label: "Compose env override",
+    timeoutMs: COMPOSE_ENV_OVERRIDE_WAIT_MS,
+    signal: opts.signal,
     run: async () => {
       const options = fileOptions(path);
       const existing = await readReplaceablePrivateFile(options);

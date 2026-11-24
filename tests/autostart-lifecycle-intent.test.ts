@@ -181,7 +181,10 @@ const containerId = "f".repeat(64);
 const context = process.env.DOCKER_CONTEXT || "none";
 const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || options.defaultStack || "sample";
 const running = fixture + (options.trackNamedStacks ? "/compose-running-" + stack : "/compose-running");
-if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
+if (args[0] === "info" && args.includes("{{.ID}}")) {
+  const identity = Bun.file(fixture + "/daemon-id");
+  if (await identity.exists()) process.stdout.write((await identity.text()) + "\\n");
+} else if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   const model = JSON.parse(await Bun.stdin.text());
   if (options.failFirstProbe && !(await Bun.file(fixture + "/name-probed").exists())) {
     await Bun.write(fixture + "/name-probed", "probed");
@@ -1410,6 +1413,89 @@ test("Restart uses the verified Docker context after a down hook edits the overl
   await writeEndpoint("original.sock");
   const stopped = await run(["down", "--json"], false, undefined, env);
   expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
+}, 40_000);
+
+test("an up hook cannot repoint the original Docker context or replace its launch", async () => {
+  const projectDir = join(root, "project", ".hack");
+  const dockerConfig = join(root, "home", ".docker");
+  const context = "fixture-engine";
+  const key = createHash("sha256").update(context).digest("hex");
+  const contextDir = join(dockerConfig, "contexts", "meta", key);
+  await mkdirOwnedFixture(contextDir, true);
+  const metadata = join(contextDir, "meta.json");
+  const endpoint = (socket: string) =>
+    JSON.stringify({
+      Endpoints: { docker: { Host: `unix://${join(root, socket)}` } },
+    });
+  await writeOwnedFixture(metadata, endpoint("original.sock"));
+  const env = {
+    PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+    DOCKER_CONFIG: dockerConfig,
+    DOCKER_CONTEXT: context,
+  };
+  await installComposeNameFixture({ startContainers: true });
+  const started = await run(["up", "-d", "--json"], false, undefined, env);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  const launch = { projectDir, composeProject: "sample" };
+  const before = await readProjectRuntimeStateEntry(launch);
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        up: {
+          before: [
+            `printf %s ${quoteShellWord(endpoint("new.sock"))} > ${quoteShellWord(metadata)}`,
+          ],
+        },
+      },
+    })
+  );
+  const refused = await run(["up", "-d", "--json"], false, undefined, env);
+  expect(refused.exitCode).toBe(1);
+  expect(refused.stdout).toContain("different Docker connection settings");
+  expect(await Bun.file(metadata).text()).toBe(endpoint("new.sock"));
+  expect(await readProjectRuntimeStateEntry(launch)).toEqual(before);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+}, 40_000);
+
+test("Down and bound readers reject a replacement Docker daemon at the same connection", async () => {
+  const projectDir = join(root, "project", ".hack");
+  const daemon = join(root, "daemon-id");
+  await Bun.write(daemon, "fixture-engine-one");
+  await writeOwnedFixture(
+    join(projectDir, "hack.env.qa.yaml"),
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n"
+  );
+  await installComposeNameFixture({
+    startContainers: true,
+    savedContextOnly: true,
+  });
+  const started = await run(["up", "-d", "--env", "qa", "--json"]);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  const launch = { projectDir, composeProject: "sample" };
+  const before = await readProjectRuntimeStateEntry(launch);
+  expect(before?.dockerDaemonIdentity).toMatch(/^[a-f0-9]{64}$/);
+  await Bun.write(daemon, "fixture-engine-two");
+  const expectProject = ["--expect-compose-project", "sample"];
+  for (const command of [
+    ["down", "--json"],
+    ["exec", ...expectProject, "app", "--", "sh"],
+    ["files", "ls", ...expectProject, "--json", "app", "/app"],
+    ["logs", ...expectProject, "--no-follow", "app"],
+  ]) {
+    const refused = await run(command);
+    expect(refused.exitCode, refused.stderr + refused.stdout).toBe(1);
+    expect(refused.stdout + refused.stderr).toContain(
+      "different Docker daemon"
+    );
+  }
+  expect(await readProjectRuntimeStateEntry(launch)).toEqual(before);
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+  await Bun.write(daemon, "fixture-engine-one");
+  const down = await run(["down", "--json"]);
+  expect(down.exitCode, down.stderr + down.stdout).toBe(0);
 }, 40_000);
 
 test("unnamed Start runs the engine hook before its implicit ownership probe and Logs finds the host output", async () => {

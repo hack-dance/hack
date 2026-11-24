@@ -28,3 +28,10 @@ remove the data of a project you no longer use.
 See the [native startup settings and refusal codes](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md#native-startup-limits)
 for the detached start budget and ceiling, the Compose-backed graph readiness
 limit and the authored native startup limit.
+
+The native authored runtime keeps up to 64 attempt directories in its active
+inventory. When that inventory fills, it can move the oldest fully removed
+attempt out of the inventory when no foreground publication, recovery intent,
+persistent storage or retained private environment record still needs it. The archive keeps up to 256 removal
+receipts for inspection and confirmation. After the archive
+fills, the oldest receipts expire as new ones are added.

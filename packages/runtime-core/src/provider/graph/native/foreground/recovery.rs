@@ -32,6 +32,13 @@ fn exists(path: &Path) -> Result<bool, CandidateError> {
         Err(_) => Err(refused()),
     }
 }
+/// The frontend may retry the original selection after losing a recovery reply,
+/// including after the publication has moved out of its live paths.
+pub(in crate::provider::graph::native) fn requires_active(
+    root: &Path,
+) -> Result<bool, CandidateError> {
+    Ok(exists(&root.join(FILE))? || exists(&root.join("live-owner-recovery.pending"))?)
+}
 fn directory(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
     let root = journal::directory(candidate, run)?;
     for path in root

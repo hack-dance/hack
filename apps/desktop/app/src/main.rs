@@ -263,7 +263,7 @@ fn main() {
                             if f.name() == "resources-unavailable" {
                                 app.simulate_daemon_unavailable(false);
                             }
-                            app.show_resources(cx);
+                            app.show_resources_fixture(f.name(), cx);
                         }
                         if f.name().starts_with("catalog-") {
                             app.show_catalog_fixture(f.name(), window, cx);

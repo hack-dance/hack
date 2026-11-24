@@ -21,6 +21,7 @@ pub(crate) fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyEl
         .px(space::S8)
         .py(space::S5)
         .type_step(text::BODY);
+    let body = body.child(disk_usage(app, ui, cx));
     let body = match app
         .model
         .snapshot()
@@ -54,19 +55,84 @@ pub(crate) fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyEl
         .flex()
         .flex_col()
         .child(
-            div().px(space::S8).py(space::S6).hairline_b(p.border).flex().items_center().gap(space::S4)
+            div()
+                .px(space::S8)
+                .py(space::S6)
+                .hairline_b(p.border)
+                .flex()
+                .items_center()
+                .gap(space::S4)
                 .child(div().type_step(text::TITLE).child("Resources"))
                 .child(div().flex_1())
-                .child(action_button("resources-doctor", Glyph::Stethoscope, "Doctor", true, ui)
-                    .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx)))),
+                .child(
+                    action_button("resources-doctor", Glyph::Stethoscope, "Doctor", true, ui)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
+                ),
         )
-        .child(div().px(space::S8).pt(space::S4).type_step(text::SMALL).text_color(p.text_secondary)
-            .child("Observed containers and attachments. Detached resources and disk usage are unavailable."))
+        .child(
+            div()
+                .px(space::S8)
+                .pt(space::S4)
+                .type_step(text::SMALL)
+                .text_color(p.text_secondary)
+                .child("Observed containers and attachments for registered projects."),
+        )
         .children(app.observed_pool().map(|report| {
-            div().px(space::S8).py(space::S4).child(crate::doctor_view::native_pool_card(report, ui))
+            div()
+                .px(space::S8)
+                .py(space::S4)
+                .child(crate::doctor_view::native_pool_card(report, ui))
         }))
         .child(body)
         .into_any_element()
+}
+
+fn disk_usage(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> Div {
+    let bytes = hack_desktop_core::usage::bytes;
+    let amounts = |allocated, logical| {
+        format!(
+            "{} allocated · {} logical",
+            bytes(allocated),
+            bytes(logical)
+        )
+    };
+    let section = div().flex().flex_col().gap(space::S2).child(
+        div()
+            .flex()
+            .items_center()
+            .gap(space::S4)
+            .child(
+                div()
+                    .type_step(text::BODY_STRONG)
+                    .child("Native home disk usage"),
+            )
+            .child(
+                action_button(
+                    "resources-disk-retry",
+                    Glyph::Restart,
+                    "Check again",
+                    app.resource_disk.is_some(),
+                    ui,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.load_resource_disk(cx))),
+            ),
+    );
+    match &app.resource_disk {
+        None => section.child("Reading native disk usage…"),
+        Some(Err(message)) => section.child(*message),
+        Some(Ok(report)) => section
+            .child(amounts(report.allocated_bytes, report.logical_bytes))
+            .children(
+                (!report.complete).then_some("Scan incomplete. Totals cover the files found."),
+            )
+            .children(report.categories.iter().map(|row| {
+                div().text_color(ui.p.text_secondary).child(format!(
+                    "{} · {}",
+                    row.label,
+                    amounts(row.allocated_bytes, row.logical_bytes),
+                ))
+            })),
+    }
 }
 
 fn group(index: usize, group: ResourceGroup, ui: &Ui, cx: &mut Context<HackApp>) -> Div {

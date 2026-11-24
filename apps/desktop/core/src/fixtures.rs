@@ -59,6 +59,7 @@ pub enum Fixture {
     ConfigError,
     ConfigLoading,
     ResourcesUnavailable,
+    ResourcesLoading,
     ResourcesEmpty,
     ResourcesReady,
     CatalogNative,
@@ -98,7 +99,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 61] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -136,6 +137,7 @@ impl Fixture {
         Self::ConfigError,
         Self::ConfigLoading,
         Self::ResourcesUnavailable,
+        Self::ResourcesLoading,
         Self::ResourcesEmpty,
         Self::ResourcesReady,
         Self::CatalogNative,
@@ -201,6 +203,7 @@ impl Fixture {
             Self::ConfigError => "config-error",
             Self::ConfigLoading => "config-loading",
             Self::ResourcesUnavailable => "resources-unavailable",
+            Self::ResourcesLoading => "resources-loading",
             Self::ResourcesEmpty => "resources-empty",
             Self::ResourcesReady => "resources-ready",
             Self::CatalogNative => "catalog-native",
@@ -579,6 +582,27 @@ pub fn project(f: Fixture) -> ProjectsPayload {
 #[must_use]
 pub fn selected(_f: Fixture) -> &'static str {
     "storefront"
+}
+
+/// Native disk usage for the Resources fixtures.
+#[must_use]
+pub fn native_disk_usage(
+    name: &str,
+) -> Option<Result<crate::resources::NativeDiskUsage, &'static str>> {
+    match name {
+            "resources-loading" => None,
+            "resources-unavailable" => Some(Err("Could not read disk usage. Check `hack native disk-usage` in a terminal.")),
+            name => Some(Ok(serde_json::from_value(serde_json::json!({
+                "scope": "native-home-host-files",
+                "complete": name != "resources-empty",
+                "allocatedBytes": 2684354560_u64,
+                "logicalBytes": 6442450944_u64,
+                "categories": [
+                    {"label":"Artifacts","allocatedBytes":536870912,"logicalBytes":1073741824},
+                    {"label":"Runtime state and VM disks","allocatedBytes":2147483648_u64,"logicalBytes":5368709120_u64}
+                ]
+            })).expect("native disk fixture"))),
+    }
 }
 
 /// Synthetic examples of refusals returned by the CLI result envelope.

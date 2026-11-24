@@ -10,7 +10,7 @@ use hack_desktop_core::{
     viewmodel::{Banner, ListView},
 };
 use hack_desktop_ui::{
-    components::{StyledExt as _, Ui, action_button, icon_button},
+    components::{StyledExt as _, Ui, action_button, icon, icon_button},
     icons::Glyph,
     tokens::{radius, space, text},
 };
@@ -18,7 +18,7 @@ use hack_desktop_ui::{
 use crate::{
     doctor_view::Mark,
     health_model::{
-        CLI_UPDATE_GUIDE, FollowUpKind as Kind, Repair, RepairTarget, cli_update_copy,
+        CLI_UPDATE_GUIDE, FollowUpKind as Kind, Repair, RepairTarget, cli_update_repair,
         daemon_repair, machine_repair, setup_card,
     },
     view::HackApp,
@@ -246,8 +246,8 @@ fn diagnostic(app: &HackApp, list: &ListView, banner: &Banner) -> Option<Notice>
                     format!(
                         "hackd {daemon} is newer than CLI {cli}. Update the CLI using its installation method."
                     ),
-                    cli_update_copy(app.health_report())
-                        .map_or_else(|| Action::Guide(CLI_UPDATE_GUIDE.into()), Action::Copy),
+                    cli_update_repair(app.health_report())
+                        .map_or_else(|| Action::Guide(CLI_UPDATE_GUIDE.into()), Action::Run),
                 ),
                 UpdateSide::Daemon => (
                     format!("hackd {daemon} and CLI {cli} can’t work together."),
@@ -354,6 +354,12 @@ pub fn banner(notice: &Notice, busy: bool, ui: &Ui, cx: &mut Context<HackApp>) -
     let p = ui.p;
     let kind = notice.kind;
     let evidence = notice.evidence.clone();
+    let status_icon = match kind {
+        Kind::Update => Some(Glyph::Upgrade),
+        Kind::Offline => Some(Glyph::WifiOff),
+        Kind::Setup => Some(Glyph::Info),
+        _ => None,
+    };
     div()
         .min_h(px(44.))
         .px(space::S6)
@@ -363,7 +369,10 @@ pub fn banner(notice: &Notice, busy: bool, ui: &Ui, cx: &mut Context<HackApp>) -
         .gap(space::S5)
         .rounded(radius::PANEL)
         .hairline(p.border_strong)
-        .child(notice.mark.icon(ui))
+        .child(status_icon.map_or_else(
+            || notice.mark.icon(ui),
+            |glyph| icon(glyph, px(15.), p.text_muted).into_any_element(),
+        ))
         .child(
             div()
                 .flex_1()
@@ -392,6 +401,25 @@ pub fn banner(notice: &Notice, busy: bool, ui: &Ui, cx: &mut Context<HackApp>) -
                 })),
         )
         .children(button(kind, &notice.action, busy, ui, cx))
+        .children(match &notice.action {
+            Action::Run(repair) if repair.runnable() => {
+                let command = repair.control.clone();
+                Some(
+                    action_button(
+                        format!("banner-copy-{kind:?}"),
+                        Glyph::Copy,
+                        "Copy",
+                        true,
+                        ui,
+                    )
+                    .flex_none()
+                    .on_click(
+                        cx.listener(move |_, _, _, cx| crate::health_commands::copy(&command, cx)),
+                    ),
+                )
+            }
+            _ => None,
+        })
         .child(
             icon_button(format!("dismiss-banner-{kind:?}"), Glyph::Close, ui)
                 .tooltip(move |window, cx| {
@@ -413,14 +441,14 @@ fn button(
     cx: &mut Context<HackApp>,
 ) -> Option<AnyElement> {
     let (glyph, label, enabled) = match action {
-        Action::Run(_) => (
+        Action::Run(repair) => (
             Glyph::Play,
             if kind == Kind::Routing {
                 "Run fix"
             } else {
                 "Run"
             },
-            !busy && crate::health_commands::AVAILABLE,
+            !busy && repair.runnable() && crate::health_commands::AVAILABLE,
         ),
         Action::Recover(action) => (Glyph::Power, action.label(), !busy),
         Action::Copy(_) => (Glyph::Copy, "Copy", true),
@@ -522,10 +550,8 @@ mod tests {
                         assert_eq!(mismatch.command.as_deref(), Some("hack update"));
                         assert!(matches!(
                             &mismatch.action,
-                            Action::Copy(CommandControl {
-                                availability: CommandAvailability::CopyOnly(spec),
-                                ..
-                            }) if spec.args.ends_with(&[program, "update".into()])
+                            Action::Run(repair) if matches!(&repair.control.availability,
+                                CommandAvailability::Ready(spec) if spec.args.ends_with(&[program, "update".into()]))
                         ));
 
                         setup.cli_program = None;

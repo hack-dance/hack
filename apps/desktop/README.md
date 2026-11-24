@@ -3,8 +3,9 @@
 Unsupported preview of a minimal native window for Hack: every
 project, its state and services, and Start / Stop / Restart / Open. It is a view
 over the `hack` CLI and the `hackd` socket; it keeps no state beyond window
-layout, holds no credentials and runs `hack` as you for every action. Not part
-of the release or onboarding yet.
+layout and holds no credentials. Project actions run `hack` as you. Service
+Stop uses Docker to target an individual Compose service. This app is outside
+the release and onboarding workflows.
 
 | Crate | What |
 |---|---|
@@ -499,7 +500,7 @@ banner and Doctor's **Upgrade** row open the Upgrade pane for an available
 release. The pane shows the target version and the CLI's install command for
 copying, when available, alongside its readiness check.
 If hackd is newer than the selected CLI, the banner and Doctor's hackd row
-offer a copyable CLI update command or installation guidance. This works
+offer Run and Copy for the CLI update command, or installation guidance. This works
 while release checks are offline.
 The wrong-CLI banner accepts version and replacement evidence as inputs. Its
 examples are fixtures until HACK-2597 supplies that evidence for live checks.
@@ -655,9 +656,10 @@ each run by the selected CLI in its checked context:
 
 - **Check** (read-only; when the pane opens and on Check again): the CLI's own
   verdict (`ready`: no blockers and nothing incomplete), each blocker and
-  each check that could not run, and the plan with one row per step. A
-  step's command is for copying: the app never runs `hack upgrade apply` or
-  a plan command.
+  each check that could not run, and the plan with one row per step. **Run**
+  opens the selected command in the shared terminal drawer and refreshes the
+  plan on exit. **Copy** is available for running it in another terminal.
+  Reports without structured arguments can still supply copy text.
 - **Save snapshot** keeps a private copy of the files an upgrade changes,
   under the CLI's home, and says what it did not cover.
 - **Review findings** (read-only) lists the findings that cannot be applied
@@ -858,3 +860,34 @@ Process-cleanup regression tests use a generous 60-second scheduling deadline,
 then check process retirement rather than enforcing a short wall-clock latency.
 The stream-drop test also proves the reader was waiting before Drop and that
 Drop's reader join completes. These test allowances do not change CLI timeouts.
+
+## Service details
+
+Select a service from the Services table to open its detail pane. The pane opens
+on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
+Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
+
+- **Info** shows copyable route, health, image, mount, container name and
+  startup information reported for the selected service. A Compose ownership
+  label identifies Docker Compose. The daemon does not report who invoked
+  Compose or the exact start command.
+- **Logs** uses the selected copy’s Hack JSON stream. Switch to any service in
+  that copy or show all services there. Search highlights matching rows. Use
+  **Only matching lines** to hide the rest. The menu also controls wrap and
+  JSON key highlighting and opens the same scope in the terminal drawer.
+- **Terminal** docks the instance’s existing Ghostty drawer in the pane. It
+  reselects a running shell in the chosen service or starts a new one after
+  the last shell exits. The ended tab retains its scrollback. Terminal tabs
+  stay open when you switch detail tabs, and the drawer keeps Ghostty’s
+  configured appearance.
+- **Restart** calls Hack for the selected service. **Stop** targets its
+  observed running Compose containers and confirms their identity with Docker
+  before stopping by full ID. On macOS, the explicit service action accepts
+  Docker CLI installs under the standard system Applications directory when
+  that directory is writable only by root and the local administrators group.
+  The project’s **Stop** still runs instance-wide
+  `hack down`.
+
+With the screenshots feature enabled, run `hack-desktop --service-screenshots
+<dir>` to render the pane’s light and dark fixtures and exercise its tab
+shortcuts through the app keymap.

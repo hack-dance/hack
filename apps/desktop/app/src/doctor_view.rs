@@ -20,7 +20,7 @@ use hack_desktop_core::source::DaemonRecovery;
 
 use crate::{
     health_model::{
-        CLI_UPDATE_GUIDE, MACHINE_ROWS, Repair, RepairTarget, cli_update_copy, machine_repair,
+        CLI_UPDATE_GUIDE, MACHINE_ROWS, Repair, RepairTarget, cli_update_repair, machine_repair,
         matches_authored_copy, project_repair, setup_card,
     },
     view::HackApp,
@@ -56,7 +56,7 @@ impl Mark {
             Self::Warning => (Glyph::CircleAlert, p.states.degraded.fg),
             Self::Error => (Glyph::CircleAlert, p.states.failed.fg),
             Self::Unknown => (Glyph::CircleAlert, p.text_muted),
-            Self::Skipped => (Glyph::Play, p.text_muted),
+            Self::Skipped => (Glyph::Minus, p.text_muted),
             Self::Running => (Glyph::Loader, p.text_primary),
         };
         icon(glyph, px(15.), fg).into_any_element()
@@ -65,6 +65,7 @@ impl Mark {
 
 pub enum Next {
     Repair(Repair),
+    SingleRepair(Repair),
     Command(CommandControl),
     Doc(String),
     Recheck,
@@ -84,7 +85,7 @@ pub struct Row {
 
 impl Row {
     fn repair(&self) -> Option<&Repair> {
-        if let Next::Repair(repair) = &self.next {
+        if let Next::Repair(repair) | Next::SingleRepair(repair) = &self.next {
             Some(repair)
         } else {
             None
@@ -233,8 +234,8 @@ fn machine_action(app: &HackApp, card: &hack_desktop_core::setup::Card) -> Next 
                 && card.status == Status::NeedsAttention
                 && matches_authored_copy(report, cmd, &["update"]) =>
         {
-            cli_update_copy(report)
-                .map_or_else(|| Next::Doc(CLI_UPDATE_GUIDE.into()), Next::Command)
+            cli_update_repair(report)
+                .map_or_else(|| Next::Doc(CLI_UPDATE_GUIDE.into()), Next::SingleRepair)
         }
         _ => Next::None,
     }
@@ -354,7 +355,7 @@ pub fn repairs(app: &HackApp) -> Vec<Repair> {
     let (machine, projects) = rows(app, view);
     let mut repairs = Vec::new();
     for row in machine.iter().chain(&projects) {
-        if let Some(repair) = row.repair()
+        if let Next::Repair(repair) = &row.next
             && repair.runnable()
             && !repairs.iter().any(|r: &Repair| r.target == repair.target)
         {
@@ -591,7 +592,7 @@ fn groups(
                         .type_step(text::SMALL)
                         .text_color(p.states.degraded.fg)
                         .child(format!("Couldn’t check {who}"))
-                        .child(details(id, ui, cx)),
+                        .child(details(id, false, ui, cx)),
                 )
                 .children(open.then(|| {
                     div()
@@ -779,7 +780,7 @@ fn row_action(
 ) -> AnyElement {
     let id = row.id.clone();
     let action = match &row.next {
-        Next::Repair(repair) => crate::health_commands::render(
+        Next::Repair(repair) | Next::SingleRepair(repair) => crate::health_commands::render(
             app,
             repair.control.clone(),
             Some(repair.clone()),
@@ -836,28 +837,43 @@ fn row_action(
         .flex_none()
         .items_center()
         .gap(space::S2)
-        .children(row.details.as_ref().map(|_| details(id, ui, cx)))
+        .children(
+            row.details
+                .as_ref()
+                .map(|_| details(id, row.repair().is_some(), ui, cx)),
+        )
         .child(action)
         .into_any_element()
 }
 
-fn details(id: String, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
-    button(
+fn details(id: String, alongside_repair: bool, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
+    let details = button(
         format!("doctor-details-{id}"),
         Glyph::ChevronDown,
         "Details",
         true,
         ui,
-    )
-    .on_click(cx.listener(move |this, _, _, cx| {
-        this.health.details_open = if this.health.details_open.as_ref() == Some(&id) {
-            None
-        } else {
-            Some(id.clone())
-        };
-        cx.notify();
-    }))
-    .into_any_element()
+    );
+    let details = if alongside_repair {
+        details
+            .w(px(64.))
+            .h(px(24.))
+            .px(px(2.))
+            .gap(px(3.))
+            .justify_center()
+    } else {
+        details
+    };
+    details
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.health.details_open = if this.health.details_open.as_ref() == Some(&id) {
+                None
+            } else {
+                Some(id.clone())
+            };
+            cx.notify();
+        }))
+        .into_any_element()
 }
 
 fn button(

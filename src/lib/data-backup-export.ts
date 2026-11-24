@@ -11,6 +11,7 @@ import {
   type DataBackupManifest,
   type DataBackupVolume,
   dataBackupHelperImage,
+  dataBackupNameSha256,
   dataBackupTimestamp,
 } from "./data-backup-format.ts";
 import {
@@ -165,7 +166,11 @@ async function exportWithin(opts: {
     lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
   });
   // Stop and drain the subscription, then decide.
-  const mounts = await monitor.finish(volumeNames);
+  const keyOf = new Map(owned.map((volume) => [volume.name, volume.key]));
+  const mounts = (await monitor.finish(volumeNames)).map((mount) => ({
+    ...mount,
+    volume: keyOf.get(mount.volume) ?? mount.volume,
+  }));
   if (mounts.length > 0) {
     throw foreignMountError({
       mounts,
@@ -245,7 +250,7 @@ async function copyVolume(opts: {
   );
   if (tar.exitCode !== 0) {
     throw helperFailure({
-      volume: volume.name,
+      volume: volume.key,
       action: "copy",
       result: tar,
       consequence,
@@ -255,12 +260,13 @@ async function copyVolume(opts: {
     docker: opts.docker,
     name: name(),
     volume: volume.name,
+    label: volume.key,
     purpose: "export",
     consequence,
   });
   return {
     key: volume.key,
-    name: volume.name,
+    nameSha256: dataBackupNameSha256(volume.name),
     driver: volume.driver,
     labels: volume.labels,
     file,

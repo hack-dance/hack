@@ -242,9 +242,7 @@ describe("planDeclaredVolumes", () => {
       { key: "db", name: "custom" },
       { key: "web", name: "shop_web" },
     ]);
-    expect(plan.external).toEqual([
-      { key: "shared", name: "shared-net-data", reason: "external" },
-    ]);
+    expect(plan.external).toEqual([{ key: "shared", reason: "external" }]);
   });
 
   test("a model without volumes declares none", () => {
@@ -307,7 +305,7 @@ describe("exportProjectData", () => {
     const tar = await readFile(join(backup, "db.tar"));
     expect(db).toEqual({
       key: "db",
-      name: "shop_db",
+      nameSha256: createHash("sha256").update("shop_db").digest("hex"),
       driver: "local",
       labels: {
         "com.docker.compose.project": PROJECT,
@@ -321,9 +319,9 @@ describe("exportProjectData", () => {
       contentDigest: createHash("sha256").update("shop_db").digest("hex"),
     });
     expect(manifest.skipped).toEqual([
-      { key: "hijacked", name: "other_thing", reason: "foreign" },
-      { key: "later", name: "shop_later", reason: "absent" },
-      { key: "shared", name: "team-shared", reason: "external" },
+      { key: "hijacked", reason: "foreign" },
+      { key: "later", reason: "absent" },
+      { key: "shared", reason: "external" },
     ]);
     // Foreign and external volumes are never mounted; external is never inspected.
     const mounted = state.calls
@@ -348,6 +346,55 @@ describe("exportProjectData", () => {
     );
   });
 
+  test("resolved Docker names never reach the manifest, JSON or text output", async () => {
+    const secret = "s3cr3t-tok3n-9f8e7d";
+    const state = baseState({
+      model: model({
+        db: { name: `shop_db-${secret}` },
+        shared: { name: `team-${secret}`, external: true },
+        gone: { name: `shop_gone-${secret}` },
+        other: { name: `other-${secret}` },
+      }),
+      volumes: {
+        [`shop_db-${secret}`]: owned("db"),
+        [`other-${secret}`]: owned("thing", "elsewhere"),
+      },
+    });
+    const result = await exportProjectData(input(state));
+    const manifest = await readFile(
+      join(result.backup, "manifest.json"),
+      "utf8"
+    );
+    for (const text of [
+      manifest,
+      JSON.stringify(result),
+      renderDataExportText(result),
+    ]) {
+      expect(text).not.toContain(secret);
+    }
+    expect(result.manifest.volumes[0]?.nameSha256).toBe(
+      createHash("sha256").update(`shop_db-${secret}`).digest("hex")
+    );
+    expect(result.manifest.skipped).toEqual([
+      { key: "gone", reason: "absent" },
+      { key: "other", reason: "foreign" },
+      { key: "shared", reason: "external" },
+    ]);
+
+    // Nor does a failure message.
+    const failing = baseState({
+      model: model({ db: { name: `shop_db-${secret}` } }),
+      volumes: { [`shop_db-${secret}`]: owned("db") },
+      failTarFor: `shop_db-${secret}`,
+    });
+    const error = await caught(
+      exportProjectData(input(failing, { outDir: join(root, "fail") }))
+    );
+    expect(
+      `${error.message}${JSON.stringify(error.detail ?? null)}`
+    ).not.toContain(secret);
+  });
+
   test("a volume labeled for this project but another key is foreign", async () => {
     const state = baseState({
       model: model({ db: { name: "shop_db" } }),
@@ -355,9 +402,7 @@ describe("exportProjectData", () => {
     });
     const result = await exportProjectData(input(state));
     expect(result.manifest.volumes).toEqual([]);
-    expect(result.manifest.skipped).toEqual([
-      { key: "db", name: "shop_db", reason: "foreign" },
-    ]);
+    expect(result.manifest.skipped).toEqual([{ key: "db", reason: "foreign" }]);
   });
 
   test("every helper is network-less, read-only and uses the pinned image", async () => {
@@ -464,7 +509,7 @@ describe("exportProjectData", () => {
     expect(error.message).toContain("ffffffffffff");
     expect(error.detail).toEqual({
       mounts: [
-        { volume: "shop_db", container: "f".repeat(64), name: "adhoc-writer" },
+        { volume: "db", container: "f".repeat(64), name: "adhoc-writer" },
       ],
     });
     const parent = join(root, "home", "data-backups", PROJECT);
@@ -494,7 +539,7 @@ describe("exportProjectData", () => {
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.detail).toEqual({
       mounts: [
-        { volume: "shop_db", container: "b".repeat(64), name: "early-writer" },
+        { volume: "db", container: "b".repeat(64), name: "early-writer" },
       ],
     });
     // The subscription was live before that check: the start marker ran first.
@@ -518,7 +563,7 @@ describe("exportProjectData", () => {
     const error = await caught(exportProjectData(input(state)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.detail).toEqual({
-      mounts: [{ volume: "shop_db", container: "d".repeat(64), name: null }],
+      mounts: [{ volume: "db", container: "d".repeat(64), name: null }],
     });
   });
 
@@ -590,7 +635,8 @@ describe("exportProjectData", () => {
       exportProjectData(input(state, { outDir: out }))
     );
     expect(error.code).toBe("E_UNEXPECTED");
-    expect(error.message).toContain("shop_db");
+    expect(error.message).toContain("volume db");
+    expect(error.message).not.toContain("shop_db");
     expect(await readdir(out)).toEqual(["20261123T140501Z.partial"]);
     // cache (sorted first) was copied; the failed db tar is left; no manifest.
     expect(

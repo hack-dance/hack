@@ -95,6 +95,13 @@ digest leaves them out too and the manifest counts them per volume as
 are runtime artifacts, such as `mysql.sock` in a MySQL data directory, that
 the service recreates when it starts.
 
+## Redaction
+
+A resolved Docker volume name can carry interpolated env values (for example
+`name: app-${TOKEN}`). The manifest, the `--json` output, the text summary and
+error messages name volumes by Compose key only; the manifest keeps a sha256
+of the resolved name so a restore can tell whether it changed.
+
 ## Format
 
 ```text
@@ -114,8 +121,8 @@ Directories and files are created private to your user (0700 and 0600).
 | `project`, `branch`, `composeProject` | Hack project name, branch slug or null, Compose project name |
 | `createdAt` | UTC start time, ISO 8601 |
 | `hackVersion`, `helperImage`, `digestAlgorithm` | Version that wrote it, pinned helper reference, `hack.tree-digest.v1` |
-| `volumes[]` | `key`, `name`, `driver`, the two ownership `labels`, `file`, `tarBytes`, `tarSha256`, `entries` (the root included, sockets not), `excludedSockets`, `contentDigest` |
-| `skipped[]` | `key`, `name` and `reason`: `external`, `foreign` or `absent` |
+| `volumes[]` | `key`, `nameSha256` (sha256 of the Docker volume name, never the name itself), `driver`, the two ownership `labels`, `file`, `tarBytes`, `tarSha256`, `entries` (the root included, sockets not), `excludedSockets`, `contentDigest` |
+| `skipped[]` | `key` and `reason`: `external`, `foreign` or `absent` |
 
 `--json` prints the standard envelope with `data.schema` `hack.data-export.v1`,
 `data.backup` (the backup path) and `data.manifest`.

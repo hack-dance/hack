@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   NATIVE_STORAGE_DOCKER_ARTIFACT,
   nativeComposeStorageDockerImageReference,
@@ -33,8 +34,12 @@ export function dataBackupHelperImage(): string {
 export type DataBackupVolume = {
   /** Logical key in the Compose model's top-level `volumes:`. */
   readonly key: string;
-  /** Docker volume name (`name:` or `<compose project>_<key>`). */
-  readonly name: string;
+  /**
+   * sha256 of the Docker volume name (`name:` or `<compose project>_<key>`).
+   * The resolved name can carry interpolated env values, so only its hash is
+   * stored; a restore compares hashes to tell whether the name changed.
+   */
+  readonly nameSha256: string;
   readonly driver: string;
   /** The Compose labels that proved ownership. */
   readonly labels: {
@@ -60,12 +65,16 @@ export type DataBackupVolume = {
 
 export type DataBackupSkipReason = "external" | "foreign" | "absent";
 
+/** Skipped volumes are reported by Compose key only, never by Docker name. */
 export type DataBackupSkipped = {
   readonly key: string;
-  /** Null when the model gives no name to check (never for Compose output). */
-  readonly name: string | null;
   readonly reason: DataBackupSkipReason;
 };
+
+/** The identity hash of a resolved Docker volume name. */
+export function dataBackupNameSha256(name: string): string {
+  return createHash("sha256").update(name).digest("hex");
+}
 
 export type DataBackupManifest = {
   readonly schema: typeof DATA_BACKUP_SCHEMA;

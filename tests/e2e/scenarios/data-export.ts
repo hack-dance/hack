@@ -29,7 +29,7 @@ type ExportPayload = {
       readonly helperImage?: string;
       readonly volumes?: readonly {
         readonly key: string;
-        readonly name: string;
+        readonly nameSha256: string;
         readonly file: string;
         readonly tarBytes: number;
         readonly tarSha256: string;
@@ -158,13 +158,14 @@ export const dataExportScenario: Scenario = {
           manifest.helperImage === HELPER &&
           manifest.volumes?.length === 1 &&
           volume?.key === "data" &&
-          volume.name === data &&
+          volume.nameSha256 ===
+            new Bun.CryptoHasher("sha256").update(data).digest("hex") &&
           volume.entries === 5 &&
           volume.excludedSockets === 1 &&
           JSON.stringify(manifest.skipped) ===
             JSON.stringify([
-              { key: "other", name: foreign, reason: "foreign" },
-              { key: "shared", name: external, reason: "external" },
+              { key: "other", reason: "foreign" },
+              { key: "shared", reason: "external" },
             ]),
         message: "manifest should list the owned volume and skip the others",
         result: exported,

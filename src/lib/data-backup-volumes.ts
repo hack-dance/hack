@@ -78,7 +78,7 @@ export function planDeclaredVolumes(model: unknown): DeclaredVolumePlan {
         ? rawName
         : null;
     if (definition.external === true || isRecord(definition.external)) {
-      external.push({ key, name, reason: "external" });
+      external.push({ key, reason: "external" });
       continue;
     }
     if (name === null) {
@@ -150,7 +150,8 @@ export async function inspectVolume(opts: {
   ) {
     throw new HackCliError({
       code: "E_UNEXPECTED",
-      message: `docker volume inspect returned unreadable output for ${opts.name}; nothing was changed.`,
+      message:
+        "docker volume inspect returned unreadable output for a declared volume; nothing was changed.",
     });
   }
   return {
@@ -192,7 +193,7 @@ export async function classifyDeclaredVolumes(opts: {
       name: volume.name,
     });
     if (inspected === null) {
-      skipped.push({ ...volume, reason: "absent" });
+      skipped.push({ key: volume.key, reason: "absent" });
       continue;
     }
     if (
@@ -202,7 +203,7 @@ export async function classifyDeclaredVolumes(opts: {
         key: volume.key,
       })
     ) {
-      skipped.push({ ...volume, reason: "foreign" });
+      skipped.push({ key: volume.key, reason: "foreign" });
       continue;
     }
     owned.push({

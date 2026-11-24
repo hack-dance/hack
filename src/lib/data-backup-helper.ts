@@ -105,7 +105,10 @@ export function dataBackupHelperArgv(opts: {
   ];
 }
 
-/** A failed helper run, classified as an engine problem when it is one. */
+/**
+ * A failed helper run, classified as an engine problem when it is one.
+ * `volume` is the Compose key: resolved Docker names are never printed.
+ */
 export function helperFailure(opts: {
   readonly volume: string;
   readonly action: string;
@@ -136,6 +139,8 @@ export async function treeDigest(opts: {
   readonly docker: DataBackupDocker;
   readonly name: string;
   readonly volume: string;
+  /** The Compose key, used in messages instead of the Docker name. */
+  readonly label: string;
   readonly purpose: HelperPurpose;
   readonly consequence: string;
 }): Promise<TreeDigest> {
@@ -161,7 +166,7 @@ export async function treeDigest(opts: {
   );
   if (result.exitCode !== 0) {
     throw helperFailure({
-      volume: opts.volume,
+      volume: opts.label,
       action: "digest",
       result,
       consequence: opts.consequence,
@@ -184,7 +189,7 @@ export async function treeDigest(opts: {
   ) {
     throw new HackCliError({
       code: "E_UNEXPECTED",
-      message: `The backup helper returned an unreadable digest for volume ${opts.volume}; ${opts.consequence}`,
+      message: `The backup helper returned an unreadable digest for volume ${opts.label}; ${opts.consequence}`,
     });
   }
   return {

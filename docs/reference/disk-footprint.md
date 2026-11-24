@@ -9,7 +9,8 @@ objects as attribution within those disks when measuring host space.
 ## Measure the selected native home
 
 Run `hack native disk-usage` for host file totals, or add `--json` for the
-same measurements in a script. The command leaves a stopped pool stopped.
+same measurements in a script. Use `hack doctor --disk` for the same totals in
+a standalone diagnostic report. The command leaves a stopped pool stopped.
 Allocated bytes are file blocks reported by the filesystem. Hard links are counted
 once, while APFS clones may share some of the reported blocks. A partial scan is
 marked incomplete. Guest data already lives in the host backing disks and is

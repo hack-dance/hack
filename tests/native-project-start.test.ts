@@ -72,6 +72,7 @@ import {
   NativeRuntimeRequestError,
   nativeRuntimeFailure,
 } from "../src/backends/native-runtime-client.ts";
+import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -7478,6 +7479,52 @@ test("up on a stopped pool whose run's owner died recovers the run with data ret
   expect(notices.join("\n")).toContain("recovered with data retained");
 });
 
+// HACK-2579: the pool's provider was killed; its record still says running, and
+// the run's detached owner has not noticed yet.
+test("up on a pool whose provider exited under a running record recovers it with one line, then recovers the run", async () => {
+  const { start, events, notices } =
+    await stoppedPoolUnderRunFixture("stopped");
+  let runtimeRecovered = false;
+  let refusedOnce = false;
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && !refusedOnce) {
+      refusedOnce = true;
+      events.push("graph retained-preflight owner running");
+      throw new NativeRuntimeRequestError({
+        nativeCode: "graph_foreground_owner_running",
+        message: "Another hack up of this run is still running.",
+      });
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "recover") {
+      events.push("runtime recover");
+      runtimeRecovered = true;
+      return { phase: "recovered-unclean", process_alive: false };
+    }
+    if (
+      request.args[0] === "runtime" &&
+      request.args[1] === "status" &&
+      !runtimeRecovered
+    ) {
+      events.push("runtime status exited");
+      return { phase: "process-exited", process_alive: false };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(start)).toBe(0);
+  expect(events.slice(0, 4)).toEqual([
+    "graph retained-preflight owner running",
+    "runtime status exited",
+    "runtime recover",
+    "graph retained-preflight refused",
+  ]);
+  expect(events.filter((event) => event === "runtime recover")).toHaveLength(1);
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(
+    notices.filter((line) => line === NATIVE_EXITED_RUNTIME_NOTICE)
+  ).toHaveLength(1);
+});
+
 test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {
   const { start, events } = await stoppedPoolUnderRunFixture("running");
   const error = await startNativeProject(start).catch(
@@ -7636,6 +7683,7 @@ test("a live foreground owner on a running pool keeps its refusal at once, with 
   );
   expect(events).toEqual([
     "graph retained-preflight owner running",
+    "runtime status",
     "pool record",
   ]);
   expect(notices).toEqual([]);

@@ -235,6 +235,7 @@ import {
   type NativeRuntimeMetadataSelection,
   verifyNativeRuntimeMetadataRoutes,
 } from "./native-runtime-metadata.ts";
+import { recoverExitedNativeRuntime } from "./native-runtime-preflight.ts";
 import {
   monitorNativeServiceExits,
   type NativeServiceExit,
@@ -2121,6 +2122,8 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   readonly recover: (() => Promise<void>) | undefined;
   readonly warn: (line: string) => void;
   readonly signal?: AbortSignal;
+  /** Set on the one retry after an exited provider was recovered (HACK-2579). */
+  readonly exitedProviderRecovered?: true;
   readonly poolBootEnded: (home: string) => Promise<boolean>;
   readonly endedBootOwnerWaitMs: number;
 }): ReturnType<typeof selectNativeStartup> {
@@ -2128,6 +2131,32 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   try {
     return await opts.select();
   } catch (error) {
+    // HACK-2579: the pool's provider exited while its record still says running.
+    // The retained preflight then sees a live owner that has not noticed yet, or a
+    // running record with a dead provider. `runtime recover` records the pool
+    // stopped (under the lease, identity checked), then selection runs once more.
+    if (
+      error instanceof NativeRuntimeRequestError &&
+      EXITED_PROVIDER_REFUSALS.has(error.nativeCode ?? "") &&
+      !opts.exitedProviderRecovered &&
+      !opts.signal?.aborted &&
+      (await recoverExitedNativeRuntime({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        invoke: opts.invoke,
+        signal: opts.signal,
+        notice: (line) => {
+          if (!reportNativeImageNotice(line)) {
+            opts.warn(line);
+          }
+        },
+      }))
+    ) {
+      return await selectNativeStartupRecoveringStoppedPool({
+        ...opts,
+        exitedProviderRecovered: true,
+      });
+    }
     failure = error;
   }
   // HACK-2572: the owner of a pool boot that has ended is still exiting. Wait,
@@ -2179,6 +2208,13 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   return await opts.select();
 }
 const NATIVE_FOREGROUND_OWNER_EXITED = "graph_foreground_owner_exited";
+/** Retained-preflight refusals a pool with an exited provider can give (HACK-2579). */
+const EXITED_PROVIDER_REFUSALS = new Set([
+  "graph_foreground_owner_running",
+  "graph_foreground_owner_uncertain",
+  "graph_retained_startup",
+  "process_identity_unavailable",
+]);
 /** A pool record that proves an ended boot, for the wait's own recheck. */
 const ENDED_RECORD = { token: "", phase: "stopped" };
 /**

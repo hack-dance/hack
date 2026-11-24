@@ -186,7 +186,7 @@ fn recover_start(
     if present(&directory, ["agent.pid"])? == [true] {
         let process = recorded_process(candidate, owner)
             .map_err(|_| unrecoverable!("the provider's PID record is unreadable or incomplete"))?;
-        if identity::alive(process.pid)? {
+        if !identity::provider_gone(&process)? {
             // SAFETY: geteuid has no preconditions and cannot fail.
             identity::verify(
                 &process,

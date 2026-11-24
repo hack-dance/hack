@@ -118,6 +118,7 @@ const MACHINE_AREAS = {
   "native hack.local route": "routing_dns",
   "native hack.local repair": "routing_dns",
   "native pool idle": "native",
+  "native disk usage": "native",
 } as const satisfies Readonly<Record<string, DoctorArea>>;
 
 const ROUTING_CHECK_PREFIXES = [

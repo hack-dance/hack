@@ -8,6 +8,10 @@ import {
   checkLegacyProjectAgentArtifacts,
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
+import {
+  describeNativeDiskBytes,
+  readNativeDiskUsage,
+} from "../backends/native-disk-usage.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import { runNativeProjectCleanupCommand } from "../backends/native-project-cleanup-command.ts";
 import {
@@ -489,6 +493,13 @@ const optBrowserResult = defineOption({
     "Your manual browser observation for --browser-url (default: unknown)",
 } as const);
 const doctorOptions = [
+  defineOption({
+    name: "disk",
+    type: "boolean",
+    long: "--disk",
+    description:
+      "Audit host file usage for the selected native home without starting the pool",
+  } as const),
   optPath,
   optFix,
   defineOption({
@@ -836,6 +847,9 @@ async function runNativePreflightMode(
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  if (args.options.disk) {
+    return await reportNativeDiskAudit(args.options);
+  }
   if (args.options.machine) {
     assertMachineDoctorOptions(args.options);
   }
@@ -844,6 +858,40 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   }
   return await runDoctorAudit(args);
 };
+
+async function reportNativeDiskAudit(
+  options: Parameters<
+    CommandHandlerFor<typeof doctorSpec>
+  >[0]["args"]["options"]
+): Promise<number> {
+  const allowed = new Set(["disk", "json", "noInteractive"]);
+  for (const [key, value] of Object.entries(options)) {
+    if (value !== undefined && value !== false && !allowed.has(key)) {
+      throw new CliUsageError(
+        "--disk is a standalone read-only audit. Combine it with --json for machine output."
+      );
+    }
+  }
+  const started = performance.now();
+  const usage = await readNativeDiskUsage(process.cwd());
+  const detail = `${describeNativeDiskBytes(usage)}${usage.complete ? "" : " · incomplete scan"}`;
+  if (options.json) {
+    return finishDoctorJson({
+      results: [
+        {
+          name: "native disk usage",
+          status: usage.complete ? "ok" : "warn",
+          message: detail,
+          durationMs: Math.round(performance.now() - started),
+        },
+      ],
+      hasError: false,
+      machine: false,
+    });
+  }
+  process.stdout.write(`Native home disk usage · ${detail}\n`);
+  return 0;
+}
 
 async function runDoctorAudit(
   args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]

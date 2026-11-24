@@ -3503,18 +3503,24 @@ mod tests {
             }))
             .unwrap()
         };
-        let live = identity::observe(i32::try_from(std::process::id()).unwrap()).unwrap();
-        let mut reused = live.clone();
-        reused.start_micros -= 1;
+        let live_pid = i32::try_from(std::process::id()).unwrap();
+        #[cfg(target_os = "macos")]
+        let live = identity::observe(live_pid).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let live = identity::ProcessIdentity {
+            pid: live_pid,
+            start_micros: 1,
+            uid: 0,
+            executable: "/fixture/smolvm".into(),
+        };
         let dead = {
-            let mut child = std::process::Command::new("/bin/sleep")
-                .arg("30")
-                .spawn()
-                .unwrap();
-            let identity = identity::observe(i32::try_from(child.id()).unwrap());
-            child.kill().unwrap();
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = i32::try_from(child.id()).unwrap();
             child.wait().unwrap();
-            identity.unwrap()
+            identity::ProcessIdentity {
+                pid,
+                ..live.clone()
+            }
         };
         for phase in [
             "stopped",
@@ -3528,11 +3534,16 @@ mod tests {
                 observed_stopped(&owner(phase, Some(&dead))).unwrap(),
                 "{phase}"
             );
-            // A live PID with a different birth belongs to a replacement process.
-            assert!(
-                observed_stopped(&owner(phase, Some(&reused))).unwrap(),
-                "{phase}"
-            );
+            #[cfg(target_os = "macos")]
+            {
+                // A live PID with a different birth belongs to a replacement process.
+                let mut reused = live.clone();
+                reused.start_micros -= 1;
+                assert!(
+                    observed_stopped(&owner(phase, Some(&reused))).unwrap(),
+                    "{phase}"
+                );
+            }
             // A live recorded provider is not stopped, whatever the phase says.
             assert!(
                 !observed_stopped(&owner(phase, Some(&live))).unwrap(),

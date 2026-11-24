@@ -1,9 +1,8 @@
 # Command drawer captures
 
-The current frames were captured from the native macOS app built at
-`67bf7327a9cf211d4767b17384ec8b275a86a285`. The fixture runner uses synthetic
-Setup reports and real embedded terminal sessions. It uses the built-in
-terminal palette for capture.
+The current frames were captured at 2× from the native macOS app built at
+`f60ac2e0e60be157cf84d2340ce6aff3867e6213`. The fixture runner uses synthetic
+Setup reports and real embedded terminal sessions with the built-in palette.
 
 | State | Light | Dark |
 | --- | --- | --- |

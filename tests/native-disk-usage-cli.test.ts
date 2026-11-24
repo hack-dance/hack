@@ -20,15 +20,9 @@ printf '%s\\n' '{"scope":"candidate-state-metadata-only","complete":false,"total
       root,
       env: { HACK_NATIVE_BINARY: binary, HACK_NATIVE_HOME: root },
     });
-    async function run(flags: string[]) {
+    async function run(command: string[], flags: string[]) {
       const child = Bun.spawn(
-        [
-          process.execPath,
-          resolve("index.ts"),
-          "native",
-          "disk-usage",
-          ...flags,
-        ],
+        [process.execPath, resolve("index.ts"), ...command, ...flags],
         { cwd: root, env, stdout: "pipe", stderr: "pipe" }
       );
       const [stdout, stderr, status] = await Promise.all([
@@ -40,14 +34,16 @@ printf '%s\\n' '{"scope":"candidate-state-metadata-only","complete":false,"total
       return stdout;
     }
 
-    const human = await run([]);
+    const human = await run(["native", "disk-usage"], []);
     expect(human).toContain(
       "Native home total · 512 B allocated · 32768 B logical"
     );
     expect(human).toContain("Disk usage scan was incomplete.");
     expect(human).toContain("Reclaimable bytes: unknown");
 
-    expect(JSON.parse(await run(["--json"]))).toMatchObject({
+    expect(
+      JSON.parse(await run(["native", "disk-usage"], ["--json"]))
+    ).toMatchObject({
       ok: true,
       data: {
         scope: "native-home-host-files",
@@ -64,7 +60,23 @@ printf '%s\\n' '{"scope":"candidate-state-metadata-only","complete":false,"total
         ],
       },
     });
+    const doctor = ["doctor", "--disk"];
+    expect(await run(doctor, [])).toContain(
+      "Native home disk usage · 512 B allocated · 32768 B logical · incomplete scan"
+    );
+    expect(JSON.parse(await run(doctor, ["--json"]))).toMatchObject({
+      ok: true,
+      data: {
+        checks: [
+          {
+            id: "native disk usage",
+            status: "warn",
+            detail: "512 B allocated · 32768 B logical · incomplete scan",
+          },
+        ],
+      },
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 30_000);

@@ -9,7 +9,7 @@ model, regression, artifact, native application and dogfood acceptance separate.
 
 The maintained runner enumerates finite domains with TLC and checks a positive
 instance plus discriminating negative controls. Its registry pins state counts,
-invariants, named counterexample actions and same-state witness fields. A parse
+invariants and witness fields in the final counterexample state. A parse
 error, zero-state search, timeout, unrelated failure or incomplete search is not a
 pass. See [model contracts](../../tests/models/tla/README.md) and
 [the result validator](../../scripts/lib/tla-result.ts).

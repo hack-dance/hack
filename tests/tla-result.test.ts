@@ -32,9 +32,17 @@ describe("TLC admission evidence", () => {
     ).toBe(false);
   });
   test("accepts only the intended negative invariant and counterexample", () => {
-    const output = "Invariant Capacity is violated.\nused = {1, 2}";
+    const output =
+      "Error: Invariant Capacity is violated.\nState 3: <Admit line 1>\n/\\ used = {1, 2}";
     expect(
       verifyAdmissionModelResult({ negative: true, exitCode: 12, output })
+    ).toBe(true);
+    expect(
+      verifyAdmissionModelResult({
+        negative: true,
+        exitCode: 12,
+        output: output.replace("<Admit ", "<Next "),
+      })
     ).toBe(true);
     for (const exitCode of [0, 1, 150, null]) {
       expect(
@@ -44,7 +52,8 @@ describe("TLC admission evidence", () => {
     for (const invalid of [
       "Parse error",
       "Invariant Other is violated.\nused = {1, 2}",
-      "Invariant Capacity is violated.\nused = {1}",
+      output.replace("used = {1, 2}", "used = {1}"),
+      `${output}\nState 4: <Next line 1>\n/\\ used = {1}`,
     ]) {
       expect(
         verifyAdmissionModelResult({
@@ -84,9 +93,16 @@ describe("TLC balloon reuse evidence", () => {
   });
   test("requires an unaccounted mapped state in the same remap step", () => {
     const output =
-      'Invariant MappedMemoryAccounted is violated.\nState 5: <Remap line 14 of module BalloonReuse>\n/\\ phase = "mapped"\n/\\ reusable = TRUE\n';
+      'Error: Invariant MappedMemoryAccounted is violated.\nState 5: <Remap line 14 of module BalloonReuse>\n/\\ phase = "mapped"\n/\\ reusable = TRUE\n';
     expect(
       verifyBalloonReuseModelResult({ negative: true, exitCode: 12, output })
+    ).toBe(true);
+    expect(
+      verifyBalloonReuseModelResult({
+        negative: true,
+        exitCode: 12,
+        output: output.replace("<Remap ", "<Next "),
+      })
     ).toBe(true);
     for (const exitCode of [0, 1, 150, null]) {
       expect(
@@ -97,7 +113,6 @@ describe("TLC balloon reuse evidence", () => {
       "Parse error",
       output.replace("MappedMemoryAccounted", "Other"),
       output.replace("TRUE", "FALSE"),
-      output.replace("<Remap", "<Stop"),
       output.replace(
         "/\\ reusable = TRUE",
         "State 6: <Discard>\n/\\ reusable = TRUE"
@@ -133,9 +148,16 @@ describe("TLC restore history evidence", () => {
       })
     ).toBe(false);
     const output =
-      'Invariant HistoryPreserved is violated.\nState 2: <Prepare line 1>\n/\\ legacy = <<>>\n/\\ manifest = <<>>\n/\\ phase = "writing"\n';
+      'Error: Invariant HistoryPreserved is violated.\nState 2: <Prepare line 1>\n/\\ legacy = <<>>\n/\\ manifest = <<>>\n/\\ phase = "writing"\n';
     expect(
       verifyRestoreHistoryModelResult({ negative: true, exitCode: 12, output })
+    ).toBe(true);
+    expect(
+      verifyRestoreHistoryModelResult({
+        negative: true,
+        exitCode: 12,
+        output: output.replace("<Prepare ", "<Next "),
+      })
     ).toBe(true);
     for (const exitCode of [0, 1, 150, null]) {
       expect(
@@ -147,6 +169,7 @@ describe("TLC restore history evidence", () => {
       output.replace("HistoryPreserved", "Other"),
       output.replace("legacy = <<>>", "legacy = <<1>>"),
       output.replace("/\\ manifest", "State 3: <Publish>\n/\\ manifest"),
+      `${output}State 3: <Publish>\n/\\ phase = "idle"`,
     ]) {
       expect(
         verifyRestoreHistoryModelResult({
@@ -187,7 +210,13 @@ State 8: <ListenerExits line 151 of module PoolStop>
     for (const invalid of [
       { ...result, exitCode: 0 },
       { ...result, output: output.replace("NoDeadEnd", "TypeOK") },
-      { ...result, output: output.replace("<ListenerExits", "<OwnerRetire") },
+      {
+        ...result,
+        output: output.replace(
+          "<ListenerExits line 151 of module PoolStop>",
+          "<unterminated"
+        ),
+      },
       {
         ...result,
         output: output.replace('port = "free"', 'port = "listener"'),

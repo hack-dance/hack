@@ -282,14 +282,17 @@ Before any write it checks, in order:
    that is missing, is not a regular file, or differs in size or sha256 from
    the manifest refuses with `E_BACKUP_INVALID`. The backup id is the sha256
    of `manifest.json`.
-2. **The source project and names.** The backup's `composeProject` must
-   equal this instance's Compose project, and each target's Docker name must
-   hash to the backup's `nameSha256`. To restore into a branch instance, a
-   renamed project or under a changed volume name, pass `--from-project
-   <backup's compose project>`; a missing or different value refuses with
-   `E_USAGE`.
+2. **The source project and names.** The backup's `composeProjectSha256`
+   must equal the sha256 of this instance's resolved Compose project name,
+   and each target's Docker name must hash to the backup's `nameSha256`. To
+   restore into a branch instance, a renamed project or under a changed
+   volume name, pass `--from-project <hack project>`: the backup's Hack
+   project name (its manifest `project`), compared as given; a missing or
+   different value refuses with `E_USAGE`. Messages name Hack projects and
+   branches only.
 3. **One import at a time.** The import holds
-   `$HACK_HOME/data-imports/<compose project>/.lock` for its whole run. A
+   `$HACK_HOME/data-imports/<hack project>[--<branch>]/.lock` for its whole
+   run (Hack's names, never the resolved Compose project). A
    second import of the same project refuses with `E_LOCKED` after a
    one-second bound instead of waiting; a lock left by a process that no
    longer exists is reclaimed.
@@ -318,7 +321,10 @@ Compose writes, and Compose does not require its config-hash label.
 
 Then, per target, through one held helper container as export uses (unique
 `hack-data-import-<random>` name, `--log-driver none`, `--network none`,
-read-only root, `no-new-privileges`, the volume read-write at `/v`):
+read-only root, `no-new-privileges`, and the target's `Mountpoint`
+bind-mounted read-write at `/v`; an existing target is never mounted by
+name, and only an absent one is created, explicitly, with `docker volume
+create`):
 
 1. An absent target is created. Because `docker volume create` returns an
    existing volume of that name unchanged, Hack inspects the result and
@@ -344,7 +350,7 @@ the event fence, as export does; only then are the journals marked
 
 ### Interruption and recovery
 
-The journal is `$HACK_HOME/data-imports/<compose project>/<key>.json`
+The journal is `$HACK_HOME/data-imports/<hack project>[--<branch>]/<key>.json`
 (`hack.data-import-journal.v1`: backup id, backup path, key, the sha256 of
 the target's Docker name, state `started`, `complete` or `failed`), written
 atomically. On a rerun, a non-empty target is treated as this import's own
@@ -372,7 +378,8 @@ labels cannot be added later), so if that import is interrupted a rerun
 refuses it; the message says to remove that volume after checking it.
 
 `--json` prints the standard envelope with `data.schema` `hack.data-import.v1`:
-`backup`, `backupId`, `sourceComposeProject`, `composeProject`, `volumes[]`
+`backup`, `backupId`, `sourceProject`, `sourceBranch`, `project`, `branch`
+(Hack names), `volumes[]`
 (`key`, `target` `created`, `empty`, `replaced-partial` or
 `verified-complete`, `outcome` `restored` or `verified`, `entries`,
 `excludedSockets`, `contentDigest`) and `skipped[]` (`key`, `reason`

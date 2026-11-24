@@ -421,6 +421,36 @@ ${exited}/\ home = "replaced"
   ).toBe(false);
 });
 
+test("image batch detects two simultaneous imports at any job positions", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "native-image-batch"
+  );
+  const verify = (phase: string, verified: string) =>
+    model?.verify({
+      negative: true,
+      exitCode: 12,
+      output: tlaWitness({
+        invariant: "Safe",
+        action: "Import",
+        fields: [`phase = ${phase}`, `verified = ${verified}`],
+      }),
+    });
+  // TLC actually reported the first and third jobs importing instead of the
+  // first and second jobs. Another job can also have failed after verification.
+  expect(verify('<<"import", "queued", "import", "queued">>', "{1, 3}")).toBe(
+    true
+  );
+  expect(
+    verify('<<"import", "failed", "import", "queued">>', "{1, 2, 3}")
+  ).toBe(true);
+  expect(verify('<<"import", "queued", "ready", "queued">>', "{1, 3}")).toBe(
+    false
+  );
+  expect(verify('<<"import", "queued", "import", "queued">>', "{1}")).toBe(
+    false
+  );
+});
+
 test("previous-boot HTTPS publisher witness accepts only the two owner-archived stages", () => {
   const model = runtimeModels.find(
     (entry) => entry.name === "previous-boot-shared-https"

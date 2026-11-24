@@ -3011,10 +3011,7 @@ const contracts: readonly ModelContract[] = [
     module: "ImageBatch",
     states: 3233,
     invariant: "Safe",
-    fields: [
-      'phase = <<"import", "import", "queued", "queued">>',
-      "verified = {1, 2}",
-    ],
+    ...imageBatchImportOverlap(),
   },
   {
     name: "native-image-presence",
@@ -3164,6 +3161,42 @@ const contracts: readonly ModelContract[] = [
     ],
   },
 ];
+
+/** A first parallel-import violation has two importers among four jobs. */
+function imageBatchImportOverlap(): {
+  readonly fields: WitnessFields;
+  readonly alternativeWitnesses: readonly WitnessFields[];
+} {
+  // A failed job may have stopped before or after its archive was verified.
+  const jobStates = [
+    { phase: "queued", verified: false, worker: false },
+    { phase: "fetch", verified: false, worker: true },
+    { phase: "ready", verified: true, worker: true },
+    { phase: "import", verified: true, worker: true },
+    { phase: "confirmed", verified: true, worker: false },
+    { phase: "failed", verified: false, worker: false },
+    { phase: "failed", verified: true, worker: false },
+  ] as const;
+  const combinations = [1, 2, 3, 4].reduce<(typeof jobStates)[number][][]>(
+    (prefixes) =>
+      prefixes.flatMap((prefix) => jobStates.map((job) => [...prefix, job])),
+    [[]]
+  );
+  const [fields, ...alternativeWitnesses] = combinations
+    .filter(
+      (jobs) =>
+        jobs.filter(({ phase }) => phase === "import").length === 2 &&
+        jobs.filter(({ worker }) => worker).length <= 3
+    )
+    .map((jobs) => [
+      `phase = <<${jobs.map(({ phase }) => `"${phase}"`).join(", ")}>>`,
+      `verified = {${jobs.flatMap(({ verified }, index) => (verified ? [index + 1] : [])).join(", ")}}`,
+    ]);
+  if (!fields) {
+    throw new Error("Missing image batch import overlap states.");
+  }
+  return { fields, alternativeWitnesses };
+}
 
 /**
  * StatKeyedHash witnesses: every state in which a lookup would hit, written out

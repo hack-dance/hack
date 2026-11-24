@@ -96,9 +96,14 @@ impl Drop for EngineChanges {
     }
 }
 
-/// Connect and send the subscription, on the reader thread. The stream is
-/// registered for shutdown before the request, and refused once closed.
+/// Connect and send the subscription, on the reader thread. A waiter already
+/// dropped (a start that returned before this thread ran) opens nothing; one dropped
+/// during the connect shuts the new stream at once. The stream is registered for
+/// shutdown before the request.
 fn subscribe(path: &Path, run: &str, shared: &Mutex<Stream>) -> Option<UnixStream> {
+    if shared.lock().ok()?.closed {
+        return None;
+    }
     let mut stream =
         crate::provider::agent::connect_until(path, Instant::now() + Duration::from_secs(1))
             .ok()?;
@@ -201,16 +206,21 @@ mod tests {
                 .unwrap();
             peer.write_all(b"10\r\n{\"status\":\"x\"}\n\r\n").unwrap();
             sent.send(()).unwrap();
-            second.recv().unwrap();
+            // The test ending (or failing) drops the sender and ends this wait too.
+            if second.recv_timeout(Duration::from_secs(10)).is_err() {
+                return String::new();
+            }
             peer.write_all(b"10\r\n{\"status\":\"y\"}\n\r\n").unwrap();
             // Keep the stream open until the test is done with it.
-            let _ = finished.recv();
+            let _ = finished.recv_timeout(Duration::from_secs(10));
             head
         });
         let changes = EngineChanges::follow(&path, RUN);
         // The first event is read before the first wait begins: that wait must
         // return at once rather than wait for the next one.
-        first.recv().unwrap();
+        first
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the fake engine saw no subscription");
         until(|| observed(&changes));
         changes.wait(Duration::from_secs(5));
         assert!(!observed(&changes), "the wait did not consume the event");
@@ -264,6 +274,28 @@ mod tests {
     }
 
     #[test]
+    fn a_waiter_dropped_before_its_worker_runs_opens_no_socket() {
+        let (_socket, path, listener) = socket("late");
+        listener.set_nonblocking(true).unwrap();
+        // What the worker finds when the start returned before it first ran.
+        let shared = Mutex::new(Stream {
+            stream: None,
+            closed: true,
+        });
+        assert!(subscribe(&path, RUN, &shared).is_none());
+        // Nothing connected: the engine has no pending connection to accept.
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        // An open waiter does connect.
+        let open = Mutex::new(Stream::default());
+        assert!(subscribe(&path, RUN, &open).is_some());
+        listener.set_nonblocking(false).unwrap();
+        assert!(listener.accept().is_ok());
+    }
+
+    #[test]
     fn dropping_it_ends_the_reader_while_the_engine_keeps_the_stream_open() {
         use std::sync::mpsc::channel;
         let (_socket, path, listener) = socket("drop");
@@ -280,7 +312,9 @@ mod tests {
             let _ = peer.read_to_end(&mut rest);
         });
         let changes = EngineChanges::follow(&path, RUN);
-        accepted.recv().unwrap();
+        accepted
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the fake engine saw no subscription");
         until(|| changes.stream.lock().unwrap().stream.is_some());
         let started = Instant::now();
         drop(changes);

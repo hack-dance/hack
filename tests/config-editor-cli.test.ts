@@ -531,6 +531,91 @@ test("show redacts a credential-bearing Compose service key and its issue path",
   expect((await readFile(path, "utf8")) === text).toBe(true);
 });
 
+test("project reports hide credential-bearing JSON keys and keep ordinary settings editable", async () => {
+  const f = await fixture();
+  const marker = "fixture-project-key-sentinel";
+  const name = `https://fixture:${marker}@registry.example.test`;
+  const path = join(f.project, "hack.config.json");
+  const config = {
+    name: "storefront",
+    dev_host: "storefront.hack",
+    internal: { dns: true, [name]: "private entry" },
+    additional: [{ [name]: "private array entry", keep: true }],
+  };
+  const text = JSON.stringify(config);
+  await writeFile(path, text);
+
+  const report = await show(f.root, f.main);
+  expect(JSON.stringify(report).includes(marker)).toBe(false);
+  expect(report.project).toEqual({
+    name: "storefront",
+    dev_host: "storefront.hack",
+    internal: { dns: true },
+    additional: [{ keep: true }],
+  });
+  expect(report.layers.find((layer) => layer.id === "1")).toMatchObject({
+    hidden: true,
+    source: null,
+    source_writable: false,
+  });
+  const patch = {
+    base: bases(report),
+    changes: [{ layer: "1", kind: "project", path: "name", value: "shop" }],
+  };
+  const validated = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["validate"],
+    patch,
+  });
+  expect(validated.payload.data.valid).toBe(true);
+  expect(validated.payload.data.previews["1"]).toBeNull();
+  const applied = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["apply"],
+    patch,
+  });
+  expect(applied.payload.ok).toBe(true);
+  const current = JSON.parse(await readFile(path, "utf8"));
+  expect(
+    JSON.stringify(current) === JSON.stringify({ ...config, name: "shop" })
+  ).toBe(true);
+});
+
+test("show omits credential-bearing map keys from legacy project data and env previews", async () => {
+  const f = await fixture();
+  const marker = "fixture-local-map-key-sentinel";
+  const key = `https://fixture:${marker}@registry.example.test`;
+  await Promise.all([
+    rm(join(f.project, "hack.config.json")),
+    writeFile(
+      join(f.project, "hack.toml"),
+      `name = "storefront"\n"${key}" = "private entry"\n[internal]\ndns = true\n`
+    ),
+    writeFile(
+      join(f.project, "hack.env.default.yaml"),
+      `${env("  global:\n    LOG_LEVEL: info")}\n"${key}": private entry\n`
+    ),
+  ]);
+
+  const report = await show(f.root, f.main);
+  expect(JSON.stringify(report).includes(marker)).toBe(false);
+  expect(report.project).toEqual({
+    name: "storefront",
+    internal: { dns: true },
+  });
+  expect(report.env.find((row) => row.key === "LOG_LEVEL")).toMatchObject({
+    values: expect.arrayContaining([
+      { layer: "3", secret: false, value: "info" },
+    ]),
+  });
+  expect(report.layers.find((layer) => layer.id === "3")).toMatchObject({
+    hidden: true,
+    source: null,
+  });
+});
+
 test("show and validation previews omit authorization headers and commands", async () => {
   const f = await fixture();
   const [projectPath, composePath] = [

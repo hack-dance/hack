@@ -11,6 +11,7 @@ import {
   isPrivateOverlayValue,
   jsonConfigTree,
   privateProjectOverlayNames,
+  safeJsonProject,
   safeJsonSource,
   safeYamlSource,
 } from "./config-editor-source.ts";
@@ -635,9 +636,9 @@ function projectModel(
       return {};
     }
   }
-  const tree = jsonConfigTree(layer.text);
-  const safe = safeJsonSource(layer.text);
-  if (!tree.ok || safe.source === null) {
+  const safe = safeJsonProject(layer.text);
+  if (safe === null) {
+    const tree = jsonConfigTree(layer.text);
     issues.push({
       layer: layer.id,
       path: [],
@@ -652,8 +653,7 @@ function projectModel(
     });
     return {};
   }
-  const contents: unknown = JSON.parse(safe.source);
-  return isRecord(contents) ? contents : {};
+  return safe;
 }
 
 function scrubLegacyProject(
@@ -662,6 +662,9 @@ function scrubLegacyProject(
 ): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(record).flatMap(([key, value]) => {
+      if (isConfigSecret("", key)) {
+        return [];
+      }
       if (
         ["startup", "lifecycle"].includes(key) ||
         isPrivateOverlayValue(value, privateOverlays) ||

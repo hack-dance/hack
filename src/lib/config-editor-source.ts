@@ -188,8 +188,11 @@ function jsonSecretRanges(
   path: SourcePath,
   ranges: Range[],
   privateOverlays: ReadonlySet<string>
-): void {
+): boolean {
   const key = path.at(-1);
+  if (isConfigSecret("", key)) {
+    return true;
+  }
   if (
     (typeof key === "string" && secretProperty(key)) ||
     (node.type === "string" &&
@@ -198,27 +201,31 @@ function jsonSecretRanges(
         isPrivateOverlayValue(node.value, privateOverlays)))
   ) {
     ranges.push({ start: node.offset, length: node.length, path });
-    return;
+    return false;
   }
+  let hasPrivateKey = false;
   (node.children ?? []).forEach((child, index) => {
     if (child.type === "property") {
       const [property, value] = child.children ?? [];
       if (value && typeof property?.value === "string") {
-        jsonSecretRanges(
-          value,
-          [...path, property.value],
-          ranges,
-          privateOverlays
-        );
+        hasPrivateKey =
+          jsonSecretRanges(
+            value,
+            [...path, property.value],
+            ranges,
+            privateOverlays
+          ) || hasPrivateKey;
       }
     } else {
-      jsonSecretRanges(child, [...path, index], ranges, privateOverlays);
+      hasPrivateKey =
+        jsonSecretRanges(child, [...path, index], ranges, privateOverlays) ||
+        hasPrivateKey;
     }
   });
+  return hasPrivateKey;
 }
 
-/** Location-preserving redaction. Invalid source is kept out of the JSON contract. */
-function jsonRanges(text: string): Range[] | null {
+function jsonRedactions(text: string) {
   const tree = jsonConfigTree(text);
   if (!(tree.ok && tree.root)) {
     return null;
@@ -228,10 +235,34 @@ function jsonRanges(text: string): Range[] | null {
   const privateOverlays = isRecord(project)
     ? privateProjectOverlayNames(project)
     : new Set<string>();
-  jsonSecretRanges(tree.root, [], ranges, privateOverlays);
-  return ranges;
+  const hasPrivateKey = jsonSecretRanges(
+    tree.root,
+    [],
+    ranges,
+    privateOverlays
+  );
+  return { ranges, hasPrivateKey };
 }
 
+function jsonRanges(text: string): Range[] | null {
+  const redactions = jsonRedactions(text);
+  return redactions && !redactions.hasPrivateKey ? redactions.ranges : null;
+}
+
+/** Keep ordinary fields available when an unsafe key hides the Source preview. */
+export function safeJsonProject(text: string): Record<string, unknown> | null {
+  const redactions = jsonRedactions(text);
+  if (!redactions) {
+    return null;
+  }
+  const project: unknown = JSON.parse(
+    redact(text, redactions.ranges),
+    (key, value: unknown) => (isConfigSecret("", key) ? undefined : value)
+  );
+  return isRecord(project) ? project : null;
+}
+
+/** Location-preserving redaction. Invalid source is kept out of the JSON contract. */
 export function safeJsonSource(text: string) {
   const ranges = jsonRanges(text);
   return ranges
@@ -273,10 +304,7 @@ function yamlSecretRanges(
       aliases = true;
     }
     if (
-      (compose &&
-        index === "key" &&
-        isScalar(node) &&
-        isConfigSecret("", node.value)) ||
+      (index === "key" && isScalar(node) && isConfigSecret("", node.value)) ||
       ((isAlias(node) || isMap(node) || isScalar(node) || isSeq(node)) &&
         privateYamlComment(node))
     ) {

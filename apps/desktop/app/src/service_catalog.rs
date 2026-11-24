@@ -226,12 +226,12 @@ impl HackApp {
                 )
             }
             Some(EditState::Saved(report)) => {
-                let can_start = !native
-                    && editable
-                    && self
-                        .model
-                        .snapshot()
-                        .is_some_and(|s| !s.projects.engine_down());
+                let can_start = editable
+                    && (native
+                        || self
+                            .model
+                            .snapshot()
+                            .is_some_and(|s| !s.projects.engine_down()));
                 let mut start = action_button(
                     "start-catalog-service",
                     Glyph::Play,
@@ -286,11 +286,6 @@ impl HackApp {
         };
         body.child(options)
             .children(status.map(|text| div().text_color(p.text_secondary).child(text)))
-            .when(native && matches!(edit, Some(EditState::Saved(_))), |body| {
-                body.child(div().text_color(p.text_secondary).child(
-                    "Native starts the whole project. Use hack up in a terminal. If the project is already running, stop it first to load the change.",
-                ))
-            })
             .when(!recipe.env_names.is_empty(), |body| {
                 body.child(div().text_color(p.text_secondary).child(format!(
                     "Set {} in Env under the {} service scope before starting.",

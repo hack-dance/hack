@@ -621,11 +621,12 @@ pub trait Source: Send + Sync {
         action: Action,
     ) -> Result<ActionOutcome, SourceError>;
 
-    /// Restart a single Compose service, or stop the exact containers from
-    /// the selected instance snapshot. Never substitutes an instance-wide action.
+    /// Start a selected service on the project backend, restart a Compose
+    /// service, or stop its exact observed containers.
     fn act_on_service(
         &self,
         _root: &Path,
+        _native: bool,
         _branch: Option<&str>,
         _target: &ServiceActionTarget,
         _action: Action,
@@ -2254,10 +2255,16 @@ impl Source for LiveSource {
     fn act_on_service(
         &self,
         root: &Path,
+        native: bool,
         branch: Option<&str>,
         target: &ServiceActionTarget,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
+        if native && action != Action::Start {
+            return Err(service_action_error(
+                "Native supports only starting a selected service",
+            ));
+        }
         validate_branch(&target.name)?;
         let branch = branch.map(validate_branch).transpose()?;
         let root = trusted_root(root)?;
@@ -2266,7 +2273,7 @@ impl Source for LiveSource {
                 let mut args = with_branch(action.cli_args(), branch);
                 args.push(&target.name);
                 let result = self
-                    .runner_for(false)
+                    .runner_for(native)
                     .run_json_to_completion(&args, Some(&root))?;
                 Ok(ActionOutcome::Lifecycle(result))
             }
@@ -5732,6 +5739,30 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
         let lines: Vec<String> = a.lines().map(str::to_owned).collect();
         let _ = std::fs::remove_file(dir.join("argv"));
         lines
+    }
+
+    #[test]
+    fn catalog_start_uses_the_selected_native_backend_and_branch() {
+        let b = std::fs::canonicalize(base("catalog-native-argv")).unwrap();
+        let hack = b.join("hack");
+        crate::test_support::script(
+            &hack,
+            "#!/bin/sh\nprintf '%s\\n' \"$HACK_RUNTIME_BACKEND\" \"$@\" > \"$HACK_HOME/argv\"\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
+        );
+        let source = LiveSource::new(fixture_runner(&hack), None);
+        let project = b.join("project");
+        make_project(&project, ".hack", "docker-compose.yml");
+        let target = ServiceActionTarget {
+            name: "redis".into(),
+            compose_project: None,
+            containers: Vec::new(),
+        };
+        let result = source.act_on_service(&project, true, Some("test"), &target, Action::Start);
+        assert!(result.is_ok(), "{result:?}");
+        let args = argv(&b);
+        assert_eq!(args[0], "native");
+        assert_eq!(&args[1..4], ["up", "--branch", "test"]);
+        assert!(args.iter().any(|arg| arg == "redis"));
     }
 
     #[test]

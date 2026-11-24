@@ -680,7 +680,7 @@ impl HackApp {
                     let branch = key.branch.clone();
                     async move {
                         if let Some(target) = service {
-                            source.act_on_service(&root, branch.as_deref(), &target, action)
+                            source.act_on_service(&root, native, branch.as_deref(), &target, action)
                         } else {
                             source.act(&root, native, branch.as_deref(), action)
                         }

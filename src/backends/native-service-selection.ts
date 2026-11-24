@@ -15,15 +15,19 @@ export class NativeUnknownServiceError extends HackCliError {
   }
 }
 
-/** Project a start onto the requested Compose services and their dependency closure. */
-export function selectNativeServices(opts: {
+type Selection = {
   readonly services: Readonly<Record<string, unknown>>;
   readonly targets: readonly string[];
   readonly profiles: readonly string[];
   readonly existingImages?: ReadonlyMap<string, string>;
-}): Record<string, unknown> {
+};
+
+function declaredService(services: Selection["services"], name: string) {
+  return Object.hasOwn(services, name) ? services[name] : undefined;
+}
+
+function selectionProfiles(opts: Selection): readonly string[] {
   const profiles = new Set(opts.profiles);
-  const included = new Set(opts.targets);
   for (const name of opts.targets) {
     if (!Object.hasOwn(opts.services, name)) {
       throw new NativeUnknownServiceError(name);
@@ -37,63 +41,80 @@ export function selectNativeServices(opts: {
       }
     }
   }
+  return [...profiles];
+}
+
+function selectDependencies(
+  dependencies: unknown,
+  include: (name: string) => void,
+  optional: (name: string) => boolean
+): unknown {
+  if (Array.isArray(dependencies)) {
+    for (const dependency of dependencies) {
+      if (typeof dependency === "string") {
+        include(dependency);
+      }
+    }
+  }
+  if (!isRecord(dependencies)) {
+    return dependencies;
+  }
+  return Object.fromEntries(
+    Object.entries(dependencies).filter(([name, condition]) => {
+      if (
+        isRecord(condition) &&
+        condition.required === false &&
+        !optional(name)
+      ) {
+        return false;
+      }
+      include(name);
+      return true;
+    })
+  );
+}
+
+/** Project a start onto the requested Compose services and their dependency closure. */
+export function selectNativeServices(opts: Selection): Record<string, unknown> {
+  const profiles = selectionProfiles(opts);
   const projected: Record<string, unknown> = Object.create(null);
+  const included = new Set(opts.targets);
+  const optional = (name: string) => {
+    const declared = declaredService(opts.services, name);
+    return (
+      opts.targets.includes(name) ||
+      opts.existingImages?.has(name) === true ||
+      (isRecord(declared) && nativeServiceActive(declared, profiles))
+    );
+  };
   // Inserting into the set extends this traversal and naturally bounds cycles.
   for (const name of included) {
-    const service = Object.hasOwn(opts.services, name)
-      ? opts.services[name]
-      : undefined;
+    const service = declaredService(opts.services, name);
     if (!isRecord(service)) {
       if (service !== undefined) {
         projected[name] = service;
       }
       continue;
     }
-    const dependencies = service.depends_on;
-    if (Array.isArray(dependencies)) {
-      for (const dependency of dependencies) {
-        if (typeof dependency === "string") {
-          included.add(dependency);
-        }
-      }
-    }
-    const dependsOn = isRecord(dependencies)
-      ? Object.fromEntries(
-          Object.entries(dependencies).filter(([dependency, condition]) => {
-            const declared = Object.hasOwn(opts.services, dependency)
-              ? opts.services[dependency]
-              : undefined;
-            const selected =
-              !(isRecord(condition) && condition.required === false) ||
-              opts.targets.includes(dependency) ||
-              opts.existingImages?.has(dependency) ||
-              (isRecord(declared) &&
-                nativeServiceActive(declared, [...profiles]));
-            if (selected) {
-              included.add(dependency);
-            }
-            return selected;
-          })
-        )
-      : dependencies;
+    const dependsOn = selectDependencies(
+      service.depends_on,
+      (dependency) => {
+        included.add(dependency);
+      },
+      optional
+    );
     const existing = opts.existingImages?.get(name);
-    if (existing !== undefined) {
-      // The live owner verifies and observes this service. Its authored config,
-      // private inputs, image tag and publication settings need no preparation.
-      projected[name] = {
-        image: existing,
-        ...(service.healthcheck !== undefined
-          ? { healthcheck: service.healthcheck }
-          : {}),
-        ...(dependsOn !== undefined ? { depends_on: dependsOn } : {}),
-      };
-    } else {
-      projected[name] = {
-        ...service,
-        profiles: undefined,
-        ...(dependsOn !== undefined ? { depends_on: dependsOn } : {}),
-      };
-    }
+    // The owner verifies existing identities. Keep only fields needed to
+    // compile dependency conditions, so an existing service pulls no image
+    // and supplies no private input or publication for this attempt.
+    projected[name] =
+      existing === undefined
+        ? { ...service, profiles: undefined, depends_on: dependsOn }
+        : {
+            image: existing,
+            healthcheck: service.healthcheck,
+            depends_on: dependsOn,
+          };
   }
   return projected;
 }

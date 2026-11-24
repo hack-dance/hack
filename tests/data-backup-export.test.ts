@@ -14,6 +14,7 @@ import {
   exportProjectData,
 } from "../src/lib/data-backup-export.ts";
 import {
+  DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
   DATA_BACKUP_DIGEST_SCRIPT,
   dataBackupHelperImage,
   dataBackupTimestamp,
@@ -233,11 +234,14 @@ describe("exportProjectData", () => {
     expect(create?.slice(-2)).toEqual([PINNED, "infinity"]);
     expect(dataBackupHelperImage()).toBe(PINNED);
     const execs = fake.calls.filter((argv) => argv[1] === "exec");
-    expect(execs.map((argv) => argv.slice(2, 4))).toEqual([
-      [name, "bun"],
-      [name, "tar"],
-      [name, "bun"],
+    expect(execs.map((argv) => argv.slice(2, 5))).toEqual([
+      [name, "bun", "-e"],
+      [name, "tar", "--numeric-owner"],
+      [name, "bun", "-e"],
+      ["--interactive", name, "bun"],
     ]);
+    // The last reads the archive from stdin with the archive digest script.
+    expect(execs[3]?.at(-1)).toBe(DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT);
     expect(execs[0]?.at(-1)).toBe(DATA_BACKUP_DIGEST_SCRIPT);
     expect(execs[1]?.slice(3)).toEqual([
       "tar",
@@ -362,6 +366,34 @@ describe("binding to the validated volume", () => {
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.detail).toEqual({ key: "db", reason: "source_changed" });
     expect(await readdir(partialDir())).toEqual(["db.tar"]);
+    expect(fake.leftovers()).toEqual([]);
+  });
+});
+
+describe("the archive must match the source", () => {
+  test("an archive whose digest differs from the source is not published", async () => {
+    const fake = engine({ only: "db" });
+    fake.archiveDigestOverride.shop_db = "0".repeat(64);
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_UNEXPECTED");
+    expect(error.detail).toEqual({ key: "db", reason: "archive_mismatch" });
+    expect(error.message).toContain("archive digest differs");
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("an archive the helper cannot parse is not published", async () => {
+    const fake = engine({ only: "db" });
+    const docker = fake.docker();
+    const failing = {
+      ...docker,
+      streamFromFile: () =>
+        Promise.resolve({ exitCode: 3, stdout: "", stderr: "bad header" }),
+    };
+    const error = await caught(
+      exportProjectData({ ...input(fake), docker: failing })
+    );
+    expect(error.message).toContain("verify the archive of volume db");
     expect(fake.leftovers()).toEqual([]);
   });
 });

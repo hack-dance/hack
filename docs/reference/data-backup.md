@@ -103,6 +103,15 @@ use the same mount:
 3. The tree digest of the source again. If it differs from the first, the
    volume changed during the copy and the export refuses
    (`detail.reason: source_changed`).
+4. The archive digest: `<key>.tar` is streamed back into the helper, and a
+   Bun script parses it (GNU and POSIX headers, checksums verified) and
+   computes the same `hack.tree-digest.v1` from the archive's headers and
+   content. If it differs from the source digest, the archive does not hold
+   the tree that was read, and the export refuses
+   (`detail.reason: archive_mismatch`).
+
+Publication requires source digest before the copy = source digest after
+the copy = archive digest.
 
 Finally the container is force-removed and Hack confirms with Docker that it
 is gone, on every path, success or failure.
@@ -130,6 +139,32 @@ disk or any other failure the helper container is removed; if Docker cannot
 confirm the removal, the outcome says so (`detail.cleanup: {container,
 removed: false}` and the `docker rm -f` command to run) instead of claiming
 cleanup, and nothing is published.
+
+## What "consistent" means
+
+A backup is consistent in this sense: no container other than the export's
+own helpers was observed using a copied volume by the live event fence, from
+before the first running-container check until after the last digest, and
+the three digests above are equal. It is not a filesystem snapshot: a
+process that writes through some other path the fence cannot see, such as
+the Docker host itself writing into the volume's directory, is not detected
+unless it changes the tree between the two source digests.
+
+## Entry types
+
+| Entry | Kept and verified |
+| --- | --- |
+| Regular files | Path, mode, uid, gid, size and content |
+| Directories | Path, mode, uid, gid |
+| Symlinks | Path, mode, uid, gid and target |
+| FIFOs | Path, mode, uid, gid |
+| Character and block devices | Path, mode, uid, gid and device number |
+| Hard links | Restored as tar stores them (a link to the first path); each path is verified as a regular file with the shared content, but link identity is not verified |
+| Unix sockets | Not copied; counted as `excludedSockets` |
+
+Timestamps, extended attributes and ACLs are not promised: tar keeps
+modification times, but no digest covers them, and attributes and ACLs are
+not copied.
 
 Unix sockets are not copied. GNU tar skips them (`socket ignored`), so the
 digest leaves them out too and the manifest counts them per volume as

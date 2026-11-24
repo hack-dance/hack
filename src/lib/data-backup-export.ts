@@ -7,6 +7,7 @@ import {
 } from "./data-backup-deadlines.ts";
 import type { DataBackupDocker } from "./data-backup-docker.ts";
 import {
+  DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
   DATA_BACKUP_MANIFEST,
   DATA_BACKUP_PARTIAL_SUFFIX,
   DATA_BACKUP_SCHEMA,
@@ -22,6 +23,7 @@ import { requireStep, withHeldVolume } from "./data-backup-held-volume.ts";
 import {
   fsStep,
   parseJsonText,
+  parseTreeDigest,
   refuseRunning,
   syncPath,
 } from "./data-backup-helper.ts";
@@ -219,9 +221,9 @@ async function refuseExisting(path: string): Promise<void> {
 
 /**
  * Copy one owned volume through one held helper container: digest the
- * tree, stream the tar to `<key>.tar`, digest the tree again. The two
- * digests must agree, or the volume changed during the copy and nothing is
- * published.
+ * tree, stream the tar to `<key>.tar`, digest the tree again, then digest
+ * the archive itself (streamed back in). Publication requires source digest
+ * before == source digest after == archive digest.
  */
 async function copyVolume(opts: {
   readonly docker: DataBackupDocker;
@@ -272,6 +274,31 @@ async function copyVolume(opts: {
           code: "E_PROJECT_RUNNING",
           message: `The volume for ${volume.key} changed while it was being copied (its tree digest before and after the copy differ), so the copy is not consistent; ${consequence} Make sure nothing writes to the project's volumes, then retry.`,
           detail: { key: volume.key, reason: "source_changed" },
+        });
+      }
+      // The archive itself must hold exactly that tree.
+      const archive = parseTreeDigest({
+        stdout: requireStep({
+          result: await held.execFromFile(
+            ["bun", "-e", DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT],
+            path
+          ),
+          label: volume.key,
+          action: "verify the archive of",
+          timeoutMs: deadlines.stepMs,
+          consequence,
+        }).stdout,
+        label: volume.key,
+        consequence,
+      });
+      if (
+        archive.digest !== before.digest ||
+        archive.entries !== before.entries
+      ) {
+        throw new HackCliError({
+          code: "E_UNEXPECTED",
+          message: `The archive of volume ${volume.key} does not hold the tree that was copied (the archive digest differs from the source digest), so it was not published; ${consequence} Check the disk the backup is written to, then retry.`,
+          detail: { key: volume.key, reason: "archive_mismatch" },
         });
       }
       return {

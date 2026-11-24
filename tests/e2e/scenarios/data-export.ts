@@ -1,7 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { DATA_BACKUP_DIGEST_SCRIPT } from "../../../src/lib/data-backup-format.ts";
+import {
+  DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
+  DATA_BACKUP_DIGEST_SCRIPT,
+} from "../../../src/lib/data-backup-format.ts";
 import { createMonorepoFixture } from "../fixture.ts";
 import {
   expect,
@@ -109,7 +112,7 @@ export const dataExportScenario: Scenario = {
           "sh",
           HELPER,
           "-c",
-          "echo one >/v/a.txt && ln -s a.txt /v/link && mkdir /v/d && echo two >/v/d/secret && chown 1234:5678 /v/d/secret && chmod 0640 /v/d/secret",
+          "echo one >/v/a.txt && ln -s a.txt /v/link && mkdir /v/d && echo two >/v/d/secret && chown 1234:5678 /v/d/secret && chmod 0640 /v/d/secret && mknod /v/d/null c 1 3 && mkfifo /v/d/fifo",
         ],
         // A stale Unix socket, like mysql.sock in a datadir: tar skips it,
         // so the digest must leave it out too for a restore to verify.
@@ -160,7 +163,7 @@ export const dataExportScenario: Scenario = {
           volume?.key === "data" &&
           volume.nameSha256 ===
             new Bun.CryptoHasher("sha256").update(data).digest("hex") &&
-          volume.entries === 5 &&
+          volume.entries === 7 &&
           volume.excludedSockets === 1 &&
           JSON.stringify(manifest.skipped) ===
             JSON.stringify([
@@ -197,6 +200,35 @@ export const dataExportScenario: Scenario = {
           /^l.* \.\/link -> a\.txt$/m.test(listing.stdout) &&
           /^-.* \.\/a\.txt$/m.test(listing.stdout),
         message: `tar should keep owner, mode and the symlink:\n${listing.stdout}`,
+      });
+      // The published archive itself digests to the recorded source digest.
+      const archived = await docker(ctx, [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--log-driver",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp",
+        "--env",
+        "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
+        "--volume",
+        `${backup}:/b:ro`,
+        "--entrypoint",
+        "sh",
+        HELPER,
+        "-c",
+        `bun -e "$0" < /b/${volume?.file ?? ""}`,
+        DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
+      ]);
+      expect({
+        that:
+          archived.exitCode === 0 &&
+          JSON.parse(archived.stdout).digest === volume?.contentDigest,
+        message: "the archive digest should equal the recorded source digest",
+        result: archived,
       });
       // Restore the tar into a scratch volume and digest it again: PR 2's check.
       const restored = await docker(ctx, [

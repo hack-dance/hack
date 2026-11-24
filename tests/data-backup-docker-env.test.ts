@@ -95,7 +95,8 @@ test("a managed DOCKER_HOST reaches every docker argv of an export", async () =>
     .map((line) => JSON.parse(line) as { args: string[]; host: string });
   const kinds = calls.map((call) => {
     if (call.args[0] === "exec") {
-      return `exec ${call.args[2]}`;
+      const args = call.args.filter((arg) => arg !== "--interactive");
+      return `exec ${args[2]}`;
     }
     return call.args
       .slice(0, ["volume", "container"].includes(call.args[0] ?? "") ? 2 : 1)

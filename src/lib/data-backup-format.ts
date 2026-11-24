@@ -140,3 +140,74 @@ const h=crypto.createHash("sha256");
 for(const fields of entries)for(const field of fields){h.update(field);h.update(NUL);}
 process.stdout.write(JSON.stringify({algorithm:"${DATA_BACKUP_TREE_DIGEST}",entries:entries.length,excludedSockets:sockets,digest:h.digest("hex")})+"\\n");
 `;
+
+/**
+ * Archive-side tree digest: the same {@link DATA_BACKUP_TREE_DIGEST},
+ * computed from a tar stream on stdin instead of a live tree, so export can
+ * prove the archive it publishes holds exactly the tree it digested. It
+ * streams (constant memory), parses GNU (`L`/`K` long names, base-256
+ * numbers) and POSIX/pax (`x`/`g` records, ustar prefix) headers, verifies
+ * each header checksum, and applies the live script's field rules: regular
+ * files hash their content; a hard link counts as a regular file with its
+ * target's size and content (its own mode, uid and gid, which are the same
+ * inode's); symlinks carry their target, devices their rdev (glibc
+ * `makedev`), directories and FIFOs nothing. Tar cannot hold sockets, so
+ * `excludedSockets` is 0. Any other entry type, a bad checksum or a
+ * truncated stream exits non-zero.
+ */
+export const DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT = `
+const crypto=require("node:crypto");
+const NUL=Buffer.from([0]),ROOT=Buffer.from(".");
+const reader=Bun.stdin.stream().getReader();
+let buf=Buffer.alloc(0),eof=false;
+const need=async n=>{while(buf.length<n&&!eof){const r=await reader.read();if(r.done){eof=true;break;}buf=buf.length?Buffer.concat([buf,Buffer.from(r.value)]):Buffer.from(r.value);}return buf.length>=n;};
+const fail=m=>{process.stderr.write(m+"\\n");process.exit(3);};
+const take=async n=>{if(!(await need(n)))fail("truncated archive");const out=buf.subarray(0,n);buf=buf.subarray(n);return out;};
+const data=async(size,onChunk)=>{let left=size;while(left>0){if(buf.length===0&&!(await need(1)))fail("truncated archive");const n=Math.min(left,buf.length);onChunk(buf.subarray(0,n));buf=buf.subarray(n);left-=n;}const pad=(512-(size%512))%512;if(pad)await take(pad);};
+const bytesOf=async size=>{const parts=[];await data(size,c=>parts.push(Buffer.from(c)));return Buffer.concat(parts);};
+const field=(b,o,l)=>{const s=b.subarray(o,o+l);const z=s.indexOf(0);return z<0?s:s.subarray(0,z);};
+const num=(b,o,l)=>{if(b[o]&0x80){let v=0n;for(let i=o;i<o+l;i++)v=(v<<8n)|BigInt(i===o?b[i]&0x7f:b[i]);return Number(v);}const t=field(b,o,l).toString("latin1").trim();return t?parseInt(t,8):0;};
+const norm=b=>{let s=b;while(s.length>=2&&s[0]===46&&s[1]===47)s=s.subarray(2);while(s.length>1&&s[s.length-1]===47)s=s.subarray(0,s.length-1);return s.length===0||(s.length===1&&s[0]===46)?ROOT:s;};
+const paxRecords=b=>{const out={};let o=0;while(o<b.length){const sp=b.indexOf(32,o);if(sp<0)break;const len=parseInt(b.subarray(o,sp).toString("latin1"),10);if(!(len>0))fail("bad pax record");const rec=b.subarray(sp+1,o+len-1);const eq=rec.indexOf(61);if(eq>0)out[rec.subarray(0,eq).toString("latin1")]=rec.subarray(eq+1);o+=len;}return out;};
+const makedev=(ma,mi)=>{const M=BigInt(ma),m=BigInt(mi);return String(Number(((M&0xfffff000n)<<32n)|((M&0xfffn)<<8n)|((m&0xffffff00n)<<12n)|(m&0xffn)));};
+const entries=[],files=new Map();
+let longName=null,longLink=null,pax={},global={};
+for(;;){
+ if(!(await need(512))){if(entries.length===0)fail("empty archive");break;}
+ const h=await take(512);
+ if(h.every(x=>x===0))break;
+ let sum=0;for(let i=0;i<512;i++)sum+=i>=148&&i<156?32:h[i];
+ if(sum!==num(h,148,8))fail("bad header checksum");
+ const type=h[156]===0?"0":String.fromCharCode(h[156]);
+ let size=num(h,124,12);
+ if(type==="L"){longName=field(await bytesOf(size),0,size);continue;}
+ if(type==="K"){longLink=field(await bytesOf(size),0,size);continue;}
+ if(type==="x"){pax=paxRecords(await bytesOf(size));continue;}
+ if(type==="g"){global={...global,...paxRecords(await bytesOf(size))};continue;}
+ const meta={...global,...pax};
+ const ustar=h.subarray(257,263).toString("latin1")==="ustar\\u000000";
+ const prefix=ustar?field(h,345,155):Buffer.alloc(0);
+ const raw=longName??meta.path??(prefix.length?Buffer.concat([prefix,Buffer.from("/"),field(h,0,100)]):field(h,0,100));
+ const link=longLink??meta.linkpath??field(h,157,100);
+ if(meta.size)size=parseInt(meta.size.toString("latin1"),10);
+ const mode=num(h,100,8)&0o7777;
+ const uid=meta.uid?parseInt(meta.uid.toString("latin1"),10):num(h,108,8);
+ const gid=meta.gid?parseInt(meta.gid.toString("latin1"),10):num(h,116,8);
+ longName=null;longLink=null;pax={};
+ const rel=norm(raw);
+ const key=rel.toString("latin1");
+ let t,fsize=0,content=Buffer.alloc(0);
+ if(type==="0"||type==="7"){const hash=crypto.createHash("sha256");await data(size,c=>hash.update(c));const hex=hash.digest("hex");t="f";fsize=size;content=Buffer.from(hex);files.set(key,{size,hex});}
+ else if(type==="1"){await data(size,()=>{});const target=files.get(norm(link).toString("latin1"));if(!target)fail("hard link to an unknown entry");t="f";fsize=target.size;content=Buffer.from(target.hex);}
+ else if(type==="2"){await data(size,()=>{});t="l";content=Buffer.from(link);}
+ else if(type==="3"||type==="4"){await data(size,()=>{});t=type==="3"?"c":"b";content=Buffer.from(makedev(num(h,329,8),num(h,337,8)));}
+ else if(type==="5"){await data(size,()=>{});t="d";}
+ else if(type==="6"){await data(size,()=>{});t="p";}
+ else fail("unsupported archive entry type "+type);
+ entries.push([rel,Buffer.from(t),Buffer.from(mode.toString(8)),Buffer.from(String(uid)),Buffer.from(String(gid)),Buffer.from(String(fsize)),content]);
+}
+entries.sort((a,b)=>Buffer.compare(a[0],b[0]));
+const d=crypto.createHash("sha256");
+for(const fields of entries)for(const f of fields){d.update(f);d.update(NUL);}
+process.stdout.write(JSON.stringify({algorithm:"${DATA_BACKUP_TREE_DIGEST}",entries:entries.length,excludedSockets:0,digest:d.digest("hex")})+"\\n");
+`;

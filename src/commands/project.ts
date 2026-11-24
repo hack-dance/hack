@@ -14078,7 +14078,7 @@ async function listInstanceNetworks(opts: {
     ],
     {
       stdin: "ignore",
-      env: { ...opts.env },
+      ...dockerHelperRunEnvironment(opts.env),
       cwd: opts.cwd,
       timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
     }

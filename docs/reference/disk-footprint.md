@@ -6,6 +6,15 @@ on macOS, or on another machine. The native backend also has host-side runtime s
 and stores engine data inside its provider disks. Count guest files and engine
 objects as attribution within those disks when measuring host space.
 
+## Measure the selected native home
+
+Run `hack native disk-usage` for host file totals, or add `--json` for the
+same measurements in a script. The command leaves a stopped pool stopped.
+Allocated bytes are file blocks reported by the filesystem. Hard links are counted
+once, while APFS clones may share some of the reported blocks. A partial scan is
+marked incomplete. Guest data already lives in the host backing disks and is
+included there. The report does not estimate how many blocks a cleanup would free.
+
 ## State managed by Hack
 
 | Location | Writer and owner | Growth bound | Cleanup and interrupted operations |

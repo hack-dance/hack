@@ -3,11 +3,18 @@ import { formatNativeSourceBytes } from "../backends/native-project-source-size.
 import { buildComposeArgs } from "../backends/runtime-backend.ts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-import { optBranch, optJson, optPath, optProject } from "../cli/options.ts";
+import { resolveRequestedEnvName } from "../cli/env-selection.ts";
+import {
+  optBranch,
+  optEnv,
+  optJson,
+  optPath,
+  optProject,
+} from "../cli/options.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
-import { hostDataBackupDocker } from "../lib/data-backup-docker.ts";
+import { createHostDataBackupDocker } from "../lib/data-backup-docker.ts";
 import {
   type DataExportResult,
   exportProjectData,
@@ -17,6 +24,7 @@ import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { scopedHackCommand } from "../lib/printed-shell-command.ts";
 import { readProjectConfig } from "../lib/project.ts";
 import {
+  resolveComposeProcessEnv,
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
 } from "./project.ts";
@@ -36,7 +44,7 @@ const exportSpec = defineCommand({
   group: "Project",
   description:
     "Copies each declared, non-external named volume that Docker labels as this project's into <backup>/<key>.tar, with a manifest of sizes and digests. The project must be stopped; Hack never stops it for you. External and foreign volumes are skipped and reported. Compose backend only. Restore is not available yet.",
-  options: [optPath, optProject, optBranch, optOut, optJson],
+  options: [optPath, optProject, optBranch, optEnv, optOut, optJson],
   positionals: [],
   subcommands: [],
 } as const);
@@ -89,7 +97,13 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
     cfg: await readProjectConfig(project),
   });
   const result = await exportProjectData({
-    docker: hostDataBackupDocker,
+    // The managed env `hack up` gives Compose: it can select the engine.
+    docker: createHostDataBackupDocker({
+      env: await resolveComposeProcessEnv({
+        project,
+        envName: resolveRequestedEnvName({ envOption: args.options.env }),
+      }),
+    }),
     composeArgs: buildComposeArgs({
       composeFiles: [project.composeFile],
       composeProject: branch ? `${base}--${branch}` : null,
@@ -122,6 +136,13 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
   return 0;
 };
 
+/** Sockets are runtime artifacts tar cannot archive; say how many were left out. */
+export function socketNote(count: number): string {
+  return count === 0
+    ? ""
+    : `, ${count} socket${count === 1 ? "" : "s"} not copied`;
+}
+
 /** Text summary: each copied volume, each skipped one with its reason, the path. */
 export function renderDataExportText(result: DataExportResult): string {
   const { volumes, skipped } = result.manifest;
@@ -132,7 +153,7 @@ export function renderDataExportText(result: DataExportResult): string {
   ];
   for (const volume of volumes) {
     lines.push(
-      `  ${volume.key}  ${formatNativeSourceBytes(volume.tarBytes)}  ${volume.entries} entr${volume.entries === 1 ? "y" : "ies"}`
+      `  ${volume.key}  ${formatNativeSourceBytes(volume.tarBytes)}  ${volume.entries} entr${volume.entries === 1 ? "y" : "ies"}${socketNote(volume.excludedSockets)}`
     );
   }
   const reasons = {

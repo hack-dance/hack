@@ -46,8 +46,14 @@ export type DataBackupVolume = {
   readonly tarBytes: number;
   /** sha256 of the tar file, computed on the host while it streamed. */
   readonly tarSha256: string;
-  /** Entries in the tree, the volume root included. */
+  /** Entries in the tree, the volume root included, sockets excluded. */
   readonly entries: number;
+  /**
+   * Unix sockets left out of both the tar (GNU tar skips them) and the
+   * digest: they are runtime artifacts (such as `mysql.sock`) that a restore
+   * cannot recreate.
+   */
+  readonly excludedSockets: number;
   /** {@link DATA_BACKUP_TREE_DIGEST} of the volume tree, computed in the helper. */
   readonly contentDigest: string;
 };
@@ -96,20 +102,23 @@ export function dataBackupTimestamp(date: Date): string {
  * {@link DATA_BACKUP_TREE_DIGEST}: every entry (the root as `.`, others by
  * their path relative to the root, as raw bytes) sorted bytewise; for each,
  * seven fields, each followed by one NUL byte: path, type (`f` `d` `l` `c`
- * `b` `p` `s`), permission bits in octal (`mode & 0o7777`), uid, gid, size
+ * `b` `p`), permission bits in octal (`mode & 0o7777`), uid, gid, size
  * (regular files only, else 0), and content (a regular file's lowercase hex
  * sha256, a symlink's raw target, a device's decimal rdev, else empty). The
  * digest is the sha256 of that byte stream. No field can contain NUL, so the
- * encoding is unambiguous. Times, xattrs and ACLs are not covered.
+ * encoding is unambiguous. Times, xattrs and ACLs are not covered. Unix
+ * sockets are left out and only counted (`excludedSockets`), because tar
+ * cannot archive them, so a restore never has them.
  */
 export const DATA_BACKUP_DIGEST_SCRIPT = `
 const fs=require("node:fs"),crypto=require("node:crypto");
 const NUL=Buffer.from([0]),SLASH=Buffer.from("/"),ROOT=Buffer.from(".");
-const entries=[];
+const entries=[];let sockets=0;
 const kind=s=>s.isFile()?"f":s.isDirectory()?"d":s.isSymbolicLink()?"l":s.isCharacterDevice()?"c":s.isBlockDevice()?"b":s.isFIFO()?"p":s.isSocket()?"s":"?";
 const fileHash=p=>{const h=crypto.createHash("sha256"),fd=fs.openSync(p,"r"),b=Buffer.allocUnsafe(1<<20);try{let n;while((n=fs.readSync(fd,b,0,b.length,null))>0)h.update(b.subarray(0,n));}finally{fs.closeSync(fd);}return h.digest("hex");};
 const walk=(abs,rel)=>{
  const s=fs.lstatSync(abs),t=kind(s);let size=0,content=Buffer.alloc(0);
+ if(t==="s"){sockets++;return;}
  if(t==="f"){size=s.size;content=Buffer.from(fileHash(abs));}
  else if(t==="l"){content=fs.readlinkSync(abs,{encoding:"buffer"});}
  else if(t==="c"||t==="b"){content=Buffer.from(String(s.rdev));}
@@ -120,5 +129,5 @@ walk(Buffer.from("/v"),ROOT);
 entries.sort((a,b)=>Buffer.compare(a[0],b[0]));
 const h=crypto.createHash("sha256");
 for(const fields of entries)for(const field of fields){h.update(field);h.update(NUL);}
-process.stdout.write(JSON.stringify({algorithm:"${DATA_BACKUP_TREE_DIGEST}",entries:entries.length,digest:h.digest("hex")})+"\\n");
+process.stdout.write(JSON.stringify({algorithm:"${DATA_BACKUP_TREE_DIGEST}",entries:entries.length,excludedSockets:sockets,digest:h.digest("hex")})+"\\n");
 `;

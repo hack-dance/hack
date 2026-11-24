@@ -15,7 +15,9 @@ import {
 } from "./data-backup-format.ts";
 import {
   dataBackupHelperArgv,
+  foreignVolumeMounts,
   fsStep,
+  helperContainerName,
   helperFailure,
   parseJsonText,
   refuseRunning,
@@ -56,8 +58,9 @@ export type DataExportResult = {
  * Ownership: only declared, non-external volumes whose labels name this
  * Compose project and key are mounted, read-only, in a network-less helper.
  * Consistency: refuses while a container of the project, or any container
- * using an owned volume, runs, before and again after the copy; it never
- * stops anything. Atomicity: everything is written into `<backup>.partial/`,
+ * using an owned volume, runs, before and again after the copy, and when
+ * Docker's event log shows any container but this run's helpers mounting an
+ * owned volume during the copy; it never stops anything. Atomicity: everything is written into `<backup>.partial/`,
  * the manifest last, fsynced, then renamed to `<backup>/`. A failure leaves
  * only the `.partial` directory, which is never a backup and is never reused:
  * each run takes a fresh UTC-second timestamp, and an existing target or
@@ -107,6 +110,9 @@ export async function exportProjectData(
   );
 
   const helperImage = dataBackupHelperImage();
+  const clock = input.now ?? (() => new Date());
+  const helperNames = new Set<string>();
+  const since = clock();
   const volumes: DataBackupVolume[] = [];
   for (const volume of owned) {
     volumes.push(
@@ -114,9 +120,19 @@ export async function exportProjectData(
         docker: input.docker,
         volume,
         partial,
+        helperNames,
       })
     );
   }
+  await refuseForeignMounts({
+    docker: input.docker,
+    since,
+    until: clock(),
+    volumeNames,
+    helperNames,
+    stopCommand,
+    partial,
+  });
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
@@ -152,13 +168,44 @@ async function refuseExisting(path: string): Promise<void> {
   }
 }
 
+/**
+ * Refuse publication when anything but this run's helpers mounted an owned
+ * volume during the copy, even a container that has exited since.
+ */
+async function refuseForeignMounts(opts: {
+  readonly docker: DataBackupDocker;
+  readonly since: Date;
+  readonly until: Date;
+  readonly volumeNames: readonly string[];
+  readonly helperNames: ReadonlySet<string>;
+  readonly stopCommand: string;
+  readonly partial: string;
+}): Promise<void> {
+  const mounts = await foreignVolumeMounts(opts);
+  if (mounts.length === 0) {
+    return;
+  }
+  const containers = [...new Set(mounts.map((mount) => mount.container))];
+  throw new HackCliError({
+    code: "E_PROJECT_RUNNING",
+    message: `Another container (${containers.map((id) => id.slice(0, 12)).join(", ")}) mounted a volume during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${opts.partial}, which you can delete. Make sure nothing uses the project's volumes (\`${opts.stopCommand}\`), then retry.`,
+    detail: { mounts },
+  });
+}
+
 /** Copy one owned volume: a tar stream to `<key>.tar`, then its tree digest. */
 async function copyVolume(opts: {
   readonly docker: DataBackupDocker;
   readonly volume: OwnedVolume;
   readonly partial: string;
+  readonly helperNames: Set<string>;
 }): Promise<DataBackupVolume> {
   const { volume } = opts;
+  const name = (): string => {
+    const helper = helperContainerName("export");
+    opts.helperNames.add(helper);
+    return helper;
+  };
   const consequence = `no backup was published; the incomplete copy is in ${opts.partial}.`;
   const file = `${volume.key}.tar`;
   const path = join(opts.partial, file);
@@ -166,6 +213,7 @@ async function copyVolume(opts: {
     opts.docker.streamToFile({
       argv: [
         ...dataBackupHelperArgv({
+          name: name(),
           volume: volume.name,
           readOnly: true,
           entrypoint: "tar",
@@ -191,6 +239,7 @@ async function copyVolume(opts: {
   }
   const tree = await treeDigest({
     docker: opts.docker,
+    name: name(),
     volume: volume.name,
     purpose: "export",
     consequence,
@@ -204,6 +253,7 @@ async function copyVolume(opts: {
     tarBytes: tar.bytes,
     tarSha256: tar.sha256,
     entries: tree.entries,
+    excludedSockets: tree.excludedSockets,
     contentDigest: tree.digest,
   };
 }

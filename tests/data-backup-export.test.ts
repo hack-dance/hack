@@ -42,8 +42,43 @@ type FakeState = {
   /** Running names reported only from the Nth `ps` round on (0-based). */
   runningFromRound?: { round: number; filter: string; names: string[] };
   failTarFor?: string;
+  /** Extra `docker events` lines, such as a foreign container's mount. */
+  extraEvents?: unknown[];
   calls: string[][];
+  /** Helper runs seen, in order: the container ID the fake gave each. */
+  helpers?: { id: string; name: string; volume: string }[];
 };
+
+function helperRun(state: FakeState, argv: readonly string[]): string {
+  state.helpers ??= [];
+  const name = argv[argv.indexOf("--name") + 1] ?? "";
+  const volume = mountedVolume(argv);
+  state.helpers.push({ id: `c${state.helpers.length}`, name, volume });
+  return volume;
+}
+
+function events(state: FakeState): string {
+  const lines: unknown[] = [];
+  for (const helper of state.helpers ?? []) {
+    lines.push(
+      {
+        Type: "container",
+        Action: "start",
+        Actor: { ID: helper.id, Attributes: { name: helper.name } },
+      },
+      {
+        Type: "volume",
+        Action: "mount",
+        Actor: {
+          ID: helper.volume,
+          Attributes: { container: helper.id, destination: "/v" },
+        },
+      }
+    );
+  }
+  lines.push(...(state.extraEvents ?? []));
+  return lines.map((line) => `${JSON.stringify(line)}\n`).join("");
+}
 
 function ok(stdout = ""): DataBackupProcessResult {
   return { exitCode: 0, stdout, stderr: "" };
@@ -100,13 +135,17 @@ function fakeDocker(state: FakeState): DataBackupDocker {
         ];
         return Promise.resolve(ok(names.map((n) => `${n}\n`).join("")));
       }
+      if (args[0] === "events") {
+        return Promise.resolve(ok(events(state)));
+      }
       if (args[0] === "run") {
-        const volume = mountedVolume(argv);
+        const volume = helperRun(state, argv);
         return Promise.resolve(
           ok(
             `${JSON.stringify({
               algorithm: "hack.tree-digest.v1",
               entries: 3,
+              excludedSockets: volume === "shop_db" ? 1 : 0,
               digest: createHash("sha256").update(volume).digest("hex"),
             })}\n`
           )
@@ -116,7 +155,7 @@ function fakeDocker(state: FakeState): DataBackupDocker {
     },
     async streamToFile({ argv, path }) {
       state.calls.push([...argv]);
-      const volume = mountedVolume(argv);
+      const volume = helperRun(state, argv);
       const bytes = Buffer.from(`tar of ${volume}`);
       await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
       if (state.failTarFor === volume) {
@@ -295,6 +334,7 @@ describe("exportProjectData", () => {
       tarBytes: tar.byteLength,
       tarSha256: createHash("sha256").update(tar).digest("hex"),
       entries: 3,
+      excludedSockets: 1,
       contentDigest: createHash("sha256").update("shop_db").digest("hex"),
     });
     expect(manifest.skipped).toEqual([
@@ -314,7 +354,7 @@ describe("exportProjectData", () => {
       [
         "Backed up 2 volumes:",
         `  cache  ${"tar of custom-cache".length} B  3 entries`,
-        `  db  ${"tar of shop_db".length} B  3 entries`,
+        `  db  ${"tar of shop_db".length} B  3 entries, 1 socket not copied`,
         "Skipped:",
         "  hijacked  labels name another project, not read",
         "  later  not created yet, nothing to back up",
@@ -346,13 +386,11 @@ describe("exportProjectData", () => {
     const runs = state.calls.filter((argv) => argv[1] === "run");
     expect(runs).toHaveLength(2);
     for (const argv of runs) {
-      expect(argv.slice(0, 5)).toEqual([
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "none",
-      ]);
+      expect(argv.slice(0, 3)).toEqual(["docker", "run", "--rm"]);
+      expect(argv[argv.indexOf("--name") + 1]).toMatch(
+        /^hack-data-export-[a-f0-9]{24}$/
+      );
+      expect(argv[argv.indexOf("--network") + 1]).toBe("none");
       expect(argv).toContain("--read-only");
       expect(argv[argv.indexOf("--volume") + 1]).toBe("shop_db:/v:ro");
       expect(argv).toContain(PINNED);
@@ -413,6 +451,79 @@ describe("exportProjectData", () => {
     expect(await readdir(join(parent, "20261123T140501Z.partial"))).toEqual([
       "db.tar",
     ]);
+  });
+
+  test("a short-lived writer seen only in volume events keeps the backup unpublished", async () => {
+    const state = baseState({
+      model: model({ db: { name: "shop_db" } }),
+      volumes: { shop_db: owned("db") },
+      extraEvents: [
+        {
+          Type: "container",
+          Action: "start",
+          Actor: { ID: "f".repeat(64), Attributes: { name: "adhoc-writer" } },
+        },
+        {
+          Type: "volume",
+          Action: "mount",
+          Actor: {
+            ID: "shop_db",
+            Attributes: { container: "f".repeat(64), destination: "/data" },
+          },
+        },
+        // A mount of an unrelated volume is ignored.
+        {
+          Type: "volume",
+          Action: "mount",
+          Actor: { ID: "other", Attributes: { container: "e".repeat(64) } },
+        },
+      ],
+    });
+    const error = await caught(exportProjectData(input(state)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.message).toContain("ffffffffffff");
+    expect(error.detail).toEqual({
+      mounts: [
+        { volume: "shop_db", container: "f".repeat(64), name: "adhoc-writer" },
+      ],
+    });
+    const parent = join(root, "home", "data-backups", PROJECT);
+    expect(await readdir(parent)).toEqual(["20261123T140501Z.partial"]);
+  });
+
+  test("a mount by a container with no start event in the window is foreign", async () => {
+    const state = baseState({
+      model: model({ db: { name: "shop_db" } }),
+      volumes: { shop_db: owned("db") },
+      extraEvents: [
+        {
+          Type: "volume",
+          Action: "mount",
+          Actor: { ID: "shop_db", Attributes: { container: "d".repeat(64) } },
+        },
+      ],
+    });
+    const error = await caught(exportProjectData(input(state)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({
+      mounts: [{ volume: "shop_db", container: "d".repeat(64), name: null }],
+    });
+  });
+
+  test("mounts by this run's own helpers publish, and the event read is bounded", async () => {
+    const state = baseState({
+      model: model({ db: { name: "shop_db" } }),
+      volumes: { shop_db: owned("db") },
+    });
+    await exportProjectData(input(state));
+    const names = (state.helpers ?? []).map((helper) => helper.name);
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2);
+    const query = state.calls.find((argv) => argv[1] === "events") ?? [];
+    expect(query).toContain("--since");
+    expect(query).toContain("--until");
+    expect(query.join(" ")).toContain("--filter type=volume");
+    expect(query.join(" ")).toContain("--filter event=mount");
   });
 
   test("a failure mid-way leaves only the partial directory; a rerun never reuses it", async () => {

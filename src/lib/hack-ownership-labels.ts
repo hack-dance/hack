@@ -18,6 +18,10 @@
  *   `generation`, `token`, `role`).
  * - `io.hack.storage-witness.`: native-config storage witness carriers
  *   (`owner`, `generation`, `helper`, `carrier`).
+ * - `io.hack.data-backup.`: `hack data export`/`import`. The root key marks
+ *   the network-less helper containers (`export` or `import`); `source` on a
+ *   volume that `hack data import` created names the backup it restores, so
+ *   a rerun can recognize its own interrupted import.
  *
  * Engine labels in these namespaces are ownership evidence. Authored Compose
  * declarations are ignored metadata and never copied to Engine resources;
@@ -32,4 +36,5 @@ export const HACK_OWNERSHIP_LABEL_NAMESPACES = [
   "io.hack.native-config.",
   "io.hack.native-file.",
   "io.hack.storage-witness.",
+  "io.hack.data-backup.",
 ] as const;

@@ -228,8 +228,6 @@ pub const CLI_VERSION: &str = "5.0.0";
 
 fn container(state: &str, status: &str) -> Container {
     Container {
-        id: None,
-        name: None,
         state: state.into(),
         status: status.into(),
         labels: BTreeMap::new(),

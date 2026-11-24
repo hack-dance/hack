@@ -24,6 +24,13 @@ function container(
     ports: "",
     workingDir: "/fixture/.hack",
     image: "fixture",
+    configuredMemoryLimitBytes: 8192,
+    observation: {
+      state,
+      health: null,
+      exitCode: null,
+      startedAt: "2026-01-01T00:00:00Z",
+    },
     labels: lifecycle ? { "hack.lifecycle.process": "true" } : {},
     mounts: [
       {
@@ -60,7 +67,7 @@ test("usage samples only running Docker containers and retains service/mount att
   };
   const index = __testOnlyUsage.buildContainerIndex({ projects: [project] });
   expect(index.containerIds).toEqual(["running"]);
-  const report = __testOnlyUsage.buildUsageReport({
+  const reportInput = {
     projects: [project],
     index,
     samples: [
@@ -77,6 +84,10 @@ test("usage samples only running Docker containers and retains service/mount att
         pids: 4,
       },
     ],
+  };
+  const report = __testOnlyUsage.buildUsageReport({
+    ...reportInput,
+    startsAfterSample: new Map([["running", "2026-01-01T00:00:00Z"]]),
   });
   expect(report.projects[0]?.containers).toBe(1);
   expect(report.containerDetails?.[0]).toMatchObject({
@@ -84,8 +95,53 @@ test("usage samples only running Docker containers and retains service/mount att
     service: "web",
     name: "running",
     memUsedBytes: 1024,
+    memLimitBytes: 4096,
+    configuredMemoryLimitBytes: 8192,
+    startedAt: "2026-01-01T00:00:00Z",
     mounts: [{ type: "volume", destination: "/app/node_modules" }],
   });
+  const restarted = __testOnlyUsage.buildUsageReport({
+    ...reportInput,
+    startsAfterSample: new Map([["running", "2026-01-01T00:00:10Z"]]),
+  });
+  expect(restarted.containerDetails?.[0]?.startedAt).toBeNull();
+});
+
+test("Docker usage retains the precision of printed network and disk counters", () => {
+  const sample = __testOnlyUsage.parseDockerStatsSampleLine({
+    line: JSON.stringify({
+      ID: "running",
+      NetIO: "1.23GB / 4.2kB",
+      BlockIO: "0B / 2MiB",
+    }),
+  });
+  expect(sample).toMatchObject({
+    netInputBytes: 1_230_000_000,
+    netOutputBytes: 4200,
+    blockInputBytes: 0,
+    blockOutputBytes: 2_097_152,
+    ioCounterErrorBytes: {
+      netInput: 5_000_000,
+      netOutput: 50,
+      blockInput: 0,
+      blockOutput: 524_288,
+    },
+  });
+});
+
+test("post-sample inspection keeps complete rows for surviving requested containers", () => {
+  const surviving = "0123456789ab";
+  const gone = "111111111111";
+  const startedAt = "2026-01-01T00:00:00Z";
+  const starts = __testOnlyUsage.parseSampleStartTimes({
+    ids: new Set([surviving, gone]),
+    output: [
+      JSON.stringify({ id: `${surviving}cdef`, startedAt }),
+      '{"id":"111111111111',
+      JSON.stringify({ id: "222222222222", startedAt }),
+    ].join("\n"),
+  });
+  expect([...starts]).toEqual([[surviving, startedAt]]);
 });
 
 test("project-scoped host usage includes branch descendants and excludes other projects from totals", () => {

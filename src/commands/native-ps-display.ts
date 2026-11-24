@@ -122,6 +122,7 @@ function displayNativeServiceRows(
   }
 ): void {
   const output = createTextOutput();
+  const starting = result.phase === "preparing" || result.phase === "restoring";
   const portServices = new Set(result.ports?.map((port) => port.service));
   for (const item of result.items) {
     portServices.delete(item.service);
@@ -144,7 +145,7 @@ function displayNativeServiceRows(
     return {
       ...row,
       address: null,
-      addresses: ps.addresses.get(row.service),
+      addresses: starting ? undefined : ps.addresses.get(row.service),
       ports:
         ports
           ?.map((port) => `127.0.0.1:${port.port} (${port.state})`)

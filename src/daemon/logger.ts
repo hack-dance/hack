@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
 import type { Logger, LogInput, LogLevel } from "../ui/logger.ts";
@@ -19,9 +20,21 @@ async function appendBoundedLog(opts: {
   readonly line: string;
 }): Promise<void> {
   const bytes = Buffer.from(opts.line).subarray(-DAEMON_LOG_MAX_BYTES);
-  const file = await open(opts.logPath, "a", 0o600);
+  const file = await open(
+    opts.logPath,
+    constants.O_WRONLY |
+      constants.O_APPEND |
+      constants.O_CREAT |
+      constants.O_NOFOLLOW |
+      constants.O_NONBLOCK,
+    0o600
+  );
   try {
-    const { size } = await file.stat();
+    const info = await file.stat();
+    if (!info.isFile() || info.nlink !== 1 || info.uid !== process.getuid?.()) {
+      return;
+    }
+    const { size } = info;
     if (size + bytes.length > DAEMON_LOG_MAX_BYTES) {
       await file.truncate(0);
     }

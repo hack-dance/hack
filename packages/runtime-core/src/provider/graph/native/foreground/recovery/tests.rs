@@ -893,6 +893,7 @@ fn recovery_commits_original_before_driver_and_archives_only_after_removed_absen
         id(&fixture.owner_root().join("operation.lock")).unwrap(),
         lock
     );
+    assert!(requires_active(&fixture.journal_root()).unwrap());
     let again = select(&fixture.candidate, RUN).unwrap();
     assert_eq!(again.receipt_sha256, selected.receipt_sha256);
     assert_eq!(again.owner_sha256, selected.owner_sha256);

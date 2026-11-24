@@ -47,6 +47,12 @@ const CONTAINER_ID = /^[0-9a-f]{64}$/;
 export const TIMED_OUT_CREATE_LOOKUPS = 5;
 export const TIMED_OUT_CREATE_LOOKUP_GAP_MS = 400;
 /**
+ * After a timed-out create's lookups, how long the run's live event
+ * subscription is watched for that create to land before a final listing
+ * may settle it as absent.
+ */
+export const TIMED_OUT_CREATE_SETTLE_MS = 2000;
+/**
  * How the local driver refuses a reference to a missing volume (a `type`
  * option without `device`): the volume was removed after validation.
  */
@@ -112,14 +118,37 @@ export class DataHelperContainers {
    */
   readonly nonce: string;
   private unknownOutcome = false;
+  /** Names of this run's creates whose outcome stayed unknown. */
+  readonly unresolved = new Set<string>();
+  /** Containers with this run's nonce whose create event arrived, by name. */
+  private readonly landed = new Map<string, string>();
+  /**
+   * True while a live event subscription reports this run's container
+   * creates (the mount monitor sets it); only then can a settle window
+   * prove that a timed-out create did not land.
+   */
+  watching = false;
 
   constructor(nonce: string = randomBytes(16).toString("hex")) {
     this.nonce = nonce;
   }
 
-  /** A create of this run could not be reconciled. */
-  markUnknown(): void {
+  /** A create of this run (named `name`) could not be reconciled. */
+  markUnknown(name?: string): void {
     this.unknownOutcome = true;
+    if (name !== undefined) {
+      this.unresolved.add(name);
+    }
+  }
+
+  /** A container `create` event carried this run's nonce. */
+  noteLanded(name: string, id: string): void {
+    this.landed.set(name, id);
+  }
+
+  /** The ID of a container of this run whose create event arrived, by name. */
+  landedId(name: string): string | undefined {
+    return this.landed.get(name);
   }
 
   /**
@@ -565,6 +594,7 @@ export async function withTrackedContainer<T>(
       checkCreate: opts.checkCreate,
       unknownNonce,
       docker: opts.docker,
+      name: opts.name,
       helpers: opts.helpers,
     });
   }
@@ -649,20 +679,104 @@ async function createTracked(opts: {
           attempts: timedOut ? TIMED_OUT_CREATE_LOOKUPS : 1,
         })
       : null;
-  const container = printed ?? (lookup?.kind === "found" ? lookup.id : null);
+  // The daemon refused the create outright: nothing was created.
+  const refused = created.exitCode !== 0 && DAEMON_REFUSAL.test(created.stderr);
+  // A timed-out create the lookups did not find may still land: watch the
+  // run's live subscription for its create through a bounded window, then
+  // list once more (see settleTimedOutCreate).
+  const settle =
+    printed === null &&
+    timedOut &&
+    !refused &&
+    lookup !== null &&
+    lookup.kind !== "found" &&
+    lookup.kind !== "taken"
+      ? await settleTimedOutCreate({
+          docker: opts.docker,
+          name: opts.name,
+          helpers: opts.helpers,
+          deadlines: opts.deadlines,
+        })
+      : null;
+  const container = printed ?? foundId(lookup) ?? foundId(settle);
   if (container !== null) {
     opts.helpers.add(container);
   }
-  // The daemon refused the create outright: nothing was created.
-  const refused = created.exitCode !== 0 && DAEMON_REFUSAL.test(created.stderr);
   // Settled without a container: the name is someone else's (our create
-  // cannot have succeeded), or Docker answered "no such container" for a
-  // create that returned without a timeout.
+  // cannot have succeeded), Docker answered "no such container" for a
+  // create that returned without a timeout, or a timed-out create's settle
+  // window proved it did not land.
   const settledAbsent =
-    lookup?.kind === "taken" || (lookup?.kind === "absent" && !timedOut);
+    lookup?.kind === "taken" ||
+    (lookup?.kind === "absent" && !timedOut) ||
+    settle?.kind === "absent";
   const unknownNonce =
     container === null && !refused && !settledAbsent ? nonce : null;
   return { created, printed, container, unknownNonce };
+}
+
+/**
+ * Settle a create that timed out and that the lookups did not find. The
+ * daemon may still be processing it, so a "no such container" proves
+ * nothing on its own. Wait {@link TIMED_OUT_CREATE_SETTLE_MS} while the
+ * run's live event subscription watches for a container `create` with the
+ * run's nonce and this name; then list containers by that label and name
+ * (`docker ps -a`). A create event, or a listed container, is found (and
+ * then removed by ID like any other). Absent only when the subscription
+ * stayed live through the whole window, no such create arrived and the
+ * final listing is empty; anything else stays unknown.
+ */
+async function settleTimedOutCreate(opts: {
+  readonly docker: DataBackupDocker;
+  readonly name: string;
+  readonly helpers: DataHelperContainers;
+  readonly deadlines: DataBackupDeadlines;
+}): Promise<
+  | { readonly kind: "found"; readonly id: string }
+  | { readonly kind: "absent" | "unknown" }
+> {
+  const watchedThroughout = opts.helpers.watching;
+  await Bun.sleep(TIMED_OUT_CREATE_SETTLE_MS);
+  const landed = opts.helpers.landedId(opts.name);
+  if (landed !== undefined) {
+    return { kind: "found", id: landed };
+  }
+  const listed = await opts.docker
+    .capture(
+      [
+        "docker",
+        "ps",
+        "--all",
+        "--quiet",
+        "--no-trunc",
+        "--filter",
+        `label=${HELPER_NONCE_LABEL}=${opts.helpers.nonce}`,
+        "--filter",
+        `name=^${opts.name}$`,
+      ],
+      { timeoutMs: opts.deadlines.commandMs }
+    )
+    .catch(() => null);
+  if (listed === null || listed.exitCode !== 0) {
+    return { kind: "unknown" };
+  }
+  const id = listed.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => CONTAINER_ID.test(line));
+  if (id !== undefined) {
+    return { kind: "found", id };
+  }
+  return watchedThroughout && opts.helpers.watching
+    ? { kind: "absent" }
+    : { kind: "unknown" };
+}
+
+/** The container ID a lookup or settle check found, or null. */
+function foundId(
+  answer: { readonly kind: string; readonly id?: string } | null
+): string | null {
+  return answer?.kind === "found" && answer.id !== undefined ? answer.id : null;
 }
 
 /** Exit codes of a client that was stopped before the daemon answered. */
@@ -700,8 +814,10 @@ function failUnreconciled(opts: {
   readonly unknownNonce: string;
   readonly docker: DataBackupDocker;
   readonly helpers: DataHelperContainers;
+  /** The create's container name. */
+  readonly name: string;
 }): never {
-  opts.helpers.markUnknown();
+  opts.helpers.markUnknown(opts.name);
   let failure: unknown;
   try {
     requireCreated(opts);
@@ -771,9 +887,10 @@ export class VolumeReferences {
     missing: () => HackCliError
   ): Promise<void> {
     const { docker, deadlines, helpers, purpose } = this.opts;
+    const referenceName = `${helperContainerName(purpose)}-ref`;
     const { created, printed, container, unknownNonce } = await createTracked({
       docker,
-      name: `${helperContainerName(purpose)}-ref`,
+      name: referenceName,
       createArgs: [
         "--network",
         "none",
@@ -824,6 +941,7 @@ export class VolumeReferences {
         unknownNonce,
         docker,
         helpers,
+        name: referenceName,
       });
     }
     requireCreated({ created, printed, checkCreate });

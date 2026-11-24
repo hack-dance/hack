@@ -224,6 +224,8 @@ export class FakeEngine {
   missingPaths = new Set<string>();
   /** The proof helper fails (exit 1) instead of answering. */
   proofFails = false;
+  /** `docker info --format {{.ID}}`: the daemon's ID; null fails it. */
+  daemonId: string | null = "FAKE:DAEMON:0001";
 
   /** A host path as the daemon resolves it when it bind-mounts it. */
   daemonRealpath(path: string): string {
@@ -415,6 +417,11 @@ export class FakeEngine {
     if (argv.slice(0, COMPOSE.length).join(" ") === COMPOSE.join(" ")) {
       return ok(JSON.stringify(this.model));
     }
+    if (args[0] === "info") {
+      return this.daemonId === null
+        ? fail("daemon id unavailable", 1)
+        : ok(`${this.daemonId}\n`);
+    }
     if (args.join(" ") === "compose version --short") {
       return ok("2.29.7\n");
     }
@@ -574,6 +581,14 @@ export class FakeEngine {
       }
       const id = fakeContainerId();
       this.created.push({ name, id });
+      // Docker's container create event carries the name and the labels.
+      if (this.events.deliverContainerCreates) {
+        this.events.emit({
+          Type: "container",
+          Action: "create",
+          Actor: { ID: id, Attributes: { name, ...labels } },
+        });
+      }
       this.containers.set(id, {
         name,
         labels,

@@ -18,6 +18,8 @@ export class FakeDockerEvents {
   deliverStarts = true;
   /** False: volume create/destroy events are dropped (only rechecks see it). */
   deliverVolumeChanges = true;
+  /** False: container create events are dropped (an engine that loses them). */
+  deliverContainerCreates = true;
   /** Called after each run's own events, e.g. to inject a foreign writer. */
   afterRun: ((argv: readonly string[]) => void) | null = null;
 

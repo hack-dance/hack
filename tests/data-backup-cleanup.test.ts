@@ -1,9 +1,12 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   dataCleanupCommand,
   renderDataCleanupText,
 } from "../src/commands/data.ts";
-import { cleanupDataHelpers } from "../src/lib/data-backup-cleanup.ts";
+import {
+  cleanupDataHelpers,
+  cleanupWithSettle,
+} from "../src/lib/data-backup-cleanup.ts";
 import { FakeEngine } from "./helpers/data-backup-fake-engine.ts";
 
 const NONCE = "0123456789abcdef0123456789abcdef";
@@ -125,4 +128,73 @@ test("a listed container Hack cannot read back (inspect timed out or failed) is 
     expect(fake.leftovers()).toEqual([listed]);
     expect(renderDataCleanupText(result)).not.toContain("No container");
   }
+});
+
+describe("cleanup applies the settle rule to a record with an unresolved create", () => {
+  const settle = (
+    fake: FakeEngine,
+    unresolvedCreates: readonly string[],
+    docker = fake.docker()
+  ) =>
+    cleanupWithSettle({
+      docker,
+      nonce: NONCE,
+      deadlines: DEADLINES,
+      unresolvedCreates,
+      settleMs: 60,
+    });
+
+  test("without one, an empty listing settles at once, with no watch", async () => {
+    const fake = new FakeEngine();
+    const { result, settled } = await settle(fake, []);
+    expect(result.listed).toEqual([]);
+    expect(settled).toBeTrue();
+    expect(fake.events.watches).toBe(0);
+  });
+
+  test("with one, a quiet watch and an empty final listing settle; the listing ran twice", async () => {
+    const fake = new FakeEngine();
+    const { settled } = await settle(fake, ["hack-data-export-x"]);
+    expect(settled).toBeTrue();
+    expect(fake.events.watches).toBe(1);
+    expect(
+      fake.calls.filter((argv) => argv[1] === "ps" && argv.includes("--all"))
+    ).toHaveLength(2);
+  });
+
+  test("a container that lands during the watch is removed", async () => {
+    const fake = new FakeEngine();
+    const real = fake.docker();
+    const docker = {
+      ...real,
+      watch: (argv: readonly string[], onLine: (line: string) => void) => {
+        const watch = real.watch(argv, onLine);
+        // It lands while the window is open.
+        setTimeout(() => {
+          labeled(fake, "late", NONCE);
+        }, 10);
+        return watch;
+      },
+    };
+    const { result, settled } = await settle(fake, ["late"], docker);
+    expect(result.removed).toHaveLength(1);
+    expect(settled).toBeTrue();
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a watch that ends early proves nothing: unknown, the record stays", async () => {
+    const fake = new FakeEngine();
+    const real = fake.docker();
+    const docker = {
+      ...real,
+      watch: (argv: readonly string[], onLine: (line: string) => void) => {
+        const watch = real.watch(argv, onLine);
+        setTimeout(() => fake.events.end(), 5);
+        return watch;
+      },
+    };
+    const { result, settled } = await settle(fake, ["gone"], docker);
+    expect(result.listed).toEqual([]);
+    expect(settled).toBeFalse();
+  });
 });

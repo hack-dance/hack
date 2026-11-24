@@ -3,6 +3,7 @@
 use super::super::owner_loop::PublisherReadiness;
 use super::{Candidate, CandidateError, Receipt, signals};
 use crate::provider::{graph, publication};
+use crate::timings::{self, Step};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -360,33 +361,45 @@ impl Publishers {
         }
         let executable = std::env::current_exe().map_err(|_| refused())?;
         self.probe_generations.clear();
-        graph::bridges::supervise_probes(
-            candidate,
-            &receipt.run,
-            &mut self.probe_generations,
-            Some(deadline),
-            &BTreeSet::new(),
-            &|| check_deadline(signals, deadline),
-        )?;
+        // Only restart-supervised routes can seed a probe generation. Reserving
+        // publications below still independently checks every selected endpoint.
+        if receipt
+            .resources
+            .values()
+            .any(|resource| resource.routing.is_some() && resource.restart_policy.is_some())
+        {
+            timings::measure(Step::GraphPublishSeed, None, |_| {
+                graph::bridges::supervise_probes(
+                    candidate,
+                    &receipt.run,
+                    &mut self.probe_generations,
+                    Some(deadline),
+                    &BTreeSet::new(),
+                    &|| check_deadline(signals, deadline),
+                )
+            })?;
+        }
         check_deadline(signals, deadline)?;
         // One snapshot and one registry update reserve every route and port.
         // `started` readiness can finish while an image healthcheck is still
         // starting; wait for those endpoints within the same startup deadline.
-        let reserved = retry_pending_endpoint(
-            || {
-                super::super::bridges::reserve_publications(
-                    candidate,
-                    receipt,
-                    slots,
-                    deadline,
-                    &|| check_deadline(signals, deadline),
-                )
-            },
-            || {
-                std::thread::sleep(PENDING_ENDPOINT_POLL);
-                check_deadline(signals, deadline)
-            },
-        )?;
+        let reserved = timings::measure(Step::GraphPublishReserve, None, |_| {
+            retry_pending_endpoint(
+                || {
+                    super::super::bridges::reserve_publications(
+                        candidate,
+                        receipt,
+                        slots,
+                        deadline,
+                        &|| check_deadline(signals, deadline),
+                    )
+                },
+                || {
+                    std::thread::sleep(PENDING_ENDPOINT_POLL);
+                    check_deadline(signals, deadline)
+                },
+            )
+        })?;
         let mut launches = Vec::new();
         for (service, route) in &routes {
             let selected = reserved.routes.get(*service).ok_or_else(refused)?;
@@ -407,8 +420,10 @@ impl Publishers {
             .iter()
             .map(|(selected, _)| (selected.slot, selected.assignment.reservation.as_str()))
             .collect::<Vec<_>>();
-        super::super::bridges::start_bridges(candidate, &receipt.run, &batch, deadline, &|| {
-            check_deadline(signals, deadline)
+        timings::measure(Step::GraphPublishRelays, None, |_| {
+            super::super::bridges::start_bridges(candidate, &receipt.run, &batch, deadline, &|| {
+                check_deadline(signals, deadline)
+            })
         })?;
         // Every child is owned (and watched) as soon as it exists; they take the
         // provider lease in turn while this owner observes all of them together.
@@ -443,14 +458,16 @@ impl Publishers {
             });
             signals.watch_child(&self.children.last().expect("pushed").child)?;
         }
-        self.await_published(
-            candidate,
-            signals,
-            deadline,
-            first,
-            PublisherReadiness::Startup,
-        )?;
-        self.verify_live(candidate)
+        timings::measure(Step::GraphPublishAwait, None, |_| {
+            self.await_published(
+                candidate,
+                signals,
+                deadline,
+                first,
+                PublisherReadiness::Startup,
+            )?;
+            self.verify_live(candidate)
+        })
     }
 
     /// Waits until every child from `first` on observes its publication. Only

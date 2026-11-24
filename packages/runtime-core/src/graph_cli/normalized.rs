@@ -24,6 +24,13 @@ pub(super) fn command(
         automatic_dependency_slots,
         report_started,
     } = flags;
+    #[cfg(target_os = "macos")]
+    let configure = if matches!(action, "serve" | "serve-restore") {
+        use hack_runtime_core::timings::{self, Step};
+        timings::start(Step::GraphOwnerConfigure, None)
+    } else {
+        None
+    };
     let report = hack_runtime_core::project::plan_normalized(candidate, options.compose)?;
     if report.plan_id != options.run.expected_plan {
         return Err(CandidateError::new(
@@ -159,6 +166,7 @@ pub(super) fn command(
             || Instant::now() + Duration::from_secs(120),
             |managed| managed.deadline(),
         );
+        super::finish_owner_input(configure);
         if let Some(generation) = generation {
             encode(graph::foreground::serve_restore_normalized_with_routes(
                 candidate,

@@ -362,9 +362,6 @@ pub struct RuntimeService {
 pub struct Container {
     pub id: Option<String>,
     pub name: Option<String>,
-    pub image: Option<String>,
-    #[serde(deserialize_with = "null_default")]
-    pub mounts: Vec<ContainerMount>,
     #[serde(deserialize_with = "null_default")]
     pub networks: Vec<ContainerNetwork>,
     /// Docker state: `running`, `exited`, `created`, `restarting`, ...
@@ -381,13 +378,6 @@ pub struct Container {
     pub labels: std::collections::BTreeMap<String, String>,
     /// The container's compose working directory.
     pub working_dir: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct ContainerMount {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

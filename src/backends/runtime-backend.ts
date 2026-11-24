@@ -107,6 +107,11 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly services?: readonly string[];
   readonly noDeps?: boolean;
   readonly forceRecreate?: boolean;
+  /**
+   * `hack up --wait`: `docker compose up -d --wait`, which returns once every
+   * service is running and healthy, as native `--wait` does.
+   */
+  readonly wait?: boolean;
 }
 
 export interface RuntimeDownOptions extends RuntimeBaseOptions {
@@ -605,6 +610,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
           "up",
           "-d",
           "--no-build",
+          ...waitArgs(opts.wait),
           ...(opts.unattended ? ["--pull", "never"] : []),
           ...scope,
         ]);
@@ -792,4 +798,9 @@ function mergeSpawnEnv(
   override: Record<string, string> | undefined
 ): Record<string, string> {
   return childEnvironment(process.env, override);
+}
+
+/** `--wait` for `docker compose up -d`, only when asked. */
+function waitArgs(wait: boolean | undefined): readonly string[] {
+  return wait ? ["--wait"] : [];
 }

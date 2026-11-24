@@ -258,10 +258,10 @@ fn inspect_targets_scoped(
     // ready by its scheduler. Standalone publishers still require a ready graph.
     let admitted = match ready_service {
         Some((service, id)) => {
-            matches!(
-                receipt.phase.as_str(),
-                "preparing" | "restoring" | super::STARTED_OBSERVED
-            ) && services.len() == 1
+            // A start that returned at started (`started-observed`) still
+            // publishes each service as it becomes ready.
+            matches!(super::start_phase(receipt), "preparing" | "restoring")
+                && services.len() == 1
                 && services.contains(service)
                 && receipt
                     .resources

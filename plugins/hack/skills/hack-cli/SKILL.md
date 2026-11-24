@@ -96,6 +96,7 @@ Use `hack` as the primary interface for local-first development.
 
 - If `.hack/` is missing: `hack init`
 - Start services: `hack up --detach` (or `hack up -d`)
+- Native `hack up` returns once every container has started, while health checks and routes are still warming; use `hack up --wait` before calling a project URL. `hack exec` and `hack run` wait for ready on their own.
 - Check status: `hack ps` or `hack status`
 - Open app URL: `hack open --json`
 - Restart: `hack restart`

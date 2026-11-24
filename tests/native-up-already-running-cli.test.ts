@@ -95,6 +95,7 @@ async function fixture(opts: {
   await writeFile(
     binary,
     `#!/bin/sh
+case "$1" in --internal-timings=*) shift;; esac
 ${nativeSetupShellReply()}
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
@@ -277,12 +278,26 @@ test(
         services: {
           started: ["db", "web"],
           completed: ["seed"],
+          warming: [],
           stopped: [],
           failed: [],
         },
+        readiness: "ready",
         durationMs: expect.any(Number),
+        timings: expect.arrayContaining([
+          expect.objectContaining({ step: "command.total" }),
+        ]),
       },
     });
+    const invalid = await up(f, [
+      "-d",
+      "--timings-file",
+      join(f.root, "missing", "timeline.jsonl"),
+    ]);
+    expect(invalid.code).toBe(0);
+    expect(
+      invalid.stderr.match(/Could not create the timings file\./g)
+    ).toEqual(["Could not create the timings file."]);
     // Only read-only observations: nothing was started, stopped or reviewed.
     for (const call of await f.calls()) {
       expect(["graph status", "graph owner-status"]).toContain(call);
@@ -345,6 +360,8 @@ test("only a live, ready graph whose owner answers counts as already running", (
     kind: "running",
     started: ["web"],
     completed: [],
+    warming: [],
+    readiness: "ready",
   });
   expect(
     classifyNativeAlreadyRunning({
@@ -357,7 +374,95 @@ test("only a live, ready graph whose owner answers counts as already running", (
         }),
       ],
     })
-  ).toEqual({ kind: "running", started: ["web"], completed: [] });
+  ).toEqual({
+    kind: "running",
+    started: ["web"],
+    completed: [],
+    warming: [],
+    readiness: "ready",
+  });
+  // A run that returned at started: a service still waiting on its health
+  // check is warming, so a second `up` says "already running" instead of
+  // refusing it as not up. A service that exited is still down.
+  const started = { ...observed, phase: "started-observed" };
+  expect(
+    classifyNativeAlreadyRunning({
+      ...started,
+      items: [
+        item("web", {
+          state: "running",
+          health: "starting",
+          readiness: "healthy",
+        }),
+        item("db", {
+          state: "running",
+          health: "healthy",
+          readiness: "healthy",
+        }),
+      ],
+    })
+  ).toEqual({
+    kind: "running",
+    started: ["db"],
+    completed: [],
+    warming: ["web"],
+    readiness: "warming",
+  });
+  expect(
+    classifyNativeAlreadyRunning({
+      ...started,
+      items: [
+        item("web", {
+          state: "running",
+          health: "starting",
+          readiness: "healthy",
+        }),
+      ],
+    })
+  ).toEqual({
+    kind: "running",
+    started: [],
+    completed: [],
+    warming: ["web"],
+    readiness: "warming",
+  });
+  expect(
+    classifyNativeAlreadyRunning({
+      ...started,
+      items: [item("web", { state: "exited", code: 1, readiness: "healthy" })],
+    })
+  ).toEqual({ kind: "partial", down: ["web"] });
+  // A completion job still running in a warming run is warming, not down.
+  expect(
+    classifyNativeAlreadyRunning({
+      ...started,
+      items: [
+        item("migrate", { state: "running", readiness: "completed" }),
+        item("db", {
+          state: "running",
+          health: "healthy",
+          readiness: "healthy",
+        }),
+      ],
+    })
+  ).toMatchObject({
+    kind: "running",
+    warming: ["migrate"],
+    readiness: "warming",
+  });
+  // The same service in a ready run is down, not warming: today's rule.
+  expect(
+    classifyNativeAlreadyRunning({
+      ...observed,
+      items: [
+        item("web", {
+          state: "running",
+          health: "starting",
+          readiness: "healthy",
+        }),
+      ],
+    })
+  ).toEqual({ kind: "partial", down: ["web"] });
   // Anything short of a confirmed ready graph launches as before, so a start
   // that is genuinely unconfirmed still reports its own reason.
   for (const other of [
@@ -418,6 +523,7 @@ test("a ready graph of completed one-shots is a successful no-op", async () => {
   expect(JSON.parse(result.stdout).data.services).toEqual({
     started: [],
     completed: ["seed"],
+    warming: [],
     stopped: [],
     failed: [],
   });

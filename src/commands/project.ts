@@ -3,6 +3,7 @@ import { resolveNativeStartTimeoutSeconds } from "../backends/native-graph-start
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
 import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
+import { beginUpTiming, withCommandTimings } from "../lib/command-timings.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
@@ -46,6 +47,7 @@ import {
   refuseRemoteStart,
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
+import { printUpTimings } from "../lib/up-timings-output.ts";
 import {
   selectLifecycleAddress,
   writeLifecycleStopped,
@@ -468,7 +470,9 @@ import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
   isNativeDetachedOwnerProcess,
+  nativeBuildProgressLine,
   nativeDetachedOwnerArgs,
+  nativeDetachedUpBuildProgress,
   nativeDetachedUpHookFailed,
   nativeDetachedUpKeepsHookOutput,
   nativeDetachedUpPrestart,
@@ -481,6 +485,7 @@ import {
   createNativeEnvFingerprintSession,
 } from "../lib/native-env-fingerprint-state.ts";
 import { refuseUnsupportedNativeUpOptions } from "../lib/native-up-refusals.ts";
+import { nativeUpWaitsForReady } from "../lib/native-up-wait.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import {
   parseOpenHostPreference,
@@ -809,6 +814,20 @@ const optImageOffline = defineOption({
   description:
     "Native backend: use recorded image resolutions and local archives without contacting a registry.",
 } as const);
+const optWait = defineOption({
+  name: "wait",
+  type: "boolean",
+  long: "--wait",
+  description:
+    "Native: return once every service is ready and every route answers (default: once every container has started). Compose: passed to docker compose up --wait (needs -d)",
+} as const);
+const optRestartWait = defineOption({
+  name: "wait",
+  type: "boolean",
+  long: "--wait",
+  description:
+    "Native only: return once every service is ready and every route answers (default: once every container has started)",
+} as const);
 const pullOptions = [optPath, optProject, optEnv, optProfile, optJson] as const;
 export const optExpectComposeProject = defineOption({
   name: "expectComposeProject",
@@ -832,6 +851,21 @@ const upOptions = [
   optProgress,
   optRefreshImages,
   optImageOffline,
+  optWait,
+  defineOption({
+    name: "timings",
+    type: "boolean",
+    long: "--timings",
+    description: "Native backend: print the startup timeline to stderr",
+  } as const),
+  defineOption({
+    name: "timingsFile",
+    type: "string",
+    long: "--timings-file",
+    valueHint: "<file>",
+    description:
+      "Native backend: write startup timing records to a new JSONL file",
+  } as const),
   defineOption({
     name: "always",
     type: "boolean",
@@ -892,6 +926,7 @@ const restartOptions = [
   optExpectComposeProject,
   optJson,
   optProgress,
+  optRestartWait,
   optRecoverFrontend,
   optExpectFinalizationAttempt,
   optExpectFrontendPid,
@@ -4048,6 +4083,11 @@ async function describeDirectIngressAccess(
 ): Promise<string> {
   const fallback =
     "Publish a service port with Compose `ports:`, for example `127.0.0.1:8080:80`, then run `hack up`.";
+  // `recorded` (one-off `run`) makes no Docker call for the override; reading the
+  // running containers here would inspect every one of them on each run.
+  if (opts.addresses === "recorded") {
+    return fallback;
+  }
   const base = await resolveComposeProjectName(opts);
   const name = opts.branch ? `${base}--${opts.branch}` : base;
   const runtime = await readRuntimeProjects({ includeGlobal: false });
@@ -6856,7 +6896,7 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
       return;
     case "build-settled":
       logger.info({
-        message: `Build ${event.services.join(", ")}: ${event.outcome} in ${formatDuration(event.durationMs)}`,
+        message: nativeBuildProgressLine(event),
       });
       return;
     case "images":
@@ -6882,6 +6922,22 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
           ...event.endpoints,
         ].join("\n"),
       });
+      return;
+    case "started":
+      logger.success({
+        message: [
+          `Project started (${event.services.join(", ")}; run ${event.run}); services and routes warm up now. Use hack ps and hack logs from another terminal; press Ctrl-C to stop.`,
+          ...event.endpoints,
+        ].join("\n"),
+      });
+      return;
+    case "all-ready":
+      logger.success({
+        message: `All services ready · ${formatDuration(event.elapsedMs)}`,
+      });
+      return;
+    case "routes-not-answering":
+      logger.warn({ message: event.detail });
       return;
     case "service-exited":
       logger.warn({ message: nativeServiceExitMessage(event) });
@@ -7014,6 +7070,7 @@ async function handleNativeUp({
   // A detached `up` owner reports a closed refusal from here until VM work
   // starts exactly as this command prints it in the foreground (HACK-2339).
   nativeDetachedUpPrestart(!restart);
+  const composeTiming = beginUpTiming("cli.compose.resolve");
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7107,6 +7164,7 @@ async function handleNativeUp({
   const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
     await resolveNativeInternalExtraHostSelection({ project, cfg });
   let ready = false;
+  composeTiming?.();
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -7161,6 +7219,7 @@ async function handleNativeUp({
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
     onReady: (services, addresses) => {
+      const resultTiming = beginUpTiming("cli.result.prepare");
       const primaryHost = branch
         ? applyBranchToHost({
             branch,
@@ -7171,17 +7230,24 @@ async function handleNativeUp({
             }),
           })
         : devHost;
-      nativeDetachedUpReady({
+      const data = {
         project: projectName,
         branch,
         composeProject,
         address: selectLifecycleAddress(addresses, primaryHost),
         ...services,
-      });
+      };
+      resultTiming?.();
+      nativeDetachedUpReady(data);
     },
     startTimeoutSeconds: resolveNativeStartTimeoutSeconds({
       env: process.env,
       project: cfg.native?.startTimeoutSeconds,
+    }),
+    waitForReady: nativeUpWaitsForReady({
+      wait: args.options.wait,
+      json: args.options.json,
+      interactive: canPrompt(),
     }),
     // HACK-2456: the pool stopped under this run; `hack down --recover`
     // starts it and stops the run with data retained before this start.
@@ -7214,8 +7280,12 @@ async function handleNativeUp({
         nativeDetachedUpPrestart(false);
       }
       // A detached launcher's clocks follow these phases (HACK-2351).
-      nativeDetachedUpProgress(event.phase);
-      if (event.phase === "ready") {
+      if (event.phase === "build-settled") {
+        nativeDetachedUpBuildProgress(event);
+      } else {
+        nativeDetachedUpProgress(event.phase);
+      }
+      if (event.phase === "ready" || event.phase === "started") {
         ready = true;
       }
       if (
@@ -7763,6 +7833,29 @@ async function handleUp(
   input: Parameters<typeof handleUpUnlocked>[0]
 ): Promise<number> {
   validateComposeExpectation(input.args.options);
+  const { json, timings, timingsFile } = input.args.options;
+  if (timings || timingsFile !== undefined || json) {
+    const native = process.env.HACK_RUNTIME_BACKEND === "native";
+    if (!native && (timings || timingsFile !== undefined)) {
+      throw new CliUsageError(
+        "--timings and --timings-file require the native backend."
+      );
+    }
+    if (native && !isNativeDetachedOwnerProcess()) {
+      return await withCommandTimings(
+        timingsFile,
+        () => runUpWithAutostart(input),
+        timings && !json ? printUpTimings : undefined
+      );
+    }
+  }
+  return await runUpWithAutostart(input);
+}
+
+async function runUpWithAutostart(
+  input: Parameters<typeof handleUpUnlocked>[0]
+): Promise<number> {
+  const autostartTiming = beginUpTiming("cli.autostart");
   parseRequestedTarget({ raw: input.args.options.target });
   nativeImageTagMode(input.args.options);
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
@@ -7773,6 +7866,7 @@ async function handleUp(
     if (login) {
       await updateAutostartIntent({ ...input, action: "up" });
     }
+    autostartTiming?.();
     return await handleUpUnlocked({
       ...input,
       loginComposeBase,
@@ -8005,6 +8099,7 @@ async function handleUpUnlocked({
     if (alreadyRunning !== null) {
       return alreadyRunning;
     }
+    const ownerTiming = beginUpTiming("cli.owner.prepare");
     await reportNativeLocalDirectoriesBeforeLaunch({
       ctx,
       path: args.options.path,
@@ -8015,6 +8110,7 @@ async function handleUpUnlocked({
         mode: "start",
       },
     });
+    ownerTiming?.();
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
       args: childArgs,
@@ -8080,6 +8176,7 @@ const UP_RETRY_VALUE_OPTIONS = new Set([
   "--env",
   "--profile",
   "--target",
+  "--timings-file",
 ]);
 
 function printedUpRetry(argv: readonly string[]): string {
@@ -8121,6 +8218,12 @@ async function runUpCommand({
   readonly lockedComposeName?: string;
 }): Promise<number> {
   const detach = args.options.detach || json;
+  if (args.options.wait && !detach) {
+    // An attached Compose `up` does not return; `--wait` applies with -d.
+    throw new CliUsageError(
+      "On the Compose backend, --wait needs -d (or --json): docker compose up --wait runs detached."
+    );
+  }
   const startedAt = performance.now();
   let budgets = resolveDetachedComposeBudgets(detach);
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -9085,6 +9188,7 @@ async function runResolvedComposeUp({
         up: (beforeStart) =>
           composeRuntimeBackend.up({
             signal: cancellation.signal,
+            wait: detach && args.options.wait === true,
             unattended:
               process.env.HACK_AUTOSTART_LOGIN === "1" ? true : undefined,
             unattendedTrustedBinds:
@@ -12667,6 +12771,12 @@ async function handleRestart({
     return authored;
   }
   const native = resolveNativeRuntimeSelection();
+  if (!native && args.options.wait) {
+    // Compose restart waits for running containers only; --wait is native here.
+    throw new CliUsageError(
+      "hack restart --wait applies to the native backend. On Compose, run hack up -d --wait after the restart."
+    );
+  }
   if (native && args.options.json === true && !recover) {
     // `--json` wants one result envelope once the services are back, as on
     // Compose. The native restart owns the services for as long as they run,
@@ -12721,6 +12831,8 @@ async function handleRestart({
           detach: false,
           always: false,
           refreshImages: false,
+          timings: false,
+          timingsFile: undefined,
           offline: false,
         },
       },
@@ -14053,6 +14165,8 @@ async function handlePs({
         nativeHome: native.home,
         branch,
       },
+      // Each service's goal, so a warming service shows as `warming`.
+      includeReadiness: true,
     });
     const imageTags =
       json || args.options.wide

@@ -356,7 +356,7 @@ fn supervisor_drains_without_clients_and_release_refuses_running() {
     fs::write(gate, b"").unwrap();
     until(|| done.exists().then_some(()));
     agent.await_reply(inspect(&handle), Response::Exited { code: 0 });
-    // The child can exit while the supervisor still has stdout to drain.
+    // Exit can be observed before the supervisor drains the last pipe burst.
     agent.await_reply(
         Request::Output {
             handle: handle.clone(),

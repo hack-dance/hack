@@ -87,6 +87,12 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if fixtures::loads_usage(f) {
                                 app.show_usage_now();
                             }
+                            if f.name().starts_with("catalog-") {
+                                app.show_catalog_fixture(f.name(), window, cx);
+                            }
+                            if f.name().starts_with("changes-") {
+                                app.show_changes_fixture(f.name());
+                            }
                             if f.name().starts_with("copies-") {
                                 app.show_copies_fixture(f.name());
                             }

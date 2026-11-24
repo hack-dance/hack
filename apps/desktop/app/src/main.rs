@@ -19,6 +19,7 @@
 //!                                      (see `drive.rs`)
 //! ```
 
+mod changes_view;
 mod clipboard;
 #[cfg(hack_terminal)]
 mod command_control;
@@ -36,6 +37,7 @@ mod logs_view;
 mod machine_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+mod service_catalog;
 mod service_view;
 mod setup_view;
 mod sidebar_view;
@@ -297,6 +299,12 @@ fn main() {
                             if !fixtures::opens_doctor(f) {
                                 app.show_project();
                             }
+                        }
+                        if f.name().starts_with("catalog-") {
+                            app.show_catalog_fixture(f.name(), window, cx);
+                        }
+                        if f.name().starts_with("changes-") {
+                            app.show_changes_fixture(f.name());
                         }
                         if f.name().starts_with("copies-") {
                             app.show_copies_fixture(f.name());

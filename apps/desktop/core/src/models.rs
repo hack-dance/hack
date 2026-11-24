@@ -76,6 +76,9 @@ pub struct ProjectRow {
     pub defined_services: Vec<String>,
     #[serde(deserialize_with = "null_default")]
     pub service_hosts: std::collections::BTreeMap<String, Vec<String>>,
+    /// Authored Compose targets in the registered checkout. No resolution or probe.
+    #[serde(deserialize_with = "null_default")]
+    pub remotes: Vec<RemoteStatus>,
     pub input_diagnostic: Option<InputDiagnostic>,
     pub runtime: Option<ProjectRuntime>,
     pub compose_project: Option<String>,
@@ -117,6 +120,59 @@ pub struct ProjectRow {
     /// row describes. `None` for the project's base instance.
     #[serde(skip)]
     pub branch: Option<String>,
+}
+
+/// The authored descriptor from the Compose project report.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RemoteStatus {
+    pub service: String,
+    pub target: String,
+    pub state: String,
+    pub probe: String,
+    pub address: Option<RemoteAddress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RemoteAddress {
+    Service {
+        service: String,
+        port: u16,
+    },
+    EnvRef {
+        name: String,
+        port: u16,
+    },
+    Hostname {
+        hostname: String,
+        port: u16,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+impl RemoteStatus {
+    #[must_use]
+    pub fn address_label(&self) -> String {
+        self.address
+            .as_ref()
+            .map_or_else(|| "unknown".into(), RemoteAddress::label)
+    }
+}
+
+impl RemoteAddress {
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Service { service, port } => format!("{service}:{port}"),
+            Self::EnvRef { name, port } => format!("${name}:{port}"),
+            Self::Hostname { hostname, port } if hostname.contains(':') => {
+                format!("[{hostname}]:{port}")
+            }
+            Self::Hostname { hostname, port } => format!("{hostname}:{port}"),
+            Self::Unknown => "Address unavailable".into(),
+        }
+    }
 }
 
 /// One registered linked worktree in a `/v1/projects` row.
@@ -583,6 +639,16 @@ pub struct ContainerMount {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ContainerMount {
+    pub name: Option<String>,
+    pub source: String,
+    pub destination: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
 impl Container {
     /// Host lifecycle processes and one-off Compose runs have no service action.
     #[must_use]
@@ -887,6 +953,24 @@ impl CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projects_accept_null_remote_addresses_from_the_daemon() {
+        let payload = ProjectsPayload::from_value(serde_json::json!({
+            "projects": [
+                { "name": "storefront", "remotes": [{
+                    "kind": "remote", "service": "db", "target": "unknown",
+                    "state": "declared", "probe": "not checked", "address": null
+                }] },
+                { "name": "docs-site" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(payload.projects.len(), 2);
+        let remote = &payload.projects[0].remotes[0];
+        assert!(remote.address.is_none());
+        assert_eq!(remote.address_label(), "unknown");
+    }
 
     #[test]
     fn container_status_parsing() {

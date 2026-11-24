@@ -26,6 +26,7 @@ pub enum Fixture {
     EnvRunning,
     EnvLong,
     EnvEdit,
+    EnvRevealed,
     // List states.
     Loading,
     Empty,
@@ -41,6 +42,7 @@ pub enum Fixture {
     Stopped,
     Starting,
     Running,
+    Remotes,
     Files,
     Degraded,
     Stopping,
@@ -50,6 +52,14 @@ pub enum Fixture {
     /// instances (`hack up --branch <name>`) run.
     Branches,
     GroupedSidebar,
+    CatalogNative,
+    CatalogAll,
+    CatalogEmpty,
+    CatalogPreview,
+    ChangesError,
+    ChangesLoading,
+    ChangesClean,
+    ChangesDirty,
     CopiesEmpty,
     CopiesError,
     CopiesLoading,
@@ -85,7 +95,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 57] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -96,6 +106,7 @@ impl Fixture {
         Self::EnvRunning,
         Self::EnvLong,
         Self::EnvEdit,
+        Self::EnvRevealed,
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -107,6 +118,7 @@ impl Fixture {
         Self::Stopped,
         Self::Starting,
         Self::Running,
+        Self::Remotes,
         Self::Files,
         Self::Degraded,
         Self::Stopping,
@@ -114,6 +126,14 @@ impl Fixture {
         Self::NeedsAttention,
         Self::Branches,
         Self::GroupedSidebar,
+        Self::CatalogNative,
+        Self::CatalogAll,
+        Self::CatalogEmpty,
+        Self::CatalogPreview,
+        Self::ChangesError,
+        Self::ChangesLoading,
+        Self::ChangesClean,
+        Self::ChangesDirty,
         Self::CopiesEmpty,
         Self::CopiesError,
         Self::CopiesLoading,
@@ -148,6 +168,7 @@ impl Fixture {
             Self::EnvRunning => "env-running",
             Self::EnvLong => "env-long",
             Self::EnvEdit => "env-edit",
+            Self::EnvRevealed => "env-revealed",
             Self::Loading => "loading",
             Self::Empty => "empty",
             Self::DaemonDown => "daemon-down",
@@ -159,6 +180,7 @@ impl Fixture {
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Remotes => "remotes",
             Self::Files => "files",
             Self::Degraded => "degraded",
             Self::Stopping => "stopping",
@@ -166,6 +188,14 @@ impl Fixture {
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
             Self::GroupedSidebar => "grouped-sidebar",
+            Self::CatalogNative => "catalog-native",
+            Self::CatalogAll => "catalog-all",
+            Self::CatalogEmpty => "catalog-empty",
+            Self::CatalogPreview => "catalog-preview",
+            Self::ChangesError => "changes-error",
+            Self::ChangesLoading => "changes-loading",
+            Self::ChangesClean => "changes-clean",
+            Self::ChangesDirty => "changes-dirty",
             Self::CopiesEmpty => "copies-empty",
             Self::CopiesError => "copies-error",
             Self::CopiesLoading => "copies-loading",
@@ -492,6 +522,23 @@ pub fn project(f: Fixture) -> ProjectsPayload {
                 branch: Some("fix-login".into()),
             }];
             r
+        }
+        Fixture::CatalogNative => {
+            let mut row = storefront(vec![], "stopped");
+            row.backend = Some("native".into());
+            row
+        }
+        Fixture::Remotes => {
+            let mut row = storefront(all_up(), "running");
+            row.remotes = serde_json::from_str(r#"[
+              {"service":"redis","target":"unknown","state":"declared","probe":"not checked",
+               "address":null},
+              {"service":"database","target":"staging","state":"declared","probe":"not checked",
+               "address":{"kind":"env_ref","name":"STAGING_DB_HOST","port":5432}},
+              {"service":"search","target":"preview","state":"tunnel not started by this version",
+               "probe":"not checked","address":{"kind":"hostname","hostname":"search.example.invalid","port":443}}
+            ]"#).expect("remote descriptors fixture");
+            row
         }
         Fixture::Branches => {
             let mut r = storefront(vec![], "stopped");

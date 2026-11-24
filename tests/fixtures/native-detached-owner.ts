@@ -18,6 +18,10 @@ import {
 import { handleRunCliError } from "../../src/cli/run.ts";
 import { ClosedCliError, HackCliError } from "../../src/lib/cli-result.ts";
 import {
+  startupTimingSpawn,
+  withCommandTimings,
+} from "../../src/lib/command-timings.ts";
+import {
   nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
@@ -443,22 +447,27 @@ if (role === "channel-holder") {
         ? deliverExitBeforeMessages()
         : undefined;
   try {
-    process.exitCode = await startNativeDetachedUp({
-      cwd: root,
-      args: [],
-      json: !process.env.FIXTURE_TEXT_OUTPUT,
-      ...(mode === "restart-action" ? { action: "restart" as const } : {}),
-      invocation: [
-        process.execPath,
-        ...(Bun.main.startsWith("/$bunfs/") ? [] : [import.meta.filename]),
-        "owner",
-        root,
-        mode,
-      ],
-      limits: fixtureLimits(mode),
-      heartbeatStaleMs: 400,
-      unwindMs: 3000,
-    });
+    const launch = () =>
+      startNativeDetachedUp({
+        cwd: root,
+        args: [],
+        json: !process.env.FIXTURE_TEXT_OUTPUT,
+        ...(mode === "restart-action" ? { action: "restart" as const } : {}),
+        invocation: [
+          process.execPath,
+          ...(Bun.main.startsWith("/$bunfs/") ? [] : [import.meta.filename]),
+          "owner",
+          root,
+          mode,
+        ],
+        limits: fixtureLimits(mode),
+        heartbeatStaleMs: 400,
+        unwindMs: 3000,
+      });
+    process.exitCode =
+      mode === "timings"
+        ? await withCommandTimings(join(root, "timings.jsonl"), launch)
+        : await launch();
   } catch (error) {
     process.exitCode = [
       "authored-attempt-limit",
@@ -489,7 +498,7 @@ if (role === "channel-holder") {
   }
 } else if (role === "owner") {
   process.exitCode = await runNativeDetachedOwner({
-    args: [],
+    args: Bun.argv.slice(5),
     run: async () => {
       const done = Promise.withResolvers<number>();
       const stop = () => done.resolve(0);
@@ -700,6 +709,18 @@ if (role === "channel-holder") {
         }
         await nativeDetachedUpFailure(new Error("synthetic-private-value"));
       }
+      if (mode === "timings") {
+        const runtime = startupTimingSpawn([join(root, "runtime")], {
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if ((await runtime.exited) !== 0) {
+          throw new Error(
+            "Synthetic runtime failed to deliver timing records."
+          );
+        }
+      }
       const notifyReady = () =>
         nativeDetachedUpReady({
           project: "fixture",
@@ -741,6 +762,7 @@ if (role === "channel-holder") {
           "unsafe-failure",
           "unsafe-prestart-refusal",
           "slow-images",
+          "timings",
         ].includes(mode)
       ) {
         notifyReady();

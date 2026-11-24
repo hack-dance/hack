@@ -35,8 +35,12 @@ fi`;
 }
 
 export function nativeSetupScriptReply(): string {
-  return `if (process.argv.length === 8 && process.argv.slice(4).join(" ") === "runtime setup inspect --json") {
-  console.log(${JSON.stringify(JSON.stringify(nativeSetupInspection()))});
-  process.exit(0);
+  return `{
+  const setupArgs = process.argv.slice(2);
+  if (setupArgs[0]?.startsWith("--internal-timings=")) setupArgs.shift();
+  if (setupArgs.length === 6 && setupArgs[0] === "--candidate-root" && setupArgs.slice(2).join(" ") === "runtime setup inspect --json") {
+    console.log(${JSON.stringify(JSON.stringify(nativeSetupInspection()))});
+    process.exit(0);
+  }
 }`;
 }

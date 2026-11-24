@@ -356,6 +356,20 @@ fn supervisor_drains_without_clients_and_release_refuses_running() {
     fs::write(gate, b"").unwrap();
     until(|| done.exists().then_some(()));
     agent.await_reply(inspect(&handle), Response::Exited { code: 0 });
+    // Exit can be observed before the supervisor drains the last pipe burst.
+    agent.await_reply(
+        Request::Output {
+            handle: handle.clone(),
+            stream: Stream::Stdout,
+            offset: 262144,
+        },
+        Response::Output {
+            start_offset: 262144,
+            bytes: vec![],
+            eof: true,
+            truncated: true,
+        },
+    );
     assert!(matches!(
         agent.request(Request::Output {
             handle,

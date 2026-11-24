@@ -567,6 +567,7 @@ fn serve_input<'a>(
             }
             publication.verify()?;
             if let Some(extend) = request.extend {
+                let has_routes = extend.has_routes();
                 let response = match service_start::handle(
                     candidate,
                     &mut runtime,
@@ -579,6 +580,18 @@ fn serve_input<'a>(
                     Ok(value) => {
                         // An added route or port may introduce the first restart-supervised service.
                         supervise_restarts = true;
+                        if has_routes {
+                            // The frontend may have started this graph without
+                            // HTTPS. It can now acquire an ingress lease on the
+                            // same run. A lost notification never changes ownership.
+                            let _ = writeln!(
+                                std::io::stdout().lock(),
+                                "{}",
+                                json!({
+                                    "kind":"graph_foreground_routes_added", "run":receipt.run, "phase":"ready-observed"
+                                })
+                            );
+                        }
                         value
                     }
                     Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),

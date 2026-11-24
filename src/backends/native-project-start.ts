@@ -3685,6 +3685,7 @@ async function startNativeProjectAttempt(
         let httpsClosing = false;
         let httpsIntent: NativeHttpsLeaseIdentity | undefined;
         let httpsFailure: Error | undefined;
+        let joinedIngress: Promise<void> | undefined;
         try {
           const dependencyFile = join(directory, "dependencies.json");
           await writeFile(
@@ -3853,11 +3854,12 @@ async function startNativeProjectAttempt(
           // Takes the HTTPS lease on the lifetime registered before the mapping.
           const acquireHttps = async (
             readyMapping: NativeProjectRun,
-            persistedMapping: NativeProjectRun
+            persistedMapping: NativeProjectRun,
+            afterAppend = false
           ) => {
             // Enrollment must exist before taking a shared lease: release
             // requires independent proof of this exact graph's cleanup.
-            if (opts.https) {
+            if (opts.https && (afterAppend || routes.services.size > 0)) {
               https = await acquireReadyHttps({
                 runtime: opts.runtime,
                 selection: opts.https,
@@ -3881,6 +3883,13 @@ async function startNativeProjectAttempt(
               });
               void https.exited.then(() => {
                 if (!httpsClosing) {
+                  if (afterAppend) {
+                    progress({
+                      phase: "routes-not-answering",
+                      detail: "The native HTTPS owner exited.",
+                    });
+                    return;
+                  }
                   httpsFailure = new ClosedCliError(
                     "Native HTTPS owner exited unexpectedly; graph shutdown requested."
                   );
@@ -4006,6 +4015,28 @@ async function startNativeProjectAttempt(
               // The owner's ready line after a started return: routes answer now.
               onAllReady: () => {
                 void allReady();
+              },
+              onRoutesAdded: () => {
+                if (
+                  !(opts.https && mapped) ||
+                  https ||
+                  joinedIngress ||
+                  httpsClosing ||
+                  routes.services.size > 0
+                ) {
+                  return;
+                }
+                joinedIngress = acquireHttps(
+                  mapped.readyMapping,
+                  mapped.persistedMapping,
+                  true
+                ).catch(() => {
+                  progress({
+                    phase: "routes-not-answering",
+                    detail:
+                      "The newly published routes could not acquire shared native HTTPS.",
+                  });
+                });
               },
               signal: controller.signal,
               // Down hooks run on the first stop request of a ready graph.
@@ -4241,6 +4272,7 @@ async function startNativeProjectAttempt(
         } finally {
           httpsClosing = true;
           try {
+            await joinedIngress;
             if (https) {
               await https.releaseAfterCleanup();
             } else if (httpsIntent) {

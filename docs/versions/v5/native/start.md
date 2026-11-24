@@ -119,6 +119,11 @@ keep their container IDs and publications, and `hack ps` shows the combined run.
 `hack up redis --json` uses the same lifecycle fields as a targeted Compose
 start. An unknown service returns `E_SERVICE_NOT_FOUND`.
 
+Adding routes or loopback ports uses spare bridge capacity in the current
+pool. A previously admitted service that has stopped, or a new service that
+needs new host relay bindings, requires a fresh graph start with `hack down`
+followed by `hack up`. Named data is retained by ordinary `down`.
+
 If a targeted start is interrupted after admission, `ps` can report the run as
 degraded and show the service states it can confirm. `hack down` stops the whole
 run, including any services created midway, and keeps named data. If the owner

@@ -3125,6 +3125,39 @@ test("unrouted graphs do not start the selected HTTPS frontend", async () => {
   };
   expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
 });
+test("the first appended route joins shared HTTPS on the existing frontend lifetime", async () => {
+  const { opts, events } = await fixture(false);
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) =>
+    await serve({
+      ...request,
+      onReady: async () => {
+        await request.onReady();
+        expect(events).not.toContain("https-start");
+        request.onRoutesAdded?.();
+        request.onRoutesAdded?.();
+      },
+    });
+  opts.dependencies.https = async (selection) => {
+    events.push("https-start");
+    return {
+      identity: leaseIdentity(selection),
+      caPath: "/synthetic/root.crt",
+      httpsPort: 8443,
+      exited: new Promise(() => {}),
+      verifyHostname: async () => ({ statusCode: 200 }),
+      releaseAfterCleanup: async () => {
+        events.push("https-close");
+      },
+    };
+  };
+  expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
+  expect(events.filter((event) => event === "https-start")).toHaveLength(1);
+  expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-start"));
+  expect(events.indexOf("https-start")).toBeLessThan(
+    events.indexOf("https-close")
+  );
+});
 test("routed HTTPS verification precedes readiness and closes after graph cleanup", async () => {
   const { opts, events } = await httpsFixture();
   opts.dependencies.https = async (selection) => {

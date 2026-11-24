@@ -25,6 +25,12 @@ pub(super) struct ExtendRequest {
     timeout_seconds: u64,
 }
 
+impl ExtendRequest {
+    pub(super) fn has_routes(&self) -> bool {
+        !self.routes.is_empty()
+    }
+}
+
 /// Forward normalized input and optional private delivery to the exact live owner.
 /// A lost reply never retries the start.
 pub fn request(

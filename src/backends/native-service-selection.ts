@@ -88,11 +88,11 @@ export function selectNativeServices(opts: {
         ...(dependsOn !== undefined ? { depends_on: dependsOn } : {}),
       };
     } else {
-      const spec = { ...service, profiles: undefined };
-      if (dependsOn !== undefined) {
-        spec.depends_on = dependsOn;
-      }
-      projected[name] = spec;
+      projected[name] = {
+        ...service,
+        profiles: undefined,
+        ...(dependsOn !== undefined ? { depends_on: dependsOn } : {}),
+      };
     }
   }
   return projected;

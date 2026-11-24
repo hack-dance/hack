@@ -141,6 +141,7 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "native ca repair"
         | "native https owner"
         | "native https route"
+        | "native disk usage"
         | "native temporary aliases"
         | "native pool idle" => (Native, Machine),
         "native settings"

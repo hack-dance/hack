@@ -2068,6 +2068,7 @@ hack doctor [options]
 
 | Option | Description |
 | --- | --- |
+| `--disk` | Audit host file usage for the selected native home without starting the pool |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
 | `--include-unverified-volumes` | With --fix, include native aliases whose volume may be unmounted |

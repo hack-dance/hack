@@ -3268,6 +3268,7 @@ dependencies = [
 name = "hack-desktop-core"
 version = "0.0.0"
 dependencies = [
+ "enum-iterator",
  "libc",
  "serde",
  "serde_json",

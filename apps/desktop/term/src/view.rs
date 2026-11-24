@@ -859,6 +859,9 @@ fn apply_ghostty_colors(mut theme: TermTheme, look: &GhosttyLook) -> TermTheme {
     theme.cursor_fg = look.cursor_text.or(theme.cursor_fg);
     if let Some(bg) = look.selection_background {
         theme.selection_bg = bg;
+        // Keep the cell's foreground unless the custom palette pairs the
+        // background with an explicit selection foreground.
+        theme.selection_fg = None;
     }
     theme.selection_fg = look.selection_foreground.or(theme.selection_fg);
     for (index, color) in look.palette.range(..16) {

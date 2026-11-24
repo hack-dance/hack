@@ -38,6 +38,10 @@ fn main() {
             "selection_background_covers_find_highlights",
             selection_background_covers_find_highlights,
         ),
+        (
+            "custom_selection_background_keeps_the_cell_foreground",
+            custom_selection_background_keeps_the_cell_foreground,
+        ),
     ]);
 }
 
@@ -124,6 +128,7 @@ use gpui_kit::{
     AppContext as _, Bounds, HeadlessAppContext, WindowBounds, WindowOptions, px, size,
 };
 use hack_desktop_term::emulator::TermTheme;
+use hack_desktop_term::ghostty_config::GhosttyLook;
 use hack_desktop_term::glyphs::{self, BundledSymbols};
 use hack_desktop_term::stream::StreamSource;
 use hack_desktop_term::view::{GridMetrics, TermFont, TerminalView};
@@ -404,6 +409,37 @@ fn selection_background_covers_find_highlights() {
     assert!(
         shot.cells(7, 0, 4).all_ink(shot.background()) > 0.8,
         "the unselected match should retain its Find highlight"
+    );
+}
+
+fn custom_selection_background_keeps_the_cell_foreground() {
+    let dark = TermTheme::DARK;
+    let Some(shot) = capture_with_view(
+        " MMMM\n",
+        None,
+        "selection-custom-background.png",
+        (560., 120.),
+        |view, cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+            view.set_look(
+                GhosttyLook {
+                    selection_background: dark.selection_fg,
+                    ..GhosttyLook::default()
+                },
+                cx,
+            );
+            view.emulator().select_start(1, 0);
+            view.emulator().select_to(4, 0);
+            cx.notify();
+        },
+    ) else {
+        return;
+    };
+    assert_eq!(shot.frame.selection[0], Some((1, 4)));
+    let ink = shot.cells(1, 0, 4).all_ink(shot.background());
+    assert!(
+        (0.01..0.5).contains(&ink),
+        "selected text should have visible ink on the custom background ({ink})"
     );
 }
 

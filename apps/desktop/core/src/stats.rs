@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 
 use crate::models::{Container, ProjectRow, ProjectRuntime, ProjectsPayload, RuntimeService};
-use crate::viewmodel::InstanceKey;
+use crate::viewmodel::{InstanceKey, instance_runtimes};
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 pub const HISTORY_WINDOW: Duration = Duration::from_secs(600);
@@ -131,6 +131,7 @@ impl ServiceKey {
             None => {
                 let dir = runtime
                     .and_then(|rt| rt.working_dir.as_deref())
+                    .or(instance.checkout.as_deref())
                     .or_else(|| {
                         project
                             .repo_root
@@ -231,14 +232,10 @@ pub fn has_running_services(projects: &ProjectsPayload) -> bool {
         .projects
         .iter()
         .filter(|p| !p.is_native())
-        .any(|p| {
-            p.runtime
-                .iter()
-                .chain(p.branch_runtime.iter().map(|branch| &branch.runtime))
-                .flat_map(|rt| &rt.services)
-                .flat_map(|service| &service.containers)
-                .any(measurable)
-        })
+        .flat_map(instance_runtimes)
+        .flat_map(|(_, runtime)| &runtime.services)
+        .flat_map(|service| &service.containers)
+        .any(measurable)
 }
 
 impl StatsHistory {
@@ -258,17 +255,7 @@ impl StatsHistory {
         }
 
         for project in projects.projects.iter().filter(|p| !p.is_native()) {
-            let instances = project
-                .runtime
-                .iter()
-                .map(|rt| (InstanceKey::project(&project.name), rt))
-                .chain(project.branch_runtime.iter().map(|branch| {
-                    (
-                        InstanceKey::branch(&project.name, &branch.branch),
-                        &branch.runtime,
-                    )
-                }));
-            for (instance, runtime) in instances {
+            for (instance, runtime) in instance_runtimes(project) {
                 self.record_instance(runtime, &instance, project, &by_service, now);
             }
         }
@@ -513,7 +500,11 @@ fn sum_bytes(mut bytes: impl Iterator<Item = Option<u64>>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{BranchRuntime, Container, ProjectRow, RuntimeService};
+    use crate::models::{
+        BranchCheckout, BranchCopy, BranchRuntime, Container, ProjectRow, RuntimeService,
+    };
+    use crate::source::Snapshot;
+    use crate::viewmodel::{AppModel, Event};
 
     fn instance(compose: &str, ids: &[&str]) -> ProjectRuntime {
         ProjectRuntime {
@@ -586,6 +577,118 @@ mod tests {
             ],
             ..StatsReport::default()
         }
+    }
+
+    fn select_sidebar_copy(listing: &ProjectsPayload, checkout: &str) -> (InstanceKey, ProjectRow) {
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(Snapshot {
+            cli_version: "test".into(),
+            projects: listing.clone(),
+            daemon: None,
+            doctor: None,
+            daemon_compatible: None,
+        })));
+        let copy = model
+            .list()
+            .running
+            .into_iter()
+            .flat_map(|row| row.branches)
+            .find(|row| row.key.checkout.as_deref() == Some(checkout))
+            .expect("running copy in the sidebar");
+        model.apply(Event::SelectInstance(copy.key));
+        (model.selected_key().unwrap(), model.selected_row().unwrap())
+    }
+
+    #[test]
+    fn observed_branch_history_uses_the_sidebar_checkout_and_records_once() {
+        let checkout = "/work/shop-preview";
+        let working_dir = format!("{checkout}/.hack");
+        let mut listing = projects();
+        let project = &mut listing.projects[0];
+        let runtime = &mut project.branch_runtime[0].runtime;
+        runtime.working_dir = Some(working_dir.clone());
+        runtime.services[0].containers[0].working_dir = Some(working_dir);
+        project.branch_copies.push(BranchCopy {
+            branch: Some("preview".into()),
+            checkout: BranchCheckout {
+                root: checkout.into(),
+                kind: "worktree".into(),
+            },
+            compose_project: Some("shop--preview".into()),
+            runtime: Some(runtime.clone()),
+            ..BranchCopy::default()
+        });
+
+        let (instance, row) = select_sidebar_copy(&listing, checkout);
+        assert_eq!(
+            instance,
+            InstanceKey::branch_at("shop", "preview", Some(checkout.into()))
+        );
+        let runtime = row.runtime.as_ref().unwrap();
+        let selected = ServiceKey::new(instance, &row, Some(runtime), "api").unwrap();
+        let now = Instant::now();
+        let mut history = StatsHistory::default();
+        history.record(&listing, &report(), now);
+        assert_eq!(history.points(&selected, now).count(), 1);
+        assert_eq!(
+            history
+                .current(&selected, runtime, now)
+                .unwrap()
+                .cpu_percent,
+            Some(1.5)
+        );
+        assert_eq!(
+            history
+                .points(&key(InstanceKey::branch("shop", "preview")), now)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn linked_base_runtime_alone_starts_sampling_and_keeps_its_own_history() {
+        let checkout = "/work/shop-linked";
+        let mut listing = projects();
+        let project = &mut listing.projects[0];
+        project.project_id = None;
+        project.repo_root = Some("/work/shop".into());
+        project.branch_runtime.clear();
+        project.branch_copies.push(BranchCopy {
+            branch_name: "linked".into(),
+            checkout: BranchCheckout {
+                root: checkout.into(),
+                kind: "worktree".into(),
+            },
+            compose_project: Some("shop".into()),
+            runtime: project.runtime.take(),
+            ..BranchCopy::default()
+        });
+
+        let (instance, row) = select_sidebar_copy(&listing, checkout);
+        assert_eq!(instance.checkout.as_deref(), Some(checkout));
+        assert!(instance.branch.is_none());
+        let runtime = row.runtime.as_ref().unwrap();
+        let selected = ServiceKey::new(instance, &row, Some(runtime), "api").unwrap();
+        assert!(has_running_services(&listing));
+        let now = Instant::now();
+        let mut history = StatsHistory::default();
+        history.record(&listing, &report(), now);
+        assert_eq!(history.points(&selected, now).count(), 1);
+        assert_eq!(
+            history
+                .current(&selected, runtime, now)
+                .unwrap()
+                .cpu_percent,
+            Some(3.0)
+        );
+        let primary = ServiceKey::new(
+            InstanceKey::project("shop"),
+            &listing.projects[0],
+            None,
+            "api",
+        )
+        .unwrap();
+        assert_eq!(history.points(&primary, now).count(), 0);
     }
 
     #[test]

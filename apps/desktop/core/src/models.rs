@@ -395,12 +395,13 @@ impl ProjectRow {
         owner.is_some() && owner == self.repo_root
     }
 
-    /// Match observations and configuration by slug and checkout together.
-    #[must_use]
-    pub fn instance_at(&self, branch: &str, checkout: Option<&str>) -> Option<ProjectRow> {
-        let copy = self.branch_copy_at(Some(branch), checkout);
-        let Some(br) = self
-            .branch_runtime
+    pub(crate) fn branch_observation_at(
+        &self,
+        branch: &str,
+        checkout: Option<&str>,
+        copy: Option<&BranchCopy>,
+    ) -> Option<&BranchRuntime> {
+        self.branch_runtime
             .iter()
             .filter(|b| b.branch == branch && self.branch_owner(b).as_deref() == checkout)
             .min_by_key(|b| {
@@ -409,7 +410,13 @@ impl ProjectRow {
                     .or(b.compose_project.as_ref());
                 expected.is_some() && expected != b.runtime.project.as_ref()
             })
-        else {
+    }
+
+    /// Match observations and configuration by slug and checkout together.
+    #[must_use]
+    pub fn instance_at(&self, branch: &str, checkout: Option<&str>) -> Option<ProjectRow> {
+        let copy = self.branch_copy_at(Some(branch), checkout);
+        let Some(br) = self.branch_observation_at(branch, checkout, copy) else {
             return Some(self.configured_instance(copy?));
         };
         // The instance's own host, by the rule `hack open --branch <b>` uses

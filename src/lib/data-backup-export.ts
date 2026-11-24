@@ -1,6 +1,7 @@
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
+import { createBackingProver } from "./data-backup-backing-proof.ts";
 import {
   type DataBackupDeadlines,
   resolveDataBackupDeadlines,
@@ -171,6 +172,12 @@ async function exportWithin(opts: {
     volumes: watched,
     exclude: helpers.created,
     timeoutMs: deadlines.commandMs,
+    prove: createBackingProver({
+      docker: input.docker,
+      purpose: "export",
+      deadlines,
+      helpers,
+    }),
     stopCommand,
     command: "export",
     lead: "The project is running, so its volumes cannot be copied consistently; nothing was backed up.",
@@ -307,6 +314,12 @@ async function copyWithinWindow(opts: {
     volumes: watched,
     exclude: helpers.created,
     timeoutMs: deadlines.commandMs,
+    prove: createBackingProver({
+      docker: input.docker,
+      purpose: "export",
+      deadlines,
+      helpers,
+    }),
     stopCommand,
     command: "export",
     lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,

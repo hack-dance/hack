@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
+import { posix } from "node:path";
 import type {
   DataBackupDocker,
   DataBackupProcessResult,
@@ -44,6 +45,8 @@ type FakeContainer = {
   mounts?: readonly unknown[];
   /** The named volume a `--mount type=volume` references. */
   references?: string;
+  /** A backing-proof helper's output, printed by `start --attach`. */
+  proof?: DataBackupProcessResult;
 };
 
 export const COMPOSE = [
@@ -209,6 +212,66 @@ export class FakeEngine {
       mounts,
     });
     return id;
+  }
+
+  /**
+   * The daemon's view of host paths, for the backing-proof helper: a path
+   * that is a symlink resolves to its target (longest prefix first), a
+   * `/proc/self/root` prefix names the daemon's own root, and a missing path
+   * cannot be bound.
+   */
+  symlinks = new Map<string, string>();
+  missingPaths = new Set<string>();
+  /** The proof helper fails (exit 1) instead of answering. */
+  proofFails = false;
+
+  /** A host path as the daemon resolves it when it bind-mounts it. */
+  daemonRealpath(path: string): string {
+    let current = posix.normalize(path);
+    for (let step = 0; step < 32; step += 1) {
+      if (
+        current === "/proc/self/root" ||
+        current.startsWith("/proc/self/root/")
+      ) {
+        current = posix.normalize(
+          current.slice("/proc/self/root".length) || "/"
+        );
+        continue;
+      }
+      const link = [...this.symlinks.keys()]
+        .filter((from) => current === from || current.startsWith(`${from}/`))
+        .sort((a, b) => b.length - a.length)[0];
+      if (link === undefined) {
+        break;
+      }
+      current = posix.normalize(
+        `${this.symlinks.get(link) ?? ""}${current.slice(link.length)}`
+      );
+    }
+    return current.length > 1 && current.endsWith("/")
+      ? current.slice(0, -1)
+      : current;
+  }
+
+  /** The answer of the proof helper for these bind mounts. */
+  private proofOf(binds: readonly { src: string; dst: string }[]) {
+    if (this.proofFails) {
+      return fail("proof helper error", 1);
+    }
+    const within = (path: string, root: string) =>
+      root === "/" || path === root || path.startsWith(`${root}/`);
+    const owned = binds.filter((bind) => bind.dst.startsWith("/o/"));
+    const results: Record<string, string[]> = {};
+    for (const bind of binds.filter((one) => one.dst.startsWith("/c/"))) {
+      const candidate = this.daemonRealpath(bind.src);
+      results[bind.dst.slice(3)] = owned
+        .filter((own) => {
+          const real = this.daemonRealpath(own.src);
+          return within(real, candidate) || within(candidate, real);
+        })
+        .map((own) => own.dst.slice(3));
+    }
+    return ok(`${JSON.stringify({ results })}\n`);
   }
 
   /** IDs of the containers that still exist. */
@@ -432,6 +495,38 @@ export class FakeEngine {
           labels[key ?? ""] = rest.join("=");
         }
       });
+      const binds = args.flatMap((value, index) =>
+        value === "--mount"
+          ? [
+              {
+                src: /src=([^,]+)/.exec(args[index + 1] ?? "")?.[1] ?? "",
+                dst: /dst=([^,]+)/.exec(args[index + 1] ?? "")?.[1] ?? "",
+              },
+            ]
+          : []
+      );
+      if (binds.some((bind) => bind.dst.startsWith("/c/"))) {
+        // The backing-proof helper: any existing path binds.
+        const missing = binds.find((bind) =>
+          this.missingPaths.has(posix.normalize(bind.src))
+        );
+        if (missing) {
+          return fail(
+            `Error response from daemon: invalid mount config for type "bind": bind source path does not exist: ${missing.src}`
+          );
+        }
+        const id = fakeContainerId();
+        this.created.push({ name, id });
+        this.containers.set(id, {
+          name,
+          labels,
+          volume: null,
+          readOnly: true,
+          running: false,
+          proof: this.proofOf(binds),
+        });
+        return ok(`${id}\n`);
+      }
       const mount = args.includes("--mount")
         ? (args[args.indexOf("--mount") + 1] ?? "")
         : null;
@@ -479,6 +574,11 @@ export class FakeEngine {
       const exit = this.startExit?.(held.name);
       if (exit !== undefined) {
         return fail("start did not finish", exit);
+      }
+      if (held.proof !== undefined) {
+        // `start --attach`: runs to completion and prints its output.
+        this.events.start(id, held.name);
+        return held.proof;
       }
       held.running = true;
       // A bind mount emits no volume mount event, only the start.

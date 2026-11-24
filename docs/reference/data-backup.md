@@ -85,6 +85,26 @@ its backing storage by the same path rule:
   as possibly the same storage and refuses with `E_PROJECT_RUNNING`
   (`detail.reason: unchecked_volume_backing`, `detail.unchecked`: short
   container IDs; no volume or container names).
+
+Text alone cannot prove two paths separate: `/proc/self/root/<Mountpoint>`
+or a symlink to a Mountpoint names the same directory under another
+spelling. Text that already shows an overlap refuses as above. Every other
+bind `Source` of a foreign container, and every bind alias's `device`, is
+proven on the daemon: one pinned helper (no network, no logging, a
+read-only root, tracked by ID) gets each such path and each copied
+`Mountpoint` bind-mounted read-only, so the daemon resolves symlinks and
+`/proc/self/root` as it does for any bind. The helper reads its own
+`/proc/self/mountinfo` and compares each mount's filesystem (major:minor)
+and its root within that filesystem, submounts included: the same
+filesystem with either root inside the other overlaps (equal, inside or
+above). For a path that is not a directory it also looks for the same
+device and inode in the copied tree (a hard link). A plain local volume's
+own directory is separate by construction and is not proven. A proof that
+cannot be made (the helper fails or times out, or a path does not exist)
+refuses with `unchecked_volume_backing`. On a host with busy containers
+this adds one short helper run to each running check and to the end of
+the window.
+
 `error.detail.running` lists their short (12 character) container IDs, never
 their names; stop the project with `hack down` and retry. Hack never stops anything for an export.
 

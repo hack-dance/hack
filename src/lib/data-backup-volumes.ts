@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import { dockerEngineFailureError } from "./compose-ps-result.ts";
+import type { BackingProver } from "./data-backup-backing-proof.ts";
 import type {
   DataBackupDocker,
   DataBackupProcessResult,
@@ -453,6 +454,12 @@ export async function containersReachingVolumes(opts: {
   readonly containers: readonly string[];
   readonly volumes: readonly WatchedVolume[];
   readonly timeoutMs: number;
+  /**
+   * Proves on the daemon where a bind source or alias device lives (see
+   * data-backup-backing-proof.ts). Without one, every such path that text
+   * does not already show overlapping is unknown: the container refuses.
+   */
+  readonly prove?: BackingProver;
 }): Promise<ContainersReach> {
   if (opts.containers.length === 0) {
     return { mounts: [], unchecked: [], uncheckedBacking: [] };
@@ -471,30 +478,90 @@ export async function containersReachingVolumes(opts: {
     names: [...others],
     timeoutMs: opts.timeoutMs,
   });
+  const reaches = new Map<string, ContainerReach>();
+  for (const [container, seen] of answered) {
+    reaches.set(
+      container,
+      containerReach({
+        mounts: seen,
+        volumes: opts.volumes,
+        watchedNames,
+        backing,
+      })
+    );
+  }
+  const proven = await proveUnsettled({
+    reaches: [...reaches.values()],
+    volumes: opts.volumes,
+    prove: opts.prove,
+  });
   const mounts: { volume: string; container: string }[] = [];
   const unchecked: string[] = [];
   const uncheckedBacking: string[] = [];
   for (const container of opts.containers) {
     const short = container.slice(0, 12);
-    const seen = answered.get(container);
-    if (seen === undefined) {
+    const reach = reaches.get(container);
+    if (reach === undefined) {
       unchecked.push(short);
       continue;
     }
-    const reach = containerReach({
-      mounts: seen,
-      volumes: opts.volumes,
-      watchedNames,
-      backing,
-    });
-    for (const volume of reach.volumes) {
+    const settled = settleReach({ reach, proven });
+    for (const volume of settled.volumes) {
       mounts.push({ volume, container: short });
     }
-    if (reach.unknownBacking && reach.volumes.length === 0) {
+    if (settled.unknown) {
       uncheckedBacking.push(short);
     }
   }
   return { mounts, unchecked, uncheckedBacking };
+}
+
+/**
+ * Prove, in one daemon-side run, every path that text left unsettled in a
+ * container that does not already reach a watched volume. `undefined`:
+ * nothing could be proven.
+ */
+async function proveUnsettled(opts: {
+  readonly reaches: readonly ContainerReach[];
+  readonly volumes: readonly WatchedVolume[];
+  readonly prove: BackingProver | undefined;
+}): Promise<ReadonlyMap<string, readonly string[]> | undefined> {
+  const candidates = [
+    ...new Set(
+      opts.reaches
+        .filter((reach) => reach.volumes.length === 0)
+        .flatMap((reach) => reach.unproven)
+    ),
+  ].sort();
+  if (candidates.length === 0) {
+    return new Map();
+  }
+  return await opts.prove?.({ paths: candidates, volumes: opts.volumes });
+}
+
+/** One container's watched volumes after the proof, and whether unknown. */
+function settleReach(opts: {
+  readonly reach: ContainerReach;
+  readonly proven: ReadonlyMap<string, readonly string[]> | undefined;
+}): { readonly volumes: readonly string[]; readonly unknown: boolean } {
+  const volumes = new Set(opts.reach.volumes);
+  if (volumes.size > 0) {
+    return { volumes: [...volumes].sort(), unknown: false };
+  }
+  let unknown = opts.reach.unknownBacking;
+  for (const path of opts.reach.unproven) {
+    const hits = opts.proven?.get(path);
+    if (hits === undefined) {
+      unknown = true;
+    }
+    for (const volume of hits ?? []) {
+      volumes.add(volume);
+    }
+  }
+  return {
+    volumes: [...volumes].sort(),
+    unknown: unknown && volumes.size === 0,
+  };
 }
 
 /**
@@ -548,31 +615,72 @@ function containerReach(opts: {
   readonly mounts: readonly unknown[];
   readonly volumes: readonly WatchedVolume[];
   readonly watchedNames: ReadonlySet<string>;
-  readonly backing: ReadonlyMap<string, string | null>;
-}): { readonly volumes: readonly string[]; readonly unknownBacking: boolean } {
+  readonly backing: ReadonlyMap<string, VolumeBacking>;
+}): ContainerReach {
   const reached = new Set(
     mountsReachingVolumes({ mounts: opts.mounts, volumes: opts.volumes })
   );
+  const unproven = new Set<string>();
+  // A bind source the text rule finds separate may still be the same
+  // directory (`/proc/self/root/...`, a symlink): proven on the daemon.
+  for (const source of bindSources(opts.mounts)) {
+    if (
+      pathReachesVolumes({ path: source, volumes: opts.volumes }).length === 0
+    ) {
+      unproven.add(source);
+    }
+  }
   let unknownBacking = false;
   for (const name of volumeMountNames(opts.mounts)) {
     if (opts.watchedNames.has(name)) {
       continue;
     }
-    if (!opts.backing.has(name)) {
+    const backing = opts.backing.get(name);
+    if (backing === undefined) {
       unknownBacking = true;
       continue;
     }
-    const path = opts.backing.get(name);
-    if (typeof path === "string") {
-      for (const volume of pathReachesVolumes({
-        path,
-        volumes: opts.volumes,
-      })) {
-        reached.add(volume);
-      }
+    if (backing.kind === "memory") {
+      continue;
+    }
+    const hits = pathReachesVolumes({
+      path: backing.path,
+      volumes: opts.volumes,
+    });
+    for (const volume of hits) {
+      reached.add(volume);
+    }
+    // A plain local volume's own directory is separate by construction; a
+    // bind alias's device is proven on the daemon.
+    if (hits.length === 0 && backing.kind === "alias") {
+      unproven.add(backing.path);
     }
   }
-  return { volumes: [...reached].sort(), unknownBacking };
+  return {
+    volumes: [...reached].sort(),
+    unknownBacking,
+    unproven: [...unproven].sort(),
+  };
+}
+
+/** What text alone shows about one container's mounts. */
+type ContainerReach = {
+  readonly volumes: readonly string[];
+  readonly unknownBacking: boolean;
+  /** Bind sources and alias devices text does not show overlapping. */
+  readonly unproven: readonly string[];
+};
+
+/** Sources of a container's bind mounts. */
+function bindSources(mounts: readonly unknown[]): string[] {
+  return mounts.flatMap((mount) =>
+    isRecord(mount) &&
+    mount.Type === "bind" &&
+    typeof mount.Source === "string" &&
+    mount.Source !== ""
+      ? [mount.Source]
+      : []
+  );
 }
 
 /**
@@ -645,8 +753,8 @@ async function volumeBackings(opts: {
   readonly docker: DataBackupDocker;
   readonly names: readonly string[];
   readonly timeoutMs: number;
-}): Promise<Map<string, string | null>> {
-  const backing = new Map<string, string | null>();
+}): Promise<Map<string, VolumeBacking>> {
+  const backing = new Map<string, VolumeBacking>();
   if (opts.names.length === 0) {
     return backing;
   }
@@ -659,18 +767,27 @@ async function volumeBackings(opts: {
     if (!(isRecord(value) && typeof value.name === "string")) {
       continue;
     }
-    const path = classifyVolumeBacking(value);
-    if (path !== undefined) {
-      backing.set(value.name, path);
+    const classified = classifyVolumeBacking(value);
+    if (classified !== undefined) {
+      backing.set(value.name, classified);
     }
   }
   return backing;
 }
 
+/**
+ * Where a volume stores its data: its own directory (a plain local
+ * volume's Mountpoint), the directory a local bind alias names (`device`),
+ * or memory (a local tmpfs).
+ */
+type VolumeBacking =
+  | { readonly kind: "own" | "alias"; readonly path: string }
+  | { readonly kind: "memory" };
+
 /** See {@link volumeBackings}; `undefined` is "cannot classify". */
 function classifyVolumeBacking(
   volume: Record<string, unknown>
-): string | null | undefined {
+): VolumeBacking | undefined {
   if (volume.driver !== "local") {
     return undefined;
   }
@@ -680,7 +797,7 @@ function classifyVolumeBacking(
     (isRecord(options) && Object.keys(options).length === 0)
   ) {
     return typeof volume.mountpoint === "string" && volume.mountpoint !== ""
-      ? volume.mountpoint
+      ? { kind: "own", path: volume.mountpoint }
       : undefined;
   }
   if (!isRecord(options)) {
@@ -695,10 +812,10 @@ function classifyVolumeBacking(
     typeof options.device === "string" &&
     options.device !== ""
   ) {
-    return options.device;
+    return { kind: "alias", path: options.device };
   }
   if (options.type === "tmpfs" && !flags.includes("bind")) {
-    return null;
+    return { kind: "memory" };
   }
   return undefined;
 }

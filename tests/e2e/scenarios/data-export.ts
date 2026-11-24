@@ -347,6 +347,18 @@ export const dataExportScenario: Scenario = {
         alias,
         holder: aliasWriter,
       });
+      // The same alias spelled through /proc/self/root: text shows no
+      // overlap, the daemon-side proof does.
+      await aliasWriterRefuses({
+        ctx,
+        fixture,
+        out,
+        volume: data,
+        alias,
+        holder: aliasWriter,
+        devicePrefix: "/proc/self/root",
+      });
+      await unrelatedBindPublishes({ ctx, fixture, holder: aliasWriter });
 
       // A short-lived writer that starts and exits while a copy helper runs:
       // no `docker ps` check can see it, the live event subscription does.
@@ -535,8 +547,8 @@ async function removalRefusedDuringCopy(opts: {
 }
 
 /**
- * The volume is removed after validation, before Hack takes its reference
- * (at the first running check). Docker creates a missing named volume for
+ * The volume is removed after validation, right before Hack creates its
+ * reference. Docker creates a missing named volume for
  * the reference container, so the identity no longer matches: export
  * refuses, publishes nothing and never removes the volume Docker created.
  */
@@ -563,7 +575,12 @@ async function removedBeforeReference(opts: {
     ...opts,
     outDir,
     before: async (argv) => {
-      if (before === "" && argv[1] === "ps") {
+      // Right before Hack's reference is created: after every check.
+      if (
+        before === "" &&
+        argv[1] === "create" &&
+        argv.some((arg) => arg.startsWith("type=volume,"))
+      ) {
         before = await createdAt();
         expectExit({
           result: await docker(ctx, ["volume", "rm", opts.volume]),
@@ -800,6 +817,8 @@ async function aliasWriterRefuses(opts: {
   readonly volume: string;
   readonly alias: string;
   readonly holder: string;
+  /** Prepended to the device path (it still names the Mountpoint). */
+  readonly devicePrefix?: string;
 }): Promise<void> {
   const { ctx } = opts;
   const mountpoint = (
@@ -820,7 +839,7 @@ async function aliasWriterRefuses(opts: {
       "--opt",
       "o=bind",
       "--opt",
-      `device=${mountpoint}`,
+      `device=${opts.devicePrefix ?? ""}${mountpoint}`,
       opts.alias,
     ]),
     codes: [0],
@@ -859,8 +878,7 @@ async function aliasWriterRefuses(opts: {
         JSON.stringify({ running: [started.stdout.trim().slice(0, 12)] }) &&
       !refused.stdout.includes(opts.alias) &&
       !refused.stdout.includes(opts.holder),
-    message:
-      "a running container writing through an alias volume should refuse",
+    message: `a running container writing through an alias volume (device prefix: ${opts.devicePrefix ?? "none"}) should refuse`,
     result: refused,
   });
   expectExit({
@@ -872,6 +890,60 @@ async function aliasWriterRefuses(opts: {
     result: await docker(ctx, ["volume", "rm", opts.alias]),
     codes: [0],
     message: "remove the alias volume",
+  });
+}
+
+/**
+ * A running container that binds a directory separate from every copied
+ * volume: text cannot settle it, so the daemon-side proof runs, finds it
+ * separate, and the export publishes.
+ */
+async function unrelatedBindPublishes(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly holder: string;
+}): Promise<void> {
+  const { ctx } = opts;
+  expectExit({
+    result: await docker(ctx, [
+      "run",
+      "--detach",
+      "--network",
+      "none",
+      "--name",
+      opts.holder,
+      "--mount",
+      `type=bind,src=${opts.fixture.hackDir},dst=/src,readonly`,
+      "--entrypoint",
+      "sleep",
+      HELPER,
+      "300",
+    ]),
+    codes: [0],
+    message: "a container with an unrelated bind should start",
+  });
+  const exported = await ctx.cli({
+    args: [
+      "data",
+      "export",
+      "--json",
+      "--out",
+      join(ctx.tempRoot, "unrelated-bind-out"),
+    ],
+    cwd: opts.fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  const payload = extractJsonObject<ExportPayload>({ text: exported.stdout });
+  expect({
+    that:
+      exported.exitCode === 0 && payload?.data?.manifest?.volumes?.length === 1,
+    message: "an unrelated bind should be proven separate and publish",
+    result: exported,
+  });
+  expectExit({
+    result: await docker(ctx, ["rm", "--force", opts.holder]),
+    codes: [0],
+    message: "remove the unrelated bind container",
   });
 }
 

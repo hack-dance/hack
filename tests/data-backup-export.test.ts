@@ -1593,3 +1593,124 @@ describe("volume mounts are checked through their backing storage", () => {
     expect(result.manifest.volumes.map((volume) => volume.key)).toEqual(["db"]);
   });
 });
+
+describe("bind sources and alias devices are proven on the daemon", () => {
+  const MOUNTPOINT = "/var/lib/docker/volumes/shop_db/_data";
+  const aliasMount = (name: string) => ({
+    Type: "volume",
+    Name: name,
+    Source: `/var/lib/docker/volumes/${name}/_data`,
+    Destination: "/data",
+  });
+  function alias(fake: FakeEngine, name: string, device: string): void {
+    fake.volume(name, {
+      labels: {},
+      content: "",
+      options: { type: "none", o: "bind", device },
+    });
+  }
+
+  test("an alias device through /proc/self/root, or a symlink to the Mountpoint, refuses", async () => {
+    for (const [device, link] of [
+      [`/proc/self/root${MOUNTPOINT}`, null],
+      ["/srv/link-to-db", MOUNTPOINT],
+      ["/srv/link-to-volumes/shop_db/_data", "/var/lib/docker/volumes"],
+    ] as const) {
+      const fake = engine({ only: "db" });
+      if (link !== null) {
+        fake.symlinks.set(
+          device.startsWith("/srv/link-to-volumes")
+            ? "/srv/link-to-volumes"
+            : device,
+          link
+        );
+      }
+      alias(fake, "alias", device);
+      const id = fake.runningContainer("alias-writer", [aliasMount("alias")]);
+      const error = await caught(
+        exportProjectData(input(fake, { outDir: join(root, "proc") }))
+      );
+      expect({ device, code: error.code, detail: error.detail }).toEqual({
+        device,
+        code: "E_PROJECT_RUNNING",
+        detail: { running: [id.slice(0, 12)] },
+      });
+    }
+  });
+
+  test("a bind source through /proc/self/root or a symlink refuses, running or started in the window", async () => {
+    const fake = engine({ only: "db" });
+    fake.symlinks.set("/srv/db", MOUNTPOINT);
+    const id = fake.runningContainer("binder", [
+      { Type: "bind", Source: "/srv/db", Destination: "/x" },
+    ]);
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.detail).toEqual({ running: [id.slice(0, 12)] });
+
+    const late = engine({ only: "db" });
+    let started = "";
+    late.onExec = (_container, args) => {
+      if (args.includes("tar") && started === "") {
+        started =
+          late.createForeign("short-lived", [
+            {
+              Type: "bind",
+              Source: "/proc/self/root/var/lib/docker/volumes/shop_db",
+              Destination: "/x",
+            },
+          ]) ?? "";
+      }
+    };
+    const raced = await caught(
+      exportProjectData(input(late, { outDir: join(root, "late") }))
+    );
+    expect(raced.detail).toEqual({
+      mounts: [{ volume: "db", container: started.slice(0, 12) }],
+    });
+  });
+
+  test("a bind alias and a bind of truly separate directories publish after the proof", async () => {
+    const fake = engine({ only: "db" });
+    alias(fake, "elsewhere", "/srv/data");
+    fake.runningContainer("app", [
+      aliasMount("elsewhere"),
+      { Type: "bind", Source: "/srv/app", Destination: "/app" },
+    ]);
+    const result = await exportProjectData(input(fake));
+    expect(result.manifest.volumes.map((volume) => volume.key)).toEqual(["db"]);
+    // The proof helper ran, tracked like every helper and removed.
+    const proofCreate = fake.calls.find(
+      (argv) =>
+        argv[1] === "create" && argv.some((arg) => arg.includes("dst=/c/0"))
+    );
+    expect(proofCreate).toBeDefined();
+    expect(proofCreate).toContain("none");
+    expect(
+      fake.leftovers().filter((id) => fake.containers.get(id)?.name !== "app")
+    ).toEqual([]);
+  });
+
+  test("a proof that cannot be made refuses closed", async () => {
+    for (const setup of [
+      (fake: FakeEngine) => {
+        fake.proofFails = true;
+      },
+      (fake: FakeEngine) => {
+        fake.missingPaths.add("/srv/app");
+      },
+    ]) {
+      const fake = engine({ only: "db" });
+      setup(fake);
+      const id = fake.runningContainer("app", [
+        { Type: "bind", Source: "/srv/app", Destination: "/app" },
+      ]);
+      const error = await caught(
+        exportProjectData(input(fake, { outDir: join(root, "unproven") }))
+      );
+      expect(error.detail).toEqual({
+        unchecked: [id.slice(0, 12)],
+        reason: "unchecked_volume_backing",
+      });
+    }
+  });
+});

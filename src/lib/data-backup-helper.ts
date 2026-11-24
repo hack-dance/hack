@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { open } from "node:fs/promises";
 import { HackCliError } from "./cli-result.ts";
+import type { BackingProver } from "./data-backup-backing-proof.ts";
 import type { DataBackupDocker } from "./data-backup-docker.ts";
 import {
   DATA_BACKUP_TREE_DIGEST,
@@ -155,6 +156,8 @@ export async function refuseRunning(opts: {
   readonly exclude: ReadonlySet<string>;
   /** Bound for the batched inspect. */
   readonly timeoutMs: number;
+  /** Daemon-side proof for bind sources and alias devices; see the volume reach check. */
+  readonly prove?: BackingProver;
   readonly stopCommand: string;
   /** First sentence: what the refusal means for this command. */
   readonly lead: string;
@@ -173,6 +176,7 @@ export async function refuseRunning(opts: {
     }),
     volumes: opts.volumes,
     timeoutMs: opts.timeoutMs,
+    prove: opts.prove,
   });
   const running = [
     ...new Set([...listed, ...reach.mounts.map((mount) => mount.container)]),

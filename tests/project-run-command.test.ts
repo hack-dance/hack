@@ -441,11 +441,27 @@ test("run with no --env uses the overlay the instance runs with (HACK-2280)", as
   ]);
 });
 
+test("Run reuses the explicit name of a saved base launch", async () => {
+  const projectRoot = await createProject({
+    runtimeComposeProject: "saved-alternate",
+    runtimeEnvName: "qa",
+    pinnedRuntime: true,
+    runningServices: ["api"],
+  });
+  expect(await runPrintenv({ projectRoot })).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]).toMatchObject({
+    composeProject: "saved-alternate",
+    noDeps: true,
+  });
+});
+
 async function createProject(input?: {
   readonly services?: readonly string[];
   readonly defaultYaml?: string;
   readonly runtimeComposeProject?: string;
   readonly runtimeEnvName?: string | null;
+  readonly pinnedRuntime?: boolean;
   readonly runningServices?: readonly string[];
   readonly config?: Record<string, unknown>;
 }): Promise<string> {
@@ -489,6 +505,13 @@ async function createProject(input?: {
               composeProject: input.runtimeComposeProject,
               envName: input.runtimeEnvName ?? null,
               updatedAt: "2026-03-31T00:00:00.000Z",
+              ...(input.pinnedRuntime
+                ? {
+                    launchBranch: null,
+                    launchComposeBase: input.runtimeComposeProject,
+                    pinnedComposeBase: input.runtimeComposeProject,
+                  }
+                : {}),
             },
           ],
         },

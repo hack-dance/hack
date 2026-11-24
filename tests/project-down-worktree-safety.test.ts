@@ -454,6 +454,9 @@ test("service Stop reports confirmed replicas on failure and uses the Compose wo
       "values:",
       "  global:",
       "    DOCKER_CONFIG: relative-docker-config",
+      "    PATH: /fixture/project-provided-path",
+      "    LD_PRELOAD: fixture-loader-value",
+      "    NODE_OPTIONS: fixture-interpreter-value",
       "",
     ].join("\n")
   );
@@ -832,6 +835,8 @@ async function createWorktreeFixture(): Promise<{
       `echo "$@" >> "${dockerLogPath}"`,
       'if [ "${DOCKER_CONFIG:-}" = "relative-docker-config" ]; then',
       '  [ -f "$DOCKER_CONFIG/fixture-context" ] || exit 29',
+      '  [ -z "${LD_PRELOAD:-}${NODE_OPTIONS:-}" ] || exit 30',
+      '  [ "$PATH" != /fixture/project-provided-path ] || exit 31',
       '  if [ "$1" = "inspect" ]; then',
       '    printf \'%s\\n\' \'{"Id":"api-one","State":{"Status":"running","StartedAt":"2026-11-23T00:00:00.000000111Z"}}\' \'{"Id":"api-two","State":{"Status":"running","StartedAt":"2026-11-23T00:00:00.000000222Z"}}\'',
       "    exit 0",
@@ -843,6 +848,7 @@ async function createWorktreeFixture(): Promise<{
       "  fi",
       "fi",
       'if [ "$1" = "ps" ]; then',
+      `  case " $* " in *"com.docker.compose.project.working_dir"*) cat "${dockerComposeRowsPath}"; exit 0;; esac`,
       `  cat "${dockerRowsPath}"`,
       "  exit 0",
       "fi",

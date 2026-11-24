@@ -29,6 +29,7 @@ import {
   removeProjectRuntimeStateEntry,
   upsertProjectRuntimeStateEntry,
 } from "../src/lib/project-runtime-state.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import {
   mkdirOwnedFixture,
@@ -188,7 +189,8 @@ const mode = args.find((arg) => ["config", "ps", "inspect", "up", "down", "exec"
 const created = fixture + "/compose-created";
 const containerId = "f".repeat(64);
 const context = process.env.DOCKER_CONTEXT || "none";
-const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || options.defaultStack || "sample";
+const stackFilter = args.find((arg) => arg.startsWith("label=com.docker.compose.project="));
+const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : stackFilter?.split("=")[2] || process.env.COMPOSE_PROJECT_NAME || options.defaultStack || "sample";
 const running = fixture + (options.trackNamedStacks ? "/compose-running-" + stack : "/compose-running");
 if (args[0] === "info" && args.includes("{{.ID}}")) {
   const countFile = Bun.file(fixture + "/daemon-probe-count");
@@ -1147,7 +1149,7 @@ exec ${quoteShellWord(git)} "$@"
         () => selected.exists(),
         "The command did not select the worktree branch"
       );
-      const rename = Bun.spawnSync(
+      const rename = spawnSyncBounded(
         [git, "-C", worktree, "branch", "-m", "renamed"],
         {
           env: privateCliEnv({ root, home: join(root, "home") }),
@@ -2329,10 +2331,10 @@ test("bare Down recovers Compose's directory-derived name after a named overlay 
     "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n"
   );
   if (process.env.HACK_TEST_COMPOSE_CONFIG === "1") {
-    const realCompose = Bun.spawnSync(
+    const plugin = process.env.HACK_E2E_COMPOSE_PLUGIN_PATH;
+    const realCompose = spawnSyncBounded(
       [
-        "docker",
-        "compose",
+        ...(plugin ? [plugin] : ["docker", "compose"]),
         "--env-file",
         "/dev/null",
         "-f",
@@ -2343,10 +2345,18 @@ test("bare Down recovers Compose's directory-derived name after a named overlay 
       ],
       {
         cwd: projectDir,
-        env: { ...process.env, COMPOSE_PROJECT_NAME: undefined },
+        env: privateCliEnv({
+          root,
+          home: join(root, "home"),
+          isolateDockerClient: false,
+          env: {
+            PATH: process.env.PATH,
+            DOCKER_HOST: `unix://${join(root, "no-engine.sock")}`,
+          },
+        }),
       }
     );
-    expect(realCompose.exitCode).toBe(0);
+    expect(realCompose.exitCode, realCompose.stderr.toString()).toBe(0);
     expect(JSON.parse(realCompose.stdout.toString()).name).toBe("hack");
   }
   await installComposeNameFixture({
@@ -3803,7 +3813,7 @@ test("reviewed cwd legacy first opt-in rebuilds a private registry and reports i
   expect((await marker()).paused).toBe(false);
 });
 
-test("manual up bypasses the auxiliary lock while every legacy down retains serialization", async () => {
+test("manual Start and Down both require a safe copy lock, including legacy registrations", async () => {
   const locks = join(root, "home", ".hack", "autostart-locks");
   await mkdir(locks, { mode: 0o777 });
   await chmod(locks, 0o777);
@@ -3816,8 +3826,10 @@ test("manual up bypasses the auxiliary lock while every legacy down retains seri
       await writeFile(path, JSON.stringify(registry));
     }
     const up = await run(["up", "--json", "-d"]);
-    expect(up.stdout + up.stderr).not.toContain("lock directory is unsafe");
+    expect(up.exitCode).toBe(1);
+    expect(up.stdout + up.stderr).toContain("lock directory is unsafe");
     const down = await run(["down", "--json"]);
+    expect(down.exitCode).toBe(1);
     expect(down.stdout + down.stderr).toContain("lock directory is unsafe");
   }
 });

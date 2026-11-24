@@ -63,6 +63,8 @@ export interface LocalComposeTarget {
   readonly env: Readonly<Record<string, string>>;
   readonly lifecycleEnv: Readonly<Record<string, string>>;
   readonly pin: boolean;
+  /** A saved runtime can keep its explicit name when running one-offs. */
+  readonly hasSavedLaunch?: boolean;
 }
 
 export interface AutostartDownTarget {

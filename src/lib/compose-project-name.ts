@@ -48,6 +48,7 @@ export function isComposeProjectName(name: string): boolean {
 
 type ComposeNameEnvironment = {
   readonly env?: Readonly<Record<string, string>>;
+  readonly executeDocker?: typeof exec;
   readonly disableEnvFile?: boolean;
   /** A branch is explicitly named with `-p`, so a literal name keeps its suffix base. */
   readonly forBranch?: boolean;
@@ -146,7 +147,7 @@ export async function resolveDesktopComposeProjectName(
     },
   });
   try {
-    const result = await exec(
+    const result = await (opts.executeDocker ?? exec)(
       [
         "docker",
         "compose",

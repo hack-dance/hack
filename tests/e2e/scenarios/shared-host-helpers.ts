@@ -71,22 +71,7 @@ export const sharedHostHelpersScenario: Scenario = {
     const holderB = `${fixture.name}--${branchB}`;
     const foreign: Bun.Subprocess[] = [];
 
-    const writeConfig = async (opts: {
-      readonly mode: HelperMode;
-      readonly readyTimeoutMs?: number;
-      /** Write the config with no sharedHelpers entry at all. */
-      readonly withoutHelpers?: boolean;
-      /** Add a long-running lifecycle process (needs tmux). */
-      readonly withProcess?: boolean;
-      /** Add a second entry with a shell-string command (invalid). */
-      readonly withInvalidEntry?: boolean;
-      /** Write the helper entry with `enabled: false`. */
-      readonly disabled?: boolean;
-      /** Add an up.before hook that waits for this gate file. */
-      readonly beforeGate?: string;
-      /** Add an up.after hook that fails. */
-      readonly failUpAfter?: boolean;
-    }): Promise<void> => {
+    const writeConfig = async (opts: ConfigOptions): Promise<void> => {
       const lifecycle = {
         ...((baseConfig.lifecycle ?? {}) as Record<string, unknown>),
         ...(opts.beforeGate
@@ -103,6 +88,19 @@ export const sharedHostHelpersScenario: Scenario = {
           : {}),
         ...(opts.failUpAfter
           ? { up: { after: [{ name: "e2e-after-fails", command: "exit 3" }] } }
+          : {}),
+        ...(opts.allowAfterGate
+          ? {
+              up: {
+                after: [
+                  {
+                    name: "e2e-after-gate",
+                    command:
+                      'if [ -n "$E2E_AFTER_GATE" ]; then : > "$E2E_AFTER_GATE.reached"; while [ ! -e "$E2E_AFTER_GATE" ]; do sleep 0.05; done; exit "${E2E_AFTER_EXIT:-0}"; fi',
+                  },
+                ],
+              },
+            }
           : {}),
         ...(opts.withProcess
           ? {
@@ -779,8 +777,8 @@ async function runRetainedHelperPhases(opts: {
 }
 
 /**
- * Regressions from the independent review of #565: a down that completes
- * while an up is paused after helper preparation; a helper entry removed
+ * Regressions for a down that waits through Compose startup;
+ * a helper entry removed
  * from config after start; and a down whose helper release fails.
  */
 async function runReviewRegressionPhases(opts: {
@@ -802,68 +800,40 @@ async function runReviewRegressionPhases(opts: {
   const { ctx, branch } = opts;
   await opts.writeConfig({ mode: "identity" });
 
-  ctx.log("down during a paused up: the up refuses to start services");
+  ctx.log("down waits for a paused Compose start before releasing its helper");
   const gate = join(ctx.tempRoot, "compose-up-gate");
-  const dockerLog = join(ctx.tempRoot, "gated-docker.log");
-  const pausedUp = Bun.spawn(
-    resolveCliSpawnArgs(["up", "--detach", "--json", "--branch", branch]),
-    {
-      cwd: opts.cwd,
-      env: buildCliEnv({
-        hackHome: ctx.hackHome,
-        extra: {
-          PATH: opts.path,
-          E2E_ISSUER_UPSTREAM: UPSTREAM,
-          E2E_DOCKER_GATE_UP: gate,
-          E2E_DOCKER_LOG: dockerLog,
-        },
-      }),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-    }
-  );
-  let reached = false;
-  await waitUntil(async () => {
-    reached = await Bun.file(`${gate}.reached`).exists();
-    return reached;
+  const pausedUp = await startGatedUp({
+    ...opts,
+    gate,
+    phase: "compose",
   });
-  if (!reached) {
-    pausedUp.kill("SIGKILL");
-    await pausedUp.exited;
-    throw new Error("the gated up never reached compose image preparation");
+  let down: Promise<CliResult> | undefined;
+  try {
+    const helper = await opts.ownedHelper();
+    down = opts.cli({ verb: "down", branch });
+    const early = await Promise.race([down, Bun.sleep(800)]);
+    expect({
+      that: early === undefined && (await isRunning(helper)),
+      message: "down must wait while Compose holds the copy lock",
+    });
+    await writeFile(gate, "open\n");
+    expect({
+      that: (await pausedUp.exited) === 0,
+      message: "the admitted up should finish Compose startup",
+    });
+    expectExit({
+      result: await down,
+      codes: [0],
+      message: "down after the admitted up completes",
+    });
+    expect({
+      that: !(await isRunning(helper)) && (await opts.readClaim()) === null,
+      message: "down must release the helper after Compose startup",
+    });
+  } finally {
+    await writeFile(gate, "open\n");
+    await Promise.allSettled([pausedUp.exited, down]);
   }
-  // Helper preparation is done: the up holds a ready helper.
-  const pausedHelper = await opts.ownedHelper();
-  expectExit({
-    result: await opts.cli({ verb: "down", branch }),
-    codes: [0],
-    message: "down while the up is paused",
-  });
-  expect({
-    that: !(await isRunning(pausedHelper)) && (await opts.readClaim()) === null,
-    message: "down must release the paused up's helper",
-  });
-  await writeFile(gate, "open\n");
-  const [pausedExit, pausedStdout] = await Promise.all([
-    pausedUp.exited,
-    new Response(pausedUp.stdout).text(),
-  ]);
-  const pausedResult = parseEnvelope(pausedStdout);
-  const startCalls = (await Bun.file(dockerLog).text())
-    .split("\n")
-    .filter((line) => line.includes(" up -d "));
-  expect({
-    that:
-      pausedExit !== 0 &&
-      pausedResult?.error?.code === "E_LIFECYCLE_FAILED" &&
-      (pausedResult.error.message ?? "").includes(
-        "before launching services"
-      ) &&
-      startCalls.length === 0 &&
-      (await opts.readClaim()) === null,
-    message: `a superseded up must fail before starting containers (exit ${pausedExit}, stdout ${pausedStdout.trim()}, start calls ${startCalls.length})`,
-  });
 
   ctx.log("a helper entry removed after start is still released by down");
   expectExit({
@@ -921,12 +891,14 @@ async function runReviewRegressionPhases(opts: {
 
 type ConfigOptions = {
   readonly mode: HelperMode;
+  readonly readyTimeoutMs?: number;
   readonly withoutHelpers?: boolean;
   readonly withProcess?: boolean;
   readonly withInvalidEntry?: boolean;
   readonly disabled?: boolean;
   readonly beforeGate?: string;
   readonly failUpAfter?: boolean;
+  readonly allowAfterGate?: boolean;
 };
 
 /**
@@ -1061,8 +1033,8 @@ type OverlapOptions = {
 };
 
 /**
- * Start `hack up` for the branch, paused at Compose image preparation by the
- * fake Docker gate. The CLI process itself is spawned (not a `bun` wrapper)
+ * Start `hack up` paused during Compose creation or the attached after-hook.
+ * The CLI process itself is spawned (not a `bun` wrapper)
  * so a signal reaches Hack's own handlers.
  */
 async function startGatedUp(opts: {
@@ -1071,6 +1043,7 @@ async function startGatedUp(opts: {
   readonly path: string;
   readonly branch: string;
   readonly gate: string;
+  readonly phase: "compose" | "after";
   readonly extraEnv?: Readonly<Record<string, string>>;
 }): Promise<Bun.Subprocess<"ignore", "pipe", "ignore">> {
   const args = ["up", "--detach", "--json", "--branch", opts.branch];
@@ -1085,7 +1058,9 @@ async function startGatedUp(opts: {
         extra: {
           PATH: opts.path,
           E2E_ISSUER_UPSTREAM: UPSTREAM,
-          E2E_DOCKER_GATE_UP: opts.gate,
+          ...(opts.phase === "compose"
+            ? { E2E_DOCKER_GATE_UP: opts.gate }
+            : { E2E_AFTER_GATE: opts.gate }),
           ...opts.extraEnv,
         },
       }),
@@ -1102,22 +1077,22 @@ async function startGatedUp(opts: {
   if (!reached) {
     proc.kill("SIGKILL");
     await proc.exited;
-    throw new Error("the gated up never reached compose image preparation");
+    throw new Error(`the gated up never reached the ${opts.phase} gate`);
   }
   return proc;
 }
 
 type EarlierOutcome =
-  | "succeeds"
-  | "compose-fails"
+  | "after-succeeds"
+  | "after-fails"
   | "sigterm"
   /** SIGTERM while another start holds the instance lock past the cleanup timeout. */
   | "sigterm-lock-held";
 
 /**
  * A newer up of the same instance adopts the lifecycle session and helpers
- * of an earlier up that is paused at image preparation. Whatever the earlier
- * up then does (succeeds, fails in Compose, or is terminated), it must not
+ * of an earlier up paused in its attached after-hook. Whether the earlier
+ * hook succeeds, fails, or is terminated, it must not
  * tear down the session or helpers the newer up now relies on.
  */
 async function runOverlappingUpPhase(opts: OverlapOptions): Promise<void> {
@@ -1130,10 +1105,14 @@ async function runOverlappingUpPhase(opts: OverlapOptions): Promise<void> {
     ctx.log("overlapping up phase skipped: tmux is not installed");
     return;
   }
-  await opts.writeConfig({ mode: "identity", withProcess: true });
+  await opts.writeConfig({
+    mode: "identity",
+    withProcess: true,
+    allowAfterGate: true,
+  });
   for (const outcome of [
-    "succeeds",
-    "compose-fails",
+    "after-succeeds",
+    "after-fails",
     "sigterm",
     "sigterm-lock-held",
   ] as const satisfies readonly EarlierOutcome[]) {
@@ -1151,8 +1130,8 @@ async function runOverlap(
   ctx.log(
     `a newer up never makes an earlier up tear down its session (earlier up ${outcome})`
   );
-  const sessionName = `${opts.fixtureName}--lifecycle-${branch}`;
   const composeProject = `${opts.fixtureName}--${branch}`;
+  const sessionName = `=${composeProject}--lifecycle`;
   const statePath = join(opts.hackDir, ".internal", "lifecycle", "state.json");
   const readToken = async (): Promise<string | null> => {
     const text = await readFile(statePath, "utf8").catch(() => null);
@@ -1183,9 +1162,8 @@ async function runOverlap(
     path: opts.path,
     branch,
     gate,
-    ...(outcome === "compose-fails"
-      ? { extraEnv: { E2E_DOCKER_FAIL_UP: "1" } }
-      : {}),
+    phase: "after",
+    ...(outcome === "after-fails" ? { extraEnv: { E2E_AFTER_EXIT: "3" } } : {}),
   });
   const helper = await opts.ownedHelper();
   const token = await readToken();
@@ -1220,11 +1198,13 @@ async function runOverlap(
     new Response(earlier.stdout).text(),
   ]);
   await lock?.release();
-  const expectedExit =
-    outcome === "succeeds" ? earlierExit === 0 : earlierExit !== 0;
+  const expectedOutcome =
+    earlierExit !== 0 &&
+    (outcome !== "after-succeeds" ||
+      parseEnvelope(earlierStdout)?.error?.code === "E_CANCELLED");
   expect({
     that:
-      expectedExit &&
+      expectedOutcome &&
       (await sessionAlive()) &&
       (await readToken()) === token &&
       (await isRunning(helper)),
@@ -1341,15 +1321,15 @@ async function runDownDuringBeforeHookPhase(
 
 /**
  * A down while an up is paused, then a newer up that succeeds with the helper
- * disabled: the newer start does not restore the earlier start's helper, so
- * the earlier up must still refuse to start services.
+ * disabled: the earlier up must preserve the newer launch without restoring
+ * the helper or dispatching Compose again.
  */
 async function runDisabledAfterDownPhase(opts: OverlapOptions): Promise<void> {
   const { ctx, branch } = opts;
   ctx.log(
     "a newer up with the helper disabled does not restore an earlier up after down"
   );
-  await opts.writeConfig({ mode: "identity" });
+  await opts.writeConfig({ mode: "identity", allowAfterGate: true });
   const gate = join(ctx.tempRoot, "disabled-gate");
   const dockerLog = join(ctx.tempRoot, "disabled-docker.log");
   const earlier = await startGatedUp({
@@ -1358,6 +1338,7 @@ async function runDisabledAfterDownPhase(opts: OverlapOptions): Promise<void> {
     path: opts.path,
     branch,
     gate,
+    phase: "after",
     extraEnv: { E2E_DOCKER_LOG: dockerLog },
   });
   const helper = await opts.ownedHelper();
@@ -1384,8 +1365,8 @@ async function runDisabledAfterDownPhase(opts: OverlapOptions): Promise<void> {
   expect({
     that:
       earlierExit !== 0 &&
-      envelope?.error?.code === "E_LIFECYCLE_FAILED" &&
-      startCalls.length === 0 &&
+      envelope?.error?.code === "E_CANCELLED" &&
+      startCalls.length === 1 &&
       !(await isRunning(helper)),
     message: `the earlier up must stay superseded after a later up with the helper disabled (exit ${earlierExit}, start calls ${startCalls.length})`,
   });

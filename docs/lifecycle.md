@@ -570,6 +570,11 @@ If the operation later fails in Compose or `up.after`, Hack removes only the lif
 by that operation. The same exact-token cleanup runs for supported `SIGINT` and `SIGTERM` paths, including
 signals received while the mux session is still being initialized.
 
+After an interrupted Compose launch, Hack retains its launch name and environment
+selection while the stack still has containers or networks, including stopped
+containers left by foreground Ctrl-C. Use `hack down` to remove the stack and clear
+its saved launch.
+
 ### `hack down`
 
 1. Run `lifecycle.down.before` hooks.

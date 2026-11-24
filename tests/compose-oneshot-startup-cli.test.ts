@@ -53,7 +53,7 @@ case " $* " in
         exit 1
       fi
     fi
-    if [ -n "\${STUB_PS_HANG:-}" ] && [ ! -f "$state/up-done" ]; then
+    if [ -n "\${STUB_PS_HANG:-}" ] && [ -f "$state/up-started" ] && [ ! -f "$state/up-done" ]; then
       printf '%s\\n' "$$" > "$state/ps.pid"
       exec sleep 60
     fi

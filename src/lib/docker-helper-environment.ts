@@ -1,7 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { childEnvironment } from "./child-environment.ts";
 import { getString, isRecord } from "./guards.ts";
 import { exec } from "./shell.ts";
@@ -54,7 +54,7 @@ const DOCKER_HELPER_NAMES: ReadonlySet<string> = new Set([
 
 /** Exclude application values, including managed globals and Compose reference values. */
 export function dockerHelperEnvironment(
-  overrides?: Readonly<Record<string, string>>
+  overrides?: Readonly<Record<string, string | undefined>>
 ): Record<string, string> {
   const env = childEnvironment(process.env, overrides);
   for (const key of Object.keys(env)) {
@@ -173,6 +173,60 @@ export function dockerHelperRunEnvironment(
   };
 }
 
+const DOCKER_STARTUP_ENV =
+  /^(?:LD_|DYLD_|_?RLD_|LDR_|LIBPATH$|SHLIB_PATH$|GCONV_PATH$|LOCPATH$|NLSPATH$|BASH_ENV$|ENV$|ZDOTDIR$|NODE_|BUN_|DENO_|PYTHON|PERL|RUBY|GEM_|LUA_|JAVA_TOOL_OPTIONS$|JDK_JAVA_OPTIONS$|_JAVA_OPTIONS$)/;
+
+/**
+ * Resolve Docker from the launcher's absolute PATH entries. Scoped Stop's
+ * Docker commands need only transport variables. The synthetic Compose name
+ * probe also needs interpolation values, but uses the launcher's client
+ * config and drops loader and interpreter controls.
+ */
+export function createServiceStopDockerExec(): typeof exec {
+  const host = dockerHelperEnvironment();
+  const path = (host.PATH ?? "")
+    .split(delimiter)
+    .filter(isAbsolute)
+    .join(delimiter);
+  const binary = path ? Bun.which("docker", { PATH: path }) : null;
+  return async (argv, opts) => {
+    if (!binary || argv[0] !== "docker") {
+      return { exitCode: 127, stdout: "", stderr: "" };
+    }
+    const env =
+      argv[1] === "compose"
+        ? composeNameProbeEnvironment(host, opts?.env)
+        : dockerHelperEnvironment({ ...opts?.env, HOME: host.HOME });
+    return await exec([binary, ...argv.slice(1)], {
+      ...opts,
+      env: { ...env, PATH: path },
+      unsetEnvKeys: Object.keys(process.env),
+    });
+  };
+}
+
+function composeNameProbeEnvironment(
+  host: Readonly<Record<string, string>>,
+  overrides?: Readonly<Record<string, string>>
+): Record<string, string> {
+  const env = childEnvironment(process.env, overrides);
+  for (const key of Object.keys(env)) {
+    if (
+      DOCKER_STARTUP_ENV.test(key) ||
+      key.startsWith("DOCKER_") ||
+      ["HOME", "XDG_CONFIG_HOME"].includes(key)
+    ) {
+      delete env[key];
+    }
+  }
+  for (const key of ["HOME", "XDG_CONFIG_HOME", "DOCKER_CONFIG"]) {
+    if (host[key] !== undefined) {
+      env[key] = host[key];
+    }
+  }
+  return env;
+}
+
 const DOCKER_DAEMON_ID = /^[a-zA-Z0-9:-]{4,160}$/;
 const UNSUPPORTED_DOCKER_DAEMON_ID = new Set([
   "",
@@ -190,15 +244,19 @@ export type DockerDaemonObservation =
 export async function readDockerDaemonIdentity(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly cwd: string;
+  readonly executeDocker?: typeof exec;
 }): Promise<DockerDaemonObservation> {
-  const result = await exec(["docker", "info", "--format", "{{.ID}}"], {
-    cwd: opts.cwd,
-    ...dockerHelperRunEnvironment(opts.env),
-    stdin: "ignore",
-    timeoutMs: 1500,
-    maxStdoutBytes: 1024,
-    maxStderrBytes: 1024,
-  }).catch(() => null);
+  const result = await (opts.executeDocker ?? exec)(
+    ["docker", "info", "--format", "{{.ID}}"],
+    {
+      cwd: opts.cwd,
+      ...dockerHelperRunEnvironment(opts.env),
+      stdin: "ignore",
+      timeoutMs: 1500,
+      maxStdoutBytes: 1024,
+      maxStderrBytes: 1024,
+    }
+  ).catch(() => null);
   if (result?.exitCode !== 0) {
     return { kind: "unverified" };
   }

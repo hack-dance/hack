@@ -51,6 +51,9 @@ pub enum Fixture {
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
     Branches,
+    ResourcesUnavailable,
+    ResourcesEmpty,
+    ResourcesReady,
     GroupedSidebar,
     CatalogNative,
     CatalogNativeSaved,
@@ -103,7 +106,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 68] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -133,6 +136,9 @@ impl Fixture {
         Self::FailedStart,
         Self::NeedsAttention,
         Self::Branches,
+        Self::ResourcesUnavailable,
+        Self::ResourcesEmpty,
+        Self::ResourcesReady,
         Self::GroupedSidebar,
         Self::CatalogNative,
         Self::CatalogNativeSaved,
@@ -203,6 +209,9 @@ impl Fixture {
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
+            Self::ResourcesUnavailable => "resources-unavailable",
+            Self::ResourcesEmpty => "resources-empty",
+            Self::ResourcesReady => "resources-ready",
             Self::GroupedSidebar => "grouped-sidebar",
             Self::CatalogNative => "catalog-native",
             Self::CatalogNativeSaved => "catalog-native-saved",
@@ -568,7 +577,7 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             ]"#).expect("remote descriptors fixture");
             row
         }
-        Fixture::Branches => {
+        Fixture::Branches | Fixture::ResourcesReady => {
             let mut r = storefront(vec![], "stopped");
             r.branch_runtime = owned(vec![
                 running_branch("feature-search"),
@@ -733,8 +742,35 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
     if matches!(f, Fixture::Hackd | Fixture::HackdOff) {
         always_on_fixture(&mut projects);
     }
-    if matches!(f, Fixture::Empty | Fixture::DoctorEmpty) {
+    if matches!(
+        f,
+        Fixture::Empty | Fixture::DoctorEmpty | Fixture::ResourcesEmpty
+    ) {
         projects.projects.clear();
+    }
+    if f == Fixture::ResourcesReady
+        && let Some(project) = projects.projects.first_mut()
+    {
+        let mut id = 0_u32;
+        for branch in &mut project.branch_runtime {
+            for service in &mut branch.runtime.services {
+                for container in &mut service.containers {
+                    container.name =
+                        Some(format!("storefront-{}-{}", branch.branch, service.service));
+                    id += 1;
+                    container.id = Some(format!("{id:012x}"));
+                    container.image = Some("example.invalid/storefront:1".into());
+                    container.mounts = vec![crate::models::ContainerMount {
+                        kind: "volume".into(),
+                        name: Some("storefront-cache".into()),
+                        ..Default::default()
+                    }];
+                    container.networks = vec![crate::models::ContainerNetwork {
+                        name: format!("storefront-{}", branch.branch),
+                    }];
+                }
+            }
+        }
     }
     if f == Fixture::ManyProjects {
         // The selected project also has more services than fit (scrolling).
@@ -1254,7 +1290,10 @@ mod tests {
                 | (Fixture::Error, Err(SourceError::Cli { .. })) => {}
                 (_, Ok(s)) => assert_eq!(
                     s.projects.projects.is_empty(),
-                    matches!(f, Fixture::Empty | Fixture::DoctorEmpty)
+                    matches!(
+                        f,
+                        Fixture::Empty | Fixture::DoctorEmpty | Fixture::ResourcesEmpty
+                    )
                 ),
                 (f, other) => panic!("{f:?}: {other:?}"),
             }

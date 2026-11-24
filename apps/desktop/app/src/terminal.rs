@@ -1002,6 +1002,22 @@ impl HackApp {
         cx.notify();
     }
 
+    pub(crate) fn show_instance_terminal_logs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = self.model.detail() else {
+            return;
+        };
+        if self.panels.by_key.contains_key(&detail.key) {
+            self.reconcile_panel(&detail, window, cx);
+            self.open_tab(&detail, NewTab::Logs, window, cx);
+        } else {
+            self.ensure_panel(window, cx);
+        }
+    }
+
     /// Restart the Logs tab when its stream has ended (a project that was
     /// stopped and now runs, or a stream that exited).
     pub(crate) fn refresh_logs_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2575,6 +2591,27 @@ mod window_tests {
             assert_eq!(sessions.read(cx).active(), Some(&reopened));
             assert_eq!(sessions.read(cx).tab_count(), 3);
             app.update(cx, |app, cx| app.close_all_terminals(window, cx));
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn resource_logs_reopen_a_collapsed_panel_and_select_logs() {
+        let (mut cx, window, app) = open(false);
+        draw(&mut cx, window, &app);
+        let sessions = panel(&mut cx, &app);
+        cx.update_window(window, |_, window, cx| {
+            let shell = cx.new(|cx| TerminalView::from_core(note_core("shell\r\n").unwrap(), cx));
+            sessions.update(cx, |s, cx| s.add_tab(shell, window, cx));
+            app.update(cx, |a, cx| {
+                a.toggle_panel(cx);
+                let key = a.model.selected_key().unwrap();
+                assert_eq!(a.panels.by_key[&key].state, PanelState::Collapsed);
+                a.show_resources(cx);
+                a.open_resource_logs(key.clone(), window, cx);
+                assert_ne!(a.panels.by_key[&key].state, PanelState::Collapsed);
+                assert_eq!(sessions.read(cx).active_index(), Some(0));
+            });
         })
         .unwrap();
     }

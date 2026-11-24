@@ -1388,6 +1388,11 @@ impl HackApp {
                 .on_click(cx.listener(|this, _, _, cx| this.open_upgrade(cx))),
             )
             .child(
+                machine_row("resources", Glyph::Container, "Resources", div(), ui)
+                    .when(self.pane == Pane::Resources, |d| d.bg(p.selection))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_resources(cx))),
+            )
+            .child(
                 machine_row(
                     "doctor",
                     Glyph::Stethoscope,
@@ -1410,6 +1415,22 @@ impl HackApp {
             })
             .child(projects)
             .child(machine)
+    }
+
+    pub(crate) fn observed_pool(&self) -> Option<hack_desktop_core::models::NativePoolReport> {
+        if self.doctor.stale {
+            return None;
+        }
+        match &self.doctor.result {
+            DoctorStateView::Loaded(view) => view.native_pool,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn show_resources(&mut self, cx: &mut Context<Self>) {
+        self.pane = Pane::Resources;
+        self.user_navigated();
+        cx.notify();
     }
 
     fn hackd_sidebar_status(&self) -> Status {
@@ -2190,10 +2211,11 @@ impl Render for HackApp {
             _ if self.pane == Pane::ErrorsSheet => {
                 crate::health_fixtures::errors(self, &ui, window, cx)
             }
-            // Setup applies whatever the project list shows, a missing CLI
-            // included.
+            _ if self.pane == Pane::Resources => crate::resources_view::render(self, &ui, cx),
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),
+            // Setup applies whatever the project list shows, a missing CLI
+            // included.
             _ if self.pane == Pane::Setup => crate::setup_view::render(self, &ui, cx),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.

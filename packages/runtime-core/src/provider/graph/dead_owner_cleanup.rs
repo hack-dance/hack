@@ -306,20 +306,10 @@ fn archive_completed_prior(
         // truncated-history proof must still establish a superseded generation.
         require_historical_recovery(root, current)?;
     }
-    let mut archived = 0;
-    for entry in fs::read_dir(root).map_err(state::io)? {
-        let name = entry.map_err(state::io)?.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with("dead-owner-cleanup-retired-"))
-        {
-            archived += 1;
-            if archived >= 8 {
-                return Err(refused());
-            }
-        }
-    }
-    let target = root.join(format!("dead-owner-cleanup-retired-{complete}.json"));
+    // HACK-2576: the history keeps the newest finished records; the oldest proven
+    // finished make room instead of refusing this recovery for ever.
+    super::retired_history::make_room(root, RETIRED_PREFIX, RETIRED_LIMIT, finished_archive)?;
+    let target = root.join(format!("{RETIRED_PREFIX}{complete}.json"));
     if exists(&target)? {
         return Err(refused());
     }
@@ -327,6 +317,26 @@ fn archive_completed_prior(
     fs::File::open(root)
         .and_then(|file| file.sync_all())
         .map_err(state::io)
+}
+
+const RETIRED_PREFIX: &str = "dead-owner-cleanup-retired-";
+/// Archived completed recoveries kept per run (HACK-2576).
+const RETIRED_LIMIT: usize = 8;
+
+/// An archived recovery that is proven finished: it parses as an intent, it is
+/// completed (a digest and the boot it completed in), it carries no one-off, and
+/// its file is named for its own completion digest.
+fn finished_archive(name: &str, bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Intent>(bytes).is_ok_and(|intent| {
+        intent.one_off_sha256.is_none()
+            && intent
+                .new_boot
+                .as_deref()
+                .is_some_and(|boot| !boot.is_empty())
+            && intent.complete_sha256.as_deref().is_some_and(|complete| {
+                hex(complete, 64) && name == format!("{RETIRED_PREFIX}{complete}.json")
+            })
+    })
 }
 
 /// A completed recovery from an older container generation is diagnostic history,
@@ -2340,6 +2350,102 @@ mod tests {
             .is_err()
         );
         assert!(root.join(FILE).exists());
+    }
+
+    /// One completed recovery per generation, as each pool stop under a running
+    /// project leaves (HACK-2576): stopped generation `index`, then a ready one.
+    fn recover_generation(root: &std::path::Path, base: &Receipt, index: usize) -> String {
+        // Each generation is its own container generation of the same run.
+        let mut original = base.clone();
+        original.resources.get_mut("container:init").unwrap().id = Some(format!("{index:064x}"));
+        let original = &original;
+        let mut stopped = original.clone();
+        stopped.phase = "stopped-data-retained".into();
+        for resource in stopped.resources.values_mut() {
+            if resource.kind != Kind::Volume {
+                resource.phase = "absent".into();
+            }
+        }
+        restore_history::retain(root, &stopped).unwrap();
+        let mut proof = intent(original);
+        proof.new_boot = Some(format!("boot-{index}"));
+        let complete = selected(&stopped).unwrap();
+        proof.complete_sha256 = Some(complete.clone());
+        state::write(&root.join(FILE), &proof).unwrap();
+        let mut current = stopped.clone();
+        current.phase = "ready-observed".into();
+        current.resources.get_mut("container:init").unwrap().id =
+            Some(format!("{:064x}", index + 1000));
+        let selected_current = selected(&current).unwrap();
+        archive_completed_prior(
+            root,
+            &current,
+            &selected_current,
+            &"2".repeat(64),
+            &format!("boot-{}", index + 1),
+        )
+        .unwrap_or_else(|error| panic!("recovery {index} refused: {}", error.message));
+        assert!(!root.join(FILE).exists());
+        complete
+    }
+    fn archives(root: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(RETIRED_PREFIX))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn twelve_recoveries_of_one_run_keep_the_newest_archives_and_never_refuse() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let original = partial();
+        // A foreign file and an unprovable record share the directory: never removed,
+        // never counted, never a reason to refuse.
+        fs::write(root.join(format!("{RETIRED_PREFIX}foreign.json")), b"{").unwrap();
+        fs::write(root.join(format!("{RETIRED_PREFIX}notes.txt")), b"notes").unwrap();
+        let mut newest = String::new();
+        for index in 0..12 {
+            newest = recover_generation(root, &original, index);
+            // Distinct modification times keep "oldest" well defined.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let left = archives(root);
+        let proven: Vec<_> = left
+            .iter()
+            .filter(|name| finished_archive(name, &fs::read(root.join(name)).unwrap()))
+            .collect();
+        assert_eq!(proven.len(), RETIRED_LIMIT, "{left:?}");
+        assert!(left.contains(&format!("{RETIRED_PREFIX}{newest}.json")));
+        assert!(left.contains(&format!("{RETIRED_PREFIX}foreign.json")));
+        assert!(left.contains(&format!("{RETIRED_PREFIX}notes.txt")));
+    }
+
+    #[test]
+    fn a_home_stuck_at_eight_archives_from_an_older_build_recovers() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let original = partial();
+        // Eight finished archives, as an older build left them before it refused.
+        let mut oldest = String::new();
+        for index in 0..8 {
+            let complete = recover_generation(root, &original, 100 + index);
+            if index == 0 {
+                oldest = complete;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(archives(root).len(), RETIRED_LIMIT);
+        // The ninth recovery, which the older build refused, now goes through.
+        let ninth = recover_generation(root, &original, 200);
+        let left = archives(root);
+        assert_eq!(left.len(), RETIRED_LIMIT);
+        assert!(left.contains(&format!("{RETIRED_PREFIX}{ninth}.json")));
+        assert!(!left.contains(&format!("{RETIRED_PREFIX}{oldest}.json")));
     }
 
     #[test]

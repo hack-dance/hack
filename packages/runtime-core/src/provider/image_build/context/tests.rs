@@ -653,6 +653,12 @@ fn a_snapshot_refuses_any_difference_from_the_record() {
 #[test]
 fn a_copy_whose_mode_cannot_be_reproduced_refuses() {
     let tree = Tree::new();
+    // The injected loss must change the mode even when the fixture was created under 077.
+    for target in ["main.txt", "sub"] {
+        let path = tree.context().join(target);
+        let mode = fs::symlink_metadata(&path).unwrap().mode() & 0o7777;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o004)).unwrap();
+    }
     let keyed = tree.walk("", None, SystemTime::now());
     let holder = tree.root.join("snapshot");
     for target in ["main.txt", "sub"] {

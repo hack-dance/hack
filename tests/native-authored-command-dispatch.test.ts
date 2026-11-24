@@ -69,9 +69,13 @@ async function invoke(opts: {
       ...opts.args,
     ],
     {
+      cwd: root,
       env: {
         PATH: process.env.PATH ?? "",
         HOME: root,
+        // Bun loads dotenv from the working directory even with an explicit
+        // environment. Keep the launcher and its re-exec on fixture settings.
+        BUN_OPTIONS: "--no-env-file",
         CI: "1",
         HACK_EXECUTION_MODE: "ci",
         HACK_DAEMON_AUTOSTART_DISABLE: "1",
@@ -249,6 +253,9 @@ test.each([
   flags,
 }) => {
   const selected = await fixture();
+  // If Bun loads this, the setup probe carries --step-store and misses the
+  // fixture's exact setup argv, before any detached startup is attempted.
+  await Bun.write(join(selected.root, ".env"), "HACK_STEP_STORE=on\n");
   const value = await invoke({
     selected,
     args: ["up", ...flags],

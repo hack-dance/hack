@@ -47,6 +47,7 @@ import {
   refuseRemoteStart,
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
+import { recordComposeResourceReceipts } from "../lib/resource-receipts.ts";
 import { printUpTimings } from "../lib/up-timings-output.ts";
 import {
   selectLifecycleAddress,
@@ -9364,6 +9365,20 @@ async function runResolvedComposeUp({
       detachedComposeSucceeded = true;
       // The containers now run: a later failure keeps their helpers.
       keepSharedHelpers?.();
+      const captured = await engine.capture();
+      if (publishedLaunch && captured.daemon.kind === "verified") {
+        await recordComposeResourceReceipts({
+          projectDir: project.projectDir,
+          composeFile: project.composeFile,
+          checkout: project.projectRoot,
+          project: projectName,
+          composeProject: lifecycleComposeProject,
+          branch,
+          launch: publishedLaunch.launchId,
+          daemon: captured.daemon.id,
+          env: envOverrides.env,
+        }).catch(() => undefined);
+      }
     }
     const observationBudgetMs = detach
       ? Math.max(

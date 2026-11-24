@@ -1901,6 +1901,78 @@ hack projects prune [options]
 | `--version, -v` | Show version |
 
 
+## `hack resources`
+
+Inspect and clean up Hack-managed resources
+
+### Usage
+
+```bash
+hack resources <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack resources list` | List observed Hack resources and disk use |
+| `hack resources remove <id>` | Preview or confirm removal of a verified unused resource |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack resources list`
+
+List observed Hack resources and disk use
+
+### Usage
+
+```bash
+hack resources list [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack resources remove <id>`
+
+Preview or confirm removal of a verified unused resource
+
+### Usage
+
+```bash
+hack resources remove <id> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `id` | A container:<id> or volume:<name> from resources list |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--dry-run` | Show exactly what would be removed without changing anything |
+| `--confirm <token>` | Confirm the exact removal reviewed with --dry-run |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack native`
 
 Set up or recover the opt-in native runtime

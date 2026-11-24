@@ -499,7 +499,9 @@ fn run_with_clock(
                 if let Some(span) = all_ready {
                     span.finish(Outcome::Ok, false, None, Default::default());
                 }
-                driver.record(Event::Ready)?;
+                timings::measure(Step::GraphReadyCommit, None, |_| {
+                    driver.record(Event::Ready)
+                })?;
                 return Ok(());
             }
         }
@@ -619,6 +621,7 @@ mod tests {
         assert_eq!(records[1].step, "services.ready");
         assert_eq!(records[0].outcome, Outcome::Ok);
         assert_eq!(records[1].outcome, Outcome::Ok);
+        assert_eq!(records[2].step, "graph.ready.commit");
     }
 
     #[test]

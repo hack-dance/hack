@@ -65,6 +65,11 @@ If native shutdown was interrupted during guest relay removal, repeat the same
 shutdown or recovery command. An empty relay allocation can be removed on retry
 when its recorded slot generation is stopped or discarded and its socket is gone.
 
+When recovery archives a previous-boot shared HTTPS owner, it checks the frontend
+invocation for this Hack home. Other users' processes and different executables
+do not need readable arguments. If a possible owner still has unreadable
+arguments, recovery keeps the retained state and reports `stop_uncertain`.
+
 ## A store whose key is lost
 
 Use next.17 or later; earlier prereleases do not have `retire-store`. Doctor's

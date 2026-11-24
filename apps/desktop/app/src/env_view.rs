@@ -1,19 +1,14 @@
 //! The Env tab: overlay tabs, a key line, and a Name / Value table.
 //!
-//! Every read goes through the CLI (`hack env list --json` per overlay and
-//! scope, `hack env get KEY` per value). Plaintext values load with the
-//! listing; a secret's value only when its eye or copy button is pressed,
-//! for that one name. A revealed value hides again after
-//! [`REVEAL_FOR`](hack_desktop_core::env::REVEAL_FOR), and when the tab, the
-//! overlay, the scope, the project or the window changes. Copy clears the
-//! clipboard after the same time if it still holds the value. Values never
-//! reach a log, `--drive` output or an error message.
+//! The listing contains names and metadata. The eye explicitly reads one
+//! value through the CLI. Revealed values expire and copy uses the shown
+//! value with the existing clipboard lifetime.
 
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, Entity, IntoElement, ParentElement, SharedString, Styled,
-    Window, div, prelude::*, px,
+    Subscription, Window, div, prelude::*, px,
 };
 use hack_desktop_core::env::{
     EnvRow, EnvView, KeyState, REVEAL_FOR, Revealed, ValueKey, ValueState, key_line,
@@ -50,15 +45,15 @@ pub(crate) struct EnvEdit {
     /// Save stores only text the user typed, never an empty field, so an
     /// unchanged Save never blanks the value.
     pub ready: bool,
+    prefill: Option<EditorPrefill>,
 }
 
-/// Why Save stays off when an existing value could not be read.
-const UNREAD_ERROR: &str =
-    "Could not read the current value. Type the new value to replace it, or close and try again.";
-
-/// Most plaintext values read with one listing (one `hack env get` each).
-/// A listing in one read is DESIGN.md request R25.
-const PLAIN_VALUES_MAX: usize = 48;
+struct EditorPrefill {
+    key: ValueKey,
+    window: gpui_kit::AnyWindowHandle,
+    touched: bool,
+    _changes: Subscription,
+}
 
 impl HackApp {
     /// The CLI arguments for the overlay tab and scope shown.
@@ -100,9 +95,10 @@ impl HackApp {
         }
     }
 
-    /// List the overlay and scope shown; then read its plaintext values.
+    /// List names in the selected overlay and scope.
     pub(crate) fn read_env(&mut self, cx: &mut Context<Self>) {
         let generation = self.env.begin();
+        self.clear_hidden_prefill(cx);
         let Some((root, native)) = self.selected_root() else {
             return;
         };
@@ -110,7 +106,6 @@ impl HackApp {
         if !self.live {
             let view = self.source.env_for(&root, native, &target);
             self.env.finish(generation, view);
-            self.load_plain_values(cx);
             return;
         }
         let source = self.source.clone();
@@ -124,66 +119,9 @@ impl HackApp {
                 // The generation drops a read the user has moved away from.
                 if this.selected_root() == Some((requested, native)) {
                     this.env.finish(generation, view);
-                    this.load_plain_values(cx);
                     cx.notify();
                 }
             });
-        })
-        .detach();
-    }
-
-    /// Plaintext values for the listing shown, one `hack env get` each.
-    fn load_plain_values(&mut self, cx: &mut Context<Self>) {
-        let EnvView::Report(report) = &self.env.view else {
-            return;
-        };
-        let Some((root, native)) = self.selected_root() else {
-            return;
-        };
-        let generation = self.env.generation();
-        let rows: Vec<(ValueKey, String, EnvTarget)> = report
-            .vars
-            .iter()
-            .filter(|r| r.is_plaintext() && !r.missing)
-            .take(PLAIN_VALUES_MAX)
-            .map(|r| (self.value_key(r), r.key.clone(), self.row_target(r)))
-            .collect();
-        for (key, _, _) in &rows {
-            self.env
-                .set_value(generation, key.clone(), ValueState::Reading);
-        }
-        if !self.live {
-            for (key, name, target) in rows {
-                let state = match self.source.env_value(&root, native, &target, &name) {
-                    Ok(v) => ValueState::Plain(v),
-                    Err(e) => ValueState::Failed(e),
-                };
-                self.env.set_value(generation, key, state);
-            }
-            return;
-        }
-        let source = self.source.clone();
-        cx.spawn(async move |this, cx| {
-            for (key, name, target) in rows {
-                let (source, root) = (source.clone(), root.clone());
-                let state = cx
-                    .background_executor()
-                    .spawn(async move {
-                        match source.env_value(&root, native, &target, &name) {
-                            Ok(v) => ValueState::Plain(v),
-                            Err(e) => ValueState::Failed(e),
-                        }
-                    })
-                    .await;
-                let current = this.update(cx, |this, cx| {
-                    this.env.set_value(generation, key, state);
-                    cx.notify();
-                    this.env.generation() == generation
-                });
-                if !matches!(current, Ok(true)) {
-                    break;
-                }
-            }
         })
         .detach();
     }
@@ -243,7 +181,7 @@ impl HackApp {
         .detach();
     }
 
-    /// The eye: show a secret's value for [`REVEAL_FOR`], or hide it.
+    /// The eye: show one value for [`REVEAL_FOR`], or hide it.
     pub(crate) fn toggle_reveal(&mut self, row: &EnvRow, cx: &mut Context<Self>) {
         let key = self.value_key(row);
         // A second press hides it, or cancels a read still in flight: the
@@ -253,11 +191,13 @@ impl HackApp {
             ValueState::Shown { .. } | ValueState::Reading
         ) {
             self.env.hide(&key);
+            self.clear_hidden_prefill(cx);
             cx.notify();
             return;
         }
         let generation = self.env.generation();
         let token = self.env.start_reveal(key.clone());
+        self.clear_hidden_prefill(cx);
         self.read_value(
             row,
             move |this, result, cx| {
@@ -283,44 +223,62 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REVEAL_FOR).await;
             let _ = this.update(cx, |this, cx| {
-                if this.env.expire() {
-                    cx.notify();
-                }
+                this.expire_env_values(cx);
             });
         })
         .detach();
     }
 
-    /// Copy: the value goes to the clipboard, read for this one name if it
-    /// is not shown, and is cleared after [`REVEAL_FOR`] if still there.
-    /// On macOS the item is marked concealed (`crate::clipboard`).
+    fn expire_env_values(&mut self, cx: &mut Context<Self>) {
+        if self.env.expire() {
+            cx.notify();
+        }
+        self.clear_hidden_prefill(cx);
+    }
+
+    fn clear_hidden_prefill(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.env_edit.as_mut() else {
+            return;
+        };
+        let Some(prefill) = edit
+            .prefill
+            .take_if(|prefill| !matches!(self.env.value(&prefill.key), ValueState::Shown { .. }))
+        else {
+            return;
+        };
+        if !prefill.touched {
+            edit.ready = false;
+        }
+        let value = edit.value.clone();
+        cx.notify();
+        // The focus callback can already be inside a window update.
+        cx.defer(move |cx| {
+            let _ = cx.update_window(prefill.window, |_, window, cx| {
+                value.update(cx, |state, cx| {
+                    // Reset history so undo cannot restore the expired prefill.
+                    let replacement = if prefill.touched {
+                        state.value()
+                    } else {
+                        "".into()
+                    };
+                    state.set_value(replacement, window, cx);
+                });
+            });
+        });
+    }
+
+    /// Copy a revealed value and clear it after the existing clipboard lifetime.
     pub(crate) fn copy_value(&mut self, row: &EnvRow, cx: &mut Context<Self>) {
         let key = self.value_key(row);
-        let known = match self.env.value(&key) {
-            ValueState::Shown { value, .. } | ValueState::Plain(value) => Some(value),
-            _ => None,
+        let ValueState::Shown { value, .. } = self.env.value(&key) else {
+            return;
         };
-        let generation = self.env.generation();
-        let done =
-            move |this: &mut Self, result: Result<Revealed, String>, cx: &mut Context<Self>| {
-                match result {
-                    Ok(value) => {
-                        crate::clipboard::write_secret(value.expose(), cx);
-                        this.env.copied = Some(key.clone());
-                        this.env.clipboard = Some(value);
-                        this.env.clipboard_copy += 1;
-                        this.clear_clipboard_later(this.env.clipboard_copy, cx);
-                    }
-                    Err(e) => this
-                        .env
-                        .set_value(generation, key.clone(), ValueState::Failed(e)),
-                }
-                cx.notify();
-            };
-        match known {
-            Some(value) => done(self, Ok(value), cx),
-            None => self.read_value(row, done, cx),
-        }
+        crate::clipboard::write_secret(value.expose(), cx);
+        self.env.copied = Some(key);
+        self.env.clipboard = Some(value);
+        self.env.clipboard_copy += 1;
+        self.clear_clipboard_later(self.env.clipboard_copy, cx);
+        cx.notify();
     }
 
     fn clear_clipboard_later(&mut self, copy: u64, cx: &mut Context<Self>) {
@@ -364,45 +322,41 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         let secret = row.is_some_and(EnvRow::is_secret);
-        let mut current = row.and_then(|r| match self.env.value(&self.value_key(r)) {
-            ValueState::Plain(v) if !secret => Some(v.expose().to_owned()),
-            _ => None,
-        });
-        // An existing plaintext value the listing has not read (still
-        // loading, failed, or past PLAIN_VALUES_MAX): read it before Save
-        // is allowed. A missing required name has no value to keep.
-        let unread = row.filter(|r| !secret && !r.missing && current.is_none());
-        let mut read_error = None;
-        if let Some(r) = unread.filter(|_| !self.live)
-            && let Some((root, native)) = self.selected_root()
-        {
-            match self
-                .source
-                .env_value(&root, native, &self.row_target(r), &r.key)
-            {
-                Ok(v) => current = Some(v.expose().to_owned()),
-                Err(_) => read_error = Some(UNREAD_ERROR.to_owned()),
+        let current = row.filter(|_| !secret).and_then(|row| {
+            let key = self.value_key(row);
+            match self.env.value(&key) {
+                ValueState::Shown { value, .. } => Some((key, value)),
+                _ => None,
             }
-        }
-        let ready = current.is_some() || unread.is_none();
+        });
+        let ready = secret || row.is_none_or(|r| r.missing) || current.is_some();
         let value = cx.new(|cx| {
             let mut state = InputState::new(window, cx)
                 .masked(secret)
-                .placeholder(if secret {
-                    "New secret value"
-                } else if ready {
-                    "Value"
-                } else {
-                    "Reading the current value…"
-                });
-            if let Some(current) = current {
-                state.set_value(current, window, cx);
+                .placeholder(if secret { "New secret value" } else { "Value" });
+            if let Some((_, revealed)) = &current {
+                state.set_value(revealed.expose(), window, cx);
             }
             state
         });
         let name = row
             .is_none()
             .then(|| cx.new(|cx| InputState::new(window, cx).placeholder("NAME")));
+        let prefill = current.map(|(key, _)| EditorPrefill {
+            key,
+            window: window.window_handle(),
+            touched: false,
+            _changes: cx.subscribe(&value, |this, _, event: &InputEvent, _| {
+                if matches!(event, InputEvent::Change)
+                    && let Some(prefill) = this
+                        .env_edit
+                        .as_mut()
+                        .and_then(|edit| edit.prefill.as_mut())
+                {
+                    prefill.touched = true;
+                }
+            }),
+        });
         self.env_edit = Some(EnvEdit {
             key: row.map(|r| r.key.clone()),
             secret,
@@ -421,56 +375,12 @@ impl HackApp {
             name,
             value,
             busy: false,
-            error: row.and_then(EnvRow::write_blocked).or(read_error),
+            error: row.and_then(EnvRow::write_blocked),
             ready,
+            prefill,
         });
         self.env_saved = None;
-        if let Some(r) = unread.filter(|_| self.live && !ready) {
-            self.read_edit_value(r.clone(), window, cx);
-        }
         cx.notify();
-    }
-
-    /// Fill the open editor with the row's current value, read for this one
-    /// name. Only that editor: one opened since is left alone.
-    fn read_edit_value(&mut self, row: EnvRow, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some((root, native)), Some(editor)) =
-            (self.selected_root(), self.env_edit.as_ref().map(|e| e.id))
-        else {
-            return;
-        };
-        let target = self.row_target(&row);
-        let source = self.source.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let key = row.key.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { source.env_value(&root, native, &target, &key) })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                let Some(edit) = this.env_edit.as_mut().filter(|e| e.id == editor) else {
-                    return;
-                };
-                match result {
-                    Ok(value) => {
-                        // Text typed while reading is the user's new value:
-                        // keep it, and fill only an empty field.
-                        let typed = !edit.value.read(cx).value().is_empty();
-                        let text = value.expose().to_owned();
-                        edit.value.update(cx, |state, cx| {
-                            if !typed {
-                                state.set_value(text, window, cx);
-                            }
-                            state.set_placeholder("Value", window, cx);
-                        });
-                        edit.ready = true;
-                    }
-                    Err(_) => edit.error = Some(UNREAD_ERROR.to_owned()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     /// A new variable only: store it encrypted or as plaintext.
@@ -746,6 +656,7 @@ impl HackApp {
         if self.env.hide_revealed() {
             cx.notify();
         }
+        self.clear_hidden_prefill(cx);
     }
 
     pub(crate) fn env_tab(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
@@ -770,12 +681,17 @@ impl HackApp {
 
         // Overlay tabs, then the scope choice on the right.
         let shown = self.env_tab_shown();
-        let mut tabs = div().flex().items_center().gap(space::S2);
+        let mut tabs = div()
+            .flex()
+            .min_w_0()
+            .flex_wrap()
+            .items_center()
+            .gap(space::S2);
         for (i, tab) in report
             .env_selection
             .clone()
             .unwrap_or_default()
-            .tabs()
+            .tabs(&report.overlays)
             .into_iter()
             .enumerate()
         {
@@ -815,7 +731,12 @@ impl HackApp {
             .clone()
             .or_else(|| report.selected_scope.clone())
             .unwrap_or_else(|| "global".into());
-        let mut scopes = div().flex().items_center().gap(space::S1);
+        let mut scopes = div()
+            .flex()
+            .min_w_0()
+            .flex_wrap()
+            .items_center()
+            .gap(space::S1);
         for (i, scope) in report.scopes.iter().enumerate() {
             let sel = *scope == selected_scope;
             let s = scope.clone();
@@ -835,8 +756,7 @@ impl HackApp {
                     })),
             );
         }
-        // Creating an overlay needs the CLI (R27); listing every overlay
-        // needs R24. Shown, not hidden, so the gap is visible.
+        // Overlay creation is a separate control from listing.
         let needs_cli = |id: &'static str, label: &'static str, why: &'static str| {
             div()
                 .id(id)
@@ -855,7 +775,7 @@ impl HackApp {
         tabs = tabs.child(needs_cli(
             "env-add-overlay",
             "+ Overlay",
-            "Needs the CLI: creating an overlay (R27) and listing every overlay (R24)",
+            "Run hack env overlay add in a terminal to create an overlay",
         ));
         body = body.child(
             div()
@@ -992,13 +912,10 @@ impl HackApp {
             }
             let value_text: SharedString = match &state {
                 _ if row.missing => "—".into(),
-                ValueState::Shown { value, .. } | ValueState::Plain(value) => {
-                    value.expose().to_owned().into()
-                }
+                ValueState::Shown { value, .. } => value.expose().to_owned().into(),
                 ValueState::Reading => "…".into(),
                 ValueState::Failed(_) => "could not read".into(),
-                ValueState::Hidden if secret => "••••••••••••".into(),
-                ValueState::Hidden => "—".into(),
+                ValueState::Hidden => "••••••••••••".into(),
             };
             let failed = matches!(state, ValueState::Failed(_));
             let value = div()
@@ -1037,7 +954,7 @@ impl HackApp {
                 );
             }
             if !row.missing {
-                if secret && !locked {
+                if !(secret && locked) {
                     let r = row.clone();
                     actions = actions.child(
                         icon_button(
@@ -1048,7 +965,7 @@ impl HackApp {
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_reveal(&r, cx))),
                     );
                 }
-                if !(secret && locked) {
+                if shown {
                     let r = row.clone();
                     actions = actions.child(
                         icon_button(
@@ -1175,12 +1092,15 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_loads_with_the_listing_and_secrets_stay_masked() {
+    fn the_listing_hides_both_plaintext_and_secret_values() {
         let (mut cx, app) = app();
         let plain = row(&mut cx, &app, "APP_MODE");
-        assert!(
-            matches!(state(&mut cx, &app, &plain), ValueState::Plain(v) if v.expose() == "fake-app-mode-value")
-        );
+        assert_eq!(state(&mut cx, &app, &plain), ValueState::Hidden);
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&plain, cx)));
+        assert!(matches!(
+            state(&mut cx, &app, &plain),
+            ValueState::Shown { .. }
+        ));
         let secret = row(&mut cx, &app, "DATABASE_URL");
         assert_eq!(state(&mut cx, &app, &secret), ValueState::Hidden);
     }
@@ -1208,10 +1128,7 @@ mod tests {
         cx.update(|cx| app.update(cx, |a, cx| a.hide_env_values(cx)));
         assert_eq!(state(&mut cx, &app, &secret), ValueState::Hidden);
         let plain = row(&mut cx, &app, "APP_MODE");
-        assert!(
-            matches!(state(&mut cx, &app, &plain), ValueState::Plain(_)),
-            "plaintext stays"
-        );
+        assert_eq!(state(&mut cx, &app, &plain), ValueState::Hidden);
         // Another overlay.
         cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&secret, cx)));
         cx.update(|cx| app.update(cx, |a, cx| a.select_overlay("dev".into(), cx)));
@@ -1227,26 +1144,30 @@ mod tests {
     }
 
     #[test]
-    fn copy_puts_one_value_on_the_clipboard_without_revealing_it() {
+    fn copy_requires_one_explicitly_revealed_value() {
         let (mut cx, app) = app();
         let secret = row(&mut cx, &app, "DATABASE_URL");
+        cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
+        assert!(cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()).is_none()));
+        assert_eq!(state(&mut cx, &app, &secret), ValueState::Hidden);
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&secret, cx)));
         cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
         let text = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
         assert_eq!(
             text.as_deref(),
             Some(hack_desktop_core::env::fixture_value("DATABASE_URL").as_str())
         );
-        assert_eq!(
+        assert!(matches!(
             state(&mut cx, &app, &secret),
-            ValueState::Hidden,
-            "copy does not reveal"
-        );
+            ValueState::Shown { .. }
+        ));
     }
 
     #[test]
     fn quitting_clears_a_copied_secret_but_never_what_was_copied_since() {
         let (mut cx, app) = app();
         let secret = row(&mut cx, &app, "DATABASE_URL");
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&secret, cx)));
         cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
         cx.update(|cx| app.update(cx, |a, cx| a.clear_owned_clipboard(cx)));
         let text = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
@@ -1268,6 +1189,7 @@ mod tests {
     fn copying_again_restarts_the_clipboard_time() {
         let (mut cx, app) = app();
         let secret = row(&mut cx, &app, "DATABASE_URL");
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&secret, cx)));
         cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
         let first = cx.update(|cx| app.read(cx).env.clipboard_copy);
         cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
@@ -1337,9 +1259,10 @@ mod tests {
     }
 
     #[test]
-    fn editing_plaintext_starts_with_its_value_in_its_own_scope() {
+    fn editing_revealed_plaintext_can_prefill_in_its_own_scope() {
         let (mut cx, window, app) = app_window();
         let plain = row(&mut cx, &app, "APP_MODE");
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&plain, cx)));
         cx.update_window(window, |_, window, cx| {
             app.update(cx, |a, cx| a.open_env_edit(Some(&plain), window, cx));
         })
@@ -1357,6 +1280,89 @@ mod tests {
             command,
             "hack env add APP_MODE --value-stdin --env staging --service global"
         );
+    }
+
+    fn prefilled_editor() -> (
+        HeadlessAppContext,
+        gpui_kit::AnyWindowHandle,
+        Entity<HackApp>,
+        EnvRow,
+    ) {
+        let (mut cx, window, app) = app_window();
+        let plain = row(&mut cx, &app, "APP_MODE");
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&plain, cx)));
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| a.open_env_edit(Some(&plain), window, cx));
+        })
+        .unwrap();
+        (cx, window, app, plain)
+    }
+
+    fn assert_prefill_cleared(cx: &mut HeadlessAppContext, app: &Entity<HackApp>) {
+        cx.update(|cx| {
+            let edit = app.read(cx).env_edit.as_ref().unwrap();
+            assert!(edit.value.read(cx).value().is_empty());
+            assert!(!HackApp::edit_can_save(edit, cx));
+        });
+    }
+
+    #[test]
+    fn expiry_clears_an_untouched_plaintext_prefill() {
+        let (mut cx, _, app, plain) = prefilled_editor();
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let key = a.value_key(&plain);
+                let ValueState::Shown { value, at } = a.env.value(&key) else {
+                    panic!("fixture value is revealed");
+                };
+                a.env.set_value(
+                    a.env.generation(),
+                    key,
+                    ValueState::Shown {
+                        value,
+                        at: at - REVEAL_FOR,
+                    },
+                );
+                a.expire_env_values(cx);
+            })
+        });
+        assert_prefill_cleared(&mut cx, &app);
+    }
+
+    #[test]
+    fn the_eye_clears_an_untouched_plaintext_prefill() {
+        let (mut cx, _, app, plain) = prefilled_editor();
+        cx.update(|cx| app.update(cx, |a, cx| a.toggle_reveal(&plain, cx)));
+        assert_prefill_cleared(&mut cx, &app);
+    }
+
+    #[test]
+    fn focus_loss_clears_an_untouched_plaintext_prefill() {
+        let (mut cx, window, app, _) = prefilled_editor();
+        cx.update_window(window, |_, _, cx| {
+            app.update(cx, |a, cx| a.hide_env_values(cx));
+        })
+        .unwrap();
+        assert_prefill_cleared(&mut cx, &app);
+    }
+
+    #[test]
+    fn typed_replacement_survives_when_the_reveal_ends() {
+        let (mut cx, window, app, _) = prefilled_editor();
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| {
+                a.env_edit.as_ref().unwrap().value.update(cx, |state, cx| {
+                    state.replace_all("fake-typed-replacement", window, cx);
+                });
+            });
+        })
+        .unwrap();
+        cx.update(|cx| app.update(cx, |a, cx| a.hide_env_values(cx)));
+        cx.update(|cx| {
+            let edit = app.read(cx).env_edit.as_ref().unwrap();
+            assert_eq!(edit.value.read(cx).value(), "fake-typed-replacement");
+            assert!(HackApp::edit_can_save(edit, cx));
+        });
     }
 
     #[test]
@@ -1471,41 +1477,20 @@ mod tests {
     }
 
     #[test]
-    fn an_unread_plaintext_value_is_read_before_save_is_allowed() {
+    fn a_hidden_plaintext_value_is_never_fetched_or_cleared_by_edit() {
         let (mut cx, window, app) = app_window();
-        // The listing has not read APP_MODE's value (past the limit, say).
-        cx.update(|cx| app.update(cx, |a, _| a.env.hide_all()));
         let plain = row(&mut cx, &app, "APP_MODE");
         cx.update_window(window, |_, window, cx| {
             app.update(cx, |a, cx| a.open_env_edit(Some(&plain), window, cx));
         })
         .unwrap();
-        let (ready, value) = cx.update(|cx| {
-            let edit = app.read(cx).env_edit.as_ref().unwrap();
-            (edit.ready, edit.value.read(cx).value().to_string())
-        });
-        assert!(ready);
-        assert_eq!(value, "fake-app-mode-value", "the current value, not empty");
-        // A value that cannot be read: Save stays off and does nothing.
-        let mut unknown = plain.clone();
-        unknown.key = "NOT_LISTED".into();
-        cx.update_window(window, |_, window, cx| {
-            app.update(cx, |a, cx| a.open_env_edit(Some(&unknown), window, cx));
-        })
-        .unwrap();
         cx.update(|cx| app.update(cx, |a, cx| a.save_env_edit(cx)));
-        let (ready, busy, error, saved) = cx.update(|cx| {
-            let a = app.read(cx);
-            let edit = a.env_edit.as_ref().unwrap();
-            (
-                edit.ready,
-                edit.busy,
-                edit.error.clone(),
-                a.env_saved.clone(),
-            )
+        cx.update(|cx| {
+            let app = app.read(cx);
+            let edit = app.env_edit.as_ref().unwrap();
+            assert!(!edit.ready && !edit.busy && app.env_saved.is_none());
+            assert!(edit.value.read(cx).value().is_empty());
         });
-        assert!(!ready && !busy && saved.is_none(), "nothing was written");
-        assert!(error.unwrap().contains("Could not read the current value"));
         // Typing a new value (deliberate) allows Save; it never stores an
         // empty field over the unread value.
         cx.update_window(window, |_, window, cx| {
@@ -1518,7 +1503,7 @@ mod tests {
         cx.update(|cx| app.update(cx, |a, cx| a.save_env_edit(cx)));
         assert_eq!(
             cx.update(|cx| app.read(cx).env_saved.clone()).as_deref(),
-            Some("Saved NOT_LISTED")
+            Some("Saved APP_MODE")
         );
     }
 

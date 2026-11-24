@@ -509,6 +509,12 @@ impl HackApp {
         // The CLI does not report a running overlay per instance yet (R22).
         self.env.running = (name == "env-running").then(|| "staging".to_owned());
         self.read_env(cx);
+        if name == "env-revealed"
+            && let hack_desktop_core::env::EnvView::Report(r) = &self.env.view
+            && let Some(row) = r.vars.iter().find(|v| v.key == "APP_MODE").cloned()
+        {
+            self.toggle_reveal(&row, cx);
+        }
         // The editor open on a secret: an empty masked field and the command.
         if name == "env-edit"
             && let hack_desktop_core::env::EnvView::Report(r) = &self.env.view

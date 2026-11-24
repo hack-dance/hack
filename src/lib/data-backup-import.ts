@@ -503,9 +503,6 @@ async function classifyTarget(
     return { key, reason: "unsupported_driver" };
   }
   const target = { ...entry, journalPath, identity: inspected };
-  if (await existingIsEmpty(context, entry, inspected)) {
-    return { ...target, kind: "empty" };
-  }
   const journal = await readDataImportJournal(journalPath);
   const sameRestore =
     journal !== null &&
@@ -513,10 +510,16 @@ async function classifyTarget(
     journal.targetSha256 === dataBackupNameSha256(entry.name);
   // An earlier run of this backup completed this target: re-verify it and
   // move on, so a run interrupted after some targets can finish the rest.
+  // Checked before emptiness: a target emptied since it was restored refuses
+  // as modified (its deletion is not undone), and one that is empty in the
+  // backup verifies instead of being rewritten.
   if (sameRestore && journal.state === "complete") {
     return (await existingMatches(context, entry, inspected))
       ? { ...target, kind: "verified-complete" }
       : { key, reason: "modified" };
+  }
+  if (await existingIsEmpty(context, entry, inspected)) {
+    return { ...target, kind: "empty" };
   }
   if (
     sameRestore &&

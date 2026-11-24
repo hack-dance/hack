@@ -354,7 +354,10 @@ and the journal is not `complete`. That copy is cleared inside the helper and
 restored again.
 
 A target whose journal is `complete` for the same backup and target name was
-restored by an earlier run, for example one stopped before its other targets
+restored by an earlier run (this is checked before the emptiness check, so a
+target the user emptied since refuses as `modified` instead of being
+restored over, and a volume that is empty in the backup verifies instead of
+being rewritten), for example one stopped before its other targets
 finished. It is re-verified in a read-only held helper: when its tree digest
 and entry count equal the manifest's it is reported as `verified-complete`
 (`outcome: verified`) and not written, and the import goes on with the other

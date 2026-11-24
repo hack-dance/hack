@@ -58,13 +58,16 @@ async function writeBackup(opts: {
   readonly keys: readonly string[];
   readonly composeProject?: string;
   readonly name?: string;
+  /** Tree contents per key; default `rows-<key>`. */
+  readonly contents?: Readonly<Record<string, string>>;
 }): Promise<string> {
   const composeProject = opts.composeProject ?? PROJECT;
   const dir = join(root, "backups", opts.name ?? "20261124T090000Z");
   await mkdir(dir, { recursive: true });
   const volumes: unknown[] = [];
   for (const key of opts.keys) {
-    const bytes = `tar:rows-${key}`;
+    const content = opts.contents?.[key] ?? `rows-${key}`;
+    const bytes = `tar:${content}`;
     await writeFile(join(dir, `${key}.tar`), bytes);
     volumes.push({
       key,
@@ -79,7 +82,7 @@ async function writeBackup(opts: {
       tarSha256: sha(bytes),
       entries: 3,
       excludedSockets: 0,
-      contentDigest: sha(`rows-${key}`),
+      contentDigest: sha(content),
     });
   }
   await writeFile(
@@ -533,6 +536,38 @@ describe("interruption and recovery", () => {
     const error = await caught(importProjectData(input(fake, dir)));
     expect(error.detail).toEqual({
       conflicts: [{ key: "db", reason: "not_empty" }],
+    });
+    expect(writes(fake)).toEqual([]);
+  });
+
+  test("a completed target the user emptied afterwards refuses as modified, not restored again", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    await importProjectData(input(fake, dir));
+    const volume = fake.volumes.get("shop_db");
+    if (volume) {
+      volume.content = "";
+    }
+    fake.calls = [];
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.detail).toEqual({
+      conflicts: [{ key: "db", reason: "modified" }],
+    });
+    expect(writes(fake)).toEqual([]);
+    expect(fake.volumes.get("shop_db")?.content).toBe("");
+  });
+
+  test("a volume empty in the backup verifies on rerun instead of being rewritten", async () => {
+    const dir = await writeBackup({ keys: ["db"], contents: { db: "" } });
+    const fake = engine();
+    const first = await importProjectData(input(fake, dir));
+    expect(first.volumes[0]?.outcome).toBe("restored");
+    fake.calls = [];
+    const again = await importProjectData(input(fake, dir));
+    expect(again.volumes[0]).toMatchObject({
+      key: "db",
+      target: "verified-complete",
+      outcome: "verified",
     });
     expect(writes(fake)).toEqual([]);
   });

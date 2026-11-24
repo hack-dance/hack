@@ -358,6 +358,41 @@ async function interruptedBetweenTargets(
       ),
     message: "a rerun should verify the completed volume and restore the other",
   });
+
+  // Emptied after the restore: a rerun refuses (modified) and does not
+  // restore the old contents over the user's deletion.
+  await docker(ctx, [
+    "run",
+    "--rm",
+    "--network",
+    "none",
+    "--volume",
+    `${fixture.name}_one:/v`,
+    "--entrypoint",
+    "find",
+    HELPER,
+    "/v",
+    "-mindepth",
+    "1",
+    "-delete",
+  ]);
+  const emptied = await treeDigest(ctx, `${fixture.name}_one`);
+  const refused = await ctx.cli({
+    args: ["data", "import", path, "--json"],
+    cwd: fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  const refusal = extractJsonObject<Envelope>({ text: refused.stdout });
+  expect({
+    that:
+      refused.exitCode === 1 &&
+      refusal?.error?.code === "E_DATA_TARGET_CONFLICT" &&
+      JSON.stringify(refusal.error.detail) ===
+        JSON.stringify({ conflicts: [{ key: "one", reason: "modified" }] }) &&
+      (await treeDigest(ctx, `${fixture.name}_one`)) === emptied,
+    message: "a volume emptied after its restore should refuse and stay empty",
+    result: refused,
+  });
 }
 
 function composeFile(fixture: MonorepoFixture): string {

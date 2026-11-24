@@ -11,6 +11,10 @@ the pool (one line says so). When another project is running there, or
 the pool is starting or stopping, `hack up` refuses the start and names up to three
 of those projects: run `hack down` in them first. A pool accepts up to eight project shares.
 
+The desktop preview's **Doctor** view shows the selected native pool's state and
+any memory or graph counts reported by Hack. A failed observation shows the pool
+state as unknown.
+
 A native home keeps up to 64 graph runs. A run whose data was removed
 (`hack down --remove-data`, or a fresh start that failed) is archived on its own
 when a new run needs the room. Runs that keep their data are never archived; when

@@ -1187,6 +1187,7 @@ fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
     }
     let mut coverage = DoctorRun::machine(Ok(crate::models::DoctorReport {
         checks: vec![crate::models::DoctorCheck {
+            native_pool: None,
             id: "desktop tool coverage".into(),
             status: "unknown".into(),
             detail: note,
@@ -1331,6 +1332,7 @@ impl LiveSource {
                 let why = format!("Could not check Doctor executable discovery: {reason}");
                 let report = crate::models::DoctorReport {
                     checks: vec![crate::models::DoctorCheck {
+                        native_pool: None,
                         id: "desktop preflight".into(),
                         status: "unknown".into(),
                         detail: why.clone(),
@@ -4009,9 +4011,9 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(tools.unchecked.contains("docker"));
         for native in [false, true] {
             let checks = vec![
-                crate::models::DoctorCheck { id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()), fix: None },
-                crate::models::DoctorCheck { id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into(), fix: None },
-                crate::models::DoctorCheck { id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into(), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into(), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into(), fix: None },
             ];
             let mut run = DoctorRun::project(
                 "fixture",
@@ -4058,6 +4060,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(!tools.unchecked.contains("docker"));
         let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
             checks: vec![crate::models::DoctorCheck {
+                native_pool: None,
                 id: "docker daemon".into(),
                 status: "error".into(),
                 detail: "validated Docker reported an engine error".into(),
@@ -4105,6 +4108,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             ("host tls trust", "missing host trust bundle"),
         ]
         .map(|(id, detail)| crate::models::DoctorCheck {
+            native_pool: None,
             id: id.into(),
             status: "error".into(),
             detail: detail.into(),
@@ -4258,6 +4262,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                 "project",
             ]
             .map(|id| crate::models::DoctorCheck {
+                native_pool: None,
                 id: id.into(),
                 status: "ok".into(),
                 detail: "independently observed".into(),

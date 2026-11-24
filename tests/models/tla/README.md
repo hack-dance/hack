@@ -686,6 +686,19 @@ not prove the kqueue exit delivery, timer accuracy, provider lease acquisition
 or that a replacement listener appears; it abstracts the listener as live, gone
 or replaced, and the retry delays as an ordered bound.
 
+
+### recovery-archive-bound
+
+`recovery-archive-bound/ArchiveBound.tla` checks HACK-2576: each pool stop under a
+running project ends a boot, the next `up` recovers the run, and a recovery that finds
+an earlier completed record moves it aside as bounded history. The bound once
+refused the recovery for ever.
+
+| Configuration | What it checks | Result |
+| --- | --- | --- |
+| `positive` | the oldest proven finished record makes room (`DropOldest`) and files that cannot be proven finished are not counted, over twelve pool stops with a bound of eight | passes: `AlwaysRecoverable`, `Bounded`, `Recovers` |
+| `negative` | today: the archive step refuses at the bound and counts every file with the prefix | `AlwaysRecoverable` fails: the stopped run can no longer be recovered |
+
 ## Native pool stop under a live run
 
 `native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down`)

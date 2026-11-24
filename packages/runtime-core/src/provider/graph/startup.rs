@@ -235,6 +235,17 @@ pub(super) trait Driver {
     fn service_ready(&mut self, _service: &str, _container_id: &str) -> Result<(), CandidateError> {
         Ok(())
     }
+
+    fn service_ready_leased(
+        &mut self,
+        _engine: &Engine<'_>,
+        _receipt: &Receipt,
+        service: &str,
+        container_id: &str,
+    ) -> Result<(), CandidateError> {
+        self.service_ready(service, container_id)
+    }
+
     /// Whether this start reports "every service started" (`--report-started`).
     /// Only then does `AllStarted` move the receipt to `started-observed` and call
     /// [`Driver::all_started`]; otherwise it changes nothing on disk. Default: no.
@@ -246,16 +257,6 @@ pub(super) trait Driver {
     /// [`Driver::reports_started`], before `verify`, never after a failure.
     fn all_started(&mut self, _run: &str) -> Result<(), CandidateError> {
         Ok(())
-    }
-
-    fn service_ready_leased(
-        &mut self,
-        _engine: &Engine<'_>,
-        _receipt: &Receipt,
-        service: &str,
-        container_id: &str,
-    ) -> Result<(), CandidateError> {
-        self.service_ready(service, container_id)
     }
 }
 

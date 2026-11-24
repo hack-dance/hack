@@ -13,6 +13,9 @@ stateDiagram-v2
     committed --> absent : Retire [aborted]
     authorized --> absent : Retire [aborted]
     bound --> absent : Retire [aborted]
+    starting --> dead : Abort [owner exited]
+    dead --> recovering : SelectDeadOwner [proof]
+    recovering --> retired : Settled [children absent]
     note right of committed
         INV identity before bind
     end note

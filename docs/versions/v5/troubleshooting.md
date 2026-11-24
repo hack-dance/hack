@@ -58,6 +58,10 @@ installed bundle keeps its older behaviour. See the
 | Native `up`: `E_RECOVERY_REQUIRED` “This project's last native run has no confirmed shutdown …” (HACK-2456) | A recovery stopped the run with data kept but did not finish its shutdown, usually the shared HTTPS lease after the pool was stopped under a running project; or another start of this instance replaced it. | Run `hack down --recover`. It starts a stopped native runtime when it needs to, finishes the shutdown with data kept, and leaves the runtime running (run `runtime down` to stop it). Then run `hack up`. |
 | next.16 `E_STARTUP_INCOMPLETE` after a fast one-shot service finished | next.16 can misread a service that exits successfully in under a second. | Inspect `ps` and logs. If this is that known case and the services are up, rerun `up --detach`. Fixed in next.17. [Trial record](guides/upgrade-from-v4.md#known-problems-and-the-dogfood-record). |
 
+If native shutdown was interrupted during guest relay removal, repeat the same
+shutdown or recovery command. An empty relay allocation can be removed on retry
+when its recorded slot generation is stopped or discarded and its socket is gone.
+
 ## A store whose key is lost
 
 Use next.17 or later; earlier prereleases do not have `retire-store`. Doctor's

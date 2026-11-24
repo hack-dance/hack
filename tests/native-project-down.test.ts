@@ -1309,9 +1309,14 @@ test.each([
 
 test.each([
   {
-    name: "an owner that exited after its restore was admitted",
+    name: "an exited owner with an unproved failed start",
     selection: ownerSelection("exited", "failed-retained"),
-    text: "Run hack ps --json",
+    text: "fresh native home instructions",
+  },
+  {
+    name: "an exited owner with an unproved unfinished start",
+    selection: ownerSelection("exited", "preparing"),
+    text: "fresh native home instructions",
   },
   {
     name: "an unclassified publication",
@@ -1915,6 +1920,8 @@ for (const predecessor of [false, true]) {
 test.each([
   { phase: "ready-observed", original: null },
   { phase: "failed-retained", original: null },
+  { phase: "preparing", original: null },
+  { phase: "restoring", original: null },
   { phase: "cleanup-intent", original: "1".repeat(64) },
 ])("plain down resumes exact dead-owner cleanup after $phase without replaying the refused stop", async ({
   phase,
@@ -1938,7 +1945,11 @@ test.each([
         return {
           ...ownerSelection("exited", phase),
           live_owner_recovery: original,
-          failed_start_recoverable: phase === "failed-retained",
+          failed_start_recoverable: [
+            "failed-retained",
+            "preparing",
+            "restoring",
+          ].includes(phase),
         };
       }
       if (command === "recover-live-owner") {
@@ -1958,6 +1969,39 @@ test.each([
   expect(calls.filter((call) => call === "cleanup")).toHaveLength(1);
   expect(calls.filter((call) => call === "recover-live-owner")).toHaveLength(1);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test.each([
+  "preparing",
+  "restoring",
+])("down --recover selects the exact unfinished $phase receipt", async (phase) => {
+  const opts = await fixture();
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async ({ args }) => {
+      if (args[1] === "foreground-owner") {
+        return {
+          ...ownerSelection("exited", phase),
+          failed_start_recoverable: true,
+        };
+      }
+      if (args[1] === "recover-live-owner") {
+        expect(args).toContain(receiptSha);
+        recovered = true;
+        return {
+          run: run.run,
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      expect(args[1]).toBe("inspect");
+      return snapshot(recovered);
+    },
+  });
+  expect(result.status).toBe("stopped");
 });
 
 // HACK-2456: the pool stopped under a running project.

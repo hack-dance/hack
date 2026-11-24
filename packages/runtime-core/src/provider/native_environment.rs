@@ -94,6 +94,32 @@ fn validate(intent: &Intent, slot: &str) -> Result<(), CandidateError> {
 pub(super) fn count(candidate: &Candidate) -> Result<usize, CandidateError> {
     environment_recovery::native_count(candidate)
 }
+/// These allocations still use the active graph journal for exact cleanup.
+pub(super) fn retained_runs(
+    candidate: &Candidate,
+) -> Result<std::collections::BTreeSet<String>, CandidateError> {
+    let mut runs = std::collections::BTreeSet::new();
+    let count = count(candidate)?;
+    if count == 0 {
+        return Ok(runs);
+    }
+    for (index, entry) in fs::read_dir(root(candidate))
+        .map_err(|_| refused())?
+        .enumerate()
+    {
+        if index >= count {
+            return Err(refused());
+        }
+        let name = entry.map_err(|_| refused())?.file_name();
+        let slot = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .ok_or_else(refused)?;
+        runs.insert(read(candidate, slot)?.binding.run);
+    }
+    Ok(runs)
+}
+
 pub(super) fn record(
     candidate: &Candidate,
     guest: &OwnedGuest<'_>,

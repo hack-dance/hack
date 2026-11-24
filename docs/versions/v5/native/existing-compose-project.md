@@ -81,6 +81,11 @@ and is shared by the services that use it. A build may use `context`, `dockerfil
 `ssh` or `dockerfile_inline`, keeps the project on the Compose backend: `up` names
 the service and the field, and prints the command that runs it there.
 
+On the Compose backend, Hack warns before a build if its context can send Hack's
+machine-local files to Docker. Add the suggested lines to the effective ignore
+file, which is `<Dockerfile>.dockerignore` if present or the context's
+`.dockerignore` otherwise. With `--json`, the warning is a JSON line on stderr.
+
 An image is reused while its build inputs are unchanged: the Dockerfile, the ignore
 file, the target, the args, and every file in the build context the ignore file lets
 the build read. Native always leaves Hack's machine-local files out of its build

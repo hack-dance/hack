@@ -503,7 +503,7 @@ export async function nativeStartupProjectPs(
     if (
       !(
         snapshot.foreground &&
-        ["preparing", "restoring"].includes(snapshot.phase)
+        ["preparing", "restoring", "started-observed"].includes(snapshot.phase)
       )
     ) {
       return null;

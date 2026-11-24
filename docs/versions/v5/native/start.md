@@ -153,6 +153,13 @@ Stop with the **same version and native home**:
 "$CANDIDATE" down --path /absolute/project
 ```
 
+If the foreground owner exited during startup, run `"$CANDIDATE" down --recover
+--path /absolute/project` while the original pool is still running. Recovery
+retains project data and requires matching records for this run. If those
+records cannot prove ownership, keep the old home and use a separate checkout
+with a [fresh manual native home](setup.md#manual-homes). This starts a separate
+run without transferring the old run’s data.
+
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
 [cleanup reference](full-reference.md#manual-candidate-upgrade-and-rollback).

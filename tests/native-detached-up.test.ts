@@ -356,6 +356,43 @@ for (const phase of ["static-preflight", "after-start"] as const) {
   });
 }
 
+test("the detached CLI preserves the native authored attempt limit refusal", async () => {
+  const root = await fixtureRoot(
+    join(tmpdir(), "native-detached-attempt-limit-")
+  );
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "authored-attempt-limit"],
+    { env: fixtureEnv(root), stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+  );
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+      new Response(launcher.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_STARTUP_INCOMPLETE",
+        message: expect.stringContaining(
+          "native authored graph limit is 64 attempts"
+        ),
+        detail: { nativeCode: "native_graph_attempt_limit" },
+      },
+    });
+    expect(stdout).toContain("private environment records");
+    expect(stdout).toContain("hack doctor --native-cleanup inspect");
+    expect(stderr).toBe("");
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await removeFixture(root);
+  }
+});
+
 test("the detached owner gets only the command and its selection options", () => {
   expect(
     nativeDetachedOwnerArgs({

@@ -227,6 +227,7 @@ impl HackApp {
             catalog: crate::service_catalog::ServiceCatalog {
                 input: catalog_input,
                 selected: 0,
+                edit: None,
             },
             service_pane: Default::default(),
             service_focus: cx.focus_handle(),
@@ -550,11 +551,13 @@ impl HackApp {
         let query = match name {
             "catalog-empty" => "unlisted",
             "catalog-all" => "",
+            "catalog-search" | "catalog-diff" | "catalog-saved" => "redis",
             _ => "postgres",
         };
         self.catalog
             .input
             .update(cx, |input, cx| input.set_value(query, window, cx));
+        self.show_catalog_edit_fixture(name);
     }
 
     /// Fixtures: mark an action as in flight without running it.

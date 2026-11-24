@@ -705,6 +705,61 @@ hack files cat <service> <container-path> [options]
 | `--version, -v` | Show version |
 
 
+## `hack service`
+
+Manage catalog services in a Compose project
+
+### Usage
+
+```bash
+hack service <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack service add <catalog-id>` | Add a catalog service to the project's Compose file |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack service add <catalog-id>`
+
+Add a catalog service to the project's Compose file
+
+### Usage
+
+```bash
+hack service add <catalog-id> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `catalog-id` | redis, postgres, mysql, mongodb, minio, or mailpit |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--name <service>` | Use a custom Compose service name |
+| `--dry-run` | Show the diff without saving |
+| `--expect-revision <revision>` | Save only if the dry-run revision still matches |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack commands`
 
 Read, inspect or cancel background commands started with `hack exec\|run --detach`

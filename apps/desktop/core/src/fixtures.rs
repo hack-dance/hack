@@ -55,6 +55,9 @@ pub enum Fixture {
     CatalogAll,
     CatalogEmpty,
     CatalogPreview,
+    CatalogSearch,
+    CatalogDiff,
+    CatalogSaved,
     ChangesError,
     ChangesLoading,
     ChangesClean,
@@ -94,7 +97,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 59] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -128,6 +131,9 @@ impl Fixture {
         Self::CatalogAll,
         Self::CatalogEmpty,
         Self::CatalogPreview,
+        Self::CatalogSearch,
+        Self::CatalogDiff,
+        Self::CatalogSaved,
         Self::ChangesError,
         Self::ChangesLoading,
         Self::ChangesClean,
@@ -189,6 +195,9 @@ impl Fixture {
             Self::CatalogAll => "catalog-all",
             Self::CatalogEmpty => "catalog-empty",
             Self::CatalogPreview => "catalog-preview",
+            Self::CatalogSearch => "catalog-search",
+            Self::CatalogDiff => "catalog-diff",
+            Self::CatalogSaved => "catalog-saved",
             Self::ChangesError => "changes-error",
             Self::ChangesLoading => "changes-loading",
             Self::ChangesClean => "changes-clean",

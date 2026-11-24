@@ -151,6 +151,49 @@ impl Palette {
         }
     }
 
+    /// Builtin Light and Merino Dark surfaces for the setup wizard.
+    #[must_use]
+    pub fn setup(mode: Mode) -> Self {
+        let mut p = Self::for_mode(mode);
+        let [
+            surface,
+            chrome,
+            hover,
+            selection,
+            border,
+            ink,
+            secondary,
+            muted,
+            ok,
+            warn,
+            error,
+        ] = match mode {
+            Mode::Light => [
+                0xFFFFFF, 0xF5F5F5, 0xF0F0F0, 0xE1E1E1, 0xE0E0E0, 0x000000, 0x616161, 0x828282,
+                0x008300, 0x747400, 0xBB0000,
+            ],
+            Mode::Dark => [
+                0x0D1117, 0x090C10, 0x1A1E24, 0x24272B, 0x2B3036, 0xE6EDF3, 0x8B9197, 0x686D73,
+                0x3FB950, 0xD29922, 0xFF7B72,
+            ],
+        }
+        .map(|value| c(rgb(value)));
+        p.surface = surface;
+        p.chrome = chrome;
+        p.surface_1 = hover;
+        p.surface_2 = selection;
+        p.border = border;
+        p.border_strong = border;
+        p.text_primary = ink;
+        p.text_secondary = secondary;
+        p.text_muted = muted;
+        p.accent = ink;
+        p.states.running.fg = ok;
+        p.states.degraded.fg = warn;
+        p.states.failed.fg = error;
+        p
+    }
+
     #[must_use]
     pub fn light() -> Self {
         Self {

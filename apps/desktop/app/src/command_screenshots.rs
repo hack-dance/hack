@@ -7,6 +7,7 @@ use hack_desktop_core::setup::{Remedy, Status};
 use hack_desktop_core::setup_fixtures;
 
 use super::*;
+use crate::setup_flow::{RunOutcome, Screen, Step};
 
 const FRAMES: [&str; 8] = [
     "h05-hackd-running",
@@ -73,12 +74,11 @@ pub(crate) fn capture(dir: &Path, cx: &mut HeadlessAppContext) {
 fn fixture(index: usize, window: &mut Window, cx: &mut Context<HackApp>) -> HackApp {
     let mut app = HackApp::new(crate::source_for(Some(Fixture::Empty)), false, window, cx);
     let daemon = index == 0;
-    let id = if daemon { "daemon" } else { "routing" };
-    let mut report = setup_fixtures::load("partial").expect("setup fixture");
+    let step = if daemon { Step::Daemon } else { Step::Domains };
+    let id = step.id();
+    let mut report =
+        setup_fixtures::load(if daemon { "partial" } else { "ready" }).expect("setup fixture");
     report.cli_program = Some("/usr/bin/true".into());
-    report
-        .cards
-        .retain(|card| card.id == "cli" || card.id == id);
     let card = report
         .cards
         .iter_mut()
@@ -91,6 +91,9 @@ fn fixture(index: usize, window: &mut Window, cx: &mut Context<HackApp>) -> Hack
         card.remedy = Remedy::Admin(vec!["global".into(), "install".into()]);
     }
     app.show_setup_now(report);
+    for visited in Step::ALL.into_iter().take(step.index() + 1) {
+        app.setup_flow.enter(Screen::Step(visited));
+    }
     if index == 1 {
         // Use checked fixture props to render the enabled control. No action is clicked.
         app.live = true;
@@ -112,7 +115,7 @@ fn fixture(index: usize, window: &mut Window, cx: &mut Context<HackApp>) -> Hack
         _ => unreachable!(),
     };
     let props = CommandControl {
-        id: format!("setup:{id}"),
+        id: crate::setup_command::control_id(step),
         label: if daemon {
             "hack daemon start"
         } else {
@@ -132,6 +135,11 @@ fn fixture(index: usize, window: &mut Window, cx: &mut Context<HackApp>) -> Hack
     assert!(app.run_drawer_command(
         props,
         move |app, completion, cx| {
+            app.setup_flow.outcome = Some(RunOutcome {
+                step,
+                exit: completion.exit.clone(),
+                diagnosis: completion.diagnosis,
+            });
             if matches!(index, 4 | 7) && completion.exit == CommandExit::Code(0) {
                 let mut checked = app.setup.report.clone();
                 let card = checked
@@ -170,30 +178,37 @@ fn wait_for_frame(index: usize, app: &Entity<HackApp>, cx: &mut HeadlessAppConte
     if index == 1 {
         return;
     }
+    wait_for_command(app, cx, FRAMES[index], |drawer, run, cx| match index {
+        0 => drawer
+            .session
+            .as_ref()
+            .and_then(|panel| panel.read(cx).active())
+            .and_then(|term| term.read(cx).output_text())
+            .is_some_and(|output| output.contains("Waiting for hackd to answer")),
+        2 | 6 => run.waiting_for_password,
+        _ => !run.running(),
+    });
+}
+
+fn wait_for_command(
+    app: &Entity<HackApp>,
+    cx: &mut HeadlessAppContext,
+    frame: &str,
+    ready: impl Fn(&Drawer, &Run, &gpui_kit::App) -> bool,
+) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         cx.update(|cx| app.update(cx, settle));
-        let ready = cx.update(|cx| {
+        if cx.update(|cx| {
             let drawer = &app.read(cx).panels.command;
             let run = drawer.last.as_ref().expect("command fixture run");
-            match index {
-                0 => drawer
-                    .session
-                    .as_ref()
-                    .and_then(|panel| panel.read(cx).active())
-                    .and_then(|term| term.read(cx).output_text())
-                    .is_some_and(|output| output.contains("Waiting for hackd to answer")),
-                2 | 6 => run.waiting_for_password,
-                _ => !run.running(),
-            }
-        });
-        if ready {
+            ready(drawer, run, cx)
+        }) {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "fixture {} did not reach its state",
-            FRAMES[index]
+            "fixture {frame} did not reach its state"
         );
     }
 }
@@ -201,10 +216,19 @@ fn wait_for_frame(index: usize, app: &Entity<HackApp>, cx: &mut HeadlessAppConte
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup_flow::StepState;
     use gpui_kit::AnyWindowHandle;
     use std::sync::Arc;
 
     fn open(index: usize) -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
+        let (mut cx, window, app) = open_with(|window, cx| fixture(index, window, cx));
+        wait_for_frame(index, &app, &mut cx);
+        (cx, window, app)
+    }
+
+    fn open_with(
+        make: impl FnOnce(&mut Window, &mut Context<HackApp>) -> HackApp,
+    ) -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_kit::NoopTextSystem::new()),
             Arc::new(hack_desktop_ui::icons::Assets),
@@ -220,12 +244,57 @@ mod tests {
                         ..WindowOptions::default()
                     },
                     cx,
-                    |window, cx| cx.new(|cx| fixture(index, window, cx)),
+                    |window, cx| cx.new(|cx| make(window, cx)),
                 )
             })
             .unwrap();
-        wait_for_frame(index, &app, &mut cx);
         (cx, window, app)
+    }
+
+    #[test]
+    fn setup_run_opens_the_drawer_on_daemon_dns_and_skipped_https_screens() {
+        for (frame, step, args) in [
+            (
+                "h04",
+                Step::Daemon,
+                &["daemon", "start", "--no-interactive"][..],
+            ),
+            ("h09", Step::Domains, &["global", "install"][..]),
+            ("h14", Step::Https, &["global", "trust"][..]),
+        ] {
+            let (mut cx, window, app) = open_with(|window, cx| {
+                let mut app =
+                    HackApp::new(crate::source_for(Some(Fixture::Empty)), false, window, cx);
+                crate::setup_frames::load(&mut app, frame);
+                app
+            });
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("run", cx);
+            })
+            .unwrap();
+            cx.update(|cx| {
+                let drawer = &app.read(cx).panels.command;
+                assert!(drawer.visible(), "{frame} Run did not open the drawer");
+                let run = drawer.last.as_ref().expect("Run started a command");
+                assert_eq!(run.props.id, crate::setup_command::control_id(step));
+                let bound_args = &run.spec.args;
+                let command = bound_args.len() - args.len() - 1;
+                assert_eq!(bound_args[command], "/usr/bin/true");
+                assert_eq!(&bound_args[command + 1..], args);
+            });
+            wait_for_command(&app, &mut cx, frame, |_, run, _| !run.running());
+            cx.update(|cx| {
+                let drawer = &app.read(cx).panels.command;
+                assert!(matches!(
+                    drawer.last.as_ref().unwrap().phase,
+                    Phase::Ended {
+                        exit: CommandExit::Code(0),
+                        ..
+                    }
+                ));
+            });
+        }
     }
 
     #[test]
@@ -235,8 +304,12 @@ mod tests {
             app.update(cx, |app, cx| {
                 let last = app.panels.command.last.as_ref().unwrap();
                 assert!(last.waiting_for_password);
+                assert_eq!(app.setup_step_state(Step::Domains), StepState::Password);
+                app.skip_setup(Step::Domains, cx);
+                assert_eq!(app.setup_flow.step(), Some(Step::Domains));
                 app.close_command_drawer(cx);
                 assert!(!app.panels.command.visible());
+                assert_eq!(app.setup_step_state(Step::Domains), StepState::Running);
                 assert!(app.machine.held_by(Holder::Command));
             })
         });
@@ -323,6 +396,7 @@ mod tests {
         cx.update(|cx| {
             app.update(cx, |app, cx| {
                 let run = app.panels.command.last.as_ref().unwrap();
+                assert_eq!(app.setup_step_state(Step::Domains), StepState::Failed);
                 assert!(matches!(
                     run.phase,
                     Phase::Ended {

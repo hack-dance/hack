@@ -1,7 +1,7 @@
 //! Live adapter exercised with fake hack only, isolated homes and no socket.
 use hack_desktop_core::{
     runner::CliRunner,
-    setup::{SafeAction, Status},
+    setup::{CheckScope, SafeAction, Status},
     source::{LiveSource, Source},
 };
 use std::os::unix::fs::PermissionsExt;
@@ -78,6 +78,41 @@ esac
         daemon: None,
         cache: Default::default(),
     };
+    for (scope, expected_cards, expected_calls) in [
+        (CheckScope::Cli, &["cli"][..], &["version --json"][..]),
+        (
+            CheckScope::Daemon,
+            &["cli", "daemon"][..],
+            &["version --json", "daemon status --json"][..],
+        ),
+        (
+            CheckScope::Login,
+            &["cli", "daemon", "login"][..],
+            &["version --json", "daemon status --json"][..],
+        ),
+        (
+            CheckScope::Network,
+            &["cli", "docker", "daemon", "routing", "trust"][..],
+            &["version --json", "daemon status --json", "doctor --json"][..],
+        ),
+    ] {
+        std::fs::write(&calls, "").unwrap();
+        let report = source.setup_for(scope);
+        assert!(report.cli_ready());
+        let cards = report
+            .cards
+            .iter()
+            .map(|card| card.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(cards, expected_cards, "{scope:?}");
+        let calls = std::fs::read_to_string(&calls).unwrap();
+        let commands = calls
+            .lines()
+            .map(|call| call.split_once(" backend=").unwrap().0)
+            .collect::<Vec<_>>();
+        assert_eq!(commands, expected_calls, "{scope:?}");
+    }
+    std::fs::write(&calls, "").unwrap();
     let r = source.setup();
     assert_eq!(
         r.cards.iter().find(|c| c.id == "daemon").unwrap().status,

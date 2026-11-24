@@ -396,6 +396,7 @@ mod tests {
             context: ExecutionContext::from_values(&[("HOME".into(), "/home/test-user".into())])
                 .ok(),
             force_cli_gate: false,
+            project_registry_read: false,
         }
     }
 

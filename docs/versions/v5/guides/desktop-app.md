@@ -41,7 +41,7 @@ refuses, the app cannot do.
 | Files tab | Browse a running Compose service's directories, preview files, copy container paths and open worktree files in an editor. | `hack files ls --json`, `hack files cat --json` |
 | Env tab | Variable names and values per overlay and scope. See below. | `hack env list`, `get`, `add` |
 | Terminal panel | Log and shell tabs inside the window. On Linux, only in a build with the `terminal` feature. | `hack logs --pretty`, shells |
-| Setup | One card per setup step: the CLI, the runtime, `hackd`, routing and DNS, certificate trust, the login service. | read-only checks |
+| Setup | A step-by-step flow for the CLI, `hackd`, Docker, local domains, HTTPS, and optional start at login. Passing checks advance automatically. | read-only checks and explicit Run actions |
 | Doctor | Machine checks once, and project checks for each registered checkout. | `hack doctor --json` |
 | hackd | Whether `hackd` runs and matches the CLI, and a summary of always-on projects. | `hack daemon status --json` |
 | Upgrade | The upgrade review pane. See below. | `hack upgrade check`, `review`, `snapshot`, `rollback` |

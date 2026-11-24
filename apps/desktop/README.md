@@ -425,40 +425,35 @@ Renders: [running, dark](screenshots/window/running-dark.png),
 
 ## Setup
 
-![When Setup checks run](diagrams/setup-evidence.svg)
-([source](diagrams/setup-evidence.mmd))
+On launch the app checks machine setup. If it needs attention and you have
+not already opened a project, terminal or Doctor, the welcome screen opens.
+Use **Run setup again** in Doctor to start it yourself.
 
-A live launch checks setup (DESIGN.md section 2) and opens **Set up Hack** when
-something needs attention, unless you have already selected an instance,
-opened Doctor or opened a terminal tab: the check can take seconds and never
-pulls the window away from what you opened. A missing CLI still opens it.
-Doctor's **Run setup again** opens it any time. One
-card per step, in order: the Hack CLI (required), the Compose or native
-runtime, hackd, routing and DNS, certificate trust, and the login service.
+Setup walks through Hack CLI, Hack service, Docker, Local domains, HTTPS, and
+optional Start at login. Each step checks its own read-only evidence and
+prerequisites. Passing steps show
+what Hack found and advance after two seconds. **Stay on this step** pauses
+that advance, and **Next** resumes it. The progress list lets you reopen a
+passed or skipped step.
 
-- When another installed CLI shares this home and runs hackd at another
-  version, the hackd card names that install and offers no restart, as the
-  project list does.
-- Checks only read; they never start a service. Unknown and skipped steps stay
-  unresolved; a skip lasts for this session and never satisfies a check. The
-  CLI cannot be skipped, and **Continue** needs it.
-- The app runs only the fixed `hack daemon start` and `hack daemon install`,
-  each followed by fresh checks. Install needs a confirmed login-service
-  manager and an ordinary Hack home.
-- Admin steps (`hack global install`, `hack global trust`) call `sudo`, so they
-  go to your own terminal (**Open in terminal**: Terminal.app, or
-  `xdg-terminal-exec` on Linux). It shows the command and waits for Enter; no
-  password passes through the app. **Copy command** works everywhere.
-- Checks and fixes run the CLI that was checked, by absolute path, refused
-  when another user can change it, with a clean environment of named,
-  non-secret variables only.
-- Setup checks again on **Check again**, after each fix it runs, when the
-  window regains focus while Setup is shown or a fix is outstanding (back
-  from an admin step in the terminal), when you switch CLI, and once its
-  result is 10 minutes old while the pane stays open in a visible window. It never checks while a check or a fix runs.
+- A compatible CLI is required. Until it passes, the other steps wait on it.
+- A skip lasts for the session and does not count as a passed check. Native
+  runtime and project DNS and HTTPS observations appear under their relevant
+  steps. This keeps Compose setup actions scoped to Compose.
+- Setup also checks again on request, after an action, when the window regains
+  focus, on a CLI switch, and when visible results are ten minutes old.
+- Commands use the checked executable and execution context. Login service
+  installation requires a confirmed service manager and ordinary Hack home.
+  The terminal handles any system password prompt.
 
-Renders: [setup, light](screenshots/window/setup-light.png),
-[no CLI, dark](screenshots/window/setup-missing-cli-dark.png).
+Build and capture the fixture screens or drive the wizard in a macOS window:
+
+```sh
+cd apps/desktop
+bash scripts/build.sh --features screenshots
+target/debug/hack-desktop --setup-frames /tmp/hack-setup-frames
+target/debug/hack-desktop --fixtures empty --theme light --drive scripts/setup-drive/fixture.steps
+```
 
 ## Doctor
 

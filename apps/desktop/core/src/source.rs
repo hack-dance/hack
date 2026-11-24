@@ -643,6 +643,13 @@ pub trait Source: Send + Sync {
         crate::setup::fixture(self.snapshot(), &self.doctor_runs(&[]))
     }
 
+    /// Refresh only the cards needed by a wizard screen.
+    fn setup_for(&self, scope: crate::setup::CheckScope) -> crate::setup::Report {
+        let mut report = self.setup();
+        report.cards.retain(|card| scope.includes(&card.id));
+        report
+    }
+
     /// Run one fixed, non-admin setup action against the checked report,
     /// never anything inferred from Doctor text. Fixtures refuse.
     fn setup_action(
@@ -2122,6 +2129,10 @@ impl Source for LiveSource {
     }
     fn setup(&self) -> crate::setup::Report {
         self.read_setup()
+    }
+
+    fn setup_for(&self, scope: crate::setup::CheckScope) -> crate::setup::Report {
+        self.read_setup_for(scope)
     }
 
     fn setup_action(

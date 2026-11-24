@@ -1,6 +1,6 @@
 //! Setup I/O, separate from the pure evidence model. No observer starts a service.
 use crate::{
-    setup::{self, Report, SafeAction},
+    setup::{self, CheckScope, Report, SafeAction},
     source::{DoctorTarget, LiveSource},
 };
 use std::time::{Duration, Instant};
@@ -8,11 +8,21 @@ use std::time::{Duration, Instant};
 impl LiveSource {
     /// One bounded setup refresh, including native observations and doctor.
     pub fn read_setup(&self) -> Report {
-        self.read_setup_within(Duration::from_secs(120))
+        self.read_setup_for(CheckScope::Full)
+    }
+
+    pub fn read_setup_for(&self, scope: CheckScope) -> Report {
+        let mut report = self.read_setup_scoped(scope, Duration::from_secs(120));
+        report.cards.retain(|card| scope.includes(&card.id));
+        report
     }
 
     /// Budget seam for bounded adapter tests; live callers use `read_setup`.
     pub fn read_setup_within(&self, budget: Duration) -> Report {
+        self.read_setup_scoped(CheckScope::Full, budget)
+    }
+
+    fn read_setup_scoped(&self, scope: CheckScope, budget: Duration) -> Report {
         let deadline = Instant::now() + budget;
         let left = || {
             deadline
@@ -72,6 +82,19 @@ impl LiveSource {
             report.force_cli_gate = matches!(cli, Err(crate::runner::RunError::NotFound));
             return report;
         }
+        if scope == CheckScope::Cli {
+            let mut report = setup::derive(
+                cli.as_deref().map_err(|_| "CLI unavailable"),
+                None,
+                None,
+                None,
+                &[],
+                setup::Platform::current(),
+            );
+            report.cli_program = selected.ok();
+            report.context = context.ok();
+            return report;
+        }
         let daemon = if left().is_zero() {
             None
         } else {
@@ -81,9 +104,16 @@ impl LiveSource {
         // only a matching daemon snapshot is allowed, including during setup.
         let client = self.effective_daemon(daemon.as_ref());
         let socket = client.as_ref().and_then(|d| d.status().ok());
+        let check_projects = matches!(
+            scope,
+            CheckScope::Full | CheckScope::Docker | CheckScope::Network
+        );
         let mut projects = socket
             .as_ref()
             .filter(|s| {
+                if !check_projects {
+                    return false;
+                }
                 // Equal versions, or ones the CLI reports as compatible.
                 cli.as_ref().is_ok_and(|v| v == &s.version)
                     || daemon
@@ -94,7 +124,9 @@ impl LiveSource {
             })
             .and(client.as_ref())
             .and_then(|d| d.projects().ok());
-        if let Some(p) = &mut projects {
+        if matches!(scope, CheckScope::Full | CheckScope::Docker)
+            && let Some(p) = &mut projects
+        {
             for row in p.projects.iter_mut().filter(|p| p.is_native()) {
                 if row.status != "missing"
                     && let Some(root) = &row.repo_root
@@ -112,21 +144,30 @@ impl LiveSource {
                 }
             }
         }
-        let targets = projects
-            .as_ref()
-            .map(DoctorTarget::from_projects)
-            .unwrap_or_default();
-        // These machine routing/trust cards describe Compose exclusively;
-        // project observers below still choose each project's own backend.
-        let observer = LiveSource::new(
-            runner.clone().with_env("HACK_RUNTIME_BACKEND", "compose"),
-            None,
-        );
-        let runs = observer.doctor_runs_within(
-            &targets,
-            Duration::from_secs(90).min(left()),
-            Duration::from_secs(60),
-        );
+        let runs = if check_projects {
+            let mut targets = projects
+                .as_ref()
+                .map(DoctorTarget::from_projects)
+                .unwrap_or_default();
+            match scope {
+                CheckScope::Docker => targets.clear(),
+                CheckScope::Network => targets.retain(|target| target.native),
+                _ => {}
+            }
+            // Machine routing/trust describe Compose. Project observers choose
+            // their own backend when the scope needs their Doctor evidence.
+            let observer = LiveSource::new(
+                runner.clone().with_env("HACK_RUNTIME_BACKEND", "compose"),
+                None,
+            );
+            observer.doctor_runs_within(
+                &targets,
+                Duration::from_secs(90).min(left()),
+                Duration::from_secs(60),
+            )
+        } else {
+            Vec::new()
+        };
         let mut report = setup::derive(
             cli.as_deref().map_err(|_| "CLI unavailable"),
             projects.as_ref(),

@@ -646,6 +646,7 @@ mod tests {
                     checked("routing", "install"),
                     checked("trust", "trust"),
                 ],
+                project_registry_read: false,
             }
         }
     }

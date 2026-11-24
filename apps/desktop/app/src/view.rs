@@ -184,8 +184,12 @@ pub struct HackApp {
     pub(crate) hackd_evidence_seen: String,
     /// Setup checks (DESIGN.md section 2; `setup_view`).
     pub(crate) setup: hack_desktop_core::setup::Pane,
+    pub(crate) setup_flow: crate::setup_flow::Flow,
     #[cfg(hack_terminal)]
-    pub(crate) setup_command_check: Option<(crate::command_control::CommandRunId, String)>,
+    pub(crate) setup_command_check: Option<(
+        crate::command_control::CommandRunId,
+        crate::setup_flow::Step,
+    )>,
     /// The launch check has not reported yet: when it finds something to
     /// do, setup opens.
     pub(crate) setup_on_launch: bool,
@@ -259,6 +263,7 @@ impl HackApp {
             hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
+            setup_flow: Default::default(),
             #[cfg(hack_terminal)]
             setup_command_check: None,
             setup_on_launch: live,
@@ -1086,7 +1091,11 @@ impl HackApp {
             self.health = Default::default();
             // Setup's report and bound commands were the previous CLI's.
             self.setup.source_changed();
+            self.setup_flow = Default::default();
             if self.pane == Pane::Setup {
+                self.setup_flow.enter(crate::setup_flow::Screen::Step(
+                    crate::setup_flow::Step::Cli,
+                ));
                 self.load_setup(cx);
             } else if self.pane == Pane::Doctor {
                 self.load_doctor(cx);
@@ -1139,26 +1148,28 @@ impl HackApp {
                             .child("Hack"),
                     )
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("search")
-                            .w(size::SEARCH_W)
-                            .h(px(24.))
-                            .rounded(radius::CONTROL)
-                            .bg(p.surface)
-                            .hairline(p.border_strong)
-                            .child(
-                                Input::new(&self.search)
-                                    .appearance(false)
-                                    .small()
-                                    .cleanable(true)
-                                    .prefix(hack_desktop_ui::components::icon(
-                                        Glyph::Search,
-                                        size::ICON,
-                                        p.text_muted,
-                                    )),
-                            ),
-                    )
+                    .when(self.pane != Pane::Setup, |d| {
+                        d.child(
+                            div()
+                                .id("search")
+                                .w(size::SEARCH_W)
+                                .h(px(24.))
+                                .rounded(radius::CONTROL)
+                                .bg(p.surface)
+                                .hairline(p.border_strong)
+                                .child(
+                                    Input::new(&self.search)
+                                        .appearance(false)
+                                        .small()
+                                        .cleanable(true)
+                                        .prefix(hack_desktop_ui::components::icon(
+                                            Glyph::Search,
+                                            size::ICON,
+                                            p.text_muted,
+                                        )),
+                                ),
+                        )
+                    })
                     .child(div().w(space::S6)),
             )
     }
@@ -1799,7 +1810,12 @@ impl HackApp {
 
     fn status_items(&self, list: &ListView) -> Vec<(Option<Status>, String)> {
         if list.cli_version.is_none() {
-            return vec![(None, "not connected".into())];
+            let label = if matches!(list.phase, Phase::CliMissing) {
+                "Hack CLI not found"
+            } else {
+                "not connected"
+            };
+            return vec![(None, label.into())];
         }
         let c = list.counts;
         let always_on = list
@@ -1919,12 +1935,36 @@ impl HackApp {
 
 impl Render for HackApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let list = self.model.list();
-        let ui = self.ui(cx);
+        let mut ui = self.ui(cx);
+        if self.pane == Pane::Setup {
+            ui.p = hack_desktop_ui::tokens::Palette::setup(ui.p.mode);
+        }
         let p = ui.p;
         self.sync_service_logs(cx);
         #[cfg(hack_terminal)]
         self.reconcile_selected_service_panel(window, cx);
+        let root = div()
+            .id("hack-window")
+            .key_context("HackWindow")
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.search.update(cx, |s, cx| s.focus(window, cx));
+            }))
+            .map(|root| self.service_handlers(root, cx))
+            .map(|root| self.terminal_handlers(root, cx))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(p.surface)
+            .text_color(p.text_primary)
+            .font_family(ui.font.clone())
+            .child(self.title_bar(&ui));
+
+        let list = self.model.list();
+        // Setup renders independently of the project list phase.
+        if self.pane == Pane::Setup {
+            crate::follow_up_view::reconcile(self, &list);
+            return root.child(crate::setup_screen::render(self, &ui, window, cx));
+        }
         let follow_up = if self.pane == Pane::Project {
             crate::follow_up_view::render(self, &list, &ui, cx)
         } else {
@@ -1936,23 +1976,13 @@ impl Render for HackApp {
             _ if self.pane == Pane::ErrorsSheet => {
                 crate::health_fixtures::errors(self, &ui, window, cx)
             }
-            // Setup applies whatever the project list shows, a missing CLI
-            // included.
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),
-            _ if self.pane == Pane::Setup => crate::setup_view::render(self, &ui, cx),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.
             _ if self.pane == Pane::Doctor => crate::doctor_view::render(self, &ui, window, cx),
-            Phase::CliMissing => empty_pane(
-                Glyph::CircleAlert,
-                "Hack CLI not found",
-                "The app runs the hack command for everything. Install it, then reopen the app.",
-                Some("brew install hack-dance/tap/hack"),
-                &ui,
-            )
-            .into_any_element(),
+            Phase::CliMissing => crate::setup_screen::not_connected(&ui, cx),
             Phase::Error { code, message } => empty_pane(
                 Glyph::CircleAlert,
                 "Could not read projects",
@@ -2019,32 +2049,17 @@ impl Render for HackApp {
                     .child(main),
             )
             .children(command_drawer);
-        div()
-            .id("hack-window")
-            .key_context("HackWindow")
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.search.update(cx, |s, cx| s.focus(window, cx));
-            }))
-            .map(|root| self.service_handlers(root, cx))
-            .map(|root| self.terminal_handlers(root, cx))
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(p.surface)
-            .text_color(p.text_primary)
-            .font_family(ui.font.clone())
-            .child(self.title_bar(&ui))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .when(!sheet, |d| d.child(self.sidebar(&list, &ui, cx)))
-                    .child(right_pane),
-            )
-            .when(!sheet, |d| {
-                d.child(self.status_bar_with_cli(&list, &ui, cx))
-            })
+        root.child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .when(!sheet, |d| d.child(self.sidebar(&list, &ui, cx)))
+                .child(right_pane),
+        )
+        .when(!sheet, |d| {
+            d.child(self.status_bar_with_cli(&list, &ui, cx))
+        })
     }
 }
 

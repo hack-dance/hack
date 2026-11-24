@@ -1,0 +1,24 @@
+# Run in a native window with --fixtures empty. All effects are mocked.
+setup open
+expect-setup welcome 4
+setup start
+expect-setup cli Passed 4
+setup stay
+wait 2200
+expect-setup cli Passed 4
+setup skip
+expect-setup cli Passed 4
+setup next
+expect-setup daemon NeedsAction 4
+setup skip
+expect-setup docker Passed 4
+expect-setup routing Unchecked 4
+setup skip
+expect-setup trust Unchecked 4
+setup skip
+expect-setup login NeedsAction 4
+setup skip
+expect-setup done 4
+setup finish
+expect-setup closed 4
+quit

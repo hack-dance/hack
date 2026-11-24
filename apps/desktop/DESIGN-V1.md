@@ -119,6 +119,13 @@ State colours (dot / pill background / pill text):
 
 Unknown is a ring so an unobserved project never reads as stopped.
 
+## Setup wizard
+
+Setup uses Builtin Light and Merino Dark in `Palette::setup`. The sidebar
+is 232 pt wide with 32 pt rows. The main card keeps a stage up to 560 pt
+wide and uses a 22 pt step title or 26 pt welcome and completion title.
+Command, details and footer controls maintain the same left alignment.
+
 ## Icons
 
 Lucide, from the icon catalog shipped inside the pinned `gpui-kit-assets`

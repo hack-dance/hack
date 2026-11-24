@@ -52,6 +52,10 @@
 //! upgrade-restore                 Restore… then confirm, on the newest
 //!                                 listed snapshot (never --overwrite)
 //! hackd                           open the hackd pane (reads hackd's status)
+//! setup <open|start|stay|next|skip|finish>
+//!                                 perform the matching wizard action
+//! expect-setup <screen> [seconds] wait for welcome, done, closed, or a
+//!                                 step ID and its state (e.g. cli Passed)
 //! expect-hackd <text> [<seconds>] wait for the hackd card's title, or a line
 //!                                 of its always-on summary, to contain text
 //! expect-env <NAME> [<seconds>]   wait for NAME in the Env listing
@@ -112,6 +116,16 @@ impl std::fmt::Debug for DriveValue {
 const ENV_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupAction {
+    Open,
+    Start,
+    Stay,
+    Next,
+    Skip,
+    Finish,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     Select {
         project: String,
@@ -158,6 +172,11 @@ pub enum Step {
     UpgradeSnapshot,
     UpgradeRestore,
     Hackd,
+    Setup(SetupAction),
+    ExpectSetup {
+        text: String,
+        within: Duration,
+    },
     ExpectHackd {
         text: String,
         within: Duration,
@@ -281,12 +300,21 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                 ),
             },
             ("hackd", []) => Step::Hackd,
+            ("setup", [action]) => Step::Setup(match *action {
+                "open" => SetupAction::Open,
+                "start" => SetupAction::Start,
+                "stay" => SetupAction::Stay,
+                "next" => SetupAction::Next,
+                "skip" => SetupAction::Skip,
+                "finish" => SetupAction::Finish,
+                _ => return Err(bad("unknown setup action")),
+            }),
             ("upgrade", []) => Step::Upgrade,
             ("upgrade-snapshot", []) => Step::UpgradeSnapshot,
             ("upgrade-restore", []) => Step::UpgradeRestore,
             (
                 "expect" | "expect-notice" | "expect-cli" | "expect-hackd" | "expect-upgrade"
-                | "expect-usage",
+                | "expect-usage" | "expect-setup",
                 _,
             ) if !rest.is_empty() => {
                 let (text, within) = match rest.rsplit_once(char::is_whitespace) {
@@ -303,6 +331,7 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                     "expect-hackd" => Step::ExpectHackd { text, within },
                     "expect-upgrade" => Step::ExpectUpgrade { text, within },
                     "expect-usage" => Step::ExpectUsage { text, within },
+                    "expect-setup" => Step::ExpectSetup { text, within },
                     _ => Step::ExpectNotice { text, within },
                 }
             }
@@ -728,6 +757,36 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
             handle
                 .update(cx, |app, _, cx| app.open_hackd(cx))
                 .map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        Step::Setup(action) => {
+            handle
+                .update(cx, |app, _, cx| match action {
+                    SetupAction::Open => app.open_setup(cx),
+                    SetupAction::Start => app.start_setup(cx),
+                    SetupAction::Stay => app.stay_on_setup_step(cx),
+                    SetupAction::Next => app.advance_setup(cx),
+                    SetupAction::Skip => {
+                        if let Some(step) = app.setup_flow.step() {
+                            app.skip_setup(step, cx);
+                        }
+                    }
+                    SetupAction::Finish => app.finish_setup(cx),
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        Step::ExpectSetup { text, within } => {
+            poll(handle, cx, *within, |app, _, _| {
+                (app.setup_position() == *text).then_some(())
+            })
+            .await
+            .ok_or_else(|| {
+                let now = handle
+                    .update(cx, |app, _, _| app.setup_position())
+                    .unwrap_or_default();
+                format!("setup did not reach {text:?} within {within:?} (shows {now:?})")
+            })?;
             Ok(String::new())
         }
         Step::ExpectHackd { text, within } => {

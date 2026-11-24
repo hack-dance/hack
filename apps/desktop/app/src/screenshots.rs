@@ -165,32 +165,42 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
     }
 }
 
-/// Every setup fixture (`setup_fixtures::NAMES`), light and dark, as
-/// `setup-<name>-<light|dark>.png`.
+pub fn run_setup(dir: &Path) {
+    std::fs::create_dir_all(dir).expect("create screenshot dir");
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(hack_desktop_ui::icons::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+    setup_shots(dir, &mut cx);
+}
+
+/// Capture the setup screens with fixture reports, using the normal window renderer.
 fn setup_shots(dir: &Path, cx: &mut HeadlessAppContext) {
-    for mode in [ThemeMode::Light, ThemeMode::Dark] {
-        for name in hack_desktop_core::setup_fixtures::NAMES {
+    for (mode, suffix) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {
+        for name in crate::setup_frames::NAMES {
             cx.update(|cx| Theme::change(mode, None, cx));
-            let opts = WindowOptions {
+            let mut opts = WindowOptions {
                 focus: false,
                 show: false,
                 ..crate::window_options()
             };
-            let report = hack_desktop_core::setup_fixtures::load(name).expect("setup fixture");
+            if let Some(gpui_kit::WindowBounds::Windowed(bounds)) = &mut opts.window_bounds {
+                bounds.size = gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(800.));
+            }
+            let base = if name.starts_with("h24") {
+                Fixture::CliMissing
+            } else {
+                Fixture::Empty
+            };
             let (handle, _app) = cx
                 .update(|cx| {
                     gpui_kit::open_window(opts, cx, |window, cx| {
                         cx.new(|cx| {
-                            // The window behind setup: no CLI for that card,
-                            // an empty registry otherwise.
-                            let base = if name == "missing-cli" {
-                                Fixture::CliMissing
-                            } else {
-                                Fixture::Empty
-                            };
                             let mut app =
                                 HackApp::new(crate::source_for(Some(base)), false, window, cx);
-                            app.show_setup_now(report);
+                            crate::setup_frames::load(&mut app, name);
                             app
                         })
                     })
@@ -198,15 +208,8 @@ fn setup_shots(dir: &Path, cx: &mut HeadlessAppContext) {
                 .expect("open offscreen window");
             cx.update_window(handle, |_, window, cx| window.render_frame(cx))
                 .expect("render");
-            let img = cx
-                .capture_screenshot(handle)
-                .expect("offscreen rendering must be available");
-            let suffix = if mode == ThemeMode::Dark {
-                "dark"
-            } else {
-                "light"
-            };
-            let path = dir.join(format!("setup-{name}-{suffix}.png"));
+            let img = cx.capture_screenshot(handle).expect("capture setup window");
+            let path = dir.join(format!("{name}-{suffix}.png"));
             img.save(&path).expect("write png");
             println!("{}", path.display());
             cx.update_window(handle, |_, window, _| window.remove_window())

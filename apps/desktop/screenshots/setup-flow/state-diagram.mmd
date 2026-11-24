@@ -1,0 +1,42 @@
+---
+title: Desktop setup · navigation
+---
+stateDiagram-v2
+    direction TB
+    state Connection <<choice>>
+    state Result <<choice>>
+    state Progress <<choice>>
+    state "Not connected" as NotConnected
+    state "Hack CLI · required" as Cli
+    state "Needs action" as NeedsAction
+    state "Couldn’t check" as Unchecked
+    state "All done" as Done
+
+    classDef wait stroke-width:1.6px
+    class Offline,NotConnected wait
+    classDef ok stroke-width:1.6px
+    class Done ok
+
+    [*] --> Connection
+    Connection --> Offline : Connection lost
+    Offline --> Connection : Connection returns
+    Connection --> NotConnected : CLI missing
+    NotConnected --> Welcome : Set up Hack
+    Connection --> Welcome : Open setup
+    Welcome --> Cli : Start setup
+    Cli --> Cli : Install, switch, or retry
+    Cli --> Checking : Hack 5 confirmed
+    Checking --> Result
+    Result --> Passed : Check passed
+    Result --> NeedsAction : Fix available
+    Result --> Unchecked : Evidence unavailable
+    Unchecked --> Checking : Check again
+    NeedsAction --> Checking : Recheck or command exit
+    NeedsAction --> Progress : Skip this step
+    Unchecked --> Progress : Skip this step
+    Passed --> Passed : Stay
+    Passed --> Progress : Two seconds or Next
+    Progress --> Checking : Step remains
+    Progress --> Done : No unresolved steps
+    Done --> Checking : Reopen or regress
+    Done --> [*] : Open Hack

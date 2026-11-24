@@ -39,6 +39,11 @@ mod machine_view;
 mod screenshots;
 mod service_catalog;
 mod service_view;
+mod setup_command;
+mod setup_flow;
+#[cfg(feature = "screenshots")]
+mod setup_frames;
+mod setup_screen;
 mod setup_view;
 #[cfg(hack_terminal)]
 mod terminal;
@@ -60,6 +65,7 @@ pub(crate) struct Args {
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
     pub service_screenshots: Option<std::path::PathBuf>,
+    pub setup_frames: Option<std::path::PathBuf>,
     pub command_screenshots: Option<std::path::PathBuf>,
     pub sequence: Option<std::path::PathBuf>,
     /// `--drive`: run the steps file in a child app and report.
@@ -87,6 +93,7 @@ fn parse_args() -> Args {
         theme: None,
         screenshots: None,
         service_screenshots: None,
+        setup_frames: None,
         command_screenshots: None,
         sequence: None,
         drive: None,
@@ -145,6 +152,7 @@ fn parse_args() -> Args {
             "--service-screenshots" => {
                 a.service_screenshots = Some(it.next().unwrap_or_else(|| usage()).into())
             }
+            "--setup-frames" => a.setup_frames = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--command-screenshots" => {
                 a.command_screenshots = Some(it.next().unwrap_or_else(|| usage()).into());
             }
@@ -222,6 +230,11 @@ fn main() {
         std::process::exit(2);
     }
     #[cfg(feature = "screenshots")]
+    if let Some(dir) = &args.setup_frames {
+        screenshots::run_setup(dir);
+        return;
+    }
+    #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.sequence {
         screenshots::sequence(dir);
         return;
@@ -250,8 +263,14 @@ fn main() {
         }
     }
     #[cfg(not(feature = "screenshots"))]
-    if args.screenshots.is_some() || args.sequence.is_some() || args.service_screenshots.is_some() {
-        eprintln!("--screenshots and --sequence need a build with --features screenshots");
+    if args.screenshots.is_some()
+        || args.sequence.is_some()
+        || args.service_screenshots.is_some()
+        || args.setup_frames.is_some()
+    {
+        eprintln!(
+            "--screenshots, --service-screenshots, --setup-frames and --sequence need a build with --features screenshots"
+        );
         std::process::exit(2);
     }
     gpui_kit::application()

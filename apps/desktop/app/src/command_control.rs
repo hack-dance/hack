@@ -63,6 +63,16 @@ impl Drawer {
         self.visible
     }
 
+    /// Return the active control and whether its password prompt is visible.
+    pub(crate) fn running_control(&self) -> Option<(&str, bool)> {
+        self.last.as_ref().filter(|run| run.running()).map(|run| {
+            (
+                run.props.id.as_str(),
+                self.visible && run.waiting_for_password,
+            )
+        })
+    }
+
     pub(crate) fn waiting_for_password(&self, control_id: &str) -> bool {
         self.last
             .as_ref()

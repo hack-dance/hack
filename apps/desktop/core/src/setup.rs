@@ -14,6 +14,10 @@ pub enum Status {
     Passed,
     NeedsAttention,
     Unknown,
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "version-mismatch")]
+    VersionMismatch,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SafeAction {
@@ -43,17 +47,77 @@ pub struct Card {
     pub detail: String,
     pub remedy: Remedy,
 }
+/// Read scope for an arrival check. The CLI and service evidence are
+/// refreshed whenever a step depends on them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CheckScope {
+    #[default]
+    Full,
+    Cli,
+    Daemon,
+    Docker,
+    Network,
+    Login,
+}
+
+impl CheckScope {
+    pub fn includes(self, id: &str) -> bool {
+        self == Self::Full
+            || id == "cli"
+            || (id == "daemon" && self != Self::Cli)
+            // Both scopes run machine Doctor and retain all its setup findings.
+            || (matches!(self, Self::Docker | Self::Network)
+                && matches!(id, "docker" | "routing" | "trust"))
+            || match self {
+                Self::Docker => id.starts_with("native:"),
+                Self::Network => id.starts_with("dns:") || id.starts_with("trust:"),
+                Self::Login => id == "login",
+                _ => false,
+            }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Report {
     pub cards: Vec<Card>,
     pub cli_program: Option<String>,
     pub context: Option<crate::execution::ExecutionContext>,
     pub force_cli_gate: bool,
+    /// A successful registry read can confirm that a previous project was removed.
+    #[serde(skip)]
+    pub project_registry_read: bool,
 }
 impl Report {
     pub fn needed(&self) -> bool {
         self.cards.is_empty() || self.cards.iter().any(|c| c.status != Status::Passed)
     }
+    /// Keep observations from the same CLI and execution context. If a
+    /// registry read failed, keep previously known project checks unresolved.
+    pub fn with_prior(mut self, prior: &Self, scope: CheckScope) -> Self {
+        if self.cli_ready()
+            && self.cards.first() == prior.cards.first()
+            && self.cli_program == prior.cli_program
+            && self.context == prior.context
+        {
+            self.cards.extend(prior.cards.iter().filter_map(|card| {
+                if !scope.includes(&card.id) {
+                    return Some(card.clone());
+                }
+                let project_card = ["native:", "dns:", "trust:"]
+                    .iter()
+                    .any(|prefix| card.id.starts_with(prefix));
+                if !self.project_registry_read && project_card {
+                    let mut unchecked = card.clone();
+                    unchecked.status = Status::Unknown;
+                    unchecked.detail = "The project registry could not be checked.".into();
+                    return Some(unchecked);
+                }
+                None
+            }));
+        }
+        self
+    }
+
     /// Bind authored argv to the executable and non-secret context actually checked.
     pub fn command(&self, args: Vec<String>) -> Result<crate::terminal::CommandSpec, String> {
         if !self.cli_ready() {
@@ -445,6 +509,7 @@ pub fn derive(
             .map(|_| "/usr/local/bin/hack".into()),
         context: None,
         force_cli_gate: cli.is_ok_and(|v| !supported_cli(v)),
+        project_registry_read: projects.is_some(),
     }
 }
 fn routing(

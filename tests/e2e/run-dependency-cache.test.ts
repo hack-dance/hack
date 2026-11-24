@@ -60,9 +60,14 @@ volumes:
   dependencies: {}
 `;
   await writeFile(join(projectDir, "docker-compose.yml"), compose);
+  // Keep ingress diagnostics out of this dependency-cache fixture.
   await writeFile(
     join(projectDir, "hack.config.json"),
-    '{"name":"cache-run","dev_host":"cache-run.hack"}\n'
+    JSON.stringify({
+      name: "cache-run",
+      dev_host: "cache-run.hack",
+      internal: { dns: false },
+    })
   );
   await writeFile(join(primary, "bun.lock"), "lock-one\n");
   const git = (args: string[]) => {
@@ -287,5 +292,5 @@ test("unlabelled run keeps the existing dependency skip without container inspec
   const result = await f.run();
   expect(result.call.args).toContain("--no-deps");
   expect(result.call.volumeName).toBeNull();
-  expect(result.calls.some((call) => call.args[0] === "inspect")).toBe(false);
+  expect(result.calls.filter((call) => call.args[0] === "inspect")).toEqual([]);
 });

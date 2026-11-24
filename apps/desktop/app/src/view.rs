@@ -1828,9 +1828,6 @@ impl HackApp {
         if self.tab == crate::files_view::FILES_TAB {
             tabs = tabs.child(self.project_files_picker(d, cx));
         }
-        if self.tab == crate::files_view::FILES_TAB {
-            tabs = tabs.child(self.project_files_picker(d, cx));
-        }
         let body: AnyElement = match self.tab {
             5 => div()
                 .id("service-catalog")

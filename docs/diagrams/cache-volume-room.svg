@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-state" viewBox="0 0 954 451" width="954" height="451" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_tw:var(--pele-title-weight,bold);--_fm:var(--pele-font-mono,Geist Mono);font:15px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Geist)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="state" data-theme="light"><style><![CDATA[/* Hack Dance house theme for Pele 1.9.x: ink on cream (fleet palette B). Light by default; dark via [data-theme=dark].
+   Colour only for meaning (house classes). Never resize label text: Pele sized label boxes for its own font size. */
+.pele {
+  --pele-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --pele-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --pele-bg: #F3EFE3;
+  --pele-fg: #1D1D1B;
+  --pele-muted: #3D3C37;
+  --pele-line: #3D3C37;
+  --pele-surface: #FBF9F1;
+  --pele-surface-alt: #E8E4D8;
+  --pele-border: #66625A;
+  --pele-accent: #1D1D1B;
+  --pele-critical: #C2461F;
+  --pele-error: #C2461F;
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: #5b3df5; --pele-series-2: #0e9f8a; --pele-series-3: #e08a00; --pele-series-4: #d6345a;
+  --pele-series-5: #2f7de1; --pele-series-6: #8a5cf6; --pele-series-7: #4f9d2d; --pele-series-8: #a0674b;
+  /* semantic state tints (house classes) */
+  --hd-live: #4B4790;  --hd-live-bg: #E6E4F0;
+  --hd-wait: #34506E;  --hd-wait-bg: #D3DBE5;
+  --hd-ok:   #3A7A2E;  --hd-ok-bg:   #E2EBD9;
+  --hd-fail: #C2461F;  --hd-fail-bg: #F5E0D6;
+  --hd-idle: #8A8576;  --hd-idle-bg: #E8E4D8;
+  background: var(--pele-bg);
+}
+.pele[data-theme="dark"], [data-theme="dark"] .pele {
+  --pele-bg: #11100E;
+  --pele-fg: #EDE8D9;
+  --pele-muted: #C9C3B2;
+  --pele-line: #C9C3B2;
+  --pele-surface: #191815;
+  --pele-surface-alt: #1B1A17;
+  --pele-border: #8F897A;
+  --pele-accent: #EDE8D9;
+  --pele-critical: #FF7A52;
+  --pele-error: #FF7A52;
+  --pele-series-1: #9a86ff; --pele-series-2: #3fd1b8; --pele-series-3: #ffb547; --pele-series-4: #ff6b8b;
+  --pele-series-5: #6aa8ff; --pele-series-6: #c4a5ff; --pele-series-7: #8fd16a; --pele-series-8: #d29b7f;
+  --hd-live: #A39CE0;  --hd-live-bg: #24223A;
+  --hd-wait: #9DB4CF;  --hd-wait-bg: #22303D;
+  --hd-ok:   #7CC25E;  --hd-ok-bg:   #1C2A17;
+  --hd-fail: #FF7A52;  --hd-fail-bg: #33190F;
+  --hd-idle: #7A7466;  --hd-idle-bg: #1B1A17;
+}
+/* polish */
+.pele .pele-edge path { stroke-width: 1.4px; stroke-linecap: round; }
+.pele .pele-edge-label rect { fill: var(--pele-bg); }
+.pele .pele-edge-label text { fill: var(--pele-muted); }
+.pele .pele-cluster-label, .pele .pele-title { letter-spacing: .01em; }
+.pele .pele-node > rect, .pele .pele-node > path, .pele .pele-node > polygon, .pele .pele-node > circle, .pele .pele-node > ellipse { stroke-width: 1.2px; }
+/* house semantic classes: in Mermaid write `classDef live stroke-width:1.6px` + `class X live` */
+.pele .live > rect, .pele .live > path, .pele .live > polygon, .pele .live > circle, .pele .live > ellipse { fill: var(--hd-live-bg) !important; stroke: var(--hd-live) !important; }
+.pele .wait > rect, .pele .wait > path, .pele .wait > polygon, .pele .wait > circle, .pele .wait > ellipse { fill: var(--hd-wait-bg) !important; stroke: var(--hd-wait) !important; }
+.pele .ok   > rect, .pele .ok   > path, .pele .ok   > polygon, .pele .ok > circle, .pele .ok > ellipse { fill: var(--hd-ok-bg)   !important; stroke: var(--hd-ok)   !important; }
+.pele .fail > rect, .pele .fail > path, .pele .fail > polygon, .pele .fail > circle, .pele .fail > ellipse { fill: var(--hd-fail-bg) !important; stroke: var(--hd-fail) !important; }
+.pele .idle > rect, .pele .idle > path, .pele .idle > polygon, .pele .idle > circle, .pele .idle > ellipse { fill: var(--hd-idle-bg) !important; stroke: var(--hd-idle) !important; stroke-dasharray: 4 3; }
+.pele .live .pele-label { fill: var(--hd-live); font-weight: 600; }
+.pele .wait .pele-label { fill: var(--hd-wait); font-weight: 600; }
+.pele .ok   .pele-label { fill: var(--hd-ok);   font-weight: 600; }
+.pele .fail .pele-label { fill: var(--hd-fail); font-weight: 600; }
+.pele .idle .pele-label { fill: var(--hd-idle); }
+]]></style><text class="pele-title" font-weight="var(--_tw)" text-anchor="middle" xml:space="preserve"><tspan x="477" y="40.75">New cache volume · room</tspan></text><g transform="translate(0,35)"><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge pele-transition" data-id="edge0"><path d="M289.88,38L289.88,99"/><path class="pele-marker" d="M289.88,106L286.52,98L293.24,98Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge1"><path d="M267.54,149L267.54,161.25C267.54,171.02 230.58,177 170.27,177C109.96,177 73,192.2 73,217L73,268"/><path class="pele-marker" d="M73,275L69.64,267L76.36,267Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge2"><path d="M282.43,149L282.43,162C282.43,178.74 272.35,189 255.88,189C239.42,189 229.33,199.64 229.33,217L229.33,241C229.33,252 289.88,252 289.88,263L289.88,268"/><path class="pele-marker" d="M289.88,275L286.52,267L293.24,267Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge3"><path d="M312.23,149L312.23,161.25C312.23,171.02 374.53,177 476.18,177C577.82,177 640.12,192.2 640.12,217L640.12,268"/><path class="pele-marker" d="M640.12,275L636.76,267L643.48,267Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge4"><path d="M289.88,275L289.88,263C289.88,252 390.3,252 390.3,241L390.3,217C390.3,199.64 372.64,189 343.82,189C315,189 297.33,178.74 297.33,162L297.33,156"/><path class="pele-marker" d="M297.33,149L300.69,157L293.97,157Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge5"><path d="M73,318C73,339.5 396.8,339.5 396.8,361L396.8,367"/><path class="pele-marker" d="M396.8,374L393.44,366L400.16,366Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge6"><path d="M640.12,318L640.12,330C640.12,345.5 396.8,345.5 396.8,361L396.8,367"/><path class="pele-marker" d="M396.8,374L393.44,366L400.16,366Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-note-edge" stroke="var(--_b)" stroke-dasharray="3 4" data-id="evict-evict----note-7"><path d="M321.3,296.5L365.3,296.5"/></g><g class="pele-edge pele-note-edge" stroke="var(--_b)" stroke-dasharray="3 4" data-id="refused-refused----note-8"><path d="M681.13,296.5L725.13,296.5"/></g></g><g class="pele-edge-labels" font-size="13"><g class="pele-edge-label" data-id="edge0"><rect x="231.32" y="58.5" width="117.12" height="20" rx="3" fill="var(--_bg)"/><text x="289.88" y="73.05" text-anchor="middle">new cache needed</text></g><g class="pele-edge-label" data-id="edge1"><rect x="26" y="219" width="94" height="20" rx="3" fill="var(--_bg)"/><text x="73" y="233.55" text-anchor="middle">[fewer than 64]</text></g><g class="pele-edge-label" data-id="edge2"><rect x="159.93" y="219" width="138.81" height="20" rx="3" fill="var(--_bg)"/><text x="229.33" y="233.55" text-anchor="middle">[64, one unreferenced]</text></g><g class="pele-edge-label" data-id="edge3"><rect x="582.29" y="219" width="115.67" height="20" rx="3" fill="var(--_bg)"/><text x="640.12" y="233.55" text-anchor="middle">[64, all referenced]</text></g><g class="pele-edge-label" data-id="edge4"><rect x="318.73" y="219" width="143.14" height="20" rx="3" fill="var(--_bg)"/><text x="390.3" y="233.55" text-anchor="middle">oldest deleted, no force</text></g></g><g class="pele-nodes"><g class="pele-node pele-state-start" data-id="root_start" transform="translate(289.88,31)"><circle r="7" fill="var(--_l)"/></g><g class="pele-node pele-state" data-id="count" transform="translate(289.88,127.5)"><rect x="-34.34" y="-21.5" width="68.69" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">count</text></g><g class="pele-node pele-state ok" data-id="create" transform="translate(73,296.5)"><rect x="-36.84" y="-21.5" width="73.69" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)" style="stroke-width:1.6px;"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">create</text></g><g class="pele-node pele-state-end" data-id="root_end" transform="translate(396.8,383)"><circle r="8.5" fill="var(--_bg)" stroke="var(--_l)"/><circle r="5" fill="var(--_l)"/></g><g class="pele-node pele-state" data-id="evict" transform="translate(289.88,296.5)"><rect x="-31.42" y="-21.5" width="62.84" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">evict</text></g><g class="pele-node pele-state fail" data-id="refused" transform="translate(640.12,296.5)"><rect x="-41.01" y="-21.5" width="82.03" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)" style="stroke-width:1.6px;"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">refused</text></g><g class="pele-note" data-id="evict----note-7" transform="translate(462.21,296.5)"><path d="M-96.9,-33.5H88.9L96.9,-25.5V33.5H-96.9Z" fill="var(--_bg)" stroke="var(--_b)"/><path d="M88.9,-33.5V-25.5H96.9" fill="none" stroke="var(--_b)"/><text class="pele-label" font-size="13" fill="var(--_m)" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-12.45">Unreferenced: no receipt that</tspan><tspan x="0" y="4.55">is not removed, no native</tspan><tspan x="0" y="21.55">receipt, no quarantine record.</tspan></text></g><g class="pele-note" data-id="refused----note-8" transform="translate(827.45,296.5)"><path d="M-102.32,-33.5H94.32L102.32,-25.5V33.5H-102.32Z" fill="var(--_bg)" stroke="var(--_b)"/><path d="M94.32,-33.5V-25.5H102.32" fill="none" stroke="var(--_b)"/><text class="pele-label" font-size="13" fill="var(--_m)" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-12.45">graph_cache_capacity: remove</tspan><tspan x="0" y="4.55">the data of a project you</tspan><tspan x="0" y="21.55">no longer use.</tspan></text></g></g></g></svg>

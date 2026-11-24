@@ -489,7 +489,7 @@ export function nativeProcessCheckResult(
   /** Refusals of services that run only when one of their profiles is selected. */
   profiled: readonly NativeProcessRefusal[] = []
 ): {
-  readonly name: string;
+  readonly name: typeof NATIVE_PROCESS_CHECK;
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly nativeProcess: NativeProcessReport;

@@ -48,6 +48,8 @@ in `.hack/docker-compose.yml`. Adjust relative build and mount paths for that
 file's location; keep the original Compose file until the app checks pass.
 This is the Compose setup path; `hack config adopt` is a separate native configuration path.
 If `.hack/` already exists, review that setup instead of replacing it.
+New scaffold files and directories created by Hack exclude group and other write
+permissions, even with a shell umask of `002`.
 
 Check `.hack/docker-compose.yml`: its images, commands, ports and mounts should
 match your app. Check the local URL in the service's routing labels. Commit shared
@@ -84,6 +86,15 @@ names the blocker and shows the command to run next.
 `hack ps` lists services with their primary address and current state. An
 address followed by `+1` has one more configured address. Use `hack ps --wide`
 for all addresses, container names, exit codes and port details.
+Use `hack ps --copies` to list the project's checkouts and branch instances
+together. The count names the backend that was observed. A copy whose runtime
+state cannot be confirmed on that backend shows `unknown`. Saved native
+instances stay listed when Compose is selected. Native mode lists only native
+records and does not query Docker. Authored projects leave the
+address cell empty because the copies view cannot resolve their saved routes.
+Use `hack ps --copies --json` for the same inventory in structured form.
+The result includes `observation: {ok, code}` for inventory, setup, or
+deadline failures. The command still returns the known copies in those cases.
 
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
@@ -108,9 +119,10 @@ Hack checks it before startup hooks. If the check fails, follow the displayed
 login command and try again. Use `hack config validate` to verify declarations
 without running the checks.
 
-When the project declares remotes, `hack ps` shows each default target with
-its configured address. An environment-backed hostname displays the variable
-name. This view reports declarations and whether their connection was checked.
+When the project declares remotes, `hack ps` shows the observed target or
+`unknown` if it cannot identify one. An environment-backed hostname displays
+the variable name. Start the whole project with `hack up`. Use `hack down`
+followed by `hack up` to restart it.
 
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may

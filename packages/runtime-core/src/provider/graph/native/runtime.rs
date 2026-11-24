@@ -879,7 +879,9 @@ impl<B: Backend> Driver for Session<'_, B> {
                 self.receipt.failed(service, observation);
                 self.save()
             }
-            Event::Observed { .. } | Event::ServiceReady { .. } => Ok(()),
+            // Native-authored graphs keep their own phases; "all started" has no
+            // reader here.
+            Event::Observed { .. } | Event::ServiceReady { .. } | Event::AllStarted => Ok(()),
             Event::Ready => {
                 self.check_cancelled()?;
                 self.receipt.phase = Phase::ReadyObserved;
@@ -1109,6 +1111,7 @@ pub(super) fn run_guarded(
             &mut config.configs,
             &private,
             &BTreeSet::new(),
+            None,
         )?
     } else {
         for service in config.data_mounts.keys() {

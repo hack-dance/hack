@@ -90,8 +90,8 @@ beforeEach(async () => {
     await mkdtemp(join(tmpdir(), "native-file-sources-"))
   );
   root = join(parent, "checkout");
-  await mkdir(join(root, ".hack"), { recursive: true });
-  await mkdir(join(root, "inputs"));
+  await mkdir(join(root, ".hack"), { recursive: true, mode: 0o755 });
+  await mkdir(join(root, "inputs"), { mode: 0o755 });
   await writeFile(
     join(root, ".hack/hack.project.json"),
     JSON.stringify(SOURCE)
@@ -100,7 +100,7 @@ beforeEach(async () => {
     join(root, ".hack/hack.env.default.yaml"),
     `version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    TOKEN: ${CANARY}\n    EMPTY: ""\n`
   );
-  await writeFile(join(root, "inputs/settings.bin"), binary);
+  await writeFile(join(root, "inputs/settings.bin"), binary, { mode: 0o644 });
   await writeFile(join(root, "inputs/secret"), Buffer.from([8, 0, 9]), {
     mode: 0o600,
   });
@@ -277,11 +277,15 @@ test.each([
         join(root, "inputs/settings.bin"),
         join(root, "inputs/original")
       );
-      await writeFile(join(root, "inputs/settings.bin"), binary);
+      await writeFile(join(root, "inputs/settings.bin"), binary, {
+        mode: 0o644,
+      });
     } else if (kind === "parent") {
       await rename(join(root, "inputs"), join(root, "original-inputs"));
-      await mkdir(join(root, "inputs"));
-      await writeFile(join(root, "inputs/settings.bin"), binary);
+      await mkdir(join(root, "inputs"), { mode: 0o755 });
+      await writeFile(join(root, "inputs/settings.bin"), binary, {
+        mode: 0o644,
+      });
     } else if (kind === "content") {
       await writeFile(
         join(root, "inputs/settings.bin"),
@@ -443,7 +447,7 @@ test("closed mutation and revoked acquisition cannot deliver previously acquired
 test("managed secret file decrypts only through the existing project key owner, with overlay scope and tombstone refusal", async () => {
   const key = "synthetic-private-file-key-never-real-credentials";
   const fixture = join(parent, "cipher-fixture");
-  await mkdir(join(fixture, ".hack"), { recursive: true });
+  await mkdir(join(fixture, ".hack"), { recursive: true, mode: 0o755 });
   await writeFile(join(fixture, PROJECT_ENV_KEY_FILENAME), key, {
     mode: 0o600,
   });
@@ -556,8 +560,12 @@ test("linked worktree selects its own source and current local managed layer whi
   expect(
     await resolveVerifiedPrimaryWorktreeRoot({ projectRoot: linked })
   ).toBe(root);
-  await mkdir(join(linked, "inputs"));
-  await writeFile(join(linked, "inputs/settings.bin"), Buffer.from([33]));
+  await chmod(linked, 0o755);
+  await chmod(join(linked, ".hack"), 0o755);
+  await mkdir(join(linked, "inputs"), { mode: 0o755 });
+  await writeFile(join(linked, "inputs/settings.bin"), Buffer.from([33]), {
+    mode: 0o644,
+  });
   await writeFile(join(linked, "inputs/secret"), Buffer.alloc(0), {
     mode: 0o600,
   });

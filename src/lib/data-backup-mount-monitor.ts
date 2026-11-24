@@ -53,9 +53,12 @@ export interface MountMonitor {
   /**
    * End coverage: run an end marker and wait for its start event (the
    * engine emits events in order, so every earlier event has then been
-   * read), stop the subscription, and return mounts of `volumeNames` by any
-   * container that is not one of `helperNames`. Refuses, closed, when the
-   * stream ended before it was stopped.
+   * read), stop the subscription, and return every mount of `volumeNames`.
+   * None is exempt: Hack's own helpers hold a volume with a bind of its
+   * Mountpoint, which emits no volume `mount` event (checked on Docker
+   * 29.9), and markers mount nothing. Container names are never trusted:
+   * a removed marker's name can be reused by another container. Refuses,
+   * closed, when the stream ended before it was stopped.
    */
   finish(volumeNames: readonly string[]): Promise<readonly ForeignMount[]>;
   /** Stop the subscription on any other path. Idempotent. */
@@ -72,8 +75,8 @@ function lostCoverage(command: HelperPurpose, why: string): HackCliError {
 /**
  * Subscribe to volume mount and container start events, and return once the
  * subscription is proven live: a no-op marker container's start event has
- * arrived on it. Only then may the caller start copying. Helpers started
- * afterwards are seen live too, so their names identify our own mounts.
+ * arrived on it. Only then may the caller start copying. Start events only
+ * name a mounting container in a refusal; they never exempt its mounts.
  * SIGINT/SIGTERM while it runs stops the subscription and force-removes
  * this run's helper containers by name before the process ends.
  */
@@ -278,14 +281,13 @@ export async function startMountMonitor(opts: {
         .map((mount) => ({
           ...mount,
           name: names.get(mount.container) ?? null,
-        }))
-        .filter((mount) => !(mount.name && opts.helperNames.has(mount.name)));
+        }));
     },
     stop,
   };
 }
 
-/** The refusal for mounts of target volumes by anything but our helpers. */
+/** The refusal for any mount of a target volume during the window. */
 export function foreignMountError(opts: {
   readonly mounts: readonly ForeignMount[];
   readonly command: HelperPurpose;

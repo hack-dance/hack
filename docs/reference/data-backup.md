@@ -63,15 +63,18 @@ the subscription live by creating and starting a no-op marker container
 (`hack-data-export-<random>-start`, no network, no logging) and waiting for
 that container's start event. Markers are tracked like the volume helpers:
 their create and start are bounded by `HACK_DATA_COMMAND_TIMEOUT_MS`, and
-each is removed and its removal confirmed on every path, a signal included; only then does it check for running containers and copy. Every helper
-runs under a unique name (`hack-data-export-<random>`), so its own mounts are
-told apart from anything else's. After the last copy it lists running
+each is removed and its removal confirmed on every path, a signal included; only then does it check for running containers and copy. No mount is
+exempt, and container names are never trusted (a removed marker's name can
+be reused): Hack's own helpers hold each volume with a bind of its
+`Mountpoint`, which emits no volume `mount` event (checked on Docker 29.9),
+and markers mount nothing, so any `mount` event of a copied volume comes
+from another container. After the last copy it lists running
 containers again, runs an end marker and waits for its start event (the
 engine emits events in order, so every earlier event has then arrived), stops
 the subscription and decides:
 
-- a mount of a copied volume by any other container, even one that started
-  and exited during the copy, refuses with `E_PROJECT_RUNNING` and
+- any mount of a copied volume, even by a container that started and exited
+  during the copy or reuses one of Hack's helper names, refuses with `E_PROJECT_RUNNING` and
   `error.detail.mounts` (volume, container ID and name);
 - an event stream that ended before Hack stopped it, an unreadable event, or
   a marker whose start event did not arrive within 30 seconds refuses with

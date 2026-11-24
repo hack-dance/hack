@@ -652,6 +652,33 @@ describe("running containers and the live event fence", () => {
     expect(marker).toBeLessThan(ps);
   });
 
+  test("a container reusing a removed marker's name and mounting a volume is refused", async () => {
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        // The start marker was removed before the copy; its name is free.
+        const reused =
+          markers(fake).map((argv) => argv[argv.indexOf("--name") + 1])[0] ??
+          "";
+        expect(reused).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
+        fake.events.start("9".repeat(64), reused);
+        fake.events.mount("shop_db", "9".repeat(64));
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({
+      mounts: [
+        {
+          volume: "db",
+          container: "9".repeat(64),
+          name: expect.stringMatching(/-start$/),
+        },
+      ],
+    });
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
   test("a mount by a container whose start was never seen is foreign", async () => {
     const fake = engine({ only: "db" });
     fake.onExec = (_container, args) => {

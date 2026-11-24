@@ -23,13 +23,16 @@ const IDLE_TICK: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(20);
 /// Time after KILL for a stop to confirm absence.
 const CONFIRM_BOUND: Duration = Duration::from_secs(2);
-/// A stop's timers allow two TERM-to-KILL bounds: the guard path, then orphan
-/// recovery after a late guard loss. The wait outlasts those timers, so a
-/// waiter normally gets its own outcome. Admission, census and signalling run
-/// outside the timers, so it is not a hard bound: an expired wait returns an
-/// `unknown` receipt with reason `stop-lock-wait-expired` and acts on nothing.
-pub(crate) const STOP_LOCK_WAIT: Duration =
-    Duration::from_secs(2 * (GRACE.as_secs() + CONFIRM_BOUND.as_secs()) + 2);
+const ORPHAN_STOP_BOUND: Duration = GRACE.saturating_add(CONFIRM_BOUND);
+/// The caller's clock starts independently of the guard. Allow extra time for
+/// the guard to handle the signal, publish its phase and run escalation.
+const GUARDED_STOP_BOUND: Duration = ORPHAN_STOP_BOUND.saturating_add(Duration::from_secs(3));
+/// Outlast the guard wait followed by a fresh orphan recovery after late guard
+/// loss. Admission, census and signalling can add time. An expired lock wait
+/// returns `unknown` with reason `stop-lock-wait-expired` and acts on nothing.
+pub(crate) const STOP_LOCK_WAIT: Duration = GUARDED_STOP_BOUND
+    .saturating_add(ORPHAN_STOP_BOUND)
+    .saturating_add(Duration::from_secs(2));
 /// Bounded wait for a previous command owner to release its lock.
 const COMMAND_LOCK_WAIT: Duration = Duration::from_secs(10);
 /// Bounded wait for another project supervisor to release the instance lock.
@@ -677,7 +680,7 @@ fn stop(states: &[State]) -> Result<()> {
                     None => self.recover()?,
                     Some(false) => return Ok(false),
                     Some(true) => {
-                        if start.elapsed() >= GRACE + CONFIRM_BOUND {
+                        if start.elapsed() >= GUARDED_STOP_BOUND {
                             return Err(refused());
                         }
                         return Ok(true);
@@ -690,7 +693,7 @@ fn stop(states: &[State]) -> Result<()> {
                 return Ok(false);
             }
             let elapsed = self.orphan_term.ok_or_else(refused)?.elapsed();
-            if elapsed >= GRACE + CONFIRM_BOUND {
+            if elapsed >= ORPHAN_STOP_BOUND {
                 return Err(refused());
             }
             // Only captured incarnations are signalled. Unobserved members get

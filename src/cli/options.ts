@@ -124,3 +124,11 @@ export const optUntil = defineOption({
   valueHint: "<time>",
   description: "End time for Loki logs (RFC3339 or duration like 15m)",
 } as const);
+
+export const optUse = defineOption({
+  name: "use",
+  type: "string",
+  long: "--use",
+  valueHint: "<remote=target>",
+  description: "Select a remote target for this Compose start",
+} as const);

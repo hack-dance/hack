@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError } from "../lib/cli-result.ts";
+import { startupTimingSpawn } from "../lib/command-timings.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { NativeProcessRefusal } from "../lib/native-process-wrappers.ts";
 import {
@@ -85,19 +86,58 @@ type ProcessOptions = {
  * acceptance; the caller must inspect ownership before publishing a run mapping.
  * Aborted/failed attempts retain native recovery state and are never replayed.
  */
+/** One of the owner's own JSON lines, for this run (and phase, when given). */
+function ownerFrame(
+  line: string,
+  kind: string,
+  run: string,
+  phase?: string
+): boolean {
+  try {
+    const value: unknown = JSON.parse(line);
+    return (
+      isRecord(value) &&
+      value.kind === kind &&
+      value.run === run &&
+      (phase === undefined || value.phase === phase)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function serveNativeProjectGraph(
   opts: ProcessOptions & {
     readonly args: readonly string[];
     readonly restore?: boolean;
+    /**
+     * Return when every service has started (`hack up` without `--wait`). The
+     * owner then reports `graph_foreground_started` first: that frame, not the
+     * ready one, is what `onReady` waits for, so the startup timer, the stop
+     * rule and everything `onReady` does happen at started. The owner's later
+     * `graph_foreground_ready` line calls `onAllReady`.
+     */
+    readonly returnAtStarted?: boolean;
+    /**
+     * Every service started, in both modes: the owner always reports it. Under
+     * `--wait` this runs (awaited) before the ready frame, so the run mapping is
+     * saved at started there too; otherwise `onReady` itself runs at started.
+     */
+    readonly onStarted?: () => Promise<void>;
     readonly onReady: () => Promise<void>;
+    /** Every goal met and every route published, after a started return. */
+    readonly onAllReady?: () => void;
   }
 ): Promise<number> {
+  const started = opts.returnAtStarted === true;
+  let startedSeen = false;
   return await serveGraphProcess({
     ...opts,
     command: [
       "graph",
       opts.restore ? "serve-restore" : "serve",
       ...opts.args,
+      "--report-started",
       "--run-id",
       opts.run,
       "--json",
@@ -105,9 +145,36 @@ export async function serveNativeProjectGraph(
     readyLimit: 8192,
     strictReady: false,
     isolateOwner: true,
+    // After a started return a later failure still reports its log tails.
+    startupLogsAfterReady: started,
     ignoreBeforeReady: (line) =>
       nativePublisherExitNotice(line, opts.run) !== null,
+    // Under --wait the started line comes first and is handled here.
+    ...(started
+      ? {}
+      : {
+          beforeReady: async (line: string) => {
+            if (
+              !ownerFrame(
+                line,
+                "graph_foreground_started",
+                opts.run,
+                "started-observed"
+              ) ||
+              startedSeen
+            ) {
+              return false;
+            }
+            startedSeen = true;
+            await opts.onStarted?.();
+            return true;
+          },
+        }),
     onEvent: (line) => {
+      if (started && ownerFrame(line, "graph_foreground_ready", opts.run)) {
+        opts.onAllReady?.();
+        return;
+      }
       const notice = nativePublisherExitNotice(line, opts.run);
       if (notice) {
         if (opts.onPublicationNotice) {
@@ -120,8 +187,12 @@ export async function serveNativeProjectGraph(
     onReady: async (value) => {
       if (
         !isRecord(value) ||
-        value.kind !== "graph_foreground_ready" ||
-        value.run !== opts.run
+        value.kind !==
+          (started ? "graph_foreground_started" : "graph_foreground_ready") ||
+        value.run !== opts.run ||
+        (started && value.phase !== "started-observed") ||
+        // Under --wait the owner reports started first; ready alone is refused.
+        !(started || startedSeen)
       ) {
         throw new ClosedCliError(
           "Native graph readiness identity is invalid or canceled."
@@ -333,6 +404,9 @@ async function serveGraphProcess(
     readonly isolateOwner?: boolean;
     readonly onEvent?: (line: string) => void;
     readonly ignoreBeforeReady?: (line: string) => boolean;
+    readonly beforeReady?: (line: string) => Promise<boolean>;
+    /** Report startup log tails even after the ready frame (a started return). */
+    readonly startupLogsAfterReady?: boolean;
     readonly onReady: (
       value: unknown,
       interrupted: () => boolean,
@@ -349,7 +423,7 @@ async function serveGraphProcess(
       environment[key] = value;
     }
   }
-  const child = Bun.spawn(
+  const child = startupTimingSpawn(
     [
       opts.runtime.binary,
       "--candidate-root",
@@ -467,6 +541,7 @@ async function serveGraphProcess(
       strictReady: opts.strictReady,
       onEvent: opts.onEvent,
       ignoreBeforeReady: opts.ignoreBeforeReady,
+      beforeReady: opts.beforeReady,
       interrupted: () =>
         canceled ||
         timedOut ||
@@ -488,7 +563,11 @@ async function serveGraphProcess(
     });
     const code = await child.exited;
     const failure = await failureCode;
-    await reportStartupLogs(opts, ready, failureCodes);
+    await reportStartupLogs(
+      opts,
+      ready && opts.startupLogsAfterReady !== true,
+      failureCodes
+    );
     rethrowNativeInputFailure(inputFailure, {
       interrupted: timedOut || canceled,
       code,
@@ -599,6 +678,8 @@ type GraphOutputOptions = {
   readonly strictReady: boolean;
   readonly onEvent?: (line: string) => void;
   readonly ignoreBeforeReady?: (line: string) => boolean;
+  /** Consume one frame before the ready frame (awaited); true when it did. */
+  readonly beforeReady?: (line: string) => Promise<boolean>;
   readonly interrupted: () => boolean;
   readonly onReady: (
     value: unknown,
@@ -654,6 +735,8 @@ function graphOutputFrames(opts: GraphOutputOptions) {
     }
     if (ready) {
       opts.onEvent?.(frame);
+    } else if (opts.beforeReady && (await opts.beforeReady(frame))) {
+      // A frame the caller handles before readiness (the started line under --wait).
     } else if (!ignoreStartupNotice(opts, frame)) {
       await acceptGraphReady({ ...opts, line: frame });
       ready = true;

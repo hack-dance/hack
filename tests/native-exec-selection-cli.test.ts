@@ -185,6 +185,8 @@ test("fresh native exec reports a service removed since startup as a changed sel
   expect(result.output).not.toMatch(STACK_FRAME);
   // Refused before any exec request reached the runtime.
   expect(await nativeCalls(f.root)).toEqual([
+    // The ready-wait's one look (the run is not warming here).
+    "status",
     "refresh-dependencies",
     "status",
     "exec-selection",
@@ -206,6 +208,8 @@ test("fresh native exec reports unresolvable values apart from a changed selecti
   expect(result.output).not.toContain("synthetic-unparseable");
   expect(result.output).not.toMatch(STACK_FRAME);
   expect(await nativeCalls(f.root)).toEqual([
+    // The ready-wait's one look (the run is not warming here).
+    "status",
     "refresh-dependencies",
     "status",
     "exec-selection",

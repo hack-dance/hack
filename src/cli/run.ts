@@ -6,6 +6,7 @@ import {
   errorResultFromUnknown,
   HackCliError,
 } from "../lib/cli-result.ts";
+import { beginComposeBuildWarnings } from "../lib/compose-build-privacy.ts";
 import { setNoInteractiveFlag } from "../lib/interactivity.ts";
 import { closeLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { reserveStdoutForMachineOutput } from "../lib/machine-stdout.ts";
@@ -138,6 +139,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
         project: typeof opts.project === "string" ? opts.project : undefined,
       };
     }
+    beginComposeBuildWarnings(opts.json === true);
     return await resolved.command.handler({
       ctx: { cwd: process.cwd(), cli },
       args: {

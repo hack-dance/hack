@@ -99,9 +99,14 @@ pub struct HostRelayRuntime {
     selected_run: Option<String>,
     control_generation: String,
     startup_cancelled: Option<fn() -> bool>,
+    /// The foreground owner's requests served while the start loop runs.
+    startup_requests: Option<std::cell::RefCell<Box<dyn StartupRequests>>>,
     /// `graph serve --report-started`: print the `graph_foreground_started` line
     /// when every service has started.
     report_started: bool,
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider::graph) early_publications:
+        Option<crate::provider::graph::foreground::publishers::EarlyPublications>,
     /// Sticky: a dependency rebind wrote its journal and did not complete. Its
     /// effects are unconfirmed, so automatic refresh must never try again.
     rebind_unconfirmed: bool,
@@ -663,7 +668,10 @@ impl HostRelayRuntime {
             selected_run: selected_run.map(str::to_owned),
             control_generation,
             startup_cancelled: None,
+            startup_requests: None,
             report_started: false,
+            #[cfg(target_os = "macos")]
+            early_publications: None,
             rebind_unconfirmed: false,
             dependency_reservation,
         })
@@ -672,6 +680,14 @@ impl HostRelayRuntime {
     /// phase (`--report-started`), for this owner's first start only.
     pub fn report_started(&mut self, enabled: bool) {
         self.report_started = enabled;
+    }
+    /// Serve the owner's transport between the start loop's operations (see
+    /// [`StartupRequests`]); `None` once the attempt has returned.
+    pub(in crate::provider::graph) fn set_startup_requests(
+        &mut self,
+        requests: Option<Box<dyn StartupRequests>>,
+    ) {
+        self.startup_requests = requests.map(std::cell::RefCell::new);
     }
     /// Armed only while the foreground initial startup runs, never during cleanup.
     pub(in crate::provider::graph) fn set_startup_cancellation(
@@ -867,6 +883,8 @@ impl HostRelayRuntime {
         if let Some(startup) = &receipt.relay_startup {
             for (name, service) in &startup.services {
                 if service.phase == Phase::Completed {
+                    // Answer requests between whole inspections, never inside one.
+                    startup_cancelled(self.startup_cancelled, self.startup_requests.as_ref())?;
                     let resource = receipt
                         .resources
                         .get(&format!("container:{name}"))
@@ -894,8 +912,11 @@ impl HostRelayRuntime {
             Option<CandidateError>,
         ) -> Result<(), CandidateError>,
     ) -> Result<(), CandidateError> {
+        // Cleanup passes no callback and so answers no requests either.
+        let requests = cancelled.and(self.startup_requests.as_ref());
         for ((name, _), child) in &mut self.children {
             if child.poll_exit()?.is_some() {
+                startup_cancelled(cancelled, requests)?;
                 let resource = receipt
                     .resources
                     .get(&format!("container:{name}"))
@@ -906,12 +927,7 @@ impl HostRelayRuntime {
                     Instant::now() + LISTENER_EXIT_SETTLE,
                     LISTENER_EXIT_POLL,
                     || {
-                        if cancelled.is_some_and(|check| check()) {
-                            return Err(error(
-                                "graph_cancelled",
-                                "Foreground startup was cancelled; owned cleanup is required.",
-                            ));
-                        }
+                        startup_cancelled(cancelled, requests)?;
                         inspect_resource(engine, receipt, resource)?.ok_or_else(refused)
                     },
                 )?;
@@ -954,6 +970,38 @@ fn report_all_started(
         .map_err(|_| refused())
 }
 
+/// Requests the foreground owner answers while its start loop runs: the loop calls
+/// [`StartupRequests::serve`] wherever it checks cancellation, between engine
+/// operations and never inside one. Final verification serves them too, between its
+/// per-service inspections, between its listener-exit polls (25 ms), and between
+/// deferred publications, one whole service at a time, in settlement rounds
+/// (100 ms apart). A request waits for at most one in-flight step: one engine request (the
+/// engine transport's 40 s timeout, after a 3 s connect), or one service's
+/// publication (inside its `ServiceReady` record or in settlement), bounded
+/// by the start's own deadline. A stop never interrupts a publication: it takes
+/// effect after the publication commits or is withdrawn.
+pub(in crate::provider::graph) trait StartupRequests {
+    /// Answer pending requests; true once a stop has been requested, which cancels the
+    /// start so the owner takes its cleanup path with data retained.
+    fn serve(&mut self) -> bool;
+}
+
+/// The start loop's cancellation: a TERM/INT or lost frontend (`check`), or a stop
+/// requested on the owner's transport.
+fn startup_cancelled(
+    check: Option<fn() -> bool>,
+    requests: Option<&std::cell::RefCell<Box<dyn StartupRequests>>>,
+) -> Result<(), CandidateError> {
+    let stopped = requests.is_some_and(|requests| requests.borrow_mut().serve());
+    if stopped || check.is_some_and(|check| check()) {
+        return Err(error(
+            "graph_cancelled",
+            "Foreground startup was cancelled; owned cleanup is required.",
+        ));
+    }
+    Ok(())
+}
+
 /// Print the started line once per owner: the flag is cleared after the first
 /// print, so a later start through the same driver (a redelivery restore after
 /// ready) neither records `started-observed` nor prints the line again.
@@ -966,6 +1014,20 @@ fn announce_started(
 }
 
 impl Driver for HostRelayRuntime {
+    #[cfg(target_os = "macos")]
+    fn service_ready_leased(
+        &mut self,
+        engine: &Engine<'_>,
+        receipt: &Receipt,
+        service: &str,
+        container_id: &str,
+    ) -> Result<(), CandidateError> {
+        if let Some(publications) = &mut self.early_publications {
+            publications.publish(engine, receipt, service, container_id)?;
+        }
+        Ok(())
+    }
+
     fn admission_started(&self) -> bool {
         self.run.is_some()
     }
@@ -984,13 +1046,7 @@ impl Driver for HostRelayRuntime {
     }
 
     fn check_cancelled(&self) -> Result<(), CandidateError> {
-        if self.startup_cancelled.is_some_and(|check| check()) {
-            return Err(error(
-                "graph_cancelled",
-                "Foreground startup was cancelled; owned cleanup is required.",
-            ));
-        }
-        Ok(())
+        startup_cancelled(self.startup_cancelled, self.startup_requests.as_ref())
     }
 
     fn validate_inputs(
@@ -1022,7 +1078,14 @@ impl Driver for HostRelayRuntime {
                 startup_failure::record(receipt, name, observation)?;
                 state::write(&root.join("state.json"), receipt)
             },
-        )
+        )?;
+        #[cfg(target_os = "macos")]
+        if let Some(publications) = &mut self.early_publications {
+            // Answer requests before each deferred service's publication.
+            let (check, requests) = (self.startup_cancelled, self.startup_requests.as_ref());
+            publications.settle(engine, receipt, || startup_cancelled(check, requests))?;
+        }
+        Ok(())
     }
 
     fn prepare(
@@ -2033,6 +2096,43 @@ mod owner_scope_tests {
         assert_eq!(
             control_root(state, "owner", Some("boot"), None).unwrap(),
             PathBuf::from(format!("/private/tmp/hkro-{}", &digest[..24]))
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_request_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    /// Answers every check; reports a stop from its `stop_at`-th call on.
+    struct Requests {
+        served: Rc<Cell<u32>>,
+        stop_at: u32,
+    }
+    impl StartupRequests for Requests {
+        fn serve(&mut self) -> bool {
+            self.served.set(self.served.get() + 1);
+            self.served.get() >= self.stop_at
+        }
+    }
+    #[test]
+    fn every_cancellation_check_serves_requests_and_a_stop_cancels() {
+        let served = Rc::new(Cell::new(0));
+        let requests: std::cell::RefCell<Box<dyn StartupRequests>> =
+            std::cell::RefCell::new(Box::new(Requests {
+                served: Rc::clone(&served),
+                stop_at: 3,
+            }));
+        assert!(startup_cancelled(None, Some(&requests)).is_ok());
+        assert!(startup_cancelled(Some(|| false), Some(&requests)).is_ok());
+        let stopped = startup_cancelled(Some(|| false), Some(&requests)).unwrap_err();
+        assert_eq!(stopped.code, "graph_cancelled");
+        assert_eq!(served.get(), 3);
+        // Without a transport only the signal check applies.
+        assert!(startup_cancelled(Some(|| false), None).is_ok());
+        assert_eq!(
+            startup_cancelled(Some(|| true), None).unwrap_err().code,
+            "graph_cancelled"
         );
     }
 }

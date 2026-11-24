@@ -37,6 +37,7 @@
  *      every 50 ms: launcher until `graph retained-preflight`, the preflight, the gap, `runtime
  *      up`, and serve to ready. `--warm-only` runs steps 1-3 and these warm runs only, for a
  *      quick before/after comparison.
+ *  10a. multi-service: add and remove a worker across retained stops and verify SQL.
  *  11. unclean stop, last and recorded only: SIGKILL to the provider VM, then what the
  *      foreground, `down --recover`, `runtime recover` and the next `up -d` do.
  *
@@ -83,6 +84,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { isRecord } from "../src/lib/guards.ts";
 
 export const GIB = 1024 * 1024 * 1024;
 
@@ -568,6 +570,32 @@ export interface Options {
   run: boolean;
 }
 
+const DEVELOPMENT_DISK_BUDGETS = {
+  fresh: ["new-pool-storage-overlay-host-reserve", 58 * GIB],
+  running: ["verified-live-owned-pool-host-reserve", 16 * GIB],
+  stopped: ["verified-stopped-owned-pool-host-reserve", 16 * GIB],
+} as const;
+
+type DevelopmentPool = keyof typeof DEVELOPMENT_DISK_BUDGETS;
+
+/** Verify the public probe's budget independently of the runtime's constants. */
+export function matchesDevelopmentDiskBudget(
+  probe: Record<string, unknown>,
+  pool: DevelopmentPool
+): boolean {
+  const [basis, minimum] = DEVELOPMENT_DISK_BUDGETS[pool];
+  const free = probe.disk_free_bytes;
+  return (
+    probe.profile === "development" &&
+    probe.host_supported === true &&
+    probe.disk_budget_basis === basis &&
+    probe.minimum_disk_free_bytes === minimum &&
+    typeof free === "number" &&
+    Number.isSafeInteger(free) &&
+    free >= 0
+  );
+}
+
 const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hack-v5 --home /abs/empty-private-root \\
   --provider-archive /abs/smolvm-<v>-darwin-arm64.tar.gz --engine-archive /abs/docker-<v>.tgz \\
   --builder-archive /abs/pinned-buildx --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
@@ -775,7 +803,8 @@ export function compose(
   webImage: string,
   dbImage: string,
   alias: string,
-  routeHost: string | null = null
+  routeHost: string | null = null,
+  topology: "web-db" | "web-db-worker" = "web-db"
 ): string {
   const labels = routeHost
     ? `
@@ -784,6 +813,13 @@ export function compose(
       caddy.reverse_proxy: "{{upstreams 8080}}"
       caddy.tls: internal`
     : "";
+  const worker =
+    topology === "web-db-worker"
+      ? `
+  worker:
+    image: ${webImage}
+    command: ["sleep", "3600"]`
+      : "";
   return `services:
   web:
     image: ${webImage}${labels}
@@ -797,10 +833,54 @@ export function compose(
     environment:
       POSTGRES_PASSWORD: qualification
     volumes:
-      - "db-data:/var/lib/postgresql/data"
+      - "db-data:/var/lib/postgresql/data"${worker}
 volumes:
   db-data: {}
 `;
+}
+
+/** Require engine-observed compute absence and retained data for an exact run. */
+export function stoppedFixtureVolume(
+  snapshot: Record<string, unknown>,
+  run: string,
+  services: readonly string[]
+): string | null {
+  const { receipt, observations } = snapshot;
+  if (
+    !isRecord(receipt) ||
+    receipt.run !== run ||
+    receipt.phase !== "stopped-data-retained" ||
+    snapshot.journal_incomplete !== false ||
+    !isRecord(receipt.resources) ||
+    !isRecord(observations)
+  ) {
+    return null;
+  }
+  const volume = receipt.resources["volume:db-data"];
+  const observedVolume = observations["volume:db-data"];
+  if (
+    !isRecord(volume) ||
+    typeof volume.name !== "string" ||
+    !volume.name ||
+    !isRecord(observedVolume) ||
+    observedVolume.state !== "present"
+  ) {
+    return null;
+  }
+  const compute = Object.keys(receipt.resources).filter(
+    (key) => key.startsWith("container:") || key.startsWith("network:")
+  );
+  const containers = compute.filter((key) => key.startsWith("container:"));
+  const expected = new Set(services.map((service) => `container:${service}`));
+  return compute.length > containers.length &&
+    containers.length === expected.size &&
+    containers.every((key) => expected.has(key)) &&
+    compute.every((key) => {
+      const item = observations[key];
+      return isRecord(item) && item.state === "absent";
+    })
+    ? volume.name
+    : null;
 }
 
 /** Native Caddy's local root CA under a native home (`native-https/data`). */
@@ -916,6 +996,25 @@ const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 /** A candidate home's provider `$HOME` (the runtime's `run/smolvm/home`). */
 const PROVIDER_HOME = join(".hack-local", "run", "smolvm", "home");
+
+/** Each wget invocation opens a fresh connection through the same relay. */
+export const RELAY_CYCLES_SCRIPT = `set -eu
+payload=$(mktemp)
+trap 'rm -f "$payload"' EXIT
+cycle=1
+while [ "$cycle" -le 256 ]; do
+  if ! wget -q -T 3 -O "$payload" http://dependency.qualification.test/blob; then
+    echo "relay cycle $cycle: download failed" >&2
+    exit 1
+  fi
+  sum=$(sha256sum "$payload")
+  if [ "\${sum%% *}" != "${BLOB_SHA256}" ]; then
+    echo "relay cycle $cycle: payload digest mismatch" >&2
+    exit 1
+  fi
+  cycle=$((cycle + 1))
+done
+printf '%s\\n' "$((cycle - 1))"`;
 
 export class Qualification {
   /** Read boundary for testing a stale diagnostic snapshot racing with child exit. */
@@ -1304,20 +1403,10 @@ export class Qualification {
       this.runtime(this.aux, `aux-${name}`, [...args]);
       this.runtime(this.isolated, `isolated-${name}`, [...args]);
     }
-    const probe = this.runtime(this.main, "probe", [
-      "runtime",
-      "probe",
-      "--profile",
-      "development",
-      "--json",
-    ]);
+    const probe = this.probeDevelopmentBudget("fresh");
     writeFileSync(
       join(this.evidence, "probe.json"),
       JSON.stringify(probe, null, 2)
-    );
-    this.check(
-      "runtime probe answers for the development profile",
-      typeof probe === "object"
     );
     const templates = join(this.main, PROVIDER_HOME, ".smolvm");
     this.check(
@@ -1326,6 +1415,25 @@ export class Qualification {
         existsSync(join(templates, name))
       )
     );
+  }
+
+  probeDevelopmentBudget(pool: DevelopmentPool): Record<string, unknown> {
+    const probe = this.runtime(
+      this.main,
+      `probe-development-${pool}`,
+      ["runtime", "probe", "--profile", "development", "--json"],
+      60
+    );
+    this.check(
+      `development disk budget matches the ${pool} pool`,
+      matchesDevelopmentDiskBudget(probe, pool),
+      JSON.stringify({
+        basis: probe.disk_budget_basis,
+        minimum: probe.minimum_disk_free_bytes,
+        free: probe.disk_free_bytes,
+      })
+    );
+    return probe;
   }
 
   /**
@@ -1994,6 +2102,7 @@ export class Qualification {
     Record<string, { size: number; ino: number; dev: number }>
   > {
     this.step = "4 disk identity";
+    this.probeDevelopmentBudget("running");
     const identity = this.diskIdentity();
     const expected = PROFILE_DISKS.development;
     this.check(
@@ -2108,6 +2217,15 @@ export class Qualification {
     );
   }
 
+  relayCycles(): void {
+    const result = this.inContainer("relay-cycles", "web", RELAY_CYCLES_SCRIPT);
+    this.check(
+      "relay: 256 successive connections return the complete payload",
+      result.trim() === "256",
+      result.trim()
+    );
+  }
+
   async run(): Promise<number> {
     mkdirSync(this.evidence, { mode: 0o700 });
     for (const directory of ["user-home", "cli-home", "tmp"]) {
@@ -2162,6 +2280,7 @@ export class Qualification {
           // admission never has to fit both pools.
           await this.ensureDown("down-before-network");
           this.stopMainPool("network");
+          this.probeDevelopmentBudget("stopped");
           this.networkModes();
         },
       ],
@@ -2171,6 +2290,7 @@ export class Qualification {
         async () => {
           const ready = await this.upForeground("up-relay", "up");
           this.relay("relay");
+          this.relayCycles();
           await this.upForeground(
             "restart-relay",
             "restart",
@@ -2204,6 +2324,11 @@ export class Qualification {
           );
           await this.warm();
         },
+      ],
+      [
+        "10a multi-service reconciliation",
+        false,
+        () => this.reconcileServices(marker),
       ],
       ["11 unclean stop (recorded)", false, () => this.uncleanStop(identity)],
     ];
@@ -2462,6 +2587,97 @@ export class Qualification {
       "disk identity is unchanged at the end",
       JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
     );
+  }
+
+  async reconcileServices(marker: string): Promise<void> {
+    await this.ensureDown("down-before-topology");
+    const composePath = join(this.project, ".hack/docker-compose.yml");
+    const original = readFileSync(composePath, "utf8");
+    const initial = await this.upForeground("up-before-add-worker", "up");
+    const run = initial.ps.run;
+    if (typeof run !== "string") {
+      throw new Failure("multi-service baseline did not report a run ID");
+    }
+    const volume = await this.stopTopology(run, "before-add-worker", [
+      "web",
+      "db",
+    ]);
+    writeFileSync(
+      composePath,
+      compose(
+        this.options.webImage,
+        this.options.dbImage,
+        "dependency.qualification.test",
+        this.options.caddy ? HTTPS_ROUTE_HOST : null,
+        "web-db-worker"
+      )
+    );
+    const added = await this.upForeground(
+      "up-with-worker",
+      "up",
+      readyContainer(initial.ps)
+    );
+    this.check("adding a service retains the run ID", added.ps.run === run);
+    this.check(
+      "the added worker reaches web by service name",
+      this.inContainer(
+        "worker-to-web",
+        "worker",
+        "wget -qO- http://web:8080/index.txt"
+      ).trim() === "ready"
+    );
+    const addedVolume = await this.stopTopology(run, "with-worker", [
+      "web",
+      "db",
+      "worker",
+    ]);
+    this.check(
+      "adding a service retains the database volume",
+      addedVolume === volume
+    );
+    writeFileSync(composePath, original);
+    const removed = await this.upForeground(
+      "up-after-remove-worker",
+      "up",
+      readyContainer(added.ps)
+    );
+    this.check("removing a service retains the run ID", removed.ps.run === run);
+    await this.dbReady();
+    this.check(
+      "SQL data survives adding and removing a service",
+      this.psql("db-read-after-topology", "SELECT v FROM qualification") ===
+        marker
+    );
+    const removedVolume = await this.stopTopology(run, "after-remove-worker", [
+      "web",
+      "db",
+    ]);
+    this.check(
+      "removing a service retains the database volume",
+      removedVolume === volume
+    );
+  }
+
+  async stopTopology(
+    run: string,
+    phase: string,
+    services: string[]
+  ): Promise<string> {
+    await this.down(`down-${phase}`);
+    const snapshot = this.runtime(
+      this.main,
+      `inspect-stopped-${phase}`,
+      ["graph", "inspect", "--run-id", run, "--json"],
+      60
+    );
+    const volume = stoppedFixtureVolume(snapshot, run, services);
+    if (!volume) {
+      throw new Failure(
+        `${phase}: graph inspection did not confirm absent compute and retained data`
+      );
+    }
+    this.check(`${phase}: stopped topology and retained data confirmed`, true);
+    return volume;
   }
 
   /** Fetch the fixture's route over native HTTPS, trusting only this home's Caddy root. */
@@ -3200,6 +3416,7 @@ export async function main(argv: string[]): Promise<number> {
       "8 rosetta",
       "9 web+db",
       "10 measurements",
+      "10a multi-service reconciliation",
       "11 unclean stop (recorded)",
     ],
   };

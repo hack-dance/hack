@@ -26,6 +26,7 @@ pub enum Fixture {
     EnvRunning,
     EnvLong,
     EnvEdit,
+    EnvRevealed,
     // List states.
     Loading,
     Empty,
@@ -41,6 +42,7 @@ pub enum Fixture {
     Stopped,
     Starting,
     Running,
+    Remotes,
     Files,
     Degraded,
     Stopping,
@@ -49,6 +51,14 @@ pub enum Fixture {
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
     Branches,
+    CatalogNative,
+    CatalogAll,
+    CatalogEmpty,
+    CatalogPreview,
+    ChangesError,
+    ChangesLoading,
+    ChangesClean,
+    ChangesDirty,
     CopiesEmpty,
     CopiesError,
     CopiesLoading,
@@ -63,6 +73,11 @@ pub enum Fixture {
     DoctorLink,
     /// No projects registered: the Doctor pane still shows machine checks.
     DoctorEmpty,
+    BannerDns,
+    BannersSheet,
+    DoctorHealth,
+    DoctorFixAll,
+    ErrorsSheet,
     // hackd pane (HACK-2288 item 6).
     /// hackd running, a login run under way, always-on projects in every
     /// state the summary shows.
@@ -79,7 +94,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 56] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -90,6 +105,7 @@ impl Fixture {
         Self::EnvRunning,
         Self::EnvLong,
         Self::EnvEdit,
+        Self::EnvRevealed,
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -101,12 +117,21 @@ impl Fixture {
         Self::Stopped,
         Self::Starting,
         Self::Running,
+        Self::Remotes,
         Self::Files,
         Self::Degraded,
         Self::Stopping,
         Self::FailedStart,
         Self::NeedsAttention,
         Self::Branches,
+        Self::CatalogNative,
+        Self::CatalogAll,
+        Self::CatalogEmpty,
+        Self::CatalogPreview,
+        Self::ChangesError,
+        Self::ChangesLoading,
+        Self::ChangesClean,
+        Self::ChangesDirty,
         Self::CopiesEmpty,
         Self::CopiesError,
         Self::CopiesLoading,
@@ -116,6 +141,11 @@ impl Fixture {
         Self::DoctorClean,
         Self::DoctorLink,
         Self::DoctorEmpty,
+        Self::BannerDns,
+        Self::BannersSheet,
+        Self::DoctorHealth,
+        Self::DoctorFixAll,
+        Self::ErrorsSheet,
         Self::Hackd,
         Self::HackdOff,
         Self::Upgrade,
@@ -136,6 +166,7 @@ impl Fixture {
             Self::EnvRunning => "env-running",
             Self::EnvLong => "env-long",
             Self::EnvEdit => "env-edit",
+            Self::EnvRevealed => "env-revealed",
             Self::Loading => "loading",
             Self::Empty => "empty",
             Self::DaemonDown => "daemon-down",
@@ -147,12 +178,21 @@ impl Fixture {
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Remotes => "remotes",
             Self::Files => "files",
             Self::Degraded => "degraded",
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
+            Self::CatalogNative => "catalog-native",
+            Self::CatalogAll => "catalog-all",
+            Self::CatalogEmpty => "catalog-empty",
+            Self::CatalogPreview => "catalog-preview",
+            Self::ChangesError => "changes-error",
+            Self::ChangesLoading => "changes-loading",
+            Self::ChangesClean => "changes-clean",
+            Self::ChangesDirty => "changes-dirty",
             Self::CopiesEmpty => "copies-empty",
             Self::CopiesError => "copies-error",
             Self::CopiesLoading => "copies-loading",
@@ -162,6 +202,11 @@ impl Fixture {
             Self::DoctorClean => "doctor-clean",
             Self::DoctorLink => "doctor-link",
             Self::DoctorEmpty => "doctor-empty",
+            Self::BannerDns => "h17-app-banner-dns",
+            Self::BannersSheet => "h18-banners-sheet",
+            Self::DoctorHealth => "h19-doctor",
+            Self::DoctorFixAll => "h20-doctor-fix-all",
+            Self::ErrorsSheet => "h25-errors-sheet",
             Self::Hackd => "hackd",
             Self::HackdOff => "hackd-off",
             Self::Upgrade => "upgrade",
@@ -185,7 +230,7 @@ fn container(state: &str, status: &str) -> Container {
         state: state.into(),
         status: status.into(),
         labels: BTreeMap::new(),
-        working_dir: None,
+        ..Container::default()
     }
 }
 
@@ -211,6 +256,25 @@ fn checkout_dir(branch: &str) -> String {
 
 /// A running branch instance of storefront with web and api routes.
 fn running_branch(branch: &str) -> BranchRuntime {
+    let mut api = routed(
+        "running",
+        "Up 2 hours (healthy)",
+        &format!("api.{branch}.storefront.hack"),
+    );
+    api.name = Some(format!("storefront--{branch}-api-1"));
+    api.image = Some("storefront-api:dev".into());
+    api.labels
+        .insert("caddy.reverse_proxy".into(), "{{upstreams 3000}}".into());
+    api.labels.insert(
+        "com.docker.compose.project".into(),
+        format!("storefront--{branch}"),
+    );
+    api.mounts.push(crate::models::ContainerMount {
+        source: checkout_dir(branch).trim_end_matches("/.hack").into(),
+        destination: "/app".into(),
+        kind: "bind".into(),
+        name: None,
+    });
     BranchRuntime {
         owner: None,
         branch: branch.into(),
@@ -218,14 +282,7 @@ fn running_branch(branch: &str) -> BranchRuntime {
             project: Some(format!("storefront--{branch}")),
             working_dir: Some(checkout_dir(branch)),
             services: vec![
-                svc(
-                    "api",
-                    routed(
-                        "running",
-                        "Up 20 minutes (healthy)",
-                        &format!("api.{branch}.storefront.hack"),
-                    ),
-                ),
+                svc("api", api),
                 svc("db", container("running", "Up 20 minutes")),
                 svc(
                     "web",
@@ -463,6 +520,23 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             }];
             r
         }
+        Fixture::CatalogNative => {
+            let mut row = storefront(vec![], "stopped");
+            row.backend = Some("native".into());
+            row
+        }
+        Fixture::Remotes => {
+            let mut row = storefront(all_up(), "running");
+            row.remotes = serde_json::from_str(r#"[
+              {"service":"redis","target":"unknown","state":"declared","probe":"not checked",
+               "address":null},
+              {"service":"database","target":"staging","state":"declared","probe":"not checked",
+               "address":{"kind":"env_ref","name":"STAGING_DB_HOST","port":5432}},
+              {"service":"search","target":"preview","state":"tunnel not started by this version",
+               "probe":"not checked","address":{"kind":"hostname","hostname":"search.example.invalid","port":443}}
+            ]"#).expect("remote descriptors fixture");
+            row
+        }
         Fixture::Branches => {
             let mut r = storefront(vec![], "stopped");
             r.branch_runtime = owned(vec![
@@ -543,11 +617,13 @@ fn doctor(f: Fixture) -> DoctorReport {
             }
             .into(),
             detail: String::new(),
+            fix: None,
         },
         DoctorCheck {
             id: "caddy local ca".into(),
             status: "warn".into(),
             detail: "Local CA is not trusted by the system".into(),
+            fix: None,
         },
     ];
     if f == Fixture::NeedsAttention {
@@ -555,6 +631,7 @@ fn doctor(f: Fixture) -> DoctorReport {
             id: "project config".into(),
             status: "error".into(),
             detail: "notes: hack.config.json is not valid JSON".into(),
+            fix: None,
         });
     }
     DoctorReport {
@@ -912,6 +989,7 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
         id: id.into(),
         status: status.into(),
         detail: detail.into(),
+        fix: None,
     };
     let report = |checks: Vec<DoctorCheck>| {
         Ok(DoctorReport {

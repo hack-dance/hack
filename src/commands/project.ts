@@ -489,6 +489,7 @@ import {
   finishImplicitLegacyEnvMigration,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hasUnmigratedLegacyDotenv,
+  listLegacyStartupOverlays,
   listProjectEnvOverlays,
   ProjectEnvKeyMissingError,
   projectEnvConfigExists,
@@ -3823,7 +3824,10 @@ export async function resolveComposeRuntimeModel(opts: {
     }),
   });
   if (envName === undefined) {
-    await refuseUnrecordedEnvWithOverlays(opts.project);
+    await refuseUnrecordedEnvWithOverlays({
+      project: opts.project,
+      projectName,
+    });
   }
   const envOverrides = await resolveComposeEnvOverrides({
     project: opts.project,
@@ -3869,27 +3873,51 @@ export async function resolveComposeRuntimeModel(opts: {
 
 /**
  * A data command without `--env` and without a recorded selection: the
- * configured default is only the env `hack up` used when the project has no
- * overlays. With overlays, refuse with E_USAGE, naming them (names only),
- * before any Docker effect.
+ * configured default is only the env `hack up` used when no other overlay
+ * could have been selected. Startup selects from the env layers
+ * (`hack.env.<name>.yaml`, machine-local and inherited layers, the
+ * configured default) and, for a legacy dotenv project, from
+ * `.hack/.env.<name>` files and overlays only the secret store holds; all of
+ * them are listed here. With any overlay, refuse with E_USAGE, naming them
+ * (names only), before any Docker effect. A legacy project whose overlays
+ * cannot all be listed (a keychain store, say) refuses too.
  */
-async function refuseUnrecordedEnvWithOverlays(
-  project: Awaited<ReturnType<typeof requireProjectContext>>
-): Promise<void> {
-  const overlays = await listProjectEnvOverlays({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
+async function refuseUnrecordedEnvWithOverlays(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly projectName: string;
+}): Promise<void> {
+  const layered = await listProjectEnvOverlays({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
   });
-  if (overlays.length === 0) {
-    return;
+  const legacy = await listLegacyStartupOverlays({
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+  });
+  const names = [
+    ...new Set([...layered.map((overlay) => overlay.name), ...legacy.names]),
+  ].sort((left, right) => left.localeCompare(right));
+  if (names.length > 0) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: unrecordedEnvRefusalMessage(names),
+    });
   }
-  throw new HackCliError({
-    code: "E_USAGE",
-    message: unrecordedEnvRefusalMessage(
-      overlays.map((overlay) => overlay.name)
-    ),
+  // The legacy inputs matter only when startup takes the legacy path.
+  const layeredConfig = await projectEnvConfigExists({
+    projectDir: opts.project.projectDir,
   });
+  if (!(legacy.complete || layeredConfig)) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: UNLISTABLE_LEGACY_ENV_REFUSAL,
+    });
+  }
 }
+
+/** The refusal when a legacy project's possible overlays cannot be listed. */
+export const UNLISTABLE_LEGACY_ENV_REFUSAL =
+  "This project's legacy env (.hack/.env files and its secret store) could select an overlay Hack cannot list, and the environment `hack up` used is no longer recorded. Pass --env <name> (or --env base for base layers only).";
 
 /** The refusal line for {@link refuseUnrecordedEnvWithOverlays}. */
 export function unrecordedEnvRefusalMessage(

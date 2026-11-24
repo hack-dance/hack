@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { dataComposeArgs } from "../src/commands/data.ts";
 import {
   resolveComposeRuntimeModel,
+  UNLISTABLE_LEGACY_ENV_REFUSAL,
   unrecordedEnvRefusalMessage,
 } from "../src/commands/project.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
@@ -286,6 +287,120 @@ test("an explicit --env wins without a recorded selection", async () => {
 test("a project without overlays uses its base layers when nothing is recorded", async () => {
   const projectRoot = await envProject();
   await rm(join(projectRoot, ".hack", "hack.env.staging.yaml"));
+  const project = await fixtureProject(projectRoot);
+  const model = await resolveComposeRuntimeModel({
+    project,
+    branch: null,
+    envName: undefined,
+  });
+  expect(model.env.VOL_SUFFIX).toBe("base");
+});
+
+/**
+ * A legacy dotenv project: no env layers, a contract, `.hack/.env` and the
+ * overlay `.hack/.env.staging`, which `hack up --env staging` selects.
+ */
+async function dotenvOverlayProject(): Promise<string> {
+  const projectRoot = join(root, "legacy");
+  const projectDir = join(projectRoot, ".hack");
+  await mkdir(join(projectDir, ".internal"), { recursive: true });
+  await writeFile(
+    join(projectDir, "docker-compose.yml"),
+    [
+      "name: shop",
+      "services:",
+      "  db:",
+      "    image: busybox",
+      "    volumes: [data:/data]",
+      "volumes:",
+      "  data:",
+      "    name: shop_data-${VOL_SUFFIX}",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    join(projectDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: "VOL_SUFFIX", source: "plain_env", required: false }],
+    })}\n`
+  );
+  await writeFile(join(projectDir, ".env"), "VOL_SUFFIX=base\n");
+  await writeFile(join(projectDir, ".env.staging"), "VOL_SUFFIX=staging\n");
+  return projectRoot;
+}
+
+test("a dotenv-overlay-only project after down refuses without --env, naming the overlay", async () => {
+  const project = await fixtureProject(await dotenvOverlayProject());
+  const refusal = await resolveComposeRuntimeModel({
+    project,
+    branch: null,
+    envName: undefined,
+  }).then(
+    () => null,
+    (error: unknown) => error
+  );
+  expect(refusal).toBeInstanceOf(HackCliError);
+  expect((refusal as HackCliError).code).toBe("E_USAGE");
+  expect((refusal as HackCliError).message).toBe(
+    unrecordedEnvRefusalMessage(["staging"])
+  );
+});
+
+test("a dotenv-overlay-only project with a recorded selection uses it", async () => {
+  const project = await fixtureProject(await dotenvOverlayProject());
+  for (const [envName, suffix] of [
+    ["staging", "staging"],
+    [null, "base"],
+  ] as const) {
+    await upsertProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      entry: {
+        composeProject: "shop",
+        envName,
+        updatedAt: "2026-11-24T00:00:00.000Z",
+      },
+    });
+    const model = await resolveComposeRuntimeModel({
+      project,
+      branch: null,
+      envName: undefined,
+    });
+    expect({ envName, suffix: model.env.VOL_SUFFIX }).toEqual({
+      envName,
+      suffix,
+    });
+  }
+});
+
+test("a dotenv project whose secret store cannot be listed refuses without --env", async () => {
+  // Contract values kept in the backend: an overlay may exist only there.
+  const projectRoot = await dotenvOverlayProject();
+  const projectDir = join(projectRoot, ".hack");
+  await rm(join(projectDir, ".env.staging"));
+  await writeFile(
+    join(projectDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: "VOL_SUFFIX", source: "keychain", required: false }],
+    })}\n`
+  );
+  const project = await fixtureProject(projectRoot);
+  const refusal = await resolveComposeRuntimeModel({
+    project,
+    branch: null,
+    envName: undefined,
+  }).then(
+    () => null,
+    (error: unknown) => error
+  );
+  expect((refusal as HackCliError).code).toBe("E_USAGE");
+  expect((refusal as HackCliError).message).toBe(UNLISTABLE_LEGACY_ENV_REFUSAL);
+});
+
+test("a dotenv project with no overlay and no backend values uses its base without --env", async () => {
+  const projectRoot = await dotenvOverlayProject();
+  await rm(join(projectRoot, ".hack", ".env.staging"));
   const project = await fixtureProject(projectRoot);
   const model = await resolveComposeRuntimeModel({
     project,

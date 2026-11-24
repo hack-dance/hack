@@ -20,7 +20,13 @@ startup. A successful `hack down` removes that record, so after
 `hack up --env staging` then `hack down` the selection is no longer known:
 when the project has env overlays the command refuses with `E_USAGE`, naming
 them, before any Docker call; pass `--env <name>` (or `--env base` for base
-layers only). A project without overlays uses its base layers. Every Docker call (Compose, the
+layers only). The overlays are every one `hack up` could have selected: env
+layers (`hack.env.<name>.yaml`, machine-local and inherited layers, the
+configured default) and, for a legacy dotenv project, `.hack/.env.<name>`
+files and overlays that only the encrypted file secret store holds values
+for. When a legacy project's overlays cannot all be listed (its contract
+values live in the keychain, say), it refuses the same way. A project
+without overlays uses its base layers. Every Docker call (Compose, the
 volume and container reads and the helper runs) gets the same managed Compose
 env `hack up` gives the project, so a project that selects its engine with a
 managed `DOCKER_HOST` or `DOCKER_CONTEXT` is read on that engine. The command

@@ -73,14 +73,17 @@ pub mod size {
     use gpui_kit::{Pixels, px};
     pub const TITLE_BAR: Pixels = px(38.);
     pub const STATUS_BAR: Pixels = px(26.);
-    pub const SIDEBAR: Pixels = px(208.);
+    pub const SIDEBAR: Pixels = px(272.);
     pub const ROW: Pixels = px(28.);
     pub const TABLE_ROW: Pixels = px(32.);
+    pub const SERVICE_COL_FRACTION: f32 = 0.2;
+    pub const CPU_COL: Pixels = px(64.);
+    pub const MEMORY_COL: Pixels = px(80.);
     pub const CONTROL: Pixels = px(26.);
     pub const DOT: Pixels = px(8.);
     pub const ICON: Pixels = px(14.);
     pub const ICON_ROW: Pixels = px(15.);
-    pub const SEARCH_W: Pixels = px(240.);
+    pub const SEARCH_W: Pixels = px(280.);
     /// Leaves room for the macOS traffic lights in the title bar.
     pub const TRAFFIC_LIGHTS: Pixels = px(76.);
 }
@@ -164,6 +167,45 @@ impl Palette {
         }
     }
 
+    /// Builtin Light and Merino Dark for the project tree and copy pane.
+    #[must_use]
+    pub fn projects(mode: Mode) -> Self {
+        let mut palette = Self::for_mode(mode);
+        let [
+            chrome,
+            surface,
+            hover,
+            selection,
+            border,
+            ink,
+            secondary,
+            muted,
+            running,
+            failed,
+        ] = match mode {
+            Mode::Light => [
+                0xF2F2F2, 0xFFFFFF, 0xF0F0F0, 0xE1E1E1, 0xE0E0E0, 0x000000, 0x2E2E2E, 0x616161,
+                0x008300, 0xBB0000,
+            ],
+            Mode::Dark => [
+                0x0B0E12, 0x0D1117, 0x1A1E24, 0x24272B, 0x2B3036, 0xE6EDF3, 0xBFC5CB, 0x8B9197,
+                0x3FB950, 0xFF7B72,
+            ],
+        };
+        palette.chrome = c(rgb(chrome));
+        palette.surface = c(rgb(surface));
+        palette.surface_1 = c(rgb(hover));
+        palette.surface_2 = c(rgb(selection));
+        palette.border = c(rgb(border));
+        palette.text_primary = c(rgb(ink));
+        palette.text_secondary = c(rgb(secondary));
+        palette.text_muted = c(rgb(muted));
+        palette.accent = palette.text_primary;
+        palette.states.running.dot = c(rgb(running));
+        palette.states.failed.dot = c(rgb(failed));
+        palette
+    }
+
     #[must_use]
     pub fn light() -> Self {
         Self {
@@ -220,32 +262,37 @@ impl Palette {
 
     #[must_use]
     pub fn dark() -> Self {
+        // Merino Dark, from the HACK-2595 desktop frames.
+        let surface_1 = c(rgb(0x1A1E24));
+        let selection = c(rgb(0x24272B));
+        let text_primary = c(rgb(0xE6EDF3));
+        let text_muted = c(rgb(0x8B9197));
         Self {
             mode: Mode::Dark,
             window: c(rgb(0x090C10)),
             surface: c(rgb(0x0D1117)),
             chrome: c(rgb(0x06080A)),
             raised: c(rgb(0x1C2026)),
-            selection: c(rgb(0x24272B)),
             attention: c(rgb(0x21252B)),
-            surface_1: c(rgb(0x1A1E24)),
-            surface_2: c(rgb(0x23272D)),
+            surface_1,
+            surface_2: c(rgb(0x1C2026)),
+            selection,
             preview_surface: c(rgb(0x1E2329)),
             border: c(rgb(0x2B3036)),
             border_strong: c(rgb(0x2B3036)),
-            text_primary: c(rgb(0xE6EDF3)),
+            text_primary,
             text_secondary: c(rgb(0xBFC5CB)),
-            text_muted: c(rgb(0x8B9197)),
-            accent: c(rgb(0xE6EDF3)),
+            text_muted,
+            accent: text_primary,
             states: States {
                 running: StateColors {
                     dot: c(rgb(0x3FB950)),
-                    bg: c(rgb(0x12221D)),
+                    bg: c(rgb(0x152C20)),
                     fg: c(rgb(0x3FB950)),
                 },
                 busy: StateColors {
                     dot: c(rgb(0xBFC5CB)),
-                    bg: c(rgb(0x1F2329)),
+                    bg: c(rgb(0x1C2026)),
                     fg: c(rgb(0xBFC5CB)),
                 },
                 degraded: StateColors {
@@ -255,18 +302,18 @@ impl Palette {
                 },
                 failed: StateColors {
                     dot: c(rgb(0xFF7B72)),
-                    bg: c(rgb(0x251C20)),
+                    bg: c(rgb(0x2F2024)),
                     fg: c(rgb(0xFF7B72)),
                 },
                 stopped: StateColors {
                     dot: c(rgb(0x686D73)),
                     bg: c(rgb(0x1A1E24)),
-                    fg: c(rgb(0x8B9197)),
+                    fg: c(rgb(0xBFC5CB)),
                 },
                 unknown: StateColors {
-                    dot: c(rgb(0x686D73)),
+                    dot: c(rgb(0x8B9197)),
                     bg: c(rgb(0x1A1E24)),
-                    fg: c(rgb(0x8B9197)),
+                    fg: c(rgb(0xBFC5CB)),
                 },
             },
         }

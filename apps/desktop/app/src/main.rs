@@ -41,6 +41,7 @@ mod screenshots;
 mod service_catalog;
 mod service_view;
 mod setup_view;
+mod sidebar_view;
 #[cfg(hack_terminal)]
 mod terminal;
 mod theme;

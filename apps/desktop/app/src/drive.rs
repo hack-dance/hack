@@ -513,6 +513,7 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
             let key = InstanceKey {
                 project: project.clone(),
                 branch: branch.clone(),
+                checkout: None,
             };
             poll(handle, cx, READY_WAIT, |app, window, cx| {
                 app.drive_select(&key, window, cx).then_some(())

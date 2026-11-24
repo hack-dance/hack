@@ -386,6 +386,26 @@ test("after an unsuccessful container start, helpers are kept unless Compose con
   }
 });
 
+test("an empty listing cannot release helpers when the daemon changes during cleanup", async () => {
+  const events: string[] = [];
+  let sameDaemon = true;
+  await retainHelpersUnlessContainersAbsent({
+    assertEngine: async () => {
+      if (!sameDaemon) {
+        throw new Error("replacement Docker daemon");
+      }
+    },
+    probe: async () => {
+      sameDaemon = false;
+      return "absent";
+    },
+    keepSharedHelpers: () => {
+      events.push("kept");
+    },
+  });
+  expect(events).toEqual(["kept"]);
+});
+
 test("the signal cleanup keeps the helpers once a container start has begun", async () => {
   for (const begun of [false, true]) {
     const events: string[] = [];

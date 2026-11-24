@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fixture, invoke, state } from "./helpers/native-compose-command.ts";
 
@@ -58,4 +59,77 @@ for (const phase of ["readiness", "prepared-guard"] as const) {
     ).toHaveLength(1);
     expect(await state(root)).toMatchObject({ pending: false, stopped: false });
   }, 30_000);
+}
+
+for (const mode of ["once", "always"] as const) {
+  test(`source CLI up handles a Docker readiness read that stalls ${mode}`, async () => {
+    const root = await fixture("", false, {
+      noHooks: true,
+      onDocker: `
+        const stalls=root+"/stalled-readiness-reads";
+        if (args[0]==="container" && args[1]==="inspect" &&
+            await Bun.file(engine).exists() && await Bun.file(root+"/stall-readiness").exists() &&
+            (${mode === "always"} || !await Bun.file(stalls).exists())) {
+          await appendFile(stalls,"inspect\\n");
+          // Hold the fake read until the CLI times it out and reaps it.
+          await Bun.sleep(60_000);
+        }
+      `,
+    });
+    const fault = join(root, "stall-readiness");
+    await Bun.write(fault, "");
+    const args = ["up", "--detach", "--json"];
+    const result = await invoke(root, args, 6000, 25_000);
+    const stalls = await Bun.file(join(root, "stalled-readiness-reads")).text();
+    if (mode === "once") {
+      expect(result.code, result.stderr + result.stdout).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: true,
+        data: { status: "ready" },
+      });
+      expect(stalls).toBe("inspect\n");
+      expect(await state(root)).toMatchObject({
+        pending: false,
+        stopped: false,
+      });
+    } else {
+      expect(result.code, result.stderr + result.stdout).toBe(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: false,
+        error: {
+          code: "E_RECOVERY_REQUIRED",
+          detail: {
+            native_compose_effect_refusal: {
+              stage: "compose-readiness",
+              reason: "probe-timeout",
+            },
+          },
+        },
+      });
+      expect(stalls).toBe("inspect\ninspect\n");
+      const replay = await invoke(root, args, 6000);
+      expect(replay.code, replay.stderr + replay.stdout).toBe(1);
+      expect(JSON.parse(replay.stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_CONFIG_INVALID" },
+      });
+      await rm(fault);
+      expect(await state(root)).toMatchObject({ pending: true });
+      const down = await invoke(root, ["down", "--recover", "--json"], 6000);
+      expect(down.code, down.stderr + down.stdout).toBe(0);
+      expect(await state(root)).toMatchObject({
+        pending: false,
+        stopped: true,
+      });
+    }
+    const requests = (await Bun.file(join(root, "requests")).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      requests.filter(
+        (args: string[]) => args[0] === "compose" && args.includes("up")
+      )
+    ).toHaveLength(1);
+  }, 40_000);
 }

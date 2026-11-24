@@ -460,8 +460,11 @@ function renderComposeYaml(opts: {
     `name: ${opts.name}`,
     "services:",
     "  web:",
-    ...(opts.composeFailure ? ["    unsupported_e2e_key: true"] : []),
-    "    image: oven/bun:1",
+    // Leave the model valid for the ownership read. Creation must fail
+    // locally after the host lifecycle has started.
+    ...(opts.composeFailure
+      ? [`    image: hack-e2e-missing:${opts.name}`, "    pull_policy: never"]
+      : ["    image: oven/bun:1"]),
     ...(opts.standaloneContainers
       ? ["    command: bun -e 'setInterval(() => {}, 60000)'"]
       : [

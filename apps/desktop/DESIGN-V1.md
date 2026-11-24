@@ -91,14 +91,14 @@ Detail content is inset 20 left and right; the sidebar list 6.
 
 | Token | Light | Dark | Used for |
 |---|---|---|---|
-| `window` | `#FFFFFF` | `#090C10` | Window background |
+| `window` | `#FFFFFF` | `#090C10` | Window background outside Projects, native dark title bar |
 | `surface` | `#FFFFFF` | `#0D1117` | Cards and controls |
-| `chrome` | `#F7F7F5` | `#06080A` | Sidebar, status bar |
+| `chrome` | `#F7F7F5` | `#06080A` | Title bar, sidebar, status bar |
 | `raised` | `#EFEFEC` | `#1C2026` | Menus and tooltips |
-| `selection` | `#EFEFEC` | `#24272B` | Selected rows and tabs |
+| `selection` | `#EFEFEC` | `#24272B` | Selected navigation, tabs, selected file row in dark mode |
 | `attention` | `#EFEFEC` | `#21252B` | Running command box |
 | `surface_1` | `#EFEFEC` | `#1A1E24` | Hover, panel handle, neutral pill |
-| `surface_2` | `#E6E6E2` | `#23272D` | Pressed |
+| `surface_2` | `#E6E6E2` | `#1C2026` | Pressed and raised surfaces, selected file row in light mode |
 | `preview_surface` | `#EFEFEC` | `#1E2329` | Read-only file preview body |
 | `border` | black 9% | `#2B3036` | Hairlines |
 | `border_strong` | black 18% | `#2B3036` | Button and field outlines |
@@ -108,19 +108,19 @@ Detail content is inset 20 left and right; the sidebar list 6.
 | `accent` | `#2F6FDB` | `#E6EDF3` | Switch on, focus ring |
 
 The dark palette is Merino Dark. GPUI components such as the search field,
-title bar, tooltips and scrollbars use the same palette. The dark title bar uses
-the window color.
+tooltips and scrollbars use the same palette. The Projects pane uses its own
+Builtin Light and Merino Dark accents for the tree and copy pane.
 
 State colours (dot / pill background / pill text):
 
 | State | Light | Dark | Shown as |
 |---|---|---|---|
-| Running | `#1D9E75` / `#E2F3EC` / `#146B50` | `#3FB950` / `#12221D` / `#3FB950` | solid dot |
-| Busy (starting, stopping) | `#378ADD` / `#E5EEFA` / `#235E9E` | `#BFC5CB` / `#1F2329` / `#BFC5CB` | solid dot |
+| Running | `#1D9E75` / `#E2F3EC` / `#146B50` | `#3FB950` / `#152C20` / `#3FB950` | solid dot |
+| Busy (starting, stopping) | `#378ADD` / `#E5EEFA` / `#235E9E` | `#BFC5CB` / `#1C2026` / `#BFC5CB` | solid dot |
 | Degraded | `#EF9F27` / `#FBEFDA` / `#8A5608` | `#D29922` / `#211F18` / `#D29922` | solid dot |
-| Failed (failed start, needs attention) | `#E24B4A` / `#FBE6E5` / `#A82E2D` | `#FF7B72` / `#251C20` / `#FF7B72` | solid dot |
-| Stopped | `#BDBCB6` / `surface_1` / secondary | `#686D73` / `surface_1` / muted | solid grey dot, name in secondary |
-| Unknown | `#9C9B95` / `surface_1` / secondary | `#686D73` / `surface_1` / muted | **ring** |
+| Failed (failed start, needs attention) | `#E24B4A` / `#FBE6E5` / `#A82E2D` | `#FF7B72` / `#2F2024` / `#FF7B72` | solid dot |
+| Stopped | `#BDBCB6` / `surface_1` / secondary | `#686D73` / `surface_1` / secondary | solid grey dot, name in secondary |
+| Unknown | `#9C9B95` / `surface_1` / secondary | `#8B9197` / `surface_1` / secondary | **ring**, never a solid dot |
 
 Unknown is a ring so an unobserved project never reads as stopped.
 

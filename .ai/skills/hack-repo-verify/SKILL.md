@@ -10,6 +10,9 @@ closest regression, then the applicable full gates. Preserve required checks; af
 they pass, stop unless new evidence warrants more work. Read-only/document edits
 need link, contract and generation checks, not an unrelated runtime exercise.
 
+For release-host acceptance of the v4.3.0 transition, use the
+[stable upgrade qualification procedure](../../../docs/qualification/v4-upgrade.md).
+
 ## Portable and native commands
 
 From repo root, the [toolchain](../../../.hack/README.md) supports these tasks:

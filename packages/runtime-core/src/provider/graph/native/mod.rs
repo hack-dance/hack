@@ -1,5 +1,7 @@
 //! Native authored lowering; runtime ownership and effects are separately admitted.
 use super::*;
+
+mod archive;
 use crate::{project::native::NativeInputs, provider::native_input};
 pub mod endpoints;
 #[cfg(target_os = "macos")]

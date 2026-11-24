@@ -1,0 +1,29 @@
+---
+title: Provider exited · record running
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+
+    [*] --> exited : provider killed
+    exited --> ownerEnds : watch sees pid gone
+    exited --> refused : up or down meets it
+    refused --> recover : status process-exited
+    recover --> stopped : runtime recover
+    ownerEnds --> stopped : owner exits
+    stopped --> resumed : run recovered as after a stop
+    resumed --> [*]
+
+    note right of recover
+        Under the provider lease;
+        the recorded provider is
+        proven gone. One line.
+    end note
+    note left of ownerEnds
+        kill 0 answers ESRCH.
+        A reused pid reads alive.
+    end note
+
+    class resumed ok
+    class recover wait

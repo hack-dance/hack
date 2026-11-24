@@ -1,5 +1,18 @@
 import { HackCliError } from "./cli-result.ts";
 
+export const NATIVE_AUTHORED_ATTEMPT_LIMIT = "native_graph_attempt_limit";
+
+export class NativeAuthoredAttemptLimitError extends HackCliError {
+  constructor() {
+    super({
+      code: "E_STARTUP_INCOMPLETE",
+      message:
+        "The native authored graph limit is 64 attempts. Active workloads, persistent storage, private environment records, or unfinished cleanup and recovery can keep attempts in the active inventory. Run hack doctor --native-cleanup inspect for cleanup guidance.",
+      detail: { nativeCode: NATIVE_AUTHORED_ATTEMPT_LIMIT },
+    });
+  }
+}
+
 /**
  * Native image-project `up` and `restart` run one whole-project foreground
  * owner. Each option that owner cannot honor is refused by name, with the

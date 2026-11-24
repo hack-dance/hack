@@ -2,9 +2,7 @@
 
 use std::time::Instant;
 
-use gpui_kit::{
-    AnyElement, Div, FontWeight, IntoElement, SharedString, Stateful, div, prelude::*, px, relative,
-};
+use gpui_kit::{AnyElement, Div, FontWeight, IntoElement, div, prelude::*, px, relative};
 use hack_desktop_core::models::{Container, ProjectRow};
 use hack_desktop_core::state::ServiceView;
 use hack_desktop_core::stats::{
@@ -90,7 +88,8 @@ impl HackApp {
     fn stats_visible(&self) -> bool {
         self.window_visible
             && self.pane == Pane::Project
-            && self.stats_service.is_some()
+            && self.selected_service().is_some()
+            && self.service_pane.tab == crate::service_view::ServiceTab::Stats
             && self
                 .model
                 .selected_row()
@@ -588,80 +587,14 @@ fn upstream_port(container: &Container) -> Option<u16> {
     port.strip_prefix("http ").unwrap_or(port).parse().ok()
 }
 
-impl HackApp {
-    /// Entry through the copy pane before the service tabs land. The chart
-    /// itself has no dependency on this navigation.
-    pub(crate) fn stats_from_services(
-        &self,
-        detail: &DetailView,
-        service: &ServiceView,
-        ui: &Ui,
-        cx: &mut gpui_kit::Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .gap(space::S6)
-            .px(space::S8)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(space::S6)
-                    .child(
-                        div()
-                            .type_step(text::HEADLINE)
-                            .child(format!("{} · Stats", service.name)),
-                    )
-                    .child(
-                        div()
-                            .id("stats-back")
-                            .type_step(text::BODY)
-                            .text_color(ui.p.text_secondary)
-                            .cursor_pointer()
-                            .hover(|d| d.underline())
-                            .child("Back to services")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.stats_service = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(self.service_stats_tab(detail, service, ui, cx))
-    }
-
-    pub(crate) fn stats_service_link(
-        &self,
-        name: &str,
-        cx: &mut gpui_kit::Context<Self>,
-    ) -> Stateful<Div> {
-        let service = name.to_owned();
-        div()
-            .id(SharedString::from(format!("show-service-stats-{name}")))
-            .truncate()
-            .cursor_pointer()
-            .hover(|d| d.underline())
-            .child(name.to_owned())
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("Show service stats").build(window, cx)
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_stats_from_services(service.clone(), cx);
-            }))
-    }
-
-    fn open_stats_from_services(&mut self, service: String, cx: &mut gpui_kit::Context<Self>) {
-        self.stats_service = Some(service);
-        cx.notify();
-    }
-}
-
 #[cfg(feature = "screenshots")]
 impl HackApp {
     /// Fill ten minutes through the same history path as live samples.
-    pub(crate) fn show_stats_fixture(&mut self, cx: &mut gpui_kit::Context<Self>) {
+    pub(crate) fn show_stats_fixture(
+        &mut self,
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::Context<Self>,
+    ) {
         use hack_desktop_core::models::ContainerMount;
         use hack_desktop_core::stats::{ContainerUsage, IoCounterErrorBytes, StatsReport};
         use hack_desktop_core::viewmodel::Event;
@@ -756,6 +689,9 @@ impl HackApp {
             );
         }
         self.model.apply(Event::Refreshed(Ok(snapshot)));
-        self.open_stats_from_services("api".into(), cx);
+        if let Some(key) = self.model.selected_key() {
+            self.select_service(key, "api".into(), window, cx);
+            self.set_service_tab(crate::service_view::ServiceTab::Stats, window, cx);
+        }
     }
 }

@@ -76,8 +76,19 @@ fn multiple_channels_fenced_handles_and_buffered_close() {
         id: "0".repeat(32),
     };
     assert_eq!(
-        s.execute(&Request::Inspect { handle: stale }),
-        Ok(Response::Unknown {})
+        s.execute(&Request::Inspect {
+            handle: stale.clone()
+        }),
+        Err(Error::StaleHandle)
+    );
+    let prior_boot = Handle {
+        boot: stale.incarnation,
+        incarnation: UUID.into(),
+        id: stale.id,
+    };
+    assert_eq!(
+        s.execute(&Request::Release { handle: prior_boot }),
+        Err(Error::StaleHandle)
     );
     for _ in 0..2 {
         assert_eq!(
@@ -176,4 +187,60 @@ fn stalled_reader_cannot_hold_a_write_past_the_deadline() {
     drop(peer);
     writer.join().unwrap();
     assert_eq!(result.unwrap(), Err(std::io::ErrorKind::TimedOut));
+}
+
+#[test]
+fn readiness_requires_facts_from_the_negotiated_guest() {
+    const OTHER: &str = "12345678-0000-4000-a000-000000000002";
+    let facts = |boot: &str, incarnation: &str| Response::Facts {
+        arch: "aarch64".into(),
+        kernel: "linux".into(),
+        agent_version: "1".into(),
+        unix_ms: 0,
+        boot: boot.into(),
+        incarnation: incarnation.into(),
+    };
+    for (reply, ready) in [
+        (facts(UUID, UUID), true),
+        (facts(OTHER, UUID), false),
+        (facts(UUID, OTHER), false),
+        (Response::Ack {}, false),
+    ] {
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            welcome(&mut guest, 1);
+            let request = read_frame::<Request>(&mut guest).unwrap();
+            assert_eq!(
+                request,
+                Frame {
+                    channel: 1,
+                    end: true,
+                    message: Request::Facts {}
+                }
+            );
+            write_frame(&mut guest, 1, true, &reply).unwrap();
+            if ready {
+                let next = read_frame::<Request>(&mut guest).unwrap();
+                assert_eq!(
+                    next,
+                    Frame {
+                        channel: 2,
+                        end: true,
+                        message: Request::List {}
+                    }
+                );
+                write_frame(&mut guest, 2, true, &Response::Handles { handles: vec![] }).unwrap();
+            }
+        });
+        let session = Session::ready(&host, Duration::from_secs(2));
+        if ready {
+            assert_eq!(
+                session.unwrap().execute(&Request::List {}),
+                Ok(Response::Handles { handles: vec![] })
+            );
+        } else {
+            assert!(matches!(session, Err(Error::Invalid)));
+        }
+        server.join().unwrap();
+    }
 }

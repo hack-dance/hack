@@ -19,7 +19,7 @@ use gpui_kit::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, KeyBinding, ParentElement,
     Render, SharedString, Styled, Task, Window, div, prelude::*, px,
 };
-use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
+use hack_desktop_core::doctor::{DoctorPane, TargetKey, should_auto_refresh};
 use hack_desktop_core::machine_gate::{Holder, MachineGate};
 use hack_desktop_core::source::{
     ActionOutcome, DaemonRecovery, DoctorTarget, NATIVE_PS_PARALLEL, Snapshot, Source, SourceError,
@@ -29,15 +29,14 @@ use crate::doctor_view::Pane;
 use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 
 use hack_desktop_core::source::target_keys;
-use hack_desktop_core::state::{Action, ProjectState, ServiceView};
+use hack_desktop_core::state::{Action, ProjectState};
 use hack_desktop_core::viewmodel::{
-    AppModel, Banner, BranchRow, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken,
-    Row, UpdateSide,
+    AppModel, Banner, BranchRow, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken, Row,
 };
 use hack_desktop_ui::components::{
-    BannerTone, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, banner, caption,
-    count_pill, dot, empty_pane, icon_button, machine_row, neutral_pill, pill_tab, primary_button,
-    project_row, services_table, skeleton, state_pill, status_bar,
+    ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, caption, count_pill, dot,
+    empty_pane, icon_button, machine_row, neutral_pill, pill_tab, primary_button, project_row,
+    services_table_with_rows, skeleton, state_pill, status_bar,
 };
 use hack_desktop_ui::icons::Glyph;
 use hack_desktop_ui::status::{Status, project_label, service_label};
@@ -64,6 +63,7 @@ const ALWAYS_ON_REASON: &str = "Read-only here: change always-on with hack autos
 /// The window's key bindings.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(SEARCH_KEY, FocusSearch, SEARCH_CONTEXT)]);
+    crate::service_view::bind_keys(cx);
     #[cfg(hack_terminal)]
     bind_terminal_keys(cx);
 }
@@ -134,6 +134,10 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) changes: crate::changes_view::ChangesPane,
+    pub(crate) catalog: crate::service_catalog::ServiceCatalog,
+    pub(crate) service_pane: crate::service_view::ServicePane,
+    pub(crate) service_focus: gpui_kit::FocusHandle,
     pub(crate) copies: crate::copies_view::CopiesPane,
     pub(crate) files: crate::files_view::ProjectFiles,
     pub(crate) env: hack_desktop_core::env::EnvModel,
@@ -153,7 +157,8 @@ pub struct HackApp {
     /// When the URL was last copied, for the check mark.
     copied: Option<Instant>,
     pub(crate) pane: Pane,
-    doctor: DoctorPane,
+    pub(crate) doctor: DoctorPane,
+    pub(crate) health: crate::health_model::Health,
     /// Is the window visible (not minimised or hidden)? Automatic doctor
     /// runs wait for it.
     pub(crate) window_visible: bool,
@@ -175,8 +180,6 @@ pub struct HackApp {
     pub(crate) usage: Option<crate::usage_view::UsageState>,
     pub(crate) usage_loading: bool,
     pub(crate) stats: crate::stats_view::ServiceStats,
-    /// Entry from the copy's Services table until the service pane owns it.
-    pub(crate) stats_service: Option<String>,
     /// [`Self::hackd_evidence_key`] when hackd was last read: a project read
     /// that changes it makes the stored read stale.
     pub(crate) hackd_evidence_seen: String,
@@ -209,15 +212,30 @@ impl HackApp {
             }
         })
         .detach();
+        let catalog_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search images"));
+        cx.subscribe(&catalog_input, |_: &mut HackApp, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         let mut this = Self {
             model: AppModel::new(),
             source,
             logs,
             tab: 0,
+            changes: Default::default(),
+            catalog: crate::service_catalog::ServiceCatalog {
+                input: catalog_input,
+                selected: 0,
+            },
+            service_pane: Default::default(),
+            service_focus: cx.focus_handle(),
             copies: Default::default(),
             files: Default::default(),
             pane: Pane::Project,
             doctor: DoctorPane::default(),
+            health: Default::default(),
             window_visible: true,
             _visibility: None,
             _activation: None,
@@ -240,7 +258,6 @@ impl HackApp {
             usage: None,
             usage_loading: false,
             stats: Default::default(),
-            stats_service: None,
             hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
@@ -297,17 +314,12 @@ impl HackApp {
         let runs = self
             .source
             .doctor_runs(targets.as_deref().unwrap_or_default());
-        self.doctor.finish(
-            generation,
-            &runs,
-            names.as_deref(),
-            std::time::Instant::now(),
-        );
+        self.accept_health_report(generation, runs, self.source.setup());
     }
 
     /// `None` when the project list has not been read: doctor then runs
     /// machine checks only and reports the projects as not checked.
-    fn doctor_targets(&self) -> Option<Vec<DoctorTarget>> {
+    pub(crate) fn doctor_targets(&self) -> Option<Vec<DoctorTarget>> {
         if !self.model.project_list_readable() {
             return None;
         }
@@ -316,45 +328,8 @@ impl HackApp {
             .map(|s| DoctorTarget::from_projects(&s.projects))
     }
 
-    fn doctor_target_keys(&self) -> Option<Vec<TargetKey>> {
+    pub(crate) fn doctor_target_keys(&self) -> Option<Vec<TargetKey>> {
         self.doctor_targets().map(|t| target_keys(&t))
-    }
-
-    /// Run doctor (machine run plus one per project) off the UI thread.
-    /// A newer run supersedes an older one; a result whose project set no
-    /// longer matches is shown as stale and checked again.
-    pub fn load_doctor(&mut self, cx: &mut Context<Self>) {
-        if !self.live {
-            self.show_doctor_now();
-            cx.notify();
-            return;
-        }
-        let targets = self.doctor_targets().unwrap_or_default();
-        let generation = self.doctor.begin(self.doctor_target_keys().as_deref());
-        cx.notify();
-        let source = self.source.clone();
-        cx.spawn(async move |this, cx| {
-            let runs = cx
-                .background_executor()
-                .spawn(async move { source.doctor_runs(&targets) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                let current = this.doctor_target_keys();
-                let outcome = this.doctor.finish(
-                    generation,
-                    &runs,
-                    current.as_deref(),
-                    std::time::Instant::now(),
-                );
-                if outcome == Finish::AppliedStale {
-                    // Re-run now only if someone can see it; otherwise the
-                    // stale result re-runs when the window is shown again.
-                    this.maybe_auto_refresh(cx);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     /// Open the Doctor pane, optionally filtered to one project, and run
@@ -371,13 +346,14 @@ impl HackApp {
 
     /// Start a doctor run if the pane is shown in a visible window and the
     /// result is missing, old or stale. Returns whether it started one.
-    fn maybe_auto_refresh(&mut self, cx: &mut Context<Self>) -> bool {
-        let start = should_auto_refresh(
-            self.pane == Pane::Doctor,
-            self.window_visible,
-            &self.doctor,
-            std::time::Instant::now(),
-        );
+    pub(crate) fn maybe_auto_refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        let start = self.health.queue.is_none()
+            && should_auto_refresh(
+                self.pane == Pane::Doctor,
+                self.window_visible,
+                &self.doctor,
+                std::time::Instant::now(),
+            );
         if start {
             self.load_doctor(cx);
         }
@@ -414,6 +390,7 @@ impl HackApp {
 
     /// Once a minute: refresh an old Doctor or Setup result on screen.
     pub(crate) fn minute_tick(&mut self, cx: &mut Context<Self>) {
+        self.refresh_update_notice(cx);
         if hack_desktop_core::setup::should_recheck_periodically(
             self.pane == Pane::Setup,
             self.window_visible,
@@ -494,32 +471,21 @@ impl HackApp {
         if selection_changed {
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
+            self.clear_selected_service();
             self.logs.model.set_service(None);
-            self.stats_service = None;
             self.reset_env_selection();
+            self.reset_changes(cx);
             self.refresh_copies_if_open(cx);
             if self.tab == 2 {
                 self.read_env(cx);
             }
-        } else if let Some(name) = &self.stats_service
-            && self.model.project_list_readable()
-            && self
-                .model
-                .snapshot()
-                .is_some_and(|s| !s.projects.engine_down())
-            && self
-                .model
-                .detail()
-                .is_some_and(|detail| !detail.services.iter().any(|service| service.name == *name))
-        {
-            self.stats_service = None;
         }
-        if self.tab == 1 && selection_changed {
+        if self.shows_json_logs() && selection_changed {
             self.open_logs(cx);
-        } else if self.tab == 1 {
+        } else if self.shows_json_logs() {
             // A stopped project's finite read becomes a followed stream once
             // the project runs (started here or elsewhere).
-            let running = self.model.detail().is_some_and(|d| d.state.is_active());
+            let running = self.displayed_logs_running();
             if self.logs.model.should_follow_now(running) {
                 self.open_logs(cx);
             }
@@ -530,6 +496,10 @@ impl HackApp {
         let current = self.doctor_target_keys();
         self.doctor.targets_seen(current.as_deref());
         self.maybe_auto_refresh(cx);
+        self.refresh_update_notice(cx);
+        if self.health.follow_ups.has_dismissals() {
+            crate::follow_up_view::reconcile(self, &self.model.list());
+        }
         cx.notify();
         true
     }
@@ -556,6 +526,12 @@ impl HackApp {
         // The CLI does not report a running overlay per instance yet (R22).
         self.env.running = (name == "env-running").then(|| "staging".to_owned());
         self.read_env(cx);
+        if name == "env-revealed"
+            && let hack_desktop_core::env::EnvView::Report(r) = &self.env.view
+            && let Some(row) = r.vars.iter().find(|v| v.key == "APP_MODE").cloned()
+        {
+            self.toggle_reveal(&row, cx);
+        }
         // The editor open on a secret: an empty masked field and the command.
         if name == "env-edit"
             && let hack_desktop_core::env::EnvView::Report(r) = &self.env.view
@@ -563,6 +539,24 @@ impl HackApp {
         {
             self.open_env_edit(Some(&row), window, cx);
         }
+    }
+
+    /// Synthetic search and preview states.
+    pub(crate) fn show_catalog_fixture(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab = 5;
+        let query = match name {
+            "catalog-empty" => "unlisted",
+            "catalog-all" => "",
+            _ => "postgres",
+        };
+        self.catalog
+            .input
+            .update(cx, |input, cx| input.set_value(query, window, cx));
     }
 
     /// Fixtures: mark an action as in flight without running it.
@@ -633,6 +627,15 @@ impl HackApp {
     }
 
     pub(crate) fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
+        self.run_scoped_action(action, None, cx);
+    }
+
+    pub(crate) fn run_scoped_action(
+        &mut self,
+        action: Action,
+        service: Option<hack_desktop_core::source::ServiceActionTarget>,
+        cx: &mut Context<Self>,
+    ) {
         if self.machine.busy() {
             return;
         }
@@ -649,10 +652,17 @@ impl HackApp {
         if !self.model.can_start(&key) {
             return;
         }
-        self.model.apply(Event::ActionStarted {
-            key: key.clone(),
-            action,
-        });
+        let scoped = service.is_some();
+        if let Some(target) = &service {
+            if !self.model.start_service_action(&key, &target.name) {
+                return;
+            }
+        } else {
+            self.model.apply(Event::ActionStarted {
+                key: key.clone(),
+                action,
+            });
+        }
         self.action_started.insert(key.clone(), Instant::now());
         cx.notify();
         if !self.live {
@@ -667,26 +677,35 @@ impl HackApp {
                 .background_executor()
                 .spawn({
                     let branch = key.branch.clone();
-                    async move { source.act(&root, native, branch.as_deref(), action) }
+                    async move {
+                        if let Some(target) = service {
+                            source.act_on_service(&root, branch.as_deref(), &target, action)
+                        } else {
+                            source.act(&root, native, branch.as_deref(), action)
+                        }
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 // Started under a CLI the app no longer runs: its result
                 // belongs to that installation, not to what is shown now.
                 if this.model.source_epoch() != epoch {
-                    this.action_started.remove(&key);
-                    cx.notify();
                     return;
                 }
                 if let Ok(ActionOutcome::Opened(o)) = &result {
                     cx.open_url(&o.url);
                 }
                 this.action_started.remove(&key);
-                if this.model.apply(Event::ActionFinished {
-                    key,
-                    action,
-                    result,
-                }) {
+                let refresh = if scoped {
+                    this.model.finish_service_action(key, action, result)
+                } else {
+                    this.model.apply(Event::ActionFinished {
+                        key,
+                        action,
+                        result,
+                    })
+                };
+                if refresh {
                     this.refresh_now_async(cx);
                 }
                 cx.notify();
@@ -695,7 +714,7 @@ impl HackApp {
         .detach();
     }
 
-    fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
         let source = self.source.clone();
         let token = self.model.begin_refresh();
         cx.spawn(async move |this, cx| {
@@ -933,11 +952,12 @@ impl HackApp {
 
     pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Project;
+        self.clear_selected_service();
         self.files = Default::default();
         self.user_navigated();
-        self.stats_service = None;
         self.copied = None;
         self.reset_env_selection();
+        self.reset_changes(cx);
         if self.tab == 2 {
             self.read_env(cx);
         }
@@ -955,13 +975,13 @@ impl HackApp {
     }
 
     pub(crate) fn set_tab(&mut self, to: usize, cx: &mut Context<Self>) {
+        self.clear_selected_service();
         self.user_navigated();
         let from = self.tab;
         if from == to {
             return;
         }
         self.tab = to;
-        self.stats_service = None;
         self.files = Default::default();
         self.refresh_copies_if_open(cx);
         self.env_edit = None;
@@ -1040,7 +1060,10 @@ impl HackApp {
             self.recovery_error = Some(why);
         }
         if before != after {
+            self.clear_selected_service();
             self.model.source_changed();
+            self.changes = Default::default();
+            self.action_started.clear();
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
             // previous installation: it must not block this one.
@@ -1056,7 +1079,6 @@ impl HackApp {
             // The upgrade and usage reads were the previous CLI's.
             self.upgrade = crate::upgrade_view::UpgradePane::default();
             self.usage = None;
-            self.stats_service = None;
             self.reset_stats_source();
             if self.pane == Pane::Upgrade {
                 self.load_upgrade(cx);
@@ -1064,10 +1086,13 @@ impl HackApp {
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();
+            self.health = Default::default();
             // Setup's report and bound commands were the previous CLI's.
             self.setup.source_changed();
             if self.pane == Pane::Setup {
                 self.load_setup(cx);
+            } else if self.pane == Pane::Doctor {
+                self.load_doctor(cx);
             }
             #[cfg(hack_terminal)]
             self.close_all_terminals(window, cx);
@@ -1295,6 +1320,14 @@ impl HackApp {
 
     /// The Doctor row's trailing mark (see [`doctor_mark`]).
     fn doctor_trailing(&self, list: &ListView, ui: &Ui) -> AnyElement {
+        if !self.doctor.stale
+            && let DoctorStateView::Loaded(v) = &self.doctor.result
+        {
+            let count = crate::doctor_view::attention_count(self, v);
+            if count > 0 {
+                return count_pill(count, ui).into_any_element();
+            }
+        }
         match doctor_mark(&self.doctor, list) {
             DoctorMark::Count(n) => count_pill(n, ui).into_any_element(),
             DoctorMark::Dot(s) => dot(s, ui).into_any_element(),
@@ -1326,98 +1359,6 @@ impl HackApp {
         )
         .on_click(cx.listener(move |this, _, _, cx| this.select_instance(key.clone(), cx)))
         .into_any_element()
-    }
-
-    fn banners(&self, list: &ListView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
-        let daemon_banner = list
-            .banners
-            .iter()
-            .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }));
-        let mut col = div().flex().flex_col();
-        let recovery = self.model.daemon_recovery();
-        let mut recovery_shown = false;
-        for b in &list.banners {
-            // The hackd pane's card says the same and offers the same action.
-            if self.pane == Pane::Hackd
-                && matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. })
-            {
-                continue;
-            }
-            let (tone, msg, offers_recovery) = match b {
-                Banner::DaemonOff => (
-                    BannerTone::Warn,
-                    "hackd is not running. Project states are not observed.".to_owned(),
-                    true,
-                ),
-                Banner::DaemonMismatch { .. } => (BannerTone::Warn, b.text(), true),
-                Banner::EngineDown { error } => (
-                    BannerTone::Error,
-                    format!("Docker is not reachable: {error}"),
-                    false,
-                ),
-                Banner::DaemonReadFailed { error } => (BannerTone::Warn, error.clone(), false),
-                // Another install's hackd: name both, offer nothing to do.
-                Banner::SharedHome { message } => (BannerTone::Warn, message.clone(), false),
-                // With a daemon banner, the stale banner repeats its cause.
-                // Otherwise it is the only sign the latest read failed.
-                Banner::Stale { .. } if daemon_banner => continue,
-                Banner::Stale { error } => (
-                    BannerTone::Warn,
-                    format!("Showing last known state. The latest read failed: {error}"),
-                    false,
-                ),
-            };
-            let mut row = banner(tone, msg, None, ui);
-            // A daemon newer than the CLI: the remedy is updating the CLI,
-            // never restarting hackd.
-            if let Banner::DaemonMismatch {
-                update: UpdateSide::Cli,
-                ..
-            } = b
-            {
-                row = row.child(
-                    action_button("copy-update", Glyph::Copy, "Copy hack update", true, ui)
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string("hack update".into()));
-                        })),
-                );
-            }
-            if offers_recovery
-                && !recovery_shown
-                && let Some(action) = recovery
-            {
-                recovery_shown = true;
-                let glyph = match action {
-                    DaemonRecovery::Start => Glyph::Power,
-                    DaemonRecovery::Restart => Glyph::Restart,
-                };
-                let label = if self.machine.held_by(Holder::Recovery) {
-                    "Working…"
-                } else {
-                    action.label()
-                };
-                row = row.child(
-                    action_button("recover-hackd", glyph, label, !self.machine.busy(), ui)
-                        .when(self.machine.held_by(Holder::Command), |button| {
-                            button.tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(if cfg!(target_os = "macos") {
-                                    "A terminal command is running. Press ⌘J to show it."
-                                } else {
-                                    "A terminal command is running. Press Ctrl+Shift+J to show it."
-                                }).build(window, cx)
-                            })
-                        })
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
-                        ),
-                );
-            }
-            col = col.child(row);
-        }
-        if let Some(e) = &self.recovery_error {
-            col = col.child(banner(BannerTone::Error, e.clone(), None, ui));
-        }
-        col
     }
 
     fn header(
@@ -1549,7 +1490,12 @@ impl HackApp {
                     .child(div().flex_1())
                     .child(actions),
             )
-            .when(!compact, |col| col.child(url_row))
+            .when(!compact, |col| {
+                col.child(url_row).children(
+                    self.changes_badge(ui)
+                        .map(|badge| div().flex().child(badge)),
+                )
+            })
             .children(
                 d.always_on_note
                     .clone()
@@ -1623,6 +1569,60 @@ impl HackApp {
         )
     }
 
+    fn remote_targets(d: &DetailView, ui: &Ui) -> Option<gpui_kit::Div> {
+        if d.remotes.is_empty() {
+            return None;
+        }
+        let p = ui.p;
+        Some(
+            div()
+                .pt(space::S6)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .pb(space::S3)
+                        .type_step(text::SMALL_STRONG)
+                        .text_color(p.text_secondary)
+                        .child("Remote targets"),
+                )
+                .children(d.remotes.iter().map(|remote| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space::S2)
+                        .py(space::S4)
+                        .hairline_t(p.border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(space::S3)
+                                .child(
+                                    div()
+                                        .type_step(text::BODY_STRONG)
+                                        .child(remote.service.clone()),
+                                )
+                                .child(neutral_pill(remote.target.clone(), ui))
+                                .child(neutral_pill(remote.probe.clone(), ui)),
+                        )
+                        .child(
+                            div()
+                                .type_step(text::MONO)
+                                .font_family(ui.mono.clone())
+                                .text_color(p.text_secondary)
+                                .child(remote.address_label()),
+                        )
+                        .child(
+                            div()
+                                .type_step(text::SMALL)
+                                .text_color(p.text_secondary)
+                                .child(remote.state.clone()),
+                        )
+                })),
+        )
+    }
+
     fn detail(
         &mut self,
         d: &DetailView,
@@ -1679,6 +1679,8 @@ impl HackApp {
             (2, "Env"),
             (3, "Copies"),
             (crate::files_view::FILES_TAB, "Files"),
+            (6, "Changes"),
+            (5, "Add service"),
         ];
         #[cfg(not(hack_terminal))]
         let pills: &[(usize, &'static str)] = &[
@@ -1687,6 +1689,8 @@ impl HackApp {
             (2, "Env"),
             (3, "Copies"),
             (crate::files_view::FILES_TAB, "Files"),
+            (6, "Changes"),
+            (5, "Add service"),
         ];
         let mut tabs = div().flex().items_center().gap(space::S2);
         for &(i, label) in pills {
@@ -1698,8 +1702,17 @@ impl HackApp {
         if self.tab == crate::files_view::FILES_TAB {
             tabs = tabs.child(self.project_files_picker(d, cx));
         }
-        let stats_service = self.stats_service_for(d);
         let body: AnyElement = match self.tab {
+            5 => div()
+                .id("service-catalog")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px(space::S8)
+                .pb(space::S5)
+                .child(self.service_catalog(d, ui, cx))
+                .into_any_element(),
+            6 => self.changes_view(ui, cx).into_any_element(),
             crate::files_view::FILES_TAB => {
                 self.project_files(d, ui, window, cx).into_any_element()
             }
@@ -1718,9 +1731,6 @@ impl HackApp {
                 .pb(space::S5)
                 .child(self.env_tab(ui, cx))
                 .into_any_element(),
-            0 if let Some(service) = stats_service => self
-                .stats_from_services(d, service, ui, cx)
-                .into_any_element(),
             _ => div()
                 .id("detail-body")
                 .flex_1()
@@ -1735,12 +1745,22 @@ impl HackApp {
                         .text_color(ui.p.text_muted)
                         .child("No services reported for this project")
                 } else {
-                    services_table(&rows, ui, |name| self.stats_service_link(name, cx))
+                    services_table_with_rows(&rows, ui, |row, service| {
+                        let key = d.key.clone();
+                        let service = service.name.clone();
+                        let p = ui.p;
+                        row.cursor_pointer()
+                            .hover(move |d| d.bg(p.surface_1))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_service(key.clone(), service.clone(), window, cx);
+                            }))
+                    })
                 })
+                .children(Self::remote_targets(d, ui))
                 .into_any_element(),
         };
         #[cfg(hack_terminal)]
-        let (maximized, panel) = if stats_service.is_some() || self.panels.command.visible() {
+        let (maximized, panel) = if self.panels.command.visible() {
             (false, None)
         } else {
             (
@@ -1823,21 +1843,11 @@ impl HackApp {
 }
 
 impl HackApp {
-    fn stats_service_for<'a>(&self, detail: &'a DetailView) -> Option<&'a ServiceView> {
-        let name = self.stats_service.as_deref()?;
-        detail.services.iter().find(|service| service.name == name)
-    }
-
-    /// The command drawer has its own actions. Keep the project panel's
-    /// state and sessions intact while the Stats body is using its space.
     #[cfg(hack_terminal)]
-    fn project_terminal_shortcuts(&self) -> bool {
+    fn stats_tab_open(&self) -> bool {
         self.pane == Pane::Project
-            && !self.panels.command.visible()
-            && self
-                .model
-                .detail()
-                .is_some_and(|detail| self.stats_service_for(&detail).is_none())
+            && self.selected_service().is_some()
+            && self.service_pane.tab == crate::service_view::ServiceTab::Stats
     }
 
     /// The panel's window-level handlers: drag the handle, and the panel
@@ -1867,14 +1877,14 @@ impl HackApp {
             cx.listener(|this, _, _, _| this.panels.dragging = false),
         )
         .on_action(cx.listener(|this, _: &TogglePanel, window, cx| {
-            if !this.toggle_command_drawer(window, cx) && this.project_terminal_shortcuts() {
-                this.toggle_panel(cx);
+            if !this.toggle_command_drawer(window, cx) {
+                this.toggle_visible_panel(window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &ToggleMaximize, _, cx| {
             if this.panels.command.visible() {
                 this.make_command_taller(cx);
-            } else if this.project_terminal_shortcuts() {
+            } else if !this.stats_tab_open() {
                 this.toggle_maximize(cx);
             }
         }))
@@ -1883,25 +1893,25 @@ impl HackApp {
                 this.make_command_taller(cx);
             },
         ))
-        .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-            if this.project_terminal_shortcuts() {
-                this.open_menu(crate::terminal::Menu::Main, cx);
+        .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+            if !this.panels.command.visible() {
+                this.terminal_new_tab(window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
             if this.panels.command.visible() {
                 this.close_command_drawer(cx);
-            } else if this.project_terminal_shortcuts() {
+            } else if !this.stats_tab_open() {
                 this.close_active_tab(window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &NextTab, window, cx| {
-            if this.project_terminal_shortcuts() {
+            if !this.stats_tab_open() {
                 this.step_tab(true, window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
-            if this.project_terminal_shortcuts() {
+            if !this.stats_tab_open() {
                 this.step_tab(false, window, cx);
             }
         }))
@@ -1922,7 +1932,20 @@ impl Render for HackApp {
         let list = self.model.list();
         let ui = self.ui(cx);
         let p = ui.p;
+        self.sync_service_logs(cx);
+        #[cfg(hack_terminal)]
+        self.reconcile_selected_service_panel(window, cx);
+        let follow_up = if self.pane == Pane::Project {
+            crate::follow_up_view::render(self, &list, &ui, cx)
+        } else {
+            crate::follow_up_view::reconcile(self, &list);
+            None
+        };
         let main: AnyElement = match &list.phase {
+            _ if self.pane == Pane::BannersSheet => crate::health_fixtures::banners(&ui, cx),
+            _ if self.pane == Pane::ErrorsSheet => {
+                crate::health_fixtures::errors(self, &ui, window, cx)
+            }
             // Setup applies whatever the project list shows, a missing CLI
             // included.
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
@@ -1931,9 +1954,7 @@ impl Render for HackApp {
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.
-            Phase::Ready | Phase::Empty | Phase::Error { .. } if self.pane == Pane::Doctor => {
-                crate::doctor_view::render(&self.doctor, &ui, cx)
-            }
+            _ if self.pane == Pane::Doctor => crate::doctor_view::render(self, &ui, window, cx),
             Phase::CliMissing => empty_pane(
                 Glyph::CircleAlert,
                 "Hack CLI not found",
@@ -1965,6 +1986,9 @@ impl Render for HackApp {
                 empty_pane(Glyph::Loader, "Loading projects…", "", None, &ui).into_any_element()
             }
             Phase::Ready => match self.model.detail() {
+                Some(d) if self.selected_service().is_some() => {
+                    self.service_detail(&d, &ui, window, cx)
+                }
                 Some(d) => self.detail(&d, &ui, window, cx).into_any_element(),
                 None => {
                     empty_pane(Glyph::Folder, "Select a project", "", None, &ui).into_any_element()
@@ -1973,12 +1997,45 @@ impl Render for HackApp {
         };
         #[cfg(hack_terminal)]
         let command_drawer = self.render_command_drawer(&ui, cx);
+        #[cfg(not(hack_terminal))]
+        let command_drawer: Option<AnyElement> = None;
+        let sheet = matches!(self.pane, Pane::BannersSheet | Pane::ErrorsSheet);
+        let right_pane = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .when(
+                        self.health.fixture.is_some()
+                            || self.pane == Pane::Doctor
+                            || follow_up.is_some(),
+                        |main| {
+                            main.mx(space::S4)
+                                .my(space::S2)
+                                .rounded(radius::PANEL)
+                                .hairline(p.border)
+                        },
+                    )
+                    .children(follow_up)
+                    .child(main),
+            )
+            .children(command_drawer);
         div()
             .id("hack-window")
             .key_context("HackWindow")
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
+            .map(|root| self.service_handlers(root, cx))
             .map(|root| self.terminal_handlers(root, cx))
             .size_full()
             .flex()
@@ -1992,39 +2049,12 @@ impl Render for HackApp {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.sidebar(&list, &ui, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(self.banners(&list, &ui, cx))
-                            .child({
-                                #[cfg(hack_terminal)]
-                                let main = if command_drawer.is_some() {
-                                    div()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .overflow_hidden()
-                                        .flex()
-                                        .flex_col()
-                                        .child(main)
-                                        .into_any_element()
-                                } else {
-                                    main
-                                };
-                                main
-                            })
-                            .map(|pane| {
-                                #[cfg(hack_terminal)]
-                                let pane = pane.children(command_drawer);
-                                pane
-                            }),
-                    ),
+                    .when(!sheet, |d| d.child(self.sidebar(&list, &ui, cx)))
+                    .child(right_pane),
             )
-            .child(self.status_bar_with_cli(&list, &ui, cx))
+            .when(!sheet, |d| {
+                d.child(self.status_bar_with_cli(&list, &ui, cx))
+            })
     }
 }
 
@@ -2180,7 +2210,8 @@ mod tests {
                     .unwrap();
                     let shell = cx.new(|cx| TerminalView::from_core(core, cx));
                     sessions.update(cx, |panel, cx| panel.add_tab(shell.clone(), window, cx));
-                    app.stats_service = Some("api".into());
+                    app.select_service(key, "api".into(), window, cx);
+                    app.set_service_tab(crate::service_view::ServiceTab::Stats, window, cx);
                     app.search.update(cx, |search, cx| search.focus(window, cx));
                     (sessions, shell)
                 })
@@ -2195,8 +2226,8 @@ mod tests {
 
         cx.update_window(handle, |_, window, cx| {
             app.update(cx, |app, cx| {
-                assert_eq!(app.stats_service.as_deref(), Some("api"));
-                app.stats_service = None;
+                assert!(app.stats_tab_open());
+                app.clear_selected_service();
                 cx.notify();
             });
             window.render_frame(cx);

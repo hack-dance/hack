@@ -29,7 +29,7 @@
 //! BuildKit cache is then pruned to the build cache budget; that never removes images.
 use super::{
     BuildPool, CACHE_BUDGET, LivePool, Phase, RESERVED_LABEL_PREFIXES, Receipt, builds_root, hex64,
-    image_id, owner_label, refusal, require_no_active_build,
+    image_fence, image_id, owner_label, refusal,
 };
 use crate::{Candidate, CandidateError};
 use serde::Serialize;
@@ -40,8 +40,10 @@ use std::{
     io::Read,
     os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     path::Path,
+    time::Instant,
 };
 
+const TRIM_MIN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SCAN_ENTRIES: usize = 20_000;
 const MAX_SCAN_DEPTH: usize = 8;
 const MAX_SCAN_FILE: u64 = 16 * 1024 * 1024;
@@ -70,14 +72,27 @@ pub struct ReclaimReport {
     pub retained: BTreeMap<String, Retained>,
     /// Build cache bytes reclaimed; `None` when the prune failed (images unaffected).
     pub cache_reclaimed_bytes: Option<u64>,
+    /// Present only for a confirmed discard. The byte count is guest free-space
+    /// growth during reclaim, not a measurement of host blocks returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trim: Option<TrimReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrimReport {
+    pub guest_bytes_freed: u64,
+    pub seconds: f64,
 }
 
 /// Engine effects reclamation needs beyond a build pool.
 pub(super) trait ReclaimPool: BuildPool {
     /// Images labeled `io.hack-local.kind=build-image`, as the engine lists them.
     fn build_images(&self, lease: &Self::Lease) -> Result<Vec<Value>, CandidateError>;
+    /// Engine image records with private build-base keeper tags.
+    fn base_images(&self, lease: &Self::Lease) -> Result<Vec<Value>, CandidateError>;
     /// Remove one image by content ID without force. `Ok(false)` when the engine refuses.
     fn remove(&self, lease: &Self::Lease, image: &str) -> Result<bool, CandidateError>;
+    fn trim(&self, lease: &Self::Lease) -> Result<(), CandidateError>;
 }
 
 fn unprovable() -> CandidateError {
@@ -109,10 +124,17 @@ fn image_tokens(bytes: &[u8], into: &mut BTreeSet<String>) {
 
 /// Collect every image ID retained graph state mentions. Symlinks, special files,
 /// unreadable entries or exceeded bounds refuse: reclamation needs a complete scan.
-pub(super) fn referenced_images(candidate: &Candidate) -> Result<BTreeSet<String>, CandidateError> {
+pub(in crate::provider) fn referenced_images(
+    candidate: &Candidate,
+) -> Result<BTreeSet<String>, CandidateError> {
     let mut found = BTreeSet::new();
     let mut entries = 0;
-    for name in ["run/graphs", "run/native-graphs", "run/graph-archive"] {
+    for name in [
+        "run/graphs",
+        "run/native-graphs",
+        "run/graph-archive",
+        "run/native-graph-archive",
+    ] {
         let root = candidate.state_root.join(name);
         match fs::symlink_metadata(&root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -193,14 +215,29 @@ fn scan_directory(
 
 /// The images build receipts protect, with why: per namespace and declaration, the
 /// most recent and the previous verified key (see the module documentation).
-fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, CandidateError> {
+#[derive(Default)]
+pub(super) struct CurrentImages {
+    pub(super) builds: BTreeMap<String, Retained>,
+    bases: BTreeSet<String>,
+    pub(super) inputs: BTreeSet<(String, String)>,
+}
+
+impl CurrentImages {
+    fn add_bases(&mut self, receipt: Receipt) {
+        self.bases.extend(receipt.base_image_ids);
+        self.inputs.extend(receipt.base_pins);
+    }
+}
+
+pub(super) fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError> {
     let root = builds_root(candidate);
-    let mut protected = BTreeMap::new();
+    let mut protected = CurrentImages::default();
     let namespaces = match fs::read_dir(&root) {
         Ok(namespaces) => namespaces,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(protected),
         Err(_) => return Err(unprovable()),
     };
+    let mut visited = 0;
     for namespace in namespaces {
         let namespace = namespace.map_err(|_| unprovable())?.path();
         let name = namespace.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -212,8 +249,12 @@ fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, C
             return Err(unprovable());
         }
         // Declaration to its verified keys' (sequence, image).
-        let mut declarations: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
+        let mut declarations: BTreeMap<String, Vec<(u64, String, Receipt)>> = BTreeMap::new();
         for entry in fs::read_dir(&namespace).map_err(|_| unprovable())? {
+            visited += 1;
+            if visited > MAX_SCAN_ENTRIES {
+                return Err(unprovable());
+            }
             let path = entry.map_err(|_| unprovable())?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -224,14 +265,17 @@ fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, C
             if receipt.phase != Phase::ContentIdVerified {
                 continue;
             }
-            let Some(id) = receipt.image_id else { continue };
-            match (receipt.declaration, receipt.sequence) {
+            let Some(id) = receipt.image_id.clone() else {
+                continue;
+            };
+            match (receipt.declaration.clone(), receipt.sequence) {
                 (Some(declaration), Some(sequence)) => declarations
                     .entry(declaration)
                     .or_default()
-                    .push((sequence, id)),
+                    .push((sequence, id, receipt)),
                 _ => {
-                    protected.insert(id, Retained::Current);
+                    protected.builds.insert(id, Retained::Current);
+                    protected.add_bases(receipt);
                 }
             }
         }
@@ -239,10 +283,10 @@ fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, C
             keys.sort_by_key(|key| std::cmp::Reverse(key.0));
             let mut sequences = keys
                 .iter()
-                .map(|(sequence, _)| *sequence)
+                .map(|(sequence, _, _)| *sequence)
                 .collect::<Vec<_>>();
             sequences.dedup();
-            for (sequence, id) in keys {
+            for (sequence, id, receipt) in keys {
                 let reason = if Some(&sequence) == sequences.first() {
                     Retained::Current
                 } else if Some(&sequence) == sequences.get(1) {
@@ -251,7 +295,8 @@ fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, C
                     continue;
                 };
                 // An image two keys share keeps its strongest reason.
-                let slot = protected.entry(id).or_insert(reason);
+                protected.add_bases(receipt);
+                let slot = protected.builds.entry(id).or_insert(reason);
                 *slot = (*slot).min(reason);
             }
         }
@@ -334,9 +379,17 @@ pub(super) fn plan(
 pub(super) fn run<P: ReclaimPool>(
     candidate: &Candidate,
     pool: &P,
+    allow_trim: bool,
 ) -> Result<ReclaimReport, CandidateError> {
+    let _fence = image_fence(candidate, libc::LOCK_EX)?;
     let (lease, identity) = pool.lease()?;
-    require_no_active_build(candidate)?;
+    super::aliases::sweep_stranded(
+        &builds_root(candidate),
+        pool,
+        &lease,
+        &identity,
+        Path::new(""),
+    );
     // Under the lease no build can start, adopt or write a receipt.
     let current = current_images(candidate)?;
     let referenced = referenced_images(candidate)?;
@@ -344,9 +397,12 @@ pub(super) fn run<P: ReclaimPool>(
     let (candidates, mut retained) = plan(
         &images,
         &owner_label(&identity.incarnation),
-        &current,
+        &current.builds,
         &referenced,
     )?;
+    let free_before = allow_trim
+        .then(|| pool.storage_available(&lease).ok())
+        .flatten();
     let mut removed = Vec::new();
     for id in candidates {
         match pool.remove(&lease, &id) {
@@ -356,11 +412,49 @@ pub(super) fn run<P: ReclaimPool>(
             }
         }
     }
+    let protected = super::super::image_tag_store::protected_image_ids(candidate);
+    for image in pool.base_images(&lease).unwrap_or_default() {
+        let Some(id) = image["Id"].as_str() else {
+            continue;
+        };
+        let Some(keeper) = super::aliases::keeper(id) else {
+            continue;
+        };
+        if !current.bases.contains(id)
+            && !referenced.contains(id)
+            && protected.as_ref().is_ok_and(|ids| !ids.contains(id))
+            && image["RepoTags"]
+                .as_array()
+                .is_some_and(|tags| tags.iter().any(|tag| tag == &keeper))
+            && pool
+                .inspect(&lease, &keeper)
+                .is_ok_and(|value| value.is_some_and(|image| image["Id"] == id))
+        {
+            let _ = pool.untag_base(&lease, &keeper);
+        }
+    }
     let cache_reclaimed_bytes = pool.prune_cache(&lease, CACHE_BUDGET).ok();
+    let trim = (|| {
+        let before = free_before?;
+        if removed.is_empty() && cache_reclaimed_bytes.unwrap_or_default() == 0 {
+            return None;
+        }
+        let guest_bytes_freed = pool.storage_available(&lease).ok()?.saturating_sub(before);
+        if guest_bytes_freed < TRIM_MIN_BYTES {
+            return None;
+        }
+        let started = Instant::now();
+        pool.trim(&lease).ok()?;
+        Some(TrimReport {
+            guest_bytes_freed,
+            seconds: started.elapsed().as_secs_f64(),
+        })
+    })();
     Ok(ReclaimReport {
         removed,
         retained,
         cache_reclaimed_bytes,
+        trim,
     })
 }
 
@@ -377,6 +471,27 @@ impl ReclaimPool for LivePool<'_> {
             .cloned()
             .ok_or_else(|| refusal("engine_protocol", "The engine image list is not an array."))
     }
+    fn base_images(&self, lease: &Self::Lease) -> Result<Vec<Value>, CandidateError> {
+        // Docker's reference filter matches only the private keeper repository.
+        lease.request(
+            reqwest::Method::GET,
+            "/v1.53/images/json?all=true&filters=%7B%22reference%22%3A%5B%22127.0.0.1%3A1%2Fhack-build-cache%3A%2A%22%5D%7D",
+            None,
+        )?
+        .as_array()
+        .cloned()
+        .ok_or_else(|| refusal("engine_protocol", "The engine image list is not an array."))
+    }
+
+    fn trim(&self, lease: &Self::Lease) -> Result<(), CandidateError> {
+        // execute_cleanup checks the live boot, owner and ext4 mount. Keep the
+        // same operation lease held across the guest command and its result.
+        lease
+            .guest()
+            .execute_cleanup("fstrim /storage", &[])
+            .map(drop)
+    }
+
     fn remove(&self, lease: &Self::Lease, image: &str) -> Result<bool, CandidateError> {
         match lease.request(reqwest::Method::DELETE, &removal_path(image), None) {
             Ok(_) => Ok(true),
@@ -395,7 +510,14 @@ fn removal_path(image: &str) -> String {
 
 /// `runtime reclaim-build-images`: see the module documentation.
 pub fn reclaim_build_images(candidate: &Candidate) -> Result<ReclaimReport, CandidateError> {
-    run(candidate, &LivePool { candidate })
+    run(
+        candidate,
+        &LivePool {
+            candidate,
+            build_deadline: None,
+        },
+        true,
+    )
 }
 
 /// Why a best-effort reclamation removed nothing.
@@ -420,7 +542,8 @@ pub struct BestEffortReport {
 /// or error becomes `skipped` in the report instead. Bounded like [`run`]: a
 /// non-blocking lease, bounded scans and one removal call per candidate image.
 pub(super) fn best_effort<P: ReclaimPool>(candidate: &Candidate, pool: &P) -> BestEffortReport {
-    match run(candidate, pool) {
+    // The frontend invokes this form during project up. Only manual reclaim trims.
+    match run(candidate, pool, false) {
         Ok(report) => BestEffortReport {
             report,
             skipped: None,
@@ -430,6 +553,7 @@ pub(super) fn best_effort<P: ReclaimPool>(candidate: &Candidate, pool: &P) -> Be
                 removed: Vec::new(),
                 retained: BTreeMap::new(),
                 cache_reclaimed_bytes: None,
+                trim: None,
             },
             skipped: Some(Skipped {
                 code: error.code,
@@ -446,7 +570,13 @@ pub(super) fn best_effort<P: ReclaimPool>(candidate: &Candidate, pool: &P) -> Be
 
 /// `runtime reclaim-build-images --best-effort`: see [`best_effort`].
 pub fn reclaim_build_images_best_effort(candidate: &Candidate) -> BestEffortReport {
-    best_effort(candidate, &LivePool { candidate })
+    best_effort(
+        candidate,
+        &LivePool {
+            candidate,
+            build_deadline: None,
+        },
+    )
 }
 
 #[cfg(test)]

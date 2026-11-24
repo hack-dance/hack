@@ -3,12 +3,18 @@ use super::*;
 use std::{path::Path, time::Instant};
 
 pub(super) fn runs(parent: &Path) -> Result<Vec<String>, CandidateError> {
+    bounded_runs(parent, RUN_LIMIT)
+}
+
+pub(super) const RUN_LIMIT: usize = 64;
+
+pub(super) fn bounded_runs(parent: &Path, limit: usize) -> Result<Vec<String>, CandidateError> {
     if !parent.exists() && !parent.is_symlink() {
         return Ok(Vec::new());
     }
     state::check_private_directory(parent)?;
     let mut runs = Vec::new();
-    for entry in fs::read_dir(parent).map_err(state::io)?.take(65) {
+    for entry in fs::read_dir(parent).map_err(state::io)?.take(limit + 1) {
         let entry = entry.map_err(state::io)?;
         let name = entry.file_name().into_string().map_err(|_| {
             error(
@@ -16,10 +22,10 @@ pub(super) fn runs(parent: &Path) -> Result<Vec<String>, CandidateError> {
                 "Invalid retained graph directory.",
             )
         })?;
-        if runs.len() == 64 || !hex(&name, 32) {
+        if runs.len() == limit || !hex(&name, 32) {
             return Err(error(
                 "graph_storage_inventory",
-                "Graph inventory exceeds 64 attempts or contains unknown entries.",
+                format!("Graph inventory exceeds {limit} attempts or contains unknown entries."),
             ));
         }
         state::check_private_directory(&entry.path())?;

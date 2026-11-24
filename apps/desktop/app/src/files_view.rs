@@ -553,7 +553,7 @@ impl FilesPane {
                 .flex_1()
                 .min_h_0()
                 .overflow_scroll()
-                .bg(ui.p.surface_1)
+                .bg(ui.p.preview_surface)
                 .child(text),
         )
     }
@@ -575,6 +575,10 @@ impl Render for FilesPane {
             .notice
             .as_deref()
             .or_else(|| (self.reading == Some(Read::List)).then_some("Reading directory…"));
+        let footnote_color = match ui.p.mode {
+            Mode::Light => ui.p.text_secondary,
+            Mode::Dark => ui.p.text_muted,
+        };
         div()
             .flex().flex_col().flex_1().min_h_0().min_w_0().gap(space::S4).pb(space::S5)
             .type_step(text::BODY).text_color(ui.p.text_primary)
@@ -585,9 +589,9 @@ impl Render for FilesPane {
                     .overflow_y_scroll().child(self.rows(&ui, cx)))
                 .child(self.preview(&ui, cx)))
             .child(div().flex().items_center().gap(space::S4).type_step(text::SMALL)
-                .text_color(ui.p.text_secondary)
-                .child(icon(Glyph::Info, size::ICON, ui.p.text_secondary))
-                .child("Worktree files are mounted from your checkout. Container files live in the container. Volume files live in a named volume."))
+                .text_color(footnote_color)
+                .child(icon(Glyph::Info, size::ICON, footnote_color).flex_none())
+                .child("worktree files are your checkout, mounted in. container files outside mounts live only in the container and go away when it is rebuilt."))
     }
 }
 
@@ -698,18 +702,23 @@ fn file_row(
     ui: &Ui,
 ) -> Stateful<Div> {
     let p = ui.p;
+    let selection = match p.mode {
+        Mode::Light => p.surface_2,
+        Mode::Dark => p.selection,
+    };
     div()
         .id(id)
         .h(size::TABLE_ROW)
+        .flex_none()
         .flex()
         .items_center()
         .gap(space::S4)
         .px(space::S4)
         .rounded(radius::CONTROL)
         .cursor_pointer()
-        .hover(move |row| row.bg(p.surface_1))
+        .when(!selected, |row| row.hover(move |row| row.bg(p.surface_1)))
         .when(selected, |row| {
-            row.bg(p.surface_2).type_step(text::BODY_STRONG)
+            row.bg(selection).type_step(text::BODY_STRONG)
         })
         .child(icon(glyph, size::ICON, p.text_secondary))
         .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))

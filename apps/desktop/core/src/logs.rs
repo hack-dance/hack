@@ -33,6 +33,7 @@ pub struct LogLine {
     pub message: String,
     pub stderr: bool,
     pub error_level: bool,
+    pub warn_level: bool,
     pub timestamp: Option<String>,
     /// The CLI cut this line (`entry.truncated`).
     pub truncated_by_hack: bool,
@@ -41,6 +42,17 @@ pub struct LogLine {
 }
 
 impl LogLine {
+    /// Display stderr separately from explicit application warnings and errors.
+    #[must_use]
+    pub fn level(&self) -> &'static str {
+        match (self.error_level, self.warn_level, self.stderr) {
+            (true, _, _) => "error",
+            (_, true, _) => "warn",
+            (_, _, true) => "stderr",
+            _ => "info",
+        }
+    }
+
     /// Bytes this line holds in the buffer (message, service, timestamp).
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
@@ -224,12 +236,15 @@ impl LogsModel {
                     if self.state == StreamState::Connecting && self.follow {
                         self.state = StreamState::Following;
                     }
+                    let (error_level, warn_level) =
+                        log_severity(entry.level.as_deref(), &entry.message);
                     self.push(LogLine {
                         seq: 0,
                         service: entry.service.clone(),
                         message: entry.message.clone(),
                         stderr: entry.stream.as_deref() == Some("stderr"),
-                        error_level: entry.level.as_deref() == Some("error"),
+                        error_level,
+                        warn_level,
                         timestamp: entry.timestamp.clone(),
                         truncated_by_hack: entry.truncated == Some(true),
                         cut: 0,
@@ -342,16 +357,10 @@ impl LogsModel {
     #[must_use]
     pub fn visible_indices(&self) -> Vec<usize> {
         let q = self.search.trim().to_lowercase();
-        (0..self.lines.len())
-            .filter(|&i| {
-                q.is_empty() || {
-                    let l = &self.lines[i];
-                    l.message.to_lowercase().contains(&q)
-                        || l.service
-                            .as_deref()
-                            .is_some_and(|s| s.to_lowercase().contains(&q))
-                }
-            })
+        self.lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| (q.is_empty() || line_matches(line, &q)).then_some(index))
             .collect()
     }
 
@@ -428,6 +437,73 @@ impl LogsModel {
             StreamState::FollowEnded | StreamState::Failed { .. }
         )
     }
+}
+
+/// Match a normalized query against the log message or its service name.
+#[must_use]
+pub fn line_matches(line: &LogLine, query: &str) -> bool {
+    line.message.to_lowercase().contains(query)
+        || line
+            .service
+            .as_ref()
+            .is_some_and(|s| s.to_lowercase().contains(query))
+}
+
+fn log_severity(level: Option<&str>, message: &str) -> (bool, bool) {
+    let trimmed = message.trim_start();
+    let json = (level.is_none() && trimmed.starts_with('{'))
+        .then(|| serde_json::from_str::<serde_json::Value>(trimmed).ok())
+        .flatten();
+    let level = level
+        .or_else(|| {
+            let value = json.as_ref()?;
+            value
+                .get("level")
+                .or_else(|| value.get("severity"))?
+                .as_str()
+        })
+        .or_else(|| {
+            trimmed
+                .trim_start_matches('[')
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .next()
+        })
+        .unwrap_or_default();
+    (
+        level.eq_ignore_ascii_case("error") || level.eq_ignore_ascii_case("fatal"),
+        level.eq_ignore_ascii_case("warn") || level.eq_ignore_ascii_case("warning"),
+    )
+}
+
+/// Byte ranges of quoted object keys in a valid JSON message.
+/// Original spacing and escapes are retained for display.
+#[must_use]
+pub fn json_key_ranges(message: &str) -> Vec<std::ops::Range<usize>> {
+    if !matches!(message.trim_start().as_bytes().first(), Some(b'{' | b'['))
+        || serde_json::from_str::<serde_json::Value>(message).is_err()
+    {
+        return Vec::new();
+    }
+    let mut start = None;
+    let mut escaped = false;
+    let mut keys = Vec::new();
+    for (index, byte) in message.bytes().enumerate() {
+        if let Some(begin) = start {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                if message[index + 1..].trim_start().starts_with(':') {
+                    keys.push(begin..index + 1);
+                }
+                start = None;
+            }
+        } else if byte == b'"' {
+            start = Some(index);
+        }
+    }
+    keys
 }
 
 /// Canned log streams for the Logs tab fixtures.
@@ -632,6 +708,24 @@ mod tests {
     }
 
     #[test]
+    fn severity_is_explicit_and_json_highlights_keys_without_reformatting() {
+        assert_eq!(log_severity(Some("warning"), "slow query"), (false, true));
+        assert_eq!(
+            log_severity(None, r#"{"level":"error","message":"failed"}"#),
+            (true, false)
+        );
+        assert_eq!(log_severity(None, "[WARN] slow query"), (false, true));
+        assert_eq!(log_severity(None, "reading error history"), (false, false));
+        let message = r#"{"d\"im": "normal", "size":10, "nested":{"Δ":true}}"#;
+        let keys: Vec<_> = json_key_ranges(message)
+            .into_iter()
+            .map(|range| &message[range])
+            .collect();
+        assert_eq!(keys, [r#""d\"im""#, r#""size""#, r#""nested""#, r#""Δ""#]);
+        assert!(json_key_ranges(r#"{"not json":}"#).is_empty());
+    }
+
+    #[test]
     fn ring_buffer_bounds_lines_and_bytes() {
         let mut m = LogsModel::with_limits(3, 1_000);
         m.start(true);
@@ -765,6 +859,7 @@ mod tests {
             message: msg.clone(),
             stderr: false,
             error_level: false,
+            warn_level: false,
             timestamp: None,
             truncated_by_hack: false,
             cut: 0,

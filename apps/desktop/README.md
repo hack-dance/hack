@@ -3,8 +3,9 @@
 Unsupported preview of a minimal native window for Hack: every
 project, its state and services, and Start / Stop / Restart / Open. It is a view
 over the `hack` CLI and the `hackd` socket; it keeps no state beyond window
-layout, holds no credentials and runs `hack` as you for every action. Not part
-of the release or onboarding yet.
+layout and holds no credentials. Project actions run `hack` as you. Service
+Stop uses Docker to target an individual Compose service. This app is outside
+the release and onboarding workflows.
 
 | Crate | What |
 |---|---|
@@ -479,12 +480,29 @@ after the read, plus a known project-only check. A machine-only or ancestor-proj
 report cannot establish Compose project coverage.
 Machine diagnostics remain visible even when a checkout cannot be verified.
 
-Cards group findings by area and offer one copied command or documentation link.
-Project commands include the checkout path. The app never runs a Doctor fix:
-one-click fixes remain blocked on the CLI's explicit safe-fix metadata (R7a/R7b).
-The probes do not use `hack global status`, which can start Docker.
-Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
-[dark](screenshots/doctor-dark.png).
+Doctor groups machine and project findings and folds the passed checks. The
+project pane shows one follow-up at a time. Dismissing it hides that finding
+for the session until its evidence changes.
+
+**Fix all** runs the available repairs in row order in the shared terminal
+drawer. It checks again after each command exits. A failed command or a check
+that cannot confirm the repair stops the queue and keeps the terminal output.
+**Stop** interrupts the current command and cancels the remaining queue. Some
+machine repairs ask for your password inside the terminal. Project repairs
+require the CLI's scoped safe-fix metadata and exact checkout evidence. Guide
+links, manual commands and upgrades stay outside the queue.
+
+The probes do not use `hack global status`, which can start Docker. The update
+banner and Doctor's **Upgrade** row open the Upgrade pane for an available
+release. The pane shows the target version and the CLI's install command for
+copying, when available, alongside its readiness check.
+If hackd is newer than the selected CLI, the banner and Doctor's hackd row
+offer Run and Copy for the CLI update command, or installation guidance. This works
+while release checks are offline.
+The wrong-CLI banner accepts version and replacement evidence as inputs. Its
+examples are fixtures until HACK-2597 supplies that evidence for live checks.
+The fixtures `h17-app-banner-dns`, `h18-banners-sheet`, `h19-doctor`,
+`h20-doctor-fix-all` and `h25-errors-sheet` render both themes.
 
 For integrations, `Card.authored_remedy` exposes an `AuthoredRemedy`: `argv()`
 returns authored arguments without an executable or environment, including each
@@ -635,9 +653,10 @@ each run by the selected CLI in its checked context:
 
 - **Check** (read-only; when the pane opens and on Check again): the CLI's own
   verdict (`ready`: no blockers and nothing incomplete), each blocker and
-  each check that could not run, and the plan with one row per step. A
-  step's command is for copying: the app never runs `hack upgrade apply` or
-  a plan command.
+  each check that could not run, and the plan with one row per step. **Run**
+  opens the selected command in the shared terminal drawer and refreshes the
+  plan on exit. **Copy** is available for running it in another terminal.
+  Reports without structured arguments can still supply copy text.
 - **Save snapshot** keeps a private copy of the files an upgrade changes,
   under the CLI's home, and says what it did not cover.
 - **Review findings** (read-only) lists the findings that cannot be applied
@@ -743,16 +762,13 @@ following resumes through Resume, not automatically when scrolling to the bottom
 
 ## Env tab
 
-Overlay tabs across the top (`base`, then each overlay the CLI names), scope
-pills on the right, one line for the secret key, and a Name / Value table.
-Names come from `hack env list --json [--env <overlay>] [--service <scope>]`;
-each value from `hack env get <KEY>` on a pipe, through the CLI and nothing
-else. Plaintext values load with the listing. A secret shows dots until its
-eye is pressed, for that one name; it hides again after 60 s and when the
-overlay, scope, detail tab or project changes, or the window is hidden or
-loses focus. Copy reads that one name, puts it on the clipboard and clears the
-clipboard after 60 s, or when the app quits sooner, if it still holds the
-value. A missing required name is
+Overlay tabs across the top show base and every overlay named in the modern
+`hack env list --json` report. Choose a scope on the right. Each value starts
+masked. Press the eye to read just that name through `hack env get <KEY>`.
+The value hides after 60 seconds or when the overlay, scope, tab or project
+changes, or the window loses focus. Copy a revealed value with the copy
+button. The clipboard clears after 60 seconds or when the app quits, if it
+still holds that value. A missing required name is
 listed first with a `required · missing` chip. With the key missing, the line
 says where the CLI looks and secrets cannot be revealed or copied.
 
@@ -771,11 +787,8 @@ its own scope (a global variable shown in a service listing stays global) and
 its own layer (a row from `hack.env[.<overlay>].local.yaml`, or a legacy
 `.env` / `.env.<overlay>`, with `--local`, so a value kept out of the
 repository never lands in the shared YAML); a
-new one goes to the scope listed, in the shared file. A plaintext value starts filled in (read for
-that one name first when the listing has not shown it; until then Save
-stores only text you type, never an empty field, so an unchanged Save never
-blanks it; a late read never overwrites what you typed); a
-secret starts empty, and its field is masked. A secret cannot be edited while
+new one goes to the scope listed, in the shared file. An already revealed plaintext value can prefill the editor. Otherwise type a
+new value to replace it. A secret starts with an empty masked field. A secret cannot be edited while
 the key is missing, and a legacy variable limited to several services cannot
 be edited in the app (one write cannot cover them): the editor says to use the
 CLI per service or `hack env migrate`. Nor can a value held outside the env
@@ -785,12 +798,12 @@ instead, so the editor names the layer and says to use the CLI. The editor close
 project. After Save the tab says "Saved NAME" and lists again.
 
 What needs the CLI is shown, not hidden: **+ Overlay** (create an overlay,
-R27; every overlay as a tab, R24), and, when the key is missing, **Choose key
+R27), and, when the key is missing, **Choose key
 file** and **Use env var** (choose the key source for a run, R26). Each is
 inactive, and its tooltip names the request.
 
-Values never reach a log, a render, `--drive` output or an error message, and
-fixtures use fake values. A failed write shows the command and its exit code,
+Values stay out of logs, `--drive` output and error messages. Offscreen render
+fixtures use obviously fake values. A failed write shows the command and its exit code,
 never the CLI's output (an echoed value could be trimmed, escaped or cut, so
 no check on it is safe): run the command shown in a terminal to see why. A
 write started before a CLI switch runs through the CLI chosen when Save was
@@ -801,7 +814,7 @@ in `Cargo.lock` through GPUI): `objc2 =0.6.5` (MIT), `objc2-app-kit =0.3.2`
 (Zlib OR Apache-2.0 OR MIT), `objc2-foundation =0.3.2` (MIT).
 
 Fixtures: `env-loading`, `env-error`, `env-normal`, `env-overlays`,
-`env-running`, `env-missing`, `env-locked`, `env-long`, `env-edit`,
+`env-running`, `env-missing`, `env-locked`, `env-long`, `env-edit`, `env-revealed`,
 `env-empty`. Each
 renders offscreen in both themes through `--screenshots`.
 Screenshots: [overlays, running](screenshots/env-running-light.png),
@@ -838,3 +851,35 @@ Process-cleanup regression tests use a generous 60-second scheduling deadline,
 then check process retirement rather than enforcing a short wall-clock latency.
 The stream-drop test also proves the reader was waiting before Drop and that
 Drop's reader join completes. These test allowances do not change CLI timeouts.
+
+## Service details
+
+Select a service from the Services table to open its detail pane. The pane opens
+on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
+Info, Stats, Logs, Terminal and Files. Stats shows recent Compose resource use.
+Files shows a placeholder.
+
+- **Info** shows copyable route, health, image, mount, container name and
+  startup information reported for the selected service. A Compose ownership
+  label identifies Docker Compose. The daemon does not report who invoked
+  Compose or the exact start command.
+- **Logs** uses the selected copy’s Hack JSON stream. Switch to any service in
+  that copy or show all services there. Search highlights matching rows. Use
+  **Only matching lines** to hide the rest. The menu also controls wrap and
+  JSON key highlighting and opens the same scope in the terminal drawer.
+- **Terminal** docks the instance’s existing Ghostty drawer in the pane. It
+  reselects a running shell in the chosen service or starts a new one after
+  the last shell exits. The ended tab retains its scrollback. Terminal tabs
+  stay open when you switch detail tabs, and the drawer keeps Ghostty’s
+  configured appearance.
+- **Restart** calls Hack for the selected service. **Stop** targets its
+  observed running Compose containers and confirms their identity with Docker
+  before stopping by full ID. On macOS, the explicit service action accepts
+  Docker CLI installs under the standard system Applications directory when
+  that directory is writable only by root and the local administrators group.
+  The project’s **Stop** still runs instance-wide
+  `hack down`.
+
+With the screenshots feature enabled, run `hack-desktop --service-screenshots
+<dir>` to render the pane’s light and dark fixtures and exercise its tab
+shortcuts through the app keymap.

@@ -124,6 +124,13 @@ When the project declares remotes, `hack ps` shows the observed target or
 the variable name. Start the whole project with `hack up`. Use `hack down`
 followed by `hack up` to restart it.
 
+The desktop preview's **Add service** tab offers a small Compose image catalog.
+Copy an entry under the existing `services:` mapping, then use **Start project**
+to apply the updated Compose configuration. For PostgreSQL, MySQL, and MinIO,
+set the listed variables in the Env tab under the matching service scope before
+starting. The CLI has no command for adding
+one service to an existing project's configuration.
+
 The desktop preview shows those descriptors on the registered project's
 **Services** tab. It shows the environment variable name for an
 environment-backed address and marks each target as unchecked.

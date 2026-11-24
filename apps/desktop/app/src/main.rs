@@ -37,6 +37,7 @@ mod logs_view;
 mod machine_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+mod service_catalog;
 mod service_view;
 mod setup_view;
 #[cfg(hack_terminal)]
@@ -297,6 +298,9 @@ fn main() {
                             if !fixtures::opens_doctor(f) {
                                 app.show_project();
                             }
+                        }
+                        if f.name().starts_with("catalog-") {
+                            app.show_catalog_fixture(f.name(), window, cx);
                         }
                         if f.name().starts_with("changes-") {
                             app.show_changes_fixture(f.name());

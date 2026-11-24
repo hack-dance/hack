@@ -135,6 +135,7 @@ pub struct HackApp {
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
     pub(crate) changes: crate::changes_view::ChangesPane,
+    pub(crate) catalog: crate::service_catalog::ServiceCatalog,
     pub(crate) service_pane: crate::service_view::ServicePane,
     pub(crate) service_focus: gpui_kit::FocusHandle,
     pub(crate) copies: crate::copies_view::CopiesPane,
@@ -210,12 +211,23 @@ impl HackApp {
             }
         })
         .detach();
+        let catalog_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search images"));
+        cx.subscribe(&catalog_input, |_: &mut HackApp, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         let mut this = Self {
             model: AppModel::new(),
             source,
             logs,
             tab: 0,
             changes: Default::default(),
+            catalog: crate::service_catalog::ServiceCatalog {
+                input: catalog_input,
+                selected: 0,
+            },
             service_pane: Default::default(),
             service_focus: cx.focus_handle(),
             copies: Default::default(),
@@ -525,6 +537,24 @@ impl HackApp {
         {
             self.open_env_edit(Some(&row), window, cx);
         }
+    }
+
+    /// Synthetic search and preview states.
+    pub(crate) fn show_catalog_fixture(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab = 5;
+        let query = match name {
+            "catalog-empty" => "unlisted",
+            "catalog-all" => "",
+            _ => "postgres",
+        };
+        self.catalog
+            .input
+            .update(cx, |input, cx| input.set_value(query, window, cx));
     }
 
     /// Fixtures: mark an action as in flight without running it.
@@ -1647,6 +1677,7 @@ impl HackApp {
             (3, "Copies"),
             (crate::files_view::FILES_TAB, "Files"),
             (6, "Changes"),
+            (5, "Add service"),
         ];
         #[cfg(not(hack_terminal))]
         let pills: &[(usize, &'static str)] = &[
@@ -1656,6 +1687,7 @@ impl HackApp {
             (3, "Copies"),
             (crate::files_view::FILES_TAB, "Files"),
             (6, "Changes"),
+            (5, "Add service"),
         ];
         let mut tabs = div().flex().items_center().gap(space::S2);
         for &(i, label) in pills {
@@ -1668,6 +1700,15 @@ impl HackApp {
             tabs = tabs.child(self.project_files_picker(d, cx));
         }
         let body: AnyElement = match self.tab {
+            5 => div()
+                .id("service-catalog")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px(space::S8)
+                .pb(space::S5)
+                .child(self.service_catalog(d, ui, cx))
+                .into_any_element(),
             6 => self.changes_view(ui, cx).into_any_element(),
             crate::files_view::FILES_TAB => {
                 self.project_files(d, ui, window, cx).into_any_element()

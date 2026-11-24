@@ -26,6 +26,7 @@ steps! {
     StartObserve => "start.observe", StartDecide => "start.decide", StartWaveRecord => "start.wave.record",
     ContainerCreate => "container.create", ContainerRemove => "container.remove",
     ContainerReady => "container.ready", ContainerPublish => "container.publish", SpecDigest => "spec.digest",
+    ContainersStarted => "containers.started", ServicesReady => "services.ready",
     EnvStage => "env.stage",
     ContainerStart => "container.start", ContainerStop => "container.stop",
     ContainerExec => "container.exec", ContainerRun => "container.run", ContainerInspect => "container.inspect",

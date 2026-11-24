@@ -496,6 +496,7 @@ pub fn render(app: &HackApp, ui: &Ui, window: &Window, cx: &mut Context<HackApp>
 
 fn native_pool_card(report: hack_desktop_core::models::NativePoolReport, ui: &Ui) -> gpui_kit::Div {
     use hack_desktop_core::models::NativePoolState;
+    use hack_desktop_ui::{components::dot, status::Status};
     let (status, label) = match report.state {
         NativePoolState::Idle => (Status::Degraded, "Running · idle"),
         NativePoolState::InUse => (Status::Running, "Running · in use"),

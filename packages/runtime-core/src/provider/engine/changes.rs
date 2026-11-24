@@ -16,11 +16,16 @@ use std::time::{Duration, Instant};
 type Signal = Arc<(Mutex<bool>, Condvar)>;
 
 /// The open stream, kept to shut it down (which ends the reader); `closed` once the
-/// waiter is dropped, so a connect that finishes later shuts its stream at once.
+/// waiter is dropped. The worker holds this lock from its `closed` check through its
+/// connect, so a drop either comes first (nothing is opened) or waits for the connect
+/// and shuts that stream before it returns: no socket is opened after a drop.
 #[derive(Default)]
 struct Stream {
     stream: Option<UnixStream>,
     closed: bool,
+    /// Test only: runs inside the check-to-connect window, with the lock held.
+    #[cfg(test)]
+    pause: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// The reader thread connects, subscribes and reads; nothing of it runs on the
@@ -37,8 +42,8 @@ impl EngineChanges {
         Self {
             signal: Signal::default(),
             stream: Arc::new(Mutex::new(Stream {
-                stream: None,
                 closed: true,
+                ..Stream::default()
             })),
         }
     }
@@ -96,25 +101,30 @@ impl Drop for EngineChanges {
     }
 }
 
-/// Connect and send the subscription, on the reader thread. A waiter already
-/// dropped (a start that returned before this thread ran) opens nothing; one dropped
-/// during the connect shuts the new stream at once. The stream is registered for
-/// shutdown before the request.
+/// How long the worker tries to reach the engine socket, under the lock a drop also
+/// takes. The socket normally exists, so the connect is immediate; this bounds the
+/// wait a drop can have when it does not.
+const CONNECT: Duration = Duration::from_millis(200);
+
+/// Connect and send the subscription, on the reader thread. The check of `closed`
+/// and the connect happen under one lock (see [`Stream`]): a waiter already dropped
+/// (a start that returned before this thread ran) opens nothing, and a drop that
+/// arrives meanwhile waits and then shuts the registered stream. The stream is
+/// registered for shutdown before the request.
 fn subscribe(path: &Path, run: &str, shared: &Mutex<Stream>) -> Option<UnixStream> {
-    if shared.lock().ok()?.closed {
-        return None;
-    }
-    let mut stream =
-        crate::provider::agent::connect_until(path, Instant::now() + Duration::from_secs(1))
-            .ok()?;
-    {
+    let mut stream = {
         let mut shared = shared.lock().ok()?;
         if shared.closed {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
             return None;
         }
+        #[cfg(test)]
+        if let Some(pause) = shared.pause.clone() {
+            pause();
+        }
+        let stream = crate::provider::agent::connect_until(path, Instant::now() + CONNECT).ok()?;
         shared.stream = Some(stream.try_clone().ok()?);
-    }
+        stream
+    };
     stream
         .set_write_timeout(Some(Duration::from_secs(1)))
         .ok()?;
@@ -279,8 +289,8 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         // What the worker finds when the start returned before it first ran.
         let shared = Mutex::new(Stream {
-            stream: None,
             closed: true,
+            ..Stream::default()
         });
         assert!(subscribe(&path, RUN, &shared).is_none());
         // Nothing connected: the engine has no pending connection to accept.
@@ -293,6 +303,61 @@ mod tests {
         assert!(subscribe(&path, RUN, &open).is_some());
         listener.set_nonblocking(false).unwrap();
         assert!(listener.accept().is_ok());
+    }
+
+    #[test]
+    fn a_drop_while_the_worker_is_between_its_check_and_its_connect_waits_and_shuts_it() {
+        use std::sync::mpsc::channel;
+        let (_socket, path, listener) = socket("window");
+        let (paused, at_pause) = channel();
+        let (go, resume) = channel::<()>();
+        let resume = Mutex::new(resume);
+        let changes = EngineChanges {
+            signal: Signal::default(),
+            stream: Arc::new(Mutex::new(Stream {
+                pause: Some(Arc::new(move || {
+                    paused.send(()).unwrap();
+                    let _ = resume.lock().unwrap().recv_timeout(Duration::from_secs(10));
+                })),
+                ..Stream::default()
+            })),
+        };
+        // The worker passes its `closed` check and pauses before connecting.
+        let shared = changes.stream.clone();
+        let worker = std::thread::spawn(move || subscribe(&path, RUN, &shared).is_some());
+        at_pause
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker did not reach its connect");
+        // The start returns now: its drop waits for the worker's connect decision.
+        let (dropped, at_drop) = channel();
+        let dropper = std::thread::spawn(move || {
+            drop(changes);
+            dropped.send(()).unwrap();
+        });
+        assert!(
+            at_drop.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the drop returned while the worker could still connect"
+        );
+        go.send(()).unwrap();
+        at_drop
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the drop did not return");
+        dropper.join().unwrap();
+        let _ = worker.join().unwrap();
+        // The one connection, made before the drop returned, is already shut.
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut rest = Vec::new();
+        assert!(
+            peer.read_to_end(&mut rest).is_ok(),
+            "the stream was left open"
+        );
+        // And nothing connects after the drop.
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]

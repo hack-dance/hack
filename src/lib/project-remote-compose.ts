@@ -218,6 +218,7 @@ export async function observedRemoteChoices(
 export async function prepareRemoteDown(opts: {
   readonly project: ProjectContext;
   readonly cfg: ProjectConfig;
+  readonly branch: string | null;
   readonly composeProjectName: string | null;
   readonly lifecycleComposeProject: string;
   readonly env: Readonly<Record<string, string>>;
@@ -244,7 +245,7 @@ export async function prepareRemoteDown(opts: {
   const choices = await observedRemoteChoices(
     project,
     cfg,
-    composeProjectName,
+    opts.branch ? composeProjectName : null,
     result?.exitCode === 0 ? (parseComposePsJson(result.stdout) ?? []) : [],
     record?.remoteTargets
   );
@@ -308,7 +309,6 @@ export function extendRemoteEnv<
   T extends {
     readonly env: Readonly<Record<string, string>>;
     readonly lifecycleEnv: Readonly<Record<string, string>>;
-    readonly composeFiles: readonly string[];
   },
 >(
   managed: T,
@@ -319,7 +319,6 @@ export function extendRemoteEnv<
     ? {
         ...managed,
         env: { ...managed.env, ...startup.env },
-        composeFiles: [...managed.composeFiles, startup.path],
         lifecycleEnv: applyRemoteEnv(managed.lifecycleEnv, choices, {
           host: true,
           missing: warnMissingRemoteEnv,
@@ -358,14 +357,15 @@ export async function prepareRemoteStartup(opts: {
   const command = (
     profiles: readonly string[],
     args: readonly string[],
-    environment = env
+    environment = env,
+    composeProject = opts.composeProject
   ) =>
     exec(
       [
         ...buildComposeArgs({
           cwd,
           composeFiles: [opts.project.composeFile],
-          composeProject: opts.composeProject,
+          composeProject,
           profiles,
         }),
         ...args,
@@ -461,13 +461,16 @@ export async function prepareRemoteStartup(opts: {
   for (const name of Object.keys(model)) {
     doc.setIn(["services", name, "labels"], labels);
   }
+  const text = doc.toString();
+  // An attached hook may release the copy lock before Compose reads this file.
+  const revision = createHash("sha256").update(text).digest("hex");
   const path = resolve(
     opts.project.projectDir,
     ".internal",
-    `compose.remote.override.${identity}.yml`
+    `compose.remote.override.${identity}.${revision}.yml`
   );
   await ensureDir(dirname(path));
-  await writeTextFileAtomicIfChanged(path, doc.toString(), {
+  await writeTextFileAtomicIfChanged(path, text, {
     createMode: 0o600,
     noFollowTarget: true,
   });
@@ -475,10 +478,11 @@ export async function prepareRemoteStartup(opts: {
     path,
     targets,
     env: { ...env, ...refs?.env },
-    stopInactive: async () => {
+    stopInactive: async (composeProject: string | null) => {
       if (
         inactive.length &&
-        (await command(["*"], ["stop", ...inactive])).exitCode !== 0
+        (await command(["*"], ["stop", ...inactive], env, composeProject))
+          .exitCode !== 0
       ) {
         throw new HackCliError({
           code: "E_COMPOSE_FAILED",

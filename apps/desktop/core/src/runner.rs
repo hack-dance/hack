@@ -152,20 +152,6 @@ fn trusted_cli(program: &Path) -> Result<(), RunError> {
         })
 }
 
-fn trusted_docker(program: &Path) -> Result<(), RunError> {
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    crate::source::trusted_docker_path(program, uid)
-        .filter(|real| crate::source::trusted_interpreter(real, uid, 4, false))
-        .map(|_| ())
-        .ok_or_else(|| {
-            RunError::Spawn(
-                "Docker CLI or its installation path is unavailable or writable by other users"
-                    .into(),
-            )
-        })
-}
-
 /// Inherited variables that make a shell or language runtime load and run
 /// code at startup, or preload libraries. Doctor's tool runs remove them.
 pub const INTERPRETER_STARTUP_VARS: &[&str] = &[
@@ -322,14 +308,6 @@ impl CliRunner {
     pub fn verified(program: impl Into<PathBuf>) -> Self {
         let mut runner = Self::new(program);
         runner.verify = Some(trusted_cli);
-        runner
-    }
-
-    /// The Docker executable for an explicit desktop service action.
-    pub(crate) fn verified_docker(program: impl Into<PathBuf>) -> Self {
-        let mut runner = Self::new(program);
-        runner.verify = Some(trusted_docker);
-        runner.strip_startup = true;
         runner
     }
 
@@ -1509,23 +1487,6 @@ mod tests {
     }
 
     const T: Duration = Duration::from_secs(5);
-
-    #[test]
-    fn docker_service_runner_refuses_writable_installations_with_a_docker_error() {
-        use std::os::unix::fs::PermissionsExt;
-        let fake = FakeHack::new("exit 0");
-        let dir = &fake.dir;
-        let docker = dir.join("docker");
-        crate::test_support::script(&docker, "#!/bin/sh\nexit 0\n");
-        let runner = CliRunner::verified_docker(&docker);
-        assert_eq!(runner.resolve_program().unwrap(), docker);
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o770)).unwrap();
-        let error = runner
-            .run_raw(&["stop"], None, Duration::from_secs(2))
-            .unwrap_err();
-        assert!(error.to_string().contains("Docker CLI"));
-        assert!(!error.to_string().contains("selected hack"));
-    }
 
     /// A slow start (here an ETXTBSY retry while another descriptor still
     /// has the program open for writing) counts against the timeout, and

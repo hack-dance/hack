@@ -1,5 +1,9 @@
 import { resolve } from "node:path";
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
+import {
+  composeEnvOverridePath,
+  isEquivalentRetainedComposeEnvOverride,
+} from "./compose-env-at-rest.ts";
 import { isRecord } from "./guards.ts";
 import {
   acquireLegacyComposeBranch,
@@ -573,7 +577,6 @@ function containerRows(
     readonly volumes: readonly LegacyComposeVerifiedVolume[];
     readonly network?: { readonly name: string; readonly id: string };
     readonly networks?: readonly LegacyComposeVerifiedNetwork[];
-    readonly composeFiles: readonly string[];
     readonly fileCandidate?: unknown;
     readonly ingress?: NativeComposeIngressBinding;
     readonly sourceBinds?: LegacyComposeSourceBindIntent["sourceBinds"];
@@ -605,7 +608,6 @@ function containerRows(
           (row.oneoff === "False" || row.oneoff === "false") &&
           typeof row.running === "boolean" &&
           row.workingDir === resolve(opts.root, ".hack") &&
-          row.configFiles === opts.composeFiles.join(",") &&
           typeof row.id === "string" &&
           ID.test(row.id) &&
           typeof row.name === "string"
@@ -740,6 +742,44 @@ function containerRows(
     })
     .sort((a, b) => a.service.localeCompare(b.service));
 }
+
+/**
+ * Keep the canonical ordered files and their runtime hash proof. Only the
+ * final generated env entry can be equivalent by alias or empty omission.
+ */
+async function assertContainerComposeFiles(opts: {
+  readonly root: string;
+  readonly composeFiles: readonly string[];
+  readonly facts: readonly Record<string, unknown>[];
+  readonly releasedReferenceDigest?: string;
+}): Promise<void> {
+  const { composeFiles, facts } = opts;
+  const canonical = composeFiles.join(",");
+  const alternatives = new Set(facts.map((row) => row.configFiles));
+  alternatives.delete(canonical);
+  if (alternatives.size === 0) {
+    return;
+  }
+  const projectDir = resolve(opts.root, ".hack");
+  requireValue(composeFiles.at(-1) === composeEnvOverridePath({ projectDir }));
+  const withoutEnv = composeFiles.slice(0, -1).join(",");
+  const prefix = `${withoutEnv},`;
+  for (const label of alternatives) {
+    requireValue(
+      typeof label === "string" &&
+        (label === withoutEnv || label.startsWith(prefix))
+    );
+    requireValue(
+      await isEquivalentRetainedComposeEnvOverride({
+        projectDir,
+        observedPath:
+          label === withoutEnv ? undefined : label.slice(prefix.length),
+        releasedReferenceDigest: opts.releasedReferenceDigest,
+      })
+    );
+  }
+}
+
 /**
  * Split a bridge's `.Containers` keys into container IDs and a transient flag.
  * A placeholder is never attributed, admitted or retained: it only marks this
@@ -905,6 +945,7 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly composeFiles?: readonly string[];
+  readonly releasedReferenceDigest?: string;
   readonly selectedBranch?: string;
 }): Promise<LegacyComposeVerifiedBinding> {
   return await inspectResources(opts);
@@ -950,6 +991,7 @@ async function inspectResources(
     readonly signal?: AbortSignal;
     readonly timeoutMs?: number;
     readonly composeFiles?: readonly string[];
+    readonly releasedReferenceDigest?: string;
     readonly selectedBranch?: string;
     readonly fileCandidate?: unknown;
   },
@@ -1060,9 +1102,14 @@ async function inspectResources(
       ingress = await observeNativeComposeIngress({ signal: opts.signal });
       requireValue(ingress.engineId === engineId);
     }
+    await assertContainerComposeFiles({
+      root: opts.root,
+      composeFiles,
+      facts,
+      releasedReferenceDigest: opts.releasedReferenceDigest,
+    });
     const containers = containerRows(facts, {
       ...opts,
-      composeFiles,
       volumes,
       network: single?.network,
       networks: plural?.networks,

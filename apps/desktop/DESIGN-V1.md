@@ -96,10 +96,10 @@ The dark desktop palette uses Merino Dark from the HACK-2595 frames.
 | `surface` | `#FFFFFF` | `#0D1117` | Detail pane |
 | `chrome` | `#F7F7F5` | `#090C10` | Title bar, sidebar, status bar |
 | `surface_1` | `#EFEFEC` | `#1A1E24` | Hover, panel handle, neutral pill |
-| `surface_2` | `#E6E6E2` | `#24272B` | Pressed, selected file row in light mode |
+| `surface_2` | `#E6E6E2` | `#1C2026` | Pressed and raised surfaces, selected file row in light mode |
 | `selection` | `#EFEFEC` | `#24272B` | Selected navigation, selected file row in dark mode |
 | `preview_surface` | `#EFEFEC` | `#1E2329` | Read-only file preview body |
-| `border` | black 9% | `#1E2329` | Hairlines |
+| `border` | black 9% | `#2B3036` | Hairlines |
 | `border_strong` | black 18% | `#2B3036` | Button and field outlines |
 | `text_primary` | `#1C1C1A` | `#E6EDF3` | |
 | `text_secondary` | `#5C5B57` | `#BFC5CB` | URL, stopped names, inactive tabs |
@@ -110,10 +110,10 @@ State colours (dot / pill background / pill text):
 
 | State | Light | Dark | Shown as |
 |---|---|---|---|
-| Running | `#1D9E75` / `#E2F3EC` / `#146B50` | `#3FB950` / `#152C20` / `#56D364` | solid dot |
-| Busy (starting, stopping) | `#378ADD` / `#E5EEFA` / `#235E9E` | `#58A6FF` / dot at 19% / `#79C0FF` | solid dot |
-| Degraded | `#EF9F27` / `#FBEFDA` / `#8A5608` | `#D29922` / dot at 18% / `#E3B341` | solid dot |
-| Failed (failed start, needs attention) | `#E24B4A` / `#FBE6E5` / `#A82E2D` | `#FF7B72` / `#2F2024` / `#FFA198` | solid dot |
+| Running | `#1D9E75` / `#E2F3EC` / `#146B50` | `#3FB950` / `#152C20` / `#3FB950` | solid dot |
+| Busy (starting, stopping) | `#378ADD` / `#E5EEFA` / `#235E9E` | `#BFC5CB` / `#1C2026` / `#BFC5CB` | solid dot |
+| Degraded | `#EF9F27` / `#FBEFDA` / `#8A5608` | `#D29922` / `#211F18` / `#D29922` | solid dot |
+| Failed (failed start, needs attention) | `#E24B4A` / `#FBE6E5` / `#A82E2D` | `#FF7B72` / `#2F2024` / `#FF7B72` | solid dot |
 | Stopped | `#BDBCB6` / `surface_1` / secondary | `#686D73` / `surface_1` / secondary | solid grey dot, name in secondary |
 | Unknown | `#9C9B95` / `surface_1` / secondary | `#8B9197` / `surface_1` / secondary | **ring**, never a solid dot |
 

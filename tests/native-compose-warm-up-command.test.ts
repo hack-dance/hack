@@ -59,7 +59,15 @@ test("a restart after readiness cannot pass strict finalization", async () => {
   expect(result.code).toBe(1);
   expect(JSON.parse(result.stdout)).toMatchObject({
     ok: false,
-    error: { code: "E_CONFIG_INVALID" },
+    error: {
+      code: "E_CONFIG_INVALID",
+      detail: {
+        native_compose_effect_refusal: {
+          stage: "effect-finalization",
+          reason: "resource-ownership",
+        },
+      },
+    },
   });
   expect(await composeStarts(root)).toHaveLength(1);
 }, 30_000);

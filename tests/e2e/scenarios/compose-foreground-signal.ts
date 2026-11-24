@@ -195,11 +195,14 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
           ),
           message: "an intentional interrupt is not a Compose startup failure",
         });
+        const launches = await readProjectRuntimeState({
+          projectDir: fixture.hackDir,
+        });
         expect({
           that:
-            (await readProjectRuntimeState({ projectDir: fixture.hackDir }))
-              .length === 0,
-          message: "foreground shutdown must retire runtime state",
+            launches.length === 1 &&
+            launches[0]?.launchComposeBase === fixture.name,
+          message: "foreground shutdown must retain the stopped stack for Down",
         });
         expect({
           that:
@@ -212,6 +215,17 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
           processGroup,
           name: fixture.name,
           cwd: fixture.root,
+        });
+        const down = await ctx.cli({
+          args: ["down", "--json"],
+          cwd: fixture.root,
+        });
+        expectExit({ result: down, codes: [0], message: "Down after Ctrl-C" });
+        expect({
+          that:
+            (await readProjectRuntimeState({ projectDir: fixture.hackDir }))
+              .length === 0,
+          message: "Down must retire the saved launch after removing the stack",
         });
       } finally {
         await Bun.write(cleanupReleased, "release");

@@ -361,6 +361,7 @@ hack up [services...] [options]
 | `--detach, -d` | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--refresh-images` | Native backend: refresh the project's mutable image tags from the registry. |
@@ -394,6 +395,8 @@ hack down [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
+| `--service <name>` | Stop only this local Compose service, keeping its containers and project resources |
 | `--timeout <seconds>` | Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
@@ -432,6 +435,7 @@ hack restart [services...] [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--wait` | Native only: return once every service is ready and every route answers (default: once every container has started) |
@@ -616,6 +620,7 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | `--timeout-ms <ms>` | With --detach: stop the command after this long (default 1800000, maximum 21600000) |
 | `--stall-after-ms <ms>` | With --detach: report an advisory stall after this long without output (default 120000, 0 turns it off) |
 | `--capture <full|metadata>` | With --detach: store output (full, the default) or only events and the outcome (metadata) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -670,6 +675,7 @@ hack files ls <service> <container-path> [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -699,6 +705,7 @@ hack files cat <service> <container-path> [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -899,6 +906,7 @@ hack logs [service] [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--expect-compose-project <name>` | Require this exact local Compose project |
 | `--follow, -f` | Follow logs (default for `hack logs`) |
 | `--no-follow` | Print logs and exit (do not follow) |
 | `--tail <n>` | Tail last N log lines (default: 200) |

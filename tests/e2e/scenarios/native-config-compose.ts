@@ -2,6 +2,7 @@ import { chmod, mkdir, realpath, rename } from "node:fs/promises";
 import { join } from "node:path";
 import type { Project } from "../../../packages/config-compiler/generated/native-config.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../../../src/constants.ts";
+import { HACK_ERROR_CODES } from "../../../src/lib/cli-result.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { openNativeComposeGenerationStore } from "../../../src/lib/native-compose-generation.ts";
 import { setProjectEnvValue } from "../../../src/lib/project-env-config.ts";
@@ -1415,13 +1416,10 @@ export const nativeConfigComposeScenario: Scenario = {
           message: "Exit-17 job must not satisfy actual detached readiness",
         });
         const failed = object(failure.stdout);
+        const failureCode = isRecord(failed.error) ? failed.error.code : null;
         expect({
-          that:
-            failed.ok === false &&
-            isRecord(failed.error) &&
-            failed.error.code === "E_STARTUP_INCOMPLETE",
-          message:
-            "Failed readiness must preserve an explicit incomplete outcome",
+          that: failed.ok === false && failureCode === "E_STARTUP_INCOMPLETE",
+          message: `Failed readiness must preserve an explicit incomplete outcome (got ${HACK_ERROR_CODES.find((code) => code === failureCode) ?? "no recognized code"})`,
         });
         await verifyFailureJob({ startup: failure, payload: failed });
         expect({

@@ -8,7 +8,6 @@ use gpui_kit::{ClipboardItem, Context, Entity, div, prelude::*};
 use hack_desktop_core::{
     models::NATIVE_PROJECT_CODE,
     service_catalog::{CatalogEdit, Recipe, recipes},
-    source::ServiceActionTarget,
     state::Action,
     viewmodel::DetailView,
 };
@@ -240,16 +239,20 @@ impl HackApp {
                     ui,
                 );
                 if can_start {
+                    let key = detail.key.clone();
                     start = start.on_click(cx.listener(move |this, _, _, cx| {
-                        this.run_scoped_action(
-                            Action::Start,
-                            Some(ServiceActionTarget {
-                                name: recipe.name.clone(),
-                                compose_project: None,
-                                containers: Vec::new(),
-                            }),
-                            cx,
-                        );
+                        if this.model.selected_key().as_ref() == Some(&key)
+                            && !this.machine.busy()
+                            && let Some((root, false)) = this.selected_root()
+                        {
+                            this.dispatch_service_action(
+                                key.clone(),
+                                root,
+                                &recipe.name,
+                                Action::Start,
+                                cx,
+                            );
+                        }
                     }));
                 }
                 (

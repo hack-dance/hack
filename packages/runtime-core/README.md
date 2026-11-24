@@ -894,7 +894,11 @@ for a security fix, so each bump stays small enough to review against upstream n
    a prepared base built and verified (its overlay inventory), a pool without internet,
    template expansion and digests, exact disk identity, restart, down and up, network
    modes, the dependency-socket relay, Rosetta and a web-plus-database project, then
-   prints the timing and idle-footprint measurements to compare. What `down --recover`
+   prints the timing and idle-footprint measurements to compare. After the warm runs,
+   the full qualification adds a worker to the stopped web and database fixture,
+   then removes it. It checks service-name reachability from the worker, the same run
+   and database volume, independent SQL readback, and observed compute absence after
+   each stop. What `down --recover`
    does after a lost foreground, and how the pool recovers from an unclean provider
    stop, are recorded in `qualification.json` but not asserted: exit 0 does not show
    that recovery works, so read those recorded outcomes. With `--keep-going`, a failed

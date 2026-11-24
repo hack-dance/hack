@@ -49,6 +49,7 @@ import {
   readyData,
   rootProblem,
   sourceTemplatePins,
+  stoppedFixtureVolume,
   terminalRuntimeErrorCode,
   warmPhases,
 } from "../scripts/qualify-provider-pin.ts";
@@ -637,6 +638,67 @@ describe("provider pin qualification", () => {
       "new Uint8Array(65536).map((_, i) => i % 251)"
     );
     expect(BLOB_SHA256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("the three-service topology adds only a worker", () => {
+    const web = `busybox@${digest}`;
+    const db = `postgres@${digest}`;
+    const baseline = parseYaml(compose(web, db, "dep.test", HTTPS_ROUTE_HOST));
+    const extended = parseYaml(
+      compose(web, db, "dep.test", HTTPS_ROUTE_HOST, "web-db-worker")
+    );
+    expect(extended).toEqual({
+      ...baseline,
+      services: {
+        ...baseline.services,
+        worker: { image: web, command: ["sleep", "3600"] },
+      },
+    });
+  });
+
+  test("a topology stop requires absent compute and a present retained volume", () => {
+    const run = "1".repeat(32);
+    const services = ["web", "db", "worker"];
+    const snapshot = {
+      journal_incomplete: false,
+      receipt: {
+        run,
+        phase: "stopped-data-retained",
+        resources: {
+          "container:web": {},
+          "container:db": {},
+          "container:worker": {},
+          "network:default": {},
+          "volume:db-data": { name: "retained-db" },
+        },
+      },
+      observations: {
+        "container:web": { state: "absent" },
+        "container:db": { state: "absent" },
+        "container:worker": { state: "absent" },
+        "network:default": { state: "absent" },
+        "volume:db-data": { state: "present" },
+      },
+    };
+    expect(stoppedFixtureVolume(snapshot, run, services)).toBe("retained-db");
+    expect(stoppedFixtureVolume(snapshot, "2".repeat(32), services)).toBeNull();
+    expect(stoppedFixtureVolume(snapshot, run, ["web", "db"])).toBeNull();
+    for (const [resource, state] of [
+      ["container:worker", "running"],
+      ["network:default", "present"],
+      ["volume:db-data", "absent"],
+    ] as const) {
+      expect(
+        stoppedFixtureVolume(
+          {
+            ...snapshot,
+            observations: { ...snapshot.observations, [resource]: { state } },
+          },
+          run,
+          services
+        )
+      ).toBeNull();
+    }
   });
 });
 

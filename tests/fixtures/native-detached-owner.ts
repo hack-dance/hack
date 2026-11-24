@@ -475,6 +475,7 @@ if (role === "channel-holder") {
       "wrapped-static-failure",
       "builder-missing",
       "build-registry-limit",
+      "build-copy-private",
       "provider-pin",
       "wrapped-provider-pin",
       "immediate-failure",
@@ -556,6 +557,14 @@ if (role === "channel-holder") {
           })
         );
       }
+      if (mode === "build-copy-private") {
+        await nativeDetachedUpFailure(
+          new NativeRuntimeRequestError({
+            nativeCode: "native_build_copy_private",
+            message: "synthetic-private-value",
+          })
+        );
+      }
       if (mode === "builder-missing") {
         await nativeDetachedUpFailure(
           new NativeRuntimeRequestError({
@@ -592,6 +601,7 @@ if (role === "channel-holder") {
           "fail",
           "builder-missing",
           "build-registry-limit",
+          "build-copy-private",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -640,6 +650,20 @@ if (role === "channel-holder") {
             batchImageFailure("fixture/image:b", { code: "image_disk_space" }, [
               "db",
             ]),
+            batchImageFailure(
+              "fixture/image:c",
+              {
+                code: "registry_image",
+                cause_code: "registry_body_stalled",
+                network_request: {
+                  version: 2,
+                  host: "registry.example.test",
+                  attempts: 3,
+                  reason: "timeout",
+                },
+              },
+              ["cache"]
+            ),
           ])
         );
         return 1;

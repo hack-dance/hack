@@ -115,6 +115,7 @@ for (const mode of [
   "fail",
   "builder-missing",
   "build-registry-limit",
+  "build-copy-private",
   "provider-pin",
   "wrapped-provider-pin",
   "timeout",
@@ -221,6 +222,16 @@ for (const mode of [
         expect(JSON.parse(stdout).error.message).toBe(
           "Image unavailable: could not resolve build base docker.io/library/python:3.12-alpine (registry rate limit reached).\nAlready present: docker.io/library/alpine:3.22.\nRetry hack up when the registry is reachable."
         );
+      } else if (mode === "build-copy-private") {
+        expect(code).toBe(1);
+        const result = JSON.parse(stdout);
+        expect(result).toMatchObject({
+          ok: false,
+          error: { code: "E_STARTUP_INCOMPLETE" },
+        });
+        expect(result.error.message).toContain("(native_build_copy_private)");
+        expect(result.error.message).toContain("Remove COPY sources");
+        expect(stdout).not.toContain("synthetic-private-value");
       } else if (mode === "builder-missing") {
         // A detached owner reports the code only; the launcher must still tell the
         // user what is wrong and the one command that fixes it.
@@ -259,6 +270,7 @@ for (const mode of [
           "fail",
           "builder-missing",
           "build-registry-limit",
+          "build-copy-private",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -751,6 +763,14 @@ test("detached JSON retains every image refusal and recovery action", async () =
             reference: "fixture/image:b",
             code: "image_disk_space",
             recovery: "Free disk space and run hack up again.",
+          },
+          {
+            reference: "fixture/image:c",
+            code: "registry_image",
+            reason:
+              "Registry layer download from registry.example.test failed after 3 attempt(s): the transfer timed out",
+            recovery:
+              "Run hack pull when the registry is reachable, then retry hack up.",
           },
         ],
       },

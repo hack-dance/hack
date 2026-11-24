@@ -56,6 +56,7 @@ import {
 } from "./native-detached-start-deadline.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "./native-environment-notices.ts";
 import {
+  NATIVE_BUILD_COPY_PRIVATE_RECOVERY,
   NATIVE_BUILDER_NOT_PREPARED,
   nativeBuilderMissingDetachedRefusal,
 } from "./native-image-builder.ts";
@@ -499,9 +500,13 @@ function startupFailureError(failure: StartupFailure): HackCliError {
   const failed = failure.failedServices?.length
     ? ` Failed during startup: ${failure.failedServices.join(", ")}. A detached start does not keep service output; run hack up without -d in a terminal to see each failed service's last lines (managed values redacted, not saved).`
     : "";
+  const recovery =
+    failure.code === "native_build_copy_private"
+      ? `\n${NATIVE_BUILD_COPY_PRIVATE_RECOVERY}\n`
+      : " ";
   return new HackCliError({
     code: "E_STARTUP_INCOMPLETE",
-    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed} ${NATIVE_IDLE_POOL_NOTE}`,
+    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed}${recovery}${NATIVE_IDLE_POOL_NOTE}`,
   });
 }
 

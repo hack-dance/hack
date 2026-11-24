@@ -35,7 +35,7 @@ refuses, the app cannot do.
 | Where | What you see | CLI behind it |
 | --- | --- | --- |
 | Project list | Every registered project and its branch instances, grouped by state. Search with Cmd-K (Ctrl-K on Linux). | `hackd` (`/v1/projects`); `hack ps --json` for native projects |
-| Project header | Start, Stop, Restart and Open, with errors and live phases for local Compose lifecycle actions. | `hack up`, `down`, `restart`, `open`; Compose progress uses `--json --progress` |
+| Project header | Start, Stop, Restart and Open, with live phases for local Compose lifecycle actions. Native projects can start when the project is stopped or the native runtime is off. Failed actions show the CLI code, diagnostic and any recovery guidance. | `hack up`, `down`, `restart`, `open`; Compose progress uses `--json --progress` |
 | Services tab | Each service, its state and its routes. For a running Compose project, also CPU and memory per service, and an **emulated** mark on a service whose image runs under CPU emulation. | `hackd`; `hack ps --json`; `hack usage --json --by-service` |
 | Logs tab | Live logs with pause, search and a filter for one service. | `hack logs --json` |
 | Files tab | Browse a running Compose service's directories, preview files, copy container paths and open worktree files in an editor. | `hack files ls --json`, `hack files cat --json` |

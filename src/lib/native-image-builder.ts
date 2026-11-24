@@ -21,6 +21,10 @@ import {
 /** The runtime's refusal code for a native home that has no image builder. */
 export const NATIVE_BUILDER_NOT_PREPARED = "builder_not_prepared";
 
+/** Recovery for a Dockerfile that explicitly copies an excluded Hack file. */
+export const NATIVE_BUILD_COPY_PRIVATE_RECOVERY =
+  "Remove COPY sources that explicitly name Hack's machine-local files or directories from the Dockerfile, then retry hack up.";
+
 /** What is wrong, in the same words wherever it is reported. */
 export const NATIVE_BUILDER_MISSING =
   "the image builder is not installed in this native home";

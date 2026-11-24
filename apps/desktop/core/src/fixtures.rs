@@ -46,6 +46,9 @@ pub enum Fixture {
     Degraded,
     Stopping,
     FailedStart,
+    ImageRefused,
+    BuildBaseRefused,
+    BuildCopyRefused,
     NeedsAttention,
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
@@ -106,7 +109,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 68] = [
+    pub const ALL: [Self; 71] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -133,6 +136,9 @@ impl Fixture {
         Self::Degraded,
         Self::Stopping,
         Self::FailedStart,
+        Self::ImageRefused,
+        Self::BuildBaseRefused,
+        Self::BuildCopyRefused,
         Self::NeedsAttention,
         Self::Branches,
         Self::ConfigProject,
@@ -206,6 +212,9 @@ impl Fixture {
             Self::Degraded => "degraded",
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
+            Self::ImageRefused => "image-refused",
+            Self::BuildBaseRefused => "build-base-refused",
+            Self::BuildCopyRefused => "build-copy-refused",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
             Self::ConfigProject => "config-project",
@@ -509,6 +518,10 @@ fn others() -> Vec<ProjectRow> {
 pub fn project(f: Fixture) -> ProjectsPayload {
     let main = match f {
         Fixture::Stopped | Fixture::Starting => storefront(vec![], "stopped"),
+        Fixture::ImageRefused | Fixture::BuildBaseRefused | Fixture::BuildCopyRefused => {
+            simple("storefront", "stopped", "native", false)
+        }
+
         Fixture::Degraded => {
             let mut s = all_up();
             s[3] = svc("worker", container("exited", "Exited (1) 4 minutes ago"));
@@ -612,6 +625,47 @@ pub fn project(f: Fixture) -> ProjectsPayload {
 #[must_use]
 pub fn selected(_f: Fixture) -> &'static str {
     "storefront"
+}
+
+/// Synthetic examples of refusals returned by the CLI result envelope.
+#[must_use]
+pub fn action_refusal(f: Fixture) -> Option<SourceError> {
+    let (code, message) = match f {
+        Fixture::ImageRefused => (
+            "E_LIFECYCLE_FAILED",
+            concat!(
+                "Image preparation failed.\n",
+                "- docker.io/library/alpine:3 for service web field image (registry_image): ",
+                "Registry layer download from registry.example.test failed after 3 attempt(s): the transfer timed out. ",
+                "Run hack pull when the registry is reachable, then retry hack up.\n",
+                "- docker.io/library/redis:7 for service db field image (image_cache): ",
+                "Conflicting image cache receipt; no entry was adopted or removed. Inspect hack doctor, then retry hack up."
+            ),
+        ),
+        Fixture::BuildBaseRefused => (
+            "E_UNEXPECTED",
+            concat!(
+                "Image unavailable: could not resolve build base docker.io/library/alpine:3 (registry rate limit reached).\n",
+                "Already present: none confirmed.\n",
+                "Retry hack up when the registry is reachable."
+            ),
+        ),
+        Fixture::BuildCopyRefused => (
+            "E_STARTUP_INCOMPLETE",
+            concat!(
+                "Native detached startup failed (native_build_copy_private); inspect hack ps before retrying; ",
+                "retained owners and recovery evidence are preserved.\n",
+                "Remove COPY sources that explicitly name Hack's machine-local files or directories from the Dockerfile, then retry hack up.\n",
+                "The native VM pool may still be running; when no other native project uses it, stop it with runtime down --json on this native home."
+            ),
+        ),
+        _ => return None,
+    };
+    Some(SourceError::Cli {
+        code: code.into(),
+        message: message.into(),
+        failed: vec![],
+    })
 }
 
 /// The app-side context (in-flight action, last failure) for a fixture.

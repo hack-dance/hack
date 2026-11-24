@@ -120,6 +120,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if let Some(a) = fixtures::local(f).in_flight {
                                 app.simulate_in_flight(a);
                             }
+                            if let Some(error) = fixtures::action_refusal(f) {
+                                app.simulate_refusal(error);
+                            }
                             if let Some(l) = logs {
                                 app.show_logs_fixture(l, window, cx);
                             }

@@ -332,6 +332,9 @@ fn main() {
                     if let Some(a) = fixture.and_then(|f| fixtures::local(f).in_flight) {
                         app.simulate_in_flight(a);
                     }
+                    if let Some(error) = fixture.and_then(fixtures::action_refusal) {
+                        app.simulate_refusal(error);
+                    }
                     if let Some(l) = logs_fixture {
                         app.show_logs_fixture(l, window, cx);
                     }

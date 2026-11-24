@@ -22,6 +22,7 @@ import {
 import { nativeHotReloadEnvironment } from "./native-hot-reload-notice.ts";
 import {
   nativeImageRegistryReason,
+  networkRequestFailureMessage,
   pendingImageProofReason,
 } from "./native-image-policy.ts";
 import {
@@ -203,78 +204,6 @@ export function nativeProviderLine(
   return redacted.length <= PROVIDER_LINE_LIMIT
     ? redacted
     : `${redacted.slice(0, PROVIDER_LINE_LIMIT - 3)}...`;
-}
-
-const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;
-
-/**
- * Why a registry layer download's last attempt failed (`network_request` version 2).
- * A closed vocabulary; `http_status` also carries the status code.
- */
-const LAYER_FAILURE_REASONS: Readonly<Record<string, string>> = {
-  timeout: "the transfer timed out",
-  short_read: "the connection ended before the whole layer arrived",
-  digest_mismatch: "the layer did not match its digest",
-  size_mismatch: "the layer did not match its size",
-  http_status: "the registry answered HTTP",
-  deadline: "the 360-second image deadline was reached",
-};
-
-/** The version-2 reason sentence, or undefined unless every field is closed. */
-function layerFailureReason(
-  request: Record<string, unknown>
-): string | undefined {
-  const reason =
-    typeof request.reason === "string" &&
-    Object.hasOwn(LAYER_FAILURE_REASONS, request.reason)
-      ? request.reason
-      : undefined;
-  if (!reason) {
-    return;
-  }
-  const keys = Object.keys(request).length;
-  if (reason !== "http_status") {
-    return keys === 4 ? LAYER_FAILURE_REASONS[reason] : undefined;
-  }
-  return keys === 5 &&
-    typeof request.status === "number" &&
-    Number.isInteger(request.status) &&
-    request.status >= 100 &&
-    request.status <= 599
-    ? `${LAYER_FAILURE_REASONS[reason]} ${request.status}`
-    : undefined;
-}
-
-/** Render only a parsed authority and bounded count, never a runtime message or URL. */
-function networkRequestFailureMessage(
-  value: Record<string, unknown>
-): string | undefined {
-  const request = value.network_request;
-  if (
-    !(
-      ["registry_image", "setup_download", "setup_download_deadline"].includes(
-        typeof value.code === "string" ? value.code : ""
-      ) && isRecord(request)
-    ) ||
-    typeof request.host !== "string" ||
-    !NETWORK_HOST.test(request.host) ||
-    typeof request.attempts !== "number" ||
-    !Number.isInteger(request.attempts) ||
-    request.attempts < 0 ||
-    request.attempts > 3
-  ) {
-    return;
-  }
-  if (request.version === 1 && Object.keys(request).length === 3) {
-    return `Network request to ${request.host} failed after ${request.attempts} attempt(s).`;
-  }
-  const reason =
-    request.version === 2 && value.code === "registry_image"
-      ? layerFailureReason(request)
-      : undefined;
-  return reason
-    ? `Registry layer download from ${request.host} failed after ${request.attempts} attempt(s): ${reason}.`
-    : undefined;
 }
 
 /** The native VM pool outlives a failed start; say how to stop it. */

@@ -5289,6 +5289,30 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
     }
 
     #[test]
+    fn native_start_uses_detached_json_and_keeps_the_refusal() {
+        if !host_temp_is_trustworthy() {
+            return;
+        }
+        let dir = base("native-start");
+        let project = dir.join("project");
+        make_project(&project, ".hack", "hack.project.json");
+        let hack = dir.join("hack");
+        crate::test_support::script(
+            &hack,
+            r#"#!/bin/sh
+[ "$HACK_RUNTIME_BACKEND" = native ] && [ "$1:$2:$3:$4" = up:--detach:--json:--no-interactive ] || exit 2
+echo '{"ok":false,"error":{"code":"E_STARTUP_INCOMPLETE","message":"Remove private COPY sources, then retry."}}'
+exit 1
+"#,
+        );
+        let source = LiveSource::new(fixture_runner(&hack), None);
+        let result = source.act(&project, true, None, Action::Start);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(result, Err(SourceError::Cli { code, message, .. })
+            if code == "E_STARTUP_INCOMPLETE" && message == "Remove private COPY sources, then retry."));
+    }
+
+    #[test]
     fn mismatch_detection() {
         let s = fixtures::snapshot(Fixture::DaemonMismatch).unwrap();
         assert_eq!(s.daemon_mismatch(), Some("4.3.0"));

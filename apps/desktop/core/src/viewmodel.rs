@@ -205,10 +205,8 @@ pub struct DetailView {
 /// app offers none.
 pub const UNKNOWN_CHECKOUT_NOTE: &str = "The checkout that started this branch instance is not one this project registered, so the app does not run actions on it. Run them from that checkout: hack up / down / restart --branch <name>.";
 
-/// v0 scope: native projects are view-only. Native `restart` (and authored
-/// `down`/`restart`) stay in the foreground and refuse `--json`; native
-/// `up --json` is detached, but the app waits for one contract (design R2b).
-pub const NATIVE_ACTIONS_NOTE: &str = "Native projects are view-only in this preview: start, stop or restart them in a terminal with HACK_RUNTIME_BACKEND=native hack up / down / restart.";
+/// Native Start uses detached JSON. The terminal handles Stop and Restart.
+pub const NATIVE_ACTIONS_NOTE: &str = "Stop or restart native projects in a terminal with HACK_RUNTIME_BACKEND=native hack down / restart.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -934,18 +932,28 @@ impl AppModel {
                             .and_then(|s| s.projects.autostart_global.as_ref()),
                     )
                 }),
-            actions: if row.is_native()
-                || self.last_error.is_some()
-                || (row.branch.is_some() && row.repo_root.is_none())
-            {
+            actions: if self.last_error.is_some() || row.repo_root.is_none() {
                 vec![]
+            } else if row.is_native() {
+                let can_start = !row.native_pending
+                    && (matches!(st, ProjectState::Stopped)
+                        || (matches!(st, ProjectState::Unknown { .. })
+                            && row
+                                .native
+                                .as_ref()
+                                .is_some_and(|ps| ps.status == "runtime_not_running")));
+                if can_start {
+                    vec![Action::Start]
+                } else {
+                    vec![]
+                }
             } else {
                 st.actions().to_vec()
             },
-            note: if row.is_native() {
-                Some(NATIVE_ACTIONS_NOTE.to_owned())
-            } else if row.branch.is_some() && row.repo_root.is_none() {
+            note: if row.branch.is_some() && row.repo_root.is_none() {
                 Some(UNKNOWN_CHECKOUT_NOTE.to_owned())
+            } else if row.is_native() {
+                Some(NATIVE_ACTIONS_NOTE.to_owned())
             } else {
                 None
             },
@@ -1977,13 +1985,30 @@ mod tests {
     }
 
     #[test]
-    fn native_projects_offer_no_actions_and_say_why() {
+    fn running_native_projects_use_the_terminal_for_stop_and_restart() {
         let mut m = model(Fixture::Running);
         m.apply(Event::Select("docs-site".into()));
         let d = m.detail().unwrap();
         assert!(d.actions.is_empty());
         assert!(d.note.is_some());
         assert_eq!(d.backend, "native");
+    }
+
+    #[test]
+    fn native_start_requires_a_confirmed_stopped_project_and_checkout() {
+        let mut s = fixtures::snapshot(Fixture::ImageRefused).unwrap();
+        let mut m = model(Fixture::ImageRefused);
+        m.apply(Event::Select("storefront".into()));
+        assert_eq!(m.detail().unwrap().actions, [Action::Start]);
+
+        s.projects.projects[0].native_pending = true;
+        m.apply(Event::Refreshed(Ok(s.clone())));
+        assert!(m.detail().unwrap().actions.is_empty());
+
+        s.projects.projects[0].native_pending = false;
+        s.projects.projects[0].repo_root = None;
+        m.apply(Event::Refreshed(Ok(s)));
+        assert!(m.detail().unwrap().actions.is_empty());
     }
 
     #[test]

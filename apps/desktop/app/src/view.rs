@@ -586,6 +586,17 @@ impl HackApp {
         }
     }
 
+    /// Fixtures: apply a value-free CLI failure through the regular action reducer.
+    pub fn simulate_refusal(&mut self, error: hack_desktop_core::source::SourceError) {
+        if let Some(key) = self.model.selected_key() {
+            self.model.apply(Event::ActionFinished {
+                key,
+                action: Action::Start,
+                result: Err(error),
+            });
+        }
+    }
+
     /// Fixture-only unavailable daemon after a previously readable snapshot.
     pub fn simulate_daemon_unavailable(&mut self, mismatch: bool) {
         self.model.apply(Event::Refreshed(Err(
@@ -1494,7 +1505,6 @@ impl HackApp {
             .iter()
             .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }));
         let reason = match (&d.state, &d.last_error) {
-            (_, Some(e)) => Some(format!("Last action failed: {e}")),
             (ProjectState::NeedsAttention { reason }, None) => Some(reason.clone()),
             // A daemon banner already explains an unobserved project.
             (ProjectState::Unknown { reason }, None) if !daemon_banner => Some(reason.clone()),
@@ -1605,6 +1615,28 @@ impl HackApp {
                             .child(note)
                     }),
             )
+            .children(d.last_error.as_ref().map(|error| {
+                div()
+                    .id("project-action-refusal")
+                    .flex()
+                    .flex_col()
+                    .gap(space::S2)
+                    .max_h(px(if compact { 100. } else { 180. }))
+                    .overflow_y_scroll()
+                    .rounded(radius::PANEL)
+                    .bg(p.states.failed.bg)
+                    .px(space::S4)
+                    .py(space::S3)
+                    .type_step(text::BODY)
+                    .text_color(p.text_primary)
+                    .child(
+                        div()
+                            .type_step(text::BODY_STRONG)
+                            .text_color(p.states.failed.fg)
+                            .child("Last action failed"),
+                    )
+                    .children(error.lines().map(|line| div().child(line.to_owned())))
+            }))
             .children((!compact).then_some(()).and(reason).map(|r| {
                 let c = if status == Status::Failed {
                     p.states.failed.fg

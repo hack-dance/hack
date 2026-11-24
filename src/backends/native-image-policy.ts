@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
+import { isRecord } from "../lib/guards.ts";
 
 /** Fixed bounds the native runtime also enforces (`image_policy.rs`). */
 const MIN_BUDGET_MIB = 16;
@@ -44,6 +45,78 @@ export function nativeImageRegistryReason(code: unknown): string | undefined {
         ? `registry request failed (${code.slice(14)})`
         : undefined;
   }
+}
+
+const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;
+
+/**
+ * Why a registry layer download's last attempt failed (`network_request` version 2).
+ * A closed vocabulary; `http_status` also carries the status code.
+ */
+const LAYER_FAILURE_REASONS: Readonly<Record<string, string>> = {
+  timeout: "the transfer timed out",
+  short_read: "the connection ended before the whole layer arrived",
+  digest_mismatch: "the layer did not match its digest",
+  size_mismatch: "the layer did not match its size",
+  http_status: "the registry answered HTTP",
+  deadline: "the 360-second image deadline was reached",
+};
+
+/** The version-2 reason sentence, or undefined unless every field is closed. */
+function layerFailureReason(
+  request: Record<string, unknown>
+): string | undefined {
+  const reason =
+    typeof request.reason === "string" &&
+    Object.hasOwn(LAYER_FAILURE_REASONS, request.reason)
+      ? request.reason
+      : undefined;
+  if (!reason) {
+    return;
+  }
+  const keys = Object.keys(request).length;
+  if (reason !== "http_status") {
+    return keys === 4 ? LAYER_FAILURE_REASONS[reason] : undefined;
+  }
+  return keys === 5 &&
+    typeof request.status === "number" &&
+    Number.isInteger(request.status) &&
+    request.status >= 100 &&
+    request.status <= 599
+    ? `${LAYER_FAILURE_REASONS[reason]} ${request.status}`
+    : undefined;
+}
+
+/** Render only a parsed authority and bounded count, never a runtime message or URL. */
+export function networkRequestFailureMessage(
+  value: Record<string, unknown>
+): string | undefined {
+  const request = value.network_request;
+  if (
+    !(
+      ["registry_image", "setup_download", "setup_download_deadline"].includes(
+        typeof value.code === "string" ? value.code : ""
+      ) && isRecord(request)
+    ) ||
+    typeof request.host !== "string" ||
+    !NETWORK_HOST.test(request.host) ||
+    typeof request.attempts !== "number" ||
+    !Number.isInteger(request.attempts) ||
+    request.attempts < 0 ||
+    request.attempts > 3
+  ) {
+    return;
+  }
+  if (request.version === 1 && Object.keys(request).length === 3) {
+    return `Network request to ${request.host} failed after ${request.attempts} attempt(s).`;
+  }
+  const reason =
+    request.version === 2 && value.code === "registry_image"
+      ? layerFailureReason(request)
+      : undefined;
+  return reason
+    ? `Registry layer download from ${request.host} failed after ${request.attempts} attempt(s): ${reason}.`
+    : undefined;
 }
 
 const DISPLAY_REFERENCE = /^[A-Za-z0-9._:/@-]{1,512}$/;
@@ -177,6 +250,7 @@ export function batchImageFailure(
       ? error.code
       : "image_reply_invalid";
   let reason =
+    networkRequestFailureMessage(error)?.slice(0, -1) ??
     nativeImageRegistryReason(error.cause_code) ??
     pendingImageProofReason(error);
   if (

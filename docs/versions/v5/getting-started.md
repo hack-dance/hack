@@ -128,7 +128,13 @@ To add Redis to a Compose project, run `hack service add redis --dry-run` to
 review the diff, then `hack service add redis` to save it and `hack up redis`
 to start the service. In the desktop preview, open **Add service**, search for
 Redis, choose **Add to project** to preview the diff, then **Save to project**
-and **Start redis**. Review the saved file in **Changes** and commit it when
+and **Start redis** on the Compose backend. Native also supports editing
+Compose files. It starts the whole project, so use `hack up` without a service
+name. If the native project is already running, stop it first to load the
+change. For projects authored in `.hack/hack.project.json`, add a workload in
+that file and run `hack config validate`.
+
+Review the saved file in **Changes** and commit it when
 you're ready. For PostgreSQL, MySQL, and MinIO, set the listed variables in the
 Env tab under the matching service scope before starting.
 

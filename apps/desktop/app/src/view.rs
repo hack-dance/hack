@@ -551,7 +551,7 @@ impl HackApp {
         let query = match name {
             "catalog-empty" => "unlisted",
             "catalog-all" => "",
-            "catalog-search" | "catalog-diff" | "catalog-saved" => "redis",
+            "catalog-search" | "catalog-diff" | "catalog-saved" | "catalog-native-saved" => "redis",
             _ => "postgres",
         };
         self.catalog

@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { releaseLaunchctlGuard, runCli } from "./harness.ts";
 
-test("service add previews and atomically updates the selected Compose file", async () => {
+test("service add previews and updates a Compose file on the native backend", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-catalog-e2e-"));
   const hackHome = join(root, "home");
   const checkout = join(root, "checkout");
@@ -36,6 +36,7 @@ test("service add previews and atomically updates the selected Compose file", as
             ...extra,
           ],
           cwd: checkout,
+          env: { HACK_RUNTIME_BACKEND: "native" },
         },
         hackHome,
       });
@@ -66,10 +67,58 @@ test("service add previews and atomically updates the selected Compose file", as
     const saved = `${source}  "cache":\n    image: redis:7-alpine\n`;
     expect(await readFile(file, "utf8")).toBe(saved);
 
+    const start = await runCli({
+      invocation: {
+        args: ["up", "--detach", "--json", "cache"],
+        cwd: checkout,
+        env: {
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_BINARY: join(root, "must-not-run"),
+        },
+      },
+      hackHome,
+    });
+    expect(start.exitCode).not.toBe(0);
+    expect(JSON.parse(start.stdout).error).toMatchObject({
+      code: "E_USAGE",
+      message: expect.stringContaining("service selection is not supported"),
+    });
+
     const duplicate = await cli([]);
     expect(duplicate.exitCode).not.toBe(0);
     expect(JSON.parse(duplicate.stdout).error.code).toBe("E_PATH_CONFLICT");
     expect(await readFile(file, "utf8")).toBe(saved);
+  } finally {
+    releaseLaunchctlGuard();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("authored native projects receive catalog guidance without a write", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-catalog-authored-"));
+  const hackHome = join(root, "home");
+  const checkout = join(root, "checkout");
+  const dir = join(checkout, ".hack");
+  try {
+    await mkdir(hackHome);
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, "hack.project.json");
+    await writeFile(file, "{}\n");
+    const result = await runCli({
+      invocation: {
+        args: ["service", "add", "redis", "--json"],
+        cwd: checkout,
+        env: { HACK_RUNTIME_BACKEND: "native" },
+      },
+      hackHome,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(JSON.parse(result.stdout).error).toMatchObject({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message: expect.stringContaining("Add the service to its workloads"),
+    });
+    expect(await readdir(dir)).toEqual(["hack.project.json"]);
+    expect(await readFile(file, "utf8")).toBe("{}\n");
   } finally {
     releaseLaunchctlGuard();
     await rm(root, { recursive: true, force: true });

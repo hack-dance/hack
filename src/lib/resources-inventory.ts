@@ -1,4 +1,3 @@
-import { stat } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 import { nativeAuthoredProjectPs } from "../backends/native-authored-project-observe.ts";
 import { readNativeDiskUsage } from "../backends/native-disk-usage.ts";
@@ -18,6 +17,7 @@ import {
 import { getString, isRecord } from "./guards.ts";
 import { readProjectRuntimeStateEntry } from "./project-runtime-state.ts";
 import { readProjectsRegistry } from "./projects-registry.ts";
+import { verifyResourceDetachment } from "./resource-detachment.ts";
 import {
   type RemovableKind,
   readResourceReceipt,
@@ -35,6 +35,7 @@ import {
   dockerResourceReader,
   inspectDockerResource,
   RESOURCE_NAME,
+  readObject,
 } from "./resources-docker.ts";
 import {
   type RuntimeContainer,
@@ -66,20 +67,16 @@ export type ResourceRow = {
   readonly refusal: string | null;
 };
 
-export async function checkoutGone(checkout: string): Promise<boolean> {
-  return await stat(checkout).then(
-    () => false,
-    (error: unknown) => isRecord(error) && error.code === "ENOENT"
-  );
-}
-
-async function receiptOwner(receipt: {
-  readonly project: string;
-  readonly checkout: string;
-  readonly branch: string | null;
-}): Promise<ResourceOwner> {
+async function receiptOwner(
+  receipt: import("./resource-receipts.ts").ResourceReceipt
+): Promise<ResourceOwner> {
   const { project, checkout, branch } = receipt;
-  return { project, checkout, branch, detached: await checkoutGone(checkout) };
+  return {
+    project,
+    checkout,
+    branch,
+    detached: (await verifyResourceDetachment(receipt)).detached,
+  };
 }
 
 function ownerKey(owner: ResourceOwner) {
@@ -97,7 +94,11 @@ function groupedResources(rows: readonly ResourceRow[]) {
         owner,
       ])
     );
-    unique.set(key, { ...row, owners: [...owners.values()] });
+    unique.set(key, {
+      ...row,
+      owners: [...owners.values()],
+      refusal: prior?.refusal ?? row.refusal,
+    });
   }
   return [...unique.values()];
 }
@@ -131,7 +132,8 @@ function composeLabels(container: RuntimeContainer) {
 async function fromContainer(
   container: RuntimeContainer,
   owner: ResourceOwner,
-  daemon: string | null
+  daemon: string | null,
+  projectDown: boolean
 ) {
   const receipt =
     daemon && CONTAINER_ID.test(container.id)
@@ -146,10 +148,14 @@ async function fromContainer(
     labels: container.labels,
   });
   const verified = receipt && receipt.fingerprint === fingerprint;
-  const removableState = ["created", "exited", "dead"].includes(
-    container.state
-  );
-  const stoppedRefusal = verified ? null : "No matching Hack launch receipt.";
+  const removableState = ["exited", "dead"].includes(container.state);
+  let stoppedRefusal: string | null = null;
+  if (!verified) {
+    stoppedRefusal = "No matching Hack launch receipt.";
+  } else if (!projectDown) {
+    stoppedRefusal =
+      "The Compose project has another active container or unverified state.";
+  }
   const row: ResourceRow = {
     id: container.id,
     kind: "container",
@@ -183,15 +189,6 @@ async function fromContainer(
   ];
 }
 
-function parseList(raw: string | null): Record<string, unknown>[] {
-  try {
-    const list: unknown = raw === null ? null : JSON.parse(raw);
-    return Array.isArray(list) ? list.filter(isRecord) : [];
-  } catch {
-    return [];
-  }
-}
-
 export function resourceDocker(cwd: string) {
   const env = projectDockerTransportEnvironment();
   return {
@@ -209,22 +206,26 @@ function knownCheckout(dir: string, checkouts: ReadonlyMap<string, string>) {
 
 async function composeInventory(cwd: string) {
   const { read, daemon } = resourceDocker(cwd);
-  const [runtime, registry, engine, volumeTable, imageTable, volumes] =
-    await Promise.all([
-      readRuntimeProjects({ includeGlobal: true }),
-      readProjectsRegistry(),
-      daemon(),
-      read(["system", "df", "-v", "--format", "{{json .Volumes}}"]),
-      read(["system", "df", "-v", "--format", "{{json .Images}}"]),
-      read([
-        "volume",
-        "ls",
-        "--filter",
-        `label=${COMPOSE_PROJECT}`,
-        "--format",
-        "{{.Name}}",
-      ]),
-    ]);
+  const [runtime, registry, engine, diskTable, volumes] = await Promise.all([
+    readRuntimeProjects({ includeGlobal: true }),
+    readProjectsRegistry(),
+    daemon(),
+    read([
+      "system",
+      "df",
+      "-v",
+      "--format",
+      '{"Volumes":{{json .Volumes}},"Images":{{json .Images}}}',
+    ]),
+    read([
+      "volume",
+      "ls",
+      "--filter",
+      `label=${COMPOSE_PROJECT}`,
+      "--format",
+      "{{.Name}}",
+    ]),
+  ]);
   const checkouts = new Map(
     registry.projects.flatMap((project) => [
       [project.repoRoot, project.name] as const,
@@ -234,6 +235,8 @@ async function composeInventory(cwd: string) {
     ])
   );
   const rows: ResourceRow[] = [];
+  let missingProof = false;
+  const disk = readObject(diskTable);
   for (const project of runtime.runtime) {
     const containers = [...project.services.values()].flatMap(
       (service) => service.containers
@@ -243,9 +246,20 @@ async function composeInventory(cwd: string) {
       const root =
         dir && isAbsolute(dir) ? knownCheckout(dir, checkouts) : null;
       const projectName = root && checkouts.get(root);
-      const detached = Boolean(root && (await checkoutGone(root)));
-      const hackConfig = dir?.endsWith("/.hack") || dir?.endsWith("/.dev");
-      if (!(project.isGlobal || projectName || (hackConfig && detached))) {
+      const receipt = engine
+        ? await readResourceReceipt({
+            daemon: engine,
+            kind: "container",
+            id: container.id,
+          })
+        : null;
+      const verified =
+        receipt &&
+        resourceFingerprint("container", {
+          id: container.id,
+          labels: container.labels,
+        }) === receipt.fingerprint;
+      if (!(project.isGlobal || projectName || verified)) {
         continue;
       }
       const record =
@@ -259,12 +273,21 @@ async function composeInventory(cwd: string) {
         project: projectName || project.project,
         checkout: root,
         branch: record?.launchBranch ?? null,
-        detached,
+        detached: false,
       };
-      rows.push(...(await fromContainer(container, owner, engine)));
+      rows.push(
+        ...(await fromContainer(
+          container,
+          owner,
+          engine,
+          containers.every((item) => ["exited", "dead"].includes(item.state))
+        ))
+      );
     }
   }
-  const volumeRows = parseList(volumeTable);
+  const volumeRows = Array.isArray(disk?.Volumes)
+    ? disk.Volumes.filter(isRecord)
+    : [];
   const sizes = new Map(
     volumeRows.map((row) => [
       getString(row, "Name"),
@@ -272,44 +295,58 @@ async function composeInventory(cwd: string) {
     ])
   );
   const images = new Map(
-    parseList(imageTable).map((row) => [
-      `${getString(row, "Repository")}:${getString(row, "Tag")}`,
-      dockerDiskBytes(getString(row, "Size")),
-    ])
+    (Array.isArray(disk?.Images) ? disk.Images.filter(isRecord) : []).map(
+      (row) => [
+        `${getString(row, "Repository")}:${getString(row, "Tag")}`,
+        dockerDiskBytes(getString(row, "Size")),
+      ]
+    )
   );
   for (const id of dockerNames(volumes, RESOURCE_NAME) ?? []) {
     const receipt = engine
       ? await readResourceReceipt({ daemon: engine, kind: "volume", id })
       : null;
-    if (!receipt) {
-      continue;
-    }
     const volume = await inspectDockerResource(read, "volume", id);
-    if (
-      !volume ||
-      resourceFingerprint("volume", volume) !== receipt.fingerprint
-    ) {
+    if (!volume) {
+      missingProof = true;
       continue;
     }
+    const verified =
+      receipt && resourceFingerprint("volume", volume) === receipt.fingerprint;
     const linked = volumeRows.find((row) => row.Name === id);
-    const owner = await receiptOwner(receipt);
-    const locationRefusal = owner.detached
+    const detachment = verified
+      ? await verifyResourceDetachment(receipt)
+      : null;
+    if (!verified) {
+      missingProof = true;
+    }
+    const locationRefusal = detachment?.detached
       ? null
-      : "A live checkout can still reference this volume.";
+      : (detachment?.reason ??
+        "No Hack launch receipt. Use hack down from the owning project to stop it and review its retained volumes.");
     rows.push({
       id,
       name: id,
       kind: "volume",
       backend: "compose",
-      owners: [owner],
+      owners: verified
+        ? [
+            {
+              project: receipt.project,
+              checkout: receipt.checkout,
+              branch: receipt.branch,
+              detached: detachment?.detached ?? false,
+            },
+          ]
+        : [],
       bytes: sizes.get(id) ?? null,
       state: null,
       labels: {
-        [COMPOSE_PROJECT]: receipt.composeProject,
+        [COMPOSE_PROJECT]: composeLabel(volume, COMPOSE_PROJECT),
         [COMPOSE_VOLUME]: composeLabel(volume, COMPOSE_VOLUME),
       },
       refusal:
-        linked?.Links !== "0"
+        verified && linked?.Links !== "0"
           ? "Referenced by a container or reference count is unavailable."
           : locationRefusal,
     });
@@ -327,11 +364,7 @@ async function composeInventory(cwd: string) {
         return row;
       })
     ),
-    complete:
-      runtime.ok &&
-      volumes !== null &&
-      volumeTable !== null &&
-      imageTable !== null,
+    complete: runtime.ok && volumes !== null && disk !== null && !missingProof,
   };
 }
 
@@ -510,7 +543,9 @@ async function nativeInventory(cwd: string) {
             ]
           : [],
         bytes:
-          typeof volume.bytes === "number" && volume.bytes >= 0
+          typeof volume.bytes === "number" &&
+          Number.isSafeInteger(volume.bytes) &&
+          volume.bytes >= 0
             ? volume.bytes
             : null,
         state: getString(ref, "classification") ?? null,

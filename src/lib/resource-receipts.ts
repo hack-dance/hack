@@ -1,14 +1,15 @@
-import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { lstat, realpath, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
 import { isMap, isScalar, parseDocument } from "yaml";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { readDockerDaemonIdentity } from "./docker-helper-environment.ts";
 import { getString, isRecord } from "./guards.ts";
 import {
   ensurePrivateDirectory,
-  publishPrivateFileExclusive,
   readReplaceablePrivateFile,
+  replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 import {
   COMPOSE_DIRECTORY,
   COMPOSE_PROJECT,
@@ -23,6 +24,11 @@ import {
 } from "./resources-docker.ts";
 
 export type RemovableKind = "container" | "volume";
+export type CheckoutWitness = {
+  readonly path: string;
+  readonly parentDevice: number;
+  readonly parentInode: number;
+};
 export type ResourceReceipt = {
   readonly fingerprint: string;
   readonly composeProject: string;
@@ -30,8 +36,18 @@ export type ResourceReceipt = {
   readonly checkout: string;
   readonly branch: string | null;
   readonly launch: string;
+  readonly checkouts: readonly CheckoutWitness[];
 };
 
+function checkoutWitness(value: unknown): value is CheckoutWitness {
+  return (
+    isRecord(value) &&
+    typeof value.path === "string" &&
+    isAbsolute(value.path) &&
+    Number.isSafeInteger(value.parentDevice) &&
+    Number.isSafeInteger(value.parentInode)
+  );
+}
 const digest = (text: string) =>
   new Bun.CryptoHasher("sha256").update(text).digest("hex");
 
@@ -116,8 +132,15 @@ export async function readResourceReceipt(opts: {
     if (!isRecord(row)) {
       return null;
     }
-    const { fingerprint, composeProject, project, checkout, branch, launch } =
-      row;
+    const {
+      fingerprint,
+      composeProject,
+      project,
+      checkout,
+      branch,
+      launch,
+      checkouts,
+    } = row;
     return typeof fingerprint === "string" &&
       CONTAINER_ID.test(fingerprint) &&
       typeof composeProject === "string" &&
@@ -128,12 +151,105 @@ export async function readResourceReceipt(opts: {
       isAbsolute(checkout) &&
       (branch === null || typeof branch === "string") &&
       typeof launch === "string" &&
-      launch.length > 0
-      ? { fingerprint, composeProject, project, checkout, branch, launch }
+      launch.length > 0 &&
+      Array.isArray(checkouts) &&
+      checkouts.length > 0 &&
+      checkouts.every(checkoutWitness)
+      ? {
+          fingerprint,
+          composeProject,
+          project,
+          checkout,
+          branch,
+          launch,
+          checkouts,
+        }
       : null;
   } catch {
     return null;
   }
+}
+
+function historyFile(dir: string, project: string) {
+  return receiptFile(dir, "compose-project-history", "volume", project);
+}
+
+export async function readResourceCheckoutHistory(
+  project: string
+): Promise<readonly CheckoutWitness[] | null> {
+  try {
+    const dir = await privateReceiptDirectory(false);
+    const file = await readReplaceablePrivateFile({
+      ...historyFile(dir, project),
+      maxBytes: 131_072,
+    });
+    const rows: unknown =
+      file && (file.mode & 0o077) === 0 ? JSON.parse(file.text) : null;
+    return Array.isArray(rows) && rows.length > 0 && rows.every(checkoutWitness)
+      ? rows
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function recordResourceCheckout(
+  project: string,
+  root: string
+): Promise<readonly CheckoutWitness[]> {
+  const dir = await privateReceiptDirectory(true);
+  const path = await realpath(root);
+  const [parent, checkout] = await Promise.all([
+    lstat(dirname(path)),
+    lstat(path),
+  ]);
+  if (
+    !(
+      parent.isDirectory() &&
+      checkout.isDirectory() &&
+      parent.dev === checkout.dev
+    )
+  ) {
+    throw new Error("Checkout and parent identity could not be recorded.");
+  }
+  const file = historyFile(dir, project);
+  return await withProjectsRegistryLock({
+    lockPath: `${file.path}.lock`,
+    label: "resource checkout history",
+    run: async () => {
+      const current = await readReplaceablePrivateFile({
+        ...file,
+        maxBytes: 131_072,
+      });
+      const prior = current ? await readResourceCheckoutHistory(project) : [];
+      if (!prior) {
+        throw new Error("Resource checkout history is unreadable.");
+      }
+      const witness = {
+        path,
+        parentDevice: parent.dev,
+        parentInode: parent.ino,
+      };
+      const checkouts = [
+        ...prior.filter((row) => row.path !== path),
+        witness,
+      ].sort((a, b) => a.path.localeCompare(b.path));
+      await replacePrivateFileAtomic({
+        ...file,
+        text: JSON.stringify(checkouts),
+      });
+      return checkouts;
+    },
+  });
+}
+
+export async function pruneResourceReceipt(
+  daemon: string,
+  kind: RemovableKind,
+  id: string
+) {
+  const dir = await privateReceiptDirectory(false);
+  await unlink(receiptFile(dir, daemon, kind, id).path);
 }
 
 async function ownedVolumeKeys(file: string): Promise<Set<string>> {
@@ -179,6 +295,7 @@ export async function recordComposeResourceReceipts(opts: {
   readonly branch: string | null;
   readonly launch: string;
   readonly daemon: string;
+  readonly checkouts: readonly CheckoutWitness[];
   readonly env: Readonly<Record<string, string>>;
 }) {
   const { projectDir, daemon, composeProject, env } = opts;
@@ -258,8 +375,9 @@ export async function recordComposeResourceReceipts(opts: {
       checkout: opts.checkout,
       branch: opts.branch,
       launch: opts.launch,
+      checkouts: opts.checkouts,
     };
-    await publishPrivateFileExclusive({
+    await replacePrivateFileAtomic({
       ...receiptFile(dir, daemon, kind, id),
       text: JSON.stringify(receipt),
     });

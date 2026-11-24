@@ -805,6 +805,18 @@ jobs:
         run: |
           bun run build
           bun run build:config-compiler
+      - name: Verify Docker resource cleanup and desktop contract
+        if: matrix.shard == 4
+        shell: bash
+        run: |
+          docker info --format '{{.ID}}' >/dev/null
+          docker pull redis:7-alpine
+          export HACK_RESOURCE_CLI_OUTPUT="$RUNNER_TEMP/hack-resource-inventory.json"
+          export HACK_E2E_CLI_BIN="$PWD/dist/hack"
+          bun test tests/e2e/resource-inventory.test.ts
+          test -s "$HACK_RESOURCE_CLI_OUTPUT"
+          rustup toolchain install 1.98.1 --profile minimal
+          cargo +1.98.1 test --locked --manifest-path apps/desktop/Cargo.toml -p hack-desktop-core --test resource_inventory_cli
       # The one-off compiler checks run once, on the last shard, off the longest shard's path.
       - name: Verify literal argv through real compiler and Compose normalization
         if: matrix.shard == 4

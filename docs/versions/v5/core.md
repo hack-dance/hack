@@ -14,7 +14,10 @@ then pass its token with `--confirm`. Interactive removal prompts before
 deleting. The desktop presents the same preview and requires explicit
 confirmation. Cleanup requires a matching launch receipt and fresh engine
 evidence, so growing the inventory alone never grants cleanup permission.
-A named Compose volume needs a deleted checkout and zero container references.
+A named Compose volume needs zero container references, no registry or run
+mapping for its Compose project name, and verified absence of every checkout
+that launched that instance. Missing or changed checkout parents block
+removal. A stopped container of an active project also stays protected.
 Native persistent data remains protected for graph restore.
 
 ## Project, instance and branch instance

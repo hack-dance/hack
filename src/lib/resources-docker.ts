@@ -22,7 +22,7 @@ export function dockerResourceReader(opts: {
       cwd: opts.cwd,
       ...dockerHelperRunEnvironment(opts.env),
       stdin: "ignore",
-      timeoutMs: 5000,
+      timeoutMs: args[0] === "system" ? 20_000 : 5000,
       maxStdoutBytes: 8 * 1024 * 1024,
       maxStderrBytes: 1024,
     }).catch(() => null);

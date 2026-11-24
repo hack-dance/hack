@@ -1,7 +1,7 @@
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
-import { confirmSafe } from "../lib/interactivity.ts";
+import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
   planResourceRemoval,
@@ -28,7 +28,7 @@ const list = withHandler(listSpec, async ({ ctx, args }) => {
   } else {
     for (const row of data.rows) {
       process.stdout.write(
-        `${row.backend} ${row.kind} ${JSON.stringify(row.name)} · ${row.bytes ?? "unknown"} bytes${row.owners.some((owner) => owner.detached) ? " · detached" : ""}\n`
+        `${row.backend} ${row.kind} ${JSON.stringify(row.name)} [${row.kind}:${row.id}] · ${row.bytes ?? "unknown"} bytes${row.owners.some((owner) => owner.detached) ? " · detached" : ""}${row.refusal ? ` · ${row.refusal}` : ""}\n`
       );
     }
     if (!(data.composeComplete && data.nativeComplete)) {
@@ -70,14 +70,21 @@ const removeSpec = defineCommand({
 } as const);
 
 const remove = withHandler(removeSpec, async ({ ctx, args }) => {
+  if (args.options.dryRun && args.options.confirm !== undefined) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: "Use --dry-run to review, then --confirm to remove.",
+    });
+  }
   const id = args.positionals.id;
   const plan = await planResourceRemoval({ id, cwd: ctx.cwd });
   let removed = false;
   if (!args.options.dryRun) {
     const token = args.options.confirm;
-    if (token === undefined && args.options.json) {
+    if (token === undefined && (args.options.json || !canPrompt())) {
       throw new HackCliError({
         code: "E_INTERACTIVE_REQUIRED",
+        detail: { reason: "confirmation_required" },
         message:
           "Review resources remove --dry-run, then pass its token with --confirm.",
       });
@@ -94,7 +101,12 @@ const remove = withHandler(removeSpec, async ({ ctx, args }) => {
       return 1;
     }
     await withComposeNameLock(plan.composeProject, () =>
-      removeResource({ id, cwd: ctx.cwd, token: token ?? plan.token })
+      removeResource({
+        id,
+        cwd: ctx.cwd,
+        token: token ?? plan.token,
+        docker: plan.docker,
+      })
     );
     removed = true;
   }

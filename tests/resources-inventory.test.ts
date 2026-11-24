@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import { lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { witnessedCheckoutStatus } from "../src/lib/resource-detachment.ts";
 import { resourceFingerprint } from "../src/lib/resource-receipts.ts";
 import {
   COMPOSE_DIRECTORY,
@@ -55,4 +59,27 @@ test("Docker disk estimates preserve unknown sizes and reject malformed IDs", ()
   expect(dockerDiskBytes("0B")).toBe(0);
   expect(dockerDiskBytes("N/A")).toBeNull();
   expect(dockerNames("known\n--force", RESOURCE_NAME)).toBeNull();
+});
+
+test("a missing checkout is proved only under its recorded parent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-detached-witness-"));
+  try {
+    const parent = join(root, "parent");
+    const path = join(parent, "checkout");
+    await mkdir(path, { recursive: true });
+    const stat = await lstat(parent);
+    const witness = { path, parentDevice: stat.dev, parentInode: stat.ino };
+    expect(await witnessedCheckoutStatus(witness)).toBe("checkout_present");
+    await rename(path, join(parent, "moved"));
+    expect(await witnessedCheckoutStatus(witness)).toBe("detached");
+    expect(
+      await witnessedCheckoutStatus({ ...witness, parentDevice: stat.dev + 1 })
+    ).toBe("checkout_unknown");
+    await rename(parent, join(root, "other-parent"));
+    expect(await witnessedCheckoutStatus(witness)).toBe("checkout_unknown");
+    await mkdir(parent);
+    expect(await witnessedCheckoutStatus(witness)).toBe("checkout_unknown");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

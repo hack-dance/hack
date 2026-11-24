@@ -7,9 +7,13 @@ export async function waitNativeComposeReady<T>(opts: {
   readonly signal?: AbortSignal;
   readonly observe: () => Promise<T | null>;
   readonly ready: (state: T) => boolean;
+  readonly failed?: (state: T) => boolean;
 }): Promise<T | null> {
   while (Date.now() < opts.deadline) {
     const state = await opts.observe();
+    if (state && opts.failed?.(state)) {
+      return null;
+    }
     if (state && opts.ready(state)) {
       return state;
     }

@@ -31,7 +31,7 @@ const COMPOSE_LINE = "migrate-1  | migrations applied (from compose)";
 
 const STUB = [
   "#!/bin/sh",
-  'printf "%s\\n" "$*" >> "$STUB_CAPTURE/docker-args.log"',
+  'printf "%s\\n" "$*" >> "${0%/*}/../capture/docker-args.log"',
   'if [ "$1" = "compose" ]; then',
   '  case " $* " in',
   `    *" logs "*) printf "%s\\n" "${COMPOSE_LINE}"; exit 0 ;;`,
@@ -158,7 +158,6 @@ function spawnLogs(args: readonly string[], opts: { readonly cwd: string }) {
       root,
       env: {
         PATH: `${join(root, "bin")}:/usr/bin:/bin`,
-        STUB_CAPTURE: capture,
         HACK_NO_INTERACTIVE: "1",
         HACK_LOKI_URL: `http://127.0.0.1:${fakeLoki?.port ?? 0}`,
       },
@@ -460,7 +459,6 @@ test("an HTTP error whose body breaks mid-read still ends the --json stream last
           root,
           env: {
             PATH: `${join(root, "bin")}:/usr/bin:/bin`,
-            STUB_CAPTURE: capture,
             HACK_NO_INTERACTIVE: "1",
             HACK_LOKI_URL: `http://127.0.0.1:${broken.port}`,
           },

@@ -20,9 +20,12 @@ import {
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
 import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
+import { dockerEngineSelectionFingerprint } from "../src/lib/docker-helper-environment.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import {
+  readProjectRuntimeState,
   readProjectRuntimeStateEntry,
+  stageProjectRuntimeLaunch,
   upsertProjectRuntimeStateEntry,
 } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -60,6 +63,11 @@ const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const upDetachSelections: Array<boolean | undefined> = [];
 const upStartupTimeouts: Array<number | undefined> = [];
 let upExitCode = 0;
+let cancelRestartBeforeDispatch = false;
+let stagedRestartOverlay: string | null | undefined;
+let replaceLaunchBeforeStaging = false;
+let activeFixtureDaemon: string | undefined;
+let switchDaemonAfterStaging = false;
 let psExitCode = 0;
 let upDurationMs = 0;
 let psDurationMs = 0;
@@ -111,6 +119,52 @@ const runtimeBackendMock = await registerScopedModuleMock({
     composeRuntimeBackend: {
       name: "compose",
       up: async (opts: RuntimeUpOptions) => {
+        if (opts.detach) {
+          if (replaceLaunchBeforeStaging && opts.cwd && opts.composeProject) {
+            const key = {
+              projectDir: opts.cwd,
+              composeProject: opts.composeProject,
+            };
+            const original = await readProjectRuntimeStateEntry(key);
+            if (original) {
+              const launchId = "newer-fixture-launch";
+              await upsertProjectRuntimeStateEntry({
+                projectDir: opts.cwd,
+                entry: {
+                  ...original,
+                  launchId,
+                  envName: "newer",
+                  dockerEngineSelection: await dockerEngineSelectionFingerprint(
+                    { cwd: opts.cwd, env: opts.env ?? {}, launchId }
+                  ),
+                },
+              });
+            }
+          }
+          await opts.beforeCreate?.();
+          if (
+            cancelRestartBeforeDispatch &&
+            opts.onCreateDispatched &&
+            opts.cwd &&
+            opts.composeProject
+          ) {
+            stagedRestartOverlay = (
+              await readProjectRuntimeStateEntry({
+                projectDir: opts.cwd,
+                composeProject: opts.composeProject,
+              })
+            )?.envName;
+            throw new DOMException(
+              "Cancelled before Compose dispatch",
+              "AbortError"
+            );
+          }
+          opts.onCreateDispatched?.();
+        }
+        await opts.beforeStart?.();
+        if (!opts.detach) {
+          opts.onCreateDispatched?.();
+        }
         runtimeCalls.push({ kind: "up", opts });
         upComposeContents.push(
           (
@@ -139,23 +193,31 @@ const runtimeBackendMock = await registerScopedModuleMock({
       },
       psJson: async (opts: {
         readonly env?: Readonly<Record<string, string>>;
+        readonly cwd?: string;
+        readonly noTrunc?: boolean;
       }) => {
-        psEnvs.push(withoutComposeEnvReferences(opts.env));
+        if (!opts.noTrunc) {
+          psEnvs.push(withoutComposeEnvReferences(opts.env));
+        }
         if (psDurationMs) {
           await Bun.sleep(psDurationMs);
         }
         return {
-          exitCode: psExitCode,
-          stdout: (psSnapshots.shift() ?? psRows)
+          exitCode: opts.noTrunc ? 0 : psExitCode,
+          stdout: (opts.noTrunc ? psRows : (psSnapshots.shift() ?? psRows))
             .map((row) => {
               const entry = JSON.parse(row);
               return JSON.stringify({
                 ID: `container-${entry.Service}`,
+                Labels: `com.docker.compose.project.working_dir=${opts.cwd}`,
                 ...entry,
               });
             })
             .join("\n"),
-          stderr: psExitCode ? "Cannot connect to the Docker daemon" : "",
+          stderr:
+            !opts.noTrunc && psExitCode
+              ? "Cannot connect to the Docker daemon"
+              : "",
         };
       },
       ps: async () => 0,
@@ -210,6 +272,36 @@ const enginePreflightMock = await registerScopedModuleMock({
   },
 });
 
+const engineIdentityMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/docker-helper-environment.ts",
+  overrides: {
+    readDockerDaemonIdentity: () =>
+      Promise.resolve(
+        activeFixtureDaemon
+          ? { kind: "verified", id: activeFixtureDaemon }
+          : { kind: "unsupported" }
+      ),
+  },
+});
+
+const realStageProjectRuntimeLaunch = stageProjectRuntimeLaunch;
+const runtimeStateMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/project-runtime-state.ts",
+  overrides: {
+    stageProjectRuntimeLaunch: async (
+      opts: Parameters<typeof stageProjectRuntimeLaunch>[0]
+    ) => {
+      const displaced = await realStageProjectRuntimeLaunch(opts);
+      if (switchDaemonAfterStaging) {
+        activeFixtureDaemon = "fixture-two";
+      }
+      return displaced;
+    },
+  },
+});
+
 const loggerMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/ui/logger.ts",
@@ -240,6 +332,8 @@ beforeAll(() => {
   runtimeProjectsMock.activate();
   shellMock.activate();
   enginePreflightMock.activate();
+  engineIdentityMock.activate();
+  runtimeStateMock.activate();
   loggerMock.activate();
 });
 
@@ -264,6 +358,11 @@ afterEach(async () => {
   upStartupTimeouts.length = 0;
   upDetachSelections.length = 0;
   upExitCode = 0;
+  cancelRestartBeforeDispatch = false;
+  stagedRestartOverlay = undefined;
+  replaceLaunchBeforeStaging = false;
+  activeFixtureDaemon = undefined;
+  switchDaemonAfterStaging = false;
   psExitCode = 0;
   upDurationMs = 0;
   psDurationMs = 0;
@@ -299,6 +398,8 @@ afterAll(() => {
   runtimeProjectsMock.deactivate();
   shellMock.deactivate();
   enginePreflightMock.deactivate();
+  engineIdentityMock.deactivate();
+  runtimeStateMock.deactivate();
   loggerMock.deactivate();
 });
 
@@ -978,13 +1079,11 @@ for (const action of ["up", "restart"] as const) {
     const run = action === "up" ? runDetachedUp : runRestart;
     await expect(run({ projectRoot })).rejects.toThrow();
     expect(upComposeContents).toEqual([]);
-    const state = JSON.parse(
-      await readFile(
-        resolve(projectRoot, ".hack/.internal/runtime-state.json"),
-        "utf8"
-      )
-    );
-    expect(state.entries).toEqual([]);
+    expect(
+      await readProjectRuntimeState({
+        projectDir: resolve(projectRoot, ".hack"),
+      })
+    ).toEqual([]);
   });
 
   test(`${action} does not start Compose after a failing before hook`, async () => {
@@ -1656,7 +1755,59 @@ test("up reports a Docker inspection error without waiting out the start budget"
   expect(psEnvs).toHaveLength(1);
 });
 
-test("full restart cleans lifecycle state before propagating a Docker inspection failure", async () => {
+test("a pre-create cancellation restores the previous Restart overlay before dispatch", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  await writeFile(
+    resolve(projectDir, "hack.env.qa.yaml"),
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    SHARED_MODE: qa\n"
+  );
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  const launch = { projectDir, composeProject: "startup-state-test" };
+  const original = await readProjectRuntimeStateEntry(launch);
+  expect(original?.envName).toBeNull();
+  cancelRestartBeforeDispatch = true;
+  replaceLaunchBeforeStaging = true;
+  await expect(runRestart({ projectRoot, env: "qa" })).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  expect(stagedRestartOverlay).toBe("qa");
+  expect(await readProjectRuntimeStateEntry(launch)).toMatchObject({
+    envName: "newer",
+    launchId: "newer-fixture-launch",
+  });
+  expect(runtimeCalls.filter((call) => call.kind === "up")).toHaveLength(1);
+});
+
+for (const action of ["up", "restart"] as const) {
+  test(`${action} restores the displaced record if the daemon changes while staging`, async () => {
+    const projectRoot = await createProject();
+    const projectDir = resolve(projectRoot, ".hack");
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+    activeFixtureDaemon = "fixture-one";
+    expect(await runDetachedUp({ projectRoot })).toBe(0);
+    const launch = { projectDir, composeProject: "startup-state-test" };
+    const original = await readProjectRuntimeStateEntry(launch);
+    switchDaemonAfterStaging = true;
+    const attempt =
+      action === "up"
+        ? runDetachedUp({ projectRoot })
+        : runRestart({ projectRoot });
+    await expect(attempt).rejects.toMatchObject({
+      code: "E_DOCKER_UNAVAILABLE",
+      message: expect.stringContaining("different Docker daemon"),
+    });
+    expect(await readProjectRuntimeStateEntry(launch)).toEqual(original);
+    expect(runtimeCalls.filter((call) => call.kind === "up")).toHaveLength(1);
+  });
+}
+
+test("full restart cleans the lifecycle owner and retains the launch after a Docker inspection failure", async () => {
   const projectRoot = await createProject();
   const projectDir = resolve(projectRoot, ".hack");
   psExitCode = 1;
@@ -1679,7 +1830,10 @@ test("full restart cleans lifecycle state before propagating a Docker inspection
       projectDir,
       composeProject: "startup-state-test",
     })
-  ).toBeNull();
+  ).toMatchObject({
+    launchComposeBase: "startup-state-test",
+    launchId: expect.any(String),
+  });
 });
 
 test("a restart repair keeps the project's start ceiling", async () => {

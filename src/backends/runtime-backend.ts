@@ -98,6 +98,12 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
    * Unattended starts also invoke it before preparation can create containers.
    */
   readonly beforeStart?: () => Promise<void>;
+  /** Recheck ownership before detached Compose can create or replace containers. */
+  readonly beforeCreate?: () => Promise<void>;
+  /** A Compose process that can create containers was spawned. */
+  readonly onCreateDispatched?: () => void;
+  /** Cancels admission, including while asynchronous startup checks are running. */
+  readonly signal?: AbortSignal;
   readonly services?: readonly string[];
   readonly noDeps?: boolean;
   readonly forceRecreate?: boolean;
@@ -130,6 +136,7 @@ export interface RuntimeDownOptions extends RuntimeBaseOptions {
 
 export interface RuntimePsOptions extends RuntimeBaseOptions {
   readonly all?: boolean;
+  readonly noTrunc?: boolean;
 }
 
 export interface RuntimeRunOptions extends RuntimeBaseOptions {
@@ -345,6 +352,7 @@ async function runComposeStartPhase(input: {
   });
   const watchdog = new AbortController();
   let done = false;
+  options.signal?.throwIfAborted();
   const finished = run(input.cmd, {
     cwd: options.cwd,
     env: options.env,
@@ -352,7 +360,9 @@ async function runComposeStartPhase(input: {
     timeoutMs: ceilingMs,
     forwardSignals: true,
     settleProcessGroupOnCancel: true,
-    signal: watchdog.signal,
+    signal: options.signal
+      ? AbortSignal.any([watchdog.signal, options.signal])
+      : watchdog.signal,
   }).finally(() => {
     done = true;
   });
@@ -507,9 +517,11 @@ async function watchStartProgress(input: {
 export const composeRuntimeBackend: RuntimeBackend = {
   name: "compose",
   async up(opts) {
+    opts.signal?.throwIfAborted();
     if (!opts.unattended) {
       await warnComposeBuildPrivacy({ ...opts, argv: buildComposeArgs(opts) });
     }
+    opts.signal?.throwIfAborted();
     if (opts.unattended && !opts.detach) {
       throw new HackCliError({
         code: "E_PERMISSION",
@@ -536,15 +548,23 @@ export const composeRuntimeBackend: RuntimeBackend = {
         ...(opts.noDeps ? ["--no-deps"] : []),
         ...(opts.services ?? []),
       ];
-      const runPhase = (cmd: readonly string[], timeoutMs: number) =>
-        run(cmd, {
+      const runPhase = (
+        cmd: readonly string[],
+        timeoutMs: number,
+        onSpawn?: () => void
+      ) => {
+        opts.signal?.throwIfAborted();
+        return run(cmd, {
           cwd: opts.cwd,
           env: opts.env,
           stdout: childStdoutTarget(opts.routeStdoutToStderr),
           timeoutMs,
           forwardSignals: true,
           settleProcessGroupOnCancel: true,
+          signal: opts.signal,
+          onSpawn: onSpawn ? async () => onSpawn() : undefined,
         });
+      };
       // Image build/pull can take far longer than starting containers, so it
       // runs (with container creation/recreation) under its own budget. The
       // start invocation then only starts the prepared containers and waits on
@@ -559,6 +579,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
           return inputs.exitCode;
         }
         opts.onStartupPhase?.("images");
+        await opts.beforeCreate?.();
         const prepared = await runPhase(
           [
             ...composeArgs,
@@ -568,7 +589,8 @@ export const composeRuntimeBackend: RuntimeBackend = {
             ...(opts.forceRecreate ? ["--force-recreate"] : []),
             ...scope,
           ],
-          imageTimeoutMs
+          imageTimeoutMs,
+          opts.onCreateDispatched
         );
         if (prepared !== 0) {
           return prepared;
@@ -639,6 +661,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...(opts.services ?? []),
     ];
     const env = mergeSpawnEnv(opts.env);
+    opts.signal?.throwIfAborted();
     const proc = Bun.spawn(cmd, {
       cwd: opts.cwd,
       env: childEnvironment(env),
@@ -649,6 +672,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       // forwards each interrupt once, including a second one during shutdown.
       detached: true,
     });
+    opts.onCreateDispatched?.();
 
     let interrupted: number | null = null;
     const forwardInterrupt = (): void => {
@@ -726,6 +750,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...buildComposeArgs(opts),
       "ps",
       ...(opts.all ? ["--all"] : []),
+      ...(opts.noTrunc ? ["--no-trunc"] : []),
       "--format",
       "json",
     ];

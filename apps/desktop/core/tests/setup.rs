@@ -13,6 +13,7 @@ fn machine(ids: &[(&str, &str)]) -> DoctorRun {
                 id: (*id).into(),
                 status: (*status).into(),
                 detail: String::new(),
+                fix: None,
             })
             .collect(),
         ..Default::default()
@@ -300,6 +301,7 @@ fn native_project_evidence_never_leaks_between_projects() {
                 id: "native root trust".into(),
                 status: "ok".into(),
                 detail: String::new(),
+                fix: None,
             }],
             ..Default::default()
         }),

@@ -1102,7 +1102,9 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
-          rustup target add x86_64-unknown-linux-musl
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+            cargo build --locked --release --target aarch64-unknown-linux-musl
           cargo build --locked --release --target x86_64-unknown-linux-musl
           cargo test --locked --target x86_64-unknown-linux-musl
 

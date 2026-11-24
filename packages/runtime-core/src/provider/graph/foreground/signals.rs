@@ -19,7 +19,7 @@ extern "C" fn notified(_: libc::c_int) {
     PENDING.store(true, Ordering::Release);
 }
 /// The caller retains Events for the entire callback lifetime.
-pub(super) fn startup_pending() -> bool {
+pub(in crate::provider::graph) fn startup_pending() -> bool {
     let frontend = FRONTEND.load(Ordering::Acquire);
     // SAFETY: getppid is a read-only kernel observation. A dead parent is
     // reparented, so its PID cannot be confused with a reused incarnation.

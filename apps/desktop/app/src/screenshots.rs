@@ -21,7 +21,11 @@ fn fixture_context() -> HeadlessAppContext {
         Arc::new(hack_desktop_ui::icons::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
-    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        crate::theme::init(cx);
+        #[cfg(target_os = "linux")]
+        crate::theme::capture_fonts(cx);
+    });
     cx
 }
 
@@ -53,7 +57,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             let opts = WindowOptions {
                 focus: false,
                 show: false,
-                ..crate::window_options()
+                ..crate::health_fixtures::window_options(Some(f))
             };
             let (handle, _app) = cx
                 .update(|cx| {
@@ -62,6 +66,12 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             let mut app =
                                 HackApp::new(crate::source_for(Some(f)), false, window, cx);
                             app.select(fixtures::selected(f));
+                            crate::health_fixtures::open(&mut app, f, window, cx);
+                            // No controls are clicked during capture. Show the
+                            // enabled appearance of checked fixture commands.
+                            if matches!(f, Fixture::DoctorHealth | Fixture::ErrorsSheet) {
+                                app.live = true;
+                            }
                             if fixtures::loads_doctor(f) {
                                 app.show_doctor_now();
                                 if !fixtures::opens_doctor(f) {
@@ -76,6 +86,12 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             }
                             if fixtures::loads_usage(f) {
                                 app.show_usage_now();
+                            }
+                            if f.name().starts_with("catalog-") {
+                                app.show_catalog_fixture(f.name(), window, cx);
+                            }
+                            if f.name().starts_with("changes-") {
+                                app.show_changes_fixture(f.name());
                             }
                             if f.name().starts_with("copies-") {
                                 app.show_copies_fixture(f.name());
@@ -113,7 +129,12 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                     _app.update(cx, HackApp::toggle_panel);
                     window.render_frame(cx);
                 }
-                _app.update(cx, |app, cx| app.settle_terminals(cx));
+                _app.update(cx, |app, cx| {
+                    app.settle_terminals(cx);
+                    if f == Fixture::DoctorFixAll {
+                        app.settle_command_fixture(cx);
+                    }
+                });
                 window.render_frame(cx);
                 window.render_frame(cx);
             })
@@ -129,8 +150,14 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             let path = dir.join(format!("{name}-{suffix}.png"));
             img.save(&path).expect("write png");
             println!("{}", path.display());
-            cx.update_window(handle, |_, window, _| window.remove_window())
-                .ok();
+            cx.update_window(handle, |_, window, _cx| {
+                #[cfg(hack_terminal)]
+                if f == Fixture::DoctorFixAll {
+                    _app.update(_cx, |app, cx| app.reset_command_drawer(window, cx));
+                }
+                window.remove_window();
+            })
+            .ok();
         }
     }
     if fixture.is_none() {

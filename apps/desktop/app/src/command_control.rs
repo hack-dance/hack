@@ -62,6 +62,12 @@ impl Drawer {
     pub(crate) fn visible(&self) -> bool {
         self.visible
     }
+
+    pub(crate) fn waiting_for_password(&self, control_id: &str) -> bool {
+        self.last
+            .as_ref()
+            .is_some_and(|run| run.props.id == control_id && run.waiting_for_password)
+    }
 }
 
 struct Run {
@@ -89,6 +95,7 @@ enum Phase {
 
 enum Check {
     Pending,
+    Output,
     NeedsAttention(String),
     Closing,
     Passed,
@@ -108,6 +115,17 @@ fn checked_home(spec: &CommandSpec) -> Option<&Path> {
         .iter()
         .take_while(|arg| arg.contains('='))
         .find_map(|arg| arg.strip_prefix("HOME=").map(Path::new))
+}
+
+/// The same checked command and working directory for inline and banner Copy.
+pub(crate) fn copy_text(props: &CommandControl) -> Option<String> {
+    let (CommandAvailability::Ready(spec) | CommandAvailability::CopyOnly(spec)) =
+        &props.availability
+    else {
+        return None;
+    };
+    let cwd = props.cwd.as_deref().or_else(|| checked_home(spec));
+    spec.display_in(cwd).ok()
 }
 
 fn command_directory(
@@ -359,6 +377,17 @@ impl HackApp {
         cx.notify();
     }
 
+    /// A manual command leaves its result visible in the drawer.
+    pub(crate) fn command_output_ready(&mut self, id: CommandRunId, cx: &mut Context<Self>) {
+        if let Some(run) = self.panels.command.last.as_mut().filter(|run| run.id == id)
+            && let Phase::Ended { check, .. } = &mut run.phase
+            && matches!(check, Check::Pending)
+        {
+            *check = Check::Output;
+            cx.notify();
+        }
+    }
+
     /// Apply fresh evidence for this run. Only a successful process and
     /// passing check arm auto-close. Late evidence cannot affect a retry.
     pub(crate) fn command_checked(
@@ -490,7 +519,16 @@ impl HackApp {
         }
     }
 
-    fn stop_drawer_command(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn stop_drawer_command(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self
+            .panels
+            .command
+            .last
+            .as_ref()
+            .map(|run| run.props.id.clone())
+        {
+            self.health_drawer_stop_requested(&id);
+        }
         let drawer = &mut self.panels.command;
         drawer.menu = false;
         if drawer.last.as_ref().is_some_and(Run::running)
@@ -599,16 +637,43 @@ pub(crate) fn render(
     cx: &mut Context<HackApp>,
     on_exit: impl Fn(&mut HackApp, CommandCompletion, &mut Context<HackApp>) + 'static,
 ) -> AnyElement {
-    let spec = match &props.availability {
-        CommandAvailability::Ready(spec) | CommandAvailability::CopyOnly(spec) => spec,
-        CommandAvailability::Blocked(reason) | CommandAvailability::VersionMismatch(reason) => {
-            return div()
-                .type_step(text::SMALL)
-                .text_color(ui.p.text_secondary)
-                .child(reason.clone())
-                .into_any_element();
-        }
-    };
+    let on_exit = Rc::new(on_exit);
+    render_with_run(
+        props,
+        caller_busy,
+        app,
+        ui,
+        cx,
+        move |app, props, window, cx| {
+            let on_exit = Rc::clone(&on_exit);
+            app.run_drawer_command(
+                props,
+                move |app, result, cx| on_exit(app, result, cx),
+                window,
+                cx,
+            );
+        },
+    )
+}
+
+/// Use the shared buttons when a caller must admit the operation before launching the drawer.
+pub(crate) fn render_with_run(
+    props: CommandControl,
+    caller_busy: bool,
+    app: &HackApp,
+    ui: &Ui,
+    cx: &mut Context<HackApp>,
+    on_run: impl Fn(&mut HackApp, CommandControl, &mut Window, &mut Context<HackApp>) + 'static,
+) -> AnyElement {
+    if let CommandAvailability::Blocked(reason) | CommandAvailability::VersionMismatch(reason) =
+        &props.availability
+    {
+        return div()
+            .type_step(text::SMALL)
+            .text_color(ui.p.text_secondary)
+            .child(reason.clone())
+            .into_any_element();
+    }
     let drawer = &app.panels.command;
     let last = drawer.last.as_ref().filter(|r| r.props.id == props.id);
     let running = last.is_some_and(Run::running);
@@ -622,8 +687,7 @@ pub(crate) fn render(
         && !caller_busy
         && !app.machine.busy()
         && matches!(props.availability, CommandAvailability::Ready(_));
-    let cwd = props.cwd.as_deref().or_else(|| checked_home(spec));
-    let copy = spec.display_in(cwd).ok();
+    let copy = copy_text(&props);
     let group = SharedString::from(format!("command-{}", props.id));
     let (width, height) = match props.size {
         CommandControlSize::Standard => (80., 28.),
@@ -665,19 +729,15 @@ pub(crate) fn render(
     }
     if can_run {
         let props = props.clone();
-        let on_exit = Rc::new(on_exit);
-        run = run
-            .focusable()
-            .on_click(cx.listener(move |app, _, window, cx| {
-                let on_exit = Rc::clone(&on_exit);
-                app.run_drawer_command(
-                    props.clone(),
-                    move |app, result, cx| on_exit(app, result, cx),
-                    window,
-                    cx,
-                );
-            }));
+        run = run.focusable().on_click(
+            cx.listener(move |app, _, window, cx| on_run(app, props.clone(), window, cx)),
+        );
     }
+    #[cfg(all(test, feature = "screenshots"))]
+    let run = {
+        use gpui_kit::test::TestSupportExt as _;
+        run.test_support()
+    };
 
     let compact = props.size == CommandControlSize::Compact;
     let p = ui.p;
@@ -826,6 +886,22 @@ pub(crate) fn render_history(
 }
 
 impl HackApp {
+    #[cfg(feature = "screenshots")]
+    pub(crate) fn settle_command_fixture(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self
+            .panels
+            .command
+            .session
+            .as_ref()
+            .and_then(|panel| panel.read(cx).active())
+            .cloned()
+        {
+            view.update(cx, |terminal, cx| {
+                terminal.settle(Duration::from_millis(100), Duration::from_secs(2), cx)
+            });
+        }
+    }
+
     /// Alternate chrome for the window's embedded bottom terminal panel.
     pub(crate) fn render_command_drawer(
         &self,
@@ -848,6 +924,7 @@ impl HackApp {
                 ..
             } => match check {
                 Check::Pending => (Glyph::Loader, "Checking… · exit 0".into(), p.text_secondary),
+                Check::Output => (Glyph::Check, "Done · exit 0".into(), p.text_secondary),
                 Check::Closing => (Glyph::Check, "Done · closing".into(), p.states.running.dot),
                 Check::Passed => (Glyph::Check, "Done · exit 0".into(), p.states.running.dot),
                 Check::NeedsAttention(_) => (
@@ -960,7 +1037,13 @@ impl HackApp {
         } else {
             body = body.children(drawer.session.clone());
         }
-        let height = if drawer.taller { 0.60 } else { 0.35 };
+        let height = if drawer.taller {
+            0.60
+        } else if run.props.size == CommandControlSize::Compact {
+            0.25
+        } else {
+            0.35
+        };
         Some(
             div()
                 .id("command-drawer")

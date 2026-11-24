@@ -33,6 +33,8 @@ pub enum Glyph {
     Folder,
     /// Error / CLI missing.
     CircleAlert,
+    WifiOff,
+    Minus,
     /// Daemon recovery.
     Power,
     /// Loading.
@@ -102,6 +104,8 @@ impl Glyph {
             Self::Alert => "icons/triangle-alert.svg",
             Self::Folder => "icons/folder-plus.svg",
             Self::CircleAlert => "icons/circle-alert.svg",
+            Self::WifiOff => "icons/wifi-off.svg",
+            Self::Minus => "icons/minus.svg",
             Self::Power => "icons/power.svg",
             Self::Loader => "icons/loader-circle.svg",
             Self::Logs => "icons/list.svg",
@@ -154,6 +158,8 @@ icon_assets!(
         TriangleAlert,
         FolderPlus,
         CircleAlert,
+        WifiOff,
+        Minus,
         Power,
         LoaderCircle,
         List,
@@ -227,6 +233,9 @@ mod tests {
             Glyph::Alert,
             Glyph::Folder,
             Glyph::CircleAlert,
+            Glyph::Info,
+            Glyph::WifiOff,
+            Glyph::Minus,
             Glyph::Power,
             Glyph::Loader,
             Glyph::Logs,

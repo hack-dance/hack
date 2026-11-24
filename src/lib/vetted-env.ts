@@ -58,3 +58,16 @@ export function vettedHelperEnv(opts?: {
     unsetEnvKeys: Object.keys(source).filter((key) => !(key in env)),
   };
 }
+
+const HOST_CONTROL_ENV_KEY =
+  /^(?:COMPOSE_|GIT_|DOCKER_|HACK_|XDG_|LD_|DYLD_|BUN_|HOME$|USER$|LOGNAME$|TMPDIR$|TMP$|TEMP$|SHELL$|PATH$|NODE_OPTIONS$|NODE_PATH$|BASH_ENV$|ENV$|SHELLOPTS$|IFS$|CDPATH$|GCONV_PATH$|PYTHON(?:PATH|HOME|STARTUP|INSPECT)$|RUBYOPT$|RUBYLIB$|PERL5OPT$|PERL5LIB$)/;
+
+export function isHostControlEnvKey(key: string): boolean {
+  return HOST_CONTROL_ENV_KEY.test(key);
+}
+
+export const HOST_LOOPBACK = "127.0.0.1";
+export const CONTAINER_ONLY_HOSTS: ReadonlySet<string> = new Set([
+  "host.docker.internal",
+  "host-gateway",
+]);

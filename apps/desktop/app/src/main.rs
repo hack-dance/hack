@@ -19,6 +19,7 @@
 //!                                      (see `drive.rs`)
 //! ```
 
+mod changes_view;
 mod clipboard;
 #[cfg(hack_terminal)]
 mod command_control;
@@ -28,14 +29,20 @@ mod doctor_view;
 mod drive;
 mod env_view;
 mod files_view;
+mod follow_up_view;
+mod health_commands;
+mod health_fixtures;
+mod health_model;
 mod logs_view;
 mod machine_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+mod service_catalog;
 mod service_view;
 mod setup_view;
 #[cfg(hack_terminal)]
 mod terminal;
+mod theme;
 mod upgrade_view;
 mod usage_view;
 mod view;
@@ -250,7 +257,11 @@ fn main() {
     gpui_kit::application()
         .with_assets(hack_desktop_ui::icons::Assets)
         .run(move |cx| {
-            gpui_kit::init(cx);
+            theme::init(cx);
+            #[cfg(all(feature = "screenshots", target_os = "linux"))]
+            if args.fixture.is_some() || args.logs_fixture.is_some() {
+                theme::capture_fonts(cx);
+            }
             view::bind_keys(cx);
             let fixture = args.fixture.or(args.logs_fixture.map(|l| {
                 if l == hack_desktop_core::logs::fixtures::LogsFixture::Stopped {
@@ -266,10 +277,10 @@ fn main() {
                 WindowOptions {
                     focus: false,
                     show: false,
-                    ..window_options()
+                    ..health_fixtures::window_options(fixture)
                 }
             } else {
-                window_options()
+                health_fixtures::window_options(fixture)
             };
             let (window, app) = gpui_kit::open_window(options, cx, move |window, cx| {
                 match theme {
@@ -281,11 +292,18 @@ fn main() {
                     app.watch_window(window, cx);
                     if let Some(f) = fixture {
                         app.select(fixtures::selected(f));
+                        health_fixtures::open(&mut app, f, window, cx);
                         if fixtures::loads_doctor(f) {
                             app.show_doctor_now();
                             if !fixtures::opens_doctor(f) {
                                 app.show_project();
                             }
+                        }
+                        if f.name().starts_with("catalog-") {
+                            app.show_catalog_fixture(f.name(), window, cx);
+                        }
+                        if f.name().starts_with("changes-") {
+                            app.show_changes_fixture(f.name());
                         }
                         if f.name().starts_with("copies-") {
                             app.show_copies_fixture(f.name());

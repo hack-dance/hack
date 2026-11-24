@@ -16,12 +16,12 @@ standalone Rust binary exercised by a fake caller; the CLI remains unchanged.
 Positive TLC exploration: 426 distinct states, queue exhausted, depth 14. Negative
 control sets `SkipLiveFence = TRUE`; `Retry` then violates `NoDuplicate` with live,
 durable and duplicate all true in the same state. Both guard-loss and project-loss
-traces can witness this violation; the registry requires the named action and
-same-state fields without depending on worker scheduling.
+traces can witness this violation. The registry requires the named invariant and
+the same final-state fields.
 
 Checker: checksum-pinned TLA+ 1.7.4 artifact (TLC reports version 2.19), Java 17,
 two workers and a bounded heap. The maintained runner pins the positive count and
-validates the negative invariant/action/witness. Apalache is not qualified here.
+validates the negative invariant and final-state witness. Apalache is not qualified here.
 
 The guard-owned Stop and Kill checks still assume matching identity. The added
 orphan signal admission is exercised by a separate SID-reuse negative control.

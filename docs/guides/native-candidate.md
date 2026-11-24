@@ -593,7 +593,13 @@ bridge to the container's target port, after the graph is ready. The rules:
   `graph_port_publication` before VM boot, including detached `up`; keep those
   projects on the Compose backend.
 - One graph publishes at most 16 ports. Routes and published ports share the
-  pool's 32 application bridge sockets.
+  pool's application bridge sockets, at most 32, across every project in the
+  pool. A running pool is never resized: the first project to boot it sets the
+  count. A second project that needs more sockets than that count is refused
+  with `bridge_conflict`. One that needs more than the other projects' runs
+  leave free is refused with `bridge_capacity_exhausted` before any hook, image
+  or graph work. In both cases the running projects are left untouched; stop one
+  of them and start again.
 - Two active services, two graphs in the same pool, or a graph and any other
   host process cannot hold the same host port. Before graph admission, and again
   under the provider lease just before binding, native refuses a host port that

@@ -283,6 +283,7 @@ fn the_request_is_checked_against_the_receipt_the_fast_path_holds() {
         dependencies: super::super::super::dependency_socket::Request::Exact(None),
         project_share: None,
         amd64_emulation: false,
+        own_run: None,
     };
     none.check(&home.owner, true).unwrap();
     // A pool that runs without x86_64 translation refuses a translation request, as the
@@ -491,6 +492,7 @@ mod live {
             dependencies: super::super::super::super::dependency_socket::Request::Exact(None),
             project_share: None,
             amd64_emulation: false,
+            own_run: None,
         }
     }
 

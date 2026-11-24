@@ -835,6 +835,41 @@ The model omits image selection, the registry and Docker's own platform handling
 those are covered by `registry_image`, `image_ensure` and graph admission unit tests.
 Actual Rosetta execution in the guest needs host evidence.
 
+## Bridge slots across project runs
+
+`bridge-slots/BridgeSlots.tla` checks how two project runs share one running pool's
+application bridge slots (U13). The pool has `Capacity` slots and is never resized.
+Each run asks for 1..`MaxNeed` slots for its routes and published ports. A start first
+passes `Check`, the early refusal in `runtime up` (`graph/bridges.rs`
+`require_free_slots`), which reads the slot registry and reserves nothing. Then it
+takes `Reserve`, the graph-start reservation under the provider mutation lock
+(`reserve_publications`), which takes every slot or none. A stopped or failed run
+releases all its slots (`release_run`). Bounds: two runs, `Capacity` 4, `MaxNeed` 3.
+
+The positive control explores 674 distinct states and checks `Safe`:
+
+- `NothingHeldWithoutStart`: a run that is idle, checked, refused or failed holds no slot.
+- `NoSteal`: no reservation takes a slot another run holds.
+- `RunningHoldsNeed`: a running run holds exactly the slots it asked for.
+- `LateFailureOnlyOnRace`: a start that passed the early check fails at reservation
+  only when another run reserved slots after that check. The check is advisory: it is
+  never wrong on its own, and the reservation stays the authority.
+
+Controls, each required to fail in a `Reserve` state:
+
+- `negative` (`EnforceFreeCheck = FALSE`, the check before U13 compared the request
+  with the pool's total): `LateFailureOnlyOnRace`, with one run running, the other
+  failed and neither raced.
+- `partial` (`EnforceAtomic = FALSE`): `NothingHeldWithoutStart`, a failed run keeping
+  the slots it got.
+- `trust-check` (`EnforceReserveCheck = FALSE`): `NoSteal`.
+- `both-running` checks `NeverBothRunning` and must fail: two projects do run together.
+
+**Uncovered:** a retained run restoring its own slots (the `own_run` exemption is a Rust
+regression, `bridges::tests::a_start_counts_only_the_slots_other_runs_hold`), dependency
+sockets, the pool's initial sizing, crashes between steps (the bridge-batch model covers
+one graph's batch and its crashes), and the live two-project run on a host VM.
+
 ## Native probe readiness
 
 `probe-readiness/ProbeReadiness.tla` checks how the host reads one native HTTP probe
@@ -1271,6 +1306,7 @@ have canonical copies and were not duplicated.
 | publication-journal | 50 | Recovery cannot adopt a live writer's pending entry; unsafe recovery violates that condition | `publication.rs` journal recovery |
 | publication | 16 | A live native publication retains its intent, directory and guest; early retirement breaks ownership | `publication.rs`, `publication_stage.rs` |
 | bridge-batch | 14674 | One provider lease starts a batch of route and port bridges and a cleanup releases them: no relay without its durable intent, no listener launched without its own fence admitting the reserved, healthy target, no relay stopped under a live listener, a finished release leaves nothing, `ready` means everything is published. Negative controls: relays before intent (`negative`), child without fence (`child-fence`), relays stopped before listeners (`release-order`); reachability of ready, release, release after ready and a mid-batch stale stop. See [COVERAGE.md](bridge-batch/COVERAGE.md) | `graph/bridges.rs` (`reserve_publications`, `start_selected`, `publish_bridge`, `release_selected`), `graph/relay.rs`, `publication.rs`, `graph/foreground/publishers.rs` |
+| bridge-slots | 674 | Two project runs share one running pool's bridge slots: a refused or failed start holds none, no slot is taken from another run, a running run holds exactly what it asked for, and a start that passed the early free-slot check fails at reservation only when another run reserved in between. Negative controls: the early check counts only total capacity (`negative`), a reservation keeps a partial grant (`partial`), a reservation trusts the early check (`trust-check`); reachability of both projects running (`both-running`). See [Bridge slots across project runs](#bridge-slots-across-project-runs) | `graph/bridges.rs` (`require_free_slots`, `reserve_publications`, `release_run`), `lifecycle/running_start.rs` |
 | loopback-port-publication | 1008 | One listener per published host port, forwarding only to the pinned container incarnation, recovery only for a dead owner, and no listener after acknowledged stop. Negative controls: recovery without the dead-owner check (`negative`), no loopback probe (`no-probe`), no endpoint identity check (`stale-target`), acknowledging stop before closing the listener (`ack-before-close`) | `publication.rs` (`require_loopback_port_free`, `release`), `graph/bridges.rs` loopback bridges, `graph/foreground/publishers.rs` |
 | fence-first | 24 | First recovery needs terminal prior state, no occupied slot, and complete evidence; ignoring occupancy fails | `graph/relay-fence.sh` initial recovery |
 | fence-pending | 7 | Recover only permitted pending transitions; accepting launching-to-stopped leaves a live process | `graph/relay-fence.sh` pending recovery |
@@ -1608,7 +1644,8 @@ restricted to steps from states that still satisfy the invariant, and are listed
 
 The model does not cover provider behavior: that the pinned provider mounts an
 updated record at the next boot, virtio-fs device limits, or live multi-project
-graphs on a host VM. Cleanup is abstracted to one run's own resources.
+graphs on a host VM. Bridge slots shared across graphs are modeled separately in
+[Bridge slots across project runs](#bridge-slots-across-project-runs). Cleanup is abstracted to one run's own resources.
 
 ## Native image build retention
 

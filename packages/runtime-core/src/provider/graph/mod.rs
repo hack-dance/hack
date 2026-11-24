@@ -83,7 +83,9 @@ pub use archive::archive;
 mod bridge_recovery;
 mod bridges;
 pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
-pub(in crate::provider) use bridges::{initialize_owner_registry, verify_owner_registry};
+pub(in crate::provider) use bridges::{
+    initialize_owner_registry, require_free_slots, verify_owner_registry,
+};
 #[cfg(target_os = "macos")]
 mod acknowledged_publisher;
 mod cleanup_diagnostics;

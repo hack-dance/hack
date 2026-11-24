@@ -162,6 +162,47 @@ pub(in crate::provider) fn verify_owner_registry(
     Ok(())
 }
 
+/// Refuse a start that needs `required` application bridge sockets when other runs
+/// already hold more of the running pool's slots than that leaves free (U13). `own_run`
+/// is the run this start restores, whose own slots stay available to it.
+///
+/// Early and advisory: it reads the validated registry and reserves nothing. Slot
+/// reservation at graph start, under the provider mutation lock, stays the authority,
+/// so a run that takes slots after this check still meets `bridge_capacity_exhausted`
+/// there. A pool without bridges, or a start needing none, passes.
+pub(in crate::provider) fn require_free_slots(
+    candidate: &Candidate,
+    owner: &state::Owner,
+    required: u8,
+    own_run: Option<&str>,
+) -> Result<(), CandidateError> {
+    let Some(intent) = owner.application_bridge else {
+        return Ok(());
+    };
+    let store = read_owner_registry(candidate, &owner.token, intent.slots, false)?;
+    check_free_slots(&store, intent.slots, required, own_run)
+}
+
+fn check_free_slots(
+    store: &Store,
+    capacity: u8,
+    required: u8,
+    own_run: Option<&str>,
+) -> Result<(), CandidateError> {
+    let held = store
+        .slots
+        .values()
+        .filter(|a| Some(a.run.as_str()) != own_run)
+        .count();
+    if usize::from(required) <= usize::from(capacity).saturating_sub(held) {
+        return Ok(());
+    }
+    Err(error(
+        "bridge_capacity_exhausted",
+        "Other project runs hold too many of the running native pool's application bridge sockets for this project's routes and published ports; nothing was started or changed. Stop another project that uses this pool, then start this one again.",
+    ))
+}
+
 fn read_owner_registry(
     candidate: &Candidate,
     owner: &str,
@@ -1528,6 +1569,38 @@ mod tests {
                 },
             )]),
         }
+    }
+    #[test]
+    fn a_start_counts_only_the_slots_other_runs_hold() {
+        // Project A's run holds slots 0..3 (fixture slot 0 plus two more).
+        let mut store = fixture();
+        let a = "b".repeat(32);
+        for slot in [1, 2] {
+            let mut held = store.slots[&0].clone();
+            held.reservation = format!("{slot:032x}");
+            held.service = format!("web-{slot}");
+            store.slots.insert(slot, held);
+        }
+        validate(&store, "owner", 32).unwrap();
+        let before = serde_json::to_value(&store).unwrap();
+        // B's 6 routes and 3 ports fit beside A in a 32-slot pool, exactly up to the edge.
+        check_free_slots(&store, 32, 9, None).unwrap();
+        check_free_slots(&store, 32, 29, None).unwrap();
+        // One more is refused early, and the check changes nothing A holds.
+        assert_eq!(
+            check_free_slots(&store, 32, 30, None).unwrap_err().code,
+            "bridge_capacity_exhausted"
+        );
+        assert_eq!(
+            check_free_slots(&store, 12, 10, None).unwrap_err().code,
+            "bridge_capacity_exhausted"
+        );
+        assert_eq!(serde_json::to_value(&store).unwrap(), before);
+        // A restore of A itself keeps its own slots available.
+        check_free_slots(&store, 12, 12, Some(&a)).unwrap();
+        // Released slots return to the pool.
+        store.slots.retain(|_, held| held.run != a);
+        check_free_slots(&store, 12, 12, None).unwrap();
     }
     #[test]
     fn loopback_bridges_coexist_with_routes_but_own_one_host_port_each() {

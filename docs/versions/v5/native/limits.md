@@ -11,6 +11,12 @@ the pool (one line says so). When another project is running there, or
 the pool is starting or stopping, `hack up` refuses the start and names up to three
 of those projects: run `hack down` in them first. A pool accepts up to eight project shares.
 
+Projects running together also share the pool's bridge sockets: one per route
+and one per published port, at most 32. The first project to start the pool sets
+how many there are. A project that needs more than the others leave free is
+refused (`bridge_conflict` or `bridge_capacity_exhausted`), and the running projects
+are left as they were: run `hack down` in one of them and start again.
+
 A native home keeps up to 64 graph runs. A run whose data was removed
 (`hack down --remove-data`, or a fresh start that failed) is archived on its own
 when a new run needs the room. Runs that keep their data are never archived; when

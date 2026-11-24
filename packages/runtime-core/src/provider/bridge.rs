@@ -63,6 +63,15 @@ impl From<Option<BridgeIntent>> for Request {
 }
 
 impl Request {
+    /// The free slots a start must find in a running pool: a minimum request's own count.
+    /// An exact request keeps the low-level contract and asks for none.
+    pub(super) fn required_free(self) -> Option<u8> {
+        match self {
+            Self::Exact(_) => None,
+            Self::Minimum(intent) => Some(intent.slots),
+        }
+    }
+
     pub(super) fn initial(self) -> Option<BridgeIntent> {
         match self {
             Self::Exact(intent) => intent,

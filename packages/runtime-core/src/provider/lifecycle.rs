@@ -1388,6 +1388,7 @@ fn start_pool_observed(
         dependencies: dependency_request,
         project_share: project_share.as_ref(),
         amd64_emulation: start.amd64_emulation,
+        own_run: retained.map(|(run, _)| run),
     };
     super::network_update::require_complete(candidate)?;
     super::share_update::require_complete(candidate)?;
@@ -1640,6 +1641,7 @@ fn start_pool_observed(
     // start won the lease first); every other running pool took the fast path. Keep the full
     // re-verification for that race.
     if owner.phase == "running" {
+        request.check_free_slots(candidate, &owner)?;
         return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
             if let Some(selected) = settled.selected() {
                 selected.reverify(candidate)?;

@@ -2450,6 +2450,65 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // Bridge slots shared by two project runs in one running pool (U13): the
+    // early free-slot check is advisory, reservation is all or none and takes
+    // only free slots; see tests/models/tla/README.md.
+    name: "bridge-slots",
+    module: "BridgeSlots",
+    states: 674,
+    invariant: "Safe",
+    action: "Reserve",
+    fields: [
+      'phase = [a |-> "running", b |-> "failed"]',
+      "raced = [a |-> FALSE, b |-> FALSE]",
+    ],
+    alternativeWitnesses: [
+      {
+        action: "Reserve",
+        fields: [
+          'phase = [a |-> "failed", b |-> "running"]',
+          "raced = [a |-> FALSE, b |-> FALSE]",
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "partial",
+        negative: true,
+        action: "Reserve",
+        fields: [
+          'phase = [a |-> "running", b |-> "failed"]',
+          "raced = [a |-> FALSE, b |-> TRUE]",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Reserve",
+            fields: [
+              'phase = [a |-> "failed", b |-> "running"]',
+              "raced = [a |-> TRUE, b |-> FALSE]",
+            ],
+          },
+        ],
+      },
+      {
+        name: "trust-check",
+        negative: true,
+        action: "Reserve",
+        fields: ["stolen = TRUE", 'phase = [a |-> "running", b |-> "running"]'],
+      },
+      {
+        name: "both-running",
+        negative: true,
+        invariant: "NeverBothRunning",
+        action: "Reserve",
+        fields: [
+          "stolen = FALSE",
+          'phase = [a |-> "running", b |-> "running"]',
+        ],
+      },
+    ],
+  },
+  {
     name: "per-service-publication",
     module: "PerServicePublication",
     states: 622,

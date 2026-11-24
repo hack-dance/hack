@@ -55,6 +55,8 @@ pub(super) struct StartRequest<'a> {
     pub(super) dependencies: super::super::dependency_socket::Request,
     pub(super) project_share: Option<&'a super::super::ProjectShareIntent>,
     pub(super) amd64_emulation: bool,
+    /// The retained run this start restores, whose own bridge slots stay available to it.
+    pub(super) own_run: Option<&'a str>,
 }
 
 impl StartRequest<'_> {
@@ -67,6 +69,22 @@ impl StartRequest<'_> {
         self.bridges.check(owner.application_bridge)?;
         super::super::network_intent::check_request(&owner.network, self.network)?;
         self.dependencies.check(owner.dependency_sockets)
+    }
+
+    /// A minimum bridge request also needs that many slots free of other runs in the
+    /// running pool (`graph::require_free_slots`), so a second project that cannot fit is
+    /// refused before any hook, image or graph work.
+    pub(super) fn check_free_slots(
+        &self,
+        candidate: &Candidate,
+        owner: &Owner,
+    ) -> Result<(), CandidateError> {
+        match self.bridges.required_free() {
+            Some(required) => {
+                super::super::graph::require_free_slots(candidate, owner, required, self.own_run)
+            }
+            None => Ok(()),
+        }
     }
 }
 
@@ -140,6 +158,7 @@ pub(super) fn resume(
     request.check(&owner, true)?;
     verify_running(candidate, &owner)?;
     super::super::graph::verify_owner_registry(candidate, &owner)?;
+    request.check_free_slots(candidate, &owner)?;
     super::super::dependency_socket::verify(candidate, &owner)?;
     verify_trees(candidate, &owner, &lock)?;
     super::super::network_tools::verify(candidate)?;

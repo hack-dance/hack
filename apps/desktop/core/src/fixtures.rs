@@ -86,7 +86,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 48] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,

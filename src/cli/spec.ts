@@ -12,6 +12,7 @@ import { dispatchCommand } from "../commands/dispatch.ts";
 import { doctorCommand } from "../commands/doctor.ts";
 import { envCommand, hostCommand } from "../commands/env.ts";
 import { execSessionsCommand } from "../commands/exec-sessions.ts";
+import { filesCommand } from "../commands/files.ts";
 import { gatewayCommand } from "../commands/gateway.ts";
 import { globalCommand } from "../commands/global.ts";
 import { helpCommand } from "../commands/help.ts";
@@ -79,6 +80,7 @@ export const CLI_SPEC = defineCli({
     tuiCommand,
     runCommand,
     execCommand,
+    filesCommand,
     execSessionsCommand,
     commandsCommand,
     logsCommand,

@@ -3,6 +3,7 @@ import { resolveNativeStartTimeoutSeconds } from "../backends/native-graph-start
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
 import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
+import { withCommandTimings } from "../lib/command-timings.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
@@ -47,6 +48,7 @@ import {
   refuseRemoteStart,
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
+import { printUpTimings } from "../lib/up-timings-output.ts";
 import {
   selectLifecycleAddress,
   writeLifecycleStopped,
@@ -792,6 +794,20 @@ const upOptions = [
   optProgress,
   optRefreshImages,
   optImageOffline,
+  defineOption({
+    name: "timings",
+    type: "boolean",
+    long: "--timings",
+    description: "Native backend: print the startup timeline to stderr",
+  } as const),
+  defineOption({
+    name: "timingsFile",
+    type: "string",
+    long: "--timings-file",
+    valueHint: "<file>",
+    description:
+      "Native backend: write startup timing records to a new JSONL file",
+  } as const),
   defineOption({
     name: "always",
     type: "boolean",
@@ -7772,6 +7788,28 @@ function nativeImageTagMode(
 async function handleUp(
   input: Parameters<typeof handleUpUnlocked>[0]
 ): Promise<number> {
+  const { json, timings, timingsFile } = input.args.options;
+  if (timings || timingsFile !== undefined || json) {
+    const native = process.env.HACK_RUNTIME_BACKEND === "native";
+    if (!native && (timings || timingsFile !== undefined)) {
+      throw new CliUsageError(
+        "--timings and --timings-file require the native backend."
+      );
+    }
+    if (native && !isNativeDetachedOwnerProcess()) {
+      return await withCommandTimings(
+        timingsFile,
+        () => runUpWithAutostart(input),
+        timings && !json ? printUpTimings : undefined
+      );
+    }
+  }
+  return await runUpWithAutostart(input);
+}
+
+async function runUpWithAutostart(
+  input: Parameters<typeof handleUpUnlocked>[0]
+): Promise<number> {
   parseRequestedTarget({ raw: input.args.options.target });
   nativeImageTagMode(input.args.options);
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
@@ -8059,6 +8097,7 @@ const UP_RETRY_VALUE_OPTIONS = new Set([
   "--env",
   "--profile",
   "--target",
+  "--timings-file",
 ]);
 
 function printedUpRetry(argv: readonly string[]): string {
@@ -10682,6 +10721,8 @@ async function handleRestart({
           detach: false,
           always: false,
           refreshImages: false,
+          timings: false,
+          timingsFile: undefined,
           offline: false,
         },
       },

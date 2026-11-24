@@ -18,6 +18,7 @@ import {
   nativeDetachedUpHotReload,
   nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
+  nativeDetachedUpSupersededFailure,
   nativeShellForwardingNotice,
   reportNativeImageDownloadWait,
   reportNativeImageNotice,
@@ -3257,8 +3258,16 @@ async function startNativeProjectAttempt(
     // The run this start takes over failed after `up` returned: say so once,
     // from the start itself. Its finalization admission is exclusive, so of two
     // racing `up` commands only the one that takes the run over says it.
+    // A detached owner's stderr is discarded: its launcher prints the notice.
     const superseded = nativeFailureAfterStarted(resumed?.snapshot);
-    if (superseded) {
+    if (
+      superseded &&
+      !nativeDetachedUpSupersededFailure(
+        isRecord(resumed?.snapshot)
+          ? resumed.snapshot.failed_after_started
+          : undefined
+      )
+    ) {
       deps.warn(nativeFailureRetryNotice(superseded));
     }
     const reviewedBranch = await prepareNativeReviewBranch({

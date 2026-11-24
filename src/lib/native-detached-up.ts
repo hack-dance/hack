@@ -20,6 +20,10 @@ import {
 } from "../backends/native-profile-selection.ts";
 import type { NativeBuildSettlement } from "../backends/native-project-builds.ts";
 import {
+  nativeFailureAfterStarted,
+  nativeFailureRetryNotice,
+} from "../backends/native-project-observe.ts";
+import {
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
@@ -93,6 +97,7 @@ let publishImageNotice: ((notice: string) => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
 let publishHotReload: ((notice: NativeHotReloadNotice) => void) | undefined;
+let publishSupersededFailure: ((record: unknown) => void) | undefined;
 let publishShellVariables:
   | ((names: readonly string[], ignoredRootDotenv?: boolean) => void)
   | undefined;
@@ -644,6 +649,32 @@ function writeBranchDropped(value: unknown): boolean {
  * Hands the pool's hot-reload notice to the launcher of a detached owner, as
  * two names and a number; false otherwise, so the caller prints it.
  */
+/**
+ * The start that took over a run which failed after `up` returned hands that
+ * run's value-free failure record to the launcher, which prints the one retry
+ * notice (the owner's own stderr is discarded). False without a launcher.
+ */
+export function nativeDetachedUpSupersededFailure(record: unknown): boolean {
+  if (!publishSupersededFailure) {
+    return false;
+  }
+  publishSupersededFailure(record);
+  return true;
+}
+function writeSupersededFailure(value: unknown): boolean {
+  if (!(isRecord(value) && value.kind === "superseded-failure")) {
+    return false;
+  }
+  // Validated by the same parser as `hack ps`; anything else is dropped whole.
+  const failure = nativeFailureAfterStarted({
+    failed_after_started: value.record,
+  });
+  if (failure) {
+    process.stderr.write(`${nativeFailureRetryNotice(failure)}\n`);
+  }
+  return true;
+}
+
 export function nativeDetachedUpHotReload(
   notice: NativeHotReloadNotice
 ): boolean {
@@ -712,7 +743,8 @@ function writeOwnerNotice(value: unknown): boolean {
     writeImageNotice(value) ||
     writeProfileNotice(value) ||
     writeBranchDropped(value) ||
-    writeHotReload(value)
+    writeHotReload(value) ||
+    writeSupersededFailure(value)
   );
 }
 
@@ -823,6 +855,10 @@ export async function runNativeDetachedOwner(opts: {
           readonly detail: NativeImageBlockerDetail | readonly ImageFailure[];
         }
       | {
+          readonly kind: "superseded-failure";
+          readonly record: unknown;
+        }
+      | {
           readonly kind: "image-download-wait";
           readonly reference: string | null;
         }
@@ -897,6 +933,11 @@ export async function runNativeDetachedOwner(opts: {
       send({ kind: "image-notice", notice });
     }
   };
+  publishSupersededFailure = (record) => {
+    if (!stopping) {
+      send({ kind: "superseded-failure", record });
+    }
+  };
   publishProfileNotice = (notice) => {
     if (!stopping) {
       send({ kind: "profile-notice", notice });
@@ -958,6 +999,7 @@ export async function runNativeDetachedOwner(opts: {
     publishImageBlocker = undefined;
     publishBranchDropped = undefined;
     publishHotReload = undefined;
+    publishSupersededFailure = undefined;
     publishFailure = undefined;
     failedStartupServices = [];
     publishPrestartRefusal = undefined;

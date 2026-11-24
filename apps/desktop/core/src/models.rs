@@ -390,16 +390,19 @@ impl NativePs {
         let Some(failure) = &self.failure else {
             return vec![];
         };
-        let mut names: Vec<String> = self
-            .failed
+        // In the record's order: `services` is the execution order at a deadline,
+        // so a timeout's blockers are not reordered; each name once.
+        let mut names: Vec<String> = Vec::new();
+        for name in failure
+            .services
             .iter()
             .chain(failure.service.iter())
-            .chain(failure.services.iter())
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .collect();
-        names.sort();
-        names.dedup();
+            .chain(self.failed.iter())
+        {
+            if !name.is_empty() && !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
         names
     }
 
@@ -830,6 +833,25 @@ impl CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_timeouts_blockers_keep_their_execution_order() {
+        // `worker` starts before `api`: not alphabetical, so a sort would reorder it.
+        let ps: NativePs = serde_json::from_value(serde_json::json!({
+            "status": "observed",
+            "items": [],
+            "failure": {
+                "code": "graph_timeout",
+                "service": "worker",
+                "services": ["worker", "api"],
+                "at": 1,
+                "reason": "not_ready"
+            },
+            "failed": ["worker", "api", "worker"]
+        }))
+        .unwrap();
+        assert_eq!(ps.failed_services(), ["worker", "api"]);
+    }
 
     #[test]
     fn projects_accept_null_remote_addresses_from_the_daemon() {

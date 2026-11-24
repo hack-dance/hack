@@ -506,6 +506,7 @@ import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
   resolveComposeExecStaleEnvWarning,
+  restoreUndispatchedRuntimeLaunch,
   updateProjectRuntimeServiceEnvFingerprints,
   upsertProjectRuntimeStateEntry,
 } from "../lib/project-runtime-state.ts";
@@ -8386,6 +8387,7 @@ async function runUpCommand({
   const foregroundTermination: {
     guard: ReturnType<typeof installForegroundTerminationGuard> | null;
   } = { guard: null };
+  let detachedComposeSucceeded = false;
   const installOperationSignalCleanup = () =>
     installLifecycleSignalCleanup({
       cleanup: signalCleanupKeepingStartedHelpers({
@@ -8653,6 +8655,7 @@ async function runUpCommand({
 
     const containersStartedAt = performance.now();
     if (detach) {
+      detachedComposeSucceeded = true;
       // The containers now run: a later failure keeps their helpers.
       keepSharedHelpers?.();
     }
@@ -8737,7 +8740,8 @@ async function runUpCommand({
     const { states, startup } = await waitForComposeStartupState({
       successfulCompletionServices,
       deadlineMs: performance.now() + observationBudgetMs,
-      read: () => readStartup(true),
+      read: () =>
+        readOnCapturedDockerEngine(engine.verify, () => readStartup(true)),
     }).finally(clearServiceWait);
     if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
       await lifecycleCleanup?.();
@@ -8829,6 +8833,12 @@ async function runUpCommand({
       exitCode: 0,
     });
   } catch (error: unknown) {
+    if (
+      detachedComposeSucceeded &&
+      error instanceof DockerLaunchConnectionError
+    ) {
+      throw error;
+    }
     await retainHelpersIfContainersMayRun();
     await lifecycleCleanup?.();
     await discardPublishedRuntimeSelection();
@@ -11066,6 +11076,8 @@ async function runRestartUpPhase(opts: {
   readonly envOverrides: Awaited<ReturnType<typeof resolveComposeEnvOverrides>>;
   readonly assertEngine: () => Promise<void>;
   readonly publishLaunch: () => Promise<void>;
+  readonly onCreateDispatched: () => void;
+  readonly publicationSettled: Promise<void>;
   readonly discardAbsentLaunch: () => Promise<void>;
   readonly detach?: boolean;
   readonly routeStdoutToStderr?: boolean;
@@ -11086,7 +11098,6 @@ async function runRestartUpPhase(opts: {
 
   const { envOverrides } = opts;
   const cancellation = new AbortController();
-  const abortOverrideWait = () => cancellation.abort();
   const restartComposeUp = (
     upOpts: Parameters<typeof composeRuntimeBackend.up>[0]
   ) => {
@@ -11156,18 +11167,19 @@ async function runRestartUpPhase(opts: {
   // keeps the shared helpers: a start still in flight can start services
   // after any snapshot, so no probe could prove them absent.
   let containerStartBegun = false;
-  const signalCleanup =
-    lifecycleSignalCleanup ??
-    installLifecycleSignalCleanup({
-      cleanup:
-        signalCleanupKeepingStartedHelpers({
-          cleanup: lifecycleCleanup,
-          containerStartBegun: () => containerStartBegun,
-          keepSharedHelpers: () => keepSharedHelpers,
-        }) ?? (() => Promise.resolve()),
-    });
-  process.once("SIGINT", abortOverrideWait);
-  process.once("SIGTERM", abortOverrideWait);
+  const cleanupOnSignal = signalCleanupKeepingStartedHelpers({
+    cleanup: lifecycleCleanup,
+    containerStartBegun: () => containerStartBegun,
+    keepSharedHelpers: () => keepSharedHelpers,
+  });
+  lifecycleSignalCleanup?.dispose();
+  const signalCleanup = installLifecycleSignalCleanup({
+    cleanup: async (cleanupOptions) => {
+      cancellation.abort();
+      await opts.publicationSettled;
+      return await cleanupOnSignal?.(cleanupOptions);
+    },
+  });
   try {
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
@@ -11242,8 +11254,10 @@ async function runRestartUpPhase(opts: {
         restartComposeUp({
           beforeCreate: async () => {
             await verifyOwnership();
+            cancellation.signal.throwIfAborted();
             await opts.publishLaunch();
           },
+          onCreateDispatched: opts.onCreateDispatched,
           beforeStart: async () => {
             await verifyOwnership();
             await beforeStart?.();
@@ -11291,8 +11305,10 @@ async function runRestartUpPhase(opts: {
           restartComposeUp({
             beforeCreate: async () => {
               await verifyOwnership();
+              cancellation.signal.throwIfAborted();
               await opts.publishLaunch();
             },
+            onCreateDispatched: opts.onCreateDispatched,
             beforeStart: async () => {
               await verifyOwnership();
               await beforeStart?.();
@@ -11343,13 +11359,13 @@ async function runRestartUpPhase(opts: {
       observationBudgetMs,
     };
   } catch (error: unknown) {
-    await retainHelpersIfContainersMayRun();
-    await lifecycleCleanup?.();
-    await opts.discardAbsentLaunch();
+    if (!cancellation.signal.aborted) {
+      await retainHelpersIfContainersMayRun();
+      await lifecycleCleanup?.();
+      await opts.discardAbsentLaunch();
+    }
     throw error;
   } finally {
-    process.off("SIGINT", abortOverrideWait);
-    process.off("SIGTERM", abortOverrideWait);
     signalCleanup.dispose();
   }
 }
@@ -12119,7 +12135,19 @@ async function runLocalRestart({
     cliProfiles: profiles,
     composeEnv: preflightEnv.env,
   });
+  const previousLaunches = (
+    await readProjectRuntimeState({ projectDir: project.projectDir })
+  ).filter(
+    (entry) =>
+      entry.composeProject === nextLifecycleKey ||
+      entry.composeProject === lifecycleComposeProject
+  );
   let launchId: string | undefined;
+  let dispatched = false;
+  const publicationSettled = Promise.withResolvers<void>();
+  const onCreateDispatched = () => {
+    dispatched = true;
+  };
   const publishLaunch = async () => {
     launchId ??= await persistProjectRuntimeEnvSelection({
       projectDir: project.projectDir,
@@ -12140,14 +12168,18 @@ async function runLocalRestart({
       composeProfiles: effectiveProfiles,
     });
   };
-  const discardAbsentLaunch = () =>
-    discardAbsentRuntimeLaunch({
+  const discardAbsentLaunch = async () => {
+    if (!dispatched) {
+      return;
+    }
+    await discardAbsentRuntimeLaunch({
       project,
       composeProject: composeProjectName,
       lifecycleComposeProject: nextLifecycleKey,
       env: preflightEnv.env,
       launchId,
     });
+  };
 
   const upOutcome = await runRestartUpPhase({
     expectComposeProject: compose.expected,
@@ -12163,9 +12195,24 @@ async function runLocalRestart({
     envOverrides: preflightEnv,
     assertEngine,
     publishLaunch,
+    onCreateDispatched,
+    publicationSettled: publicationSettled.promise,
     discardAbsentLaunch,
     detach: true,
     routeStdoutToStderr: json,
+  }).finally(async () => {
+    try {
+      if (launchId && !dispatched) {
+        await restoreUndispatchedRuntimeLaunch({
+          projectDir: project.projectDir,
+          composeProject: nextLifecycleKey,
+          launchId,
+          previous: previousLaunches,
+        });
+      }
+    } finally {
+      publicationSettled.resolve();
+    }
   });
 
   const upCode = upOutcome.code;
@@ -12223,18 +12270,20 @@ async function runLocalRestart({
   const { states, startup } = await waitForComposeStartupState({
     successfulCompletionServices,
     deadlineMs: performance.now() + (upOutcome.observationBudgetMs ?? 0),
-    read: async () => {
-      await assertEngine();
-      return await readComposeServiceStates({
-        project,
-        composeProjectName,
-        profiles,
-        env: preflightEnv.env,
-        strict: true,
-      });
-    },
+    read: () =>
+      readOnCapturedDockerEngine(assertEngine, () =>
+        readComposeServiceStates({
+          project,
+          composeProjectName,
+          profiles,
+          env: preflightEnv.env,
+          strict: true,
+        })
+      ),
   }).catch(async (error: unknown) => {
-    await cleanupIncompleteStartup();
+    if (!(error instanceof DockerLaunchConnectionError)) {
+      await cleanupIncompleteStartup();
+    }
     throw error;
   });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
@@ -12473,6 +12522,24 @@ type AdmittedDockerDaemon = Exclude<
   { readonly kind: "unverified" }
 >;
 
+class DockerLaunchConnectionError extends HackCliError {
+  constructor(message: string) {
+    super({ code: "E_DOCKER_UNAVAILABLE", message });
+  }
+}
+
+async function readOnCapturedDockerEngine<T>(
+  verify: () => Promise<void>,
+  read: () => Promise<T>
+): Promise<T> {
+  await verify();
+  try {
+    return await read();
+  } finally {
+    await verify();
+  }
+}
+
 /** Observe the engine once before effects, then compare rather than rebinding it. */
 function createDockerLaunchGuard(opts: {
   readonly record: ProjectRuntimeStateEntry | null;
@@ -12492,14 +12559,14 @@ function createDockerLaunchGuard(opts: {
     | undefined;
   const assertSettings = async (settings: string) => {
     if ((await dockerEngineSelectionFingerprint(selection)) !== settings) {
-      throw new CliUsageError(
+      throw new DockerLaunchConnectionError(
         "The runtime now has different Docker connection settings. Restore the connection and retry."
       );
     }
   };
   const verify = async () => {
     if (!captured) {
-      throw new CliUsageError(
+      throw new DockerLaunchConnectionError(
         "The Docker daemon has not been verified for this operation."
       );
     }
@@ -12507,7 +12574,7 @@ function createDockerLaunchGuard(opts: {
     if (captured.daemon.kind === "verified") {
       const daemon = await readDockerDaemonIdentity(selection);
       if (daemon.kind !== "verified" || daemon.id !== captured.daemon.id) {
-        throw new CliUsageError(
+        throw new DockerLaunchConnectionError(
           "The operation now sees a different Docker daemon or the daemon could not be verified."
         );
       }

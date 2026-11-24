@@ -66,10 +66,6 @@ export function dockerHelperEnvironment(
 }
 
 const ENGINE_SELECTION_NAMES = [
-  "HOME",
-  "DOCKER_CONTEXT",
-  "DOCKER_HOST",
-  "DOCKER_CONFIG",
   "DOCKER_TLS",
   "DOCKER_TLS_VERIFY",
   "DOCKER_CERT_PATH",
@@ -103,13 +99,14 @@ export async function dockerEngineSelectionFingerprint(opts: {
         ) || "default");
   const endpoint =
     context === "default"
-      ? null
+      ? env.DOCKER_HOST || null
       : await readDockerContextEndpoint({ configDir, context });
   return createHmac("sha256", opts.launchId)
     .update("hack.docker-engine-selection.v1\0")
     .update(
       JSON.stringify([
-        ENGINE_SELECTION_NAMES.map((name) => env[name] ?? null),
+        ENGINE_SELECTION_NAMES.map((name) => env[name] || null),
+        configDir,
         context,
         endpoint,
       ])

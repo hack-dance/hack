@@ -40,6 +40,7 @@ test("cancellation during a pending pre-create check prevents the Compose spawn"
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const cancel = new AbortController();
+  let dispatched = false;
   const starting = composeRuntimeBackend.up({
     composeFiles: [join(root, "docker-compose.yml")],
     composeProject: "fixture",
@@ -48,6 +49,9 @@ test("cancellation during a pending pre-create check prevents the Compose spawn"
     detach: true,
     forceRecreate: true,
     signal: cancel.signal,
+    onCreateDispatched: () => {
+      dispatched = true;
+    },
     beforeCreate: async () => {
       entered.resolve();
       await release.promise;
@@ -59,6 +63,7 @@ test("cancellation during a pending pre-create check prevents the Compose spawn"
     cancel.abort();
     release.resolve();
     expect(await outcome).toMatchObject({ name: "AbortError" });
+    expect(dispatched).toBe(false);
     expect(await Bun.file(invoked).exists()).toBe(false);
   } finally {
     release.resolve();

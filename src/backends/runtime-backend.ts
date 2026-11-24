@@ -99,6 +99,8 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly beforeStart?: () => Promise<void>;
   /** Recheck ownership before detached Compose can create or replace containers. */
   readonly beforeCreate?: () => Promise<void>;
+  /** The detached create process was spawned and may now affect the runtime. */
+  readonly onCreateDispatched?: () => void;
   /** Cancels admission, including while asynchronous startup checks are running. */
   readonly signal?: AbortSignal;
   readonly services?: readonly string[];
@@ -536,7 +538,11 @@ export const composeRuntimeBackend: RuntimeBackend = {
         ...(opts.noDeps ? ["--no-deps"] : []),
         ...(opts.services ?? []),
       ];
-      const runPhase = (cmd: readonly string[], timeoutMs: number) => {
+      const runPhase = (
+        cmd: readonly string[],
+        timeoutMs: number,
+        onSpawn?: () => void
+      ) => {
         opts.signal?.throwIfAborted();
         return run(cmd, {
           cwd: opts.cwd,
@@ -546,6 +552,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
           forwardSignals: true,
           settleProcessGroupOnCancel: true,
           signal: opts.signal,
+          onSpawn: onSpawn ? async () => onSpawn() : undefined,
         });
       };
       // Image build/pull can take far longer than starting containers, so it
@@ -572,7 +579,8 @@ export const composeRuntimeBackend: RuntimeBackend = {
             ...(opts.forceRecreate ? ["--force-recreate"] : []),
             ...scope,
           ],
-          imageTimeoutMs
+          imageTimeoutMs,
+          opts.onCreateDispatched
         );
         if (prepared !== 0) {
           return prepared;

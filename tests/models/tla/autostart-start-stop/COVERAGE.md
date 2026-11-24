@@ -91,6 +91,10 @@ evidence. Scoped mutations recheck after lock waits and before Docker effects.
 Restart cancellation aborts reference-file admission and guards the final
 Compose spawn. A helper-retention probe requires matching engine evidence to
 establish absence.
+If Restart staged a launch before a child could spawn, it restores the previous
+association using the staged launch ID. Successful detached startup accepts
+readiness only while the captured engine matches on both sides of the read.
+Explicit and implicit selection of the same Docker context share a fingerprint.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

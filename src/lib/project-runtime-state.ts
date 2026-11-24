@@ -158,6 +158,35 @@ export async function removeProjectRuntimeStateEntry(opts: {
   });
 }
 
+/** Roll back an unpublished-to-Docker launch without replacing another writer's records. */
+export async function restoreUndispatchedRuntimeLaunch(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly launchId: string;
+  readonly previous: readonly ProjectRuntimeStateEntry[];
+}): Promise<void> {
+  await mutateProjectRuntimeState(opts.projectDir, (entries) => {
+    const current = entries.find(
+      (entry) => entry.composeProject === opts.composeProject
+    );
+    if (current?.launchId !== opts.launchId) {
+      return null;
+    }
+    const retained = entries.filter(
+      (entry) => entry.composeProject !== opts.composeProject
+    );
+    const retainedKeys = new Set(retained.map((entry) => entry.composeProject));
+    return [
+      ...retained,
+      ...opts.previous.filter(
+        (entry) => !retainedKeys.has(entry.composeProject)
+      ),
+    ].sort((left, right) =>
+      left.composeProject.localeCompare(right.composeProject)
+    );
+  });
+}
+
 /**
  * Refresh or forget the env digests of `services` after a service-scoped
  * (re)create, preserving the rest of the stack's entry.

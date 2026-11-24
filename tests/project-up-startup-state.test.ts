@@ -61,6 +61,8 @@ const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const upDetachSelections: Array<boolean | undefined> = [];
 const upStartupTimeouts: Array<number | undefined> = [];
 let upExitCode = 0;
+let cancelRestartBeforeDispatch = false;
+let stagedRestartOverlay: string | null | undefined;
 let psExitCode = 0;
 let upDurationMs = 0;
 let psDurationMs = 0;
@@ -114,6 +116,24 @@ const runtimeBackendMock = await registerScopedModuleMock({
       up: async (opts: RuntimeUpOptions) => {
         if (opts.detach) {
           await opts.beforeCreate?.();
+          if (
+            cancelRestartBeforeDispatch &&
+            opts.onCreateDispatched &&
+            opts.cwd &&
+            opts.composeProject
+          ) {
+            stagedRestartOverlay = (
+              await readProjectRuntimeStateEntry({
+                projectDir: opts.cwd,
+                composeProject: opts.composeProject,
+              })
+            )?.envName;
+            throw new DOMException(
+              "Cancelled before Compose dispatch",
+              "AbortError"
+            );
+          }
+          opts.onCreateDispatched?.();
         }
         await opts.beforeStart?.();
         runtimeCalls.push({ kind: "up", opts });
@@ -283,6 +303,8 @@ afterEach(async () => {
   upStartupTimeouts.length = 0;
   upDetachSelections.length = 0;
   upExitCode = 0;
+  cancelRestartBeforeDispatch = false;
+  stagedRestartOverlay = undefined;
   psExitCode = 0;
   upDurationMs = 0;
   psDurationMs = 0;
@@ -1672,6 +1694,29 @@ test("up reports a Docker inspection error without waiting out the start budget"
     code: "E_DOCKER_UNAVAILABLE",
   });
   expect(psEnvs).toHaveLength(1);
+});
+
+test("a pre-create cancellation restores the previous Restart overlay before dispatch", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  await writeFile(
+    resolve(projectDir, "hack.env.qa.yaml"),
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    SHARED_MODE: qa\n"
+  );
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  const launch = { projectDir, composeProject: "startup-state-test" };
+  const original = await readProjectRuntimeStateEntry(launch);
+  expect(original?.envName).toBeNull();
+  cancelRestartBeforeDispatch = true;
+  await expect(runRestart({ projectRoot, env: "qa" })).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  expect(stagedRestartOverlay).toBe("qa");
+  expect(await readProjectRuntimeStateEntry(launch)).toEqual(original);
+  expect(runtimeCalls.filter((call) => call.kind === "up")).toHaveLength(1);
 });
 
 test("full restart cleans the lifecycle owner and retains the launch after a Docker inspection failure", async () => {

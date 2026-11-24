@@ -864,13 +864,36 @@ for (const [index, step] of ["containers.started", "services.ready"].entries()) 
     expect(await new Response(child.stderr).text()).toBe("");
     expect(await child.exited).toBe(0);
     const records = JSON.parse(stdout).data.timings;
-    expect(records.map((r: { step: string }) => r.step)).toEqual([
-      "containers.started",
-      "services.ready",
-      "command.total",
-    ]);
-    expect(records[0].parent).toBe(records[2].span);
-    expect(records[1].trace).toBe(records[2].trace);
+    expect(records.map((r: { step: string }) => r.step)).toEqual(
+      expect.arrayContaining([
+        "cli.owner.launch",
+        "containers.started",
+        "services.ready",
+        "cli.owner.accept",
+        "cli.result.prepare",
+        "command.total",
+      ])
+    );
+    const command = records.find(
+      (r: { step: string }) => r.step === "command.total"
+    );
+    const owner = records.find(
+      (r: { step: string }) => r.step === "cli.owner.launch"
+    );
+    expect(owner).toMatchObject({
+      proc: "owner",
+      parent: command.span,
+      trace: command.trace,
+      clock: "host",
+    });
+    expect(
+      records
+        .filter((r: { proc: string }) => r.proc === "runtime")
+        .every(
+          (r: { parent: string; trace: string }) =>
+            r.parent === command.span && r.trace === command.trace
+        )
+    ).toBe(true);
     expect(
       (await readFile(join(root, "timings.jsonl"), "utf8"))
         .trim()

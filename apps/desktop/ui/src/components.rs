@@ -143,8 +143,8 @@ pub fn project_row(
         .gap(space::S4)
         .rounded(radius::CONTROL)
         .cursor_pointer()
-        .when(selected, |d| d.bg(p.surface_1))
-        .hover(move |d| d.bg(p.surface_1))
+        .when(selected, |d| d.bg(p.selection))
+        .when(!selected, |d| d.hover(move |d| d.bg(p.surface_1)))
         .child(dot(status, ui))
         .child(
             div()
@@ -190,8 +190,8 @@ pub fn branch_row(
         .gap(space::S3)
         .rounded(radius::CONTROL)
         .cursor_pointer()
-        .when(selected, |d| d.bg(p.surface_1))
-        .hover(move |d| d.bg(p.surface_1))
+        .when(selected, |d| d.bg(p.selection))
+        .when(!selected, |d| d.hover(move |d| d.bg(p.surface_1)))
         .child(icon(Glyph::Branch, size::ICON, p.text_muted))
         .child(dot(status, ui))
         .child(
@@ -361,7 +361,7 @@ pub fn pill_tab(
         } else {
             p.text_secondary
         })
-        .when(sel, |d| d.bg(p.surface_1))
+        .when(sel, |d| d.bg(p.selection))
         .when(!sel, |d| d.hover(move |d| d.text_color(p.text_primary)))
         .child(label)
 }

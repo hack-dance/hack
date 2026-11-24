@@ -1150,6 +1150,7 @@ fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
             id: "desktop tool coverage".into(),
             status: "unknown".into(),
             detail: note,
+            fix: None,
         }],
         summary: vec![],
     }));
@@ -1293,6 +1294,7 @@ impl LiveSource {
                         id: "desktop preflight".into(),
                         status: "unknown".into(),
                         detail: why.clone(),
+                        fix: None,
                     }],
                     summary: vec![],
                 };
@@ -4064,9 +4066,9 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(tools.unchecked.contains("docker"));
         for native in [false, true] {
             let checks = vec![
-                crate::models::DoctorCheck { id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()) },
-                crate::models::DoctorCheck { id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into() },
-                crate::models::DoctorCheck { id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into() },
+                crate::models::DoctorCheck { id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()), fix: None },
+                crate::models::DoctorCheck { id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into(), fix: None },
+                crate::models::DoctorCheck { id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into(), fix: None },
             ];
             let mut run = DoctorRun::project(
                 "fixture",
@@ -4116,6 +4118,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                 id: "docker daemon".into(),
                 status: "error".into(),
                 detail: "validated Docker reported an engine error".into(),
+                fix: None,
             }],
             summary: vec![],
         }))];
@@ -4162,6 +4165,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             id: id.into(),
             status: "error".into(),
             detail: detail.into(),
+            fix: None,
         })
         .to_vec();
         let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
@@ -4314,6 +4318,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                 id: id.into(),
                 status: "ok".into(),
                 detail: "independently observed".into(),
+                fix: None,
             })
             .to_vec();
             let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {

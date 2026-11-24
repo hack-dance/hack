@@ -560,6 +560,15 @@ pub struct DoctorCheck {
     #[serde(deserialize_with = "null_default")]
     pub status: String,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<DoctorCheckFix>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DoctorCheckFix {
+    pub kind: String,
+    pub args: Vec<String>,
 }
 
 impl DoctorReport {

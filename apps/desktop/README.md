@@ -480,12 +480,29 @@ after the read, plus a known project-only check. A machine-only or ancestor-proj
 report cannot establish Compose project coverage.
 Machine diagnostics remain visible even when a checkout cannot be verified.
 
-Cards group findings by area and offer one copied command or documentation link.
-Project commands include the checkout path. The app never runs a Doctor fix:
-one-click fixes remain blocked on the CLI's explicit safe-fix metadata (R7a/R7b).
-The probes do not use `hack global status`, which can start Docker.
-Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
-[dark](screenshots/doctor-dark.png).
+Doctor groups machine and project findings and folds the passed checks. The
+project pane shows one follow-up at a time. Dismissing it hides that finding
+for the session until its evidence changes.
+
+**Fix all** runs the available repairs in row order in the shared terminal
+drawer. It checks again after each command exits. A failed command or a check
+that cannot confirm the repair stops the queue and keeps the terminal output.
+**Stop** interrupts the current command and cancels the remaining queue. Some
+machine repairs ask for your password inside the terminal. Project repairs
+require the CLI's scoped safe-fix metadata and exact checkout evidence. Guide
+links, manual commands and upgrades stay outside the queue.
+
+The probes do not use `hack global status`, which can start Docker. The update
+banner and Doctor's **Upgrade** row open the Upgrade pane for an available
+release. The pane shows the target version and the CLI's install command for
+copying, when available, alongside its readiness check.
+If hackd is newer than the selected CLI, the banner and Doctor's hackd row
+offer a copyable CLI update command or installation guidance. This works
+while release checks are offline.
+The wrong-CLI banner accepts version and replacement evidence as inputs. Its
+examples are fixtures until HACK-2597 supplies that evidence for live checks.
+The fixtures `h17-app-banner-dns`, `h18-banners-sheet`, `h19-doctor`,
+`h20-doctor-fix-all` and `h25-errors-sheet` render both themes.
 
 For integrations, `Card.authored_remedy` exposes an `AuthoredRemedy`: `argv()`
 returns authored arguments without an executable or environment, including each

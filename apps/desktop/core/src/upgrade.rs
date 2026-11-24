@@ -82,6 +82,97 @@ pub struct CheckCli {
     pub channel: String,
 }
 
+/// Evidence from the read-only release check for the selected CLI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UpdateObservation {
+    Available(ReleaseUpdate),
+    NetworkUnavailable,
+    #[default]
+    NoNotice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseUpdate {
+    pub latest: String,
+    pub upgrade_command: Option<Vec<String>>,
+}
+
+impl ReleaseUpdate {
+    /// Quote each argument for display and copying to the user's terminal.
+    #[must_use]
+    pub fn terminal_command(&self) -> Option<String> {
+        let argv = self.upgrade_command.as_deref()?;
+        argv.first()?;
+        argv.iter()
+            .map(|arg| crate::terminal::quote(arg))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+            .map(|args| args.join(" "))
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateReport {
+    latest: Option<String>,
+    available: Option<bool>,
+    reason: Option<String>,
+    upgrade_command: Option<Vec<String>>,
+}
+
+/// The checked CLI owns release selection and comparison. The desktop only
+/// displays the observation and never executes an upgrade command from it.
+#[must_use]
+pub fn observe_update(checked: &crate::setup::Report) -> UpdateObservation {
+    let read = || {
+        let program = checked.cli_program.as_ref()?;
+        let context = checked.context.as_ref()?.with_controlled_path().ok()?;
+        context
+            .runner(program)
+            .ok()?
+            .run_schema_json::<UpdateReport>(
+                &["update", "--check", "--json", "--observe"],
+                None,
+                std::time::Duration::from_secs(20),
+                "hack.update-check.v1",
+            )
+            .ok()
+    };
+    if !checked.cli_ready() {
+        return UpdateObservation::NoNotice;
+    }
+    read().map_or(UpdateObservation::NoNotice, UpdateReport::observation)
+}
+
+impl UpdateReport {
+    fn observation(self) -> UpdateObservation {
+        match self {
+            UpdateReport {
+                available: Some(true),
+                latest: Some(version),
+                reason: None,
+                upgrade_command,
+            } if version.len() <= 64
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+                && crate::source::compare_versions(&version, &version).is_some() =>
+            {
+                UpdateObservation::Available(ReleaseUpdate {
+                    latest: version,
+                    upgrade_command,
+                })
+            }
+            UpdateReport {
+                available: None,
+                latest: None,
+                reason: Some(reason),
+                ..
+            } if reason == "network-unavailable" => UpdateObservation::NetworkUnavailable,
+            _ => UpdateObservation::NoNotice,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct CheckProject {
@@ -384,6 +475,69 @@ impl Rollback {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn release_observations_require_consistent_and_versioned_evidence() {
+        for (input, expected) in [
+            (
+                r#"{"available":true,"latest":"5.1.0-next.2","reason":null,"upgrade_command":["/opt/Hack Next/bin/hack-next","--manager","upgrade","--version","5.1.0-next.2"]}"#,
+                UpdateObservation::Available(ReleaseUpdate {
+                    latest: "5.1.0-next.2".into(),
+                    upgrade_command: Some(
+                        [
+                            "/opt/Hack Next/bin/hack-next",
+                            "--manager",
+                            "upgrade",
+                            "--version",
+                            "5.1.0-next.2",
+                        ]
+                        .map(String::from)
+                        .to_vec(),
+                    ),
+                }),
+            ),
+            (
+                r#"{"available":true,"latest":"5.1.0","reason":null,"upgrade_command":null}"#,
+                UpdateObservation::Available(ReleaseUpdate {
+                    latest: "5.1.0".into(),
+                    upgrade_command: None,
+                }),
+            ),
+            (
+                r#"{"available":null,"latest":null,"reason":"network-unavailable"}"#,
+                super::UpdateObservation::NetworkUnavailable,
+            ),
+            (
+                r#"{"available":true,"latest":"not-a-version","reason":null}"#,
+                super::UpdateObservation::NoNotice,
+            ),
+            (
+                r#"{"available":true,"latest":"5.1.0","reason":"network-unavailable"}"#,
+                super::UpdateObservation::NoNotice,
+            ),
+        ] {
+            let report: super::UpdateReport = serde_json::from_str(input).unwrap();
+            assert_eq!(report.observation(), expected);
+        }
+    }
+
+    #[test]
+    fn release_install_commands_quote_argv_for_copy_and_refuse_control_characters() {
+        let mut release = ReleaseUpdate {
+            latest: "5.1.0".into(),
+            upgrade_command: Some(vec!["/opt/Hack's CLI/hack".into(), "update".into()]),
+        };
+        assert_eq!(
+            release.terminal_command().as_deref(),
+            Some(r"'/opt/Hack'\''s CLI/hack' 'update'")
+        );
+        release.upgrade_command = Some(vec!["hack\n".into(), "update".into()]);
+        assert_eq!(release.terminal_command(), None);
+        release.upgrade_command = Some(vec![]);
+        assert_eq!(release.terminal_command(), None);
+        release.upgrade_command = None;
+        assert_eq!(release.terminal_command(), None);
+    }
+
     use super::*;
 
     const CHECK: &str = include_str!("../tests/fixtures/upgrade/check-v2.json");

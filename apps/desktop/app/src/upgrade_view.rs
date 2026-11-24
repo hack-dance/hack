@@ -22,7 +22,9 @@ use gpui_kit::{
 };
 
 use hack_desktop_core::machine_gate::Holder;
-use hack_desktop_core::upgrade::{CheckReport, Review, Rollback, Snapshot, SnapshotList};
+use hack_desktop_core::upgrade::{
+    CheckReport, ReleaseUpdate, Review, Rollback, Snapshot, SnapshotList,
+};
 use hack_desktop_ui::components::{StyledExt as _, Ui, action_button, dot, empty_pane};
 use hack_desktop_ui::icons::Glyph;
 use hack_desktop_ui::status::Status;
@@ -381,8 +383,43 @@ pub fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
         .flex()
         .flex_col()
         .child(header)
+        .children(
+            app.health
+                .signals
+                .update
+                .as_ref()
+                .map(|release| release_review(release, ui, cx)),
+        )
         .child(body)
         .into_any_element()
+}
+
+fn release_review(release: &ReleaseUpdate, ui: &Ui, cx: &mut Context<HackApp>) -> gpui_kit::Div {
+    let panel = div()
+        .flex()
+        .flex_col()
+        .gap(space::S3)
+        .px(space::S8)
+        .py(space::S5)
+        .hairline_b(ui.p.border)
+        .child(section("Release update", ui).child(line(
+            Status::Unknown,
+            format!("Hack {} is available", release.latest),
+            ui,
+        )));
+    if let Some(command) = release.terminal_command() {
+        panel
+            .child(note(
+                "Run this command in your terminal to update the CLI.",
+                ui,
+            ))
+            .child(copy_chip("copy-release-update", &command, ui, cx).flex_wrap())
+    } else {
+        panel.child(note(
+            "Update Hack using the method you used to install it.",
+            ui,
+        ))
+    }
 }
 
 fn section(title: &'static str, ui: &Ui) -> gpui_kit::Div {

@@ -3218,6 +3218,13 @@ const contracts: readonly ModelContract[] = [
             action: "PoolRecover",
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
+          // The same stranded finalization, reported one step later: a `Listen`
+          // fault earlier in the trace leaves `ListenerExits` as the last enabled
+          // step, which `NoDeadEnd` counts as progress (seen on the B1 factory).
+          {
+            action: "ListenerExits",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
         ],
       },
       {

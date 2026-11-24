@@ -193,3 +193,17 @@ in Compose volumes. This switch does not copy either database.
 
 [The command contract](authored-commands.md) and
 [full reference](full-reference.md) cover advanced configuration and recovery.
+
+### Read the startup timeline
+
+Run `hack up --detach --timings` to see the native startup timeline on stderr.
+It shows when every container started and when all services met their readiness
+conditions. A service with a health check must pass it. A completed one-shot
+service must exit successfully. A milestone appears only when this invocation
+observed it. A project that is still warming may have a start time without a
+readiness time.
+
+Native `hack up --json` includes the same `hack.timings/1` records
+in `data.timings`. Add `--timings-file <file>` to save those records as JSONL
+in a new file. Times overlap when steps run together, so use `command.total`
+for elapsed startup time.

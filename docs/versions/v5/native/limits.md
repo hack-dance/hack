@@ -23,11 +23,10 @@ when a new run needs the room. Runs that keep their data are never archived; whe
 64 of them fill the home, `hack up` refuses with `graph_retention_budget` until you
 remove the data of a project you no longer use.
 
-A native home keeps up to 64 graph runs. A run whose data was removed
-(`hack down --remove-data`, or a fresh start that failed) is archived on its own
-when a new run needs the room. Runs that keep their data are never archived; when
-64 of them fill the home, `hack up` refuses with `graph_retention_budget` until you
-remove the data of a project you no longer use.
+The host image cache keeps up to 64 verified registry archives. An online
+acquisition at the slot limit can discard the oldest archive that retained
+graph state does not reference. Images already loaded in the pool stay loaded.
+If every archive is referenced, the acquisition refuses.
 
 ## Native startup limits
 

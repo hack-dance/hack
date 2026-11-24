@@ -136,6 +136,7 @@ export async function exportProjectData(
       docker: input.docker,
       helpers,
       now,
+      commandMs: deadlines.commandMs,
     },
     async () => {
       const monitor = await startMountMonitor({

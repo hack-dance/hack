@@ -1,6 +1,5 @@
 import { posix } from "node:path";
 import { HackCliError } from "./cli-result.ts";
-import { dockerEngineFailureError } from "./compose-ps-result.ts";
 import type { BackingProver } from "./data-backup-backing-proof.ts";
 import type {
   DataBackupDocker,
@@ -93,24 +92,80 @@ export function planDeclaredVolumes(model: unknown): DeclaredVolumePlan {
   return { composeProject, declared, external };
 }
 
-/** A failed Docker read, classified as an engine problem when it is one. */
+/**
+ * How the Docker client reports that it cannot reach the selected engine:
+ * a daemon that is down or absent, a connection or dial failure, a host
+ * that does not resolve, a socket the user may not open, a context that
+ * does not exist. These lines name the endpoint (a private socket path, a
+ * host with userinfo), so a data command never quotes them.
+ */
+const ENGINE_UNREACHABLE = [
+  /cannot connect to the docker daemon/i,
+  /is the docker daemon running/i,
+  /error during connect/i,
+  /failed to connect to the docker api/i,
+  /\bdial (unix|tcp|ssh)\b/i,
+  /\bconnect: (connection refused|no such file or directory|permission denied|network is unreachable|host is unreachable)/i,
+  /connection (refused|reset by peer)/i,
+  /no such host/i,
+  /permission denied[^\n]*docker[^\n]*\.sock/i,
+  /got permission denied while trying to connect/i,
+  /context "[^"\n]*" (does not exist|not found)/i,
+  /context not found/i,
+  /i\/o timeout/i,
+  /context deadline exceeded/i,
+  /tls: (handshake|bad certificate|failed)/i,
+  /\bssh: /i,
+] as const;
+
+/** Exit code of a client Hack stopped at its deadline. */
+const CLIENT_TIMEOUT_EXIT = 124;
+
+/** Whether a failed Docker call could not reach the selected engine. */
+export function isEngineUnreachable(result: DataBackupProcessResult): boolean {
+  const text = `${result.stderr}\n${result.stdout}`;
+  return ENGINE_UNREACHABLE.some((pattern) => pattern.test(text));
+}
+
+/**
+ * The refusal when the selected Docker engine cannot be reached: fixed
+ * text and a stable code and reason, never the client's own line, which
+ * names the endpoint.
+ */
+export function engineUnreachableError(command: string): HackCliError {
+  return new HackCliError({
+    code: "E_DOCKER_UNAVAILABLE",
+    message: `${command} cannot reach the selected Docker engine. Check that the engine is running and that this project's Docker settings (DOCKER_HOST or DOCKER_CONTEXT, in its env or yours) select it, then retry.`,
+    detail: { reason: "engine_unreachable" },
+  });
+}
+
+/**
+ * A failed Docker call in a data command, classified without ever quoting
+ * the engine's stderr: an engine Hack cannot reach (see
+ * {@link isEngineUnreachable}), a call stopped at its deadline, or any
+ * other failure by command and exit code only. `redactValues` is kept for
+ * callers; nothing from the engine is printed, so nothing needs redacting.
+ */
 export function dockerReadError(opts: {
   readonly result: DataBackupProcessResult;
   readonly command: string;
-  /** The managed values to redact from a quoted engine line. */
   readonly redactValues: readonly string[];
 }): HackCliError {
-  return (
-    dockerEngineFailureError({
-      result: opts.result,
-      command: opts.command,
-      redactValues: opts.redactValues,
-    }) ??
-    new HackCliError({
-      code: "E_UNEXPECTED",
-      message: `${opts.command} failed (exit ${opts.result.exitCode}).`,
-    })
-  );
+  if (isEngineUnreachable(opts.result)) {
+    return engineUnreachableError(opts.command);
+  }
+  if (opts.result.exitCode === CLIENT_TIMEOUT_EXIT) {
+    return new HackCliError({
+      code: "E_DOCKER_UNAVAILABLE",
+      message: `${opts.command} did not finish within Hack's time limit, so it was stopped. The Docker engine may be hung or heavily loaded; check \`docker info\` and retry.`,
+      detail: { reason: "timeout" },
+    });
+  }
+  return new HackCliError({
+    code: "E_UNEXPECTED",
+    message: `${opts.command} failed (exit ${opts.result.exitCode}).`,
+  });
 }
 
 function parseInspect(stdout: string): unknown {
@@ -585,15 +640,12 @@ async function inspectContainerMounts(opts: {
     ],
     { timeoutMs: opts.timeoutMs }
   );
-  if (result.exitCode !== 0 && result.stdout.trim() === "") {
-    const engine = dockerEngineFailureError({
-      result,
-      command: "docker container inspect",
-      redactValues: opts.docker.redactValues,
-    });
-    if (engine) {
-      throw engine;
-    }
+  if (
+    result.exitCode !== 0 &&
+    result.stdout.trim() === "" &&
+    isEngineUnreachable(result)
+  ) {
+    throw engineUnreachableError("docker container inspect");
   }
   const answered = new Map<string, readonly unknown[]>();
   for (const line of result.stdout.split("\n")) {

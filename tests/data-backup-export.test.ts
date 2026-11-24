@@ -1801,6 +1801,8 @@ describe("a create whose outcome cannot be reconciled is reported, not hidden", 
   ): DataBackupDocker {
     const real = fake.docker();
     let lost = false;
+    // The engine also loses the create event: nothing can reconcile it.
+    fake.events.deliverContainerCreates = !lookupFails;
     return {
       ...real,
       capture: async (argv, opts) => {
@@ -1811,8 +1813,9 @@ describe("a create whose outcome cannot be reconciled is reported, not hidden", 
         }
         if (
           lookupFails &&
-          argv[2] === "inspect" &&
-          argv.some((arg) => arg.includes(".Config.Labels"))
+          ((argv[2] === "inspect" &&
+            argv.some((arg) => arg.includes(".Config.Labels"))) ||
+            (argv[1] === "ps" && argv.includes("--all")))
         ) {
           return {
             exitCode: 1,
@@ -1886,7 +1889,14 @@ describe("a create that timed out is settled only by finding the container", () 
    */
   function timedOutCreate(
     fake: FakeEngine,
-    opts: { readonly landAtLookup: number | null; readonly exitCode?: number }
+    opts: {
+      readonly landAtLookup: number | null;
+      readonly exitCode?: number;
+      /** Land this long after the timeout instead (inside the window). */
+      readonly landAfterMs?: number;
+      /** Which create times out: a bind hold (default) or the start marker. */
+      readonly which?: "hold" | "marker";
+    }
   ): { docker: DataBackupDocker; lookups: () => number } {
     const real = fake.docker();
     let pending: readonly string[] | null = null;
@@ -1896,12 +1906,19 @@ describe("a create that timed out is settled only by finding the container", () 
       docker: {
         ...real,
         capture: async (argv, captureOpts) => {
-          if (
-            pending === null &&
-            argv[1] === "create" &&
-            argv.some((arg) => arg.startsWith("type=bind,"))
-          ) {
+          const isTarget =
+            opts.which === "marker"
+              ? !argv.includes("--mount")
+              : argv.some((arg) => arg.startsWith("type=bind,"));
+          if (pending === null && argv[1] === "create" && isTarget) {
             pending = argv;
+            const landing = argv;
+            if (opts.landAfterMs !== undefined) {
+              // The daemon registers it after the client gave up.
+              setTimeout(() => {
+                void real.capture(landing, captureOpts);
+              }, opts.landAfterMs);
+            }
             return {
               exitCode: opts.exitCode ?? FAKE_TIMEOUT_EXIT,
               stdout: "",
@@ -1924,15 +1941,72 @@ describe("a create that timed out is settled only by finding the container", () 
     };
   }
 
-  test('a timeout with an immediate "No such container" is reported as unknown', async () => {
+  const records = (): Promise<string[]> =>
+    readdir(join(root, "home", "data-cleanup")).catch(() => []);
+
+  test('a timeout plus "No such container" before the event watch is proven stays unknown; the record stays', async () => {
+    // The start marker's create: the subscription is not proven live yet,
+    // so no settle window can prove the create will not land.
+    const fake = engine({ only: "db" });
+    const { docker, lookups } = timedOutCreate(fake, {
+      landAtLookup: null,
+      which: "marker",
+    });
+    const error = await caught(exportProjectData({ ...input(fake), docker }));
+    expect(lookups()).toBe(TIMED_OUT_CREATE_LOOKUPS);
+    const cleanup = (error.detail as { cleanup: Record<string, unknown> })
+      .cleanup;
+    expect(cleanup).toMatchObject({ outcome: "unknown" });
+    const nonce = String(cleanup.label).split("=")[1];
+    expect(await records()).toEqual([`${nonce}.json`]);
+    const record = JSON.parse(
+      await readFile(
+        join(root, "home", "data-cleanup", `${nonce}.json`),
+        "utf8"
+      )
+    );
+    expect(record.unresolvedCreates).toHaveLength(1);
+    expect(record.unresolvedCreates[0]).toMatch(/-start$/);
+  });
+
+  test("a container that lands inside the settle window is removed and the record deleted", async () => {
+    const fake = engine({ only: "db" });
+    // After the lookups (about 1.6 s), inside the 2 s window.
+    const { docker } = timedOutCreate(fake, {
+      landAtLookup: null,
+      landAfterMs: 2400,
+    });
+    const error = await caught(exportProjectData({ ...input(fake), docker }));
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
+    // The hold landed (it was created) and was removed with the rest.
+    expect(
+      fake.created.some((entry) =>
+        /^hack-data-export-[a-f0-9]{24}$/.test(entry.name)
+      )
+    ).toBeTrue();
+    expect(fake.leftovers()).toEqual([]);
+    expect(await records()).toEqual([]);
+  });
+
+  test("no create event within the window and an empty final listing settle it: the record is deleted", async () => {
     const fake = engine({ only: "db" });
     const { docker, lookups } = timedOutCreate(fake, { landAtLookup: null });
     const error = await caught(exportProjectData({ ...input(fake), docker }));
     expect(lookups()).toBe(TIMED_OUT_CREATE_LOOKUPS);
-    expect(error.detail).toMatchObject({
-      cleanup: { container: null, removed: false, outcome: "unknown" },
-    });
-    expect(error.message).toContain("io.hack.data-backup.nonce=");
+    // The step's own refusal, not an unknown outcome.
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
+    // The final listing by label and name ran after the window.
+    expect(
+      fake.calls.some(
+        (argv) =>
+          argv[1] === "ps" &&
+          argv.includes("--all") &&
+          argv.some((arg) => arg.startsWith("name=^"))
+      )
+    ).toBeTrue();
+    expect(await records()).toEqual([]);
   });
 
   test("a timeout where a later lookup finds the container removes it; not unknown", async () => {
@@ -1967,6 +2041,7 @@ describe("the unknown cleanup instruction targets the export's engine", () => {
   ): DataBackupDocker {
     const real = fake.docker();
     let lost = false;
+    fake.events.deliverContainerCreates = false;
     return {
       ...real,
       ...extra,
@@ -1977,8 +2052,9 @@ describe("the unknown cleanup instruction targets the export's engine", () => {
           return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
         }
         if (
-          argv[2] === "inspect" &&
-          argv.some((arg) => arg.includes(".Config.Labels"))
+          (argv[2] === "inspect" &&
+            argv.some((arg) => arg.includes(".Config.Labels"))) ||
+          (argv[1] === "ps" && argv.includes("--all"))
         ) {
           return { exitCode: 1, stdout: "", stderr: "error during connect" };
         }
@@ -2092,6 +2168,7 @@ describe("the run's cleanup record", () => {
 
   test("stays when a create could not be reconciled", async () => {
     const fake = engine({ only: "db" });
+    fake.events.deliverContainerCreates = false;
     const real = fake.docker();
     let lost = false;
     const docker: DataBackupDocker = {
@@ -2103,8 +2180,9 @@ describe("the run's cleanup record", () => {
           return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
         }
         if (
-          argv[2] === "inspect" &&
-          argv.some((arg) => arg.includes(".Config.Labels"))
+          (argv[2] === "inspect" &&
+            argv.some((arg) => arg.includes(".Config.Labels"))) ||
+          (argv[1] === "ps" && argv.includes("--all"))
         ) {
           return { exitCode: 1, stdout: "", stderr: "error during connect" };
         }
@@ -2116,5 +2194,63 @@ describe("the run's cleanup record", () => {
       (error.detail as { cleanup: { label: string } }).cleanup.label
     ).split("=")[1];
     expect(await readdir(recordsDir())).toEqual([`${nonce}.json`]);
+  });
+});
+
+describe("the daemon's ID proves the engine", () => {
+  const recordsDir = (): string => join(root, "home", "data-cleanup");
+
+  test("is read before the first create and stored in the record", async () => {
+    const fake = engine({ only: "db" });
+    fake.daemonId = "WXYZ:ABCD:0042";
+    const real = fake.docker();
+    const order: string[] = [];
+    const docker: DataBackupDocker = {
+      ...real,
+      capture: async (argv, opts) => {
+        if (argv[1] === "info" || argv[1] === "create") {
+          order.push(argv[1]);
+        }
+        if (
+          argv[1] === "create" &&
+          order.filter((step) => step === "create").length === 1
+        ) {
+          const [file] = await readdir(recordsDir());
+          const record = JSON.parse(
+            await readFile(join(recordsDir(), file ?? ""), "utf8")
+          );
+          expect(record.daemonId).toBe("WXYZ:ABCD:0042");
+        }
+        return await real.capture(argv, opts);
+      },
+    };
+    await exportProjectData({ ...input(fake), docker });
+    expect(order[0]).toBe("info");
+    expect(order.indexOf("info")).toBeLessThan(order.indexOf("create"));
+    expect(fake.calls.find((argv) => argv[1] === "info")).toEqual([
+      "docker",
+      "info",
+      "--format",
+      "{{.ID}}",
+    ]);
+  });
+
+  test("an ID that cannot be read refuses the run before any create", async () => {
+    for (const daemonId of [null, ""]) {
+      const fake = engine({ only: "db" });
+      fake.daemonId = daemonId;
+      const error = await caught(
+        exportProjectData(
+          input(fake, { outDir: join(root, `none-${daemonId}`) })
+        )
+      );
+      expect({ daemonId, code: error.code, detail: error.detail }).toEqual({
+        daemonId,
+        code: "E_DOCKER_UNAVAILABLE",
+        detail: { reason: "daemon_id_unreadable" },
+      });
+      expect(fake.calls.some((argv) => argv[1] === "create")).toBeFalse();
+      expect(await readdir(recordsDir()).catch(() => [])).toEqual([]);
+    }
   });
 });

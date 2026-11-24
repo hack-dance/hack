@@ -15,7 +15,7 @@ import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
-  cleanupDataHelpers,
+  cleanupWithSettle,
   type DataCleanupResult,
 } from "../lib/data-backup-cleanup.ts";
 import { HELPER_NONCE_PATTERN } from "../lib/data-backup-cleanup-instruction.ts";
@@ -25,11 +25,14 @@ import {
   type DataExportResult,
   exportProjectData,
 } from "../lib/data-backup-export.ts";
+import { TIMED_OUT_CREATE_SETTLE_MS } from "../lib/data-backup-held-volume.ts";
+import { engineUnreachableError } from "../lib/data-backup-volumes.ts";
 import {
   cleanupRecordError,
   type DataCleanupEngineSource,
   endpointDigest,
   engineSource,
+  readDaemonId,
   readDataCleanupRecord,
   removeDataCleanupRecord,
 } from "../lib/data-cleanup-record.ts";
@@ -324,9 +327,43 @@ const handleCleanup: CommandHandlerFor<typeof cleanupSpec> = async ({
       why: `the engine this project's env now selects is not the one the ${record.command} used (its endpoint digest differs)`,
     });
   }
-  const result = await cleanupDataHelpers({ docker, nonce, deadlines });
-  if (result.unconfirmed.length === 0) {
+  // The positive proof: the daemon this client reaches is the one the run
+  // recorded. Read before any listing or removal.
+  const daemon = await readDaemonId({
+    docker,
+    timeoutMs: deadlines.commandMs,
+  });
+  if (daemon.kind === "unreachable") {
+    throw engineUnreachableError("hack data cleanup");
+  }
+  if (daemon.kind !== "read") {
+    throw cleanupRecordError({
+      nonce,
+      why: "the Docker engine's ID could not be read (docker info), so the engine this project's env reaches cannot be proven to be the one the run used",
+    });
+  }
+  if (daemon.id !== record.daemonId) {
+    throw cleanupRecordError({
+      nonce,
+      why: `the Docker engine this project's env reaches is not the one the ${record.command} used (its daemon ID differs)`,
+    });
+  }
+  const { result, settled } = await cleanupWithSettle({
+    docker,
+    nonce,
+    deadlines,
+    unresolvedCreates: record.unresolvedCreates ?? [],
+    settleMs: TIMED_OUT_CREATE_SETTLE_MS,
+  });
+  if (settled) {
     await removeDataCleanupRecord({ hackHome, nonce });
+  } else if (result.listed.length === 0) {
+    // A timed-out create of that run may still land: keep the record.
+    throw new HackCliError({
+      code: "E_UNEXPECTED",
+      message: `No container is labeled ${result.label} yet, but the run had a create whose outcome is unknown and Hack could not prove it will not land (its event watch did not stay live, or a create was seen). The cleanup record was kept; retry \`hack data cleanup --nonce ${nonce}\`.`,
+      detail: { ...result, outcome: "unknown" },
+    });
   }
   if (result.unconfirmed.length > 0) {
     throw new HackCliError({

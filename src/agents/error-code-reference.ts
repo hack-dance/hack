@@ -218,7 +218,7 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
   },
   E_DATA_CLEANUP_RECORD: {
     meaning:
-      "`hack data cleanup --nonce` found no usable cleanup record for that nonce under `$HACK_HOME/data-cleanup/`, or the record's project, instance, env selection or engine endpoint no longer matches what this project's managed env selects; nothing was listed or removed and no engine was contacted.",
+      "`hack data cleanup --nonce` found no usable cleanup record for that nonce under `$HACK_HOME/data-cleanup/`, or the record's project, instance, env selection, engine endpoint or Docker daemon ID no longer matches what this project's managed env reaches (or the ID cannot be read, or the record has none); nothing was listed or removed.",
     readFirst: "`ls $HACK_HOME/data-cleanup/`",
   },
   E_PATH_CONFLICT: {

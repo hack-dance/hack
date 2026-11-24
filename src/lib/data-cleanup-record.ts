@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import { HELPER_NONCE_PATTERN } from "./data-backup-cleanup-instruction.ts";
 import type { DataBackupDocker } from "./data-backup-docker.ts";
+import {
+  engineUnreachableError,
+  isEngineUnreachable,
+} from "./data-backup-volumes.ts";
 import { isRecord } from "./guards.ts";
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -43,6 +47,17 @@ export type DataCleanupRecord = {
   readonly engine: DataCleanupEngineSource;
   /** sha256 of the resolved engine endpoint identity (never the value). */
   readonly endpointSha256: string;
+  /**
+   * The daemon's own ID (`docker info --format {{.ID}}`) as the run reached
+   * it: the positive proof that cleanup reaches the same engine.
+   */
+  readonly daemonId: string;
+  /**
+   * Names of this run's creates whose outcome stayed unknown (a timed-out
+   * create that never settled). While any are listed, an empty listing
+   * proves nothing: cleanup runs the settle check first.
+   */
+  readonly unresolvedCreates?: readonly string[];
   readonly createdAt: string;
 };
 
@@ -140,6 +155,37 @@ export async function removeDataCleanupRecord(opts: {
   await rm(dataCleanupRecordPath(opts), { force: true });
 }
 
+/**
+ * The ID of the daemon the client reaches (`docker info --format {{.ID}}`),
+ * bounded: an engine it cannot reach, or an empty ID, an error or a
+ * timeout, is not an ID.
+ */
+export async function readDaemonId(opts: {
+  readonly docker: DataBackupDocker;
+  readonly timeoutMs: number;
+}): Promise<
+  | { readonly kind: "read"; readonly id: string }
+  | { readonly kind: "unreachable" | "unreadable" }
+> {
+  const info = await opts.docker
+    .capture(["docker", "info", "--format", "{{.ID}}"], {
+      timeoutMs: opts.timeoutMs,
+    })
+    .catch(() => null);
+  if (info === null) {
+    return { kind: "unreadable" };
+  }
+  if (info.exitCode !== 0) {
+    return isEngineUnreachable(info)
+      ? { kind: "unreachable" }
+      : { kind: "unreadable" };
+  }
+  const id = info.stdout.trim();
+  return id === "" || id.includes("\n")
+    ? { kind: "unreadable" }
+    : { kind: "read", id };
+}
+
 /** The refusal for a cleanup whose record cannot vouch for the engine. */
 export function cleanupRecordError(opts: {
   readonly nonce: string;
@@ -171,6 +217,17 @@ export async function readDataCleanupRecord(opts: {
   } catch {
     value = undefined;
   }
+  if (
+    isRecord(value) &&
+    value.daemonId === undefined &&
+    isDataCleanupRecord({ ...value, daemonId: "-" }) &&
+    value.nonce === opts.nonce
+  ) {
+    throw cleanupRecordError({
+      nonce: opts.nonce,
+      why: "the record holds no Docker engine ID (an older Hack wrote it), so it cannot prove which engine the run used",
+    });
+  }
   if (!isDataCleanupRecord(value) || value.nonce !== opts.nonce) {
     throw cleanupRecordError({
       nonce: opts.nonce,
@@ -201,6 +258,11 @@ function isDataCleanupRecord(value: unknown): value is DataCleanupRecord {
     (value.envName === null || typeof value.envName === "string") &&
     typeof value.envDefault === "boolean" &&
     engineOk &&
+    typeof value.daemonId === "string" &&
+    value.daemonId !== "" &&
+    (value.unresolvedCreates === undefined ||
+      (Array.isArray(value.unresolvedCreates) &&
+        value.unresolvedCreates.every((name) => typeof name === "string"))) &&
     typeof value.endpointSha256 === "string" &&
     SHA256_HEX.test(value.endpointSha256) &&
     typeof value.createdAt === "string"
@@ -222,27 +284,47 @@ export async function withDataCleanupRecord<T>(
     /** As the model resolved it; `undefined` is the configured default. */
     readonly envSelection: string | null | undefined;
     readonly docker: DataBackupDocker;
-    readonly helpers: { readonly nonce: string; readonly settled: boolean };
+    readonly helpers: {
+      readonly nonce: string;
+      readonly settled: boolean;
+      readonly unresolved: ReadonlySet<string>;
+    };
     readonly now: Date;
+    /** Bound for reading the daemon's ID. */
+    readonly commandMs: number;
   },
   work: () => Promise<T>
 ): Promise<T> {
   const envName = opts.envSelection ?? null;
-  await writeDataCleanupRecord({
-    hackHome: opts.hackHome,
-    record: {
-      version: 1,
-      nonce: opts.helpers.nonce,
-      command: opts.command,
-      project: opts.project,
-      branch: opts.branch,
-      envName,
-      envDefault: opts.envSelection === undefined,
-      engine: engineSource({ docker: opts.docker, envName }),
-      endpointSha256: await endpointDigest(opts.docker),
-      createdAt: opts.now.toISOString(),
-    },
+  // Before any create: the run must know which daemon it reaches.
+  const daemonId = await readDaemonId({
+    docker: opts.docker,
+    timeoutMs: opts.commandMs,
   });
+  if (daemonId.kind !== "read") {
+    throw daemonId.kind === "unreachable"
+      ? engineUnreachableError("docker info")
+      : new HackCliError({
+          code: "E_DOCKER_UNAVAILABLE",
+          message:
+            "Hack could not read the selected Docker engine's ID (docker info), so it cannot record which engine this run uses; nothing was created. Check `docker info`, then retry.",
+          detail: { reason: "daemon_id_unreadable" },
+        });
+  }
+  const record: DataCleanupRecord = {
+    version: 1,
+    nonce: opts.helpers.nonce,
+    command: opts.command,
+    project: opts.project,
+    branch: opts.branch,
+    envName,
+    envDefault: opts.envSelection === undefined,
+    engine: engineSource({ docker: opts.docker, envName }),
+    endpointSha256: await endpointDigest(opts.docker),
+    daemonId: daemonId.id,
+    createdAt: opts.now.toISOString(),
+  };
+  await writeDataCleanupRecord({ hackHome: opts.hackHome, record });
   try {
     return await work();
   } finally {
@@ -250,6 +332,16 @@ export async function withDataCleanupRecord<T>(
       await removeDataCleanupRecord({
         hackHome: opts.hackHome,
         nonce: opts.helpers.nonce,
+      });
+    } else if (opts.helpers.unresolved.size > 0) {
+      // Cleanup must not trust an empty listing for these creates. The
+      // rename replaces the record atomically: it is never absent.
+      await writeDataCleanupRecord({
+        hackHome: opts.hackHome,
+        record: {
+          ...record,
+          unresolvedCreates: [...opts.helpers.unresolved].sort(),
+        },
       });
     }
   }

@@ -18,6 +18,7 @@ import {
   dataCleanupRecordPath,
   endpointDigest,
   engineSource,
+  readDaemonId,
   writeDataCleanupRecord,
 } from "../../../src/lib/data-cleanup-record.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
@@ -461,6 +462,15 @@ export const dataExportScenario: Scenario = {
     }
   },
 };
+
+/** The real engine's ID, through the same client (`docker info`). */
+async function realDaemonId(docker: DataBackupDocker): Promise<string> {
+  const read = await readDaemonId({ docker, timeoutMs: TIMEOUT_MS });
+  if (read.kind !== "read") {
+    throw new Error("docker info returned no daemon ID");
+  }
+  return read.id;
+}
 
 /** Export through a wrapper around the real engine that `before` sees. */
 async function exportThrough(opts: {
@@ -1011,6 +1021,8 @@ async function cleanupRemovesLabeledHelper(opts: {
       envDefault: true,
       engine: engineSource({ docker, envName: null }),
       endpointSha256: await endpointDigest(docker),
+      // The real daemon's ID, as export reads it before its first create.
+      daemonId: await realDaemonId(docker),
       createdAt: new Date().toISOString(),
     },
   });

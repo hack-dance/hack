@@ -30,6 +30,8 @@ import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
  */
 
 const MANAGED_HOST = "unix:///managed/engine.sock";
+/** The daemon ID the stub answers by default. */
+const STUB_DAEMON_ID = "STUB:DAEMON:0001";
 
 const STUB = `
 const { appendFileSync, readFileSync, existsSync } = require("node:fs");
@@ -38,7 +40,7 @@ appendFileSync(process.env.DATA_STUB_LOG, JSON.stringify({ args, host: process.e
 // An unreachable engine at one step: the client names DOCKER_HOST verbatim.
 const failAt = process.env.DATA_STUB_FAIL;
 if (failAt && args.join(" ").includes(failAt)) {
-  process.stderr.write("Cannot connect to the Docker daemon at " + process.env.DOCKER_HOST + ". Is the docker daemon running?\\n");
+  process.stderr.write((process.env.DATA_STUB_FAIL_TEXT || ("Cannot connect to the Docker daemon at " + process.env.DOCKER_HOST + ". Is the docker daemon running?")) + "\\n");
   process.exit(1);
 }
 const feed = process.env.DATA_STUB_LOG + ".events";
@@ -47,7 +49,11 @@ const project = process.env.DATA_STUB_PROJECT || "shop";
 const volumeName = project + "_db";
 const mountpoint = "/var/lib/docker/volumes/" + volumeName + "/_data";
 const out = (value) => process.stdout.write(typeof value === "string" ? value : JSON.stringify(value) + "\\n");
-if (args[0] === "context" && args[1] === "show") {
+if (args[0] === "info") {
+  // The daemon's ID, as the test configures it; empty when asked to be.
+  if (process.env.DATA_STUB_INFO_FAIL) { process.stderr.write(process.env.DATA_STUB_INFO_FAIL + "\\n"); process.exit(1); }
+  out((process.env.DATA_STUB_DAEMON_ID ?? "STUB:DAEMON:0001") + "\\n");
+} else if (args[0] === "context" && args[1] === "show") {
   out("default\\n");
 } else if (args[0] === "context" && args[1] === "inspect") {
   // A context's endpoints, as the test configures them (local CLI read).
@@ -157,6 +163,7 @@ test("a managed DOCKER_HOST reaches every docker argv of an export", async () =>
   expect(new Set(kinds)).toEqual(
     new Set([
       "compose",
+      "info",
       "volume inspect",
       "ps",
       "events",
@@ -224,8 +231,12 @@ test("an unreachable managed DOCKER_HOST is redacted from every engine refusal",
       failAt,
       code: "E_DOCKER_UNAVAILABLE",
     });
-    expect(refusal.message).toContain("Engine said: Cannot connect");
-    expect(refusal.message).toContain("[REDACTED]");
+    // Fixed text and a stable reason: the engine's own line is never quoted.
+    expect(refusal.message).toContain(
+      "cannot reach the selected Docker engine"
+    );
+    expect(refusal.detail).toEqual({ reason: "engine_unreachable" });
+    expect(refusal.message).not.toContain("Cannot connect");
     const rendered = JSON.stringify({
       message: refusal.message,
       detail: refusal.detail,
@@ -300,9 +311,7 @@ test("hack data export prints no managed DOCKER_HOST in text or JSON when the en
       json,
       exitCode: false,
     });
-    expect(output).toContain(
-      "Cannot connect to the Docker daemon at [REDACTED]"
-    );
+    expect(output).toContain("cannot reach the selected Docker engine");
     expect({ json, leaked: output.includes(PRIVATE_ENDPOINT_MARKER) }).toEqual({
       json,
       leaked: false,
@@ -430,6 +439,8 @@ async function recordRun(opts: {
   readonly extraEnv?: Readonly<Record<string, string>>;
   readonly envName?: string | null;
   readonly endpointSha256?: string;
+  /** The daemon ID the run read (the stub answers DATA_STUB_DAEMON_ID). */
+  readonly daemonId?: string;
 }): Promise<string> {
   const docker = createHostDataBackupDocker({
     env: {
@@ -452,6 +463,7 @@ async function recordRun(opts: {
       envDefault: opts.envName === undefined,
       engine: engineSource({ docker, envName: opts.envName ?? null }),
       endpointSha256: opts.endpointSha256 ?? (await endpointDigest(docker)),
+      daemonId: opts.daemonId ?? STUB_DAEMON_ID,
       createdAt: "2026-11-24T00:00:00.000Z",
     },
   });
@@ -704,4 +716,183 @@ test("hack data cleanup: a listed container it cannot verify exits nonzero; an e
     `No container is labeled io.hack.data-backup.nonce=${nonce}; nothing to remove.`
   );
   expect(await readFile(record, "utf8").catch(() => null)).toBeNull();
+});
+
+/** Engine lines that name private endpoints (recognizable stand-ins). */
+const PRIVATE_ENGINE_LINES = [
+  "Cannot connect to the Docker daemon at unix:///run/user/4242/.private-runtime/docker.sock. Is the docker daemon running?",
+  'error during connect: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/info": dial tcp://remote-user@198.51.100.42:2376: connect: connection refused',
+];
+const PRIVATE_FRAGMENTS = [
+  "/run/user/4242/.private-runtime",
+  ".private-runtime",
+  "remote-user@198.51.100.42",
+  "198.51.100.42",
+];
+
+test("hack data cleanup: a matching daemon ID proceeds; another, an unreadable one or none refuses before any listing", async () => {
+  const { bin, log } = await stubBin();
+  const managedHost = `unix://${root}/managed-engine.sock`;
+  const projectRoot = await shopProject({
+    envFiles: { default: [`DOCKER_HOST: "${managedHost}"`] },
+  });
+  const listOrRemove = async () =>
+    (await stubCalls(log)).filter(
+      (call) => call.args[0] === "ps" || call.args[0] === "rm"
+    );
+  // Matching: proceeds to list and remove.
+  const matching = "6123456789abcdef0123456789abcdef";
+  const record = await recordRun({
+    nonce: matching,
+    managed: { DOCKER_HOST: managedHost },
+    bin,
+    log,
+    daemonId: "DAEMON-A",
+  });
+  expect(JSON.parse(await readFile(record, "utf8")).daemonId).toBe("DAEMON-A");
+  const ok = await runDataCli({
+    cwd: projectRoot,
+    args: ["data", "cleanup", "--nonce", matching, "--json"],
+    bin,
+    env: {
+      DATA_STUB_LOG: log,
+      DATA_STUB_DAEMON_ID: "DAEMON-A",
+      DATA_STUB_LABELED: "f".repeat(64),
+      DATA_STUB_NONCE: matching,
+    },
+  });
+  expect(ok.exitCode).toBe(0);
+  expect((await listOrRemove()).length).toBeGreaterThan(0);
+  // Another daemon, an unreadable ID: refuse, zero list or remove calls.
+  for (const [nonce, env, why] of [
+    [
+      "7123456789abcdef0123456789abcdef",
+      { DATA_STUB_DAEMON_ID: "DAEMON-B" },
+      "daemon ID differs",
+    ],
+    [
+      "8123456789abcdef0123456789abcdef",
+      { DATA_STUB_DAEMON_ID: "" },
+      "could not be read",
+    ],
+    [
+      "9123456789abcdef0123456789abcdef",
+      { DATA_STUB_INFO_FAIL: "unexpected server response" },
+      "could not be read",
+    ],
+  ] as const) {
+    await recordRun({
+      nonce,
+      managed: { DOCKER_HOST: managedHost },
+      bin,
+      log,
+      daemonId: "DAEMON-A",
+    });
+    const refused = await runDataCli({
+      cwd: projectRoot,
+      args: ["data", "cleanup", "--nonce", nonce, "--json"],
+      bin,
+      env: {
+        DATA_STUB_LOG: log,
+        DATA_STUB_LABELED: "f".repeat(64),
+        DATA_STUB_NONCE: nonce,
+        ...env,
+      },
+    });
+    expect({ nonce, ok: refused.exitCode === 0 }).toEqual({ nonce, ok: false });
+    expect(refused.output).toContain("E_DATA_CLEANUP_RECORD");
+    expect(refused.output).toContain(why);
+    expect(await listOrRemove()).toEqual([]);
+  }
+  // A record an older Hack wrote, without a daemon ID: refuses, no call.
+  const older = "a123456789abcdef0123456789abcdef";
+  const olderPath = await recordRun({
+    nonce: older,
+    managed: { DOCKER_HOST: managedHost },
+    bin,
+    log,
+  });
+  const { daemonId: _dropped, ...withoutId } = JSON.parse(
+    await readFile(olderPath, "utf8")
+  );
+  await writeFile(olderPath, `${JSON.stringify(withoutId)}\n`);
+  const refused = await runDataCli({
+    cwd: projectRoot,
+    args: ["data", "cleanup", "--nonce", older, "--json"],
+    bin,
+    env: { DATA_STUB_LOG: log, DATA_STUB_NONCE: older },
+  });
+  expect(refused.output).toContain("E_DATA_CLEANUP_RECORD");
+  expect(refused.output).toContain("holds no Docker engine ID");
+  expect(await readFile(log, "utf8")).toBe("");
+});
+
+test("engine connection errors in export and cleanup are fixed text with a stable code, never the engine's line", async () => {
+  const { bin, log } = await stubBin();
+  const managedHost = `unix://${root}/managed-engine.sock`;
+  const projectRoot = await shopProject({
+    envFiles: { default: [`DOCKER_HOST: "${managedHost}"`] },
+  });
+  const nonce = "b123456789abcdef0123456789abcdef";
+  await recordRun({
+    nonce,
+    managed: { DOCKER_HOST: managedHost },
+    bin,
+    log,
+  });
+  for (const line of PRIVATE_ENGINE_LINES) {
+    for (const [args, failAt] of [
+      [["data", "export"], "compose"],
+      [["data", "export"], "info"],
+      [["data", "export"], "volume inspect"],
+      [["data", "cleanup", "--nonce", nonce], "info"],
+      [["data", "cleanup", "--nonce", nonce], "ps --all"],
+    ] as const) {
+      for (const json of [false, true]) {
+        const result = await runDataCli({
+          cwd: projectRoot,
+          args: [...args, ...(json ? ["--json"] : [])],
+          bin,
+          env: {
+            DATA_STUB_LOG: log,
+            DATA_STUB_FAIL: failAt,
+            DATA_STUB_FAIL_TEXT: line,
+            DATA_STUB_NONCE: nonce,
+          },
+        });
+        const label = { command: args[1], failAt, json };
+        expect({ ...label, ok: result.exitCode === 0 }).toEqual({
+          ...label,
+          ok: false,
+        });
+        expect({
+          ...label,
+          fixed: result.output.includes(
+            "cannot reach the selected Docker engine"
+          ),
+          code: result.output.includes("E_DOCKER_UNAVAILABLE"),
+        }).toEqual({ ...label, fixed: true, code: true });
+        if (json) {
+          const envelope = JSON.parse(result.stdout) as {
+            error: { detail?: unknown };
+          };
+          expect({ ...label, detail: envelope.error.detail }).toEqual({
+            ...label,
+            detail: { reason: "engine_unreachable" },
+          });
+        }
+        for (const fragment of PRIVATE_FRAGMENTS) {
+          expect({
+            ...label,
+            fragment,
+            leaked: result.output.includes(fragment),
+          }).toEqual({
+            ...label,
+            fragment,
+            leaked: false,
+          });
+        }
+      }
+    }
+  }
 });

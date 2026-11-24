@@ -1,5 +1,6 @@
 import { HackCliError } from "./cli-result.ts";
 import { createBackingProver } from "./data-backup-backing-proof.ts";
+import { HELPER_NONCE_LABEL } from "./data-backup-cleanup-instruction.ts";
 import type { DataBackupDeadlines } from "./data-backup-deadlines.ts";
 import type {
   DataBackupDocker,
@@ -110,6 +111,12 @@ type WindowEvent =
   | { readonly kind: "start"; readonly id: string }
   | { readonly kind: "mount"; readonly id: string; readonly container: string }
   | { readonly kind: "create" | "destroy"; readonly id: string }
+  | {
+      readonly kind: "container-create";
+      readonly id: string;
+      readonly name: string;
+      readonly nonce: string;
+    }
   | { readonly kind: "other" };
 
 function readEvent(line: string): WindowEvent | null {
@@ -124,7 +131,16 @@ function readEvent(line: string): WindowEvent | null {
   }
   const id = actor.ID;
   if (event.Type === "container") {
-    return event.Action === "start" ? { kind: "start", id } : { kind: "other" };
+    if (event.Action === "start") {
+      return { kind: "start", id };
+    }
+    // A data command's own container (its labels ride on the event).
+    const nonce = attributes[HELPER_NONCE_LABEL];
+    return event.Action === "create" &&
+      typeof nonce === "string" &&
+      typeof attributes.name === "string"
+      ? { kind: "container-create", id, name: attributes.name, nonce }
+      : { kind: "other" };
   }
   if (event.Type !== "volume") {
     return { kind: "other" };
@@ -203,6 +219,12 @@ export async function startMountMonitor(opts: {
       mounts.push({ volume: event.id, container: event.container });
     } else if (event.kind === "create" || event.kind === "destroy") {
       volumeEvents.push({ action: event.kind, volume: event.id });
+    } else if (
+      event.kind === "container-create" &&
+      event.nonce === opts.helpers.nonce
+    ) {
+      // A create of this run landed (it may have timed out on the client).
+      opts.helpers.noteLanded(event.name, event.id);
     }
   };
   const watch: DataBackupWatch = opts.docker.watch(MOUNT_EVENTS_ARGV, onLine);
@@ -213,6 +235,7 @@ export async function startMountMonitor(opts: {
   void closed.then(() => {
     if (!stopped) {
       ended = true;
+      opts.helpers.watching = false;
     }
     for (const wake of waiting.values()) {
       wake();
@@ -228,6 +251,7 @@ export async function startMountMonitor(opts: {
   };
   const stop = async (): Promise<void> => {
     stopped = true;
+    opts.helpers.watching = false;
     dispose();
     await watch.stop();
   };
@@ -344,6 +368,8 @@ export async function startMountMonitor(opts: {
 
   try {
     await marker("start");
+    // Proven live: from here on it reports this run's creates.
+    opts.helpers.watching = true;
   } catch (error: unknown) {
     await stop();
     throw error;

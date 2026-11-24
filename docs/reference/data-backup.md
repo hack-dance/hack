@@ -305,9 +305,15 @@ is not settled by one "No such container": the daemon may still register
 it after the client gave up, so Hack looks it up again, five times 400 ms
 apart, each bounded by `HACK_DATA_COMMAND_TIMEOUT_MS`. Only finding it
 (it is then removed by ID with removal confirmed) or finding its name held
-by someone else's container settles it; otherwise the outcome stays
-unknown. A create that returned without a timeout and is absent is
-settled as absent. Ctrl-C or SIGTERM
+by someone else's container settles it, or a settle window: for 2 seconds
+the run's event subscription (only once its start marker proved it live)
+watches for a container `create` with the run's nonce and that name, and
+then `docker ps -a` lists containers by that label and name. A create event
+or a listed container is found and removed by ID; only a subscription that
+stayed live through the window, no such create and an empty final listing
+settle it as absent. Otherwise the outcome stays unknown and the run's
+cleanup record keeps that create's name. A create that returned without a
+timeout and is absent is settled as absent. Ctrl-C or SIGTERM
 stops the event subscription, force-removes the run's live helper containers
 by ID and reports
 `E_CANCELLED`; removal is confirmed with a few short retries, since Docker
@@ -389,8 +395,13 @@ the engine (a managed `DOCKER_CONTEXT` by name, the fact that a managed
 `DOCKER_HOST` came from the env and from which env selection, or the
 caller's own Docker settings) and the sha256 of the resolved endpoint
 identity (the effective `DOCKER_HOST` value, or the context with its
-endpoints as `docker context inspect` reports them). It never holds an
-endpoint value or any other managed value. The run removes the record once
+endpoints as `docker context inspect` reports them), and the daemon's own
+ID (`docker info --format {{.ID}}`, read through the same engine selection
+and bounded by `HACK_DATA_COMMAND_TIMEOUT_MS` before the run's first create;
+a run that cannot read it refuses with `E_DOCKER_UNAVAILABLE`,
+`detail.reason: daemon_id_unreadable`, and creates nothing), plus the names
+of any creates whose outcome stayed unknown. It never holds an endpoint
+value or any other managed value. The run removes the record once
 every container it created is confirmed removed and no create is unknown;
 otherwise it stays.
 
@@ -402,14 +413,33 @@ the recorded selection, and refuses unless the engine is selected the same
 way and its endpoint identity hashes the same. A record that is missing,
 unreadable or does not match refuses with `E_DATA_CLEANUP_RECORD`, says
 why, and makes no engine call (reading a context's endpoints is a local CLI
-read). Then it lists the containers, running or not, labeled with the
+read). Then, before any listing or removal, it reads the reached daemon's
+ID through the recorded selection and refuses with `E_DATA_CLEANUP_RECORD`
+unless it equals the recorded one; an ID it cannot read, and a record an
+older Hack wrote without an ID, refuse the same way. Then it lists the containers, running or not, labeled with the
 nonce, reads each one's label back by ID, and removes each by ID with
 removal confirmed; it never removes a volume. A listed container whose
 read-back fails or times out, or whose removal Docker cannot confirm, is
 `unconfirmed`: the command exits 1 with `E_UNEXPECTED`, naming the label,
 and keeps the record for a retry. Only an empty listing is a no-op ("No
 container is labeled …"), which exits 0. Once nothing is unconfirmed the
-record is removed. A nonce that is not 32 hex characters refuses with
+record is removed, with one exception: when the record names a create whose
+outcome stayed unknown, an empty listing proves nothing on its own, so
+cleanup watches a label-filtered `docker events` subscription for a
+container `create` with the nonce for 2 seconds and lists once more; a
+container that shows up is removed as usual, and the record is removed only
+when the watch stayed live, saw no create and the final listing is empty.
+Otherwise the record stays and the command exits 1 with `E_UNEXPECTED`
+(`detail.outcome: "unknown"`).
+
+A data command never quotes the Docker client's own error line: it names
+the endpoint (a private socket path, a host with userinfo). An engine Hack
+cannot reach (the daemon is down, a connection or dial failure, a host that
+does not resolve, a socket the user may not open, a missing context)
+refuses with `E_DOCKER_UNAVAILABLE`, `detail.reason: engine_unreachable`,
+and the fixed text "… cannot reach the selected Docker engine", in text and
+JSON alike; any other failed call is reported by command and exit code
+only. A nonce that is not 32 hex characters refuses with
 `E_USAGE` before anything else. `--json` prints the standard envelope with
 `data.schema` `hack.data-cleanup.v1`: `nonce`, `label`, `listed`, `removed`
 (full container IDs) and `unconfirmed`.

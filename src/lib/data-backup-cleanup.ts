@@ -99,3 +99,81 @@ export async function cleanupDataHelpers(opts: {
   }
   return { nonce: opts.nonce, label, listed: ids, removed, unconfirmed };
 }
+
+/**
+ * `hack data cleanup`'s removal under the record's settle rule. When the
+ * listing is empty and the record names creates whose outcome stayed
+ * unknown (a timed-out create), the empty listing proves nothing on its
+ * own: watch a label-filtered `docker events` subscription for a container
+ * `create` with the nonce for `settleMs`, then list once more. A container
+ * that shows up is removed as usual. `settled` is true only when the list
+ * is empty and, if the record had unresolved creates, the watch stayed live
+ * through the window, saw no create, and the final listing was empty; only
+ * then may the record be removed.
+ */
+export async function cleanupWithSettle(opts: {
+  readonly docker: DataBackupDocker;
+  readonly nonce: string;
+  readonly deadlines: DataBackupDeadlines;
+  readonly unresolvedCreates: readonly string[];
+  readonly settleMs: number;
+}): Promise<{ readonly result: DataCleanupResult; readonly settled: boolean }> {
+  const first = await cleanupDataHelpers(opts);
+  if (first.listed.length > 0 || opts.unresolvedCreates.length === 0) {
+    return { result: first, settled: first.unconfirmed.length === 0 };
+  }
+  const quiet = await watchForNonceCreates({
+    docker: opts.docker,
+    nonce: opts.nonce,
+    settleMs: opts.settleMs,
+  });
+  const again = await cleanupDataHelpers(opts);
+  if (again.listed.length > 0) {
+    return { result: again, settled: again.unconfirmed.length === 0 };
+  }
+  return { result: again, settled: quiet };
+}
+
+/**
+ * Watch `docker events` for a container `create` labeled with `nonce` for
+ * `settleMs`; true when the subscription stayed live and saw none.
+ */
+async function watchForNonceCreates(opts: {
+  readonly docker: DataBackupDocker;
+  readonly nonce: string;
+  readonly settleMs: number;
+}): Promise<boolean> {
+  let seen = false;
+  let ended = false;
+  const watch = opts.docker.watch(
+    [
+      "docker",
+      "events",
+      "--filter",
+      "type=container",
+      "--filter",
+      "event=create",
+      "--filter",
+      `label=${HELPER_NONCE_LABEL}=${opts.nonce}`,
+      "--format",
+      "{{json .}}",
+    ],
+    (line) => {
+      if (line.trim() !== "") {
+        seen = true;
+      }
+    }
+  );
+  void watch.done.then(
+    () => {
+      ended = true;
+    },
+    () => {
+      ended = true;
+    }
+  );
+  await Bun.sleep(opts.settleMs);
+  const live = !ended;
+  await watch.stop();
+  return live && !seen;
+}

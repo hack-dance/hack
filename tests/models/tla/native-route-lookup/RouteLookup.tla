@@ -1,13 +1,14 @@
 ---------------------------- MODULE RouteLookup ----------------------------
-CONSTANTS RejectJournal, RejectDetached
+CONSTANTS RejectJournal, RejectDetached, SkipRevalidation
 VARIABLES committed, pending, lookup, opened, linked, selected
 
 States == {"absent", "claimed", "staged"}
-Registry == [a : {"live", "absent"}, b : States]
+Claims == {"original", "replacement", "absent"}
+Registry == [a : Claims, b : States]
 vars == <<committed, pending, lookup, opened, linked, selected>>
 
 Init ==
-    /\ committed = [a |-> "live", b |-> "absent"]
+    /\ committed = [a |-> "original", b |-> "absent"]
     /\ pending = "none"
     /\ lookup = "first"
     /\ opened = [a |-> "absent", b |-> "absent"]
@@ -20,7 +21,7 @@ TypeOK ==
     /\ lookup \in {"first", "firstOpen", "second", "secondOpen", "allow", "deny"}
     /\ opened \in Registry
     /\ linked \in BOOLEAN
-    /\ selected \in {"live", "absent", "none"}
+    /\ selected \in Claims \cup {"none"}
 
 NextSibling == [state \in States |->
     CASE state = "absent" -> "claimed"
@@ -38,6 +39,14 @@ CommitSibling ==
     /\ pending' = "none"
     /\ linked' = FALSE
     /\ UNCHANGED <<lookup, opened, selected>>
+
+ChangeSelected ==
+    /\ committed.a = "original"
+    /\ pending = "none"
+    /\ \E claim \in Claims \ {"original"}:
+        committed' = [committed EXCEPT !.a = claim]
+    /\ linked' = FALSE
+    /\ UNCHANGED <<pending, lookup, opened, selected>>
 
 RejectPending ==
     /\ RejectJournal /\ pending # "none"
@@ -63,22 +72,25 @@ ReadFirst ==
     /\ lookup = "firstOpen"
     /\ ~RejectDetached \/ linked
     /\ selected' = opened.a
-    /\ lookup' = IF selected' = "live" THEN "second" ELSE "deny"
+    /\ lookup' = IF selected' # "absent" THEN "second" ELSE "deny"
     /\ UNCHANGED <<committed, pending, opened, linked>>
 
 ReadSecond ==
     /\ lookup = "secondOpen"
     /\ ~RejectDetached \/ linked
-    /\ lookup' = IF selected = opened.a THEN "allow" ELSE "deny"
+    /\ lookup' = IF SkipRevalidation \/ selected = opened.a THEN "allow" ELSE "deny"
     /\ UNCHANGED <<committed, pending, opened, linked, selected>>
 
 Next ==
-    StageSibling \/ CommitSibling \/ RejectPending \/ OpenCommitted
+    StageSibling \/ CommitSibling \/ ChangeSelected \/ RejectPending \/ OpenCommitted
     \/ RejectUnlinked \/ ReadFirst \/ ReadSecond
 
 Spec == Init /\ [][Next]_vars
 
-LiveRouteAllowed == committed.a = "live" => lookup # "deny"
+LiveRouteAllowed == committed.a = "original" => lookup # "deny"
+AllowMatchesOpenedClaim ==
+    lookup = "allow" => selected = opened.a /\ selected # "absent"
 NeverDetachDuringRetirement ==
-    ~(lookup = "secondOpen" /\ committed.b = "absent" /\ opened.b = "staged" /\ ~linked)
+    ~(lookup = "secondOpen" /\ committed.a = "original"
+      /\ committed.b = "absent" /\ opened.b = "staged" /\ ~linked)
 =============================================================================

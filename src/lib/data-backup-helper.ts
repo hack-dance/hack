@@ -51,10 +51,9 @@ export async function syncPath(path: string): Promise<void> {
 export type HelperPurpose = "export" | "import";
 
 /**
- * A unique helper container name, `hack-data-<purpose>-<24 hex>`. Volume
- * mount events name containers by ID only; the container start events of the
- * same window map each ID to this name, so the mount check can exclude
- * exactly the helpers this run started.
+ * A unique helper container name, `hack-data-<purpose>-<24 hex>`, for
+ * `docker ps` readability only: Hack tracks and removes its containers by
+ * the ID their create returned, never by this name.
  */
 export function helperContainerName(purpose: HelperPurpose): string {
   return `hack-data-${purpose}-${randomBytes(12).toString("hex")}`;
@@ -129,6 +128,8 @@ export function parseTreeDigest(opts: {
 /**
  * Refuse with `E_PROJECT_RUNNING` while a container of the Compose project,
  * or any container mounting one of `volumeNames`, runs. Never stops anything.
+ * `detail.running` lists short container IDs, never names: a name can carry
+ * interpolated env values (`container_name: db-${TOKEN}`).
  */
 export async function refuseRunning(opts: {
   readonly docker: DataBackupDocker;
@@ -138,11 +139,8 @@ export async function refuseRunning(opts: {
   /** First sentence: what the refusal means for this command. */
   readonly lead: string;
   readonly command: "export" | "import";
-  /** Redacts interpolated identifiers from reported container names. */
-  readonly redact?: (text: string) => string;
 }): Promise<void> {
-  const redact = opts.redact ?? ((text: string) => text);
-  const running = (await runningContainers(opts)).map(redact);
+  const running = await runningContainers(opts);
   if (running.length === 0) {
     return;
   }

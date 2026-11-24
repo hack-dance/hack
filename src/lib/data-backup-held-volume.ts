@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { HackCliError } from "./cli-result.ts";
 import {
   DATA_STEP_TIMEOUT_ENV,
@@ -30,6 +31,15 @@ import {
 import { isRecord } from "./guards.ts";
 
 const NO_SUCH_CONTAINER = /no such (container|object)/i;
+/** A full container ID, as `docker create` prints it. */
+const CONTAINER_ID = /^[0-9a-f]{64}$/;
+/**
+ * A random per-container label. It lets a create whose outcome is unknown
+ * (the client timed out or was interrupted) find the container this run
+ * created, if any, without trusting the name: a name can be reused by
+ * another container, an ID cannot.
+ */
+const HELPER_NONCE_LABEL = "io.hack.data-backup.nonce";
 /** Docker's refusal of a bind whose source path does not exist. */
 const MISSING_BIND =
   /bind source path does not exist|no such file or directory/i;
@@ -52,7 +62,7 @@ const MISSING_BIND =
  * the pinned image.
  */
 export type HeldVolume = {
-  /** The helper container's unique name. */
+  /** The helper container's ID, as its own `docker create` returned it. */
   readonly container: string;
   /** Run a command in the helper, bounded by the step deadline. */
   exec(
@@ -73,7 +83,31 @@ export type HeldVolume = {
   treeDigest(consequence: string): Promise<TreeDigest>;
 };
 
+/**
+ * The containers one data command created, by the immutable ID each of its
+ * own creates returned; never by name, which another container can reuse
+ * once ours is gone. `live` holds those whose removal is not confirmed yet:
+ * the signal cleanup removes exactly these. `created` keeps every ID (Docker
+ * never reuses one), so the mount monitor can tell this run's container
+ * starts from anyone else's.
+ */
+export class DataHelperContainers {
+  readonly live = new Set<string>();
+  readonly created = new Set<string>();
+
+  add(id: string): void {
+    this.live.add(id);
+    this.created.add(id);
+  }
+
+  /** Docker confirmed the removal. */
+  retire(id: string): void {
+    this.live.delete(id);
+  }
+}
+
 export type HeldVolumeRelease = {
+  /** The container ID. */
   readonly container: string;
   /** True only when Docker confirms the container no longer exists. */
   readonly removed: boolean;
@@ -90,8 +124,8 @@ export type HoldVolumeOptions = {
   readonly readOnly: boolean;
   readonly purpose: HelperPurpose;
   readonly deadlines: DataBackupDeadlines;
-  /** Every helper name this run used; the mount monitor excludes them. */
-  readonly helperNames: Set<string>;
+  /** The containers this run created (see {@link DataHelperContainers}). */
+  readonly helpers: DataHelperContainers;
   /** The refusal when the held volume is not the validated one. */
   readonly changed: () => HackCliError;
   /** What a failure leaves behind, as a sentence, for helper errors. */
@@ -239,52 +273,38 @@ function withUnconfirmedCleanup(
   });
 }
 
+/** The `docker create` arguments of a helper that holds `opts.volume`. */
+function holdCreateArgs(opts: HoldVolumeOptions): string[] {
+  return [
+    "--network",
+    "none",
+    "--log-driver",
+    "none",
+    "--pull",
+    "missing",
+    "--read-only",
+    "--security-opt",
+    "no-new-privileges",
+    "--label",
+    `io.hack.data-backup=${opts.purpose}`,
+    "--tmpfs",
+    "/tmp",
+    "--env",
+    "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
+    "--mount",
+    `type=bind,src=${opts.identity.mountpoint},dst=/v${opts.readOnly ? ",readonly" : ""}`,
+    "--entrypoint",
+    "sleep",
+    dataBackupHelperImage(),
+    "infinity",
+  ];
+}
+
+/** Start the created helper `container` (an ID) and prove what it holds. */
 async function holdVolume(
   opts: HoldVolumeOptions & { readonly container: string }
 ): Promise<HeldVolume> {
   const { docker, deadlines, container } = opts;
-  const created = await docker.capture(
-    [
-      "docker",
-      "create",
-      "--name",
-      container,
-      "--network",
-      "none",
-      "--log-driver",
-      "none",
-      "--pull",
-      "missing",
-      "--read-only",
-      "--security-opt",
-      "no-new-privileges",
-      "--label",
-      `io.hack.data-backup=${opts.purpose}`,
-      "--tmpfs",
-      "/tmp",
-      "--env",
-      "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
-      "--mount",
-      `type=bind,src=${opts.identity.mountpoint},dst=/v${opts.readOnly ? ",readonly" : ""}`,
-      "--entrypoint",
-      "sleep",
-      dataBackupHelperImage(),
-      "infinity",
-    ],
-    // Creating may pull the pinned image once.
-    { timeoutMs: deadlines.stepMs }
-  );
-  // A bind of a path that is gone fails instead of creating anything: the
-  // volume was removed after validation.
-  if (created.exitCode !== 0) {
-    throw MISSING_BIND.test(created.stderr)
-      ? opts.changed()
-      : dockerReadError({
-          result: created,
-          command: "docker create",
-          redactValues: docker.redactValues,
-        });
-  }
   const started = await docker.capture(["docker", "start", container], {
     timeoutMs: deadlines.commandMs,
   });
@@ -370,41 +390,123 @@ async function holdVolume(
   return held;
 }
 
+/** Read the container ID `docker create` printed, or null. */
+function createdContainerId(stdout: string): string | null {
+  const id = stdout.trim();
+  return CONTAINER_ID.test(id) ? id : null;
+}
+
 /**
- * Run `work` with a container this run owns, named `container`, and remove
- * it on every path: the name is registered first (so the signal cleanup and
- * the mount monitor know it, even if `work` fails halfway through creating
- * it), and removal is confirmed with Docker. An unconfirmed removal is added
- * to the outcome (`detail.cleanup`) and turns a success into a refusal,
- * never a silent claim of cleanup.
+ * After a create whose outcome is unknown, the ID of the container this run
+ * created under `name`, if Docker has one: it must carry this create's
+ * nonce. A container that merely has the name is someone else's.
+ */
+async function findOwnCreated(opts: {
+  readonly docker: DataBackupDocker;
+  readonly name: string;
+  readonly nonce: string;
+  readonly deadlines: DataBackupDeadlines;
+}): Promise<string | null> {
+  const found = await opts.docker.capture(
+    [
+      "docker",
+      "container",
+      "inspect",
+      "--format",
+      `{{.Id}} {{index .Config.Labels "${HELPER_NONCE_LABEL}"}}`,
+      opts.name,
+    ],
+    { timeoutMs: opts.deadlines.commandMs }
+  );
+  if (found.exitCode !== 0) {
+    return null;
+  }
+  const [id, nonce] = found.stdout.trim().split(" ");
+  return id !== undefined && CONTAINER_ID.test(id) && nonce === opts.nonce
+    ? id
+    : null;
+}
+
+/**
+ * Create a container this run owns, named `name`, run `work` with its ID,
+ * and remove it on every path. The container is tracked by the immutable ID
+ * its own `docker create` returned, never by name (a name can be reused once
+ * the container is gone): the ID is registered in `helpers` before
+ * `work` runs, so the signal cleanup removes exactly it, and retired once
+ * Docker confirms its removal. Every later call (start, exec, inspect, rm)
+ * uses the ID. When the create's outcome is unknown, a container under the
+ * name counts as ours only with this create's nonce label. An unconfirmed
+ * removal is added to the outcome (`detail.cleanup`) and turns a success
+ * into a refusal, never a silent claim of cleanup.
  */
 export async function withTrackedContainer<T>(
   opts: {
     readonly docker: DataBackupDocker;
-    readonly container: string;
+    /** A unique name, for `docker ps` readability only. */
+    readonly name: string;
+    /** `docker create` arguments after `--name` (options, image, command). */
+    readonly createArgs: readonly string[];
+    readonly createTimeoutMs: number;
+    /** Throws the refusal for a failed create. */
+    readonly checkCreate: (result: DataBackupProcessResult) => void;
     readonly deadlines: DataBackupDeadlines;
-    readonly helperNames: Set<string>;
+    readonly helpers: DataHelperContainers;
   },
-  work: () => Promise<T>
+  work: (container: string) => Promise<T>
 ): Promise<T> {
-  const { container } = opts;
-  opts.helperNames.add(container);
+  const nonce = randomBytes(16).toString("hex");
+  const created = await opts.docker.capture(
+    [
+      "docker",
+      "create",
+      "--name",
+      opts.name,
+      "--label",
+      `${HELPER_NONCE_LABEL}=${nonce}`,
+      ...opts.createArgs,
+    ],
+    { timeoutMs: opts.createTimeoutMs }
+  );
   let failure: unknown;
   let value: T | undefined;
   let ok = false;
+  const printed =
+    created.exitCode === 0 ? createdContainerId(created.stdout) : null;
+  const container =
+    printed ??
+    (await findOwnCreated({
+      docker: opts.docker,
+      name: opts.name,
+      nonce,
+      deadlines: opts.deadlines,
+    }).catch(() => null));
+  if (container !== null) {
+    opts.helpers.add(container);
+  }
   try {
-    value = await work();
+    opts.checkCreate(created);
+    if (printed === null) {
+      throw new HackCliError({
+        code: "E_UNEXPECTED",
+        message:
+          "docker create did not print a container ID, so Hack cannot track the helper container; nothing was changed.",
+      });
+    }
+    value = await work(printed);
     ok = true;
   } catch (error: unknown) {
     failure = error;
   }
-  const released = await release({
-    docker: opts.docker,
-    container,
-    deadlines: opts.deadlines,
-  }).catch((): HeldVolumeRelease => ({ container, removed: false }));
-  if (!released.removed) {
-    throw withUnconfirmedCleanup(ok ? undefined : failure, released);
+  if (container !== null) {
+    const released = await release({
+      docker: opts.docker,
+      container,
+      deadlines: opts.deadlines,
+    }).catch((): HeldVolumeRelease => ({ container, removed: false }));
+    if (!released.removed) {
+      throw withUnconfirmedCleanup(ok ? undefined : failure, released);
+    }
+    opts.helpers.retire(container);
   }
   if (!ok) {
     throw failure;
@@ -420,8 +522,29 @@ export async function withHeldVolume<T>(
   opts: HoldVolumeOptions,
   work: (held: HeldVolume) => Promise<T>
 ): Promise<T> {
-  const container = helperContainerName(opts.purpose);
-  return await withTrackedContainer({ ...opts, container }, async () =>
-    work(await holdVolume({ ...opts, container }))
+  return await withTrackedContainer(
+    {
+      docker: opts.docker,
+      name: helperContainerName(opts.purpose),
+      createArgs: holdCreateArgs(opts),
+      // Creating may pull the pinned image once.
+      createTimeoutMs: opts.deadlines.stepMs,
+      // A bind of a path that is gone fails instead of creating anything:
+      // the volume was removed after validation.
+      checkCreate: (created) => {
+        if (created.exitCode !== 0) {
+          throw MISSING_BIND.test(created.stderr)
+            ? opts.changed()
+            : dockerReadError({
+                result: created,
+                command: "docker create",
+                redactValues: opts.docker.redactValues,
+              });
+        }
+      },
+      deadlines: opts.deadlines,
+      helpers: opts.helpers,
+    },
+    async (container) => work(await holdVolume({ ...opts, container }))
   );
 }

@@ -1,11 +1,14 @@
+import { posix } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import type { DataBackupDeadlines } from "./data-backup-deadlines.ts";
 import type {
   DataBackupDocker,
+  DataBackupProcessResult,
   DataBackupWatch,
 } from "./data-backup-docker.ts";
 import { dataBackupHelperImage } from "./data-backup-format.ts";
 import {
+  type DataHelperContainers,
   requireStep,
   withTrackedContainer,
 } from "./data-backup-held-volume.ts";
@@ -42,53 +45,165 @@ export const MOUNT_EVENTS_ARGV = [
   "{{json .}}",
 ] as const;
 
+/**
+ * A mount of a watched volume. The container is named by its short (12
+ * character) ID only: a container name can carry interpolated env values
+ * (`container_name: db-${TOKEN}`), and it identifies nothing.
+ */
 export type ForeignMount = {
   readonly volume: string;
   readonly container: string;
-  /** The container's name from its start event, or null when none was seen. */
-  readonly name: string | null;
+};
+
+/** A volume the window watches: its Docker name and inspected Mountpoint. */
+export type WatchedVolume = {
+  readonly name: string;
+  readonly mountpoint: string;
 };
 
 export interface MountMonitor {
   /**
    * End coverage: run an end marker and wait for its start event (the
    * engine emits events in order, so every earlier event has then been
-   * read), stop the subscription, and return every mount of `volumeNames`.
-   * None is exempt: Hack's own helpers hold a volume with a bind of its
-   * Mountpoint, which emits no volume `mount` event (checked on Docker
-   * 29.9), and markers mount nothing. Container names are never trusted:
-   * a removed marker's name can be reused by another container. Refuses,
-   * closed, when the stream ended before it was stopped.
+   * read), stop the subscription, and return every use of `volumes` seen in
+   * the window:
+   *
+   * - each volume `mount` event of a watched volume. None is exempt: Hack's
+   *   own helpers hold a volume with a bind of its Mountpoint, which emits
+   *   no volume `mount` event (checked on Docker 29.9), and markers mount
+   *   nothing;
+   * - each container that started in the window and is not one this run
+   *   created (by ID), inspected by ID: a volume mount of a watched volume,
+   *   or a bind whose Source is a watched Mountpoint, inside one, or above
+   *   one. A bind emits no volume event, so another container could use the
+   *   same technique as Hack's helpers.
+   *
+   * Refuses, closed, when the stream ended before it was stopped, or when a
+   * foreign container that started in the window cannot be inspected (it is
+   * already gone, or the inspect failed): what it mounted is unknown.
    */
-  finish(volumeNames: readonly string[]): Promise<readonly ForeignMount[]>;
+  finish(volumes: readonly WatchedVolume[]): Promise<readonly ForeignMount[]>;
   /** Stop the subscription on any other path. Idempotent. */
   stop(): Promise<void>;
+}
+
+function notPublished(command: HelperPurpose): string {
+  return command === "export"
+    ? "the backup was not published"
+    : "the restore is not marked complete";
+}
+
+/**
+ * A container started during the window and could not be inspected, so
+ * what it mounted is unknown. On a busy engine it can be unrelated (any
+ * short-lived container): retrying is the answer.
+ */
+function uncheckedStartError(
+  command: HelperPurpose,
+  containers: readonly string[]
+): HackCliError {
+  return new HackCliError({
+    code: "E_PROJECT_RUNNING",
+    message: `A container (${containers.join(", ")}) started during the ${command} and could not be checked (it was already gone or could not be inspected), so Hack cannot prove it did not use the project's volumes; ${notPublished(command)}. If nothing else should be using them, retry.`,
+    detail: { unchecked: containers, reason: "unchecked_start" },
+  });
+}
+
+/** A Docker-side path, lexically normalized without a trailing slash. */
+function normalizedDaemonPath(path: string): string {
+  const normal = posix.normalize(path);
+  return normal.length > 1 && normal.endsWith("/")
+    ? normal.slice(0, -1)
+    : normal;
+}
+
+/** Whether `path` is `root` or inside it. */
+function within(path: string, root: string): boolean {
+  return root === "/" || path === root || path.startsWith(`${root}/`);
+}
+
+/**
+ * Watched volumes a container's mounts reach: a volume mount by name, or
+ * any mount whose Source is a watched Mountpoint, inside one or above one.
+ * Paths are the daemon's own (they may live in a VM), so they are compared
+ * lexically after normalization.
+ */
+export function mountsReachingVolumes(opts: {
+  readonly mounts: readonly unknown[];
+  readonly volumes: readonly WatchedVolume[];
+}): string[] {
+  const reached = new Set<string>();
+  for (const mount of opts.mounts) {
+    if (!isRecord(mount)) {
+      continue;
+    }
+    for (const volume of opts.volumes) {
+      if (mount.Type === "volume" && mount.Name === volume.name) {
+        reached.add(volume.name);
+        continue;
+      }
+      if (typeof mount.Source !== "string" || mount.Source === "") {
+        continue;
+      }
+      const source = normalizedDaemonPath(mount.Source);
+      const mountpoint = normalizedDaemonPath(volume.mountpoint);
+      if (within(source, mountpoint) || within(mountpoint, source)) {
+        reached.add(volume.name);
+      }
+    }
+  }
+  return [...reached].sort();
+}
+
+/** The Mounts of a container, by ID; null when it cannot be inspected. */
+async function inspectMounts(opts: {
+  readonly docker: DataBackupDocker;
+  readonly container: string;
+  readonly timeoutMs: number;
+}): Promise<readonly unknown[] | null> {
+  const result = await opts.docker
+    .capture(
+      [
+        "docker",
+        "container",
+        "inspect",
+        "--format",
+        "{{json .Mounts}}",
+        opts.container,
+      ],
+      { timeoutMs: opts.timeoutMs }
+    )
+    .catch(() => null);
+  if (result === null || result.exitCode !== 0) {
+    return null;
+  }
+  const mounts = parseJsonText(result.stdout.trim());
+  return Array.isArray(mounts) ? mounts : null;
 }
 
 function lostCoverage(command: HelperPurpose, why: string): HackCliError {
   return new HackCliError({
     code: "E_DOCKER_UNAVAILABLE",
-    message: `Hack lost its watch on Docker's volume events (${why}), so it cannot prove that nothing else used the volumes during the ${command}; ${command === "export" ? "the backup was not published" : "the restore is not marked complete"}. Check \`docker info\`, then retry.`,
+    message: `Hack lost its watch on Docker's volume events (${why}), so it cannot prove that nothing else used the volumes during the ${command}; ${notPublished(command)}. Check \`docker info\`, then retry.`,
   });
 }
 
 /**
  * Subscribe to volume mount and container start events, and return once the
  * subscription is proven live: a no-op marker container's start event has
- * arrived on it. Only then may the caller start copying. Start events only
- * name a mounting container in a refusal; they never exempt its mounts.
+ * arrived on it. Only then may the caller start copying. Markers are matched
+ * by the ID their own `docker create` returned, never by name.
  * SIGINT/SIGTERM while it runs stops the subscription and force-removes
- * this run's helper containers by name before the process ends.
+ * exactly this run's live helper containers, by ID, before the process ends.
  */
 export async function startMountMonitor(opts: {
   readonly docker: DataBackupDocker;
   readonly purpose: HelperPurpose;
-  /** Every container this run owns; markers are added and removed here. */
-  readonly helperNames: Set<string>;
+  /** This run's containers (helpers and markers), by the IDs it created. */
+  readonly helpers: DataHelperContainers;
   readonly deadlines: DataBackupDeadlines;
   readonly markerTimeoutMs?: number;
 }): Promise<MountMonitor> {
-  const names = new Map<string, string>();
   const started = new Set<string>();
   const mounts: { volume: string; container: string }[] = [];
   const waiting = new Map<string, () => void>();
@@ -109,14 +224,9 @@ export async function startMountMonitor(opts: {
       unreadable = true;
       return;
     }
-    if (
-      event.Type === "container" &&
-      event.Action === "start" &&
-      typeof attributes.name === "string"
-    ) {
-      names.set(actor.ID, attributes.name);
-      started.add(attributes.name);
-      waiting.get(attributes.name)?.();
+    if (event.Type === "container" && event.Action === "start") {
+      started.add(actor.ID);
+      waiting.get(actor.ID)?.();
     } else if (
       event.Type === "volume" &&
       event.Action === "mount" &&
@@ -157,9 +267,10 @@ export async function startMountMonitor(opts: {
         .listeners(signal)
         .some((listener) => listener !== handler);
       // Held: the explicit exit must not orphan the events child. A killed
-      // `docker run` client leaves its container running, so this run's
-      // helpers are removed by exact name too.
-      const helpers = [...opts.helperNames];
+      // client leaves its container running, so this run's live helpers are
+      // removed too: by the IDs their creates returned, never by name, so a
+      // container that reused a removed helper's name is left alone.
+      const helpers = [...opts.helpers.live];
       holdSignalCleanup({
         cleanup: Promise.all([
           stop(),
@@ -181,55 +292,60 @@ export async function startMountMonitor(opts: {
    * every path, a signal included.
    */
   const marker = async (stage: "start" | "end"): Promise<void> => {
-    const name = `${helperContainerName(opts.purpose)}-${stage}`;
-    const seen = new Promise<void>((resolve) => {
-      waiting.set(name, resolve);
-    });
-    const { commandMs } = opts.deadlines;
+    const { commandMs, stepMs } = opts.deadlines;
+    const step = (
+      result: DataBackupProcessResult,
+      action: "create" | "start",
+      timeoutMs: number
+    ): void => {
+      requireStep({
+        result,
+        label: `${stage} marker`,
+        action,
+        timeoutMs,
+        consequence: "nothing was changed.",
+        redactValues: opts.docker.redactValues,
+      });
+    };
+    let markerId: string | null = null;
     await withTrackedContainer(
       {
         docker: opts.docker,
-        container: name,
+        name: `${helperContainerName(opts.purpose)}-${stage}`,
+        createArgs: [
+          "--network",
+          "none",
+          "--log-driver",
+          "none",
+          "--pull",
+          "missing",
+          "--read-only",
+          "--security-opt",
+          "no-new-privileges",
+          "--label",
+          `io.hack.data-backup=${opts.purpose}`,
+          "--entrypoint",
+          "true",
+          dataBackupHelperImage(),
+        ],
+        // Creating may pull the pinned image once.
+        createTimeoutMs: stepMs,
+        checkCreate: (result) => step(result, "create", stepMs),
         deadlines: opts.deadlines,
-        helperNames: opts.helperNames,
+        helpers: opts.helpers,
       },
-      async () => {
-        for (const argv of [
-          [
-            "docker",
-            "create",
-            "--name",
-            name,
-            "--network",
-            "none",
-            "--log-driver",
-            "none",
-            "--pull",
-            "missing",
-            "--read-only",
-            "--security-opt",
-            "no-new-privileges",
-            "--label",
-            `io.hack.data-backup=${opts.purpose}`,
-            "--entrypoint",
-            "true",
-            dataBackupHelperImage(),
-          ],
-          ["docker", "start", name],
-        ]) {
-          // Creating may pull the pinned image once.
-          const result = await opts.docker.capture(argv, {
-            timeoutMs: argv[1] === "create" ? opts.deadlines.stepMs : commandMs,
-          });
-          requireStep({
-            result,
-            label: `${stage} marker`,
-            action: argv[1] === "create" ? "create" : "start",
+      async (container) => {
+        markerId = container;
+        const seen = new Promise<void>((resolve) => {
+          waiting.set(container, resolve);
+        });
+        step(
+          await opts.docker.capture(["docker", "start", container], {
             timeoutMs: commandMs,
-            consequence: "nothing was changed.",
-            redactValues: opts.docker.redactValues,
-          });
-        }
+          }),
+          "start",
+          commandMs
+        );
         let timer: ReturnType<typeof setTimeout> | undefined;
         await Promise.race([
           seen,
@@ -242,13 +358,13 @@ export async function startMountMonitor(opts: {
           }),
         ]);
         clearTimeout(timer);
-        waiting.delete(name);
+        waiting.delete(container);
       }
     );
     if (ended) {
       throw lostCoverage(opts.purpose, "the event stream ended");
     }
-    if (!started.has(name)) {
+    if (markerId === null || !started.has(markerId)) {
       throw lostCoverage(
         opts.purpose,
         `the ${stage} marker's start event did not arrive`
@@ -263,7 +379,7 @@ export async function startMountMonitor(opts: {
     throw error;
   }
   return {
-    async finish(volumeNames) {
+    async finish(volumes) {
       try {
         await marker("end");
       } finally {
@@ -275,13 +391,43 @@ export async function startMountMonitor(opts: {
       if (unreadable) {
         throw lostCoverage(opts.purpose, "an event line was unreadable");
       }
-      const watched = new Set(volumeNames);
-      return mounts
+      const watched = new Set(volumes.map((volume) => volume.name));
+      const found = mounts
         .filter((mount) => watched.has(mount.volume))
         .map((mount) => ({
-          ...mount,
-          name: names.get(mount.container) ?? null,
+          volume: mount.volume,
+          container: mount.container.slice(0, 12),
         }));
+      const unchecked: string[] = [];
+      for (const container of started) {
+        if (opts.helpers.created.has(container)) {
+          continue;
+        }
+        const inspected = await inspectMounts({
+          docker: opts.docker,
+          container,
+          timeoutMs: opts.deadlines.commandMs,
+        });
+        if (inspected === null) {
+          unchecked.push(container.slice(0, 12));
+          continue;
+        }
+        for (const volume of mountsReachingVolumes({
+          mounts: inspected,
+          volumes,
+        })) {
+          found.push({ volume, container: container.slice(0, 12) });
+        }
+      }
+      const unique = [
+        ...new Map(
+          found.map((mount) => [`${mount.volume}\0${mount.container}`, mount])
+        ).values(),
+      ];
+      if (unique.length === 0 && unchecked.length > 0) {
+        throw uncheckedStartError(opts.purpose, unchecked);
+      }
+      return unique;
     },
     stop,
   };
@@ -295,9 +441,7 @@ export function foreignMountError(opts: {
   readonly consequence: string;
   readonly stopCommand: string;
 }): HackCliError {
-  const containers = [
-    ...new Set(opts.mounts.map((mount) => mount.container.slice(0, 12))),
-  ];
+  const containers = [...new Set(opts.mounts.map((mount) => mount.container))];
   return new HackCliError({
     code: "E_PROJECT_RUNNING",
     message: `Another container (${containers.join(", ")}) mounted a volume during the ${opts.command}, so the result may be inconsistent: ${opts.consequence} Make sure nothing uses the project's volumes (\`${opts.stopCommand}\`), then retry.`,

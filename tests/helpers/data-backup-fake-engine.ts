@@ -11,9 +11,11 @@ import { FakeDockerEvents } from "./data-backup-events.ts";
  * A synthetic Docker engine for `hack data` unit tests. Volumes hold one
  * string of content; a tar of a volume is the file `tar:<content>`, and every
  * digest (live tree or archive) is the sha256 of the content, so they agree
- * unless a test makes them differ. Helper containers are created, started,
- * exec'd into and removed by name, as the real flow does, and `docker run`
- * markers report to the live event stream.
+ * unless a test makes them differ. Containers behave as Docker's do: each
+ * `docker create` returns a new unique ID, a name is unique among existing
+ * containers (a create under a taken name fails) and is free again once the
+ * container is removed, and every command accepts the ID, a 12+ character
+ * ID prefix, or the name. Starts report to the live event stream.
  */
 export type FakeVolume = {
   labels: Record<string, string>;
@@ -26,10 +28,14 @@ export type FakeVolume = {
 };
 
 type FakeContainer = {
+  name: string;
+  labels: Record<string, string>;
   /** Null for an event-stream marker, which mounts nothing. */
   volume: string | null;
   readOnly: boolean;
   running: boolean;
+  /** `{{json .Mounts}}` of a foreign container; helpers derive theirs. */
+  mounts?: readonly unknown[];
 };
 
 export const COMPOSE = [
@@ -51,13 +57,36 @@ function fail(stderr: string, exitCode = 1): DataBackupProcessResult {
 }
 
 let births = 0;
+let containerIds = 0;
+
+/**
+ * The short ID `docker ps --format {{.ID}}` prints for a running container
+ * a test names in {@link FakeEngine.running}.
+ */
+export function fakePsId(name: string): string {
+  return createHash("sha256").update(`ps:${name}`).digest("hex").slice(0, 12);
+}
+
+/** A new unique 64-hex container ID. */
+export function fakeContainerId(): string {
+  containerIds += 1;
+  return createHash("sha256")
+    .update(`fake-container-${containerIds}`)
+    .digest("hex");
+}
 
 export class FakeEngine {
   model: unknown = { name: "shop", services: {}, volumes: {} };
   volumes = new Map<string, FakeVolume>();
+  /** Existing containers by full ID. */
   containers = new Map<string, FakeContainer>();
+  /** Every container `docker create` made, in order (removed ones too). */
+  created: { readonly name: string; readonly id: string }[] = [];
   events = new FakeDockerEvents();
-  /** `docker ps --filter <filter>` answers. */
+  /**
+   * Running containers, by name, per `docker ps --filter <filter>`; `ps`
+   * prints them in the requested `--format` (names, or {@link fakePsId}).
+   */
   running: Record<string, string[]> = {};
   calls: string[][] = [];
   psCalls = 0;
@@ -74,7 +103,7 @@ export class FakeEngine {
   tarThrows: Record<string, Error> = {};
   /** A `docker start` answer instead of success (124 timeout, 130 interrupt). */
   startExit: ((name: string) => number | undefined) | null = null;
-  /** `docker rm` leaves these containers in place. */
+  /** `docker rm` leaves these containers (full IDs) in place. */
   rmFails = new Set<string>();
   /** Extra content appended by an extract (a restore that differs). */
   extractAppends = "";
@@ -93,9 +122,45 @@ export class FakeEngine {
     return this;
   }
 
-  /** Containers this run created that still exist. */
+  /** IDs of the containers that still exist. */
   leftovers(): string[] {
     return [...this.containers.keys()];
+  }
+
+  /** The full ID a reference (ID, 12+ character prefix or name) names. */
+  resolve(ref: string): string | null {
+    if (this.containers.has(ref)) {
+      return ref;
+    }
+    for (const [id, container] of this.containers) {
+      if (container.name === ref || (ref.length >= 12 && id.startsWith(ref))) {
+        return id;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * A container someone else creates and starts outside the run, with
+   * `mounts` as `docker container inspect` reports them. Like a bind, it
+   * emits only its start event. Returns null, as Docker refuses, when the
+   * name is taken.
+   */
+  createForeign(name: string, mounts: readonly unknown[] = []): string | null {
+    if (this.resolve(name) !== null) {
+      return null;
+    }
+    const id = fakeContainerId();
+    this.containers.set(id, {
+      name,
+      labels: {},
+      volume: null,
+      readOnly: true,
+      running: true,
+      mounts,
+    });
+    this.events.start(id, name);
+    return id;
   }
 
   private inspectVolume(name: string): DataBackupProcessResult {
@@ -116,7 +181,8 @@ export class FakeEngine {
   }
 
   private exec(container: string, args: readonly string[]) {
-    const held = this.containers.get(container);
+    const id = this.resolve(container);
+    const held = id === null ? undefined : this.containers.get(id);
     const volume = held?.volume ? this.volumes.get(held.volume) : undefined;
     this.onExec?.(container, args);
     return { held, volume };
@@ -227,13 +293,27 @@ export class FakeEngine {
           ? late.names
           : []),
       ];
-      return ok(names.map((n) => `${n}\n`).join(""));
+      const format = args[args.indexOf("--format") + 1] ?? "";
+      const shown = format === "{{.ID}}" ? names.map(fakePsId) : names;
+      return ok(shown.map((n) => `${n}\n`).join(""));
     }
     if (args[0] === "run") {
       return fail("data commands never use docker run", 99);
     }
     if (args[0] === "create") {
       const name = args[args.indexOf("--name") + 1] ?? "";
+      if (this.resolve(name) !== null) {
+        return fail(
+          `Error response from daemon: Conflict. The container name "/${name}" is already in use.`
+        );
+      }
+      const labels: Record<string, string> = {};
+      args.forEach((value, index) => {
+        if (value === "--label") {
+          const [key, ...rest] = (args[index + 1] ?? "").split("=");
+          labels[key ?? ""] = rest.join("=");
+        }
+      });
       const mount = args.includes("--mount")
         ? (args[args.indexOf("--mount") + 1] ?? "")
         : null;
@@ -251,35 +331,45 @@ export class FakeEngine {
           );
         }
       }
-      this.containers.set(name, {
+      const id = fakeContainerId();
+      this.created.push({ name, id });
+      this.containers.set(id, {
+        name,
+        labels,
         volume,
         readOnly: mount?.includes(",readonly") ?? true,
         running: false,
       });
-      return ok(`${"c".repeat(64)}\n`);
+      return ok(`${id}\n`);
     }
     if (args[0] === "start") {
-      const name = argv.at(-1) ?? "";
-      const held = this.containers.get(name);
-      if (!held) {
-        return fail(`Error response from daemon: No such container: ${name}`);
+      const ref = argv.at(-1) ?? "";
+      const id = this.resolve(ref);
+      const held = id === null ? undefined : this.containers.get(id);
+      if (id === null || !held) {
+        return fail(`Error response from daemon: No such container: ${ref}`);
       }
-      const exit = this.startExit?.(name);
+      const exit = this.startExit?.(held.name);
       if (exit !== undefined) {
         return fail("start did not finish", exit);
       }
       held.running = true;
       // A bind mount emits no volume mount event, only the start.
-      this.events.run(["docker", "run", "--name", name]);
-      return ok(`${name}\n`);
+      this.events.start(id, held.name);
+      this.events.afterRun?.(["docker", "start", id]);
+      return ok(`${ref}\n`);
     }
     if (args[0] === "container" && args[1] === "inspect") {
-      const name = argv.at(-1) ?? "";
-      const held = this.containers.get(name);
-      if (!held) {
-        return fail(`Error: No such container: ${name}`);
+      const ref = argv.at(-1) ?? "";
+      const id = this.resolve(ref);
+      const held = id === null ? undefined : this.containers.get(id);
+      if (id === null || !held) {
+        return fail(`Error: No such container: ${ref}`);
       }
       if (argv.includes("{{json .Mounts}}")) {
+        if (held.mounts !== undefined) {
+          return ok(`${JSON.stringify(held.mounts)}\n`);
+        }
         return ok(
           `${JSON.stringify([
             {
@@ -291,14 +381,28 @@ export class FakeEngine {
           ])}\n`
         );
       }
-      return ok(`${"c".repeat(64)}\n`);
+      const format = argv[argv.indexOf("--format") + 1] ?? "";
+      const nonce = /index \.Config\.Labels "([^"]+)"/.exec(format)?.[1];
+      return ok(
+        nonce === undefined
+          ? `${id}\n`
+          : `${id} ${held.labels[nonce] ?? "<no value>"}\n`
+      );
     }
     if (args[0] === "rm") {
-      const name = argv.at(-1) ?? "";
-      if (!this.rmFails.has(name)) {
-        this.containers.delete(name);
+      const refs = args.slice(1).filter((arg) => !arg.startsWith("-"));
+      let failed = false;
+      for (const ref of refs) {
+        const id = this.resolve(ref);
+        if (id === null) {
+          failed = true;
+        } else if (this.rmFails.has(id)) {
+          failed = true;
+        } else {
+          this.containers.delete(id);
+        }
       }
-      return this.rmFails.has(name) ? fail("Error: cannot remove") : ok(name);
+      return failed ? fail("Error: cannot remove") : ok(refs.join("\n"));
     }
     if (args[0] === "exec") {
       const container = args[1] ?? "";

@@ -332,7 +332,8 @@ function names(stdout: string): string[] {
 
 /**
  * Running containers that make a copy or restore inconsistent: any of the
- * Compose project's, and any other container that mounts one of the volumes.
+ * Compose project's, and any other container that mounts one of the volumes,
+ * as short IDs (never names, which can carry interpolated values).
  */
 export async function runningContainers(opts: {
   readonly docker: DataBackupDocker;
@@ -351,7 +352,7 @@ export async function runningContainers(opts: {
       "--filter",
       filter,
       "--format",
-      "{{.Names}}",
+      "{{.ID}}",
     ]);
     if (result.exitCode !== 0) {
       throw dockerReadError({

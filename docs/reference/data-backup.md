@@ -54,8 +54,9 @@ Bind mounts, tmpfs mounts and anonymous volumes are not backed up.
 
 The export refuses with `E_PROJECT_RUNNING` (exit 1) when a container of the
 instance is running, or when any other container that mounts one of the
-copied volumes is running. `error.detail.running` names them; stop the project
-with `hack down` and retry. Hack never stops anything for an export.
+copied volumes is running. `error.detail.running` lists their short (12
+character) container IDs, never their names; stop the project with
+`hack down` and retry. Hack never stops anything for an export.
 
 Before its first check, the export subscribes to Docker's live event
 stream (`docker events`, volume `mount` and container `start` events, with no
@@ -64,19 +65,44 @@ the subscription live by creating and starting a no-op marker container
 (`hack-data-export-<random>-start`, no network, no logging) and waiting for
 that container's start event. Markers are tracked like the volume helpers:
 their create and start are bounded by `HACK_DATA_COMMAND_TIMEOUT_MS`, and
-each is removed and its removal confirmed on every path, a signal included; only then does it check for running containers and copy. No mount is
-exempt, and container names are never trusted (a removed marker's name can
-be reused): Hack's own helpers hold each volume with a bind of its
+each is removed and its removal confirmed on every path, a signal included; only then does it check for running containers and copy.
+
+Hack tracks every container it creates (helpers and markers) by the
+immutable ID its own `docker create` returned, never by name: a name is free
+again once a container is removed, and another container can take it. Every
+start, exec, inspect and removal uses that ID, and an ID is retired as soon
+as Docker confirms the container is gone. When a create's outcome is unknown
+(the client timed out or was interrupted), a container under the name counts
+as Hack's only when it carries that create's random
+`io.hack.data-backup.nonce` label; one that merely has the name is left
+alone.
+
+No mount is exempt: Hack's own helpers hold each volume with a bind of its
 `Mountpoint`, which emits no volume `mount` event (checked on Docker 29.9),
 and markers mount nothing, so any `mount` event of a copied volume comes
-from another container. After the last copy it lists running
+from another container. Because a bind emits no volume event, another
+container could use the same technique, so every container that starts in
+the window and is not one Hack created is inspected by ID (bounded by
+`HACK_DATA_COMMAND_TIMEOUT_MS`) once the window closes. After the last copy it lists running
 containers again, runs an end marker and waits for its start event (the
 engine emits events in order, so every earlier event has then arrived), stops
 the subscription and decides:
 
 - any mount of a copied volume, even by a container that started and exited
-  during the copy or reuses one of Hack's helper names, refuses with `E_PROJECT_RUNNING` and
-  `error.detail.mounts` (volume, container ID and name);
+  during the copy or reuses one of Hack's helper names, refuses with
+  `E_PROJECT_RUNNING` and `error.detail.mounts` (volume key and short
+  container ID);
+- so does a container that started in the window with a volume mount of a
+  copied volume or a bind whose `Source` is a copied volume's `Mountpoint`,
+  a path inside it, or a directory above it. Paths are the daemon's own
+  (they may live in a VM), so they are compared after lexical
+  normalization;
+- a container that started in the window but cannot be inspected (it was
+  already removed, or the inspect failed) refuses with `E_PROJECT_RUNNING`
+  (`detail.reason: unchecked_start`, `detail.unchecked`: short IDs), since
+  what it mounted is unknown. On a busy engine an unrelated short-lived
+  container that starts during the export can cause this refusal; if
+  nothing else should be using the project's volumes, retry the export;
 - an event stream that ended before Hack stopped it, an unreadable event, or
   a marker whose start event did not arrive within 30 seconds refuses with
   `E_DOCKER_UNAVAILABLE`: Hack lost coverage and cannot prove nothing else
@@ -84,8 +110,9 @@ the subscription and decides:
 
 Either refusal leaves the copy unpublished in `<backup>.partial/`. On every
 path the events child is stopped (SIGTERM, a two-second drain, then SIGKILL)
-and awaited; on Ctrl-C or SIGTERM the export also force-removes its running
-helper containers by name before exiting.
+and awaited; on Ctrl-C or SIGTERM the export also force-removes its live
+helper containers, by ID, before exiting; a container that reused one of
+their names is never touched.
 
 ## How it copies
 
@@ -164,9 +191,10 @@ runs. A step past its bound is stopped and refuses with
 `E_DOCKER_UNAVAILABLE` (`detail.reason: step_timeout`). On a timeout, a full
 disk or any other failure the helper container is removed; if Docker cannot
 confirm the removal, the outcome says so (`detail.cleanup: {container,
-removed: false}` and the `docker rm -f` command to run) instead of claiming
-cleanup, and nothing is published. Ctrl-C or SIGTERM stops the event
-subscription, force-removes the run's helper containers by name and reports
+removed: false}`, the container ID, and the `docker rm -f <id>` command to
+run) instead of claiming cleanup, and nothing is published. Ctrl-C or SIGTERM
+stops the event subscription, force-removes the run's live helper containers
+by ID and reports
 `E_CANCELLED`; removal is confirmed with a few short retries, since Docker
 may still be tearing a container down.
 
@@ -218,8 +246,10 @@ resolved value is written or printed:
 - the default backup path is named after Hack's project name
   (`hack.config.json` `name`, else the checkout directory) and the branch
   slug, never the Compose project;
-- container names in refusals (`detail.running`, `detail.mounts[].name`)
-  have the resolved Compose project name replaced by `<compose project>`;
+- refusals name containers by short ID only (`detail.running`,
+  `detail.mounts[].container`, `detail.unchecked`), never by name: a name
+  can carry the resolved Compose project name or a managed value
+  interpolated into `container_name:`;
 - an engine line quoted in a refusal (`Engine said: …`, in text and JSON)
   has every value the project's managed env adds, such as a managed
   `DOCKER_HOST` or `DOCKER_CONTEXT`, replaced by `[REDACTED]`, as

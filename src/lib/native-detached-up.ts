@@ -78,6 +78,9 @@ type Ready = {
   readonly address?: string;
   readonly started: readonly string[];
   readonly completed?: readonly string[];
+  /** Absent from an older owner: `ready`. */
+  readonly readiness?: "warming" | "ready";
+  readonly warming?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
 let publishImageBlocker:
@@ -983,7 +986,14 @@ function isReady(value: unknown): value is Ready {
     (value.completed === undefined ||
       (Array.isArray(value.completed) &&
         value.completed.length <= 256 &&
-        value.completed.every((name: unknown) => typeof name === "string")))
+        value.completed.every((name: unknown) => typeof name === "string"))) &&
+    (value.readiness === undefined ||
+      value.readiness === "warming" ||
+      value.readiness === "ready") &&
+    (value.warming === undefined ||
+      (Array.isArray(value.warming) &&
+        value.warming.length <= 256 &&
+        value.warming.every((name: unknown) => typeof name === "string")))
   );
 }
 
@@ -1002,6 +1012,7 @@ export function nativeDetachedOwnerArgs(opts: {
     readonly profile?: string;
     readonly refreshImages?: boolean;
     readonly offline?: boolean;
+    readonly wait?: boolean;
   };
 }): string[] {
   const args: string[] = [opts.action];
@@ -1016,6 +1027,9 @@ export function nativeDetachedOwnerArgs(opts: {
   }
   if (opts.options.offline) {
     args.push("--offline");
+  }
+  if (opts.options.wait) {
+    args.push("--wait");
   }
   return args;
 }
@@ -1300,6 +1314,7 @@ export async function startNativeDetachedUp(opts: {
       const services = {
         started: [...data.started].sort(),
         completed: [...(data.completed ?? [])].sort(),
+        warming: [...(data.warming ?? [])].sort(),
         stopped: [],
         failed: [],
       };
@@ -1312,6 +1327,7 @@ export async function startNativeDetachedUp(opts: {
             branch: data.branch,
             composeProject: data.composeProject,
             services,
+            readiness: data.readiness ?? "ready",
             durationMs,
             timings: completeUpTimings(),
           },
@@ -1325,10 +1341,13 @@ export async function startNativeDetachedUp(opts: {
         url,
         backend: "native",
         durationMs,
+        warming: data.warming?.length ?? 0,
       });
     } else {
       process.stdout.write(
-        "Project restarted and is ready. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n"
+        data.readiness === "warming"
+          ? "Project restarted; services and routes warm up now. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n"
+          : "Project restarted and is ready. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n"
       );
     }
     return 0;

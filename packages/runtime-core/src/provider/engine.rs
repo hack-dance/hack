@@ -413,7 +413,7 @@ impl<'a> Engine<'a> {
         self.logs_with_tail(id, "all")
     }
     /// Bounded per-stream tail for callers that keep the streams apart. Built from
-    /// the same whole-line, newest-first selection as [`Self::logs_tail_lines`];
+    /// the same whole-line, newest-first selection as `logs_tail_lines`;
     /// each stream also stays within [`LOG_STREAM_BUDGET`] (see [`stream_tail`]).
     #[cfg(all(feature = "native-config-plan", any(target_os = "macos", test)))]
     pub(super) fn logs_tail(
@@ -427,7 +427,9 @@ impl<'a> Engine<'a> {
         stream_tail(&self.logs_bytes(id, &tail.to_string())?)
     }
     /// Bounded tail in engine order, which interleaves stdout and stderr by time.
-    /// Whole lines are kept newest first; see [`LogTail`].
+    /// Whole lines are kept newest first; see [`LogTail`]. macOS reads lease-free
+    /// through `Observer::logs_tail_lines` instead.
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn logs_tail_lines(&self, id: &str, tail: u16) -> Result<LogTail, CandidateError> {
         if !(1..=1000).contains(&tail) {
             return Err(failure("Container log tail must be from 1 to 1000."));
@@ -679,6 +681,22 @@ impl<'a> Observer<'a> {
         let value = self.transport.request(Method::GET, path, None)?;
         self.guest.verify()?;
         Ok(value)
+    }
+
+    /// The lease-free twin of `Engine::logs_tail_lines`, for finite snapshots.
+    #[cfg(target_os = "macos")]
+    pub(super) fn logs_tail_lines(&self, id: &str, tail: u16) -> Result<LogTail, CandidateError> {
+        if !(1..=1000).contains(&tail)
+            || id.len() != 64
+            || !id.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(failure("Invalid container log identity."));
+        }
+        let path = format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail={tail}");
+        self.guest.verify()?;
+        let bytes = self.transport.request_bytes(Method::GET, &path, None)?;
+        self.guest.verify()?;
+        decode_log_lines(&bytes)
     }
 
     pub(super) fn identity_document(&self) -> Result<Value, CandidateError> {

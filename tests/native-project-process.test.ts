@@ -23,7 +23,7 @@ test.each([
 ])("early publisher notices are ignored and later notices forwarded, including split frames (%s)", async (split) => {
   const event = `${JSON.stringify({ kind: "graph_publisher_exit", run, port: 18_080 })}\n`;
   const opts = await fixture(`
-    process.stdout.write(${JSON.stringify(event)} + JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}) + "\\n" + ${JSON.stringify(split ? event.slice(0, 12) : event)});
+    process.stdout.write(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"}) + "\\n" + ${JSON.stringify(event)} + JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}) + "\\n" + ${JSON.stringify(split ? event.slice(0, 12) : event)});
     await Bun.sleep(30);
     ${split ? `process.stdout.write(${JSON.stringify(event.slice(12))});` : ""}
     await Bun.sleep(50);
@@ -96,6 +96,100 @@ test.each([
   );
 });
 
+test.each([
+  false,
+  true,
+])("the owner reports started in both modes; up returns there unless --wait (wait %s)", async (wait) => {
+  const started = JSON.stringify({
+    kind: "graph_foreground_started",
+    phase: "started-observed",
+    run,
+  });
+  const ready = JSON.stringify({ kind: "graph_foreground_ready", run });
+  const opts = await fixture(`
+    await Bun.write("argv", JSON.stringify(process.argv.slice(2)));
+    console.log(${JSON.stringify(started)});
+    await Bun.sleep(40);
+    console.log(${JSON.stringify(ready)});
+    await Bun.sleep(40);
+  `);
+  const events: string[] = [];
+  expect(
+    await serveNativeProjectGraph({
+      ...opts,
+      returnAtStarted: !wait,
+      onStarted: async () => {
+        events.push("started");
+      },
+      onReady: async () => {
+        events.push("onReady");
+      },
+      onAllReady: () => {
+        events.push("all-ready");
+      },
+    })
+  ).toBe(0);
+  // Without --wait the chain runs at started and the ready line comes after;
+  // with --wait the mapping step runs at started and the chain at ready.
+  expect(events).toEqual(
+    wait ? ["started", "onReady"] : ["onReady", "all-ready"]
+  );
+  const argv: string[] = JSON.parse(
+    await Bun.file(join(opts.projectRoot, "argv")).text()
+  );
+  expect(argv).toContain("--report-started");
+});
+
+test("under --wait a ready frame without a started frame (or with another phase) is refused", async () => {
+  for (const before of [
+    "",
+    `console.log(JSON.stringify({kind:"graph_foreground_started",phase:"preparing",run:"${run}"}));`,
+  ]) {
+    const opts = await fixture(`
+      ${before}
+      console.log(JSON.stringify({run:"${run}",kind:"graph_foreground_ready"}));
+      await Bun.sleep(30);
+    `);
+    await expect(
+      serveNativeProjectGraph({
+        ...opts,
+        returnAtStarted: false,
+        onReady: async () => {
+          throw new Error("must not accept ready");
+        },
+      })
+    ).rejects.toThrow(
+      "Native graph readiness identity is invalid or canceled."
+    );
+  }
+});
+test("after a started return, a later failure still reports its startup log tails", async () => {
+  const logs = [
+    { service: "slow", stdout: "", stderr: "never healthy", truncated: false },
+  ];
+  const reply = JSON.stringify({
+    code: "graph_timeout",
+    startup_logs: { version: 1, services: logs },
+  });
+  const opts = await fixture(`
+    console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"}));
+    await Bun.sleep(50);
+    console.error(${JSON.stringify(reply)});
+    process.exit(2);
+  `);
+  const received: unknown[] = [];
+  const code = await serveNativeProjectGraph({
+    ...opts,
+    returnAtStarted: true,
+    onReady: async () => undefined,
+    onStartupLogs: (tails) => {
+      received.push(tails);
+    },
+  }).catch(() => -1);
+  expect(code).not.toBe(0);
+  expect(received).toEqual([logs]);
+});
+
 async function fixture(program: string) {
   const root = await mkdtemp(join(tmpdir(), "native-process-"));
   roots.push(root);
@@ -119,7 +213,7 @@ test("foreground owner receives private stdin, reports readiness once and return
   const opts = await fixture(`
     const input = JSON.parse(await Bun.stdin.text());
     if (input.value !== "synthetic-private-input" || process.argv.some(a => a.includes("synthetic-private-input"))) process.exit(19);
-    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"})); console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
     await Bun.sleep(30);
     console.log(JSON.stringify({phase:"cleaned"}));
   `);
@@ -181,13 +275,13 @@ test("startup timeout and pre-cancellation do not become readiness", async () =>
 });
 test("failed owner preserves nonzero completion and callback failure terminates ownership", async () => {
   const opts = await fixture(
-    `console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"})); await Bun.sleep(20); process.exit(23);`
+    `console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"})); console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"})); await Bun.sleep(20); process.exit(23);`
   );
   expect(
     await serveNativeProjectGraph({ ...opts, onReady: async () => {} })
   ).toBe(23);
   const waiting = await fixture(
-    `console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"})); await Bun.sleep(10000);`
+    `console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"})); console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"})); await Bun.sleep(10000);`
   );
   await expect(
     serveNativeProjectGraph({
@@ -324,7 +418,7 @@ test("cancellation preserves the owner's graceful cleanup beyond five seconds", 
       await Bun.write(${JSON.stringify("PLACEHOLDER")}, "cleaned");
       process.exit(0);
     });
-    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"})); console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
     await Bun.sleep(30000);
   `);
   const marker = join(opts.projectRoot, "cleanup-complete");
@@ -385,7 +479,7 @@ test("readiness rejection retains identity while observing safe native cleanup c
       console.error(JSON.stringify({code:"graph_owner_recovery",message:"synthetic-private-cleanup"}));
       process.exit(2);
     });
-    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"})); console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
     await Bun.sleep(10000);
   `);
   const failure = new Error("synthetic TLS failure");
@@ -556,7 +650,7 @@ test.each([
     const deadline = Date.now() + ${HANDSHAKE_BUDGET_MS};
     while (!existsSync("keeper-pid") && Date.now() < deadline) await Bun.sleep(10);
     if (!existsSync("keeper-pid")) process.exit(3);
-    ${ready ? `console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));` : ""}
+    ${ready ? `console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"})); console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));` : ""}
     console.error(JSON.stringify({code:"${nativeCode}",message:"synthetic-private-detail"}));
     writeFileSync("exited-at", String(Date.now()));
     process.exit(${exitCode});
@@ -709,7 +803,7 @@ test("a stop request after readiness runs beforeStop before the detached owner i
       await Bun.write(${JSON.stringify("MARKER")}, seen ? "before-seen" : "before-missing");
       process.exit(0);
     });
-    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"})); console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
     await Bun.sleep(30000);
   `);
   const before = join(opts.projectRoot, "before-ran");
@@ -743,7 +837,7 @@ test("a stop request after readiness runs beforeStop before the detached owner i
 test("a second stop request during beforeStop forces the owner to stop", async () => {
   const opts = await fixture(`
     process.on("SIGTERM", () => process.exit(0));
-    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    console.log(JSON.stringify({kind:"graph_foreground_started",phase:"started-observed",run:"${run}"})); console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
     await Bun.sleep(30000);
   `);
   const controller = new AbortController();

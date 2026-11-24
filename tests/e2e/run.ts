@@ -26,6 +26,7 @@ import { agentSurfaceFreezeScenario } from "./scenarios/agent-surface-freeze.ts"
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { backgroundCommandComposeScenario } from "./scenarios/background-command-compose.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
+import { composeBranchScaleScenario } from "./scenarios/compose-branch-scale.ts";
 import { composeConfigHashDriftScenario } from "./scenarios/compose-config-hash-drift.ts";
 import { composeForegroundSignalScenario } from "./scenarios/compose-foreground-signal.ts";
 import { composeLongOneshotScenario } from "./scenarios/compose-long-oneshot.ts";
@@ -170,6 +171,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   nativeComposeAdoptionSourceBindWorktreesScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,
+  composeBranchScaleScenario,
 ];
 
 type CliArgs = {

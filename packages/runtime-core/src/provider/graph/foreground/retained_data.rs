@@ -330,6 +330,7 @@ fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Valu
         verify_guard,
     )?;
     verify_guard()?;
+    graph::explicit_cleanup_done(&root);
     Ok(json!({"ok":true,"run":run,"phase":cleaned.phase,"receipt":cleaned}))
 }
 

@@ -112,3 +112,11 @@ gets one deadline for its complete write and read. Poll readiness and per-call
 nonblocking I/O preserve the owner's socket settings. A failed exchange retires
 the session. Reconnect to reconcile an uncertain effect.
 The exchange requires a single writer per socket. On Apple platforms each send is bounded by the socket send low-water mark after poll reports writable, so a slow reader cannot hold a large write past the exchange deadline.
+
+### Readiness on a connected host stream
+
+After the runtime admits the endpoint, `Session::ready` runs Hello and Facts
+on that stream under one timeout. Both the kernel boot UUID and the agent
+incarnation in Facts must match Welcome before the client returns a session
+for commands. A different guest identity or an unexpected reply fails the
+probe. Endpoint admission and provider VM boot remain the caller’s responsibility.

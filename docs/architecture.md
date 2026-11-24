@@ -1052,10 +1052,22 @@ records what each model does and does not prove.
 
 ### Foreground startup owner
 
-A foreground `hack up` on the native backend serves the run until it is ready or
-fails. Readiness publishes the run mapping. A failure after resources were created
-must leave them owned: either cleanup is confirmed, or the frontend's final
-read-only inspection authenticates the owner receipt and records it.
+A native `hack up` serves the run until it is ready, fails or is stopped. The run
+reaches `started` (every container started, by Compose's rule) before `ready`
+(every service goal met). At `started` the owner checks the run's ownership and
+saves the run mapping, with or without `--wait`. Without `--wait`, `up` then
+commits the down-hook debt and returns, and the run shows as `warming` until it
+is ready. With `--wait` it returns at `ready`. A `down` while the run is warming
+queues a stop. The owner accepts it between passes of its start loop, which
+cancels its wait, and never half-way through a service publication. A failure after resources
+were created must leave them owned: either cleanup is confirmed, or the
+frontend's final read-only inspection authenticates the owner receipt and
+records it.
+
+The run states between started and ready are drawn in
+[the owner state chart](https://github.com/hack-dance/hack/blob/next/tests/models/tla/native-startup-owner/state.svg),
+and [the model's coverage](https://github.com/hack-dance/hack/blob/next/tests/models/tla/native-startup-owner/COVERAGE.md)
+maps each step to the source. The chart below is the failure path.
 
 ```mermaid
 ---
@@ -1066,8 +1078,10 @@ stateDiagram-v2
   [*] --> idle
   idle --> serving : Serve
   serving --> serving : StartResources
-  serving --> ready : Ready [resources present]
+  serving --> started : Started [resources present]
+  started --> ready : Ready
   serving --> failed : Fail
+  started --> failed : Fail
   ready --> failed : Fail
   state inspect <<choice>>
   failed --> inspect : Inspect
@@ -1075,10 +1089,11 @@ stateDiagram-v2
   inspect --> exited : ExitUnconfirmed [receipt authenticated, owner recorded]
   inspect --> exited : ExitUnconfirmed [receipt refused]
   exited --> [*]
-  note right of ready
+  note right of started
     INV NoUnprovenOwner: a mapping is
-    published only by readiness or an
-    authenticated receipt.
+    published only by the started
+    inspection or an authenticated
+    receipt.
   end note
   note right of exited
     INV NoUnownedResources: resources that
@@ -1089,6 +1104,7 @@ stateDiagram-v2
   classDef ok stroke-width:1.6px
   classDef fail stroke-width:1.6px
   class serving live
+  class started live
   class ready ok
   class failed fail
 ```

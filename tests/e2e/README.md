@@ -855,3 +855,37 @@ HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_COMPOSE_ONESHOT_RUNS=50 bun
 
 The scenario uses cached `alpine:3.20`, exercises the current-source CLI (or
 `HACK_E2E_CLI_BIN`), and tears down its fixture before the harness checks for leaks.
+
+## Compose release sweep
+
+On a disposable Docker host with Bun pinned by `package.json`, tmux, and the
+usual Docker E2E prerequisites, build the exact revision with `bun run build`
+and `bun run build:config-compiler`. Cache `alpine:3.20` with
+`docker pull alpine:3.20`, then run:
+
+```sh
+bash scripts/check-compose-upgrade-sweep.sh
+```
+
+The script stops on the first failure or skip. Each of its ten independent
+invocations exercises plain foreground shutdown, graceful lifecycle cleanup,
+and repeated interruption during forced lifecycle cleanup. It checks exit 130,
+container retirement and owned runtime state through the existing scenario.
+The final SDK run checks the 8 MiB cutoff and typed outcomes against Compose.
+Keep the revision, CLI digest and complete output together.
+
+On macOS a long absolute `TMPDIR` can prevent Docker from opening its CLI
+plugin control socket. In a disposable scratch checkout, run the sweep with
+`TMPDIR=.` to use short relative socket addresses and keep files in scratch.
+
+Enable the Compose qualification trial on CI dispatches for the same ref:
+
+```sh
+gh workflow run ci.yml --repo hack-dance/hack --ref "$qualification_ref" -f compose_upgrade_trial=true
+```
+
+Record distinct run IDs and verify each run's head SHA and
+`compose-upgrade-trial` job. Each trial requires three SIGINT passes and a real
+MCP SDK pass. Missing jobs, skips, and runs built from another revision do not
+count. Capture the local and hosted results independently. The dispatch adds the Compose trial to
+the ordinary CI run, which retains its required checks.

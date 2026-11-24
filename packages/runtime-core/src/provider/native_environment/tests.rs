@@ -42,6 +42,10 @@ fn native_allocation_codec_has_no_compose_alias_and_refuses_unknown_private_fiel
         read(&fixture.candidate, slot).unwrap().binding.run,
         "b".repeat(32)
     );
+    assert_eq!(
+        retained_runs(&fixture.candidate).unwrap(),
+        std::collections::BTreeSet::from(["b".repeat(32)])
+    );
     for (pointer, value) in [
         ("/version", json!(1)),
         ("/kind", json!("environment-allocation")),

@@ -3917,6 +3917,11 @@ async function describeDirectIngressAccess(
 ): Promise<string> {
   const fallback =
     "Publish a service port with Compose `ports:`, for example `127.0.0.1:8080:80`, then run `hack up`.";
+  // `recorded` (one-off `run`) makes no Docker call for the override; reading the
+  // running containers here would inspect every one of them on each run.
+  if (opts.addresses === "recorded") {
+    return fallback;
+  }
   const base = await resolveComposeProjectName(opts);
   const name = opts.branch ? `${base}--${opts.branch}` : base;
   const runtime = await readRuntimeProjects({ includeGlobal: false });

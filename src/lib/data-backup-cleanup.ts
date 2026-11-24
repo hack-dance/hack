@@ -8,8 +8,13 @@ import { dockerReadError } from "./data-backup-volumes.ts";
 export type DataCleanupResult = {
   readonly nonce: string;
   readonly label: string;
+  /** Every container Docker listed under the label. */
+  readonly listed: readonly string[];
   readonly removed: readonly string[];
-  /** Containers whose removal Docker could not confirm. */
+  /**
+   * Listed containers Hack could not verify (their inspect failed or timed
+   * out) or whose removal Docker could not confirm.
+   */
   readonly unconfirmed: readonly string[];
 };
 
@@ -57,7 +62,9 @@ export async function cleanupDataHelpers(opts: {
     ),
   ];
   // Only a container whose label holds exactly this nonce, read back by ID.
+  // One Docker listed but Hack cannot read back is not settled: unconfirmed.
   const matching: string[] = [];
+  const unconfirmed: string[] = [];
   for (const id of ids) {
     const read = await opts.docker.capture(
       [
@@ -70,12 +77,13 @@ export async function cleanupDataHelpers(opts: {
       ],
       { timeoutMs: opts.deadlines.commandMs }
     );
-    if (read.exitCode === 0 && read.stdout.trim() === opts.nonce) {
+    if (read.exitCode !== 0) {
+      unconfirmed.push(id);
+    } else if (read.stdout.trim() === opts.nonce) {
       matching.push(id);
     }
   }
   const removed: string[] = [];
-  const unconfirmed: string[] = [];
   for (const id of matching) {
     if (
       await removeContainerConfirmed({
@@ -89,5 +97,5 @@ export async function cleanupDataHelpers(opts: {
       unconfirmed.push(id);
     }
   }
-  return { nonce: opts.nonce, label, removed, unconfirmed };
+  return { nonce: opts.nonce, label, listed: ids, removed, unconfirmed };
 }

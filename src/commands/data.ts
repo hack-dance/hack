@@ -29,6 +29,14 @@ import {
   type DataImportResult,
   importProjectData,
 } from "../lib/data-backup-import.ts";
+import {
+  cleanupRecordError,
+  type DataCleanupEngineSource,
+  endpointDigest,
+  engineSource,
+  readDataCleanupRecord,
+  removeDataCleanupRecord,
+} from "../lib/data-cleanup-record.ts";
 import { HACK_VERSION } from "../lib/hack-version.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
@@ -99,8 +107,8 @@ const cleanupSpec = defineCommand({
   summary: "Remove a helper container a data command could not track",
   group: "Project",
   description:
-    "Removes the containers labeled io.hack.data-backup.nonce=<nonce>, which a data command's refusal names when a helper create's outcome could not be reconciled, on the engine the project's managed env selects (as export resolves it), by ID with removal confirmed. Never removes a volume.",
-  options: [optPath, optProject, optBranch, optEnv, optNonce, optJson],
+    "Removes the containers labeled io.hack.data-backup.nonce=<nonce>, which a data command's refusal names when a helper create's outcome could not be reconciled. Reads the run's cleanup record under $HACK_HOME/data-cleanup/ for its env selection and engine, and refuses (E_DATA_CLEANUP_RECORD, no engine call) unless the project's managed env still resolves to the same engine. Removes by ID with removal confirmed; never removes a volume.",
+  options: [optPath, optProject, optBranch, optNonce, optJson],
   positionals: [],
   subcommands: [],
 } as const);
@@ -188,9 +196,10 @@ async function resolveDataContext(opts: {
         path: opts.options.path,
         project: opts.options.project,
         branch: branch ?? undefined,
-        env: opts.options.env,
       }),
     }),
+    // Kept in the run's cleanup record, so cleanup resolves the same env.
+    envSelection: model.envSelection,
     composeArgs: dataComposeArgs(model),
     hackHome: resolveGlobalHackDir(),
     downCommand: scopedHackCommand("down", {
@@ -218,6 +227,7 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
     project: context.projectName,
     branch: context.branch,
     hackHome: context.hackHome,
+    envSelection: context.envSelection,
     outDir:
       args.options.out === undefined
         ? undefined
@@ -256,6 +266,7 @@ const handleImport: CommandHandlerFor<typeof importSpec> = async ({
     backupPath: resolve(ctx.cwd, args.positionals.backupDir),
     fromProject: args.options.fromProject,
     hackHome: context.hackHome,
+    envSelection: context.envSelection,
     downCommand: context.downCommand,
   });
   if (args.options.json === true) {
@@ -313,7 +324,10 @@ export function socketNote(count: number): string {
 }
 
 /** Compose argv for a data command: the instance's model, all profiles on. */
-export function dataComposeArgs(model: ComposeRuntimeModel): string[] {
+export function dataComposeArgs(
+  model: Pick<ComposeRuntimeModel, "composeFiles" | "composeProject" | "cwd"> &
+    Partial<ComposeRuntimeModel>
+): string[] {
   return buildComposeArgs({
     composeFiles: model.composeFiles,
     composeProject: model.composeProject,
@@ -360,7 +374,6 @@ export function dataCleanupCommand(selection: {
   readonly path?: string;
   readonly project?: string;
   readonly branch?: string;
-  readonly env?: string;
 }): (nonce: string) => string {
   return (nonce) => {
     const argv = [currentCandidateLauncher().command, "data", "cleanup"];
@@ -370,7 +383,6 @@ export function dataCleanupCommand(selection: {
     for (const [name, value] of [
       ["project", selection.project],
       ["branch", selection.branch],
-      ["env", selection.env],
     ] as const) {
       if (value !== undefined) {
         argv.push(`--${name}=${value}`);
@@ -385,6 +397,10 @@ const handleCleanup: CommandHandlerFor<typeof cleanupSpec> = async ({
   ctx,
   args,
 }) => {
+  requireComposeBackendForData({
+    command: "cleanup",
+    backend: process.env.HACK_RUNTIME_BACKEND,
+  });
   const json = args.options.json === true;
   const nonce = args.options.nonce;
   if (nonce === undefined || !HELPER_NONCE_PATTERN.test(nonce)) {
@@ -394,21 +410,64 @@ const handleCleanup: CommandHandlerFor<typeof cleanupSpec> = async ({
         "hack data cleanup needs --nonce <nonce>: the 32-character hex value of the io.hack.data-backup.nonce label a data command's refusal named.",
     });
   }
-  // The managed env exactly as export and import resolve it: the same engine.
-  const context = await resolveDataContext({
+  const project = await resolveProjectForArgs({
     ctx,
-    command: "cleanup",
-    options: args.options,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
   });
-  const result = await cleanupDataHelpers({
-    docker: context.docker,
-    nonce,
-    deadlines: context.deadlines,
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+    noticeToStderr: json,
   });
+  const deadlines = resolveDataBackupDeadlines();
+  const hackHome = resolveGlobalHackDir();
+  // The run's record, not an argument, says how it reached its engine.
+  const record = await readDataCleanupRecord({ hackHome, nonce });
+  const projectName = await resolveEffectiveProjectName(project);
+  if (record.project !== projectName || record.branch !== branch) {
+    throw cleanupRecordError({
+      nonce,
+      why: `it was made for another project or instance than this command selects (pass the same --path, --project or --branch the ${record.command} used)`,
+    });
+  }
+  // The managed env through the recorded selection: the same engine.
+  const model = await resolveComposeRuntimeModel({
+    project,
+    branch,
+    envName: record.envDefault ? undefined : record.envName,
+  });
+  const docker = createHostDataBackupDocker({
+    env: model.env,
+    cwd: model.cwd,
+    captureTimeoutMs: deadlines.commandMs,
+  });
+  const source = engineSource({
+    docker,
+    envName: record.envDefault ? null : record.envName,
+  });
+  if (JSON.stringify(source) !== JSON.stringify(record.engine)) {
+    throw cleanupRecordError({
+      nonce,
+      why: `the setting that selects the engine changed since the ${record.command} (it now comes from ${describeEngineSource(source)}, the record says ${describeEngineSource(record.engine)})`,
+    });
+  }
+  // Local CLI reads only (a context's endpoints), never an engine call.
+  if ((await endpointDigest(docker)) !== record.endpointSha256) {
+    throw cleanupRecordError({
+      nonce,
+      why: `the engine this project's env now selects is not the one the ${record.command} used (its endpoint digest differs)`,
+    });
+  }
+  const result = await cleanupDataHelpers({ docker, nonce, deadlines });
+  if (result.unconfirmed.length === 0) {
+    await removeDataCleanupRecord({ hackHome, nonce });
+  }
   if (result.unconfirmed.length > 0) {
     throw new HackCliError({
       code: "E_UNEXPECTED",
-      message: `Docker could not confirm the removal of ${result.unconfirmed.length} container${result.unconfirmed.length === 1 ? "" : "s"} labeled ${result.label} (${result.unconfirmed.map((id) => id.slice(0, 12)).join(", ")}); retry, or remove ${result.unconfirmed.length === 1 ? "it" : "them"} with \`docker rm -f <id>\`.`,
+      message: `Hack could not verify or confirm the removal of ${result.unconfirmed.length} container${result.unconfirmed.length === 1 ? "" : "s"} labeled ${result.label} (${result.unconfirmed.map((id) => id.slice(0, 12)).join(", ")}); retry the same \`hack data cleanup --nonce ${result.nonce}\`.`,
       detail: result,
     });
   }
@@ -427,10 +486,22 @@ const handleCleanup: CommandHandlerFor<typeof cleanupSpec> = async ({
 
 /** Text summary of a cleanup: what was removed, or that nothing matched. */
 export function renderDataCleanupText(result: DataCleanupResult): string {
-  if (result.removed.length === 0) {
+  // Only an empty listing is a no-op: never when Docker listed a container.
+  if (result.listed.length === 0) {
     return `No container is labeled ${result.label}; nothing to remove.\n`;
   }
   return `Removed ${result.removed.length} container${result.removed.length === 1 ? "" : "s"} labeled ${result.label}: ${result.removed.map((id) => id.slice(0, 12)).join(", ")}.\n`;
+}
+
+/** A record's engine source in words (names a context, never an endpoint). */
+function describeEngineSource(source: DataCleanupEngineSource): string {
+  if (source.kind === "managed-context") {
+    return `the managed DOCKER_CONTEXT ${source.context}`;
+  }
+  if (source.kind === "managed-host") {
+    return `a managed DOCKER_HOST (env ${source.overlay ?? "base"})`;
+  }
+  return "the caller's own Docker settings";
 }
 
 export const dataCommand = {

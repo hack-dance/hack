@@ -78,18 +78,51 @@ test("a removal Docker cannot confirm is reported, and nothing matching is a cle
   );
 });
 
-test("the printed hack data cleanup line carries export's selection, --env only when given", () => {
+test("the printed hack data cleanup line carries the run's project and instance, never an env", () => {
   const launcher = dataCleanupCommand({})(NONCE).split(" ")[0] ?? "";
   expect(dataCleanupCommand({})(NONCE)).toBe(
     `${launcher} data cleanup --nonce=${NONCE}`
   );
-  expect(
-    dataCleanupCommand({ branch: "feature-x", env: "staging" })(NONCE)
-  ).toBe(
-    `${launcher} data cleanup --branch=feature-x --env=staging --nonce=${NONCE}`
+  // The env selection comes from the run's cleanup record, not the line.
+  expect(dataCleanupCommand({ branch: "feature-x" })(NONCE)).toBe(
+    `${launcher} data cleanup --branch=feature-x --nonce=${NONCE}`
   );
   // A path that looks like a pasted assignment is never printed.
   expect(dataCleanupCommand({ path: "TOKEN=abc" })(NONCE)).not.toContain(
     "TOKEN"
   );
+});
+
+test("a listed container Hack cannot read back (inspect timed out or failed) is unconfirmed", async () => {
+  for (const failure of [
+    { exitCode: 124, stdout: "", stderr: "" },
+    { exitCode: 1, stdout: "", stderr: "error during connect" },
+  ]) {
+    const fake = new FakeEngine();
+    const listed = labeled(fake, "a", NONCE);
+    const real = fake.docker();
+    const docker = {
+      ...real,
+      capture: async (
+        argv: readonly string[],
+        opts?: { readonly timeoutMs?: number }
+      ) =>
+        argv[2] === "inspect" &&
+        argv.some((arg) => arg.includes(".Config.Labels"))
+          ? failure
+          : await real.capture(argv, opts),
+    };
+    const result = await cleanupDataHelpers({
+      docker,
+      nonce: NONCE,
+      deadlines: DEADLINES,
+    });
+    expect({ exit: failure.exitCode, result }).toMatchObject({
+      exit: failure.exitCode,
+      result: { listed: [listed], removed: [], unconfirmed: [listed] },
+    });
+    // Never removed blind, and never reported as nothing there.
+    expect(fake.leftovers()).toEqual([listed]);
+    expect(renderDataCleanupText(result)).not.toContain("No container");
+  }
 });

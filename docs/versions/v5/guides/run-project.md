@@ -60,8 +60,10 @@ It refuses while the project runs and skips external and foreign volumes.
 checking every tar, and verifies the restored files. It never overwrites a
 volume that holds data. Use `--from-project <name>` to restore a backup taken
 from another Compose project, such as a branch instance. If a refusal reports a
-helper container it could not confirm removing, run the `hack data cleanup
---nonce …` command it prints. These commands work on Compose only; see
+helper container it could not track, run the `hack data cleanup --nonce …`
+command it prints: it reads the run's cleanup record under
+`~/.hack/data-cleanup/` and removes the container only on the same engine the
+export or import used. These commands work on Compose only; see
 [Data backup](https://github.com/hack-dance/hack/blob/next/docs/reference/data-backup.md).
 
 ## Native backend

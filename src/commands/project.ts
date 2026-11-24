@@ -3797,6 +3797,13 @@ export type ComposeRuntimeModel = {
   readonly composeProject: string | null;
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * The env selection the model was resolved with: an overlay name, `null`
+   * for base layers only, or `undefined` for the configured default (no
+   * `--env` and no recorded selection). Passing it back resolves the same
+   * env.
+   */
+  readonly envSelection: string | null | undefined;
 };
 
 /**
@@ -3887,6 +3894,7 @@ export async function resolveComposeRuntimeModel(opts: {
     composeProject: composeProjectName,
     cwd: dirname(opts.project.composeFile),
     env: envOverrides.env,
+    envSelection: envName,
   };
 }
 

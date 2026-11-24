@@ -14,6 +14,12 @@ import {
   DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
   DATA_BACKUP_DIGEST_SCRIPT,
 } from "../../../src/lib/data-backup-format.ts";
+import {
+  dataCleanupRecordPath,
+  endpointDigest,
+  engineSource,
+  writeDataCleanupRecord,
+} from "../../../src/lib/data-cleanup-record.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { createMonorepoFixture, type MonorepoFixture } from "../fixture.ts";
 import {
@@ -439,7 +445,12 @@ export const dataExportScenario: Scenario = {
       // During the copy Hack holds a Docker reference to the volume: its
       // removal is refused and the export completes with the right digest.
       await removalRefusedDuringCopy({ ctx, fixture, project, volume: data });
-      await cleanupRemovesLabeledHelper({ ctx, fixture, volume: data });
+      await cleanupRemovesLabeledHelper({
+        ctx,
+        fixture,
+        project,
+        volume: data,
+      });
       await replacedWithinOneSecond({ ctx, fixture, project, volume: data });
       await recreateVolume({ ctx, project, volume: data });
       await removedBeforeReference({ ctx, fixture, project, volume: data });
@@ -957,6 +968,7 @@ async function unrelatedBindPublishes(opts: {
 async function cleanupRemovesLabeledHelper(opts: {
   readonly ctx: ScenarioContext;
   readonly fixture: MonorepoFixture;
+  readonly project: string;
   readonly volume: string;
 }): Promise<void> {
   const { ctx } = opts;
@@ -964,7 +976,45 @@ async function cleanupRemovesLabeledHelper(opts: {
     .update(`${ctx.tempRoot}-cleanup`)
     .digest("hex")
     .slice(0, 32);
-  const left = await docker(ctx, [
+  // A nonce with no record: cleanup refuses and touches nothing.
+  const unrecorded = new Bun.CryptoHasher("sha256")
+    .update(`${ctx.tempRoot}-unrecorded`)
+    .digest("hex")
+    .slice(0, 32);
+  const refused = await ctx.cli({
+    args: ["data", "cleanup", "--nonce", unrecorded, "--json"],
+    cwd: opts.fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  expect({
+    that:
+      refused.exitCode !== 0 &&
+      extractJsonObject<{ error?: { code?: string } }>({ text: refused.stdout })
+        ?.error?.code === "E_DATA_CLEANUP_RECORD",
+    message: "a nonce without a cleanup record should refuse",
+    result: refused,
+  });
+  // The run's record, as export writes it before its first create.
+  const docker = createHostDataBackupDocker({
+    env: {},
+    cwd: opts.fixture.hackDir,
+  });
+  await writeDataCleanupRecord({
+    hackHome: ctx.hackHome,
+    record: {
+      version: 1,
+      nonce,
+      command: "export",
+      project: opts.project,
+      branch: null,
+      envName: null,
+      envDefault: true,
+      engine: engineSource({ docker, envName: null }),
+      endpointSha256: await endpointDigest(docker),
+      createdAt: new Date().toISOString(),
+    },
+  });
+  const left = await dockerCli(ctx, [
     "create",
     "--network",
     "none",
@@ -990,17 +1040,22 @@ async function cleanupRemovesLabeledHelper(opts: {
   const payload = extractJsonObject<{
     data?: { schema?: string; removed?: string[] };
   }>({ text: cleaned.stdout });
-  const gone = await docker(ctx, ["container", "inspect", id]);
-  const kept = await docker(ctx, ["volume", "inspect", opts.volume]);
+  const gone = await dockerCli(ctx, ["container", "inspect", id]);
+  const kept = await dockerCli(ctx, ["volume", "inspect", opts.volume]);
+  const record = await readFile(
+    dataCleanupRecordPath({ hackHome: ctx.hackHome, nonce }),
+    "utf8"
+  ).catch(() => null);
   expect({
     that:
       cleaned.exitCode === 0 &&
       payload?.data?.schema === "hack.data-cleanup.v1" &&
       JSON.stringify(payload.data.removed) === JSON.stringify([id]) &&
       gone.exitCode !== 0 &&
-      kept.exitCode === 0,
+      kept.exitCode === 0 &&
+      record === null,
     message:
-      "hack data cleanup should remove the labeled helper by ID and keep the volume",
+      "hack data cleanup should remove the labeled helper by ID, keep the volume and remove the record",
     result: cleaned,
   });
 }
@@ -1013,6 +1068,9 @@ function labels(project: string, key: string): string[] {
     `com.docker.compose.volume=${key}`,
   ];
 }
+
+const dockerCli = (ctx: ScenarioContext, argv: readonly string[]) =>
+  docker(ctx, argv);
 
 async function docker(ctx: ScenarioContext, argv: readonly string[]) {
   return await runCommand({

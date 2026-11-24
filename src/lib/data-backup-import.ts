@@ -43,6 +43,7 @@ import {
   volumeReplacedError,
   type WatchedVolume,
 } from "./data-backup-volumes.ts";
+import { withDataCleanupRecord } from "./data-cleanup-record.ts";
 import {
   type DataImportJournal,
   dataImportJournalPath,
@@ -78,6 +79,11 @@ export type DataImportInput = {
   readonly lockTimeoutMs?: number;
   /** Bounds for Docker calls; default from the environment overrides. */
   readonly deadlines?: DataBackupDeadlines;
+  /**
+   * The env selection the managed env was resolved with, kept in the run's
+   * cleanup record; `undefined` is the configured default.
+   */
+  readonly envSelection?: string | null;
 };
 
 /** How a target was prepared before extraction. */
@@ -211,44 +217,59 @@ export async function importProjectData(
     timeoutMs: input.lockTimeoutMs,
     run: async () => {
       const helpers = new DataHelperContainers();
-      // Subscribe and prove coverage before the first running-container check.
-      const monitor = await startMountMonitor({
-        docker: input.docker,
-        purpose: "import",
-        helpers,
-        deadlines,
-        markerTimeoutMs: input.markerTimeoutMs,
-      });
-      try {
-        const volumes = await importWithin(
-          {
-            input,
-            backup,
-            plan,
-            deadlines,
-            helpers,
-            mountpoints: new Map(),
-            identities: new Map(),
-            ownCreates: [],
-            references: { current: null },
-            now: input.now ?? (() => new Date()),
-          },
-          selected,
-          monitor
-        );
-        return {
-          backup: backup.path,
-          backupId: backup.id,
-          sourceProject: backup.manifest.project,
-          sourceBranch: backup.manifest.branch,
+      // The run's cleanup record, durable before its first container create.
+      return await withDataCleanupRecord(
+        {
+          hackHome: input.hackHome,
+          command: "import",
           project: input.project,
           branch: input.branch,
-          volumes,
-          skipped,
-        };
-      } finally {
-        await monitor.stop();
-      }
+          envSelection: input.envSelection,
+          docker: input.docker,
+          helpers,
+          now: (input.now ?? (() => new Date()))(),
+        },
+        async () => {
+          // Subscribe and prove coverage before the first running-container check.
+          const monitor = await startMountMonitor({
+            docker: input.docker,
+            purpose: "import",
+            helpers,
+            deadlines,
+            markerTimeoutMs: input.markerTimeoutMs,
+          });
+          try {
+            const volumes = await importWithin(
+              {
+                input,
+                backup,
+                plan,
+                deadlines,
+                helpers,
+                mountpoints: new Map(),
+                identities: new Map(),
+                ownCreates: [],
+                references: { current: null },
+                now: input.now ?? (() => new Date()),
+              },
+              selected,
+              monitor
+            );
+            return {
+              backup: backup.path,
+              backupId: backup.id,
+              sourceProject: backup.manifest.project,
+              sourceBranch: backup.manifest.branch,
+              project: input.project,
+              branch: input.branch,
+              volumes,
+              skipped,
+            };
+          } finally {
+            await monitor.stop();
+          }
+        }
+      );
     },
   });
 }

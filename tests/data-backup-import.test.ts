@@ -1290,6 +1290,8 @@ describe("Docker references hold the targets", () => {
     const dir = await writeBackup({ keys: ["db"] });
     const fake = engine();
     fake.volume("shop_db", { labels: OWNED("db"), content: "" });
+    // The engine loses the create's response, its event and its listing.
+    fake.events.deliverContainerCreates = false;
     const real = fake.docker();
     let lost = false;
     const docker = {
@@ -1308,8 +1310,9 @@ describe("Docker references hold the targets", () => {
           return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
         }
         if (
-          argv[2] === "inspect" &&
-          argv.some((arg) => arg.includes(".Config.Labels"))
+          (argv[2] === "inspect" &&
+            argv.some((arg) => arg.includes(".Config.Labels"))) ||
+          (argv[1] === "ps" && argv.includes("--all"))
         ) {
           return {
             exitCode: 1,
@@ -1349,7 +1352,11 @@ describe("Docker references hold the targets", () => {
 
 describe("a timed-out create during the import", () => {
   /** The write-hold create times out; it lands during lookup `landAt`. */
-  function timedOutHold(fake: FakeEngine, landAt: number | null) {
+  function timedOutHold(
+    fake: FakeEngine,
+    landAt: number | null,
+    which: "hold" | "marker" = "hold"
+  ) {
     const real = fake.docker();
     let pending: readonly string[] | null = null;
     let lookups = 0;
@@ -1362,11 +1369,11 @@ describe("a timed-out create during the import", () => {
         argv: readonly string[],
         opts?: { readonly timeoutMs?: number }
       ) => {
-        if (
-          pending === null &&
-          argv[1] === "create" &&
-          argv.some((arg) => arg.startsWith("type=bind,"))
-        ) {
+        const isTarget =
+          which === "marker"
+            ? !argv.includes("--mount")
+            : argv.some((arg) => arg.startsWith("type=bind,"));
+        if (pending === null && argv[1] === "create" && isTarget) {
           pending = argv;
           return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
         }
@@ -1384,13 +1391,14 @@ describe("a timed-out create during the import", () => {
     };
   }
 
-  test("an unanswered timeout stays unknown, with hack data cleanup and no endpoint", async () => {
+  test("an unanswered timeout before the event watch is proven stays unknown, with hack data cleanup and no endpoint", async () => {
+    // The start marker's create: no settle window can prove it will not land.
     const dir = await writeBackup({ keys: ["db"] });
     const fake = engine();
     const error = await caught(
       importProjectData({
         ...input(fake, dir),
-        docker: timedOutHold(fake, null),
+        docker: timedOutHold(fake, null, "marker"),
       })
     );
     const cleanup = (error.detail as { cleanup: Record<string, string> })
@@ -1405,6 +1413,21 @@ describe("a timed-out create during the import", () => {
     expect(rendered).not.toContain("10.0.0.5");
     expect(rendered).not.toContain("DOCKER_HOST");
     expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
+  });
+
+  test("an unanswered write-hold timeout settles in the window: the record is deleted", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    const error = await caught(
+      importProjectData({
+        ...input(fake, dir),
+        docker: timedOutHold(fake, null),
+      })
+    );
+    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
+    expect(
+      await readdir(join(root, "home", "data-cleanup")).catch(() => [])
+    ).toEqual([]);
   });
 
   test("a timeout that a later lookup finds is removed; not unknown", async () => {

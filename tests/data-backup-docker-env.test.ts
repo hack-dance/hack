@@ -446,7 +446,7 @@ test("hack data import prints no managed DOCKER_HOST in text or JSON when the en
         ok: false,
       });
       expect(result.output).toContain(
-        "Cannot connect to the Docker daemon at [REDACTED]"
+        "cannot reach the selected Docker engine"
       );
       expect({
         failAt,
@@ -935,8 +935,9 @@ test("hack data cleanup: a matching daemon ID proceeds; another, an unreadable o
   expect(await readFile(log, "utf8")).toBe("");
 });
 
-test("engine connection errors in export and cleanup are fixed text with a stable code, never the engine's line", async () => {
+test("engine connection errors in export, import and cleanup are fixed text with a stable code, never the engine's line", async () => {
   const { bin, log } = await stubBin();
+  const backup = await shopBackup();
   const managedHost = `unix://${root}/managed-engine.sock`;
   const projectRoot = await shopProject({
     envFiles: { default: [`DOCKER_HOST: "${managedHost}"`] },
@@ -953,13 +954,18 @@ test("engine connection errors in export and cleanup are fixed text with a stabl
       [["data", "export"], "compose"],
       [["data", "export"], "info"],
       [["data", "export"], "volume inspect"],
+      [["data", "import", "@BACKUP@"], "compose"],
+      [["data", "import", "@BACKUP@"], "volume inspect"],
       [["data", "cleanup", "--nonce", nonce], "info"],
       [["data", "cleanup", "--nonce", nonce], "ps --all"],
     ] as const) {
       for (const json of [false, true]) {
         const result = await runDataCli({
           cwd: projectRoot,
-          args: [...args, ...(json ? ["--json"] : [])],
+          args: [
+            ...args.map((arg) => (arg === "@BACKUP@" ? backup : arg)),
+            ...(json ? ["--json"] : []),
+          ],
           bin,
           env: {
             DATA_STUB_LOG: log,

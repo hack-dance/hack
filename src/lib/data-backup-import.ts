@@ -228,6 +228,7 @@ export async function importProjectData(
           docker: input.docker,
           helpers,
           now: (input.now ?? (() => new Date()))(),
+          commandMs: deadlines.commandMs,
         },
         async () => {
           // Subscribe and prove coverage before the first running-container check.

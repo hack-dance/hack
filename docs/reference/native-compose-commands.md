@@ -65,6 +65,15 @@ running, healthy when it declares a health check, and each initializer job must
 have exited successfully. An older healthy container does not satisfy a new
 generation's readiness.
 
+Each readiness scan uses the remaining start-phase budget, capped at 60 seconds
+per scan. Until a timeout has been retried, each Docker read gets at most half
+the time left in its scan, up to 15 seconds. This leaves time for one fresh
+scan if a read stalls. A timeout discards the partial scan and retries the
+complete read-only proof once within the same start deadline. Only an owned,
+ready observation made before that deadline can advance startup. The existing
+post-deadline check for a transient restart endpoint can diagnose a topology
+refusal and cannot report readiness.
+
 Compiler-selected HTTP routes use the already running global Caddy proxy and the
 external `hack-dev` network on the selected Docker engine. Only routed services
 join that ingress. Hack verifies the exact engine, proxy and network before effects,
@@ -369,6 +378,14 @@ then rechecks generation, ownership and pending intent. A crash after retirement
 leaves the pending generation; retry proves absence again and preserves any later
 foreign claim. A receipt already lost by an older version cannot be reconstructed
 from orphan generation files by this recovery path.
+
+When Hack records an uncertain operation or refuses because an earlier one is
+still pending, it reports `E_RECOVERY_REQUIRED`. A readiness read timeout
+that leaves engine intent pending adds `compose-readiness` and `probe-timeout`
+under `error.detail.native_compose_effect_refusal` in JSON. Inspect with
+`hack ps --json` or run `hack down --recover` before trying another start.
+An ownership read timeout outside the uncertain-operation error reports
+`E_COMPOSE_FAILED`.
 
 Storage startup diagnostics retain the first closed owner boundary through witness
 error normalization. The stage distinguishes selection, cold absence, dependency,

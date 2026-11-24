@@ -2667,6 +2667,22 @@ async function dispatchNativeComposeCommand(
   }
 }
 
+function nativeComposeCommandFailureCode(
+  error:
+    | NativeComposeGenerationError
+    | NativeComposeOwnershipError
+    | NativeComposeBuildError
+): HackCliError["code"] {
+  switch (error.code) {
+    case "E_NATIVE_COMPOSE_UNCERTAIN":
+      return "E_RECOVERY_REQUIRED";
+    case "E_NATIVE_COMPOSE_PROBE_TIMEOUT":
+      return "E_COMPOSE_FAILED";
+    default:
+      return "E_CONFIG_INVALID";
+  }
+}
+
 function throwNativeComposeCommandError(error: unknown): never {
   if (error instanceof NativeConfigCompilerError) {
     throw new HackCliError({
@@ -2701,7 +2717,7 @@ function throwNativeComposeCommandError(error: unknown): never {
   ) {
     const diagnostic = nativeComposeEffectRefusal(error);
     throw new HackCliError({
-      code: "E_CONFIG_INVALID",
+      code: nativeComposeCommandFailureCode(error),
       message: error.message,
       ...(diagnostic
         ? { detail: { native_compose_effect_refusal: diagnostic } }

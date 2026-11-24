@@ -158,16 +158,20 @@ test("optional issuance and translation preserve primitive/proxy failure precede
 });
 
 test.each([
-  "issued",
-  "forged",
-] as const)("public native command exposes only %s diagnostic provenance and unchanged fixed code/text", async (kind) => {
+  ["issued", "E_RECOVERY_REQUIRED"],
+  ["forged", "E_RECOVERY_REQUIRED"],
+  ["probe timeout", "E_COMPOSE_FAILED"],
+] as const)("public native command maps %s to %s and retains only issued diagnostics", async (kind, code) => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-effect-diagnostic-"))
   );
   const oldBackend = process.env.HACK_RUNTIME_BACKEND;
-  const error = new generation.NativeComposeGenerationError(
-    "E_NATIVE_COMPOSE_UNCERTAIN"
-  );
+  const error =
+    kind === "probe timeout"
+      ? new NativeComposeOwnershipError("E_NATIVE_COMPOSE_PROBE_TIMEOUT")
+      : new generation.NativeComposeGenerationError(
+          "E_NATIVE_COMPOSE_UNCERTAIN"
+        );
   if (kind === "issued") {
     attachNativeComposeEffectRefusal(error, DIAGNOSTIC);
   } else {
@@ -201,7 +205,7 @@ test.each([
     expect(errorResultFromUnknown({ error: caught })).toEqual({
       ok: false,
       error: {
-        code: "E_CONFIG_INVALID",
+        code,
         message: error.message,
         ...(kind === "issued"
           ? { detail: { native_compose_effect_refusal: DIAGNOSTIC } }

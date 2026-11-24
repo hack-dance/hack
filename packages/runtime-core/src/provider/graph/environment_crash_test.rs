@@ -80,6 +80,47 @@ fn environment_crash_child() {
     .unwrap();
     panic!("fault helper unexpectedly completed");
 }
+/// The helper child's stdout and stderr, kept in one file so a failure can show why the
+/// child exited (the helper's values are synthetic). Keep it outside the project directory.
+fn child_log(path: &Path) -> Result<(Stdio, Stdio), CandidateError> {
+    let file = fs::File::create(path).map_err(state::io)?;
+    let other = file.try_clone().map_err(state::io)?;
+    Ok((Stdio::from(file), Stdio::from(other)))
+}
+/// Print the helper child's output when the attempt it served failed.
+fn report_child<T>(
+    outcome: &std::thread::Result<Result<T, CandidateError>>,
+    log: &Path,
+    context: &str,
+) {
+    let failed = match outcome {
+        Ok(Ok(_)) => false,
+        Ok(Err(error)) => {
+            eprintln!("{context}: {error:?}");
+            true
+        }
+        Err(_) => true,
+    };
+    if failed {
+        eprintln!(
+            "--- helper child output ({context}) ---\n{}--- end ---",
+            fs::read_to_string(log).unwrap_or_else(|error| format!("(unreadable: {error})\n"))
+        );
+    }
+}
+/// Ordinary removal cleanup without its trailing history compaction. Since HACK-1193
+/// ordinary `cleanup` compacts the retired records it just retired, leaving archive nothing
+/// to move. Enrolled relay cleanup (every environment-bound CLI graph) and a retained
+/// compaction refusal instead leave the last generation's retired records active until
+/// archive moves them; this reproduces that state with the same cleanup effect (HACK-2627).
+fn cleanup_without_compaction(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
+    let receipt = cleanup_owned(candidate, &engine, receipt, &root, true)?;
+    explicit_cleanup_done(&root);
+    Ok(receipt)
+}
 struct OwnedChild(Option<Child>);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
@@ -107,6 +148,9 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
         (true, "after-start"),
     ] {
         let fixture = tests::Fixture::new();
+        // Outside the project: a file in it changes the reviewed source a restore replays.
+        let logs = tests::Fixture::new();
+        let log = logs.0.join("helper-child.log");
         let run = format!(
             "{:032x}",
             std::time::SystemTime::now()
@@ -125,6 +169,7 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
                     execute(&candidate, &fixture.0, &run, false)?;
                     cleanup(&candidate, &run, false)?;
                 }
+                let output = child_log(&log)?;
                 let child = Command::new(std::env::current_exe().map_err(state::io)?)
                     .args([
                         "--ignored",
@@ -139,8 +184,8 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
                     )
                     .env("HACK_LOCAL_GRAPH_FAULT", point)
                     .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stdout(output.0)
+                    .stderr(output.1)
                     .spawn()
                     .map_err(state::io)?;
                 let mut child = OwnedChild(Some(child));
@@ -184,14 +229,10 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
                     engine.guest(),
                     &run,
                 )?;
-                assert_eq!(
-                    slots.len(),
-                    if restore && point != "restore-intent" {
-                        2
-                    } else {
-                        1
-                    }
-                );
+                // Ordinary cleanup compacts the retired initial generation (HACK-1193), so a
+                // restore's prior slots are retained history, never active inventory: only the
+                // interrupted attempt's own allocation, if it reached one, is active.
+                assert_eq!(slots.len(), usize::from(point != "restore-intent"));
                 if point == "restore-intent" || point == "after-environment-stage" {
                     assert!(present.is_none());
                 } else {
@@ -234,6 +275,10 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
             },
         ));
         let cleaned = cleanup(&candidate, &run, true);
+        report_child(&outcome, &log, &format!("restore={restore} point={point}"));
+        if let Err(error) = &cleaned {
+            eprintln!("restore={restore} point={point} final cleanup: {error:?}");
+        }
         outcome.unwrap()?;
         cleaned?;
         cleanup(&candidate, &run, true)?;
@@ -250,6 +295,9 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let fixture = tests::Fixture::new();
+    // Outside the project: a file in it changes the reviewed source a restore replays.
+    let logs = tests::Fixture::new();
+    let log = logs.0.join("helper-child.log");
     let run = format!(
         "{:032x}",
         std::time::SystemTime::now()
@@ -265,6 +313,7 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<(), CandidateError> {
             execute(&candidate, &fixture.0, &run, false)?;
+            let output = child_log(&log)?;
             let child = Command::new(std::env::current_exe().map_err(state::io)?)
                 .args([
                     "--ignored",
@@ -276,8 +325,8 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
                 .env("HACK_LOCAL_GRAPH_ACTION", "cleanup")
                 .env("HACK_LOCAL_GRAPH_FAULT", "cleanup-after-remove")
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(output.0)
+                .stderr(output.1)
                 .spawn()
                 .map_err(state::io)?;
             let mut child = OwnedChild(Some(child));
@@ -339,6 +388,7 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
         },
     ));
     let cleaned = cleanup(&candidate, &run, true);
+    report_child(&outcome, &log, "cleanup-after-remove");
     outcome.unwrap()?;
     cleaned?;
     cleanup(&candidate, &run, true)?;
@@ -354,6 +404,9 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let fixture = tests::Fixture::new();
+    // Outside the project: a file in it changes the reviewed source a restore replays.
+    let logs = tests::Fixture::new();
+    let log = logs.0.join("helper-child.log");
     let run = format!(
         "{:032x}",
         std::time::SystemTime::now()
@@ -384,7 +437,13 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
                 .join("run/environment-leases")
                 .join(format!("{slot}.json"));
             let original = fs::read(&source).map_err(state::io)?;
-            cleanup(&candidate, &run, true)?;
+            // Archive moves only records a cleanup left active; ordinary cleanup compacts them.
+            assert_eq!(
+                cleanup_without_compaction(&candidate, &run)?.phase,
+                "removed"
+            );
+            assert_eq!(fs::read(&source).map_err(state::io)?, original);
+            let output = child_log(&log)?;
             let mut child = OwnedChild(Some(
                 Command::new(std::env::current_exe().map_err(state::io)?)
                     .args([
@@ -396,8 +455,9 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
                     .env("HACK_LOCAL_GRAPH_ACTION", "archive")
                     .env("HACK_LOCAL_GRAPH_RUN", &run)
                     .env("HACK_LOCAL_GRAPH_FAULT", "archive-after-environment-move")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stdin(Stdio::null())
+                    .stdout(output.0)
+                    .stderr(output.1)
                     .spawn()
                     .map_err(state::io)?,
             ));
@@ -493,6 +553,7 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
             Ok(())
         },
     ));
+    report_child(&outcome, &log, "archive-after-environment-move");
     if root.exists() {
         cleanup(&candidate, &run, true)?;
     }

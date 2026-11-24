@@ -39,6 +39,7 @@ const OTHER_MODULES: Readonly<Record<string, string>> = {
   image_volumes:
     "Cadence selection only normalizes mount paths here. Image volume admission needs the verified guest image config.",
   iter: "Standard iterator helper.",
+  timings: "Optional observations do not produce startup refusals.",
   serde_json: "JSON encoding of already-admitted values.",
   fs: "Filesystem acquisition for verified cache bindings.",
   libc: "Host identity for verified cache bindings.",

@@ -397,6 +397,9 @@ fn run_with_clock(
         ));
     }
     let deadline = now() + timeout;
+    use crate::timings::{self, Outcome, Step};
+    let mut started_timing = timings::start(Step::ContainersStarted, None);
+    let all_ready = timings::start(Step::ServicesReady, None);
     let mut started = BTreeSet::<String>::new();
     let mut seen = Seen::default();
     loop {
@@ -489,7 +492,13 @@ fn run_with_clock(
                 driver.record(Event::AllStarted)?;
                 seen.all_started = true;
             }
+            if all_started && let Some(span) = started_timing.take() {
+                span.finish(Outcome::Ok, false, None, Default::default());
+            }
             if ready {
+                if let Some(span) = all_ready {
+                    span.finish(Outcome::Ok, false, None, Default::default());
+                }
                 driver.record(Event::Ready)?;
                 return Ok(());
             }
@@ -567,6 +576,51 @@ mod tests {
             Ok(observed)
         }
     }
+    #[test]
+    fn timing_records_started_then_ready_from_the_existing_graph_observations() {
+        use crate::timings::{self, Clock, Collector, Config, Outcome, Record, Role, Sink, Step};
+        use std::sync::{Arc, Mutex};
+        struct TestClock;
+        impl timings::TimeSource for TestClock {
+            fn sample(&self) -> Option<(u64, u64)> {
+                Some((1_000_000, 1000))
+            }
+        }
+        #[derive(Default)]
+        struct Records(Mutex<Vec<Record>>);
+        impl Sink for Records {
+            fn write_line(&self, line: &[u8]) -> bool {
+                let record = Record::parse_line(std::str::from_utf8(line).unwrap()).unwrap();
+                self.0.lock().unwrap().push(record);
+                true
+            }
+        }
+
+        let records = Arc::new(Records::default());
+        let collector = Collector::new(
+            Config {
+                trace: "1".repeat(32),
+                parent: None,
+                role: Role::Runtime,
+                clock: Clock::Host,
+                spawn_mono_us: None,
+                service_index_stable: false,
+            },
+            Arc::new(TestClock),
+            records.clone(),
+        )
+        .unwrap();
+        timings::observe(Some(&collector), Step::RuntimeDispatch, None, |_| {
+            run(&graph(), &mut driver(), Duration::from_secs(1))
+        })
+        .unwrap();
+        let records = records.0.lock().unwrap();
+        assert_eq!(records[0].step, "containers.started");
+        assert_eq!(records[1].step, "services.ready");
+        assert_eq!(records[0].outcome, Outcome::Ok);
+        assert_eq!(records[1].outcome, Outcome::Ok);
+    }
+
     #[test]
     fn cancellation_before_start_has_no_intent_or_effect() {
         let pending = std::cell::Cell::new(true);

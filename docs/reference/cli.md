@@ -365,6 +365,8 @@ hack up [services...] [options]
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--refresh-images` | Native backend: refresh the project's mutable image tags from the registry. |
 | `--offline` | Native backend: use recorded image resolutions and local archives without contacting a registry. |
+| `--timings` | Native backend: print the startup timeline to stderr |
+| `--timings-file <file>` | Native backend: write startup timing records to a new JSONL file |
 | `--always` | Mark this project for machine-local autostart and start it |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

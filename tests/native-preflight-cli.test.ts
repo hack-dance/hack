@@ -69,6 +69,7 @@ async function fixture(compose: Record<string, unknown>) {
   await writeFile(
     binary,
     `#!/bin/sh
+case "$1" in --internal-timings=*) shift;; esac
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ "$3" = runtime ] && [ "$4" = setup ]; then
   if [ "$#" != 6 ] || [ "$5" != inspect ] || [ "$6" != --json ]; then

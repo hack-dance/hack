@@ -19,7 +19,7 @@ fn published_owner_refused(candidate: &Candidate, run: &str) -> CandidateError {
     match published_owner(candidate, run) {
         Ok(PublishedOwner::Running) => error(
             "graph_foreground_owner_running",
-            "Another foreground hack up or hack restart still owns this run. Stop it with Ctrl-C in its terminal, or run hack down, then start the project again.",
+            "Another hack up or hack restart of this run is still running, in a terminal or detached (-d). Run hack down to stop it (or press Ctrl-C if it runs in your terminal), then start the project again.",
         ),
         Ok(PublishedOwner::Exited) if exited_ready(candidate, run) => error(
             "graph_foreground_owner_exited",
@@ -99,7 +99,7 @@ pub(in crate::provider::graph) fn checked(
     }
     match (&owner.process, owner.phase == "running") {
         (Some(process), running) => {
-            if identity::alive(process.pid)? != running {
+            if !identity::provider_gone(process)? != running {
                 return Err(refused());
             }
         }
@@ -529,7 +529,7 @@ pub(in crate::provider::graph) mod tests {
                 }
                 "no-previous" => owner.previous_guest_boot_id = None,
                 _ => {
-                    owner.process.as_mut().unwrap().pid = i32::try_from(std::process::id()).unwrap()
+                    owner.process = Some(identity::observe(std::process::id() as i32).unwrap());
                 }
             }
             owner.save(&fixture.candidate).unwrap();

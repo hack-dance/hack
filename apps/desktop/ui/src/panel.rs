@@ -35,6 +35,8 @@ impl PanelState {
 pub enum TabKind {
     /// Read-only stream of the project's logs (always the first tab).
     Logs,
+    /// Single command run in the same embedded terminal panel.
+    Command { label: String },
     /// `hack exec <service> -- <shell>`.
     ContainerShell { service: String, shell: String },
     /// The user's login shell in the project root.
@@ -54,6 +56,7 @@ impl TabKind {
     pub fn label(&self) -> String {
         match self {
             Self::Logs => "Logs".into(),
+            Self::Command { label } => label.clone(),
             Self::ContainerShell { service, shell } => format!("{service} · {shell}"),
             Self::HostShell { shell } | Self::HostShellWithEnv { shell, .. } => {
                 format!("host · {shell}")
@@ -65,6 +68,7 @@ impl TabKind {
     pub fn glyph(&self) -> Glyph {
         match self {
             Self::Logs => Glyph::Logs,
+            Self::Command { .. } => Glyph::Terminal,
             Self::ContainerShell { .. } => Glyph::Container,
             Self::HostShell { .. } | Self::HostShellWithEnv { .. } => Glyph::HostShell,
         }

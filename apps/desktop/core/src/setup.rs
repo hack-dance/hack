@@ -637,6 +637,7 @@ mod routing_tests {
             id: id.into(),
             status: "ok".into(),
             detail: String::new(),
+            fix: None,
         };
         let mut checks = vec![ok("dnsmasq:53"), ok("coredns forwarding")];
         for d in ["hack", "hack.local", "hack.gy"] {

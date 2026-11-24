@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+pub(in crate::provider) mod changes;
 #[cfg(any(target_os = "macos", test))]
 mod exec_io;
 pub(in crate::provider) mod inspection;

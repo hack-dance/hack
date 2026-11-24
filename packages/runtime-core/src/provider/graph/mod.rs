@@ -979,6 +979,15 @@ impl Session<'_, '_> {
         }
         Ok(())
     }
+    /// The start loop's wait between passes: woken by an engine event for one of
+    /// this run's containers, else the whole pass interval (see `engine::changes`).
+    fn engine_changes(&self) -> crate::provider::engine::changes::EngineChanges {
+        use crate::provider::engine::changes::EngineChanges;
+        self.engine.guest().engine_socket().map_or_else(
+            |_| EngineChanges::sleeping(),
+            |socket| EngineChanges::follow(&socket, &self.receipt.run),
+        )
+    }
     fn save(&self) -> Result<(), CandidateError> {
         state::write(&self.root.join("state.json"), &self.receipt)
     }
@@ -1845,10 +1854,12 @@ fn run_inputs(
             )?;
         }
         session.create_resources(false)?;
-        execution::run(
+        let changes = session.engine_changes();
+        execution::run_with_wait(
             &prepared.graph,
             &mut session,
             admission_deadline.saturating_duration_since(std::time::Instant::now()),
+            |interval| changes.wait(interval),
         )
     })();
     if let Err(failure) = result {
@@ -2718,7 +2729,12 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         launcher: None,
     };
     session.save()?;
-    if let Err(failure) = execution::run(&prepared.graph, &mut session, options.timeout) {
+    let changes = session.engine_changes();
+    if let Err(failure) =
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
+    {
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);

@@ -85,16 +85,19 @@ pub fn daemon_repair(action: DaemonRecovery, report: &setup::Report) -> Repair {
     }
 }
 
-pub fn cli_update_copy(report: &setup::Report) -> Option<CommandControl> {
+pub fn cli_update_repair(report: &setup::Report) -> Option<Repair> {
     let spec = report.command(vec!["update".into()]).ok()?;
-    Some(CommandControl {
-        id: "update-cli-for-hackd".into(),
-        label: "hack update".into(),
-        title: "Terminal".into(),
-        availability: CommandAvailability::CopyOnly(spec),
-        size: CommandControlSize::Compact,
-        cwd: None,
-        expects_password: false,
+    Some(Repair {
+        target: RepairTarget::Setup("daemon".into()),
+        control: CommandControl {
+            id: "update-cli-for-hackd".into(),
+            label: "hack update".into(),
+            title: "Terminal".into(),
+            availability: CommandAvailability::Ready(spec),
+            size: CommandControlSize::Compact,
+            cwd: None,
+            expects_password: false,
+        },
     })
 }
 

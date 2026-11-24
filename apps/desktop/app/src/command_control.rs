@@ -3,8 +3,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-#[cfg(all(test, feature = "screenshots"))]
-use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, Entity, Focusable, IntoElement, ParentElement,
     SharedString, Styled, Subscription, Window, div, prelude::*, px, relative,
@@ -107,6 +105,7 @@ enum Phase {
 
 enum Check {
     Pending,
+    Output,
     NeedsAttention(String),
     Closing,
     Passed,
@@ -386,6 +385,17 @@ impl HackApp {
             callback(self, completion, cx);
         }
         cx.notify();
+    }
+
+    /// A manual command leaves its result visible in the drawer.
+    pub(crate) fn command_output_ready(&mut self, id: CommandRunId, cx: &mut Context<Self>) {
+        if let Some(run) = self.panels.command.last.as_mut().filter(|run| run.id == id)
+            && let Phase::Ended { check, .. } = &mut run.phase
+            && matches!(check, Check::Pending)
+        {
+            *check = Check::Output;
+            cx.notify();
+        }
     }
 
     /// Apply fresh evidence for this run. Only a successful process and
@@ -734,7 +744,10 @@ pub(crate) fn render_with_run(
         );
     }
     #[cfg(all(test, feature = "screenshots"))]
-    let run = run.test_support();
+    let run = {
+        use gpui_kit::test::TestSupportExt as _;
+        run.test_support()
+    };
 
     let compact = props.size == CommandControlSize::Compact;
     let p = ui.p;
@@ -921,6 +934,7 @@ impl HackApp {
                 ..
             } => match check {
                 Check::Pending => (Glyph::Loader, "Checking… · exit 0".into(), p.text_secondary),
+                Check::Output => (Glyph::Check, "Done · exit 0".into(), p.text_secondary),
                 Check::Closing => (Glyph::Check, "Done · closing".into(), p.states.running.dot),
                 Check::Passed => (Glyph::Check, "Done · exit 0".into(), p.states.running.dot),
                 Check::NeedsAttention(_) => (

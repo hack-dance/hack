@@ -156,6 +156,16 @@ pub(crate) fn guarded_names(
     links_left: &mut usize,
     as_ancestor: bool,
 ) -> bool {
+    guarded_names_with(path, uid, links_left, as_ancestor, |_, _| false)
+}
+
+pub(crate) fn guarded_names_with(
+    path: &Path,
+    uid: u32,
+    links_left: &mut usize,
+    as_ancestor: bool,
+    writable_dir: fn(&Path, &std::fs::Metadata) -> bool,
+) -> bool {
     if !path.is_absolute() {
         return false;
     }
@@ -182,7 +192,13 @@ pub(crate) fn guarded_names(
                 };
                 parent.join(target)
             };
-            if !guarded_names(&target, uid, links_left, as_ancestor || index > 0) {
+            if !guarded_names_with(
+                &target,
+                uid,
+                links_left,
+                as_ancestor || index > 0,
+                writable_dir,
+            ) {
                 return false;
             }
         } else {
@@ -190,7 +206,10 @@ pub(crate) fn guarded_names(
                 && meta.is_dir()
                 && meta.uid() == 0
                 && meta.mode() & 0o1000 != 0;
-            if (index > 0 && !meta.is_dir()) || (meta.mode() & 0o022 != 0 && !sticky_root) {
+            let allowed_dir = (index > 0 || as_ancestor) && writable_dir(component, &meta);
+            if (index > 0 && !meta.is_dir())
+                || (meta.mode() & 0o022 != 0 && !sticky_root && !allowed_dir)
+            {
                 return false;
             }
         }

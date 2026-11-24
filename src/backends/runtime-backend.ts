@@ -99,6 +99,8 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly beforeStart?: () => Promise<void>;
   /** Recheck ownership before detached Compose can create or replace containers. */
   readonly beforeCreate?: () => Promise<void>;
+  /** Cancels admission, including while asynchronous startup checks are running. */
+  readonly signal?: AbortSignal;
   readonly services?: readonly string[];
   readonly noDeps?: boolean;
   readonly forceRecreate?: boolean;
@@ -342,6 +344,7 @@ async function runComposeStartPhase(input: {
   });
   const watchdog = new AbortController();
   let done = false;
+  options.signal?.throwIfAborted();
   const finished = run(input.cmd, {
     cwd: options.cwd,
     env: options.env,
@@ -349,7 +352,9 @@ async function runComposeStartPhase(input: {
     timeoutMs: ceilingMs,
     forwardSignals: true,
     settleProcessGroupOnCancel: true,
-    signal: watchdog.signal,
+    signal: options.signal
+      ? AbortSignal.any([watchdog.signal, options.signal])
+      : watchdog.signal,
   }).finally(() => {
     done = true;
   });
@@ -504,6 +509,7 @@ async function watchStartProgress(input: {
 export const composeRuntimeBackend: RuntimeBackend = {
   name: "compose",
   async up(opts) {
+    opts.signal?.throwIfAborted();
     if (opts.unattended && !opts.detach) {
       throw new HackCliError({
         code: "E_PERMISSION",
@@ -530,15 +536,18 @@ export const composeRuntimeBackend: RuntimeBackend = {
         ...(opts.noDeps ? ["--no-deps"] : []),
         ...(opts.services ?? []),
       ];
-      const runPhase = (cmd: readonly string[], timeoutMs: number) =>
-        run(cmd, {
+      const runPhase = (cmd: readonly string[], timeoutMs: number) => {
+        opts.signal?.throwIfAborted();
+        return run(cmd, {
           cwd: opts.cwd,
           env: opts.env,
           stdout: childStdoutTarget(opts.routeStdoutToStderr),
           timeoutMs,
           forwardSignals: true,
           settleProcessGroupOnCancel: true,
+          signal: opts.signal,
         });
+      };
       // Image build/pull can take far longer than starting containers, so it
       // runs (with container creation/recreation) under its own budget. The
       // start invocation then only starts the prepared containers and waits on
@@ -633,6 +642,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...(opts.services ?? []),
     ];
     const env = mergeSpawnEnv(opts.env);
+    opts.signal?.throwIfAborted();
     const proc = Bun.spawn(cmd, {
       cwd: opts.cwd,
       env: childEnvironment(env),

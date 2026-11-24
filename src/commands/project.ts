@@ -500,7 +500,6 @@ import {
   assertLegacyProjectInputFamily,
 } from "../lib/project-input-selection.ts";
 import {
-  confirmProjectRuntimeDaemon,
   type ProjectRuntimeStateEntry,
   readProjectRuntimeCopyLaunch,
   readProjectRuntimeState,
@@ -2963,7 +2962,16 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
         signalCleanup: null,
       };
     }
-    await opts.beforeManagedProcesses?.();
+    if (
+      opts.beforeManagedProcesses &&
+      (sharedHelperConfigs.length > 0 ||
+        (opts.cfg.lifecycle?.processes?.length ?? 0) > 0 ||
+        (await readLifecycleState(opts.project)).some(
+          (entry) => entry.composeProject === opts.composeProject
+        ))
+    ) {
+      await opts.beforeManagedProcesses();
+    }
     const lifecycleStart = await startWithSharedHelpers({
       ...opts,
       shutdownGeneration,
@@ -3126,12 +3134,20 @@ export function signalCleanupKeepingStartedHelpers(opts: {
  */
 export async function retainHelpersUnlessContainersAbsent(opts: {
   readonly probe: () => Promise<"absent" | "present" | "unknown">;
+  readonly assertEngine?: () => Promise<void>;
   readonly keepSharedHelpers: (() => void) | undefined;
 }): Promise<void> {
   if (!opts.keepSharedHelpers) {
     return;
   }
-  const containers = await opts.probe().catch(() => "unknown" as const);
+  const containers = await (async () => {
+    await opts.assertEngine?.();
+    const observed = await opts.probe();
+    if (observed === "absent") {
+      await opts.assertEngine?.();
+    }
+    return observed;
+  })().catch(() => "unknown" as const);
   if (containers !== "absent") {
     opts.keepSharedHelpers();
   }
@@ -8197,19 +8213,13 @@ async function runUpCommand({
     projectDir: project.projectDir,
     composeProject: savedLifecycleKey,
   });
-  const assertOriginalLaunchEngine = (
-    opts: {
-      readonly settingsOnly?: boolean;
-      readonly captureIdentity?: boolean;
-    } = {}
-  ) =>
-    assertDockerLaunchEngine({
-      record: originalLaunch,
-      projectDir: project.projectDir,
-      env: envOverrides.env,
-      ...opts,
-    });
-  await assertOriginalLaunchEngine({ settingsOnly: true });
+  const engineOptions = {
+    record: originalLaunch,
+    projectDir: project.projectDir,
+    env: envOverrides.env,
+  };
+  await assertDockerLaunchEngine({ ...engineOptions, settingsOnly: true });
+  const engine = createDockerLaunchGuard(engineOptions);
 
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
@@ -8227,14 +8237,11 @@ async function runUpCommand({
     action: "start",
   });
   let publishedLaunchId: string | undefined;
-  let publishedDaemon: DockerDaemonObservation | undefined;
-  const publishRuntimeSelection = async (
-    daemon: DockerDaemonObservation | undefined
-  ) => {
+  const publishRuntimeSelection = async () => {
+    const daemon = await engine.capture();
     if (serviceScoped) {
       return;
     }
-    publishedDaemon = daemon;
     publishedLaunchId = await persistProjectRuntimeEnvSelection({
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
@@ -8280,6 +8287,7 @@ async function runUpCommand({
   let keepSharedHelpers: LifecycleUpResult["keepSharedHelpers"];
   const retainHelpersIfContainersMayRun = (): Promise<void> =>
     retainHelpersUnlessContainersAbsent({
+      assertEngine: engine.verify,
       probe: () =>
         probeComposeContainers({
           project,
@@ -8320,7 +8328,7 @@ async function runUpCommand({
           env: envOverrides.lifecycleEnv,
           effectiveEnvName: envOverrides.effectiveEnvName,
           composeProject: lifecycleComposeProject,
-          beforeManagedProcesses: () => assertOriginalLaunchEngine(),
+          beforeManagedProcesses: engine.capture,
         });
     if (lifecycleUp.code !== 0) {
       if (json) {
@@ -8474,9 +8482,7 @@ async function runUpCommand({
     if (!progress) {
       reportComposeStartupBudget({ budgets, detach });
     }
-    if (serviceScoped || cacheBootstrapServices.length > 0) {
-      await assertOriginalLaunchEngine();
-    }
+    await engine.capture();
     if (serviceScoped) {
       await updateProjectRuntimeServiceEnvFingerprints({
         projectDir: project.projectDir,
@@ -8536,21 +8542,9 @@ async function runUpCommand({
               composeFiles: composeFilesWithEnv,
               action: "start",
             });
-            await publishRuntimeSelection(
-              await assertOriginalLaunchEngine({
-                captureIdentity: !serviceScoped,
-              })
-            );
+            await publishRuntimeSelection();
           },
           beforeStart: async () => {
-            if (publishedLaunchId) {
-              await assertSavedDockerEngine({
-                projectDir: project.projectDir,
-                lifecycleComposeProject,
-                env: envOverrides.env,
-                settingsOnly: publishedDaemon?.kind === "unverified",
-              });
-            }
             await assertDesktopComposeOwnership({
               expected: expectedComposeProject,
               project,
@@ -8562,19 +8556,15 @@ async function runUpCommand({
             });
             await assertLoginAutostartCurrent(branch, project.projectRoot);
             await beforeStart?.();
-            if (!detach) {
-              await publishRuntimeSelection(
-                await assertOriginalLaunchEngine({
-                  captureIdentity: !serviceScoped,
-                })
-              );
+            if (detach) {
+              await engine.verify();
+            } else {
+              await publishRuntimeSelection();
               // Compose owns foreground shutdown. Lifecycle cleanup runs after
               // it settles; re-raising here would turn one Ctrl-C into two.
               // Keep an owner until the caller's cleanup has also settled.
               foregroundTermination.guard = installForegroundTerminationGuard();
               signalCleanup.dispose();
-            } else if (!publishedLaunchId) {
-              await assertOriginalLaunchEngine();
             }
           },
           dependencyProgress: resolveDependencyCacheProgress({
@@ -8776,12 +8766,6 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
-    await retryUnverifiedLaunchDaemon({
-      projectDir: project.projectDir,
-      lifecycleComposeProject,
-      launchId: publishedLaunchId,
-      env: envOverrides.env,
-    });
     if (!showBeforeAfter) {
       progress?.services(startup);
     }
@@ -11108,7 +11092,10 @@ async function runRestartUpPhase(opts: {
   ) => {
     const run = () => {
       cancellation.signal.throwIfAborted();
-      return composeRuntimeBackend.up(upOpts);
+      return composeRuntimeBackend.up({
+        ...upOpts,
+        signal: cancellation.signal,
+      });
     };
     return envOverrides.referenceText
       ? withComposeEnvOverride({
@@ -11126,6 +11113,7 @@ async function runRestartUpPhase(opts: {
   let keepSharedHelpers: LifecycleUpResult["keepSharedHelpers"];
   const retainHelpersIfContainersMayRun = (): Promise<void> =>
     retainHelpersUnlessContainersAbsent({
+      assertEngine: opts.assertEngine,
       probe: () =>
         probeComposeContainers({
           project: opts.project,
@@ -12038,35 +12026,16 @@ async function runLocalRestart({
     allServiceNames,
     envName: effectiveEnvName,
   });
-  const daemon = await assertSavedDockerEngine({
+  const engine = createDockerLaunchGuard({
+    record: await readProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    }),
+    env: preflightEnv.env,
     projectDir: project.projectDir,
-    lifecycleComposeProject,
-    env: preflightEnv.env,
-    captureIdentity: true,
   });
-  const selection = {
-    env: preflightEnv.env,
-    cwd: project.projectDir,
-    launchId: crypto.randomUUID(),
-  };
-  const engineFingerprint = await dockerEngineSelectionFingerprint(selection);
-  const assertEngine = async () => {
-    if (
-      (await dockerEngineSelectionFingerprint(selection)) !== engineFingerprint
-    ) {
-      throw new CliUsageError(
-        "Docker connection settings changed during Restart. Restore the connection and retry."
-      );
-    }
-    if (daemon?.kind === "verified") {
-      const observed = await readDockerDaemonIdentity(selection);
-      if (observed.kind !== "verified" || observed.id !== daemon.id) {
-        throw new CliUsageError(
-          "The Docker daemon changed or could not be verified during Restart."
-        );
-      }
-    }
-  };
+  const daemon = await engine.capture();
+  const assertEngine = engine.verify;
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
@@ -12294,12 +12263,6 @@ async function runLocalRestart({
       exitCode: 1,
     });
   }
-  await retryUnverifiedLaunchDaemon({
-    projectDir: project.projectDir,
-    lifecycleComposeProject: nextLifecycleKey,
-    launchId,
-    env: preflightEnv.env,
-  });
   if (!json) {
     return 0;
   }
@@ -12384,7 +12347,7 @@ async function persistProjectRuntimeEnvSelection(opts: {
   readonly pinnedComposeBase?: string;
   readonly envName: string | null;
   readonly dockerEnv: Readonly<Record<string, string>>;
-  readonly daemon: DockerDaemonObservation | undefined;
+  readonly daemon: AdmittedDockerDaemon;
   readonly services: readonly string[];
   readonly envByService: Readonly<
     Record<string, Readonly<Record<string, string>>>
@@ -12408,14 +12371,14 @@ async function persistProjectRuntimeEnvSelection(opts: {
         cwd: opts.projectDir,
         launchId,
       }),
-      ...(opts.daemon?.kind === "verified"
+      ...(opts.daemon.kind === "verified"
         ? {
             dockerDaemonIdentity: dockerDaemonIdentityFingerprint(
               opts.daemon.id,
               launchId
             ),
           }
-        : { dockerDaemonIdentityState: opts.daemon?.kind ?? "unverified" }),
+        : { dockerDaemonIdentityState: "unsupported" }),
       launchComposeBase: opts.launchComposeBase,
       launchBranch: opts.launchBranch,
       envProjectName: opts.envProjectName,
@@ -12442,14 +12405,12 @@ export async function assertSavedDockerEngine(opts: {
   readonly projectDir: string;
   readonly lifecycleComposeProject: string;
   readonly env: Readonly<Record<string, string>>;
-  readonly captureIdentity?: boolean;
-  readonly settingsOnly?: boolean;
-}): Promise<DockerDaemonObservation | undefined> {
+}): Promise<void> {
   const record = await readProjectRuntimeStateEntry({
     projectDir: opts.projectDir,
     composeProject: opts.lifecycleComposeProject,
   });
-  return await assertDockerLaunchEngine({ ...opts, record });
+  await assertDockerLaunchEngine({ ...opts, record });
 }
 
 async function assertDockerLaunchEngine(opts: {
@@ -12485,10 +12446,14 @@ async function assertDockerLaunchEngine(opts: {
   if (!(opts.captureIdentity || record?.dockerDaemonIdentity)) {
     return undefined;
   }
-  const daemon = await readDockerDaemonIdentity({
+  const selection = {
     cwd: opts.projectDir,
     env: opts.env,
-  });
+  };
+  let daemon = await readDockerDaemonIdentity(selection);
+  if (opts.captureIdentity && daemon.kind === "unverified") {
+    daemon = await readDockerDaemonIdentity(selection);
+  }
   if (
     record?.dockerDaemonIdentity &&
     record.launchId &&
@@ -12503,44 +12468,72 @@ async function assertDockerLaunchEngine(opts: {
   return daemon;
 }
 
-async function retryUnverifiedLaunchDaemon(opts: {
+type AdmittedDockerDaemon = Exclude<
+  DockerDaemonObservation,
+  { readonly kind: "unverified" }
+>;
+
+/** Observe the engine once before effects, then compare rather than rebinding it. */
+function createDockerLaunchGuard(opts: {
+  readonly record: ProjectRuntimeStateEntry | null;
   readonly projectDir: string;
-  readonly lifecycleComposeProject: string;
-  readonly launchId: string | undefined;
   readonly env: Readonly<Record<string, string>>;
-}): Promise<void> {
-  if (!opts.launchId) {
-    return;
-  }
-  const { projectDir, launchId } = opts;
-  const composeProject = opts.lifecycleComposeProject;
-  const record = await readProjectRuntimeStateEntry({
-    projectDir,
-    composeProject,
-  });
-  if (
-    record?.launchId !== launchId ||
-    record.dockerDaemonIdentityState !== "unverified"
-  ) {
-    return;
-  }
-  await assertDockerLaunchEngine({ ...opts, record, settingsOnly: true });
-  const daemon = await readDockerDaemonIdentity({
-    cwd: projectDir,
+}): {
+  readonly capture: () => Promise<AdmittedDockerDaemon>;
+  readonly verify: () => Promise<void>;
+} {
+  const selection = {
+    cwd: opts.projectDir,
     env: opts.env,
-  });
-  if (daemon.kind !== "unverified") {
-    await assertDockerLaunchEngine({ ...opts, record, settingsOnly: true });
-    await confirmProjectRuntimeDaemon({
-      projectDir,
-      composeProject,
-      launchId,
-      dockerDaemonIdentity:
-        daemon.kind === "verified"
-          ? dockerDaemonIdentityFingerprint(daemon.id, launchId)
-          : undefined,
+    launchId: crypto.randomUUID(),
+  };
+  let captured:
+    | { readonly settings: string; readonly daemon: AdmittedDockerDaemon }
+    | undefined;
+  const assertSettings = async (settings: string) => {
+    if ((await dockerEngineSelectionFingerprint(selection)) !== settings) {
+      throw new CliUsageError(
+        "The runtime now has different Docker connection settings. Restore the connection and retry."
+      );
+    }
+  };
+  const verify = async () => {
+    if (!captured) {
+      throw new CliUsageError(
+        "The Docker daemon has not been verified for this operation."
+      );
+    }
+    await assertSettings(captured.settings);
+    if (captured.daemon.kind === "verified") {
+      const daemon = await readDockerDaemonIdentity(selection);
+      if (daemon.kind !== "verified" || daemon.id !== captured.daemon.id) {
+        throw new CliUsageError(
+          "The operation now sees a different Docker daemon or the daemon could not be verified."
+        );
+      }
+      await assertSettings(captured.settings);
+    }
+  };
+  const capture = async () => {
+    if (captured) {
+      await verify();
+      return captured.daemon;
+    }
+    const settings = await dockerEngineSelectionFingerprint(selection);
+    const daemon = await assertDockerLaunchEngine({
+      ...opts,
+      captureIdentity: true,
     });
-  }
+    if (!daemon || daemon.kind === "unverified") {
+      throw new CliUsageError(
+        "Could not verify the Docker daemon before starting this copy. Check Docker and retry."
+      );
+    }
+    await assertSettings(settings);
+    captured = { settings, daemon };
+    return daemon;
+  };
+  return { capture, verify };
 }
 
 /** A failed launch remains selectable until all runtime owners are absent. */

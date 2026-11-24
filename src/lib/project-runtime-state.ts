@@ -158,33 +158,6 @@ export async function removeProjectRuntimeStateEntry(opts: {
   });
 }
 
-/** Upgrade only this operation's unverified launch, even if another writer superseded it. */
-export async function confirmProjectRuntimeDaemon(opts: {
-  readonly projectDir: string;
-  readonly composeProject: string;
-  readonly launchId: string;
-  readonly dockerDaemonIdentity: string | undefined;
-}): Promise<void> {
-  await mutateProjectRuntimeState(opts.projectDir, (entries) => {
-    const entry = entries.find(
-      (item) => item.composeProject === opts.composeProject
-    );
-    if (
-      entry?.launchId !== opts.launchId ||
-      entry.dockerDaemonIdentityState !== "unverified"
-    ) {
-      return null;
-    }
-    return replaceRuntimeEntry(entries, {
-      ...entry,
-      dockerDaemonIdentity: opts.dockerDaemonIdentity,
-      dockerDaemonIdentityState: opts.dockerDaemonIdentity
-        ? undefined
-        : "unsupported",
-    });
-  });
-}
-
 /**
  * Refresh or forget the env digests of `services` after a service-scoped
  * (re)create, preserving the rest of the stack's entry.

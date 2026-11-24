@@ -84,11 +84,13 @@ through each Compose attempt and lets sibling hooks finish before claiming it.
 When supplied by the engine, a bounded daemon ID observation also distinguishes
 replacements behind the same endpoint. Start rechecks the original launch after
 hooks, and bound readers check the selected connection before accessing services.
-A failed daemon ID read remains unverified through startup until a confirmed
-runtime can retry it. A missing field in a successful probe and a failed probe
-remain distinct. Scoped mutations recheck after lock waits and before Docker
-effects. Restart cancellation aborts reference-file admission before lifecycle
-cleanup settles.
+Start and Restart retry a failed daemon ID read before starting managed resources.
+When both reads fail, the command leaves no new launch. If a successful probe
+reports that an ID is unsupported, the command retains the connection-settings
+evidence. Scoped mutations recheck after lock waits and before Docker effects.
+Restart cancellation aborts reference-file admission and guards the final
+Compose spawn. A helper-retention probe requires matching engine evidence to
+establish absence.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

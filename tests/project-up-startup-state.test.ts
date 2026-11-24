@@ -22,6 +22,7 @@ import {
 import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import {
+  readProjectRuntimeState,
   readProjectRuntimeStateEntry,
   upsertProjectRuntimeStateEntry,
 } from "../src/lib/project-runtime-state.ts";
@@ -111,6 +112,10 @@ const runtimeBackendMock = await registerScopedModuleMock({
     composeRuntimeBackend: {
       name: "compose",
       up: async (opts: RuntimeUpOptions) => {
+        if (opts.detach) {
+          await opts.beforeCreate?.();
+        }
+        await opts.beforeStart?.();
         runtimeCalls.push({ kind: "up", opts });
         upComposeContents.push(
           (
@@ -139,18 +144,23 @@ const runtimeBackendMock = await registerScopedModuleMock({
       },
       psJson: async (opts: {
         readonly env?: Readonly<Record<string, string>>;
+        readonly cwd?: string;
+        readonly noTrunc?: boolean;
       }) => {
-        psEnvs.push(withoutComposeEnvReferences(opts.env));
+        if (!opts.noTrunc) {
+          psEnvs.push(withoutComposeEnvReferences(opts.env));
+        }
         if (psDurationMs) {
           await Bun.sleep(psDurationMs);
         }
         return {
           exitCode: psExitCode,
-          stdout: (psSnapshots.shift() ?? psRows)
+          stdout: (opts.noTrunc ? psRows : (psSnapshots.shift() ?? psRows))
             .map((row) => {
               const entry = JSON.parse(row);
               return JSON.stringify({
                 ID: `container-${entry.Service}`,
+                Labels: `com.docker.compose.project.working_dir=${opts.cwd}`,
                 ...entry,
               });
             })
@@ -210,6 +220,14 @@ const enginePreflightMock = await registerScopedModuleMock({
   },
 });
 
+const engineIdentityMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/docker-helper-environment.ts",
+  overrides: {
+    readDockerDaemonIdentity: () => Promise.resolve({ kind: "unsupported" }),
+  },
+});
+
 const loggerMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/ui/logger.ts",
@@ -240,6 +258,7 @@ beforeAll(() => {
   runtimeProjectsMock.activate();
   shellMock.activate();
   enginePreflightMock.activate();
+  engineIdentityMock.activate();
   loggerMock.activate();
 });
 
@@ -299,6 +318,7 @@ afterAll(() => {
   runtimeProjectsMock.deactivate();
   shellMock.deactivate();
   enginePreflightMock.deactivate();
+  engineIdentityMock.deactivate();
   loggerMock.deactivate();
 });
 
@@ -978,13 +998,11 @@ for (const action of ["up", "restart"] as const) {
     const run = action === "up" ? runDetachedUp : runRestart;
     await expect(run({ projectRoot })).rejects.toThrow();
     expect(upComposeContents).toEqual([]);
-    const state = JSON.parse(
-      await readFile(
-        resolve(projectRoot, ".hack/.internal/runtime-state.json"),
-        "utf8"
-      )
-    );
-    expect(state.entries).toEqual([]);
+    expect(
+      await readProjectRuntimeState({
+        projectDir: resolve(projectRoot, ".hack"),
+      })
+    ).toEqual([]);
   });
 
   test(`${action} does not start Compose after a failing before hook`, async () => {
@@ -1656,7 +1674,7 @@ test("up reports a Docker inspection error without waiting out the start budget"
   expect(psEnvs).toHaveLength(1);
 });
 
-test("full restart cleans lifecycle state before propagating a Docker inspection failure", async () => {
+test("full restart cleans the lifecycle owner and retains the launch after a Docker inspection failure", async () => {
   const projectRoot = await createProject();
   const projectDir = resolve(projectRoot, ".hack");
   psExitCode = 1;
@@ -1679,7 +1697,10 @@ test("full restart cleans lifecycle state before propagating a Docker inspection
       projectDir,
       composeProject: "startup-state-test",
     })
-  ).toBeNull();
+  ).toMatchObject({
+    launchComposeBase: "startup-state-test",
+    launchId: expect.any(String),
+  });
 });
 
 test("a restart repair keeps the project's start ceiling", async () => {

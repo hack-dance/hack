@@ -1633,7 +1633,7 @@ test("Down and bound readers reject a replacement Docker daemon at the same conn
 }, 40_000);
 
 for (const failures of [1, 2]) {
-  test(`Start retries daemon verification after ${failures} failed identity reads`, async () => {
+  test(`Start verifies the daemon before Compose after ${failures} failed identity reads`, async () => {
     const projectDir = join(root, "project", ".hack");
     await Bun.write(join(root, "daemon-id"), "fixture-engine-original");
     await installComposeNameFixture({
@@ -1641,26 +1641,26 @@ for (const failures of [1, 2]) {
       daemonProbeFailures: failures,
     });
     const started = await run(["up", "-d", "--json"]);
-    expect(started.exitCode, started.stderr + started.stdout).toBe(0);
-    const entry = await readProjectRuntimeStateEntry({
-      projectDir,
-      composeProject: "sample",
-    });
-    if (failures === 1) {
-      expect(entry?.dockerDaemonIdentity).toMatch(/^[a-f0-9]{64}$/);
-      expect(entry?.dockerDaemonIdentityState).toBeUndefined();
-      const stopped = await run(["down", "--json"]);
-      expect(stopped.exitCode, stopped.stderr + stopped.stdout).toBe(0);
-      return;
+    const launch = { projectDir, composeProject: "sample" };
+    if (failures === 2) {
+      expect(started.exitCode).toBe(1);
+      expect(started.stdout).toContain(
+        "Could not verify the Docker daemon before starting"
+      );
+      expect(await Bun.file(join(root, "compose-running")).exists()).toBe(
+        false
+      );
+      expect(await readProjectRuntimeStateEntry(launch)).toBeNull();
+      const retried = await run(["up", "-d", "--json"]);
+      expect(retried.exitCode, retried.stderr + retried.stdout).toBe(0);
+    } else {
+      expect(started.exitCode, started.stderr + started.stdout).toBe(0);
     }
-    expect(entry?.dockerDaemonIdentity).toBeUndefined();
-    expect(entry?.dockerDaemonIdentityState).toBe("unverified");
-    const refused = await run(["down", "--json"]);
-    expect(refused.exitCode).toBe(1);
-    expect(refused.stdout).toContain(
-      "could not be verified when this copy started"
-    );
-    expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+    expect(
+      (await readProjectRuntimeStateEntry(launch))?.dockerDaemonIdentity
+    ).toMatch(/^[a-f0-9]{64}$/);
+    const stopped = await run(["down", "--json"]);
+    expect(stopped.exitCode, stopped.stderr + stopped.stdout).toBe(0);
   }, 40_000);
 }
 

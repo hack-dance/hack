@@ -57,7 +57,7 @@ import {
   writeStartBlocker,
   writeUpHookBlocker,
 } from "../ui/start-refusal-output.ts";
-import { createTextOutput, formatDuration } from "../ui/text-output.ts";
+import { createTextOutput } from "../ui/text-output.ts";
 import { writeComposeStarted } from "./compose-lifecycle-closing.ts";
 import {
   createComposeUpProgress,
@@ -449,7 +449,9 @@ import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
   isNativeDetachedOwnerProcess,
+  nativeBuildProgressLine,
   nativeDetachedOwnerArgs,
+  nativeDetachedUpBuildProgress,
   nativeDetachedUpHookFailed,
   nativeDetachedUpKeepsHookOutput,
   nativeDetachedUpPrestart,
@@ -6712,7 +6714,7 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
       return;
     case "build-settled":
       logger.info({
-        message: `Build ${event.services.join(", ")}: ${event.outcome} in ${formatDuration(event.durationMs)}`,
+        message: nativeBuildProgressLine(event),
       });
       return;
     case "images":
@@ -7075,7 +7077,11 @@ async function handleNativeUp({
         nativeDetachedUpPrestart(false);
       }
       // A detached launcher's clocks follow these phases (HACK-2351).
-      nativeDetachedUpProgress(event.phase);
+      if (event.phase === "build-settled") {
+        nativeDetachedUpBuildProgress(event);
+      } else {
+        nativeDetachedUpProgress(event.phase);
+      }
       if (event.phase === "ready") {
         ready = true;
       }

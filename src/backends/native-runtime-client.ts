@@ -40,6 +40,8 @@ import {
   readNativeStopFailures,
 } from "./native-stop-diagnostics.ts";
 
+export const NATIVE_BUILD_RETENTION_TIMEOUT_MS = 30 * 60_000 + 5000;
+
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const NATIVE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
 const NATIVE_TAIL = /^[1-9][0-9]{0,3}$/;
@@ -843,12 +845,18 @@ export async function invokeNativeRuntime(opts: {
     // Internal invariant: callers build these argv shapes; no user input selects them.
     throw new Error(REQUEST_BUDGET_REFUSAL);
   }
-  const imageBatch =
-    opts.args[0] === "runtime" && opts.args[1] === "ensure-images";
+  const runtimeCommand = opts.args[0] === "runtime" ? opts.args[1] : undefined;
+  const imageBatch = runtimeCommand === "ensure-images";
+  let maxTimeoutMs = 600_000;
+  if (imageBatch) {
+    maxTimeoutMs = 3_600_000;
+  } else if (runtimeCommand === "retain-build-bases") {
+    maxTimeoutMs = NATIVE_BUILD_RETENTION_TIMEOUT_MS;
+  }
   if (
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
-    timeoutMs > (imageBatch ? 3_600_000 : 600_000) ||
+    timeoutMs > maxTimeoutMs ||
     (opts.privateInput?.byteLength ?? 0) > MAX_PRIVATE_INPUT_BYTES
   ) {
     // A selected startup timeout or the managed environment size can exceed these bounds.

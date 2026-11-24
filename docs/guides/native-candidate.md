@@ -509,11 +509,14 @@ With it:
   an unchanged context is not read again. The cache misses only a change that keeps the
   size, inode, modification time and change time identical, which needs a deliberate
   clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
-- Only those inputs count. A changed network response (a download in a `RUN` step),
-  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
-  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
-  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
-  `hack restart` to build every image again; base-image tags then resolve again too.
+- A changed network response in a `RUN` step or changed cache mount contents do
+  not trigger a rebuild. Native checks base-image tags according to the image tag
+  policy and rebuilds when the selected base digest changes. `hack up --offline`
+  uses locally recorded selections even after they expire. `hack up --refresh-images`
+  checks the registry for current tags. Ordinary expiry is checked after readiness.
+  `HACK_NATIVE_REBUILD=1` forces BuildKit to run with the recorded selection.
+  Cold solves let BuildKit fetch missing bases by digest. Background retention
+  tags a verified local base or downloads and loads it after readiness.
 - When an image is actually built, BuildKit reads a private copy of the included
   context, made and checked against the build key right before it runs, so edits during
   a build never reach the image. The copy keeps hard links as links and gives every
@@ -1532,11 +1535,14 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the resolved base references that the receipt and the result report. Never pass a
   secret as a build argument. BuildKit build secrets are the right mechanism for
   secrets; native builds do not support them yet.
-- Every build runs under a BuildKit source policy: only the pinned base images
-  resolve as images, and network sources (`ADD` of an `http`, `https` or git URL, and
-  image blob sources) are denied. The engine would otherwise fetch those from outside
-  the isolated build network. The policy also covers sources that a base image's
-  stored `ONBUILD` triggers add; such bases refuse before the build anyway.
+- A fresh recorded base resolution whose verified image is in the guest makes
+  no registry request. An expired resolution checks the registry and can use the
+  proven loaded base if the registry is unavailable. `hack pull` refreshes build
+  bases as well as service images. The build key includes each base digest.
+- BuildKit receives only attempt-owned local references to the verified bases.
+  The source policy denies other image sources and remote `ADD`, git and image
+  blob sources. A private cache tag keeps the base while attempt aliases are
+  removed, including on recovery after an interrupted build.
 - Argument values reach the client only through a private definition file (mode
   `0600`, removed after the build), never its command line or its environment; the
   client's environment is a fixed list of its own settings. Names must be plain

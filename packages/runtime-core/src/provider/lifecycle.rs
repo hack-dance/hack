@@ -3494,10 +3494,7 @@ mod tests {
     fn observation_treats_only_a_stopped_pool_without_a_live_provider_as_not_running() {
         // `ObservedGuest::connect` answers `runtime_not_running` exactly when this holds,
         // before any identity comparison; otherwise `verify` keeps `runtime_changed`.
-        let owner = |phase: &str, process: Option<i32>| -> Owner {
-            let process = process.map(|pid| {
-                json!({"pid": pid, "start_micros": 1, "uid": 0, "executable": "/fixture/smolvm"})
-            });
+        let owner = |phase: &str, process: Option<&identity::ProcessIdentity>| -> Owner {
             serde_json::from_value(json!({
                 "version": 1, "checkout": "/fixture", "token": "fixture", "machine": "fixture",
                 "short_home": "/fixture", "created": true, "phase": phase,
@@ -3506,13 +3503,19 @@ mod tests {
             }))
             .unwrap()
         };
+        let live = identity::observe(i32::try_from(std::process::id()).unwrap()).unwrap();
+        let mut reused = live.clone();
+        reused.start_micros -= 1;
         let dead = {
-            let mut child = std::process::Command::new("true").spawn().unwrap();
-            let pid = i32::try_from(child.id()).unwrap();
+            let mut child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let identity = identity::observe(i32::try_from(child.id()).unwrap());
+            child.kill().unwrap();
             child.wait().unwrap();
-            pid
+            identity.unwrap()
         };
-        let live = i32::try_from(std::process::id()).unwrap();
         for phase in [
             "stopped",
             "stopped-before-engine",
@@ -3522,12 +3525,17 @@ mod tests {
         ] {
             assert!(observed_stopped(&owner(phase, None)).unwrap(), "{phase}");
             assert!(
-                observed_stopped(&owner(phase, Some(dead))).unwrap(),
+                observed_stopped(&owner(phase, Some(&dead))).unwrap(),
+                "{phase}"
+            );
+            // A live PID with a different birth belongs to a replacement process.
+            assert!(
+                observed_stopped(&owner(phase, Some(&reused))).unwrap(),
                 "{phase}"
             );
             // A live recorded provider is not stopped, whatever the phase says.
             assert!(
-                !observed_stopped(&owner(phase, Some(live))).unwrap(),
+                !observed_stopped(&owner(phase, Some(&live))).unwrap(),
                 "{phase}"
             );
         }

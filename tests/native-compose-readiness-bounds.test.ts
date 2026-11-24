@@ -242,6 +242,7 @@ function virtualDeadline(observations: number): void {
 async function waitStartup(opts: {
   readonly observations: number;
   readonly ready?: (state: NativeComposeOwnershipObservation) => boolean;
+  readonly failed?: (state: NativeComposeOwnershipObservation) => boolean;
   readonly observed?: NativeComposeOwnershipObservation[];
 }): Promise<NativeComposeOwnershipObservation | null> {
   virtualDeadline(opts.observations);
@@ -251,6 +252,7 @@ async function waitStartup(opts: {
       restartingServices: ON_FAILURE,
       deadline: Date.now() + DEADLINE_MS,
       ready: opts.ready ?? (() => true),
+      failed: opts.failed,
       observed: (state) => opts.observed?.push(state),
     });
   } finally {
@@ -312,6 +314,24 @@ test(
     } finally {
       now.mockRestore();
     }
+  },
+  TEST_TIMEOUT_MS
+);
+
+test(
+  "a verified terminal workload failure ends readiness after its first full scan",
+  async () => {
+    await serve(["member", "member"]);
+    const observed: NativeComposeOwnershipObservation[] = [];
+    const result = await waitStartup({
+      observations: 2,
+      ready: () => false,
+      failed: () => true,
+      observed,
+    });
+    expect(result).toBeNull();
+    expect(observed).toHaveLength(1);
+    expect(await inspects()).toBe(4);
   },
   TEST_TIMEOUT_MS
 );

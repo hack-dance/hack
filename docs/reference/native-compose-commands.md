@@ -387,6 +387,10 @@ When Docker responds and workloads remain unready through the deadline,
 startup reports `E_STARTUP_INCOMPLETE`. A standalone ownership read timeout
 reports `E_COMPOSE_FAILED`.
 
+An owned initializer from the proposed generation that exits nonzero with
+restart disabled makes startup incomplete as soon as Hack verifies the exit.
+The generation remains pending for explicit recovery.
+
 Storage startup diagnostics retain the first closed owner boundary through witness
 error normalization. The stage distinguishes selection, cold absence, dependency,
 expectation admission/write, journal, enrollment read, provision, root discovery,

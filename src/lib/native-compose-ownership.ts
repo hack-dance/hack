@@ -527,6 +527,7 @@ export async function waitNativeComposeStartupOwned(opts: {
   readonly restartingServices: readonly string[];
   readonly deadline: number;
   readonly ready: (state: NativeComposeOwnershipObservation) => boolean;
+  readonly failed?: (state: NativeComposeOwnershipObservation) => boolean;
   readonly observed?: (state: NativeComposeOwnershipObservation) => void;
   /** Post-Compose callers may re-acquire a refused member-ID observation; never admits a placeholder. */
   readonly settleNetworkMembers?: boolean;
@@ -592,6 +593,7 @@ export async function waitNativeComposeStartupOwned(opts: {
       return Date.now() < deadline ? result.observation : null;
     },
     ready: opts.ready,
+    failed: opts.failed,
   });
   if (state !== null || !transient || signal?.aborted) {
     return state;

@@ -53,6 +53,7 @@ import {
   nativeComposeCompletedOneoff,
   nativeComposeOnFailureServices,
   nativeComposeRunDependenciesReady,
+  nativeComposeStartupJobFailed,
   nativeComposeWorkloadsReady as ready,
 } from "./native-compose-completion.ts";
 import {
@@ -523,6 +524,8 @@ async function waitReady(opts: {
     observed: opts.observeStorage,
     settleNetworkMembers: true,
     ready: (state) => ready(opts.document, state, opts.generation),
+    failed: (state) =>
+      nativeComposeStartupJobFailed(opts.document, state, opts.generation),
   });
 }
 function requireService(

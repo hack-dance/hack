@@ -497,7 +497,7 @@ banner and Doctor's **Upgrade** row open the Upgrade pane for an available
 release. The pane shows the target version and the CLI's install command for
 copying, when available, alongside its readiness check.
 If hackd is newer than the selected CLI, the banner and Doctor's hackd row
-offer a copyable CLI update command or installation guidance. This works
+offer Run and Copy for the CLI update command, or installation guidance. This works
 while release checks are offline.
 The wrong-CLI banner accepts version and replacement evidence as inputs. Its
 examples are fixtures until HACK-2597 supplies that evidence for live checks.
@@ -653,9 +653,10 @@ each run by the selected CLI in its checked context:
 
 - **Check** (read-only; when the pane opens and on Check again): the CLI's own
   verdict (`ready`: no blockers and nothing incomplete), each blocker and
-  each check that could not run, and the plan with one row per step. A
-  step's command is for copying: the app never runs `hack upgrade apply` or
-  a plan command.
+  each check that could not run, and the plan with one row per step. **Run**
+  opens the selected command in the shared terminal drawer and refreshes the
+  plan on exit. **Copy** is available for running it in another terminal.
+  Reports without structured arguments can still supply copy text.
 - **Save snapshot** keeps a private copy of the files an upgrade changes,
   under the CLI's home, and says what it did not cover.
 - **Review findings** (read-only) lists the findings that cannot be applied

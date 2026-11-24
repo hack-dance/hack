@@ -379,6 +379,27 @@ resolved value is written or printed:
 
 A restore compares these hashes instead of the values.
 
+## Cleaning up an untracked helper (`hack data cleanup`)
+
+```sh
+hack data cleanup --nonce <nonce> [--path <dir>] [--project <name>] [--branch <name>] [--env <name>] [--json]
+```
+
+A refusal with an unknown cleanup outcome (see Deadlines) names the
+create's `io.hack.data-backup.nonce` label and prints this command with the
+same project, instance and `--env` selection. It resolves the managed env
+exactly as `hack data export` does, so it lists and removes containers on
+the same engine, including one a managed `DOCKER_HOST` or `DOCKER_CONTEXT`
+selects. It removes only containers, running or not, whose
+`io.hack.data-backup.nonce` label equals the nonce (read back by ID), each
+by its ID with removal confirmed, and never removes a volume. A nonce that
+is not 32 hex characters refuses with `E_USAGE` before any engine call.
+`--json` prints the standard envelope with `data.schema`
+`hack.data-cleanup.v1`: `nonce`, `label`, `removed` (full container IDs)
+and `unconfirmed`. A removal Docker cannot confirm exits 1 with
+`E_UNEXPECTED` and the same fields in `error.detail`. Nothing matching is a
+clean no-op.
+
 ## Format
 
 ```text

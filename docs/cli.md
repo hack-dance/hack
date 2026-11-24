@@ -214,7 +214,7 @@ Historical remote guides are excluded from the supported documentation.
 - A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
   from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `files ls`, `files cat`,
   `open`, `tui`, `branch ...`,
-  `config get`/`set`, `data export`, `env ...`, `host exec`/`shell`, `usage --by-service` and
+  `config get`/`set`, `data export`/`cleanup`, `env ...`, `host exec`/`shell`, `usage --by-service` and
   `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
   error envelope. In text mode `up` shows a project blocker with the next command. Other commands print

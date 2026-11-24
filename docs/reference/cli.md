@@ -1241,6 +1241,7 @@ hack data <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack data export` | Back up the project's Compose named volumes to verified tar files |
+| `hack data cleanup` | Remove a helper container a data command could not track |
 
 ### Options
 
@@ -1271,6 +1272,32 @@ Copies each declared, non-external named volume that Docker labels as this proje
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--out <dir>` | Parent directory for the backup (default: $HACK_HOME/data-backups/<hack project>[--<branch>]) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack data cleanup`
+
+Remove a helper container a data command could not track
+
+### Usage
+
+```bash
+hack data cleanup [options]
+```
+
+Removes the containers labeled io.hack.data-backup.nonce=<nonce>, which a data command's refusal names when a helper create's outcome could not be reconciled, on the engine the project's managed env selects (as export resolves it), by ID with removal confirmed. Never removes a volume.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--nonce <nonce>` | The io.hack.data-backup.nonce label value a data command's refusal named |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

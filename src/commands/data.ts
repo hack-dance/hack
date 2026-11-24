@@ -11,8 +11,14 @@ import {
   optPath,
   optProject,
 } from "../cli/options.ts";
+import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import {
+  cleanupDataHelpers,
+  type DataCleanupResult,
+} from "../lib/data-backup-cleanup.ts";
+import { HELPER_NONCE_PATTERN } from "../lib/data-backup-cleanup-instruction.ts";
 import { resolveDataBackupDeadlines } from "../lib/data-backup-deadlines.ts";
 import { createHostDataBackupDocker } from "../lib/data-backup-docker.ts";
 import {
@@ -21,7 +27,11 @@ import {
 } from "../lib/data-backup-export.ts";
 import { HACK_VERSION } from "../lib/hack-version.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
-import { scopedHackCommand } from "../lib/printed-shell-command.ts";
+import {
+  canPrintPathSelector,
+  printedShellCommand,
+  scopedHackCommand,
+} from "../lib/printed-shell-command.ts";
 import { resolveEffectiveProjectName } from "../lib/project.ts";
 import {
   type ComposeRuntimeModel,
@@ -50,13 +60,33 @@ const exportSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const optNonce = defineOption({
+  name: "nonce",
+  type: "string",
+  long: "--nonce",
+  valueHint: "<nonce>",
+  description:
+    "The io.hack.data-backup.nonce label value a data command's refusal named",
+} as const);
+
+const cleanupSpec = defineCommand({
+  name: "cleanup",
+  summary: "Remove a helper container a data command could not track",
+  group: "Project",
+  description:
+    "Removes the containers labeled io.hack.data-backup.nonce=<nonce>, which a data command's refusal names when a helper create's outcome could not be reconciled, on the engine the project's managed env selects (as export resolves it), by ID with removal confirmed. Never removes a volume.",
+  options: [optPath, optProject, optBranch, optEnv, optNonce, optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
 const dataSpec = defineCommand({
   name: "data",
   summary: "Back up project volume data",
   group: "Project",
   options: [],
   positionals: [],
-  subcommands: [exportSpec],
+  subcommands: [exportSpec, cleanupSpec],
 } as const);
 
 /**
@@ -109,6 +139,12 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
       env: model.env,
       cwd: model.cwd,
       captureTimeoutMs: deadlines.commandMs,
+      hackCleanupCommand: dataCleanupCommand({
+        path: args.options.path,
+        project: args.options.project,
+        branch: branch ?? undefined,
+        env: args.options.env,
+      }),
     }),
     deadlines,
     composeArgs: dataComposeArgs(model),
@@ -184,7 +220,110 @@ export function renderDataExportText(result: DataExportResult): string {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * The `hack data cleanup --nonce <nonce>` line for a data command's
+ * selection (project, instance and `--env` when it had one), so cleanup
+ * runs on the same engine. A path that looks like a pasted assignment is
+ * left out, as for every printed command.
+ */
+export function dataCleanupCommand(selection: {
+  readonly path?: string;
+  readonly project?: string;
+  readonly branch?: string;
+  readonly env?: string;
+}): (nonce: string) => string {
+  return (nonce) => {
+    const argv = [currentCandidateLauncher().command, "data", "cleanup"];
+    if (selection.path !== undefined && canPrintPathSelector(selection.path)) {
+      argv.push(`--path=${selection.path}`);
+    }
+    for (const [name, value] of [
+      ["project", selection.project],
+      ["branch", selection.branch],
+      ["env", selection.env],
+    ] as const) {
+      if (value !== undefined) {
+        argv.push(`--${name}=${value}`);
+      }
+    }
+    argv.push(`--nonce=${nonce}`);
+    return printedShellCommand(argv);
+  };
+}
+
+const handleCleanup: CommandHandlerFor<typeof cleanupSpec> = async ({
+  ctx,
+  args,
+}) => {
+  requireComposeBackendForDataExport(process.env.HACK_RUNTIME_BACKEND);
+  const json = args.options.json === true;
+  const nonce = args.options.nonce;
+  if (nonce === undefined || !HELPER_NONCE_PATTERN.test(nonce)) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message:
+        "hack data cleanup needs --nonce <nonce>: the 32-character hex value of the io.hack.data-backup.nonce label a data command's refusal named.",
+    });
+  }
+  const project = await resolveProjectForArgs({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
+  });
+  const branch = await resolveEffectiveBranchForCommand({
+    project,
+    branchOption: args.options.branch,
+    noticeToStderr: json,
+  });
+  const deadlines = resolveDataBackupDeadlines();
+  // The managed env exactly as export resolves it: the same engine.
+  const model = await resolveComposeRuntimeModel({
+    project,
+    branch,
+    envName: resolveRequestedEnvName({ envOption: args.options.env }),
+  });
+  const result = await cleanupDataHelpers({
+    docker: createHostDataBackupDocker({
+      env: model.env,
+      cwd: model.cwd,
+      captureTimeoutMs: deadlines.commandMs,
+    }),
+    nonce,
+    deadlines,
+  });
+  if (result.unconfirmed.length > 0) {
+    throw new HackCliError({
+      code: "E_UNEXPECTED",
+      message: `Docker could not confirm the removal of ${result.unconfirmed.length} container${result.unconfirmed.length === 1 ? "" : "s"} labeled ${result.label} (${result.unconfirmed.map((id) => id.slice(0, 12)).join(", ")}); retry, or remove ${result.unconfirmed.length === 1 ? "it" : "them"} with \`docker rm -f <id>\`.`,
+      detail: result,
+    });
+  }
+  if (json) {
+    emitCliResult({
+      result: machineSuccess({
+        schema: MACHINE_SCHEMAS.dataCleanup,
+        data: result,
+      }),
+    });
+  } else {
+    process.stdout.write(renderDataCleanupText(result));
+  }
+  return 0;
+};
+
+/** Text summary of a cleanup: what was removed, or that nothing matched. */
+export function renderDataCleanupText(result: DataCleanupResult): string {
+  if (result.removed.length === 0) {
+    return `No container is labeled ${result.label}; nothing to remove.\n`;
+  }
+  return `Removed ${result.removed.length} container${result.removed.length === 1 ? "" : "s"} labeled ${result.label}: ${result.removed.map((id) => id.slice(0, 12)).join(", ")}.\n`;
+}
+
 export const dataCommand = {
   ...dataSpec,
-  subcommands: [withHandler(exportSpec, handleExport)],
+  subcommands: [
+    withHandler(exportSpec, handleExport),
+    withHandler(cleanupSpec, handleCleanup),
+  ],
 } as const;

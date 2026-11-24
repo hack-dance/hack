@@ -19,6 +19,7 @@ export const MACHINE_SCHEMAS = {
   doctorMachine: "hack.doctor.machine.v1",
   envOverlays: "hack.env-overlays.v1",
   dataExport: "hack.data-export.v1",
+  dataCleanup: "hack.data-cleanup.v1",
 } as const;
 
 export function machineSuccess<T extends object>(opts: {

@@ -439,6 +439,7 @@ export const dataExportScenario: Scenario = {
       // During the copy Hack holds a Docker reference to the volume: its
       // removal is refused and the export completes with the right digest.
       await removalRefusedDuringCopy({ ctx, fixture, project, volume: data });
+      await cleanupRemovesLabeledHelper({ ctx, fixture, volume: data });
       await replacedWithinOneSecond({ ctx, fixture, project, volume: data });
       await recreateVolume({ ctx, project, volume: data });
       await removedBeforeReference({ ctx, fixture, project, volume: data });
@@ -945,6 +946,62 @@ async function unrelatedBindPublishes(opts: {
     result: await docker(ctx, ["rm", "--force", opts.holder]),
     codes: [0],
     message: "remove the unrelated bind container",
+  });
+}
+
+/**
+ * A helper left behind under a nonce (as after a create whose outcome Hack
+ * could not reconcile), referencing the volume: `hack data cleanup --nonce`
+ * removes exactly it, by ID, and the volume stays.
+ */
+async function cleanupRemovesLabeledHelper(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly volume: string;
+}): Promise<void> {
+  const { ctx } = opts;
+  const nonce = new Bun.CryptoHasher("sha256")
+    .update(`${ctx.tempRoot}-cleanup`)
+    .digest("hex")
+    .slice(0, 32);
+  const left = await docker(ctx, [
+    "create",
+    "--network",
+    "none",
+    "--label",
+    `io.hack.data-backup.nonce=${nonce}`,
+    "--mount",
+    `type=volume,src=${opts.volume},dst=/v,volume-nocopy`,
+    "--entrypoint",
+    "true",
+    HELPER,
+  ]);
+  expectExit({
+    result: left,
+    codes: [0],
+    message: "leave a labeled helper behind",
+  });
+  const id = left.stdout.trim();
+  const cleaned = await ctx.cli({
+    args: ["data", "cleanup", "--nonce", nonce, "--json"],
+    cwd: opts.fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  const payload = extractJsonObject<{
+    data?: { schema?: string; removed?: string[] };
+  }>({ text: cleaned.stdout });
+  const gone = await docker(ctx, ["container", "inspect", id]);
+  const kept = await docker(ctx, ["volume", "inspect", opts.volume]);
+  expect({
+    that:
+      cleaned.exitCode === 0 &&
+      payload?.data?.schema === "hack.data-cleanup.v1" &&
+      JSON.stringify(payload.data.removed) === JSON.stringify([id]) &&
+      gone.exitCode !== 0 &&
+      kept.exitCode === 0,
+    message:
+      "hack data cleanup should remove the labeled helper by ID and keep the volume",
+    result: cleaned,
   });
 }
 

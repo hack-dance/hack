@@ -888,8 +888,17 @@ pub(crate) fn read_daemon_status(
 }
 
 pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
+    trusted_tool_path_with(path, uid, directory, |_, _| false)
+}
+
+fn trusted_tool_path_with(
+    path: &Path,
+    uid: u32,
+    directory: bool,
+    writable_dir: fn(&Path, &std::fs::Metadata) -> bool,
+) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
-    if !crate::doctor_plugins::guarded_names(path, uid, &mut 64, false) {
+    if !crate::doctor_plugins::guarded_names_with(path, uid, &mut 64, false, writable_dir) {
         return None;
     }
     let real = std::fs::canonicalize(path).ok()?;
@@ -900,7 +909,9 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
             || (index > 0 || directory) && !meta.is_dir()
             || (index == 0 && !directory && (!meta.is_file() || meta.mode() & 0o111 == 0))
             || (meta.uid() != uid && meta.uid() != 0)
-            || (meta.mode() & 0o022 != 0 && !sticky_root)
+            || (meta.mode() & 0o022 != 0
+                && !sticky_root
+                && !(index > 0 && writable_dir(component, &meta)))
         {
             return None;
         }

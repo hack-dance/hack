@@ -81,6 +81,8 @@ impl std::fmt::Display for InstanceKey {
 /// Navigation intent for the service detail pane, scoped to an instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceDestination {
+    Info,
+    Stats,
     Logs,
     Terminal,
     Files,
@@ -298,8 +300,8 @@ pub struct AppModel {
     selected: Option<InstanceKey>,
     selected_service: Option<ServiceSelection>,
     local: HashMap<InstanceKey, LocalContext>,
+    service_actions: HashMap<InstanceKey, String>,
     action_errors: HashMap<InstanceKey, String>,
-    service_actions: std::collections::HashSet<InstanceKey>,
     loaded_once: bool,
     refresh_sequence: u64,
     applied_sequence: u64,
@@ -595,8 +597,8 @@ impl AppModel {
         self.snapshot = None;
         self.last_error = None;
         self.local.clear();
-        self.action_errors.clear();
         self.service_actions.clear();
+        self.action_errors.clear();
         self.loaded_once = false;
         // Shells the other CLI's reads reported are not this one's.
         self.shells.clear();
@@ -679,11 +681,10 @@ impl AppModel {
                 false
             }
             Event::ActionStarted { key, action } => {
-                let ctx = self.local.entry(key.clone()).or_default();
-                if ctx.in_flight.is_some() {
+                if self.action_in_flight(&key) {
                     return false;
                 }
-                ctx.in_flight = Some(action);
+                self.local.entry(key.clone()).or_default().in_flight = Some(action);
                 self.action_epoch += 1;
                 self.action_errors.remove(&key);
                 false
@@ -792,7 +793,10 @@ impl AppModel {
     /// evidence: a failed start can leave containers never created.
     fn clear_recovered_failures(&mut self, s: &Snapshot) {
         for (key, ctx) in &mut self.local {
-            if ctx.last_failed.is_empty() || ctx.in_flight.is_some() {
+            if ctx.last_failed.is_empty()
+                || ctx.in_flight.is_some()
+                || self.service_actions.contains_key(key)
+            {
                 continue;
             }
             let Some(row) = instance_row(s, key) else {
@@ -813,45 +817,57 @@ impl AppModel {
         }
     }
 
-    /// Can an action start for this instance now? Each instance has its
-    /// own single flight: a branch action does not block the base.
-    #[must_use]
-    pub fn can_start(&self, key: &InstanceKey) -> bool {
-        self.last_error.is_none()
-            && self.local.get(key).is_none_or(|c| c.in_flight.is_none())
-            && !self.service_actions.contains(key)
-    }
-
-    pub fn begin_service_action(&mut self, key: &InstanceKey) -> bool {
+    /// A scoped action shares the instance's single flight and refresh epoch.
+    /// Its in-flight state does not override the state of the whole copy.
+    pub fn start_service_action(&mut self, key: &InstanceKey, service: &str) -> bool {
         if !self.can_start(key) {
             return false;
         }
-        self.service_actions.insert(key.clone());
+        self.service_actions.insert(key.clone(), service.to_owned());
         self.action_errors.remove(key);
         self.action_epoch += 1;
         true
     }
 
+    /// Apply only the changes that belong to the named service.
     pub fn finish_service_action(
         &mut self,
         key: InstanceKey,
+        action: Action,
         result: Result<LifecycleResult, ServiceActionError>,
-    ) {
-        self.service_actions.remove(&key);
+    ) -> bool {
+        let Some(service) = self.service_actions.remove(&key) else {
+            return false;
+        };
         self.action_epoch += 1;
+        let failed = &mut self.local.entry(key.clone()).or_default().last_failed;
         match result {
             Ok(receipt) => {
+                failed.retain(|name| name != &service);
+                if action == Action::Restart && receipt.services.failed.contains(&service) {
+                    failed.push(service);
+                }
                 if let Some(stopped_at) = receipt.stopped_at {
                     self.record_service_stop(&key, receipt.stopped_containers, &stopped_at);
                 }
             }
             Err(error) => {
+                if action == Action::Restart
+                    && let SourceError::Cli {
+                        failed: reported, ..
+                    } = error.source.as_ref()
+                    && reported.contains(&service)
+                    && !failed.contains(&service)
+                {
+                    failed.push(service);
+                }
                 if let Some(receipt) = error.stopped {
                     self.record_service_stop(&key, receipt.stopped_containers, &receipt.stopped_at);
                 }
                 self.action_errors.insert(key, describe(&error.source));
             }
         }
+        true
     }
 
     /// Remember only executions whose stop was confirmed by the CLI.
@@ -877,6 +893,18 @@ impl AppModel {
                     },
                 )
             }));
+    }
+
+    /// Can an action start for this instance now? Each instance has its
+    /// own single flight: a branch action does not block the base.
+    #[must_use]
+    pub fn can_start(&self, key: &InstanceKey) -> bool {
+        self.last_error.is_none() && !self.action_in_flight(key)
+    }
+
+    fn action_in_flight(&self, key: &InstanceKey) -> bool {
+        self.service_actions.contains_key(key)
+            || self.local.get(key).is_some_and(|c| c.in_flight.is_some())
     }
 
     /// The last good snapshot, if any.
@@ -945,6 +973,10 @@ impl AppModel {
     #[must_use]
     pub fn selected_service(&self) -> Option<&ServiceSelection> {
         self.selected_service.as_ref()
+    }
+
+    pub fn clear_service_selection(&mut self) {
+        self.selected_service = None;
     }
 
     /// Search includes service names in closed copies, without expanding them.
@@ -1243,7 +1275,7 @@ impl AppModel {
             } else {
                 None
             },
-            busy: local.in_flight.is_some() || self.service_actions.contains(&key),
+            busy: self.action_in_flight(&key),
             runtime_addressable: can_target && row.repo_root.is_some(),
             shells: if can_target {
                 self.shells
@@ -1329,6 +1361,38 @@ fn describe(e: &SourceError) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_actions_preserve_other_failures_and_the_observed_instance_state() {
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(fixtures::snapshot(Fixture::Running)));
+        model.apply(Event::Select("storefront".into()));
+        let key = model.selected_key().unwrap();
+        model.local.entry(key.clone()).or_default().last_failed = vec!["web".into(), "api".into()];
+        let observed = model.detail().unwrap().state;
+        let ok = || Ok(LifecycleResult::default());
+
+        assert!(model.start_service_action(&key, "api"));
+        assert!(!model.can_start(&key));
+        assert!(model.detail().unwrap().busy);
+        assert_eq!(model.detail().unwrap().state, observed);
+        assert!(model.finish_service_action(key.clone(), Action::Stop, ok()));
+        assert!(model.can_start(&key));
+        assert_eq!(model.local_for(&key).last_failed, ["web"]);
+
+        assert!(model.start_service_action(&key, "api"));
+        let failure = Err(SourceError::Cli {
+            code: "E_RESTART".into(),
+            message: "Restart failed".into(),
+            failed: vec!["api".into()],
+        }
+        .into());
+        assert!(model.finish_service_action(key.clone(), Action::Restart, failure));
+        assert_eq!(model.local_for(&key).last_failed, ["web", "api"]);
+        assert!(model.start_service_action(&key, "api"));
+        assert!(model.finish_service_action(key.clone(), Action::Restart, ok()));
+        assert_eq!(model.local_for(&key).last_failed, ["web"]);
+    }
+
     #[test]
     fn a_branch_instance_url_is_its_instance_host_not_a_service_route() {
         let mut m = AppModel::new();
@@ -2533,11 +2597,11 @@ mod tests {
             model.selected_service().map(|s| &s.instance),
             Some(&feature)
         );
-        assert!(model.begin_service_action(&feature));
+        assert!(model.start_service_action(&feature, "api"));
         assert!(model.detail().unwrap().busy);
         assert!(model.detail().unwrap().state.is_active());
         assert!(model.can_start(&release));
-        model.finish_service_action(feature, Ok(LifecycleResult::default()));
+        model.finish_service_action(feature, Action::Stop, Ok(LifecycleResult::default()));
 
         model.apply(Event::SelectInstance(release.clone()));
         assert!(model.selected_service().is_none());
@@ -2661,9 +2725,10 @@ mod tests {
         let mut model = AppModel::new();
         model.apply(Event::Refreshed(Ok(snapshot.clone())));
         model.apply(Event::SelectInstance(key.clone()));
-        assert!(model.begin_service_action(&key));
+        assert!(model.start_service_action(&key, "api"));
         model.finish_service_action(
             key,
+            Action::Stop,
             Err(crate::runner::RunError::Cli(crate::models::CliError {
                 code: "E_COMPOSE_FAILED".into(),
                 message: "Could not stop api (Docker exit 1).".into(),

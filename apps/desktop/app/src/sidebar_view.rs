@@ -2,7 +2,9 @@ use gpui_kit::base::{Popover, TestSupportExt as _};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{AnyElement, Context, Div, Stateful, Window, div, prelude::*, px};
 use hack_desktop_core::state::{Action, ProjectState, ServiceView};
-use hack_desktop_core::viewmodel::{DetailView, InstanceKey, ListView, Row, ServiceDestination};
+use hack_desktop_core::viewmodel::{DetailView, InstanceKey, ListView, Row};
+
+use crate::service_view::ServiceTab;
 use hack_desktop_ui::components::{StyledExt as _, Ui, dot, icon, icon_button};
 use hack_desktop_ui::icons::Glyph;
 use hack_desktop_ui::status::{Status, project_label};
@@ -290,6 +292,8 @@ impl HackApp {
         };
         let app = cx.entity().downgrade();
         let menu_name = service.name.clone();
+        let menu_key = detail.key.clone();
+        let service_key = detail.key.clone();
         let mut actions = div().flex_none().flex().items_center().gap(space::S1);
         if let Some(url) = service_url(service) {
             actions = actions.child(
@@ -315,11 +319,10 @@ impl HackApp {
             Popover::new("service-menu")
                 .open(menu_open)
                 .trigger_with(move |_, _, _| more)
-                .on_open_change(move |open, _, cx| {
+                .on_open_change(move |open, window, cx| {
                     let _ = app.update(cx, |app, cx| {
                         if *open {
-                            app.model
-                                .select_service(menu_name.clone(), ServiceDestination::Logs);
+                            app.select_service(menu_key.clone(), menu_name.clone(), window, cx);
                             app.sidebar_menu = Some(menu_name.clone());
                         } else if app.sidebar_menu.as_deref() == Some(menu_name.as_str()) {
                             app.sidebar_menu = None;
@@ -350,10 +353,8 @@ impl HackApp {
                     .focusable()
                     .tab_stop(true)
                     .child(name(service.name.clone(), selected, ui))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.model
-                            .select_service(service_name.clone(), ServiceDestination::Logs);
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_service(service_key.clone(), service_name.clone(), window, cx);
                     }))
                     .test_support(),
             )
@@ -515,35 +516,16 @@ impl HackApp {
                 }
             }
             ServiceCommand::Logs => {
-                self.model
-                    .select_service(service.clone(), ServiceDestination::Logs);
-                let changed = self.logs.model.set_service(Some(service));
-                if self.tab != 1 {
-                    self.set_tab(1, cx);
-                } else if changed {
-                    self.open_logs(cx);
-                }
+                self.select_service(key, service, window, cx);
+                self.set_service_tab(ServiceTab::Logs, window, cx);
             }
             ServiceCommand::Shell => {
-                self.model
-                    .select_service(service.clone(), ServiceDestination::Terminal);
-                #[cfg(hack_terminal)]
-                if let Some(detail) = self.model.detail() {
-                    self.ensure_panel(window, cx);
-                    self.open_tab(
-                        &detail,
-                        crate::terminal::NewTab::Container(service),
-                        window,
-                        cx,
-                    );
-                }
-                #[cfg(not(hack_terminal))]
-                let _ = window;
+                self.select_service(key, service, window, cx);
+                self.set_service_tab(ServiceTab::Terminal, window, cx);
             }
             ServiceCommand::Files => {
-                self.model
-                    .select_service(service.clone(), ServiceDestination::Files);
-                self.open_project_files(service, cx);
+                self.select_service(key, service, window, cx);
+                self.set_service_tab(ServiceTab::Files, window, cx);
             }
             ServiceCommand::Restart => self.run_service_action(key, &service, Action::Restart, cx),
             ServiceCommand::Stop => self.run_service_action(key, &service, Action::Stop, cx),

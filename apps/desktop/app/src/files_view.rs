@@ -35,15 +35,6 @@ pub(crate) struct ProjectFiles {
 }
 
 impl HackApp {
-    pub(crate) fn open_project_files(&mut self, service: String, cx: &mut Context<Self>) {
-        let Some(key) = self.model.selected_key() else {
-            return;
-        };
-        self.set_tab(FILES_TAB, cx);
-        self.files.service = Some((key, service));
-        cx.notify();
-    }
-
     pub(crate) fn project_files(
         &mut self,
         detail: &DetailView,
@@ -102,6 +93,12 @@ impl HackApp {
 
     pub(crate) fn files_service<'a>(&'a self, detail: &'a DetailView) -> Option<&'a String> {
         let services = &detail.services;
+        if let Some(selected) = self.model.selected_service().filter(|selected| {
+            selected.instance == detail.key
+                && selected.destination == hack_desktop_core::viewmodel::ServiceDestination::Files
+        }) {
+            return Some(&selected.name);
+        }
         self.files
             .service
             .as_ref()

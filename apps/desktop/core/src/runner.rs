@@ -67,6 +67,8 @@ impl std::fmt::Display for RunError {
     }
 }
 
+type VerifyProgram = fn(&Path) -> Result<(), RunError>;
+
 #[derive(Debug, Clone)]
 pub struct CliRunner {
     program: PathBuf,
@@ -82,7 +84,7 @@ pub struct CliRunner {
     clear_env: bool,
     /// Refuse to run `program` unless no other user can change it or the
     /// directories above it ([`Self::verified`]).
-    verify: bool,
+    verify: Option<VerifyProgram>,
     /// The name [`Self::on_path`] searched for; [`Self::rediscover`] searches
     /// for it again.
     path_name: Option<String>,
@@ -225,7 +227,7 @@ impl CliRunner {
             term_grace: TERM_GRACE,
             strip_startup: false,
             clear_env: false,
-            verify: false,
+            verify: None,
             path_name: None,
             pinned: None,
         }
@@ -305,7 +307,7 @@ impl CliRunner {
     #[must_use]
     pub fn verified(program: impl Into<PathBuf>) -> Self {
         let mut runner = Self::new(program);
-        runner.verify = true;
+        runner.verify = Some(trusted_cli);
         runner
     }
 
@@ -324,8 +326,8 @@ impl CliRunner {
     /// `NotFound`, or `Spawn` for a verified CLI others can change.
     pub fn resolve_program(&self) -> Result<PathBuf, RunError> {
         let program = self.program_path().ok_or(RunError::NotFound)?;
-        if self.verify {
-            trusted_cli(&program)?;
+        if let Some(verify) = self.verify {
+            verify(&program)?;
         }
         Ok(program)
     }
@@ -535,8 +537,8 @@ impl CliRunner {
 
     fn spawn_io(&self, args: &[&str], path: Option<&Path>, input: bool) -> Result<Child, RunError> {
         let program = self.current_program().ok_or(RunError::NotFound)?;
-        if self.verify {
-            trusted_cli(&program)?;
+        if let Some(verify) = self.verify {
+            verify(&program)?;
         }
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry

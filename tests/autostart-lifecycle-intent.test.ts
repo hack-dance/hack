@@ -1316,12 +1316,13 @@ test.skipIf(!Bun.which("tmux"))(
       expect(created?.backend).toBe("tmux");
       const second = await run(["up", "-d", "--json"], false, undefined, env);
       expect(second.exitCode, second.stderr + second.stdout).toBe(0);
-      const [adopted] = await readLifecycleState({ projectDir });
-      expect(adopted?.ownershipToken).toBe(created?.ownershipToken);
-      expect(adopted?.cleanupEpoch).not.toBe(created?.cleanupEpoch);
+      const adopted = await readLifecycleState({ projectDir });
+      expect(adopted).toHaveLength(1);
+      expect(adopted[0]?.ownershipToken).toBe(created?.ownershipToken);
+      expect(adopted[0]?.cleanupEpoch).not.toBe(created?.cleanupEpoch);
       await Bun.write(release, "release");
       expect((await first).exitCode).toBe(7);
-      expect(await readLifecycleState({ projectDir })).toEqual([adopted]);
+      expect(await readLifecycleState({ projectDir })).toEqual(adopted);
       expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
     } finally {
       await Bun.write(release, "release");

@@ -181,6 +181,23 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "project-remote-selection",
+    module: "ProjectRemoteSelection",
+    states: 11,
+    invariant: "TeardownUsesStartedTarget",
+    action: "Teardown",
+    fields: ['hook = "pending"', 'started = "none"', 'record = "none"'],
+    additionalControls: [
+      {
+        name: "stale-negative",
+        negative: true,
+        invariant: "ActiveLabelWins",
+        action: "Teardown",
+        fields: ["stale = TRUE", 'label = "qa"', 'hook = "none"'],
+      },
+    ],
+  },
+  {
     name: "guest-execution",
     module: "GuestAgent",
     states: 3900,

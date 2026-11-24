@@ -34,6 +34,18 @@ import {
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
+import {
+  extendRemoteEnv,
+  observedRemoteChoices,
+  prepareRemoteDown,
+  prepareRemoteStartup,
+  recordStartedRemotes,
+  remotePrerequisites,
+} from "../lib/project-remote-compose.ts";
+import {
+  prepareRemoteChoices,
+  refuseRemoteStart,
+} from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import {
   selectLifecycleAddress,
@@ -186,6 +198,7 @@ import {
   optSince,
   optTail,
   optUntil,
+  optUse,
 } from "../cli/options.ts";
 import {
   parseProjectSelectorOption,
@@ -768,6 +781,7 @@ const upOptions = [
   optPath,
   optProject,
   optEnv,
+  optUse,
   optBranch,
   optDetach,
   optProfile,
@@ -7632,6 +7646,9 @@ async function handleUpUnlocked({
   if (args.options.refreshImages && args.options.offline) {
     throw new CliUsageError("Use either --refresh-images or --offline.");
   }
+  if (native && args.options.use !== undefined) {
+    throw new CliUsageError("--use requires the Compose backend.");
+  }
   if (native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,
@@ -7867,9 +7884,15 @@ async function runUpCommand({
     throw error;
   }
   const cfg = await readProjectConfig(project);
+  const choices = await prepareRemoteChoices({
+    projectDir: project.projectDir,
+    defaults: cfg.prerequisites?.config?.selected ?? [],
+    services: args.positionals.services,
+    use: args.options.use,
+  });
   if (
     !(await enforceProjectPrerequisites(
-      cfg.prerequisites,
+      remotePrerequisites(cfg, choices),
       json,
       project.projectRoot,
       { composeFile: project.composeFile, services: args.positionals.services }
@@ -7975,7 +7998,17 @@ async function runUpCommand({
         composeFile: project.composeFile,
       })
     : null;
-  const targetServices = serviceScoped ? requestedServices : allServiceNames;
+  const remoteStartup = await prepareRemoteStartup({
+    project,
+    baseProjectName,
+    composeProject: composeProjectName,
+    profiles,
+    envName,
+    choices,
+  });
+  const targetServices =
+    remoteStartup?.targets ??
+    (serviceScoped ? requestedServices : allServiceNames);
   const cacheBootstrapServices = scopedDependencyCache
     ? await resolveDependencyCacheBootstrapServices({
         composeFile: project.composeFile,
@@ -7986,7 +8019,7 @@ async function runUpCommand({
   const preparedServices = [
     ...new Set([...targetServices, ...cacheBootstrapServices]),
   ];
-  const envOverrides = await resolveComposeEnvOverrides({
+  const managedOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
     targetServices: preparedServices,
@@ -7994,6 +8027,11 @@ async function runUpCommand({
     envName,
   });
 
+  const envOverrides = extendRemoteEnv(
+    managedOverrides,
+    remoteStartup,
+    choices
+  );
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
@@ -8259,6 +8297,7 @@ async function runUpCommand({
       return bootstrapCode;
     }
     const upPhase = trackComposeStartupPhase();
+    await remoteStartup?.stopInactive();
     containerStartBegun = true;
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,
@@ -8299,7 +8338,7 @@ async function runUpCommand({
           cwd: dirname(project.composeFile),
           env: envOverrides.env,
           routeStdoutToStderr: json,
-          services: serviceScoped ? targetServices : undefined,
+          services: serviceScoped || remoteStartup ? targetServices : undefined,
           noDeps: serviceScoped,
         }),
     });
@@ -8489,6 +8528,11 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
+    await recordStartedRemotes(
+      project.projectDir,
+      lifecycleComposeProject,
+      choices
+    );
     if (!showBeforeAfter) {
       progress?.services(startup);
     }
@@ -9114,6 +9158,13 @@ async function runDownCommand({
     envName: effectiveEnvName,
   });
 
+  const hookEnv = await prepareRemoteDown({
+    project,
+    cfg,
+    composeProjectName,
+    lifecycleComposeProject,
+    env: lifecycleEnv,
+  });
   const interruptionCheck = await checkOneShotInterruption({
     project,
     composeProjectName,
@@ -9178,7 +9229,7 @@ async function runDownCommand({
       title: "Lifecycle (down before)",
       commands: cfg.lifecycle?.down?.before,
       projectRoot: project.projectRoot,
-      env: lifecycleEnv,
+      env: hookEnv,
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
     });
@@ -9342,7 +9393,7 @@ async function runDownCommand({
     title: "Lifecycle (down after)",
     commands: cfg.lifecycle?.down?.after,
     projectRoot: project.projectRoot,
-    env: lifecycleEnv,
+    env: hookEnv,
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
@@ -10413,6 +10464,7 @@ async function handleRestart({
         ...args,
         options: {
           ...args.options,
+          use: undefined,
           detach: false,
           always: false,
           refreshImages: false,
@@ -10478,6 +10530,7 @@ async function runRestartCommand({
     projectOpt: args.options.project,
   });
   const cfg = await readProjectConfig(project);
+  refuseRemoteStart(cfg.prerequisites?.config?.selected, "hack restart");
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
@@ -11432,7 +11485,10 @@ async function handlePs({
     }),
     entries,
   });
-  const remotes = projectRemoteStatuses(cfg.prerequisites?.config?.selected);
+  const remotes = projectRemoteStatuses(
+    cfg.prerequisites?.config?.selected,
+    await observedRemoteChoices(project, cfg, composeProjectName, entries)
+  );
   if (json) {
     const payload = {
       project: baseProjectName,
@@ -11607,6 +11663,7 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
+  refuseRemoteStart(cfg.prerequisites?.config?.selected, "hack run");
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,

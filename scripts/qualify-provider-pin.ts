@@ -570,6 +570,32 @@ export interface Options {
   run: boolean;
 }
 
+const DEVELOPMENT_DISK_BUDGETS = {
+  fresh: ["new-pool-storage-overlay-host-reserve", 58 * GIB],
+  running: ["verified-live-owned-pool-host-reserve", 16 * GIB],
+  stopped: ["verified-stopped-owned-pool-host-reserve", 16 * GIB],
+} as const;
+
+type DevelopmentPool = keyof typeof DEVELOPMENT_DISK_BUDGETS;
+
+/** Verify the public probe's budget independently of the runtime's constants. */
+export function matchesDevelopmentDiskBudget(
+  probe: Record<string, unknown>,
+  pool: DevelopmentPool
+): boolean {
+  const [basis, minimum] = DEVELOPMENT_DISK_BUDGETS[pool];
+  const free = probe.disk_free_bytes;
+  return (
+    probe.profile === "development" &&
+    probe.host_supported === true &&
+    probe.disk_budget_basis === basis &&
+    probe.minimum_disk_free_bytes === minimum &&
+    typeof free === "number" &&
+    Number.isSafeInteger(free) &&
+    free >= 0
+  );
+}
+
 const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hack-v5 --home /abs/empty-private-root \\
   --provider-archive /abs/smolvm-<v>-darwin-arm64.tar.gz --engine-archive /abs/docker-<v>.tgz \\
   --builder-archive /abs/pinned-buildx --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
@@ -971,6 +997,25 @@ const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 /** A candidate home's provider `$HOME` (the runtime's `run/smolvm/home`). */
 const PROVIDER_HOME = join(".hack-local", "run", "smolvm", "home");
 
+/** Each wget invocation opens a fresh connection through the same relay. */
+export const RELAY_CYCLES_SCRIPT = `set -eu
+payload=$(mktemp)
+trap 'rm -f "$payload"' EXIT
+cycle=1
+while [ "$cycle" -le 256 ]; do
+  if ! wget -q -T 3 -O "$payload" http://dependency.qualification.test/blob; then
+    echo "relay cycle $cycle: download failed" >&2
+    exit 1
+  fi
+  sum=$(sha256sum "$payload")
+  if [ "\${sum%% *}" != "${BLOB_SHA256}" ]; then
+    echo "relay cycle $cycle: payload digest mismatch" >&2
+    exit 1
+  fi
+  cycle=$((cycle + 1))
+done
+printf '%s\\n' "$((cycle - 1))"`;
+
 export class Qualification {
   /** Read boundary for testing a stale diagnostic snapshot racing with child exit. */
   readStartupOutput = startupOutput;
@@ -1358,20 +1403,10 @@ export class Qualification {
       this.runtime(this.aux, `aux-${name}`, [...args]);
       this.runtime(this.isolated, `isolated-${name}`, [...args]);
     }
-    const probe = this.runtime(this.main, "probe", [
-      "runtime",
-      "probe",
-      "--profile",
-      "development",
-      "--json",
-    ]);
+    const probe = this.probeDevelopmentBudget("fresh");
     writeFileSync(
       join(this.evidence, "probe.json"),
       JSON.stringify(probe, null, 2)
-    );
-    this.check(
-      "runtime probe answers for the development profile",
-      typeof probe === "object"
     );
     const templates = join(this.main, PROVIDER_HOME, ".smolvm");
     this.check(
@@ -1380,6 +1415,25 @@ export class Qualification {
         existsSync(join(templates, name))
       )
     );
+  }
+
+  probeDevelopmentBudget(pool: DevelopmentPool): Record<string, unknown> {
+    const probe = this.runtime(
+      this.main,
+      `probe-development-${pool}`,
+      ["runtime", "probe", "--profile", "development", "--json"],
+      60
+    );
+    this.check(
+      `development disk budget matches the ${pool} pool`,
+      matchesDevelopmentDiskBudget(probe, pool),
+      JSON.stringify({
+        basis: probe.disk_budget_basis,
+        minimum: probe.minimum_disk_free_bytes,
+        free: probe.disk_free_bytes,
+      })
+    );
+    return probe;
   }
 
   /**
@@ -2048,6 +2102,7 @@ export class Qualification {
     Record<string, { size: number; ino: number; dev: number }>
   > {
     this.step = "4 disk identity";
+    this.probeDevelopmentBudget("running");
     const identity = this.diskIdentity();
     const expected = PROFILE_DISKS.development;
     this.check(
@@ -2162,6 +2217,15 @@ export class Qualification {
     );
   }
 
+  relayCycles(): void {
+    const result = this.inContainer("relay-cycles", "web", RELAY_CYCLES_SCRIPT);
+    this.check(
+      "relay: 256 successive connections return the complete payload",
+      result.trim() === "256",
+      result.trim()
+    );
+  }
+
   async run(): Promise<number> {
     mkdirSync(this.evidence, { mode: 0o700 });
     for (const directory of ["user-home", "cli-home", "tmp"]) {
@@ -2216,6 +2280,7 @@ export class Qualification {
           // admission never has to fit both pools.
           await this.ensureDown("down-before-network");
           this.stopMainPool("network");
+          this.probeDevelopmentBudget("stopped");
           this.networkModes();
         },
       ],
@@ -2225,6 +2290,7 @@ export class Qualification {
         async () => {
           const ready = await this.upForeground("up-relay", "up");
           this.relay("relay");
+          this.relayCycles();
           await this.upForeground(
             "restart-relay",
             "restart",

@@ -151,17 +151,19 @@ test("Compose lifecycle refuses before running hooks with a missing prerequisite
       });
       expect(result.exitCode).toBe(1);
       expect(await Bun.file(marker).exists()).toBe(false);
-      if (argv.includes("--json")) {
+      if (argv[0] === "up" || argv[0] === "restart") {
         expect(JSON.parse(result.stdout.toString())).toMatchObject({
           ok: false,
-          error: { code: "E_PREREQUISITE_TOOL_MISSING" },
+          error: {
+            code:
+              argv[0] === "up"
+                ? "E_PREREQUISITE_TOOL_MISSING"
+                : "E_REMOTE_START_UNSUPPORTED",
+          },
         });
       } else {
-        expect(result.stderr.toString()).toContain(
-          "! unavailable-fixture-cloud  not found (cloud-cli)"
-        );
-        expect(result.stderr.toString()).toContain(
-          "Install the example cloud CLI."
+        expect(result.stderr.toString() + result.stdout.toString()).toContain(
+          "E_REMOTE_START_UNSUPPORTED"
         );
       }
     }

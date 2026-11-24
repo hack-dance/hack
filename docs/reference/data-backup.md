@@ -45,16 +45,30 @@ instance is running, or when any other container that mounts one of the
 copied volumes is running. `error.detail.running` names them; stop the project
 with `hack down` and retry. Hack never stops anything for an export.
 
-After copying, it checks twice more before publishing. It reads Docker's
-event log for the whole copy window (`docker events --since <start> --until
-<now>`, volume `mount` and container `start` events): a mount of a copied
-volume by any container other than this run's own helpers refuses with
-`E_PROJECT_RUNNING` and `error.detail.mounts` (volume, container ID and name).
-This catches a short-lived writer that started and exited during the copy,
-which a `docker ps` snapshot cannot see. Each helper runs under a unique name
-(`hack-data-export-<random>`) so exactly those mounts are excluded. Then it
-lists running containers again. Either refusal leaves the copy unpublished in
-`<backup>.partial/`.
+Before its first check, the export subscribes to Docker's live event
+stream (`docker events`, volume `mount` and container `start` events, with no
+`--since`, so nothing depends on the engine's short event history). It proves
+the subscription live by running a no-op marker container
+(`hack-data-export-<random>-start`) and waiting for that container's start
+event; only then does it check for running containers and copy. Every helper
+runs under a unique name (`hack-data-export-<random>`), so its own mounts are
+told apart from anything else's. After the last copy it lists running
+containers again, runs an end marker and waits for its start event (the
+engine emits events in order, so every earlier event has then arrived), stops
+the subscription and decides:
+
+- a mount of a copied volume by any other container, even one that started
+  and exited during the copy, refuses with `E_PROJECT_RUNNING` and
+  `error.detail.mounts` (volume, container ID and name);
+- an event stream that ended before Hack stopped it, an unreadable event, or
+  a marker whose start event did not arrive within 30 seconds refuses with
+  `E_DOCKER_UNAVAILABLE`: Hack lost coverage and cannot prove nothing else
+  wrote.
+
+Either refusal leaves the copy unpublished in `<backup>.partial/`. On every
+path the events child is stopped (SIGTERM, a two-second drain, then SIGKILL)
+and awaited; on Ctrl-C or SIGTERM the export also force-removes its running
+helper containers by name before exiting.
 
 ## How it copies
 

@@ -3,13 +3,17 @@ import type { DataBackupDocker } from "./data-backup-docker.ts";
 import type { DataBackupVolume } from "./data-backup-format.ts";
 import {
   dataBackupHelperArgv,
-  foreignVolumeMounts,
   helperContainerName,
   helperFailure,
   parseJsonText,
   refuseRunning,
   treeDigest,
 } from "./data-backup-helper.ts";
+import {
+  foreignMountError,
+  type MountMonitor,
+  startMountMonitor,
+} from "./data-backup-mount-monitor.ts";
 import { type VerifiedBackup, verifyDataBackup } from "./data-backup-verify.ts";
 import {
   COMPOSE_PROJECT_LABEL,
@@ -42,6 +46,8 @@ export type DataImportInput = {
   readonly hackHome: string;
   readonly now?: () => Date;
   readonly downCommand?: string;
+  /** Bound for each event-stream marker (default 30 s). */
+  readonly markerTimeoutMs?: number;
 };
 
 /** How a target was prepared before extraction. */
@@ -100,7 +106,6 @@ export type DataTargetConflict = {
 export async function importProjectData(
   input: DataImportInput
 ): Promise<DataImportResult> {
-  const clock = input.now ?? (() => new Date());
   const backup = await verifyDataBackup(input.backupPath);
   const config = await input.docker.capture([
     ...input.composeArgs,
@@ -114,6 +119,49 @@ export async function importProjectData(
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
   requireSourceProject({ backup, plan, fromProject: input.fromProject });
   const { selected, skipped } = selectTargets({ backup, plan });
+  const helperNames = new Set<string>();
+  // Subscribe and prove coverage before the first running-container check.
+  const monitor = await startMountMonitor({
+    docker: input.docker,
+    purpose: "import",
+    helperNames,
+    markerTimeoutMs: input.markerTimeoutMs,
+  });
+  try {
+    const volumes = await importWithin({
+      input,
+      backup,
+      plan,
+      selected,
+      monitor,
+      helperNames,
+    });
+    return {
+      backup: backup.path,
+      backupId: backup.id,
+      sourceComposeProject: backup.manifest.composeProject,
+      composeProject: plan.composeProject,
+      volumes,
+      skipped,
+    };
+  } finally {
+    await monitor.stop();
+  }
+}
+
+async function importWithin(opts: {
+  readonly input: DataImportInput;
+  readonly backup: VerifiedBackup;
+  readonly plan: DeclaredVolumePlan;
+  readonly selected: readonly {
+    readonly volume: DataBackupVolume;
+    readonly name: string;
+  }[];
+  readonly monitor: MountMonitor;
+  readonly helperNames: Set<string>;
+}): Promise<readonly DataImportVolume[]> {
+  const { input, backup, plan, selected, monitor, helperNames } = opts;
+  const clock = input.now ?? (() => new Date());
   const stopCommand = input.downCommand ?? "hack down";
   const volumeNames = selected.map((entry) => entry.name);
   await refuseRunning({
@@ -124,7 +172,6 @@ export async function importProjectData(
     command: "import",
     lead: "The project is running, so its volumes cannot be restored safely; nothing was changed.",
   });
-  const helperNames = new Set<string>();
   const helperName = (): string => {
     const name = helperContainerName("import");
     helperNames.add(name);
@@ -139,7 +186,6 @@ export async function importProjectData(
     helperName,
   });
 
-  const since = clock();
   const composeVersion = targets.some((target) => target.kind === "created")
     ? await readComposeVersion(input.docker)
     : null;
@@ -157,20 +203,6 @@ export async function importProjectData(
       })
     );
   }
-  const mounts = await foreignVolumeMounts({
-    docker: input.docker,
-    since,
-    until: clock(),
-    volumeNames,
-    helperNames,
-  });
-  if (mounts.length > 0) {
-    throw new HackCliError({
-      code: "E_PROJECT_RUNNING",
-      message: `Another container (${[...new Set(mounts.map((m) => m.container.slice(0, 12)))].join(", ")}) mounted a target volume during the import, so the restore is not marked complete. Make sure nothing uses the project's volumes (\`${stopCommand}\`), then rerun hack data import, which replaces its own copy.`,
-      detail: { mounts },
-    });
-  }
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
@@ -179,17 +211,21 @@ export async function importProjectData(
     command: "import",
     lead: "A container started during the import, so the restore is not marked complete; rerunning hack data import after stopping it replaces its own copy.",
   });
+  // Stop and drain the subscription, then decide.
+  const mounts = await monitor.finish(volumeNames);
+  if (mounts.length > 0) {
+    throw foreignMountError({
+      mounts,
+      command: "import",
+      consequence:
+        "the restore is not marked complete; rerunning hack data import replaces its own copy.",
+      stopCommand,
+    });
+  }
   for (const target of targets) {
     await writeJournal({ backup, target, state: "complete", now: clock() });
   }
-  return {
-    backup: backup.path,
-    backupId: backup.id,
-    sourceComposeProject: backup.manifest.composeProject,
-    composeProject: plan.composeProject,
-    volumes,
-    skipped,
-  };
+  return volumes;
 }
 
 function requireSourceProject(opts: {

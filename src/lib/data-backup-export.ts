@@ -15,7 +15,6 @@ import {
 } from "./data-backup-format.ts";
 import {
   dataBackupHelperArgv,
-  foreignVolumeMounts,
   fsStep,
   helperContainerName,
   helperFailure,
@@ -25,7 +24,13 @@ import {
   treeDigest,
 } from "./data-backup-helper.ts";
 import {
+  foreignMountError,
+  type MountMonitor,
+  startMountMonitor,
+} from "./data-backup-mount-monitor.ts";
+import {
   classifyDeclaredVolumes,
+  type DeclaredVolumePlan,
   dockerReadError,
   type OwnedVolume,
   planDeclaredVolumes,
@@ -45,6 +50,8 @@ export type DataExportInput = {
   readonly now?: () => Date;
   /** The command that stops this instance, named in the running refusal. */
   readonly downCommand?: string;
+  /** Bound for each event-stream marker (default 30 s). */
+  readonly markerTimeoutMs?: number;
 };
 
 export type DataExportResult = {
@@ -58,9 +65,12 @@ export type DataExportResult = {
  * Ownership: only declared, non-external volumes whose labels name this
  * Compose project and key are mounted, read-only, in a network-less helper.
  * Consistency: refuses while a container of the project, or any container
- * using an owned volume, runs, before and again after the copy, and when
- * Docker's event log shows any container but this run's helpers mounting an
- * owned volume during the copy; it never stops anything. Atomicity: everything is written into `<backup>.partial/`,
+ * using an owned volume, runs, before and again after the copy, and when a
+ * live Docker event subscription sees any container but this run's helpers
+ * mount an owned volume; it never stops anything. The subscription is
+ * proven live (see startMountMonitor) before the first running-container
+ * check, so a mount between that check and the first copy is seen too.
+ * Atomicity: everything is written into `<backup>.partial/`,
  * the manifest last, fsynced, then renamed to `<backup>/`. A failure leaves
  * only the `.partial` directory, which is never a backup and is never reused:
  * each run takes a fresh UTC-second timestamp, and an existing target or
@@ -80,6 +90,29 @@ export async function exportProjectData(
     throw dockerReadError({ result: config, command: "docker compose config" });
   }
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
+  const helperNames = new Set<string>();
+  // Subscribe and prove coverage before the first running-container check.
+  const monitor = await startMountMonitor({
+    docker: input.docker,
+    purpose: "export",
+    helperNames,
+    markerTimeoutMs: input.markerTimeoutMs,
+  });
+  try {
+    return await exportWithin({ input, now, plan, monitor, helperNames });
+  } finally {
+    await monitor.stop();
+  }
+}
+
+async function exportWithin(opts: {
+  readonly input: DataExportInput;
+  readonly now: Date;
+  readonly plan: DeclaredVolumePlan;
+  readonly monitor: MountMonitor;
+  readonly helperNames: Set<string>;
+}): Promise<DataExportResult> {
+  const { input, now, plan, monitor, helperNames } = opts;
   const stopCommand = input.downCommand ?? "hack down";
   const { owned, skipped } = await classifyDeclaredVolumes({
     docker: input.docker,
@@ -110,9 +143,6 @@ export async function exportProjectData(
   );
 
   const helperImage = dataBackupHelperImage();
-  const clock = input.now ?? (() => new Date());
-  const helperNames = new Set<string>();
-  const since = clock();
   const volumes: DataBackupVolume[] = [];
   for (const volume of owned) {
     volumes.push(
@@ -124,15 +154,6 @@ export async function exportProjectData(
       })
     );
   }
-  await refuseForeignMounts({
-    docker: input.docker,
-    since,
-    until: clock(),
-    volumeNames,
-    helperNames,
-    stopCommand,
-    partial,
-  });
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
@@ -141,6 +162,16 @@ export async function exportProjectData(
     command: "export",
     lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
   });
+  // Stop and drain the subscription, then decide.
+  const mounts = await monitor.finish(volumeNames);
+  if (mounts.length > 0) {
+    throw foreignMountError({
+      mounts,
+      command: "export",
+      consequence: `the backup was not published; the incomplete copy is in ${partial}, which you can delete.`,
+      stopCommand,
+    });
+  }
 
   const manifest: DataBackupManifest = {
     schema: DATA_BACKUP_SCHEMA,
@@ -166,31 +197,6 @@ async function refuseExisting(path: string): Promise<void> {
       message: `${path} already exists; Hack never writes into or replaces an existing backup. Retry to use a new timestamp, or choose another --out.`,
     });
   }
-}
-
-/**
- * Refuse publication when anything but this run's helpers mounted an owned
- * volume during the copy, even a container that has exited since.
- */
-async function refuseForeignMounts(opts: {
-  readonly docker: DataBackupDocker;
-  readonly since: Date;
-  readonly until: Date;
-  readonly volumeNames: readonly string[];
-  readonly helperNames: ReadonlySet<string>;
-  readonly stopCommand: string;
-  readonly partial: string;
-}): Promise<void> {
-  const mounts = await foreignVolumeMounts(opts);
-  if (mounts.length === 0) {
-    return;
-  }
-  const containers = [...new Set(mounts.map((mount) => mount.container))];
-  throw new HackCliError({
-    code: "E_PROJECT_RUNNING",
-    message: `Another container (${containers.map((id) => id.slice(0, 12)).join(", ")}) mounted a volume during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${opts.partial}, which you can delete. Make sure nothing uses the project's volumes (\`${opts.stopCommand}\`), then retry.`,
-    detail: { mounts },
-  });
 }
 
 /** Copy one owned volume: a tar stream to `<key>.tar`, then its tree digest. */

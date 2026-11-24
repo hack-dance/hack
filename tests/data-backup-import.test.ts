@@ -19,6 +19,7 @@ import {
   readDataImportJournal,
   writeDataImportJournal,
 } from "../src/lib/data-import-journal.ts";
+import { FakeDockerEvents } from "./helpers/data-backup-events.ts";
 
 const PROJECT = "shop";
 const COMPOSE = ["docker", "compose", "-f", "/p/.hack/docker-compose.yml"];
@@ -40,6 +41,7 @@ type FakeState = {
   corruptRestore?: string;
   calls: string[][];
   psCalls: number;
+  events: FakeDockerEvents;
 };
 
 const sha = (text: string): string =>
@@ -111,10 +113,11 @@ function fakeDocker(state: FakeState): DataBackupDocker {
         ];
         return Promise.resolve(ok(names.map((n) => `${n}\n`).join("")));
       }
-      if (args[0] === "events") {
-        return Promise.resolve(ok(""));
-      }
       if (args[0] === "run") {
+        state.events.run(argv);
+        if (!argv.includes("--volume")) {
+          return Promise.resolve(ok());
+        }
         const volume = state.volumes.get(mounted(argv));
         if (!volume) {
           return Promise.resolve({ exitCode: 125, stdout: "", stderr: "" });
@@ -142,6 +145,7 @@ function fakeDocker(state: FakeState): DataBackupDocker {
     streamToFile: () => Promise.reject(new Error("import never archives")),
     async streamFromFile({ argv, path }) {
       state.calls.push([...argv]);
+      state.events.run(argv);
       const volume = state.volumes.get(mounted(argv));
       if (!volume) {
         return { exitCode: 125, stderr: "no volume" };
@@ -149,6 +153,7 @@ function fakeDocker(state: FakeState): DataBackupDocker {
       volume.content += `${await readFile(path, "utf8")}${state.corruptRestore ?? ""}`;
       return { exitCode: 0, stderr: "" };
     },
+    watch: (argv, onLine) => state.events.watch(argv, onLine),
   };
 }
 
@@ -228,6 +233,7 @@ function baseState(overrides: Partial<FakeState> = {}): FakeState {
     running: {},
     calls: [],
     psCalls: 0,
+    events: new FakeDockerEvents(),
     ...overrides,
   };
 }
@@ -263,7 +269,10 @@ function effects(state: FakeState): string[][] {
   return state.calls.filter(
     (argv) =>
       (argv[1] === "volume" && argv[2] === "create") ||
-      (argv[1] === "run" && !argv.includes("-quit") && !argv.includes("-e"))
+      (argv[1] === "run" &&
+        argv.includes("--volume") &&
+        !argv.includes("-quit") &&
+        !argv.includes("-e"))
   );
 }
 

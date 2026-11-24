@@ -307,7 +307,8 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
     }
   }
   if (options.recordStartReferences) {
-    const references = args.find((arg) => arg.includes("/compose.env.") && arg.endsWith(".override.yml"));
+    const references = args.find((arg) => arg.endsWith("/compose.env.override.yml") ||
+      (arg.includes("/foreground-env.") && arg.endsWith(".override.yml")));
     const app = YAML.parse(await Bun.file(references).text()).services.app.environment;
     const keys = Object.entries(app).map(([key, reference]) => [key, process.env[reference.slice(2, -1)] !== undefined]);
     const phase = args.includes("--no-start") ? "create" : "start";
@@ -1473,6 +1474,11 @@ test("foreground service startup records the mutation and releases the copy whil
       "Start did not reach its after-hook",
       20_000
     );
+    const stableEnv = join(projectDir, ".internal/compose.env.override.yml");
+    await Bun.write(
+      stableEnv,
+      "services:\n  app:\n    environment:\n      LEGACY_FIXTURE: stale-fixture-value\n"
+    );
     foreground = run(["up", "app", "--env", "qa"], false, undefined, env);
     await Promise.race([
       waitForCondition(
@@ -1493,12 +1499,13 @@ test("foreground service startup records the mutation and releases the copy whil
       join(root, "foreground-dispatched")
     ).json();
     expect(invocation[invocation.indexOf("-p") + 1]).toBe("sample");
+    const stableReferences = await Bun.file(stableEnv).text();
+    expect(stableReferences).toContain("QA_ONLY");
+    expect(stableReferences).not.toContain("stale-fixture-value");
     expect(
       invocation.some(
         (arg) =>
-          arg.includes("compose.env.") &&
-          arg.endsWith(".override.yml") &&
-          !arg.endsWith("/compose.env.override.yml")
+          arg.includes("/foreground-env.") && arg.endsWith(".override.yml")
       )
     ).toBe(true);
     const sibling = await run(

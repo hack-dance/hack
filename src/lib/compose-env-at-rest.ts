@@ -54,6 +54,8 @@ export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 
 const REFUSAL =
   "Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted.";
+const MAX_REFERENCE_PROOF_BYTES = 1024 * 1024;
+const EMPTY_REFERENCE_OVERRIDE = "services: {}\n";
 
 /** Absolute path of the generated env override for a project directory. */
 export function composeEnvOverridePath(opts: {
@@ -177,17 +179,75 @@ export async function withComposeEnvOverride<T>(opts: {
  * the shared override lock for the terminal lifetime. The content path stays
  * available for Docker's config_files labels after the command exits.
  */
-export async function writeForegroundComposeEnvOverride(opts: {
+export async function prepareForegroundComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly text?: string;
+}): Promise<string | undefined> {
+  const current = await inspectComposeEnvOverrideAtRest(opts);
+  const text =
+    opts.text ??
+    (current.kind === "references" || current.kind === "plaintext"
+      ? EMPTY_REFERENCE_OVERRIDE
+      : undefined);
+  if (text === undefined) {
+    return undefined;
+  }
+  // Keep the ordered canonical file used by existing containers and adoption.
+  // Replace old literal content atomically so its path remains usable.
+  if (!(await composeEnvOverrideAdoptionBound(opts))) {
+    await writeComposeEnvOverride({ ...opts, text });
+  }
+  const path = foregroundComposeEnvPath({ ...opts, text });
+  return await withTerminationAbort((signal) =>
+    withReferenceFile({ ...opts, text, path, signal, run: async () => path })
+  );
+}
+
+function foregroundComposeEnvPath(opts: {
   readonly projectDir: string;
   readonly text: string;
-  readonly signal?: AbortSignal;
-}): Promise<string> {
+}): string {
   const digest = createHash("sha256").update(opts.text).digest("hex");
-  const path = join(
+  return join(
     dirname(composeEnvOverridePath(opts)),
-    `compose.env.${digest}.override.yml`
+    `foreground-env.${digest}.override.yml`
   );
-  return await withReferenceFile({ ...opts, path, run: async () => path });
+}
+
+/**
+ * An attached start can label a container with a content-addressed alias
+ * of its canonical generated override. Accept only the exact private file
+ * with identical reference bytes so either path produces the same hash.
+ */
+export async function isEquivalentForegroundComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly observedPath: string;
+}): Promise<boolean> {
+  try {
+    const canonical = await readReplaceablePrivateFile({
+      ...fileOptions(composeEnvOverridePath(opts)),
+      maxBytes: MAX_REFERENCE_PROOF_BYTES,
+    });
+    if (
+      !canonical ||
+      classifyComposeEnvOverrideText(canonical.text).kind !== "references" ||
+      opts.observedPath !==
+        foregroundComposeEnvPath({ ...opts, text: canonical.text })
+    ) {
+      return false;
+    }
+    const observed = await readReplaceablePrivateFile({
+      ...fileOptions(opts.observedPath),
+      maxBytes: MAX_REFERENCE_PROOF_BYTES,
+    });
+    return (
+      observed !== null &&
+      (observed.mode & 0o077) === 0 &&
+      observed.text === canonical.text
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function withReferenceFile<T>(opts: {

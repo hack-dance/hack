@@ -41,6 +41,18 @@ case " $* " in
     exit 0 ;;
   *" ps "*)
     if [ -f "$state/down-ran" ]; then exit 0; fi
+    if [ -f "$state/fail-refresh" ]; then
+      ordinal=0
+      if [ -f "$state/refresh-reads" ]; then
+        read -r ordinal < "$state/refresh-reads"
+      fi
+      ordinal=$((ordinal + 1))
+      printf '%s\n' "$ordinal" > "$state/refresh-reads"
+      if [ "$ordinal" = 2 ]; then
+        : > "$state/refresh-failed"
+        exit 1
+      fi
+    fi
     if [ -n "\${STUB_PS_HANG:-}" ] && [ ! -f "$state/up-done" ]; then
       printf '%s\\n' "$$" > "$state/ps.pid"
       exec sleep 60
@@ -271,6 +283,28 @@ test("Down reports a one-shot that starts during its before-hook", async () => {
   );
   const result = await cli(["down", "--json"]);
   expect(result.exitCode, result.stderr + result.stdout).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: true,
+    data: { interrupted: ["migrate"] },
+  });
+  expect(result.stderr).toContain("interrupted the one-shot service migrate");
+}, 60_000);
+
+test("Down keeps the known one-shot interruption when its refresh fails", async () => {
+  await writeFile(join(state, "up-started"), "");
+  await writeFile(
+    join(project, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "shop",
+      internal: { dns: false, tls: false },
+      lifecycle: {
+        down: { before: [{ command: ': > "$STUB_STATE/fail-refresh"' }] },
+      },
+    })
+  );
+  const result = await cli(["down", "--json"]);
+  expect(result.exitCode, result.stderr + result.stdout).toBe(0);
+  expect(await Bun.file(join(state, "refresh-failed")).exists()).toBe(true);
   expect(JSON.parse(result.stdout)).toMatchObject({
     ok: true,
     data: { interrupted: ["migrate"] },

@@ -279,10 +279,10 @@ import {
 import {
   composeEnvOverridePath,
   inspectComposeEnvOverrideAtRest,
+  prepareForegroundComposeEnvOverride,
   removePlaintextComposeEnvOverride,
   withComposeEnvOverride,
   writeComposeEnvOverride,
-  writeForegroundComposeEnvOverride,
 } from "../lib/compose-env-at-rest.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import {
@@ -1349,8 +1349,8 @@ export type OneShotInterruption = {
  * dependencies (migrations, seed jobs) still running would be stopped
  * mid-run, which can leave their work half done. Interactive runs ask first
  * (`proceed: false` when declined); `--json` and non-interactive runs go on
- * and report the warning, which also goes to stderr. A failed read finds
- * nothing to interrupt.
+ * and report the warning, which also goes to stderr. A failed refresh keeps
+ * the previous observation when one was made.
  */
 async function checkOneShotInterruption(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -1360,7 +1360,7 @@ async function checkOneShotInterruption(opts: {
   readonly json: boolean;
   /** A targeted restart interrupts only these services. */
   readonly services?: readonly string[];
-  readonly approvedServices?: readonly string[];
+  readonly previousObservation?: OneShotInterruption;
   readonly deferWarning?: boolean;
   /**
    * The Compose environment the command's other `ps` reads use (delivered
@@ -1385,9 +1385,14 @@ async function checkOneShotInterruption(opts: {
     ...(opts.env ? { env: { ...opts.env } } : {}),
     all: true,
   });
-  // A failed read finds nothing to interrupt: the command goes on unchanged,
-  // and its own reads report the engine error as before.
   const entries = ps.exitCode === 0 ? parseComposePsJson(ps.stdout) : null;
+  if (entries === null) {
+    const interruption = opts.previousObservation;
+    if (interruption && !opts.deferWarning) {
+      logger.warn({ message: interruption.warning });
+    }
+    return { proceed: true, interruption };
+  }
   const interpolationEnv = await readComposeInterpolationEnv({
     composeFiles: [opts.project.composeFile],
     env: { ...process.env, ...opts.env },
@@ -1400,7 +1405,7 @@ async function checkOneShotInterruption(opts: {
     interpolationEnv,
     // Services with containers run whatever this command's profiles are.
     presentServices: new Set(
-      (entries ?? []).flatMap((entry) =>
+      entries.flatMap((entry) =>
         typeof entry.Service === "string" ? [entry.Service] : []
       )
     ),
@@ -1408,7 +1413,7 @@ async function checkOneShotInterruption(opts: {
   if (graph.oneShots.size === 0) {
     return { proceed: true };
   }
-  const services = (entries ? runningOneShots({ graph, entries }) : []).filter(
+  const services = runningOneShots({ graph, entries }).filter(
     (service) => !opts.services || opts.services.includes(service)
   );
   if (services.length === 0) {
@@ -1416,7 +1421,7 @@ async function checkOneShotInterruption(opts: {
   }
   const names = services.join(", ");
   const needsApproval = services.filter(
-    (service) => !opts.approvedServices?.includes(service)
+    (service) => !opts.previousObservation?.services.includes(service)
   );
   const warning = `hack ${opts.action} interrupted the one-shot service ${names} while it was still running; its work (for example migrations) may be incomplete. Check its logs before relying on it.`;
   if (needsApproval.length > 0 && !opts.json && canPrompt()) {
@@ -8539,6 +8544,13 @@ async function runResolvedComposeUp({
       ? (composeProjectName ?? undefined)
       : undefined);
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
+  const foregroundEnvFile =
+    !detach && serviceScoped
+      ? await prepareForegroundComposeEnvOverride({
+          projectDir: project.projectDir,
+          text: envOverrides.referenceText,
+        })
+      : undefined;
 
   // Preserve the owner of a live upgraded session. Its controller must see
   // the existing key to verify, reuse or replace it under its ownership lock.
@@ -9030,15 +9042,10 @@ async function runResolvedComposeUp({
     };
     const launchWithEnv = async () => {
       if (!detach && serviceScoped) {
-        const path = envOverrides.referenceText
-          ? await writeForegroundComposeEnvOverride({
-              projectDir: project.projectDir,
-              text: envOverrides.referenceText,
-              signal: cancellation.signal,
-            })
-          : undefined;
         return await launch(
-          path ? [...composeFilesWithMetadata, path] : composeFilesWithMetadata
+          foregroundEnvFile
+            ? [...composeFilesWithMetadata, foregroundEnvFile]
+            : composeFilesWithMetadata
         );
       }
       if (!detach) {
@@ -11134,7 +11141,7 @@ async function runDownCommand({
       action: "down",
       json,
       env: composeEnv,
-      approvedServices: interruptionCheck.interruption?.services,
+      previousObservation: interruptionCheck.interruption,
     });
     if (!interruptionCheck.proceed) {
       return 1;

@@ -31,6 +31,7 @@ import { composeForegroundSignalScenario } from "./scenarios/compose-foreground-
 import { composeLongOneshotScenario } from "./scenarios/compose-long-oneshot.ts";
 import { composeShortOneshotScenario } from "./scenarios/compose-short-oneshot.ts";
 import { dataExportScenario } from "./scenarios/data-export.ts";
+import { dataImportScenario } from "./scenarios/data-import.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
 import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
 import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
@@ -122,6 +123,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   sharedHostHelpersScenario,
   cachePruneScenario,
   dataExportScenario,
+  dataImportScenario,
   dependencyCacheScenario,
   dependencyCacheBootstrapScenario,
   dependencyCacheProtocolScenario,

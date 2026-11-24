@@ -76,6 +76,7 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "lifecycle-session-recovery": 21,
   "cache-prune": 18,
   "data-export": 4,
+  "data-import": 40,
   "up-down": 16,
   "down-profiles": 40,
   "dependency-cache-protocol": 14,

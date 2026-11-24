@@ -237,6 +237,10 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
     kind: "envelope",
     argv: ["data", "export", "-p", "DIR", "--json"],
   },
+  "data import": {
+    kind: "envelope",
+    argv: ["data", "import", "DIR", "-p", "DIR", "--json"],
+  },
   "mcp install": { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "mcp print": { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "setup cursor": { kind: "not-a-project-command", reason: NOT_REQUIRED },

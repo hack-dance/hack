@@ -58,6 +58,7 @@ export const JSON_COMMAND_SHAPES = {
   "config import": "legacy-object",
   "config adopt": "legacy-object",
   "data export": "schema-envelope",
+  "data import": "schema-envelope",
   "setup sync": "error-only",
   "setup migrate": "envelope",
   "native setup": "runtime-passthrough",
@@ -113,6 +114,7 @@ export const SCHEMA_JSON_VARIANTS = [
   { command: "env overlay add", flags: [], schema: "hack.env-overlays.v1" },
   { command: "env overlay list", flags: [], schema: "hack.env-overlays.v1" },
   { command: "data export", flags: [], schema: "hack.data-export.v1" },
+  { command: "data import", flags: [], schema: "hack.data-import.v1" },
   {
     command: "projects",
     flags: ["--observe"],

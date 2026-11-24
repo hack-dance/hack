@@ -95,6 +95,7 @@ async function fixture(opts: {
   await writeFile(
     binary,
     `#!/bin/sh
+case "$1" in --internal-timings=*) shift;; esac
 ${nativeSetupShellReply()}
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
@@ -281,8 +282,20 @@ test(
           failed: [],
         },
         durationMs: expect.any(Number),
+        timings: expect.arrayContaining([
+          expect.objectContaining({ step: "command.total" }),
+        ]),
       },
     });
+    const invalid = await up(f, [
+      "-d",
+      "--timings-file",
+      join(f.root, "missing", "timeline.jsonl"),
+    ]);
+    expect(invalid.code).toBe(0);
+    expect(
+      invalid.stderr.match(/Could not create the timings file\./g)
+    ).toEqual(["Could not create the timings file."]);
     // Only read-only observations: nothing was started, stopped or reviewed.
     for (const call of await f.calls()) {
       expect(["graph status", "graph owner-status"]).toContain(call);

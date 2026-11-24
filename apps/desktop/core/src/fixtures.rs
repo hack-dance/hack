@@ -51,6 +51,10 @@ pub enum Fixture {
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
     Branches,
+    ChangesError,
+    ChangesLoading,
+    ChangesClean,
+    ChangesDirty,
     CopiesEmpty,
     CopiesError,
     CopiesLoading,
@@ -86,7 +90,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 52] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -116,6 +120,10 @@ impl Fixture {
         Self::FailedStart,
         Self::NeedsAttention,
         Self::Branches,
+        Self::ChangesError,
+        Self::ChangesLoading,
+        Self::ChangesClean,
+        Self::ChangesDirty,
         Self::CopiesEmpty,
         Self::CopiesError,
         Self::CopiesLoading,
@@ -169,6 +177,10 @@ impl Fixture {
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
+            Self::ChangesError => "changes-error",
+            Self::ChangesLoading => "changes-loading",
+            Self::ChangesClean => "changes-clean",
+            Self::ChangesDirty => "changes-dirty",
             Self::CopiesEmpty => "copies-empty",
             Self::CopiesError => "copies-error",
             Self::CopiesLoading => "copies-loading",

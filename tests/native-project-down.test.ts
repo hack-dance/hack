@@ -17,6 +17,7 @@ import {
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
+  orphanNativeProjectLifetime,
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import {
@@ -294,6 +295,84 @@ test("already-stopped down waits for finalization without guest cleanup or hooks
   expect((await result).status).toBe("stopped");
   expect(calls).toEqual(["inspect", "retire-host"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("down of a run that failed after started clears its failure record", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  const result = await nativeProjectDown({
+    ...opts,
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      if (request.args[1] === "clear-failure-after-started") {
+        expect(request.args).toEqual([
+          "graph",
+          "clear-failure-after-started",
+          "--run-id",
+          run.run,
+          "--json",
+        ]);
+        return { run: run.run, cleared: true };
+      }
+      return {
+        ...snapshot(true),
+        failed_after_started: { code: "graph_service_failed", at: 1 },
+      };
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(calls).toEqual(["inspect", "clear-failure-after-started"]);
+  // Without a record nothing extra is called (see the test above).
+});
+
+test.each([
+  { recover: false },
+  { recover: true },
+])("down of a warming run while its owner holds the provider lease goes to the owner (recover $recover)", async ({
+  recover,
+}) => {
+  // A start that returned at started: the owner holds the provider lease until
+  // its ready line, so every leased command is refused until the stop lands.
+  const opts = await fixture();
+  let held = true;
+  const calls: string[] = [];
+  const warming = snapshot(false);
+  warming.receipt.phase = "started-observed";
+  const started = performance.now();
+  const result = await nativeProjectDown({
+    ...opts,
+    recover,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "status" || command === "foreground-owner") {
+        return command === "status"
+          ? warming
+          : ownerSelection("running", "started-observed");
+      }
+      if (command === "cleanup") {
+        // The owner's socket takes the stop without the lease; then it lets go.
+        held = false;
+        return {};
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      if (held) {
+        throw new NativeRuntimeRequestError({
+          message:
+            "Native runtime request failed (provider_busy); inspect owned state before retrying.",
+          nativeCode: "provider_busy",
+        });
+      }
+      return snapshot(true);
+    },
+  }).catch((error: unknown) => error);
+  expect(calls).toContain("status");
+  expect(calls).toContain("cleanup");
+  expect(result).toMatchObject({ status: "stopped" });
+  // No wait for the lease the owner holds: well under the 15 s busy wait.
+  expect(performance.now() - started).toBeLessThan(5000);
 });
 
 test("already-stopped unacknowledged frontend refuses without replaying compute", async () => {
@@ -2359,6 +2438,133 @@ test("down --recover starts a stopped pool to finish a recovery whose frontend f
     token,
     timeoutMs: 1,
   });
+});
+
+test("a frontend lost after its lifetime and mapping were written: down --recover finds both (PR B review, item 1)", async () => {
+  const opts = await fixture();
+  // The started chain registers this frontend's lifetime, then saves the mapping;
+  // the frontend then dies, leaving a warming run whose owner has exited.
+  await deadFrontend(opts.scope);
+  const calls: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "foreground-owner") {
+        return ownerSelection("exited", "started-observed");
+      }
+      if (command === "recover-live-owner") {
+        recovered = true;
+        return {
+          run: run.run,
+          phase: "stopped-data-retained",
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+          same_boot: true,
+        };
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      expect(command).toBe("inspect");
+      return snapshot(recovered);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(calls).toContain("recover-live-owner");
+  // The dead frontend's lifetime was captured and is now recovered: the next up
+  // can register its own.
+  const token = await captureNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+  });
+  await waitNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+    token,
+    timeoutMs: 1,
+  });
+});
+
+test("a frontend lost in the window: plain down recovers it as down --recover does", async () => {
+  const opts = await fixture();
+  await deadFrontend(opts.scope);
+  const calls: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "foreground-owner") {
+        return ownerSelection("exited", "started-observed");
+      }
+      if (command === "recover-live-owner") {
+        recovered = true;
+        return {
+          run: run.run,
+          phase: "stopped-data-retained",
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+          same_boot: true,
+        };
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      expect(command).toBe("inspect");
+      return snapshot(recovered);
+    },
+  });
+  // Past finalization capture to owner selection, then the same-boot recovery.
+  expect(calls.indexOf("foreground-owner")).toBeLessThan(
+    calls.indexOf("recover-live-owner")
+  );
+  expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+});
+
+test("a start that crashed after its lifetime and before its mapping: plain down finds it from the lifetime", async () => {
+  // No mapping was saved; the lifetime record carries the same run identity.
+  const opts = await fixture(false);
+  await deadFrontend(opts.scope);
+  const calls: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    startupWaitMs: 1,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "foreground-owner") {
+        return ownerSelection("exited", "started-observed");
+      }
+      if (command === "recover-live-owner") {
+        recovered = true;
+        return {
+          run: run.run,
+          phase: "stopped-data-retained",
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+          same_boot: true,
+        };
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      expect(command).toBe("inspect");
+      return snapshot(recovered);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", run: run.run });
+  expect(calls).toContain("recover-live-owner");
+  // Recovered: a second down no longer selects it.
+  expect(await orphanNativeProjectLifetime(opts.scope)).toBeNull();
 });
 
 test("down --recover sends runtime up at most once when the pool is still not running", async () => {

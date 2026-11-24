@@ -134,6 +134,7 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) changes: crate::changes_view::ChangesPane,
     pub(crate) service_pane: crate::service_view::ServicePane,
     pub(crate) service_focus: gpui_kit::FocusHandle,
     pub(crate) copies: crate::copies_view::CopiesPane,
@@ -214,6 +215,7 @@ impl HackApp {
             source,
             logs,
             tab: 0,
+            changes: Default::default(),
             service_pane: Default::default(),
             service_focus: cx.focus_handle(),
             copies: Default::default(),
@@ -458,6 +460,7 @@ impl HackApp {
             self.clear_selected_service();
             self.logs.model.set_service(None);
             self.reset_env_selection();
+            self.reset_changes(cx);
             self.refresh_copies_if_open(cx);
             if self.tab == 2 {
                 self.read_env(cx);
@@ -922,6 +925,7 @@ impl HackApp {
         self.user_navigated();
         self.copied = None;
         self.reset_env_selection();
+        self.reset_changes(cx);
         if self.tab == 2 {
             self.read_env(cx);
         }
@@ -1026,6 +1030,7 @@ impl HackApp {
         if before != after {
             self.clear_selected_service();
             self.model.source_changed();
+            self.changes = Default::default();
             self.action_started.clear();
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
@@ -1452,7 +1457,12 @@ impl HackApp {
                     .child(div().flex_1())
                     .child(actions),
             )
-            .when(!compact, |col| col.child(url_row))
+            .when(!compact, |col| {
+                col.child(url_row).children(
+                    self.changes_badge(ui)
+                        .map(|badge| div().flex().child(badge)),
+                )
+            })
             .children(
                 d.always_on_note
                     .clone()
@@ -1636,6 +1646,7 @@ impl HackApp {
             (2, "Env"),
             (3, "Copies"),
             (crate::files_view::FILES_TAB, "Files"),
+            (6, "Changes"),
         ];
         #[cfg(not(hack_terminal))]
         let pills: &[(usize, &'static str)] = &[
@@ -1644,6 +1655,7 @@ impl HackApp {
             (2, "Env"),
             (3, "Copies"),
             (crate::files_view::FILES_TAB, "Files"),
+            (6, "Changes"),
         ];
         let mut tabs = div().flex().items_center().gap(space::S2);
         for &(i, label) in pills {
@@ -1656,6 +1668,7 @@ impl HackApp {
             tabs = tabs.child(self.project_files_picker(d, cx));
         }
         let body: AnyElement = match self.tab {
+            6 => self.changes_view(ui, cx).into_any_element(),
             crate::files_view::FILES_TAB => {
                 self.project_files(d, ui, window, cx).into_any_element()
             }

@@ -39,7 +39,22 @@ included there. The report does not estimate how many blocks a cleanup would fre
 | Native images and BuildKit cache | [Image import](../../packages/runtime-core/src/provider/image_load.rs), [build](../../packages/runtime-core/src/provider/image_build.rs) and [reclaim](../../packages/runtime-core/src/provider/image_build/reclaim.rs) in the guest engine. | Best-effort post-build cache target of 4 GiB. The target bounds private build cache unused by any retained image, including the current and previous images. No aggregate image bound found. | Image reclamation uses retained references. Failed or interrupted pruning can leave extra engine data. |
 | Native graph containers, persistent volumes, networks and graph receipts | [Graph runtime](../../packages/runtime-core/src/provider/graph/mod.rs), with host journals and guest resources. | No aggregate graph or retained-volume bound. | Down and recovery retain data by default. A crash can leave resources attached to prior receipts. |
 
+### Native build base retention
+
+After a native `hack up` reaches readiness, Hack can retain exact build bases
+as guest engine images and stage missing images in the host image archive cache.
+The guest cost is the retained layers that the engine cannot share with other
+images. In one 11-service project, retaining two bases added 1.06 GiB of engine
+image data. Reclaim checks the current and previous verified build generations
+and protects images still referenced by services or tag records.
+
+Set `HACK_NATIVE_BUILD_RETENTION=0` in the environment that launches `hack up`
+to disable automatic retention. This also disables background build-base tag
+refresh for that invocation. Existing images and archives remain on disk until
+their normal cleanup runs.
+
 ## Temporary paths
+
 
 | Location | Owner | Growth bound | Cleanup and interrupted operations |
 | --- | --- | --- | --- |

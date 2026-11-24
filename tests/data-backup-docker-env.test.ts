@@ -36,6 +36,10 @@ if (failAt && args.join(" ").includes(failAt)) {
   process.exit(1);
 }
 const feed = process.env.DATA_STUB_LOG + ".events";
+// The resolved Compose project name; a test can make it carry a value.
+const project = process.env.DATA_STUB_PROJECT || "shop";
+const volumeName = project + "_db";
+const mountpoint = "/var/lib/docker/volumes/" + volumeName + "/_data";
 const out = (value) => process.stdout.write(typeof value === "string" ? value : JSON.stringify(value) + "\\n");
 if (args[0] === "events") {
   // A live subscription: replay what runs append, until SIGTERM.
@@ -48,22 +52,27 @@ if (args[0] === "events") {
   };
   tick();
 } else if (args[0] === "compose") {
-  out({ name: "shop", services: {}, volumes: { db: { name: "shop_db" } } });
+  out({ name: project, services: {}, volumes: { db: { name: volumeName } } });
 } else if (args[0] === "volume" && args[1] === "inspect") {
-  out({ name: "shop_db", createdAt: "2026-11-24T00:00:00Z", driver: "local", mountpoint: "/var/lib/docker/volumes/shop_db/_data", options: null, labels: { "com.docker.compose.project": "shop", "com.docker.compose.volume": "db" } });
+  out({ name: volumeName, createdAt: "2026-11-24T00:00:00Z", driver: "local", mountpoint, options: null, labels: { "com.docker.compose.project": project, "com.docker.compose.volume": "db" } });
 } else if (args[0] === "ps") {
   // A running container named by the test: its name, or its short ID.
   const named = process.env.DATA_STUB_RUNNING;
   const format = args[args.indexOf("--format") + 1];
-  if (named) out(format === "{{.ID}}" ? "5".repeat(12) + "\\n" : named + "\\n");
-  else out("");
+  if (!named) out("");
+  else if (args.includes("--quiet")) out("5".repeat(64) + "\\n");
+  else out(format === "{{.ID}}" ? "5".repeat(12) + "\\n" : named + "\\n");
 } else if (args[0] === "run" || args[0] === "start") {
   const name = args[0] === "run" ? args[args.indexOf("--name") + 1] : args.at(-1);
   appendFileSync(feed, JSON.stringify({ Type: "container", Action: "start", Actor: { ID: name, Attributes: { name } } }) + "\\n");
 } else if (args[0] === "create") {
   out("c".repeat(64));
+} else if (args[0] === "container" && args.includes("{{.Id}} {{json .Mounts}}")) {
+  // Batched: every container binds the owned Mountpoint.
+  const ids = args.slice(args.indexOf("--format") + 2);
+  out(ids.map((id) => id + " " + JSON.stringify([{ Type: "bind", Source: mountpoint, Destination: "/v", RW: false }])).join("\\n") + "\\n");
 } else if (args[0] === "container" && args.includes("{{json .Mounts}}")) {
-  out([{ Type: "bind", Source: "/var/lib/docker/volumes/shop_db/_data", Destination: "/v", RW: false }]);
+  out([{ Type: "bind", Source: mountpoint, Destination: "/v", RW: false }]);
 } else if (args[0] === "container") {
   process.stderr.write("Error: No such container: " + args.at(-1) + "\\n");
   process.exit(1);
@@ -74,7 +83,7 @@ if (args[0] === "events") {
   // its inspect (below) shows a bind of the owned Mountpoint too.
   if (args.includes("tar") && process.env.DATA_STUB_FOREIGN) {
     appendFileSync(feed, JSON.stringify({ Type: "container", Action: "start", Actor: { ID: "6".repeat(64), Attributes: { name: process.env.DATA_STUB_FOREIGN } } }) + "\\n");
-    appendFileSync(feed, JSON.stringify({ Type: "volume", Action: "mount", Actor: { ID: "shop_db", Attributes: { container: "6".repeat(64), destination: "/x" } } }) + "\\n");
+    appendFileSync(feed, JSON.stringify({ Type: "volume", Action: "mount", Actor: { ID: volumeName, Attributes: { container: "6".repeat(64), destination: "/x" } } }) + "\\n");
   }
   if (args.includes("tar")) out("tar bytes");
   else out({ algorithm: "hack.tree-digest.v1", entries: 2, excludedSockets: 0, digest: "a".repeat(64) });
@@ -349,24 +358,28 @@ async function shopProject(opts: {
 }
 
 test("hack data export never prints a container name, which can carry a managed value", async () => {
+  // The reviewer's example: `name: app-${STORAGE_TOKEN}` and
+  // `container_name: worker-${STORAGE_TOKEN}`, with STORAGE_TOKEN a managed
+  // value. The old redactor replaced only the full `app-…` project name, so
+  // the token stayed in `worker-…` in `detail.running` and mount refusals.
   const { bin, log } = await stubBin();
-  // Not a credential: a recognizable stand-in for a managed secret that a
-  // service interpolates into `container_name: db-${TOKEN}`.
-  const token = "managed-secret-canary-5c1d";
+  // Not a credential: a recognizable stand-in for a managed secret.
+  const token = "storage-token-canary-5c1d";
   const projectRoot = await shopProject({
-    envFiles: { default: [`DB_TOKEN: "${token}"`] },
+    envFiles: { default: [`STORAGE_TOKEN: "${token}"`] },
   });
   for (const [stage, env] of [
-    ["running", { DATA_STUB_RUNNING: `db-${token}` }],
-    ["mount", { DATA_STUB_FOREIGN: `db-${token}` }],
+    ["running", { DATA_STUB_RUNNING: `worker-${token}` }],
+    ["mount", { DATA_STUB_FOREIGN: `worker-${token}` }],
   ] as const) {
     for (const json of [false, true]) {
       const result = await runDataCli({
         cwd: projectRoot,
         args: ["data", "export", ...(json ? ["--json"] : [])],
         bin,
-        env: { DATA_STUB_LOG: log, ...env },
+        env: { DATA_STUB_LOG: log, DATA_STUB_PROJECT: `app-${token}`, ...env },
       });
+      expect(result.output).toContain("E_PROJECT_RUNNING");
       expect({ stage, json, ok: result.exitCode === 0 }).toEqual({
         stage,
         json,

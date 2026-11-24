@@ -81,10 +81,14 @@ export const dataExportScenario: Scenario = {
     const data = `${project}_data`;
     const foreign = `${project}-foreign`;
     const external = `${project}-external`;
-    const runner = `${project}-web-1`;
+    // Container names that carry a value, as `container_name:
+    // worker-${STORAGE_TOKEN}` would: no refusal may print them. Not a
+    // credential, a recognizable canary.
+    const token = "storage-token-canary-e2e";
+    const runner = `${project}-worker-${token}`;
     const scratch = `${project}-restore`;
-    const writer = `${project}-writer`;
-    const holder = `${project}-bind-holder`;
+    const writer = `${project}-writer-${token}`;
+    const holder = `${project}-bind-holder-${token}`;
     await Bun.write(
       join(fixture.hackDir, "docker-compose.yml"),
       [
@@ -319,7 +323,8 @@ export const dataExportScenario: Scenario = {
           refusal?.error?.code === "E_PROJECT_RUNNING" &&
           // A short ID, never the name (which carries the project name).
           JSON.stringify(refusal.error.detail) ===
-            JSON.stringify({ running: [standIn.stdout.trim().slice(0, 12)] }),
+            JSON.stringify({ running: [standIn.stdout.trim().slice(0, 12)] }) &&
+          !refused.stdout.includes(token),
         message: "a running project container should refuse the export",
         result: refused,
       });
@@ -400,7 +405,7 @@ export const dataExportScenario: Scenario = {
           race?.error?.code === "E_PROJECT_RUNNING" &&
           writerId.length === 12 &&
           mounts?.some((mount) => mount.container === writerId) === true &&
-          !raced.stdout.includes(writer),
+          !raced.stdout.includes(token),
         message:
           "a writer that started and exited during the copy should refuse publication",
         result: raced,
@@ -598,7 +603,8 @@ async function bindHolderRefuses(opts: {
       refused.exitCode === 1 &&
       refusal?.error?.code === "E_PROJECT_RUNNING" &&
       JSON.stringify(refusal.error.detail) ===
-        JSON.stringify({ running: [started.stdout.trim().slice(0, 12)] }),
+        JSON.stringify({ running: [started.stdout.trim().slice(0, 12)] }) &&
+      !refused.stdout.includes(opts.holder),
     message: "a running container binding the Mountpoint should refuse",
     result: refused,
   });

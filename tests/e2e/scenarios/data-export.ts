@@ -89,6 +89,8 @@ export const dataExportScenario: Scenario = {
     const scratch = `${project}-restore`;
     const writer = `${project}-writer-${token}`;
     const holder = `${project}-bind-holder-${token}`;
+    const alias = `${project}-alias-${token}`;
+    const aliasWriter = `${project}-alias-writer-${token}`;
     await Bun.write(
       join(fixture.hackDir, "docker-compose.yml"),
       [
@@ -334,6 +336,14 @@ export const dataExportScenario: Scenario = {
         message: "remove the stand-in project container",
       });
       await bindHolderRefuses({ ctx, fixture, out, volume: data, holder });
+      await aliasWriterRefuses({
+        ctx,
+        fixture,
+        out,
+        volume: data,
+        alias,
+        holder: aliasWriter,
+      });
 
       // A short-lived writer that starts and exits while a copy helper runs:
       // no `docker ps` check can see it, the live event subscription does.
@@ -432,7 +442,8 @@ export const dataExportScenario: Scenario = {
         stage: "before-hold",
       });
     } finally {
-      await docker(ctx, ["rm", "--force", runner, writer, holder]);
+      await docker(ctx, ["rm", "--force", runner, writer, holder, aliasWriter]);
+      await docker(ctx, ["volume", "rm", alias]);
       await docker(ctx, ["volume", "rm", data, foreign, external, scratch]);
     }
   },
@@ -734,6 +745,95 @@ async function bindHolderRefuses(opts: {
     result: await docker(ctx, ["rm", "--force", opts.holder]),
     codes: [0],
     message: "remove the bind holder",
+  });
+}
+
+/**
+ * A foreign local volume whose options bind the owned volume's Mountpoint
+ * (`--opt type=none --opt o=bind --opt device=<Mountpoint>`) aliases its
+ * storage; a container mounting it shows only the alias's own Name and
+ * Source. Export inspects the alias's backing and refuses, by short ID,
+ * printing neither name.
+ */
+async function aliasWriterRefuses(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly out: string;
+  readonly volume: string;
+  readonly alias: string;
+  readonly holder: string;
+}): Promise<void> {
+  const { ctx } = opts;
+  const mountpoint = (
+    await docker(ctx, [
+      "volume",
+      "inspect",
+      "--format",
+      "{{.Mountpoint}}",
+      opts.volume,
+    ])
+  ).stdout.trim();
+  expectExit({
+    result: await docker(ctx, [
+      "volume",
+      "create",
+      "--opt",
+      "type=none",
+      "--opt",
+      "o=bind",
+      "--opt",
+      `device=${mountpoint}`,
+      opts.alias,
+    ]),
+    codes: [0],
+    message: "create a local volume aliasing the owned Mountpoint",
+  });
+  const started = await docker(ctx, [
+    "run",
+    "--detach",
+    "--network",
+    "none",
+    "--name",
+    opts.holder,
+    "--volume",
+    `${opts.alias}:/data`,
+    "--entrypoint",
+    "sleep",
+    HELPER,
+    "300",
+  ]);
+  expectExit({
+    result: started,
+    codes: [0],
+    message: "a container mounting the alias should start",
+  });
+  const refused = await ctx.cli({
+    args: ["data", "export", "--json", "--out", opts.out],
+    cwd: opts.fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  const refusal = extractJsonObject<ExportPayload>({ text: refused.stdout });
+  expect({
+    that:
+      refused.exitCode === 1 &&
+      refusal?.error?.code === "E_PROJECT_RUNNING" &&
+      JSON.stringify(refusal.error.detail) ===
+        JSON.stringify({ running: [started.stdout.trim().slice(0, 12)] }) &&
+      !refused.stdout.includes(opts.alias) &&
+      !refused.stdout.includes(opts.holder),
+    message:
+      "a running container writing through an alias volume should refuse",
+    result: refused,
+  });
+  expectExit({
+    result: await docker(ctx, ["rm", "--force", opts.holder]),
+    codes: [0],
+    message: "remove the alias writer",
+  });
+  expectExit({
+    result: await docker(ctx, ["volume", "rm", opts.alias]),
+    codes: [0],
+    message: "remove the alias volume",
   });
 }
 

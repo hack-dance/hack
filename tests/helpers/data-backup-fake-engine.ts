@@ -329,6 +329,23 @@ export class FakeEngine {
       return ok("2.29.7\n");
     }
     if (args[0] === "volume" && args[1] === "inspect") {
+      // Several names: one line per volume Docker has; a missing one fails
+      // the call after printing the others, as Docker does.
+      const names = args.slice(args.indexOf("--format") + 2);
+      if (names.length > 1) {
+        const found = names.map((name) => this.inspectVolume(name));
+        return {
+          exitCode: found.some((one) => one.exitCode !== 0) ? 1 : 0,
+          stdout: found
+            .map((one) => one.stdout)
+            .filter(Boolean)
+            .join("\n"),
+          stderr: found
+            .map((one) => one.stderr)
+            .filter(Boolean)
+            .join("\n"),
+        };
+      }
       return this.inspectVolume(argv.at(-1) ?? "");
     }
     if (args[0] === "volume" && args[1] === "create") {

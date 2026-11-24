@@ -453,13 +453,60 @@ export async function containersReachingVolumes(opts: {
   readonly containers: readonly string[];
   readonly volumes: readonly WatchedVolume[];
   readonly timeoutMs: number;
-}): Promise<{
-  readonly mounts: readonly { volume: string; container: string }[];
-  readonly unchecked: readonly string[];
-}> {
+}): Promise<ContainersReach> {
   if (opts.containers.length === 0) {
-    return { mounts: [], unchecked: [] };
+    return { mounts: [], unchecked: [], uncheckedBacking: [] };
   }
+  const answered = await inspectContainerMounts(opts);
+  // Volume mounts of other volumes: an alias (a local volume whose options
+  // bind another directory) shows its own Name and Source, never ours.
+  const watchedNames = new Set(opts.volumes.map((volume) => volume.name));
+  const others = new Set(
+    [...answered.values()]
+      .flatMap(volumeMountNames)
+      .filter((name) => !watchedNames.has(name))
+  );
+  const backing = await volumeBackings({
+    docker: opts.docker,
+    names: [...others],
+    timeoutMs: opts.timeoutMs,
+  });
+  const mounts: { volume: string; container: string }[] = [];
+  const unchecked: string[] = [];
+  const uncheckedBacking: string[] = [];
+  for (const container of opts.containers) {
+    const short = container.slice(0, 12);
+    const seen = answered.get(container);
+    if (seen === undefined) {
+      unchecked.push(short);
+      continue;
+    }
+    const reach = containerReach({
+      mounts: seen,
+      volumes: opts.volumes,
+      watchedNames,
+      backing,
+    });
+    for (const volume of reach.volumes) {
+      mounts.push({ volume, container: short });
+    }
+    if (reach.unknownBacking && reach.volumes.length === 0) {
+      uncheckedBacking.push(short);
+    }
+  }
+  return { mounts, unchecked, uncheckedBacking };
+}
+
+/**
+ * `{{json .Mounts}}` of each container, by full ID, from one bounded
+ * inspect; a container Docker does not answer for is absent. An engine
+ * failure is thrown as one.
+ */
+async function inspectContainerMounts(opts: {
+  readonly docker: DataBackupDocker;
+  readonly containers: readonly string[];
+  readonly timeoutMs: number;
+}): Promise<Map<string, readonly unknown[]>> {
   const result = await opts.docker.capture(
     [
       "docker",
@@ -484,35 +531,176 @@ export async function containersReachingVolumes(opts: {
   const answered = new Map<string, readonly unknown[]>();
   for (const line of result.stdout.split("\n")) {
     const space = line.indexOf(" ");
-    if (space <= 0) {
-      continue;
-    }
-    let mounts: unknown;
-    try {
-      mounts = JSON.parse(line.slice(space + 1));
-    } catch {
-      continue;
-    }
+    const mounts = space > 0 ? parseInspect(line.slice(space + 1)) : undefined;
     if (Array.isArray(mounts)) {
       answered.set(line.slice(0, space), mounts);
     }
   }
-  const mounts: { volume: string; container: string }[] = [];
-  const unchecked: string[] = [];
-  for (const container of opts.containers) {
-    const seen = answered.get(container);
-    if (seen === undefined) {
-      unchecked.push(container.slice(0, 12));
+  return answered;
+}
+
+/**
+ * The watched volumes one container's mounts reach, directly or through
+ * the backing path of another volume it mounts, and whether one of those
+ * volumes has a backing Hack cannot classify.
+ */
+function containerReach(opts: {
+  readonly mounts: readonly unknown[];
+  readonly volumes: readonly WatchedVolume[];
+  readonly watchedNames: ReadonlySet<string>;
+  readonly backing: ReadonlyMap<string, string | null>;
+}): { readonly volumes: readonly string[]; readonly unknownBacking: boolean } {
+  const reached = new Set(
+    mountsReachingVolumes({ mounts: opts.mounts, volumes: opts.volumes })
+  );
+  let unknownBacking = false;
+  for (const name of volumeMountNames(opts.mounts)) {
+    if (opts.watchedNames.has(name)) {
       continue;
     }
-    for (const volume of mountsReachingVolumes({
-      mounts: seen,
-      volumes: opts.volumes,
-    })) {
-      mounts.push({ volume, container: container.slice(0, 12) });
+    if (!opts.backing.has(name)) {
+      unknownBacking = true;
+      continue;
+    }
+    const path = opts.backing.get(name);
+    if (typeof path === "string") {
+      for (const volume of pathReachesVolumes({
+        path,
+        volumes: opts.volumes,
+      })) {
+        reached.add(volume);
+      }
     }
   }
-  return { mounts, unchecked };
+  return { volumes: [...reached].sort(), unknownBacking };
+}
+
+/**
+ * The refusal for containers whose volume mounts Hack cannot prove
+ * disjoint from the protected volumes: a non-local driver, local options it
+ * cannot classify, or a volume it could not inspect. Short container IDs
+ * only; never a volume or container name.
+ */
+export function uncheckedBackingError(opts: {
+  readonly containers: readonly string[];
+  /** What the refusal leaves behind, as a sentence. */
+  readonly consequence: string;
+}): HackCliError {
+  return new HackCliError({
+    code: "E_PROJECT_RUNNING",
+    message: `A container (${opts.containers.join(", ")}) mounts a volume whose storage Hack cannot prove is separate from the project's volumes (another volume driver, or local options such as a bind, device or network mount it cannot classify), so it may be writing to them; ${opts.consequence} Stop it, or check what its volumes store into, then retry.`,
+    detail: { unchecked: opts.containers, reason: "unchecked_volume_backing" },
+  });
+}
+
+/** What {@link containersReachingVolumes} found, by short container ID. */
+export type ContainersReach = {
+  readonly mounts: readonly { volume: string; container: string }[];
+  /** Containers Docker did not answer for. */
+  readonly unchecked: readonly string[];
+  /**
+   * Containers with a volume mount whose backing storage Hack cannot prove
+   * disjoint from the watched volumes (another driver, options it cannot
+   * classify, or a volume it could not inspect).
+   */
+  readonly uncheckedBacking: readonly string[];
+};
+
+/** Names of a container's volume mounts. */
+function volumeMountNames(mounts: readonly unknown[]): string[] {
+  return mounts.flatMap((mount) =>
+    isRecord(mount) &&
+    mount.Type === "volume" &&
+    typeof mount.Name === "string" &&
+    mount.Name !== ""
+      ? [mount.Name]
+      : []
+  );
+}
+
+/** Watched volumes a backing path is, is inside, or is above. */
+function pathReachesVolumes(opts: {
+  readonly path: string;
+  readonly volumes: readonly WatchedVolume[];
+}): string[] {
+  return mountsReachingVolumes({
+    mounts: [{ Type: "bind", Source: opts.path }],
+    volumes: opts.volumes,
+  });
+}
+
+/**
+ * The storage path each volume writes into, by name, from one bounded,
+ * batched `docker volume inspect`:
+ *
+ * - a plain `local` volume (no options): its Mountpoint, its own directory;
+ * - a `local` volume whose `o` option includes `bind` or `rbind` and that
+ *   names a `device`: that device, the directory it aliases;
+ * - a `local` `tmpfs` volume: `null`, memory only, provably disjoint;
+ * - anything else is absent from the map (another driver, options Hack
+ *   cannot classify, a block device or network mount, or a volume Docker
+ *   did not answer for): callers fail closed.
+ */
+async function volumeBackings(opts: {
+  readonly docker: DataBackupDocker;
+  readonly names: readonly string[];
+  readonly timeoutMs: number;
+}): Promise<Map<string, string | null>> {
+  const backing = new Map<string, string | null>();
+  if (opts.names.length === 0) {
+    return backing;
+  }
+  const result = await opts.docker.capture(
+    ["docker", "volume", "inspect", "--format", VOLUME_FORMAT, ...opts.names],
+    { timeoutMs: opts.timeoutMs }
+  );
+  for (const line of result.stdout.split("\n")) {
+    const value = parseInspect(line);
+    if (!(isRecord(value) && typeof value.name === "string")) {
+      continue;
+    }
+    const path = classifyVolumeBacking(value);
+    if (path !== undefined) {
+      backing.set(value.name, path);
+    }
+  }
+  return backing;
+}
+
+/** See {@link volumeBackings}; `undefined` is "cannot classify". */
+function classifyVolumeBacking(
+  volume: Record<string, unknown>
+): string | null | undefined {
+  if (volume.driver !== "local") {
+    return undefined;
+  }
+  const options = volume.options;
+  if (
+    options === null ||
+    (isRecord(options) && Object.keys(options).length === 0)
+  ) {
+    return typeof volume.mountpoint === "string" && volume.mountpoint !== ""
+      ? volume.mountpoint
+      : undefined;
+  }
+  if (!isRecord(options)) {
+    return undefined;
+  }
+  const flags =
+    typeof options.o === "string"
+      ? options.o.split(",").map((flag) => flag.trim())
+      : [];
+  if (
+    (flags.includes("bind") || flags.includes("rbind")) &&
+    typeof options.device === "string" &&
+    options.device !== ""
+  ) {
+    return options.device;
+  }
+  if (options.type === "tmpfs" && !flags.includes("bind")) {
+    return null;
+  }
+  return undefined;
 }
 
 /**

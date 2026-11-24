@@ -11,6 +11,7 @@ import {
   dockerReadError,
   runningContainerIds,
   runningContainers,
+  uncheckedBackingError,
   type WatchedVolume,
 } from "./data-backup-volumes.ts";
 import { closedFileWriteError, type FileWriteOperation } from "./fs.ts";
@@ -189,6 +190,12 @@ export async function refuseRunning(opts: {
       code: "E_PROJECT_RUNNING",
       message: `A running container (${reach.unchecked.join(", ")}) could not be checked (it was gone or could not be inspected), so Hack cannot prove it does not use the project's volumes; nothing was ${opts.command === "export" ? "published" : "marked complete"}. If nothing else should be using them, retry.`,
       detail: { unchecked: reach.unchecked, reason: "unchecked_running" },
+    });
+  }
+  if (reach.uncheckedBacking.length > 0) {
+    throw uncheckedBackingError({
+      containers: reach.uncheckedBacking,
+      consequence: `nothing was ${opts.command === "export" ? "published" : "marked complete"}.`,
     });
   }
 }

@@ -18,6 +18,7 @@ import {
 } from "./data-backup-helper.ts";
 import {
   containersReachingVolumes,
+  uncheckedBackingError,
   type WatchedVolume,
 } from "./data-backup-volumes.ts";
 import { isRecord } from "./guards.ts";
@@ -103,6 +104,38 @@ export interface MountMonitor {
   stop(): Promise<void>;
 }
 
+/** One event line, classified; null when it cannot be read. */
+type WindowEvent =
+  | { readonly kind: "start"; readonly id: string }
+  | { readonly kind: "mount"; readonly id: string; readonly container: string }
+  | { readonly kind: "create" | "destroy"; readonly id: string }
+  | { readonly kind: "other" };
+
+function readEvent(line: string): WindowEvent | null {
+  const event = parseJsonText(line);
+  const actor = isRecord(event) && isRecord(event.Actor) ? event.Actor : null;
+  const attributes =
+    actor && isRecord(actor.Attributes) ? actor.Attributes : null;
+  if (
+    !(isRecord(event) && actor && attributes && typeof actor.ID === "string")
+  ) {
+    return null;
+  }
+  const id = actor.ID;
+  if (event.Type === "container") {
+    return event.Action === "start" ? { kind: "start", id } : { kind: "other" };
+  }
+  if (event.Type !== "volume") {
+    return { kind: "other" };
+  }
+  if (event.Action === "mount" && typeof attributes.container === "string") {
+    return { kind: "mount", id, container: attributes.container };
+  }
+  return event.Action === "create" || event.Action === "destroy"
+    ? { kind: event.Action, id }
+    : { kind: "other" };
+}
+
 function notPublished(command: HelperPurpose): string {
   return command === "export"
     ? "the backup was not published"
@@ -159,30 +192,16 @@ export async function startMountMonitor(opts: {
     if (line.trim() === "") {
       return;
     }
-    const event = parseJsonText(line);
-    const actor = isRecord(event) && isRecord(event.Actor) ? event.Actor : null;
-    const attributes =
-      actor && isRecord(actor.Attributes) ? actor.Attributes : null;
-    if (
-      !(isRecord(event) && actor && attributes && typeof actor.ID === "string")
-    ) {
+    const event = readEvent(line);
+    if (event === null) {
       unreadable = true;
-      return;
-    }
-    if (event.Type === "container" && event.Action === "start") {
-      started.add(actor.ID);
-      waiting.get(actor.ID)?.();
-    } else if (
-      event.Type === "volume" &&
-      event.Action === "mount" &&
-      typeof attributes.container === "string"
-    ) {
-      mounts.push({ volume: actor.ID, container: attributes.container });
-    } else if (
-      event.Type === "volume" &&
-      (event.Action === "create" || event.Action === "destroy")
-    ) {
-      volumeEvents.push({ action: event.Action, volume: actor.ID });
+    } else if (event.kind === "start") {
+      started.add(event.id);
+      waiting.get(event.id)?.();
+    } else if (event.kind === "mount") {
+      mounts.push({ volume: event.id, container: event.container });
+    } else if (event.kind === "create" || event.kind === "destroy") {
+      volumeEvents.push({ action: event.kind, volume: event.id });
     }
   };
   const watch: DataBackupWatch = opts.docker.watch(MOUNT_EVENTS_ARGV, onLine);
@@ -365,6 +384,12 @@ export async function startMountMonitor(opts: {
       ];
       if (unique.length === 0 && unchecked.length > 0) {
         throw uncheckedStartError(opts.purpose, unchecked);
+      }
+      if (unique.length === 0 && reach.uncheckedBacking.length > 0) {
+        throw uncheckedBackingError({
+          containers: reach.uncheckedBacking,
+          consequence: `${notPublished(opts.purpose)}.`,
+        });
       }
       return unique;
     },

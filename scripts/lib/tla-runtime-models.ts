@@ -2924,6 +2924,62 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-build-base-scheduling",
+    module: "BaseScheduling",
+    states: 12,
+    invariant: "NoForegroundImport",
+    action: "Cold",
+    fields: ['phase = "solving"', "foregroundDownload = TRUE"],
+    additionalControls: [
+      {
+        name: "unsafe-overlap",
+        negative: true,
+        invariant: "OnlyIdleRetention",
+        action: "Stop",
+        fields: ['phase = "stopping"', "retention = TRUE"],
+      },
+    ],
+  },
+  {
+    name: "native-build-alias",
+    module: "BuildAlias",
+    states: 23,
+    invariant: "BaseSurvives",
+    action: "Cleanup",
+    fields: ["base = FALSE", "alias = FALSE"],
+    additionalControls: [
+      {
+        name: "old-order",
+        negative: true,
+        invariant: "CanRecover",
+        action: "Refuse",
+        fields: ['phase = "blocked"', "keeper = FALSE", "alias = TRUE"],
+      },
+      {
+        name: "unsafe-remote",
+        negative: true,
+        invariant: "NoRegistryFallback",
+        action: "ResolveMissing",
+        fields: ["wire = TRUE", 'phase = "solving"'],
+      },
+      {
+        name: "unsafe-sweep",
+        negative: true,
+        invariant: "NoLiveSweep",
+        action: "Cleanup",
+        fields: ["sweptLive = TRUE", "alias = FALSE"],
+      },
+    ],
+  },
+  {
+    name: "native-keeper-reclaim",
+    module: "KeeperReclaim",
+    states: 5,
+    invariant: "PinPreservesImage",
+    action: "Reclaim",
+    fields: ['fence = "pinning"', "keeper = FALSE"],
+  },
+  {
     name: "native-build-batch",
     module: "BuildBatch",
     states: 296,
@@ -3157,6 +3213,13 @@ const contracts: readonly ModelContract[] = [
           },
           {
             action: "PoolRecover",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+          // The same stranded finalization, reported one step later: a `Listen`
+          // fault earlier in the trace leaves `ListenerExits` as the last enabled
+          // step, which `NoDeadEnd` counts as progress (seen on the B1 factory).
+          {
+            action: "ListenerExits",
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
         ],

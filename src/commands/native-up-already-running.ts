@@ -13,6 +13,7 @@ import {
 } from "../backends/native-project-run.ts";
 import type { NativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { emitCliResult, HackCliError, okResult } from "../lib/cli-result.ts";
+import { beginUpTiming, completeUpTimings } from "../lib/command-timings.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
@@ -147,6 +148,7 @@ export function reportNativeAlreadyRunning(opts: {
           stopped: [],
           failed: [],
         },
+        timings: completeUpTimings(),
         durationMs: Date.now() - opts.startedAtMs,
       },
     }),
@@ -257,6 +259,7 @@ export async function answerNativeAlreadyRunning(opts: {
     project: ProjectContext;
   };
   try {
+    const selectionTiming = beginUpTiming("cli.project.selection");
     const project = await opts.resolveProject();
     const branch = await opts.resolveBranch(project);
     opts.onBranchResolved?.(branch);
@@ -266,6 +269,7 @@ export async function answerNativeAlreadyRunning(opts: {
       nativeHome: opts.native.home,
       branch,
     };
+    selectionTiming?.();
     const result = await nativeProjectPs({
       runtime: opts.native,
       scope,

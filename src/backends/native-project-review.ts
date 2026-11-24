@@ -1,9 +1,9 @@
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, realpath, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { BranchDroppedSites } from "../lib/branch-hosts.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
 import { nativeEnvironmentUnsetsReviewed } from "./native-environment-unsets.ts";
 import {
   nativeProjectBranchArgs,
@@ -367,7 +367,7 @@ export async function withNativeProjectReview<T>(opts: {
   }
   const { namespace, projectArgs, retainedGeneration } = identity;
   const invoke = opts.invoke ?? invokeNativeRuntime;
-  const directory = await mkdtemp(join(tmpdir(), "hack-native-review-"));
+  const directory = await nativeRuntimeTempDirectory("hack-native-review-");
   try {
     await chmod(directory, 0o700);
     const normalized = join(directory, "compose.json");

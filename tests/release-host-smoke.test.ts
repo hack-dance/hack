@@ -108,3 +108,48 @@ test("CI and the release build use the same pins, build and installed-archive ac
   // The CI smoke cannot publish: its token is read-only.
   expect(ci.permissions).toEqual({ contents: "read" });
 });
+
+test("the rehearsal qualifies all publishing hosts and retains packages without release access", async () => {
+  const workflow = Bun.YAML.parse(
+    await Bun.file(".github/workflows/release-rehearsal.yml").text()
+  ) as { permissions: Record<string, string>; jobs: Record<string, Job> };
+  const rehearsal = await job("release-rehearsal.yml", "build");
+  const release = await job("release.yml", "build");
+  const include = rehearsal.strategy?.matrix?.include as readonly {
+    os: string;
+    target: string;
+  }[];
+  const releaseHosts = release.strategy?.matrix?.include as readonly {
+    os: string;
+  }[];
+  expect(include.map((entry) => entry.os).sort()).toEqual(
+    releaseHosts.map((entry) => entry.os).sort()
+  );
+  for (const { os, target } of include) {
+    expect(target).toBe(
+      RELEASE_HOST_TARGETS[os]?.replace("/", "-").replace("-x64", "-x86_64") ??
+        ""
+    );
+  }
+  expect(pins(rehearsal.steps)).toEqual(pins(release.steps));
+  expect(workflow.permissions).toEqual({ contents: "read" });
+  expect(Object.keys(workflow.jobs)).toEqual(["build"]);
+  expect(rehearsal.permissions).toBeUndefined();
+  expect(rehearsal.steps[0]?.with?.["persist-credentials"]).toBe(false);
+  const commands = runs(rehearsal.steps);
+  expect(commands).toContain(
+    'bun run build:release "--version=$RELEASE_VERSION" --skip-tests'
+  );
+  expect(commands).toContain(
+    "bun scripts/check-release-config-compiler.ts dist/release"
+  );
+  expect(commands).toContain(
+    "bun scripts/check-release-lifecycle-supervisor.ts dist/release"
+  );
+  expect(commands).not.toContain("gh release");
+  const upload = rehearsal.steps.at(-1);
+  expect(upload?.uses).toBe("actions/upload-artifact@v4");
+  expect(upload?.with?.path).toContain("dist/release/package-files.txt");
+  expect(upload?.with?.path).toContain("dist/release/package-sha256.txt");
+  expect(upload?.with?.path).toContain("dist/release/source-revision.txt");
+});

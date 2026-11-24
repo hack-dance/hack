@@ -616,6 +616,30 @@ test("show omits credential-bearing map keys from legacy project data and env pr
   });
 });
 
+test("show masks plaintext GitHub tokens in local env cells and Source", async () => {
+  const f = await fixture();
+  const byName = "fixture-opaque-pat-sentinel";
+  const byValue = `ghp_${"FixtureOnly".repeat(4)}`;
+  const path = join(f.project, "hack.env.local.yaml");
+  const text = env(
+    `  global:\n    GITHUB_PAT: ${byName}\n    ADAPTER: ${byValue}\n    LOG_LEVEL: debug`
+  );
+  await writeFile(path, text);
+
+  const report = await show(f.root, f.main);
+  expect(JSON.stringify(report).includes(byName)).toBe(false);
+  expect(JSON.stringify(report).includes(byValue)).toBe(false);
+  for (const key of ["GITHUB_PAT", "ADAPTER"]) {
+    expect(report.env.find((row) => row.key === key)?.values).toEqual([
+      { layer: "5", secret: true },
+    ]);
+  }
+  expect(
+    report.env.find((row) => row.key === "LOG_LEVEL")?.values
+  ).toContainEqual({ layer: "5", secret: false, value: "debug" });
+  expect((await readFile(path, "utf8")) === text).toBe(true);
+});
+
 test("show and validation previews omit authorization headers and commands", async () => {
   const f = await fixture();
   const [projectPath, composePath] = [

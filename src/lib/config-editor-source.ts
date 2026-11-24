@@ -15,9 +15,11 @@ import {
 } from "./project.ts";
 
 const SECRET_KEY =
-  /(?:access[_-]?key|auth(?:orization)?|credential|pass(?:word|phrase|wd)?\b|secret|secure|token|private[_-]?key|api[_-]?key)/i;
+  /(?:access[_-]?key|auth(?:orization)?|credential|pass(?:word|phrase|wd)?\b|secret|secure|token|private[_-]?key|api[_-]?key|(?:^|[_-])pat(?:$|[_-]))/i;
 const SECRET_TEXT =
   /(?:(?<![a-z\d+.-])[a-z][a-z\d+.-]*:\/\/[^\s/?#@]+@|[?&](?:token|key|secret|password|signature)=|-----BEGIN [^-]+PRIVATE KEY-----|\bauthorization(?:\s*:\s*|\s+)(?:bearer|basic)\s+\S)/i;
+const PROVIDER_CREDENTIAL =
+  /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{16,}|npm_[A-Za-z0-9]{30,}|AGE-SECRET-KEY-[A-Z0-9]{20,})\b/;
 const PRIVATE_COMPOSE_FIELDS = /^(?:command|entrypoint|args|secrets|test)$/;
 const CADDY_HEADER =
   /^caddy(?:[._].*)?[._](?:header_up|header_down|header|request_header)(?:[._]|$)/i;
@@ -27,7 +29,8 @@ const PRIVATE_COMMENT =
 export function isConfigSecret(key: string, value: unknown): boolean {
   return (
     SECRET_KEY.test(key) ||
-    (typeof value === "string" && SECRET_TEXT.test(value))
+    (typeof value === "string" &&
+      (SECRET_TEXT.test(value) || PROVIDER_CREDENTIAL.test(value)))
   );
 }
 

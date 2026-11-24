@@ -159,3 +159,46 @@ test.skipIf(!tarAvailable)(
     expect(archiveDigest(corrupted).exitCode).not.toBe(0);
   }
 );
+
+const pythonAvailable = (() => {
+  try {
+    return (
+      spawnSyncBounded(["python3", "-c", "import tarfile"], { timeout: 10_000 })
+        .exitCode === 0
+    );
+  } catch {
+    return false;
+  }
+})();
+
+test.skipIf(!pythonAvailable)(
+  "a ustar archive whose paths are split between prefix and name digests like the source",
+  async () => {
+    const dir = join(root, "v");
+    // 130 + 1 + 40 bytes: too long for the 100-byte name field, so ustar
+    // puts the directories in the prefix field and the file in name.
+    const deep = join(dir, "p".repeat(60), "q".repeat(69));
+    await mkdir(deep, { recursive: true });
+    await writeFile(join(deep, "f".repeat(40)), "split");
+    const archive = join(root, "ustar.tar");
+    const script = [
+      "import sys, tarfile",
+      "src, out = sys.argv[1], sys.argv[2]",
+      "with tarfile.open(out, 'w', format=tarfile.USTAR_FORMAT) as tar:",
+      "    tar.add(src, arcname='.')",
+    ].join("\n");
+    expect(
+      spawnSyncBounded(["python3", "-c", script, dir, archive], {
+        timeout: 60_000,
+      }).exitCode
+    ).toBe(0);
+    const bytes = Buffer.from(await Bun.file(archive).arrayBuffer());
+    // The header really uses the prefix field.
+    const header = bytes.indexOf(Buffer.from("f".repeat(40)));
+    expect(header).toBeGreaterThan(0);
+    expect(bytes.subarray(257, 263).toString("latin1")).toBe("ustar\u0000");
+    const archived = archiveDigest(bytes);
+    expect(archived.exitCode).toBe(0);
+    expect(archived.value).toEqual({ ...liveDigest(dir), excludedSockets: 0 });
+  }
+);

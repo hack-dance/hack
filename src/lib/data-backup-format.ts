@@ -146,7 +146,8 @@ process.stdout.write(JSON.stringify({algorithm:"${DATA_BACKUP_TREE_DIGEST}",entr
  * computed from a tar stream on stdin instead of a live tree, so export can
  * prove the archive it publishes holds exactly the tree it digested. It
  * streams (constant memory), parses GNU (`L`/`K` long names, base-256
- * numbers) and POSIX/pax (`x`/`g` records, ustar prefix) headers, verifies
+ * numbers) and POSIX/pax (`x`/`g` records, the ustar prefix when the magic is `ustar\0` version
+ * `00`) headers, verifies
  * each header checksum, and applies the live script's field rules: regular
  * files hash their content; a hard link takes its target entry's type,
  * size and content (of any type tar links: a file, FIFO, symlink or device)
@@ -185,7 +186,7 @@ for(;;){
  if(type==="x"){pax=paxRecords(await bytesOf(size));continue;}
  if(type==="g"){global={...global,...paxRecords(await bytesOf(size))};continue;}
  const meta={...global,...pax};
- const ustar=h.subarray(257,263).toString("latin1")==="ustar\\u000000";
+ const ustar=h.subarray(257,263).toString("latin1")==="ustar\\u0000"&&h.subarray(263,265).toString("latin1")==="00";
  const prefix=ustar?field(h,345,155):Buffer.alloc(0);
  const raw=longName??meta.path??(prefix.length?Buffer.concat([prefix,Buffer.from("/"),field(h,0,100)]):field(h,0,100));
  const link=longLink??meta.linkpath??field(h,157,100);

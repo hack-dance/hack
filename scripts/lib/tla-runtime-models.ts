@@ -1374,6 +1374,70 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-route-lookup",
+    module: "RouteLookup",
+    states: 102,
+    invariant: "LiveRouteAllowed",
+    action: "RejectPending",
+    fields: [
+      'lookup = "deny"',
+      'pending = "claimed"',
+      'committed = [a |-> "live", b |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "RejectPending",
+        fields: [
+          'lookup = "deny"',
+          'pending = "staged"',
+          'committed = [a |-> "live", b |-> "claimed"]',
+        ],
+      },
+      {
+        action: "RejectPending",
+        fields: [
+          'lookup = "deny"',
+          'pending = "absent"',
+          'committed = [a |-> "live", b |-> "staged"]',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "detached-inode",
+        negative: true,
+        invariant: "LiveRouteAllowed",
+        action: "RejectUnlinked",
+        fields: [
+          'lookup = "deny"',
+          "linked = FALSE",
+          'opened = [a |-> "live", b |-> "absent"]',
+        ],
+        alternativeWitnesses: ["claimed", "staged"].map((phase) => ({
+          action: "RejectUnlinked",
+          fields: [
+            'lookup = "deny"',
+            "linked = FALSE",
+            `opened = [a |-> "live", b |-> "${phase}"]`,
+          ],
+        })),
+      },
+      {
+        name: "retirement-reachable",
+        negative: true,
+        invariant: "NeverDetachDuringRetirement",
+        action: "CommitSibling",
+        fields: [
+          'lookup = "secondOpen"',
+          "linked = FALSE",
+          'pending = "none"',
+          'opened = [a |-> "live", b |-> "staged"]',
+          'committed = [a |-> "live", b |-> "absent"]',
+        ],
+      },
+    ],
+  },
+  {
     name: "native-route-stop",
     module: "Stop",
     states: 202,

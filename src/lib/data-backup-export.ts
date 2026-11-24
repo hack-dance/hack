@@ -1,5 +1,5 @@
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import {
   type DataBackupDeadlines,
@@ -142,6 +142,8 @@ async function exportWithin(opts: {
     join(input.hackHome, DATA_BACKUPS_DIR_NAME, plan.composeProject);
   const backup = join(parent, dataBackupTimestamp(now));
   const partial = `${backup}${DATA_BACKUP_PARTIAL_SUFFIX}`;
+  // Directories this export creates; their entries are flushed at the end.
+  const createdDirs = await missingDirectories(parent);
   await fsStep({ path: parent, operation: "create_directory" }, () =>
     mkdir(parent, { recursive: true, mode: 0o700 })
   );
@@ -204,9 +206,28 @@ async function exportWithin(opts: {
     backup,
     parent,
     manifest,
+    createdDirs,
     syncDirectory: input.syncDirectory ?? syncPath,
   });
   return { backup, manifest };
+}
+
+/**
+ * The directories `mkdir -p` would create for `path`, deepest first: `path`
+ * and each ancestor up to (not including) the first that exists.
+ */
+async function missingDirectories(path: string): Promise<readonly string[]> {
+  const missing: string[] = [];
+  let current = path;
+  while ((await stat(current).catch(() => null)) === null) {
+    missing.push(current);
+    const up = dirname(current);
+    if (up === current) {
+      break;
+    }
+    current = up;
+  }
+  return missing;
 }
 
 async function refuseExisting(path: string): Promise<void> {
@@ -320,7 +341,7 @@ async function copyVolume(opts: {
 /**
  * Manifest last; fsync the manifest and the `.partial` directory (each tar
  * was fsynced as it was written); one rename publishes; then fsync the
- * parent. A failure before the rename leaves only `.partial`. A failed
+ * parent, and the directory above each directory this export created. A failure before the rename leaves only `.partial`. A failed
  * parent fsync after it is a distinct outcome: the backup is complete and
  * visible, but its durability is unconfirmed (`detail.published: true,
  * durable: false`).
@@ -330,6 +351,8 @@ async function publishBackup(opts: {
   readonly backup: string;
   readonly parent: string;
   readonly manifest: DataBackupManifest;
+  /** Directories this export created, deepest first. */
+  readonly createdDirs: readonly string[];
   readonly syncDirectory: (path: string) => Promise<void>;
 }): Promise<void> {
   const manifestPath = join(opts.partial, DATA_BACKUP_MANIFEST);
@@ -348,6 +371,11 @@ async function publishBackup(opts: {
   );
   try {
     await opts.syncDirectory(opts.parent);
+    // A directory this export created is durable only once its own entry
+    // in the directory above is flushed, deepest first.
+    for (const created of opts.createdDirs) {
+      await opts.syncDirectory(dirname(created));
+    }
   } catch {
     throw new HackCliError({
       code: "E_UNEXPECTED",

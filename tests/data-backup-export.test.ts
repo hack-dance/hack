@@ -661,6 +661,47 @@ describe("publication", () => {
     expect(await readdir(out)).toEqual(["20261123T140501Z"]);
   });
 
+  test("directories export creates for --out are flushed in their parents, deepest first", async () => {
+    const out = join(root, "a", "b", "c");
+    const backup = join(out, "20261123T140501Z");
+    const synced: string[] = [];
+    await exportProjectData(
+      input(engine(), {
+        outDir: out,
+        syncDirectory: (path) => {
+          synced.push(path);
+          return Promise.resolve();
+        },
+      })
+    );
+    expect(synced).toEqual([
+      `${backup}.partial`,
+      out,
+      join(root, "a", "b"),
+      join(root, "a"),
+      root,
+    ]);
+
+    // A failure on one of them is the durability-unconfirmed outcome.
+    const again = join(root, "x", "y");
+    const error = await caught(
+      exportProjectData(
+        input(engine(), {
+          outDir: again,
+          syncDirectory: (path) =>
+            path === join(root, "x")
+              ? Promise.reject(Object.assign(new Error("io"), { code: "EIO" }))
+              : Promise.resolve(),
+        })
+      )
+    );
+    expect(error.detail).toEqual({
+      backup: join(again, "20261123T140501Z"),
+      published: true,
+      durable: false,
+    });
+  });
+
   test("refuses an existing target directory", async () => {
     const out = join(root, "out");
     await exportProjectData(input(engine(), { outDir: out }));

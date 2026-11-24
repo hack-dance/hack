@@ -845,16 +845,16 @@ impl TerminalView {
 fn apply_ghostty_colors(mut theme: TermTheme, look: &GhosttyLook) -> TermTheme {
     if let Some(fg) = look.foreground {
         theme.foreground = fg;
-        // Keep the inherited foreground cursor for configs that set only
-        // foreground. An explicit cursor color takes precedence below.
-        theme.cursor = fg;
-        theme.cursor_fg = None;
     }
     if let Some(bg) = look.background {
         theme.background = bg;
     }
-    if let Some(color) = look.cursor_color {
+    // The foreground supplies the cursor color unless Ghostty sets one.
+    if let Some(color) = look.cursor_color.or(look.foreground) {
         theme.cursor = color;
+        // A custom cursor uses the terminal background for its text
+        // unless Ghostty explicitly supplies cursor-text.
+        theme.cursor_fg = None;
     }
     theme.cursor_fg = look.cursor_text.or(theme.cursor_fg);
     if let Some(bg) = look.selection_background {

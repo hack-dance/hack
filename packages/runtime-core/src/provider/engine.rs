@@ -681,6 +681,13 @@ impl<'a> Observer<'a> {
         Ok(value)
     }
 
+    pub(super) fn identity_document(&self) -> Result<Value, CandidateError> {
+        self.guest.verify()?;
+        let result = self.transport.request(Method::GET, "/v1.53/info", None);
+        self.guest.verify()?;
+        result
+    }
+
     /// Fixed read-only image endpoint. Recheck ownership on both success and
     /// 404 so an absence after a guest change cannot authorize a load.
     pub(super) fn image(&self, image: &str) -> Result<Value, CandidateError> {

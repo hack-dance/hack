@@ -289,7 +289,16 @@ runs. A step past its bound is stopped and refuses with
 disk or any other failure the helper container is removed; if Docker cannot
 confirm the removal, the outcome says so (`detail.cleanup: {container,
 removed: false}`, the container ID, and the `docker rm -f <id>` command to
-run) instead of claiming cleanup, and nothing is published. Ctrl-C or SIGTERM
+run) instead of claiming cleanup, and nothing is published. When a `docker
+create` for a helper, marker or reference returns no container ID (the
+response was lost or timed out) and Hack cannot find the container by its
+name and the create's random `io.hack.data-backup.nonce` label either, a
+container of this run may exist that Hack does not track: the refusal says
+so with an unknown cleanup outcome (`detail.cleanup: {container: null,
+removed: false, outcome: "unknown", label, command}`) and, in text too, one
+command that finds and removes it by that label only,
+`docker ps -aq --filter label=io.hack.data-backup.nonce=<nonce> | xargs -r docker rm -f`.
+A create the daemon itself refused created nothing and is not reported. Ctrl-C or SIGTERM
 stops the event subscription, force-removes the run's live helper containers
 by ID and reports
 `E_CANCELLED`; removal is confirmed with a few short retries, since Docker

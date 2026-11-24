@@ -344,7 +344,13 @@ impl HackApp {
         let facts = ServiceFacts::new(row.as_ref(), service, containers);
         let body = match self.service_pane.tab {
             ServiceTab::Info => render_info(&facts, self.live, ui),
-            ServiceTab::Stats => render_service_stats(ui),
+            ServiceTab::Stats => service.map_or_else(
+                || render_service_stats(ui),
+                |service| {
+                    self.service_stats_tab(detail, service, ui, cx)
+                        .into_any_element()
+                },
+            ),
             ServiceTab::Logs => self.render_service_logs(detail, ui, cx),
             ServiceTab::Terminal => self.render_service_terminal(detail, ui, window, cx),
             ServiceTab::Files => self

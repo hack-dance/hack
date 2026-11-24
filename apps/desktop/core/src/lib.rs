@@ -6,9 +6,10 @@
 //! - [`state`]: project display state and actions.
 //! - [`viewmodel`]: list and detail state machines; [`logs`]: the Logs tab.
 //! - [`source`]: live and fixture data sources; [`fixtures`]: canned states.
+//! - [`stats`]: in-memory service usage history.
 //!
-//! The app keeps no state of its own beyond window layout and holds no
-//! credentials; every action is one CLI command.
+//! The app holds no credentials. It saves window preferences and keeps stats
+//! history for the current session. Every action is one CLI command.
 
 pub mod cli_choice;
 pub mod config;
@@ -32,6 +33,7 @@ pub mod setup_io;
 mod setup_login;
 pub mod source;
 pub mod state;
+pub mod stats;
 pub mod upgrade;
 pub mod usage;
 pub mod viewmodel;

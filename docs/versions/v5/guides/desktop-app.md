@@ -11,8 +11,8 @@ It needs macOS 15 or newer, or Linux with Wayland or X11 and Vulkan.
 
 ## What it is
 
-The app keeps no state of its own except its window layout and which CLI you
-chose. It holds no credentials. For every action it runs `hack` as you, exactly
+The app saves its window layout and which CLI you chose. It holds resource
+history in memory and holds no credentials. For every action it runs `hack` as you, exactly
 as you would in a terminal.
 
 ```mermaid
@@ -27,8 +27,8 @@ flowchart LR
   Cli --> Files[".hack/ env files"]
 ```
 
-So anything the app shows, you can also get from the CLI, and anything the CLI
-refuses, the app cannot do.
+The app reads its data from the CLI and `hackd`. It collects the points shown
+in the Stats charts while the app is open.
 
 ## What it shows
 
@@ -37,6 +37,7 @@ refuses, the app cannot do.
 | Project list | Every registered project and its branch instances, grouped by state. Search with Cmd-K (Ctrl-K on Linux). | `hackd` (`/v1/projects`); `hack ps --json` for native projects |
 | Project header | Start, Stop, Restart and Open, with progress and errors. | `hack up`, `down`, `restart`, `open` |
 | Services tab | Each service, its state and its routes. For a running Compose project, also CPU and memory per service, and an **emulated** mark on a service whose image runs under CPU emulation. | `hackd`; `hack ps --json`; `hack usage --json --by-service` |
+| Service Stats | Up to 10 minutes of CPU, memory against the configured limit, and network rates for a Compose service. A short Info list shows the service's runtime details. | `hack usage --json --details --no-host`; `hackd` |
 | Logs tab | Live logs with pause, search and a filter for one service. | `hack logs --json` |
 | Files tab | Browse a running Compose service's directories, preview files, copy container paths and open worktree files in an editor. | `hack files ls --json`, `hack files cat --json` |
 | Env tab | Variable names and values per overlay and scope. See below. | `hack env list`, `get`, `add` |
@@ -53,6 +54,12 @@ The `hackd` and **Routing and DNS** sidebar indicators follow the checks shown
 in Setup. When a command finishes, the indicator updates with the result of the
 fresh check. Dark mode uses Merino Dark. Your Ghostty configuration can override
 the embedded terminal's look.
+
+The app samples running Compose services every five seconds, including while
+you view another pane. For a stopped service, its recent samples age out of
+the chart. Network rates need two samples with the same known container
+start time. Rounded Docker counters can leave gaps in the chart. The history
+starts fresh each time you open the app or switch CLI installations.
 
 ## How it finds the CLI
 

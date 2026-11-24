@@ -48,6 +48,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
         };
         shots.push((l.name(), base, Some(l)));
     }
+    shots.push(("service-stats", Fixture::Usage, None));
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
         for &(name, f, logs) in shots
             .iter()
@@ -92,6 +93,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             }
                             if f.name().starts_with("changes-") {
                                 app.show_changes_fixture(f.name());
+                            }
+                            if name == "service-stats" {
+                                app.show_stats_fixture(window, cx);
                             }
                             if f.name().starts_with("copies-") {
                                 app.show_copies_fixture(f.name());

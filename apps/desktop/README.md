@@ -874,9 +874,9 @@ Drop's reader join completes. These test allowances do not change CLI timeouts.
 
 ## Service details
 
-Select a service from the sidebar or Services table to open its detail pane. The pane opens
-on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
-Info, Stats, Logs, Terminal and Files. Stats shows a placeholder.
+Select a service from the sidebar or Services table to open its detail pane.
+The pane opens on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
+Info, Stats, Logs, Terminal and Files. Stats shows recent Compose resource use.
 
 - **Info** shows copyable route, health, image, mount, container name and
   startup information reported for the selected service. A Compose ownership

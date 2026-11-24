@@ -734,6 +734,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "export",
         "reconcile-export",
         "prune",
+        "retire-pruned-host-roots",
         "reserve-bridge",
         "release-bridge",
         "start-bridge",
@@ -1066,6 +1067,16 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "bridges" => graph::inspect_bridges(candidate, run),
         "reconcile-bridges" => graph::reconcile_bridges(candidate, run),
         "prune" => graph::prune(candidate, run),
+        "retire-pruned-host-roots" => {
+            #[cfg(target_os = "macos")]
+            {
+                graph::retire_pruned(candidate, run)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(invalid())
+            }
+        }
         "reconcile-export" => graph::reconcile_export(candidate, run),
         "inspect" => serde_json::to_value(graph::inspect_with_startup_wait(
             candidate,

@@ -589,9 +589,8 @@ impl HostRelayRuntime {
         // The native owner incarnation also lets pre-admission recovery locate
         // its directory before a Startup receipt exists. A replacement process
         // has a different birth time even when its PID was reused.
-        let control_generation = process_control_generation(&crate::provider::identity::observe(
-            std::process::id() as i32,
-        )?)?;
+        let process = crate::provider::identity::observe(std::process::id() as i32)?;
+        let control_generation = process_control_generation(&process)?;
         let control_root = control_root_generation(
             &candidate.state_root,
             &owner.token,
@@ -599,7 +598,23 @@ impl HostRelayRuntime {
             selected_run,
             Some(&control_generation),
         )?;
-        state::private_directory(&control_root)?;
+        let created = match fs::DirBuilder::new().mode(0o700).create(&control_root) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => return Err(state::io(error)),
+        };
+        state::check_private_directory(&control_root)?;
+        if created && let (Some(run), Some(boot)) = (selected_run, owner.guest_boot_id.as_deref()) {
+            // A failed inventory write grants no later cleanup authority.
+            let _ = super::super::host_root_retirement::record_relay(
+                candidate,
+                run,
+                &control_root,
+                &owner.token,
+                boot,
+                &process,
+            );
+        }
         let mut dependency_reservation = if let Some(run) = selected_run {
             super::super::dependency_slots::Reservation::reserve(
                 candidate,

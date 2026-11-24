@@ -66,6 +66,35 @@ struct Tombstone {
     export_sha256: String,
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn verify_pruned(candidate: &Candidate, run: &str) -> Result<(), CandidateError> {
+    let target = consumed(candidate, run)?;
+    state::check_private_directory(&target)?;
+    let marker: Tombstone = state::read(&target.join("state.json"))?;
+    let absent = |path: &Path| match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(_) => Ok(false),
+        Err(error) => Err(state::io(error)),
+    };
+    let active = directory(candidate, run)?;
+    let archived = archive::path(candidate, run)?;
+    crate::reject_aliased_state(&active)?;
+    crate::reject_aliased_state(&archived)?;
+    if marker.version != 1
+        || marker.run != run
+        || !hex(&marker.owner, 32)
+        || !hex(&marker.export_sha256, 64)
+        || !absent(&active)?
+        || !absent(&archived)?
+    {
+        return Err(error(
+            "graph_host_root_retirement",
+            "Graph prune is not fully committed.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn prune(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
     prune_with(candidate, &engine, run, false)
@@ -403,7 +432,14 @@ fn prunable(candidate: &Candidate, run: &str, path: &Path) -> bool {
 /// run is left either way, so that answer is accurate in substance.
 fn make_consumed_room(candidate: &Candidate) -> Result<(), CandidateError> {
     let parent = candidate.state_root.join("run/graph-consumed");
-    let (mut count, oldest) = oldest_runs(&parent, CONSUMED_LIMIT, |run, _| {
+    let (mut count, oldest) = oldest_runs(&parent, CONSUMED_LIMIT, |run, path| {
+        let planned = path.join("host-retirement.json");
+        let complete = path.join("host-retirement-complete.json");
+        if fs::symlink_metadata(&planned).is_ok()
+            && !state::read::<usize>(&complete).is_ok_and(|count| count <= 129)
+        {
+            return false;
+        }
         archive::path(candidate, run)
             .is_ok_and(|archived| !archived.exists() && !archived.is_symlink())
     })?;
@@ -483,6 +519,34 @@ mod chain_tests {
         state::private_directory(&root).unwrap();
         (Candidate::discover(&root).unwrap(), root)
     }
+    #[test]
+    fn retirement_requires_the_archive_to_be_removed_after_tombstone_commit() {
+        let (candidate, fixture) = candidate();
+        let run = "a".repeat(32);
+        let consumed = consumed(&candidate, &run).unwrap();
+        let archive = archive::path(&candidate, &run).unwrap();
+        let active = directory(&candidate, &run).unwrap();
+        state::private_directory(&consumed).unwrap();
+        state::private_directory(&archive).unwrap();
+        assert!(verify_pruned(&candidate, &run).is_err());
+        state::write(
+            &consumed.join("state.json"),
+            &Tombstone {
+                version: 1,
+                run: run.clone(),
+                owner: "b".repeat(32),
+                export_sha256: "c".repeat(64),
+            },
+        )
+        .unwrap();
+        assert!(verify_pruned(&candidate, &run).is_err());
+        fs::remove_dir(&archive).unwrap();
+        assert!(verify_pruned(&candidate, &run).is_ok());
+        state::private_directory(&active).unwrap();
+        assert!(verify_pruned(&candidate, &run).is_err());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
     fn aged(path: &Path, seconds: u64) {
         let time = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
         fs::File::options()

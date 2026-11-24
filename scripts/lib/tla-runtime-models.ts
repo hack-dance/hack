@@ -2915,6 +2915,13 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "host-root-retirement",
+    module: "HostRootRetirement",
+    states: 18,
+    invariant: "PreserveReferences",
+    fields: ['phase = "Quarantined"', 'reference = "Recoverable"'],
+  },
+  {
     name: "relay-fence",
     module: "RelayFence",
     negativeModule: "RelayFenceBroken",

@@ -606,3 +606,54 @@ test("build retention accepts the observed image-2 reclaim violation only with a
     ).toBe(false);
   }
 });
+
+test("native-pool-stop https-stopped accepts its stranded finalization after a listener fault only", () => {
+  // The B1 factory trace: Listen, Start, OwnerCrash, RecoverRunning, RuntimeDown,
+  // OwnerRetire, then ListenerExits as the last step before the dead end.
+  const control = runtimeModels
+    .find((entry) => entry.name === "native-pool-stop")
+    ?.additionalControls?.find((entry) => entry.name === "https-stopped");
+  expect(control).toBeDefined();
+  const terminal = [
+    "faults = 3",
+    'pool = "stopped"',
+    "boot = 1",
+    'https = "records"',
+    "fin = TRUE",
+    'port = "free"',
+    'run = "retained"',
+    'owner = "none"',
+    "pub = FALSE",
+  ];
+  const witness = (action: string, fields = terminal) =>
+    tlaWitness({ invariant: "NoDeadEnd", action, fields });
+  const verify = (output: string) =>
+    control?.verify({ negative: true, exitCode: 12, output });
+  expect(verify(witness("ListenerExits"))).toBe(true);
+  const valid = witness("ListenerExits");
+  for (const invalid of [
+    // Another dead end is not this control's.
+    witness(
+      "ListenerExits",
+      terminal.map((field) => field.replace("fin = TRUE", "fin = FALSE"))
+    ),
+    witness(
+      "ListenerExits",
+      terminal.map((field) =>
+        field.replace('pool = "stopped"', 'pool = "running"')
+      )
+    ),
+    witness(
+      "ListenerExits",
+      terminal.map((field) =>
+        field.replace('run = "retained"', 'run = "ready"')
+      )
+    ),
+    // An action no witness names, another invariant, or an extra failure refuse.
+    witness("Finalize"),
+    valid.replace("Invariant NoDeadEnd", "Invariant NoArchiveOverListener"),
+    `${valid}\nError: unrelated checker failure`,
+  ]) {
+    expect(verify(invalid)).toBe(false);
+  }
+});

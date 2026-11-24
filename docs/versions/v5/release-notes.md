@@ -56,6 +56,13 @@ flowchart LR
 Follow [Upgrade from v4](upgrade.md). It is a backup-first procedure, and it
 says how to go back.
 
+### Native build receipts and downgrades
+
+New native build receipts record verified base image IDs for reclamation. After
+a downgrade to a runtime that rejects the new receipt field, build-image
+reclamation skips cleanup when it encounters those receipts. Upgrade to the
+newer runtime to reclaim the images.
+
 ### Native build contexts
 
 Native builds exclude machine-local `.hack/` state, including generated Compose

@@ -19,7 +19,11 @@ import {
   dataBackupNameSha256,
   dataBackupTimestamp,
 } from "./data-backup-format.ts";
-import { requireStep, withHeldVolume } from "./data-backup-held-volume.ts";
+import {
+  DataHelperContainers,
+  requireStep,
+  withHeldVolume,
+} from "./data-backup-held-volume.ts";
 import {
   fsStep,
   parseJsonText,
@@ -103,13 +107,13 @@ export async function exportProjectData(
     });
   }
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
-  const helperNames = new Set<string>();
+  const helpers = new DataHelperContainers();
   // Subscribe and prove coverage before the first running-container check.
   const deadlines = input.deadlines ?? resolveDataBackupDeadlines();
   const monitor = await startMountMonitor({
     docker: input.docker,
     purpose: "export",
-    helperNames,
+    helpers,
     deadlines,
     markerTimeoutMs: input.markerTimeoutMs,
   });
@@ -119,7 +123,7 @@ export async function exportProjectData(
       now,
       plan,
       monitor,
-      helperNames,
+      helpers,
       deadlines,
     });
   } finally {
@@ -132,10 +136,10 @@ async function exportWithin(opts: {
   readonly now: Date;
   readonly plan: DeclaredVolumePlan;
   readonly monitor: MountMonitor;
-  readonly helperNames: Set<string>;
+  readonly helpers: DataHelperContainers;
   readonly deadlines: DataBackupDeadlines;
 }): Promise<DataExportResult> {
-  const { input, now, plan, monitor, helperNames, deadlines } = opts;
+  const { input, now, plan, monitor, helpers, deadlines } = opts;
   const stopCommand = input.downCommand ?? "hack down";
   const { owned, skipped } = await classifyDeclaredVolumes({
     docker: input.docker,
@@ -154,14 +158,12 @@ async function exportWithin(opts: {
     });
   }
   const volumeNames = owned.map((volume) => volume.name);
-  const redact = redactComposeProject(plan.composeProject);
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
     volumeNames,
     stopCommand,
     command: "export",
-    redact,
     lead: "The project is running, so its volumes cannot be copied consistently; nothing was backed up.",
   });
 
@@ -193,7 +195,7 @@ async function exportWithin(opts: {
         docker: input.docker,
         volume,
         partial,
-        helperNames,
+        helpers,
         deadlines,
       })
     );
@@ -204,15 +206,20 @@ async function exportWithin(opts: {
     volumeNames,
     stopCommand,
     command: "export",
-    redact,
     lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
   });
   // Stop and drain the subscription, then decide.
   const keyOf = new Map(owned.map((volume) => [volume.name, volume.key]));
-  const mounts = (await monitor.finish(volumeNames)).map((mount) => ({
+  const mounts = (
+    await monitor.finish(
+      owned.map((volume) => ({
+        name: volume.name,
+        mountpoint: volume.identity.mountpoint,
+      }))
+    )
+  ).map((mount) => ({
     ...mount,
     volume: keyOf.get(mount.volume) ?? mount.volume,
-    name: mount.name === null ? null : redact(mount.name),
   }));
   if (mounts.length > 0) {
     throw foreignMountError({
@@ -264,16 +271,6 @@ async function missingDirectories(path: string): Promise<readonly string[]> {
   return missing;
 }
 
-/**
- * Replace the resolved Compose project name (which can carry interpolated
- * env values) wherever it appears in a reported container name.
- */
-export function redactComposeProject(
-  composeProject: string
-): (text: string) => string {
-  return (text) => text.replaceAll(composeProject, "<compose project>");
-}
-
 async function refuseExisting(path: string): Promise<void> {
   const existing = await stat(path).catch(() => null);
   if (existing) {
@@ -294,7 +291,7 @@ async function copyVolume(opts: {
   readonly docker: DataBackupDocker;
   readonly volume: OwnedVolume;
   readonly partial: string;
-  readonly helperNames: Set<string>;
+  readonly helpers: DataHelperContainers;
   readonly deadlines: DataBackupDeadlines;
 }): Promise<DataBackupVolume> {
   const { volume, deadlines } = opts;
@@ -310,7 +307,7 @@ async function copyVolume(opts: {
       readOnly: true,
       purpose: "export",
       deadlines,
-      helperNames: opts.helperNames,
+      helpers: opts.helpers,
       consequence,
       changed: () =>
         new HackCliError({

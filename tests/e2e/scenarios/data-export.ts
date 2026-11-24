@@ -285,21 +285,22 @@ export const dataExportScenario: Scenario = {
         result: digest,
       });
 
+      const standIn = await docker(ctx, [
+        "run",
+        "--detach",
+        "--network",
+        "none",
+        "--name",
+        runner,
+        "--label",
+        `com.docker.compose.project=${project}`,
+        "--entrypoint",
+        "sleep",
+        HELPER,
+        "300",
+      ]);
       expectExit({
-        result: await docker(ctx, [
-          "run",
-          "--detach",
-          "--network",
-          "none",
-          "--name",
-          runner,
-          "--label",
-          `com.docker.compose.project=${project}`,
-          "--entrypoint",
-          "sleep",
-          HELPER,
-          "300",
-        ]),
+        result: standIn,
         codes: [0],
         message: "a stand-in project container should start",
       });
@@ -315,8 +316,9 @@ export const dataExportScenario: Scenario = {
         that:
           refused.exitCode === 1 &&
           refusal?.error?.code === "E_PROJECT_RUNNING" &&
+          // A short ID, never the name (which carries the project name).
           JSON.stringify(refusal.error.detail) ===
-            JSON.stringify({ running: ["<compose project>-web-1"] }),
+            JSON.stringify({ running: [standIn.stdout.trim().slice(0, 12)] }),
         message: "a running project container should refuse the export",
         result: refused,
       });
@@ -352,6 +354,7 @@ export const dataExportScenario: Scenario = {
         timeoutMs: TIMEOUT_MS,
       });
       const helper = /^hack-data-export-[a-f0-9]{24}$/m;
+      const writerCid = join(ctx.tempRoot, "writer.cid");
       let aimed = false;
       for (let attempt = 0; attempt < 600 && !aimed; attempt += 1) {
         const running = await docker(ctx, ["ps", "--format", "{{.Names}}"]);
@@ -362,6 +365,8 @@ export const dataExportScenario: Scenario = {
               "--rm",
               "--name",
               writer,
+              "--cidfile",
+              writerCid,
               "--network",
               "none",
               "--volume",
@@ -380,15 +385,20 @@ export const dataExportScenario: Scenario = {
       }
       const raced = await racing;
       const race = extractJsonObject<ExportPayload>({ text: raced.stdout });
-      const mounts = (race?.error?.detail as { mounts?: { name: string }[] })
-        ?.mounts;
+      const mounts = (
+        race?.error?.detail as { mounts?: { container: string }[] }
+      )?.mounts;
+      const writerId = aimed
+        ? (await readFile(writerCid, "utf8")).trim().slice(0, 12)
+        : "";
       expect({
         that:
           aimed &&
           raced.exitCode === 1 &&
           race?.error?.code === "E_PROJECT_RUNNING" &&
-          mounts?.some((mount) => mount.name === "<compose project>-writer") ===
-            true,
+          writerId.length === 12 &&
+          mounts?.some((mount) => mount.container === writerId) === true &&
+          !raced.stdout.includes(writer),
         message:
           "a writer that started and exited during the copy should refuse publication",
         result: raced,

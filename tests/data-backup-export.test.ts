@@ -25,6 +25,7 @@ import {
   FAKE_TIMEOUT_EXIT,
   FakeEngine,
   type FakeVolume,
+  fakePsId,
 } from "./helpers/data-backup-fake-engine.ts";
 
 const PROJECT = "shop";
@@ -116,6 +117,10 @@ const markers = (fake: FakeEngine): string[][] =>
   fake.calls.filter(
     (argv) => argv[1] === "create" && !argv.includes("--mount")
   );
+
+/** The names the run's markers were created under, in order. */
+const markerNames = (fake: FakeEngine): string[] =>
+  markers(fake).map((argv) => argv[argv.indexOf("--name") + 1] ?? "");
 
 describe("planDeclaredVolumes", () => {
   test("maps keys to Docker names, sorts them and skips external volumes", () => {
@@ -235,8 +240,12 @@ describe("exportProjectData", () => {
     await exportProjectData(input(fake));
     const [create] = creates(fake);
     expect(create?.slice(0, 2)).toEqual(["docker", "create"]);
-    const name = create?.[create.indexOf("--name") + 1] ?? "";
-    expect(name).toMatch(/^hack-data-export-[a-f0-9]{24}$/);
+    const helperName = create?.[create.indexOf("--name") + 1] ?? "";
+    expect(helperName).toMatch(/^hack-data-export-[a-f0-9]{24}$/);
+    // Every later call names the helper by the ID its create returned.
+    const name =
+      fake.created.find((entry) => entry.name === helperName)?.id ?? "";
+    expect(name).toMatch(/^[a-f0-9]{64}$/);
     expect(create?.[create.indexOf("--network") + 1]).toBe("none");
     expect(create?.[create.indexOf("--log-driver") + 1]).toBe("none");
     expect(create).toContain("--read-only");
@@ -510,7 +519,7 @@ describe("deadlines and cleanup", () => {
     expect(await readdir(partialDir())).toEqual(["db.tar"]);
   });
 
-  test("an unclassified write error plus a failed cleanup keeps the helper name and status", async () => {
+  test("an unclassified write error plus a failed cleanup keeps the helper ID and status", async () => {
     const fake = engine({ only: "db" });
     fake.tarThrows.shop_db = Object.assign(new Error("input/output error"), {
       code: "EIO",
@@ -518,7 +527,7 @@ describe("deadlines and cleanup", () => {
     fake.onExec = (container) => fake.rmFails.add(container);
     const error = await caught(exportProjectData(input(fake)));
     const [container] = fake.leftovers();
-    expect(container).toMatch(/^hack-data-export-[a-f0-9]{24}$/);
+    expect(container).toMatch(/^[a-f0-9]{64}$/);
     expect(error.message).toContain("input/output error");
     expect(error.message).toContain(`docker rm -f ${container}`);
     expect(error.detail).toEqual({ cleanup: { container, removed: false } });
@@ -541,7 +550,7 @@ describe("deadlines and cleanup", () => {
     };
     const error = await caught(exportProjectData(input(fake)));
     const [container] = fake.leftovers();
-    expect(container).toMatch(/^hack-data-export-/);
+    expect(container).toMatch(/^[a-f0-9]{64}$/);
     expect(error.message).toContain(`docker rm -f ${container}`);
     expect(error.detail).toEqual({ cleanup: { container, removed: false } });
     // Nothing was published.
@@ -575,8 +584,8 @@ describe("running containers and the live event fence", () => {
     );
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.message).toContain("`hack down --branch=x`");
-    // Container names carry the resolved Compose project name: redacted.
-    expect(error.detail).toEqual({ running: ["<compose project>-web-1"] });
+    // Short IDs, never names (which carry the resolved Compose project name).
+    expect(error.detail).toEqual({ running: [fakePsId("shop-web-1")] });
     expect(creates(fake)).toEqual([]);
     expect(fake.events.open).toBeFalse();
     expect(await readdir(root)).toEqual([]);
@@ -587,7 +596,7 @@ describe("running containers and the live event fence", () => {
     fake.running["volume=shop_db"] = ["adhoc-debug"];
     const error = await caught(exportProjectData(input(fake)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
-    expect(error.detail).toEqual({ running: ["adhoc-debug"] });
+    expect(error.detail).toEqual({ running: [fakePsId("adhoc-debug")] });
   });
 
   test("a container that starts during the copy keeps the backup unpublished", async () => {
@@ -618,9 +627,7 @@ describe("running containers and the live event fence", () => {
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.message).toContain("ffffffffffff");
     expect(error.detail).toEqual({
-      mounts: [
-        { volume: "db", container: "f".repeat(64), name: "adhoc-writer" },
-      ],
+      mounts: [{ volume: "db", container: "f".repeat(12) }],
     });
     expect(await readdir(partialDir())).toEqual(["db.tar"]);
     expect(fake.events.open).toBeFalse();
@@ -640,9 +647,7 @@ describe("running containers and the live event fence", () => {
     };
     const error = await caught(exportProjectData(input(fake)));
     expect(error.detail).toEqual({
-      mounts: [
-        { volume: "db", container: "b".repeat(64), name: "early-writer" },
-      ],
+      mounts: [{ volume: "db", container: "b".repeat(12) }],
     });
     // The subscription was live before that check: the start marker ran first.
     const marker = fake.calls.findIndex(
@@ -654,27 +659,23 @@ describe("running containers and the live event fence", () => {
 
   test("a container reusing a removed marker's name and mounting a volume is refused", async () => {
     const fake = engine({ only: "db" });
+    let reuser: string | null = null;
     fake.onExec = (_container, args) => {
-      if (args.includes("tar")) {
+      if (args.includes("tar") && reuser === null) {
         // The start marker was removed before the copy; its name is free.
-        const reused =
-          markers(fake).map((argv) => argv[argv.indexOf("--name") + 1])[0] ??
-          "";
+        const reused = markerNames(fake)[0] ?? "";
         expect(reused).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
-        fake.events.start("9".repeat(64), reused);
-        fake.events.mount("shop_db", "9".repeat(64));
+        reuser = fake.createForeign(reused, [
+          { Type: "volume", Name: "shop_db", Source: "/x", Destination: "/v" },
+        ]);
+        fake.events.mount("shop_db", reuser ?? "");
       }
     };
     const error = await caught(exportProjectData(input(fake)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(reuser).toMatch(/^[a-f0-9]{64}$/);
     expect(error.detail).toEqual({
-      mounts: [
-        {
-          volume: "db",
-          container: "9".repeat(64),
-          name: expect.stringMatching(/-start$/),
-        },
-      ],
+      mounts: [{ volume: "db", container: (reuser ?? "").slice(0, 12) }],
     });
     expect(await readdir(partialDir())).toEqual(["db.tar"]);
   });
@@ -688,7 +689,7 @@ describe("running containers and the live event fence", () => {
     };
     const error = await caught(exportProjectData(input(fake)));
     expect(error.detail).toEqual({
-      mounts: [{ volume: "db", container: "d".repeat(64), name: null }],
+      mounts: [{ volume: "db", container: "d".repeat(12) }],
     });
   });
 
@@ -720,18 +721,20 @@ describe("running containers and the live event fence", () => {
   test("our own held helper's mount publishes; markers bracket the copy", async () => {
     const fake = engine({ only: "db" });
     await exportProjectData(input(fake));
-    const names = markers(fake).map((argv) => argv[argv.indexOf("--name") + 1]);
+    const names = markerNames(fake);
     expect(names).toHaveLength(2);
     expect(names[0]).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
     expect(names[1]).toMatch(/^hack-data-export-[a-f0-9]{24}-end$/);
-    // Markers are removed and confirmed, like helpers.
+    // Markers are removed and confirmed, like helpers: by ID, never by name.
     for (const name of names) {
-      expect(fake.calls).toContainEqual([
-        "docker",
-        "rm",
-        "--force",
-        name ?? "",
-      ]);
+      const id = fake.created.find((entry) => entry.name === name)?.id ?? "";
+      expect(id).toMatch(/^[a-f0-9]{64}$/);
+      expect(fake.calls).toContainEqual(["docker", "rm", "--force", id]);
+    }
+    for (const argv of fake.calls.filter((call) => call[1] === "rm")) {
+      expect(argv.slice(3).every((ref) => /^[a-f0-9]{64}$/.test(ref))).toBe(
+        true
+      );
     }
     expect(fake.leftovers()).toEqual([]);
     expect(fake.events.watches).toBe(1);
@@ -886,4 +889,154 @@ test("the native backend is refused; compose and unset are accepted", () => {
   );
   expect(() => requireComposeBackendForDataExport("compose")).not.toThrow();
   expect(() => requireComposeBackendForDataExport(undefined)).not.toThrow();
+});
+
+/**
+ * Run `export` with `during` called from inside the tar exec, the run's
+ * SIGINT handler at hand. A no-op listener stays registered so the handler
+ * does not re-raise the signal on the test runner.
+ */
+async function exportInterruptedDuringCopy(
+  fake: FakeEngine,
+  during: (interrupt: () => void) => void
+): Promise<void> {
+  const keep = (): void => undefined;
+  process.on("SIGINT", keep);
+  const before = new Set(process.listeners("SIGINT"));
+  let fired = false;
+  fake.onExec = (_container, args) => {
+    if (args.includes("tar") && !fired) {
+      fired = true;
+      const handler = process
+        .listeners("SIGINT")
+        .find((listener) => !before.has(listener));
+      expect(handler).toBeDefined();
+      during(() => (handler as () => void)());
+    }
+  };
+  try {
+    await exportProjectData(input(fake)).catch(() => undefined);
+  } finally {
+    process.off("SIGINT", keep);
+  }
+  expect(fired).toBeTrue();
+}
+
+describe("helper containers are tracked by ID, never by name", () => {
+  test("an interrupt removes our live helper by ID and spares a container that reused a removed marker's name", async () => {
+    const fake = engine({ only: "db" });
+    let reuser: string | null = null;
+    let helperId = "";
+    let firstCall = 0;
+    await exportInterruptedDuringCopy(fake, (interrupt) => {
+      reuser = fake.createForeign(markerNames(fake)[0] ?? "");
+      helperId = fake.created.at(-1)?.id ?? "";
+      firstCall = fake.calls.length;
+      interrupt();
+    });
+    expect(reuser).toMatch(/^[a-f0-9]{64}$/);
+    // The signal cleanup's own removal: exactly the live helper, by ID.
+    const signalRm = fake.calls
+      .slice(firstCall)
+      .find((argv) => argv[1] === "rm");
+    expect(signalRm).toEqual(["docker", "rm", "--force", helperId]);
+    // The replacement survives: nothing ever named it, by ID or by name.
+    expect(fake.containers.has(reuser ?? "")).toBeTrue();
+    const markerName = markerNames(fake)[0] ?? "";
+    for (const argv of fake.calls.filter((call) => call[1] === "rm")) {
+      expect(argv).not.toContain(reuser);
+      expect(argv).not.toContain(markerName);
+    }
+    expect(fake.leftovers()).toEqual([reuser ?? ""]);
+  });
+
+  test("a create whose outcome is unknown adopts only a container with its nonce", async () => {
+    // The create timed out after Docker made the container: it carries this
+    // create's nonce label, so it is ours and is removed by ID.
+    const fake = engine({ only: "db" });
+    const real = fake.docker();
+    let timedOut = false;
+    const docker: DataBackupDocker = {
+      ...real,
+      capture: async (argv, opts) => {
+        const result = await real.capture(argv, opts);
+        if (!timedOut && argv[1] === "create" && argv.includes("--mount")) {
+          timedOut = true;
+          return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
+        }
+        return result;
+      },
+    };
+    const error = await caught(exportProjectData({ ...input(fake), docker }));
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(fake.leftovers()).toEqual([]);
+
+    // A container that merely has the name (no nonce) is never touched.
+    const other = engine({ only: "db" });
+    const otherReal = other.docker();
+    let foreign: string | null = null;
+    const racing: DataBackupDocker = {
+      ...otherReal,
+      capture: async (argv, opts) => {
+        if (
+          foreign === null &&
+          argv[1] === "create" &&
+          argv.includes("--mount")
+        ) {
+          foreign = other.createForeign(argv[argv.indexOf("--name") + 1] ?? "");
+          return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
+        }
+        return await otherReal.capture(argv, opts);
+      },
+    };
+    const raced = await caught(
+      exportProjectData({
+        ...input(other, { outDir: join(root, "second") }),
+        docker: racing,
+      })
+    );
+    expect(raced.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(foreign).toMatch(/^[a-f0-9]{64}$/);
+    expect(other.leftovers()).toEqual([foreign ?? ""]);
+  });
+});
+
+describe("container names never reach output", () => {
+  // Not a credential: a recognizable stand-in for a managed value that a
+  // service interpolates into `container_name: db-${TOKEN}`.
+  const TOKEN = "managed-token-canary-7f3a";
+
+  test("a running refusal lists short IDs, not names", async () => {
+    const fake = engine();
+    fake.running[`label=com.docker.compose.project=${PROJECT}`] = [
+      `db-${TOKEN}`,
+    ];
+    fake.running["volume=shop_db"] = [`db-${TOKEN}`];
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ running: [fakePsId(`db-${TOKEN}`)] });
+    expect(`${error.message}${JSON.stringify(error.detail)}`).not.toContain(
+      TOKEN
+    );
+  });
+
+  test("a mount refusal lists short IDs, not names", async () => {
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        const id = fake.createForeign(`db-${TOKEN}`, []) ?? "";
+        fake.events.mount("shop_db", id);
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({
+      mounts: [
+        { volume: "db", container: expect.stringMatching(/^[a-f0-9]{12}$/) },
+      ],
+    });
+    expect(`${error.message}${JSON.stringify(error.detail)}`).not.toContain(
+      TOKEN
+    );
+  });
 });

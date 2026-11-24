@@ -52,7 +52,11 @@ if (args[0] === "events") {
 } else if (args[0] === "volume" && args[1] === "inspect") {
   out({ name: "shop_db", createdAt: "2026-11-24T00:00:00Z", driver: "local", mountpoint: "/var/lib/docker/volumes/shop_db/_data", options: null, labels: { "com.docker.compose.project": "shop", "com.docker.compose.volume": "db" } });
 } else if (args[0] === "ps") {
-  out("");
+  // A running container named by the test: its name, or its short ID.
+  const named = process.env.DATA_STUB_RUNNING;
+  const format = args[args.indexOf("--format") + 1];
+  if (named) out(format === "{{.ID}}" ? "5".repeat(12) + "\\n" : named + "\\n");
+  else out("");
 } else if (args[0] === "run" || args[0] === "start") {
   const name = args[0] === "run" ? args[args.indexOf("--name") + 1] : args.at(-1);
   appendFileSync(feed, JSON.stringify({ Type: "container", Action: "start", Actor: { ID: name, Attributes: { name } } }) + "\\n");
@@ -66,6 +70,12 @@ if (args[0] === "events") {
 } else if (args[0] === "rm") {
   out(args.at(-1));
 } else if (args[0] === "exec") {
+  // A foreign container starts during the copy and mounts the owned volume;
+  // its inspect (below) shows a bind of the owned Mountpoint too.
+  if (args.includes("tar") && process.env.DATA_STUB_FOREIGN) {
+    appendFileSync(feed, JSON.stringify({ Type: "container", Action: "start", Actor: { ID: "6".repeat(64), Attributes: { name: process.env.DATA_STUB_FOREIGN } } }) + "\\n");
+    appendFileSync(feed, JSON.stringify({ Type: "volume", Action: "mount", Actor: { ID: "shop_db", Attributes: { container: "6".repeat(64), destination: "/x" } } }) + "\\n");
+  }
   if (args.includes("tar")) out("tar bytes");
   else out({ algorithm: "hack.tree-digest.v1", entries: 2, excludedSockets: 0, digest: "a".repeat(64) });
 } else {
@@ -274,4 +284,106 @@ test("hack data export prints no managed DOCKER_HOST in text or JSON when the en
   }
   // The stub saw the managed endpoint, so the refusal really quoted it.
   expect(await readFile(log, "utf8")).toContain(PRIVATE_ENDPOINT_MARKER);
+});
+
+async function runDataCli(opts: {
+  readonly cwd: string;
+  readonly args: readonly string[];
+  readonly bin: string;
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<{ exitCode: number; output: string; stdout: string }> {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "..", "index.ts"),
+      ...opts.args,
+    ],
+    {
+      cwd: opts.cwd,
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${opts.bin}:/usr/bin:/bin`,
+          HACK_NO_INTERACTIVE: "1",
+          ...opts.env,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, output: `${stdout}\n${stderr}`, stdout };
+}
+
+async function shopProject(opts: {
+  readonly envFiles: Readonly<Record<string, readonly string[]>>;
+}): Promise<string> {
+  const projectRoot = join(root, "repo");
+  const hackDir = join(projectRoot, ".hack");
+  await mkdir(hackDir, { recursive: true });
+  await writeFile(
+    join(hackDir, "docker-compose.yml"),
+    "name: shop\nservices: {}\nvolumes:\n  db: {}\n"
+  );
+  for (const [env, values] of Object.entries(opts.envFiles)) {
+    await writeFile(
+      join(hackDir, `hack.env.${env}.yaml`),
+      [
+        "version: 1",
+        `environment: ${env}`,
+        "secretsprovider: project_key",
+        "values:",
+        "  global:",
+        ...values.map((line) => `    ${line}`),
+        "",
+      ].join("\n")
+    );
+  }
+  return projectRoot;
+}
+
+test("hack data export never prints a container name, which can carry a managed value", async () => {
+  const { bin, log } = await stubBin();
+  // Not a credential: a recognizable stand-in for a managed secret that a
+  // service interpolates into `container_name: db-${TOKEN}`.
+  const token = "managed-secret-canary-5c1d";
+  const projectRoot = await shopProject({
+    envFiles: { default: [`DB_TOKEN: "${token}"`] },
+  });
+  for (const [stage, env] of [
+    ["running", { DATA_STUB_RUNNING: `db-${token}` }],
+    ["mount", { DATA_STUB_FOREIGN: `db-${token}` }],
+  ] as const) {
+    for (const json of [false, true]) {
+      const result = await runDataCli({
+        cwd: projectRoot,
+        args: ["data", "export", ...(json ? ["--json"] : [])],
+        bin,
+        env: { DATA_STUB_LOG: log, ...env },
+      });
+      expect({ stage, json, ok: result.exitCode === 0 }).toEqual({
+        stage,
+        json,
+        ok: false,
+      });
+      // The refusal names the container by its short ID (the running
+      // refusal lists it in `detail.running` only).
+      if (json || stage === "mount") {
+        expect(result.output).toContain(
+          stage === "running" ? "5".repeat(12) : "6".repeat(12)
+        );
+      }
+      expect({ stage, json, leaked: result.output.includes(token) }).toEqual({
+        stage,
+        json,
+        leaked: false,
+      });
+    }
+  }
 });

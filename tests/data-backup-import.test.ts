@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderDataImportText } from "../src/commands/data.ts";
@@ -1321,14 +1328,22 @@ describe("Docker references hold the targets", () => {
       fake.containers.get(left ?? "")?.labels["io.hack.data-backup.nonce"] ??
       "";
     expect(nonce).toMatch(/^[a-f0-9]{32}$/);
-    expect(error.detail).toMatchObject({
-      cleanup: {
-        outcome: "unknown",
-        label: `io.hack.data-backup.nonce=${nonce}`,
-        command: `docker ps -aq --filter label=io.hack.data-backup.nonce=${nonce} | xargs -r docker rm -f`,
-      },
+    expect((error.detail as { cleanup?: unknown }).cleanup).toEqual({
+      container: null,
+      removed: false,
+      outcome: "unknown",
+      label: `io.hack.data-backup.nonce=${nonce}`,
+      hackCommand: `hack data cleanup --nonce=${nonce}`,
     });
+    expect(error.message).not.toContain("docker ps");
     expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
+    // The run's cleanup record stays for that cleanup.
+    expect(
+      await readFile(
+        join(root, "home", "data-cleanup", `${nonce}.json`),
+        "utf8"
+      )
+    ).toContain(nonce);
   });
 });
 
@@ -1342,7 +1357,7 @@ describe("a timed-out create during the import", () => {
       ...real,
       engine: { host: "tcp://10.0.0.5:2376", context: null },
       hackCleanupCommand: (nonce: string) =>
-        `hack data cleanup --env=staging --nonce=${nonce}`,
+        `hack data cleanup --branch=feature-x --nonce=${nonce}`,
       capture: async (
         argv: readonly string[],
         opts?: { readonly timeoutMs?: number }
@@ -1369,7 +1384,7 @@ describe("a timed-out create during the import", () => {
     };
   }
 
-  test("an unanswered timeout stays unknown, with hack data cleanup and the engine selection", async () => {
+  test("an unanswered timeout stays unknown, with hack data cleanup and no endpoint", async () => {
     const dir = await writeBackup({ keys: ["db"] });
     const fake = engine();
     const error = await caught(
@@ -1383,11 +1398,12 @@ describe("a timed-out create during the import", () => {
     expect(cleanup.outcome).toBe("unknown");
     const nonce = cleanup.label?.split("=")[1] ?? "";
     expect(cleanup.hackCommand).toBe(
-      `hack data cleanup --env=staging --nonce=${nonce}`
+      `hack data cleanup --branch=feature-x --nonce=${nonce}`
     );
-    expect(cleanup.command).toStartWith(
-      "DOCKER_HOST=tcp://10.0.0.5:2376 docker ps -aq"
-    );
+    expect("command" in cleanup).toBeFalse();
+    const rendered = `${error.message}${JSON.stringify(error.detail)}`;
+    expect(rendered).not.toContain("10.0.0.5");
+    expect(rendered).not.toContain("DOCKER_HOST");
     expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
   });
 
@@ -1399,5 +1415,47 @@ describe("a timed-out create during the import", () => {
     );
     expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
     expect(fake.leftovers()).toEqual([]);
+  });
+});
+
+describe("the import run's cleanup record", () => {
+  test("is written before the first create, holds no endpoint, and is removed once the run is settled", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    const real = fake.docker();
+    const records = join(root, "home", "data-cleanup");
+    let atFirstCreate: string[] | null = null;
+    let recordText = "";
+    const docker = {
+      ...real,
+      engine: { host: "tcp://10.0.0.5:2376", context: null },
+      capture: async (
+        argv: readonly string[],
+        opts?: { readonly timeoutMs?: number }
+      ) => {
+        if (atFirstCreate === null && argv[1] === "create") {
+          const listed = await readdir(records).catch(() => [] as string[]);
+          atFirstCreate = listed;
+          recordText = await readFile(join(records, listed[0] ?? ""), "utf8");
+        }
+        return await real.capture(argv, opts);
+      },
+    };
+    const result = await importProjectData({
+      ...input(fake, dir),
+      docker,
+      envSelection: null,
+    });
+    expect(result.volumes[0]?.outcome).toBe("restored");
+    expect(atFirstCreate).toHaveLength(1);
+    expect(JSON.parse(recordText)).toMatchObject({
+      command: "import",
+      project: PROJECT,
+      envName: null,
+      envDefault: false,
+      engine: { kind: "managed-host", overlay: null },
+    });
+    expect(recordText).not.toContain("10.0.0.5");
+    expect(await readdir(records)).toEqual([]);
   });
 });

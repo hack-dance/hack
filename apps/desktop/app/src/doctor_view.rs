@@ -502,6 +502,7 @@ pub(crate) fn native_pool_card(
     ui: &Ui,
 ) -> gpui_kit::Div {
     use hack_desktop_core::models::NativePoolState;
+    use hack_desktop_ui::{components::dot, status::Status};
     let (status, label) = match report.state {
         NativePoolState::Idle => (Status::Degraded, "Running · idle"),
         NativePoolState::InUse => (Status::Running, "Running · in use"),

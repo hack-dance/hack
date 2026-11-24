@@ -709,6 +709,7 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
                     container.mounts = vec![crate::models::ContainerMount {
                         kind: "volume".into(),
                         name: Some("storefront-cache".into()),
+                        ..Default::default()
                     }];
                     container.networks = vec![crate::models::ContainerNetwork {
                         name: format!("storefront-{}", branch.branch),

@@ -844,6 +844,35 @@ test("a post-start failure with an unauthenticated receipt records no owner", as
   expect(await loadNativeProjectRun(opts.scope)).toBeNull();
 });
 
+test("the start that takes over a run that failed after up returned says so once", async () => {
+  const { opts, saved, state } = await retainedFinalizationFixture();
+  await acknowledgeRetainedFrontend(opts.scope, saved);
+  const warnings: string[] = [];
+  opts.dependencies.warn = (line) => warnings.push(line);
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    const value = await invoke(request);
+    // The superseded run's snapshot carries its failure record.
+    return request.args[1] === "inspect" && !state.serving && isRecord(value)
+      ? {
+          ...value,
+          failed_after_started: {
+            code: "graph_timeout",
+            service: "api",
+            services: ["api", "worker"],
+            at: 1,
+            reason: "not_ready",
+          },
+        }
+      : value;
+  };
+  await startNativeProject(opts).catch(() => undefined);
+  const notices = warnings.filter((line) => line.includes("Starting again"));
+  expect(notices).toEqual([
+    "The last start failed after up returned: api (and 1 more) not ready at 1970-01-01T00:00:01.000Z. Starting again.",
+  ]);
+});
+
 test("a retained run's post-start failure keeps its existing mapping unchanged", async () => {
   const { opts, events, saved, state } = await retainedFinalizationFixture();
   await acknowledgeRetainedFrontend(opts.scope, saved);

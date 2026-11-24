@@ -1353,6 +1353,7 @@ mod tests {
                 state: "running".into(),
                 ..Default::default()
             }],
+            ..Default::default()
         });
         let mut m = AppModel::new();
         m.apply(Event::Refreshed(Ok(snap)));
@@ -1381,6 +1382,7 @@ mod tests {
                 exit_code: (!running).then_some(1),
                 ..Default::default()
             }],
+            ..Default::default()
         });
         row.native_pending = pending;
         snap
@@ -1671,6 +1673,7 @@ mod tests {
                 } else {
                     vec![]
                 },
+                ..Default::default()
             });
             snap
         };

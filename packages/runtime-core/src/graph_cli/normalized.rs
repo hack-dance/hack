@@ -9,6 +9,9 @@ pub(super) struct ServeFlags {
     pub automatic_dependency_slots: bool,
     /// `--report-started`: the owner prints `graph_foreground_started` first.
     pub report_started: bool,
+    /// `--returned-at-started` (only with `report_started`): the caller returned at
+    /// that line, so a later failure is recorded as a failure after started.
+    pub returned_at_started: bool,
 }
 
 pub(super) fn command(
@@ -23,6 +26,7 @@ pub(super) fn command(
         environment_stdin,
         automatic_dependency_slots,
         report_started,
+        returned_at_started,
     } = flags;
     #[cfg(target_os = "macos")]
     let configure = if matches!(action, "serve" | "serve-restore") {
@@ -162,6 +166,7 @@ pub(super) fn command(
             automatic_dependency_slots,
         )?;
         runtime.report_started(report_started);
+        runtime.returned_at_started(returned_at_started);
         let deadline = managed.as_ref().map_or_else(
             || Instant::now() + Duration::from_secs(120),
             |managed| managed.deadline(),
@@ -196,6 +201,7 @@ pub(super) fn command(
             environment_stdin,
             automatic_dependency_slots,
             report_started,
+            returned_at_started,
         );
         Err(CandidateError::new(
             "unsupported_host",

@@ -158,6 +158,9 @@ export async function serveNativeProjectGraph(
       opts.restore ? "serve-restore" : "serve",
       ...opts.args,
       "--report-started",
+      // Only a start that really returns at started records a later failure as
+      // "after up returned"; under --wait it is an ordinary startup failure.
+      ...(started ? ["--returned-at-started"] : []),
       "--run-id",
       opts.run,
       "--json",

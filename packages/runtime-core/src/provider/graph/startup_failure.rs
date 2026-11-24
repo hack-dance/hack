@@ -37,7 +37,9 @@ impl Failure {
 }
 /// Why a start failed after it reported `started-observed`, when its frontend may
 /// be gone: the error code, the failed service when known, and when (Unix seconds).
-/// Value-free. Kept in its own run-directory file ([`AFTER_STARTED`]), not in the
+/// Only an owner whose `up` returned at started (`--returned-at-started`) records it.
+/// Value-free. Bound to its attempt by `generation` ([`attempt_generation`]); a
+/// reader ignores a record of any other attempt. Kept in its own run-directory file ([`AFTER_STARTED`]), not in the
 /// receipt, which an older runtime parses strictly; the owner's own cleanup keeps
 /// it, and an explicit cleanup or the next start removes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +48,11 @@ pub struct AfterStarted {
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
+    /// Every service it concerns, in execution order: for a deadline each service
+    /// still below its readiness goal, otherwise the failed service. `service` is
+    /// the first of them. At most [`MAX_SERVICES`]; absent when none is known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
     pub at: u64,
     /// Closed: `not_ready` (the deadline passed first), `unhealthy`, `exited`
     /// (with `exit_code`) or `dead`; absent when the failure names no observation.
@@ -53,6 +60,37 @@ pub struct AfterStarted {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i64>,
+    /// The attempt that recorded it ([`attempt_generation`] of its receipt).
+    pub generation: String,
+}
+/// The most services one record names.
+pub(super) const MAX_SERVICES: usize = 64;
+/// Identifies the attempt a receipt belongs to, for binding [`AfterStarted`]: a
+/// digest of its container identities. A fresh start and every restore create new
+/// containers (restore drops the prior IDs before it commits `restoring`), so a new
+/// attempt never shares it with an earlier one, also while its first receipt has
+/// no IDs yet; and the owner's own cleanup keeps the IDs, so the failed attempt's
+/// record still matches after it stops. The whole-receipt digest
+/// (`service_exec_generation`) would not: it changes with every phase. An in-place
+/// restart keeps its containers, and with them the generation; it never records a
+/// failure itself (it never reaches `started-observed`), and the record it could
+/// find was written by an attempt with other containers, as a failed attempt is
+/// not restartable.
+pub(super) fn attempt_generation(receipt: &Receipt) -> String {
+    use sha2::{Digest, Sha256};
+    let containers: Vec<(&str, Option<&str>)> = (receipt.resources.iter())
+        .filter(|(_, resource)| resource.kind == Kind::Container)
+        .map(|(key, resource)| (key.as_str(), resource.id.as_deref()))
+        .collect();
+    let bytes = serde_json::to_vec(&("hack-graph-attempt-v1", &receipt.run, containers))
+        .unwrap_or_default();
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
+}
+fn service_name(service: &str) -> bool {
+    (1..=128).contains(&service.len())
+        && service
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 /// The closed reason for a failure after started, from the failed service's own
 /// observation, else from the code (`graph_timeout`: its goal was not met in time).
@@ -80,12 +118,11 @@ impl AfterStarted {
                 .as_deref()
                 .is_none_or(|reason| ["not_ready", "unhealthy", "exited", "dead"].contains(&reason))
             && (self.exit_code.is_some() == (self.reason.as_deref() == Some("exited")))
-            && self.service.as_ref().is_none_or(|service| {
-                (1..=128).contains(&service.len())
-                    && service
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-            })
+            && self.service.as_deref().is_none_or(service_name)
+            && self.services.len() <= MAX_SERVICES
+            && self.services.iter().all(|service| service_name(service))
+            && self.services.first() == self.service.as_ref()
+            && hex(&self.generation, 64)
     }
 }
 /// The [`AfterStarted`] file, next to `state.json`.
@@ -93,26 +130,41 @@ pub(super) const AFTER_STARTED: &str = "failed-after-started.json";
 /// `state::write`'s temporary for [`AFTER_STARTED`].
 const AFTER_STARTED_PENDING: &str = "failed-after-started.pending";
 /// Record `failure` for a receipt still in `started-observed`; call before the
-/// failed phase replaces it. The recorded startup failure names the service first.
+/// failed phase replaces it. The recorded startup failure names the service first;
+/// for a deadline (`graph_timeout`), `below_goal` (every service still below its
+/// goal, in execution order) does, when known.
 /// Diagnostic only: a failed write never obstructs the failure's own handling.
-pub(super) fn record_after_started(root: &Path, receipt: &Receipt, failure: &CandidateError) {
+pub(super) fn record_after_started(
+    root: &Path,
+    receipt: &Receipt,
+    failure: &CandidateError,
+    below_goal: &[String],
+) {
     // A stop (signal or `hack down`) is not a failure.
     if receipt.phase != super::STARTED_OBSERVED || failure.code == "graph_cancelled" {
         return;
     }
-    let service = (receipt.startup_failure.as_ref().map(|f| f.service.as_str()))
-        .or(failure.service.as_deref())
-        .map(str::to_owned);
+    let services: Vec<String> = if failure.code == "graph_timeout" && !below_goal.is_empty() {
+        below_goal.iter().take(MAX_SERVICES).cloned().collect()
+    } else {
+        (receipt.startup_failure.as_ref().map(|f| f.service.as_str()))
+            .or(failure.service.as_deref())
+            .map(str::to_owned)
+            .into_iter()
+            .collect()
+    };
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     let (reason, exit_code) = after_started_reason(receipt, failure.code);
     let recorded = AfterStarted {
         code: failure.code.into(),
-        service,
+        service: services.first().cloned(),
+        services,
         at,
         reason,
         exit_code,
+        generation: attempt_generation(receipt),
     };
     if recorded.valid() {
         // An interrupted earlier write may have left the temporary behind.
@@ -120,12 +172,14 @@ pub(super) fn record_after_started(root: &Path, receipt: &Receipt, failure: &Can
             .and_then(|_| super::state::write(&root.join(AFTER_STARTED), &recorded));
     }
 }
-/// The recorded failure after started, for lease-free status. A missing, unsafe,
-/// oversized or invalid file reads as none; it is never an error.
-pub(super) fn after_started(root: &Path) -> Option<AfterStarted> {
-    super::state::read_bounded::<AfterStarted>(&root.join(AFTER_STARTED), 4096)
+/// The recorded failure after started of `receipt`'s attempt, for lease-free
+/// status. A missing, unsafe, oversized or invalid file, or a record of another
+/// attempt (one a crash left before a newer start cleared it), reads as none; it
+/// is never an error.
+pub(super) fn after_started(root: &Path, receipt: &Receipt) -> Option<AfterStarted> {
+    super::state::read_bounded::<AfterStarted>(&root.join(AFTER_STARTED), 16 * 1024)
         .ok()
-        .filter(AfterStarted::valid)
+        .filter(|recorded| recorded.valid() && recorded.generation == attempt_generation(receipt))
 }
 /// Remove the record (and a leftover temporary). Called by a new start once it
 /// supersedes the previous one, and by an explicit cleanup; never by the owner's
@@ -260,15 +314,17 @@ mod tests {
             &root,
             &receipt,
             &CandidateError::new("graph_cancelled", "stopped"),
+            &[],
         );
-        assert_eq!(after_started(&root), None);
+        assert_eq!(after_started(&root, &receipt), None);
         record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
         record_after_started(
             &root,
             &receipt,
             &CandidateError::new("graph_service_failed", "x"),
+            &[],
         );
-        let recorded = after_started(&root).unwrap();
+        let recorded = after_started(&root, &receipt).unwrap();
         assert_eq!(recorded.code, "graph_service_failed");
         assert_eq!(recorded.service.as_deref(), Some("web"));
         assert!(recorded.at > 0);
@@ -280,9 +336,14 @@ mod tests {
         assert!(json.get("failed_after_started").is_none());
         // Failed, then the owner's own cleanup: still there, and only once.
         receipt.set_phase("failed-retained");
-        record_after_started(&root, &receipt, &CandidateError::new("graph_timeout", "x"));
+        record_after_started(
+            &root,
+            &receipt,
+            &CandidateError::new("graph_timeout", "x"),
+            &[],
+        );
         receipt.set_phase("stopped-data-retained");
-        assert_eq!(after_started(&root).as_ref(), Some(&recorded));
+        assert_eq!(after_started(&root, &receipt).as_ref(), Some(&recorded));
         assert!(!root.join(AFTER_STARTED_PENDING).exists());
         // Without a recorded service the error's own service is used.
         let mut timed_out = started_receipt();
@@ -291,8 +352,9 @@ mod tests {
             &root,
             &timed_out,
             &CandidateError::new("graph_timeout", "x"),
+            &[],
         );
-        let timed = after_started(&root).unwrap();
+        let timed = after_started(&root, &timed_out).unwrap();
         assert_eq!(timed.service, None);
         // A deadline with no failed observation: the goal was not met in time.
         assert_eq!(timed.reason.as_deref(), Some("not_ready"));
@@ -301,9 +363,11 @@ mod tests {
         let invalid = AfterStarted {
             code: "Not value-free".into(),
             service: None,
+            services: Vec::new(),
             at: 1,
             reason: None,
             exit_code: None,
+            generation: "1".repeat(64),
         };
         assert!(!invalid.valid());
         // Only the closed reasons, and an exit code exactly with `exited`.
@@ -316,24 +380,127 @@ mod tests {
             let bad = AfterStarted {
                 code: "graph_service_failed".into(),
                 service: None,
+                services: Vec::new(),
                 at: 1,
                 reason: reason.map(Into::into),
                 exit_code,
+                generation: "1".repeat(64),
             };
             assert!(!bad.valid(), "{reason:?} {exit_code:?}");
         }
     }
     #[test]
+    fn a_deadline_names_every_service_still_below_its_goal_in_order() {
+        let (_fixture, root) = private_root();
+        let mut receipt = started_receipt();
+        receipt.startup_failure = None;
+        let timeout = CandidateError::new("graph_timeout", "x");
+        record_after_started(&root, &receipt, &timeout, &["api".into(), "worker".into()]);
+        let recorded = after_started(&root, &receipt).unwrap();
+        assert_eq!(recorded.service.as_deref(), Some("api"));
+        assert_eq!(recorded.services, ["api", "worker"]);
+        assert_eq!(recorded.reason.as_deref(), Some("not_ready"));
+        let json = serde_json::to_value(&recorded).unwrap();
+        assert_eq!(json["services"], serde_json::json!(["api", "worker"]));
+        assert_eq!(json["generation"], attempt_generation(&receipt));
+        assert_eq!(
+            json.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["at", "code", "generation", "reason", "service", "services"]
+        );
+        // More than the bound: the first ones, still a valid record.
+        let many: Vec<String> = (0..MAX_SERVICES + 3).map(|i| format!("s{i}")).collect();
+        record_after_started(&root, &receipt, &timeout, &many);
+        let recorded = after_started(&root, &receipt).unwrap();
+        assert_eq!(recorded.services, many[..MAX_SERVICES]);
+        // Any other failure names only the failed service, never the deadline list.
+        record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
+        let failed = CandidateError::new("graph_service_failed", "x");
+        record_after_started(&root, &receipt, &failed, &["api".into()]);
+        let recorded = after_started(&root, &receipt).unwrap();
+        assert_eq!(recorded.services, ["web"]);
+        // A failure that names no service: neither field is written.
+        let mut unnamed = started_receipt();
+        unnamed.startup_failure = None;
+        record_after_started(&root, &unnamed, &failed, &[]);
+        let json = serde_json::to_value(after_started(&root, &unnamed).unwrap()).unwrap();
+        assert!(json.get("service").is_none() && json.get("services").is_none());
+        // `service` is the first of `services`; names are value-free and bounded.
+        let base = after_started(&root, &unnamed).unwrap();
+        for (service, services) in [
+            (None, vec!["api"]),
+            (Some("web"), vec!["api", "web"]),
+            (Some("api"), vec!["api", "not value-free"]),
+        ] {
+            let bad = AfterStarted {
+                service: service.map(Into::into),
+                services: services.into_iter().map(Into::into).collect(),
+                ..base.clone()
+            };
+            assert!(!bad.valid());
+        }
+        let too_many = AfterStarted {
+            service: Some("s0".into()),
+            services: (0..=MAX_SERVICES).map(|i| format!("s{i}")).collect(),
+            ..base.clone()
+        };
+        assert!(!too_many.valid());
+        let unbound = AfterStarted {
+            generation: "not hex".into(),
+            ..base
+        };
+        assert!(!unbound.valid());
+    }
+    #[test]
+    fn a_record_of_another_attempt_is_not_reported() {
+        let (_fixture, root) = private_root();
+        let mut receipt = started_receipt();
+        record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
+        record_after_started(
+            &root,
+            &receipt,
+            &CandidateError::new("graph_service_failed", "x"),
+            &[],
+        );
+        // The same attempt after its own failure handling and cleanup still matches.
+        receipt.set_phase("failed-retained");
+        assert!(after_started(&root, &receipt).is_some());
+        receipt.set_phase("stopped-data-retained");
+        receipt.resources.get_mut("container:web").unwrap().phase = "absent".into();
+        assert!(after_started(&root, &receipt).is_some());
+        // A restore committed `restoring` with the prior containers dropped, then
+        // crashed before clearing the record: it is not this attempt's.
+        let mut restoring = receipt.clone();
+        restoring.set_phase("restoring");
+        let web = restoring.resources.get_mut("container:web").unwrap();
+        web.id = None;
+        web.phase = "reserved".into();
+        assert_eq!(after_started(&root, &restoring), None);
+        // Nor once that attempt has its own containers.
+        restoring.resources.get_mut("container:web").unwrap().id = Some("9".repeat(64));
+        restoring.set_phase("failed-retained");
+        assert_eq!(after_started(&root, &restoring), None);
+        // A record written before records were bound to an attempt is not reported.
+        let path = root.join(AFTER_STARTED);
+        std::fs::remove_file(&path).unwrap();
+        super::super::state::write(
+            &path,
+            &serde_json::json!({"code":"graph_timeout","at":1,"reason":"not_ready"}),
+        )
+        .unwrap();
+        assert_eq!(after_started(&root, &receipt), None);
+    }
+    #[test]
     fn an_invalid_or_oversized_record_reads_as_none() {
         let (_fixture, root) = private_root();
         let path = root.join(AFTER_STARTED);
+        let receipt = started_receipt();
         for bytes in [
             b"not json".to_vec(),
             br#"{"code":"Not value-free","at":1}"#.to_vec(),
             br#"{"code":"graph_timeout","at":1,"extra":true}"#.to_vec(),
             format!(
                 r#"{{"code":"graph_timeout","at":1,"service":"{}"}}"#,
-                " ".repeat(8192)
+                " ".repeat(32 * 1024)
             )
             .into_bytes(),
         ] {
@@ -341,13 +508,24 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
             std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
                 .unwrap();
-            assert_eq!(after_started(&root), None);
+            assert_eq!(after_started(&root, &receipt), None);
         }
         // A file other users may write is not evidence either.
-        std::fs::write(&path, br#"{"code":"graph_timeout","at":1}"#).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let valid = AfterStarted {
+            code: "graph_timeout".into(),
+            service: None,
+            services: Vec::new(),
+            at: 1,
+            reason: None,
+            exit_code: None,
+            generation: attempt_generation(&receipt),
+        };
+        super::super::state::write(&path, &valid).unwrap();
+        assert_eq!(after_started(&root, &receipt), Some(valid));
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
             .unwrap();
-        assert_eq!(after_started(&root), None);
+        assert_eq!(after_started(&root, &receipt), None);
     }
     #[test]
     fn clearing_removes_the_record_and_a_leftover_temporary() {
@@ -357,11 +535,16 @@ mod tests {
         record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
         // A write interrupted before its rename left the temporary behind.
         std::fs::write(root.join(AFTER_STARTED_PENDING), b"interrupted").unwrap();
-        record_after_started(&root, &receipt, &CandidateError::new("graph_timeout", "x"));
-        assert!(after_started(&root).is_some());
+        record_after_started(
+            &root,
+            &receipt,
+            &CandidateError::new("graph_timeout", "x"),
+            &[],
+        );
+        assert!(after_started(&root, &receipt).is_some());
         std::fs::write(root.join(AFTER_STARTED_PENDING), b"interrupted").unwrap();
         clear_after_started(&root).unwrap();
-        assert_eq!(after_started(&root), None);
+        assert_eq!(after_started(&root, &receipt), None);
         assert!(!root.join(AFTER_STARTED).exists());
         assert!(!root.join(AFTER_STARTED_PENDING).exists());
     }
@@ -370,7 +553,12 @@ mod tests {
         let (_fixture, root) = private_root();
         let mut receipt = started_receipt();
         record(&mut receipt, "web", Observation::Exited { code: 3 }).unwrap();
-        record_after_started(&root, &receipt, &CandidateError::new("graph_timeout", "x"));
+        record_after_started(
+            &root,
+            &receipt,
+            &CandidateError::new("graph_timeout", "x"),
+            &[],
+        );
         for phase in [
             "preparing",
             "restoring",
@@ -383,15 +571,15 @@ mod tests {
             receipt.set_phase(phase);
             let refused = clear_stopped(&root, &receipt).unwrap_err();
             assert_eq!(refused.code, "graph_failure_record_not_stopped", "{phase}");
-            assert!(after_started(&root).is_some(), "{phase}");
+            assert!(after_started(&root, &receipt).is_some(), "{phase}");
         }
         receipt.set_phase("stopped-data-retained");
         std::fs::write(root.join("state.pending"), b"uncertain").unwrap();
         assert!(clear_stopped(&root, &receipt).is_err());
-        assert!(after_started(&root).is_some());
+        assert!(after_started(&root, &receipt).is_some());
         std::fs::remove_file(root.join("state.pending")).unwrap();
         assert!(clear_stopped(&root, &receipt).unwrap());
-        assert_eq!(after_started(&root), None);
+        assert_eq!(after_started(&root, &receipt), None);
         assert!(!clear_stopped(&root, &receipt).unwrap());
         receipt.set_phase("removed");
         assert!(!clear_stopped(&root, &receipt).unwrap());
@@ -445,11 +633,14 @@ mod tests {
             assert!(!source.contains("explicit_cleanup_done"));
             assert!(!source.contains("clear_after_started"));
         }
-        // The next start clears it once its receipt supersedes the previous one.
-        let restart = body(module, "receipt.set_phase(\"restarting\");", "mod tests;");
+        // The next start clears it once its receipt supersedes the previous one;
+        // an in-place restart, which keeps the attempt generation, just before.
+        let restart = body(module, "reserve_restart(&mut receipt);", "mod tests;");
         assert!(
-            restart.find("session.save()?;").unwrap()
-                < restart.find("clear_after_started(&session.root)").unwrap()
+            restart
+                .find("clear_after_started(&session.root)?;")
+                .unwrap()
+                < restart.find("session.save()?;").unwrap()
         );
         let restore = body(
             include_str!("restore.rs"),

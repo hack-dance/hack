@@ -95,7 +95,7 @@ Usage:
   hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
   hack-local graph serve ... [--route-slot <service=index|auto>]...
   hack-local graph serve|serve-restore ... [--auto-dependency-slots]
-  hack-local graph serve|serve-restore ... [--report-started]
+  hack-local graph serve|serve-restore ... [--report-started [--returned-at-started]]
   hack-local graph start-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph publish-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> (--port <loopback-port> | --unix [--hostname <name>]...)
   hack-local graph unpublish-bridge --run-id <32-hex> --expect-reservation <32-hex> [--json]
@@ -2212,8 +2212,8 @@ fn print_json(value: &impl Serialize) -> Result<(), CandidateError> {
 mod usage_tests {
     #[test]
     fn the_usage_names_the_report_started_flag() {
-        assert!(
-            super::HELP.contains("hack-local graph serve|serve-restore ... [--report-started]")
-        );
+        assert!(super::HELP.contains(
+            "hack-local graph serve|serve-restore ... [--report-started [--returned-at-started]]"
+        ));
     }
 }

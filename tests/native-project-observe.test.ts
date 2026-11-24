@@ -286,6 +286,33 @@ test("ps reports a failure after started from the receipt, value-free, and drops
       { code: "graph_timeout", service: "web", at: 1, reason: "not_ready" },
       { code: "graph_timeout", service: "web", at: 1, reason: "not_ready" },
     ],
+    // Every service below its goal at the deadline, in order.
+    [
+      {
+        code: "graph_timeout",
+        service: "api",
+        services: ["api", "worker"],
+        at: 1,
+        reason: "not_ready",
+      },
+      {
+        code: "graph_timeout",
+        service: "api",
+        services: ["api", "worker"],
+        at: 1,
+        reason: "not_ready",
+      },
+    ],
+    // A list with an invalid name is dropped whole.
+    [
+      {
+        code: "graph_timeout",
+        service: "api",
+        services: ["api", "a/b"],
+        at: 1,
+      },
+      { code: "graph_timeout", service: "api", at: 1 },
+    ],
     // An unknown reason, or an exit code without `exited`, is dropped.
     [
       { code: "graph_timeout", at: 1, reason: "crashed" },
@@ -305,9 +332,17 @@ test("ps reports a failure after started from the receipt, value-free, and drops
     });
     expect(result.failure).toEqual(want);
     // One field for scripts: the failed services.
-    expect(result.failed).toEqual(
-      want === undefined ? undefined : "service" in want ? [want.service] : []
-    );
+    let failed: readonly string[] | undefined;
+    if (want !== undefined) {
+      if ("services" in want) {
+        failed = want.services;
+      } else if ("service" in want) {
+        failed = [want.service];
+      } else {
+        failed = [];
+      }
+    }
+    expect(result.failed).toEqual(failed);
   }
   expect(
     [

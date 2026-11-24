@@ -161,7 +161,9 @@ import {
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import {
   describeNativeFailureAfterStarted,
+  nativeFailedServicesLabel,
   nativeFailureAfterStarted,
+  nativeFailureRetryNotice,
 } from "./native-project-observe.ts";
 import {
   ensuredPlatformAccepted,
@@ -2482,7 +2484,10 @@ export type NativeStartupProgress =
   | {
       /** After a started return the run failed: this service, and why (value-free). */
       readonly phase: "service-failed";
+      /** The first failed service, for its `hack logs` command. */
       readonly service: string | null;
+      /** All of them: `api`, or `api (and 1 more)`. */
+      readonly label: string;
       readonly reason: string;
     };
 
@@ -3249,6 +3254,13 @@ async function startNativeProjectAttempt(
       run: retained,
       invoke: deps.invoke,
     });
+    // The run this start takes over failed after `up` returned: say so once,
+    // from the start itself. Its finalization admission is exclusive, so of two
+    // racing `up` commands only the one that takes the run over says it.
+    const superseded = nativeFailureAfterStarted(resumed?.snapshot);
+    if (superseded) {
+      deps.warn(nativeFailureRetryNotice(superseded));
+    }
     const reviewedBranch = await prepareNativeReviewBranch({
       runtime: opts.runtime,
       scope: opts.scope,
@@ -3932,6 +3944,7 @@ async function startNativeProjectAttempt(
                 progress({
                   phase: "service-failed",
                   service: failed.service ?? null,
+                  label: nativeFailedServicesLabel(failed),
                   reason: describeNativeFailureAfterStarted(failed),
                 });
               }

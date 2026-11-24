@@ -32,7 +32,7 @@ fn finish_owner_input(span: Option<hack_runtime_core::timings::Span>) {
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune/clear-failure-after-started require --run-id. Cleanup alone may use --remove-data. foreground-owner --run-id selects a run's receipt digest and publication state read-only. retire-unadmitted-owner --run-id --expect-receipt retires a retained restore whose foreground owner died before admission. Dead-owner recover-cleanup and same-boot recover-live-owner require --expect-receipt; retire-recovered-publisher requires --expect-owner. A missing publisher lock requires inspect-missing-publication-lock --run-id and explicitly selected retire-missing-publication-lock --run-id --expect-selection --accept-quiesced-candidate-home. Foreground serve may opt into --auto-dependency-slots for pool-wide transport allocation; serve and serve-restore accept --report-started to print a graph_foreground_started line once every service has started, before the ready line; dependency-reservations inspects claims and recover-dependency-reservation --run-id --expect-reservation releases a verified dead pre-admission claim. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and exactly one of --executable or --ancestor-pid; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims, and it waits up to 30 s for the provider lease while sibling publishers hold it; unpublish-bridge requires --run-id and --expect-reservation.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune/clear-failure-after-started require --run-id. Cleanup alone may use --remove-data. foreground-owner --run-id selects a run's receipt digest and publication state read-only. retire-unadmitted-owner --run-id --expect-receipt retires a retained restore whose foreground owner died before admission. Dead-owner recover-cleanup and same-boot recover-live-owner require --expect-receipt; retire-recovered-publisher requires --expect-owner. A missing publisher lock requires inspect-missing-publication-lock --run-id and explicitly selected retire-missing-publication-lock --run-id --expect-selection --accept-quiesced-candidate-home. Foreground serve may opt into --auto-dependency-slots for pool-wide transport allocation; serve and serve-restore accept --report-started to print a graph_foreground_started line once every service has started, before the ready line, and with it --returned-at-started when the caller returns at that line, so a failure after it is recorded as a failure after started (graph status failed_after_started); dependency-reservations inspects claims and recover-dependency-reservation --run-id --expect-reservation releases a verified dead pre-admission claim. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and exactly one of --executable or --ancestor-pid; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims, and it waits up to 30 s for the provider lease while sibling publishers hold it; unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -756,6 +756,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut environment_stdin = false;
     let mut automatic_dependency_slots = false;
     let mut report_started = false;
+    let mut returned_at_started = false;
     let mut live_source = false;
     let mut shared_source = false;
     let mut json = false;
@@ -805,6 +806,13 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 return Err(invalid());
             }
             report_started = true;
+            continue;
+        }
+        if key == "--returned-at-started" {
+            if returned_at_started || !["serve", "serve-restore"].contains(action) {
+                return Err(invalid());
+            }
+            returned_at_started = true;
             continue;
         }
         if key == "--environment-stdin" {
@@ -939,6 +947,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         } else {
             return Err(invalid());
         }
+    }
+    // `up` returns at the started line only when the owner prints it.
+    if returned_at_started && !report_started {
+        return Err(invalid());
     }
     if live_source && normalized_selection.is_some() {
         return Err(CandidateError::new(
@@ -1205,6 +1217,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                         environment_stdin,
                         automatic_dependency_slots,
                         report_started,
+                        returned_at_started,
                     },
                 );
             }
@@ -1274,6 +1287,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                         automatic_dependency_slots,
                     )?;
                     runtime.report_started(report_started);
+                    runtime.returned_at_started(returned_at_started);
                     finish_owner_input(owner_input);
                     return encode(if let Some(managed) = &managed {
                         graph::foreground::serve_with_routes(

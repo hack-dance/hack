@@ -138,6 +138,8 @@ test.each([
     await Bun.file(join(opts.projectRoot, "argv")).text()
   );
   expect(argv).toContain("--report-started");
+  // Only a start that returns at started records a later failure as after up.
+  expect(argv.includes("--returned-at-started")).toBe(!wait);
 });
 
 test.each([

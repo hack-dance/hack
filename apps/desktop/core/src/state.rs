@@ -187,17 +187,26 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
             .iter()
             .map(|i| {
                 let running = i.state == "running";
-                let status = match &i.health {
-                    Some(h) => format!("{} ({h})", i.state),
-                    None => i.state.clone(),
+                // After a failure record, the service it names carries its
+                // reason (`not ready`, `exited (1)`, ...). Every other
+                // stopped container was stopped with the run: `stopped`,
+                // its exit code (the stop's) not a failure of its own.
+                let reason = ps.failure_reason(&i.service);
+                let stopped_with_run = ps.failure.is_some() && !running && reason.is_none();
+                let status = match (reason, &i.health) {
+                    (Some(reason), _) => reason,
+                    (None, _) if stopped_with_run => "stopped".into(),
+                    (None, Some(h)) => format!("{} ({h})", i.state),
+                    (None, None) => i.state.clone(),
                 };
+                let exit_code = i.exit_code.filter(|_| !stopped_with_run);
                 ServiceView {
                     created: true,
                     name: i.service.clone(),
                     running,
                     status,
-                    exit_code: i.exit_code,
-                    completed: !running && i.exit_code == Some(0),
+                    exit_code,
+                    completed: !running && exit_code == Some(0),
                     route: row
                         .service_hosts
                         .get(&i.service)
@@ -413,6 +422,25 @@ pub fn native_state(ps: Option<&NativePs>) -> ProjectState {
             down: native_down(ps),
         },
         "observed" => {
+            // A failure after `up` returned stops the whole run: every
+            // container is stopped, but only the services the record names
+            // failed (their reason: `NativePs::failure_reason`).
+            let failed = ps.failed_services();
+            if !failed.is_empty() {
+                let running_other = ps
+                    .items
+                    .iter()
+                    .any(|i| i.state == "running" && !failed.contains(&i.service));
+                return if running_other {
+                    let mut down = native_down(ps);
+                    down.extend(failed);
+                    down.sort();
+                    down.dedup();
+                    ProjectState::Degraded { down }
+                } else {
+                    ProjectState::FailedStart { services: failed }
+                };
+            }
             let down = native_down(ps);
             if ps.items.is_empty() {
                 ProjectState::Stopped
@@ -563,6 +591,110 @@ mod tests {
         assert!(matches!(st, ProjectState::Running { .. }));
     }
 
+    /// A native run that failed after `up` returned is stopped whole: both
+    /// containers are stopped, but only the service the failure record
+    /// names is failed, and it carries the CLI's reason.
+    #[test]
+    fn native_failure_after_started_names_only_the_failed_service() {
+        use crate::models::NativePs;
+        let ps: NativePs = serde_json::from_str(
+            r#"{"backend":"native","status":"observed","run":"r1","phase":"stopped",
+              "items":[
+                {"service":"web","state":"exited","exitCode":137},
+                {"service":"api","state":"exited","exitCode":137}],
+              "failure":{"code":"graph_timeout","service":"api","services":["api"],
+                         "reason":"not_ready","at":1},
+              "failed":["api"]}"#,
+        )
+        .unwrap();
+        assert_eq!(ps.failed_services(), vec!["api".to_owned()]);
+        assert_eq!(ps.failure_reason("api").as_deref(), Some("not ready"));
+        assert_eq!(ps.failure_reason("web"), None);
+        assert_eq!(
+            native_state(Some(&ps)),
+            ProjectState::FailedStart {
+                services: vec!["api".into()]
+            }
+        );
+        let row = ProjectRow {
+            name: "n".into(),
+            backend: Some("native".into()),
+            native: Some(ps.clone()),
+            ..ProjectRow::default()
+        };
+        let svcs = services(&row);
+        let api = svcs.iter().find(|s| s.name == "api").unwrap();
+        assert_eq!(api.status, "not ready");
+        assert_eq!(api.exit_code, Some(137));
+        let web = svcs.iter().find(|s| s.name == "web").unwrap();
+        assert_eq!((web.status.as_str(), web.exit_code), ("stopped", None));
+        assert_eq!(
+            derive(&row, &LocalContext::default()).label(),
+            "Failed to start: api"
+        );
+
+        // Without the record, both stopped containers read as failed.
+        let bare = NativePs {
+            failure: None,
+            failed: vec![],
+            ..ps
+        };
+        assert_eq!(
+            native_state(Some(&bare)),
+            ProjectState::FailedStart {
+                services: vec!["api".into(), "web".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn native_failure_wording_matches_the_cli() {
+        use crate::models::NativeFailure;
+        let f = |reason: Option<&str>, exit_code: Option<i32>| NativeFailure {
+            code: "graph_failed".into(),
+            reason: reason.map(Into::into),
+            exit_code,
+            ..NativeFailure::default()
+        };
+        assert_eq!(f(Some("exited"), Some(1)).describe(), "exited (1)");
+        assert_eq!(f(Some("not_ready"), None).describe(), "not ready");
+        assert_eq!(f(Some("unhealthy"), None).describe(), "unhealthy");
+        assert_eq!(f(Some("dead"), None).describe(), "dead");
+        assert_eq!(f(Some("exited"), None).describe(), "graph_failed");
+        assert_eq!(f(Some("later"), None).describe(), "graph_failed");
+        assert_eq!(f(None, None).describe(), "graph_failed");
+    }
+
+    #[test]
+    fn malformed_native_failure_fields_are_ignored() {
+        use crate::models::NativePs;
+        for raw in [
+            r#"{"status":"observed","failure":"x","failed":"api"}"#,
+            r#"{"status":"observed","failure":{"service":"api"},"failed":["api"]}"#,
+            r#"{"status":"observed","failure":null,"failed":null}"#,
+            r#"{"status":"observed","failure":{"code":7},"failed":[1,null]}"#,
+        ] {
+            let ps: NativePs = serde_json::from_str(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(ps.failure, None, "{raw}");
+            assert!(ps.failed_services().is_empty(), "{raw}");
+        }
+        // Wrong-typed optional fields inside a valid record are dropped.
+        let ps: NativePs = serde_json::from_str(
+            r#"{"status":"observed","failure":{"code":"graph_timeout","service":3,
+              "services":["api",4],"at":"soon","reason":"not_ready","exitCode":"x"},
+              "failed":[null,"api"]}"#,
+        )
+        .unwrap();
+        let failure = ps.failure.as_ref().unwrap();
+        assert_eq!(failure.service, None);
+        assert_eq!(failure.services, vec!["api".to_owned()]);
+        assert_eq!(failure.at, None);
+        assert_eq!(ps.failure_reason("api").as_deref(), Some("not ready"));
+        // An older payload without the fields still parses.
+        let ps: NativePs = serde_json::from_str(r#"{"status":"observed","items":[]}"#).unwrap();
+        assert_eq!((ps.failure, ps.failed), (None, vec![]));
+    }
+
     #[test]
     fn native_status_mapping() {
         use crate::models::{NativePs, NativePsItem};
@@ -576,6 +708,7 @@ mod tests {
                     ..NativePsItem::default()
                 })
                 .collect(),
+            ..NativePs::default()
         };
         assert_eq!(
             native_state(Some(&ps("not_started", vec![]))),
@@ -635,6 +768,7 @@ mod tests {
                         ..NativePsItem::default()
                     },
                 ],
+                ..NativePs::default()
             }),
             ..ProjectRow::default()
         };

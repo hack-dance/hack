@@ -368,6 +368,117 @@ pub struct NativePs {
     pub status: String,
     #[serde(deserialize_with = "null_default")]
     pub items: Vec<NativePsItem>,
+    /// The run failed after `hack up` returned at started and was stopped
+    /// with its data retained. `None` when absent, `null` or malformed.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub failure: Option<NativeFailure>,
+    /// The services that failed after `up` returned (may be empty when the
+    /// failure names none). Non-string entries are dropped.
+    #[serde(
+        deserialize_with = "lenient_strings",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub failed: Vec<String>,
+}
+
+impl NativePs {
+    /// The services the failure record names: `failed`, `failure.service`
+    /// and `failure.services`, sorted, deduplicated, without empty names.
+    /// Empty when there is no failure record.
+    #[must_use]
+    pub fn failed_services(&self) -> Vec<String> {
+        let Some(failure) = &self.failure else {
+            return vec![];
+        };
+        let mut names: Vec<String> = self
+            .failed
+            .iter()
+            .chain(failure.service.iter())
+            .chain(failure.services.iter())
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Why `service` failed, worded as the CLI words it (`exited (1)`,
+    /// `not ready`, `unhealthy`, `dead`, else the failure code). `None`
+    /// when the failure record does not name this service.
+    #[must_use]
+    pub fn failure_reason(&self, service: &str) -> Option<String> {
+        let failure = self.failure.as_ref()?;
+        self.failed_services()
+            .iter()
+            .any(|s| s == service)
+            .then(|| failure.describe())
+    }
+}
+
+/// `hack ps --json` (native) `data.failure`: a value-free record of a run
+/// that failed after `up` returned (a closed code, never command output).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct NativeFailure {
+    /// Machine-readable code, for example `graph_timeout`. Required: a
+    /// record without one is ignored as malformed.
+    pub code: String,
+    #[serde(default, deserialize_with = "lenient")]
+    pub service: Option<String>,
+    #[serde(default, deserialize_with = "lenient_strings")]
+    pub services: Vec<String>,
+    /// Unix seconds.
+    #[serde(default, deserialize_with = "lenient")]
+    pub at: Option<i64>,
+    /// `not_ready | unhealthy | exited | dead`; other values are kept as
+    /// text and described by the code.
+    #[serde(default, deserialize_with = "lenient")]
+    pub reason: Option<String>,
+    /// With `reason: "exited"` only.
+    #[serde(default, rename = "exitCode", deserialize_with = "lenient")]
+    pub exit_code: Option<i32>,
+}
+
+impl NativeFailure {
+    /// The CLI's wording (`describeNativeFailureAfterStarted`).
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match (self.reason.as_deref(), self.exit_code) {
+            (Some("exited"), Some(code)) => format!("exited ({code})"),
+            (Some("not_ready"), _) => "not ready".into(),
+            (Some(r @ ("unhealthy" | "dead")), _) => r.into(),
+            _ => self.code.clone(),
+        }
+    }
+}
+
+/// Any value that does not deserialize as `T` (wrong type, `null`) becomes
+/// the default: an optional field never fails the payload.
+fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+/// A string array, keeping only its string entries; anything else is empty.
+fn lenient_strings<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(match value {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                serde_json::Value::String(s) => Some(s),
+                _ => None,
+            })
+            .collect(),
+        _ => vec![],
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

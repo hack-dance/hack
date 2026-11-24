@@ -2,6 +2,7 @@ import type { NativeImageTagStatus } from "../backends/native-image-tags.ts";
 import {
   describeNativeFailureAfterStarted,
   type NativeProjectPsResult,
+  nativeFailedServicesLabel,
 } from "../backends/native-project-observe.ts";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
@@ -198,7 +199,7 @@ function displayNativeServiceRows(
     const { service, at } = result.failure;
     output.line();
     output.blocker({
-      thing: service ?? "project",
+      thing: service ? nativeFailedServicesLabel(result.failure) : "project",
       problem: `${describeNativeFailureAfterStarted(result.failure)} after up returned`,
       which: new Date(at * 1000).toISOString(),
       needs: "see why it did not become ready",

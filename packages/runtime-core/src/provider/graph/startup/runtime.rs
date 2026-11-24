@@ -104,6 +104,10 @@ pub struct HostRelayRuntime {
     /// `graph serve --report-started`: print the `graph_foreground_started` line
     /// when every service has started.
     report_started: bool,
+    /// `--returned-at-started`: `up` returns at the started line, so a later failure
+    /// is recorded as a failure after started (see
+    /// [`super::Driver::returned_at_started`]). Never set without `report_started`.
+    returned_at_started: bool,
     /// The started line was printed: from then on each service that becomes
     /// ready (goal met, publication done) gets its own `graph_foreground_service_ready` line.
     started_announced: bool,
@@ -673,6 +677,7 @@ impl HostRelayRuntime {
             startup_cancelled: None,
             startup_requests: None,
             report_started: false,
+            returned_at_started: false,
             started_announced: false,
             #[cfg(target_os = "macos")]
             early_publications: None,
@@ -684,6 +689,11 @@ impl HostRelayRuntime {
     /// phase (`--report-started`), for this owner's first start only.
     pub fn report_started(&mut self, enabled: bool) {
         self.report_started = enabled;
+    }
+    /// `--returned-at-started` (only with `--report-started`): `up` returned at the
+    /// started line, so a failure after it is recorded as one after started.
+    pub fn returned_at_started(&mut self, enabled: bool) {
+        self.returned_at_started = enabled;
     }
     /// Serve the owner's transport between the start loop's operations (see
     /// [`StartupRequests`]); `None` once the attempt has returned.
@@ -1058,6 +1068,9 @@ impl Driver for HostRelayRuntime {
     }
     fn reports_started(&self) -> bool {
         self.report_started
+    }
+    fn returned_at_started(&self) -> bool {
+        self.returned_at_started
     }
     fn all_started(&mut self, run: &str) -> Result<(), CandidateError> {
         let armed = self.report_started;

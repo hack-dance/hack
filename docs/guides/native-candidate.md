@@ -715,10 +715,18 @@ same lines, exit codes and timeout text.
     (`slow ready · 46.2s`), then the failure (`api exited (1) · hack logs api`)
     with the failed services' last output, and exits 1;
   - after `hack up -d`, `hack ps` shows `! api  exited (1) after up returned`
-    with `hack logs api`; `ps --json` has `failure` (`code`, `service`, `at`,
-    and `reason`: `not_ready`, `unhealthy`, `exited` with `exitCode`, or
-    `dead`) and `failed: ["api"]`; the next `hack up` says so once and starts
-    again; `hack down` clears the record.
+    with `hack logs api`; `ps --json` has `failure` (`code`, `service`,
+    `services`, `at`, and `reason`: `not_ready`, `unhealthy`, `exited` with
+    `exitCode`, or `dead`) and `failed: ["api"]`. When the start budget runs
+    out, every service still below its goal is named, in start order
+    (`api (and 1 more)`);
+  - the next `hack up` (detached or foreground) that takes the run over prints
+    `The last start failed after up returned: … Starting again.` once; of two
+    racing `up` commands only the one that takes it over says so. `hack down`
+    clears the record.
+- **With `--wait`,** `up` has not returned until ready, so a failure before
+  ready is an ordinary failed start (exit 1, as before) and leaves no
+  "after up returned" record.
 - **Scripts:** whether `--json` and `--no-interactive` imply `--wait` is one
   setting, currently off. Pass `--wait` when a script needs live endpoints.
 - **On the Compose backend,** `hack up -d --wait` passes `--wait` to

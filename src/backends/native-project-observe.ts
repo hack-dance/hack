@@ -186,7 +186,10 @@ function inspected(
  */
 export type NativeFailureAfterStarted = {
   readonly code: string;
+  /** The first failed service (the first of `services`). */
   readonly service?: string;
+  /** Every service still below its goal at a deadline, in order; else the failed one. */
+  readonly services?: readonly string[];
   /** Unix seconds. */
   readonly at: number;
   /** Closed; absent when the failure names no observation. */
@@ -195,6 +198,31 @@ export type NativeFailureAfterStarted = {
   readonly exitCode?: number;
 };
 const FAILURE_REASONS = new Set(["not_ready", "unhealthy", "exited", "dead"]);
+/** The failed services: `services`, else the one `service`, else none. */
+export function nativeFailedServices(
+  failure: NativeFailureAfterStarted
+): readonly string[] {
+  if (failure.services?.length) {
+    return failure.services;
+  }
+  return failure.service ? [failure.service] : [];
+}
+/** `api`, or `api (and 2 more)`, or `a service`. */
+export function nativeFailedServicesLabel(
+  failure: NativeFailureAfterStarted
+): string {
+  const [first, ...rest] = nativeFailedServices(failure);
+  if (!first) {
+    return "a service";
+  }
+  return rest.length ? `${first} (and ${rest.length} more)` : first;
+}
+/** The one line a start prints when it takes over a run that failed after `up` returned. */
+export function nativeFailureRetryNotice(
+  failure: NativeFailureAfterStarted
+): string {
+  return `The last start failed after up returned: ${nativeFailedServicesLabel(failure)} ${describeNativeFailureAfterStarted(failure)} at ${new Date(failure.at * 1000).toISOString()}. Starting again.`;
+}
 /** `exited (1)`, `unhealthy`, `dead`, `not ready`, else the code. */
 export function describeNativeFailureAfterStarted(
   failure: NativeFailureAfterStarted
@@ -243,10 +271,23 @@ function failureAfterStarted(
   const exitCode = Number.isSafeInteger(value.exit_code)
     ? (value.exit_code as number)
     : undefined;
+  const services = Array.isArray(value.services)
+    ? value.services.filter(
+        (service): service is string =>
+          typeof service === "string" && SERVICE.test(service)
+      )
+    : [];
   return {
     failure: {
       code: value.code,
       ...(typeof value.service === "string" ? { service: value.service } : {}),
+      // Only a complete, bounded list of valid names is kept.
+      ...(Array.isArray(value.services) &&
+      value.services.length <= 64 &&
+      services.length === value.services.length &&
+      services.length > 0
+        ? { services }
+        : {}),
       at: value.at as number,
       // An exit code belongs to `exited` only; anything else is dropped.
       ...(reason && (reason === "exited") === (exitCode !== undefined)
@@ -477,7 +518,7 @@ export async function nativeProjectPs(
     ...(snapshot.failure
       ? {
           failure: snapshot.failure,
-          failed: snapshot.failure.service ? [snapshot.failure.service] : [],
+          failed: nativeFailedServices(snapshot.failure),
         }
       : {}),
     ...(ports.length ? { ports } : {}),

@@ -122,6 +122,12 @@ pub trait Driver {
     }
     fn start(&mut self, service: &str) -> Result<(), CandidateError>;
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError>;
+    /// The attempt is about to return `graph_timeout`: `services`, in execution
+    /// order, are every service still below its own readiness goal (not started,
+    /// or its latest observation does not meet it). Called at most once, never
+    /// for any other outcome. Diagnostic only: it cannot fail the attempt. The
+    /// default ignores it.
+    fn below_goal_at_deadline(&mut self, _services: &[&str]) {}
 
     /// Add reviewed readiness context to an observed failure, without copying
     /// application output or private configuration into the error.
@@ -402,7 +408,7 @@ fn run_with_clock(
     let all_ready = timings::start(Step::ServicesReady, None);
     let mut started = BTreeSet::<String>::new();
     let mut seen = Seen::default();
-    loop {
+    let result = (|| loop {
         before_deadline(deadline, now())?;
         driver.check_cancelled()?;
         // This pass's observations. A dependency edge whose dependency was already
@@ -506,7 +512,30 @@ fn run_with_clock(
             }
         }
         wait(Duration::from_millis(100).min(deadline.saturating_duration_since(now())));
+    })();
+    let Err(failure) = result else {
+        return Ok(());
+    };
+    if failure.code != "graph_timeout" {
+        return Err(failure);
     }
+    let below: Vec<&str> = order
+        .iter()
+        .filter(|name| {
+            !started.contains(**name)
+                || !seen
+                    .observations
+                    .get(**name)
+                    .is_some_and(|state| state.satisfies(graph.services[**name].ready))
+        })
+        .map(|name| name.as_str())
+        .collect();
+    driver.below_goal_at_deadline(&below);
+    // The deadline error names the first service still below its goal.
+    Err(match below.first() {
+        Some(first) if failure.service.is_none() => failure.with_service(first),
+        _ => failure,
+    })
 }
 
 #[cfg(all(test, feature = "native-http-probe"))]
@@ -1542,5 +1571,106 @@ mod stop_during_publication_tests {
         assert!(driver.published);
         assert!(driver.stopped_after_publication.get());
         assert_eq!(driver.starts, ["web"]);
+    }
+}
+
+#[cfg(test)]
+mod below_goal_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    /// Fixed observations; the deadline passes at the first wait.
+    struct Fixed {
+        states: BTreeMap<String, Observation>,
+        below: Option<Vec<String>>,
+    }
+    impl Driver for Fixed {
+        fn record(&mut self, _: Event<'_>) -> Result<(), CandidateError> {
+            Ok(())
+        }
+        fn start(&mut self, _: &str) -> Result<(), CandidateError> {
+            Ok(())
+        }
+        fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
+            Ok(self.states[service])
+        }
+        fn below_goal_at_deadline(&mut self, services: &[&str]) {
+            assert!(self.below.is_none(), "reported once");
+            self.below = Some(services.iter().map(|&s| s.to_owned()).collect());
+        }
+    }
+    const HEALTHY: Observation = Observation::Running {
+        health: Health::Healthy,
+    };
+    const STARTING: Observation = Observation::Running {
+        health: Health::Starting,
+    };
+    fn healthy_goal(dependencies: &[&str]) -> Service {
+        Service {
+            dependencies: dependencies
+                .iter()
+                .map(|&d| (d.to_owned(), Condition::Healthy))
+                .collect(),
+            ready: Condition::Healthy,
+        }
+    }
+    fn attempt(
+        services: &[(&str, Service, Observation)],
+    ) -> (Result<(), CandidateError>, Option<Vec<String>>) {
+        let graph = Graph::from_services(
+            services
+                .iter()
+                .map(|(name, service, _)| ((*name).to_owned(), service.clone()))
+                .collect(),
+        )
+        .unwrap();
+        let mut driver = Fixed {
+            states: (services.iter())
+                .map(|(name, _, state)| ((*name).to_owned(), *state))
+                .collect(),
+            below: None,
+        };
+        let start = Instant::now();
+        let late = Rc::new(Cell::new(false));
+        let waited = Rc::clone(&late);
+        let outcome = run_with_clock(
+            &graph,
+            &mut driver,
+            Duration::from_secs(1),
+            move |_| waited.set(true),
+            move || start + Duration::from_secs(if late.get() { 2 } else { 0 }),
+        );
+        (outcome, driver.below)
+    }
+    #[test]
+    fn a_deadline_names_the_service_still_starting_not_the_healthy_one() {
+        let (outcome, below) = attempt(&[
+            ("api", healthy_goal(&[]), STARTING),
+            ("web", healthy_goal(&[]), HEALTHY),
+        ]);
+        let error = outcome.unwrap_err();
+        assert_eq!(error.code, "graph_timeout");
+        assert_eq!(error.service.as_deref(), Some("api"));
+        assert_eq!(below.unwrap(), ["api"]);
+    }
+    #[test]
+    fn a_deadline_names_every_blocker_in_execution_order() {
+        let (outcome, below) = attempt(&[
+            ("worker", healthy_goal(&["api"]), HEALTHY),
+            ("web", healthy_goal(&[]), HEALTHY),
+            ("db", healthy_goal(&[]), STARTING),
+            ("api", healthy_goal(&[]), STARTING),
+        ]);
+        assert_eq!(outcome.unwrap_err().service.as_deref(), Some("api"));
+        // `worker` never started: its dependency stayed below its goal.
+        assert_eq!(below.unwrap(), ["api", "db", "worker"]);
+    }
+    #[test]
+    fn any_other_failure_reports_no_deadline_list() {
+        let (outcome, below) = attempt(&[
+            ("api", healthy_goal(&[]), Observation::Exited { code: 2 }),
+            ("web", healthy_goal(&[]), STARTING),
+        ]);
+        assert_eq!(outcome.unwrap_err().code, "graph_service_failed");
+        assert!(below.is_none());
     }
 }

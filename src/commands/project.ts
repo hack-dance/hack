@@ -6779,7 +6779,7 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
     case "service-failed":
       logger.error({
         message: event.service
-          ? `${event.service} ${event.reason} · hack logs ${event.service}`
+          ? `${event.label} ${event.reason} · hack logs ${event.service}`
           : `the project ${event.reason} · hack ps --json`,
       });
       return;

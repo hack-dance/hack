@@ -2190,6 +2190,7 @@ mod native_fill_tests {
             Some(NativePs {
                 status: "not_started".into(),
                 items: vec![],
+                ..Default::default()
             })
         }
         fn act(

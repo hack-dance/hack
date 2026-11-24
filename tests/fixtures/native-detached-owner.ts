@@ -2,10 +2,10 @@ import { ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { NativeImageBlocker } from "../../src/backends/native-image-policy.ts";
 import {
   batchImageFailure,
   NativeImageBatchError,
+  NativeImageBlocker,
 } from "../../src/backends/native-image-policy.ts";
 import {
   NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,

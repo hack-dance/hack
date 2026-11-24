@@ -118,6 +118,7 @@ import {
   nativeProjectLogServices,
   nativeProjectLogs,
   nativeProjectPs,
+  nativeStartupProjectPs,
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
 import {
@@ -138,6 +139,7 @@ import {
 import {
   type NativeProjectRunScope,
   nativeForeignHomeRefusal,
+  nativeProjectStartupPending,
 } from "../backends/native-project-run.ts";
 import {
   nativeAdaptationCandidates,
@@ -13328,6 +13330,14 @@ async function handleOpen({
   const baseHosts = resolveProjectRouteBaseHosts({ devHost, aliasHost });
 
   const targetRaw = (args.positionals.target ?? "").trim();
+  const startupOrigin = await startupOpenOrigin({
+    target: targetRaw,
+    project,
+    branch,
+  });
+  if (startupOrigin !== null) {
+    return await emitOpenOrigin({ url: startupOrigin, json, origin: "native" });
+  }
   const preferenceRaw = args.options.prefer;
   const optionPreference = parseOpenHostPreference(preferenceRaw);
   if (preferenceRaw !== undefined && !optionPreference) {
@@ -13558,6 +13568,40 @@ export function resolveOpenUrl(opts: {
  * frontend, which may listen on another port (for example 18443). The target
  * is checked first: Grafana and full URLs never consult the native runtime.
  */
+async function startupOpenOrigin(opts: {
+  readonly target: string;
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly branch: string | null;
+}): Promise<string | null> {
+  const runtime = resolveNativeRuntimeSelection();
+  if (!(runtime && openTargetIsProjectHost(opts.target))) {
+    return null;
+  }
+  const scope = {
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    nativeHome: runtime.home,
+    branch: opts.branch,
+  };
+  if (!(await nativeProjectStartupPending(scope))) {
+    return null;
+  }
+  const snapshot = await nativeStartupProjectPs({ runtime, scope });
+  const ports = snapshot?.ports?.filter(
+    (port) =>
+      port.state === "observed" &&
+      (!opts.target || port.service === opts.target)
+  );
+  if (ports?.length === 1) {
+    return `http://127.0.0.1:${ports[0]?.port}`;
+  }
+  throw new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message:
+      "Native project is still starting. The requested address is not available yet.",
+  });
+}
+
 async function resolveNativeOpenPort(opts: {
   readonly targetRaw: string;
   readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;

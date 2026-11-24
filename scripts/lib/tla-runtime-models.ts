@@ -2452,7 +2452,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "per-service-publication",
     module: "PerServicePublication",
-    states: 622,
+    states: 811,
     invariant: "Safe",
     action: "Record",
     fields: [
@@ -2486,6 +2486,13 @@ const contracts: readonly ModelContract[] = [
             ],
           },
         ],
+      },
+      {
+        name: "dead-authorization",
+        negative: true,
+        invariant: "NoDeadAuthorizedBind",
+        action: "Bind",
+        fields: ["lateBind = TRUE", 'phase = "dead"'],
       },
     ],
   },

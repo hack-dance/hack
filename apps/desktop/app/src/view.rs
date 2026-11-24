@@ -1918,12 +1918,12 @@ impl HackApp {
             }
         }))
         .on_action(cx.listener(|this, _: &NextTab, window, cx| {
-            if !this.stats_tab_open() {
+            if !this.panels.command.visible() && !this.stats_tab_open() {
                 this.step_tab(true, window, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
-            if !this.stats_tab_open() {
+            if !this.panels.command.visible() && !this.stats_tab_open() {
                 this.step_tab(false, window, cx);
             }
         }))

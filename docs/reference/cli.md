@@ -619,6 +619,90 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | `--version, -v` | Show version |
 
 
+## `hack files`
+
+Browse files in a running Compose service
+
+### Usage
+
+```bash
+hack files <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack files ls <service> <container-path>` | List a running service's files and their mount sources |
+| `hack files cat <service> <container-path>` | Read a file from a running service |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack files ls <service> <container-path>`
+
+List a running service's files and their mount sources
+
+### Usage
+
+```bash
+hack files ls <service> <container-path> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `service` |  |
+| `container-path` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack files cat <service> <container-path>`
+
+Read a file from a running service
+
+### Usage
+
+```bash
+hack files cat <service> <container-path> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `service` |  |
+| `container-path` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack commands`
 
 Read, inspect or cancel background commands started with `hack exec\|run --detach`
@@ -1984,6 +2068,7 @@ hack doctor [options]
 
 | Option | Description |
 | --- | --- |
+| `--disk` | Audit host file usage for the selected native home without starting the pool |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
 | `--include-unverified-volumes` | With --fix, include native aliases whose volume may be unmounted |

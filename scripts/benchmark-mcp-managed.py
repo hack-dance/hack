@@ -121,7 +121,7 @@ def compatible_schema_hash(schema):
 
 
 def run_cohort(binaries, variant, count, idle_seconds, cgroup=None, rss_ceiling=3 * 1024**2, allow_optional_output_truncation=False):
-    root = Path(tempfile.mkdtemp(prefix="hack-mm-", dir="/tmp")).resolve()
+    root = Path(tempfile.mkdtemp(prefix="hack-mm-")).resolve()
     root.chmod(0o700)
     backend_root = root / "backend"
     backend_root.mkdir(mode=0o700)

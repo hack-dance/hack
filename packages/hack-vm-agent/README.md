@@ -56,3 +56,8 @@ wire frame across AgentRestart. The crash regression lets a child perform an
 observable write after its agent exits. The launcher must enforce KillCgroup
 and observe that the cgroup is empty to enable a safe AgentRestart.
 The test exercises a real Linux process. A change of kernel boot ID requires a VM.
+
+The Linux guest CI job builds release executables for both
+`aarch64-unknown-linux-musl` and `x86_64-unknown-linux-musl`. The ARM64 build
+uses Rust's bundled linker. The x86_64 runner executes the musl recovery tests;
+execution on ARM64 hardware is covered separately during VM qualification.

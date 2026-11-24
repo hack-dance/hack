@@ -1730,7 +1730,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-startup-owner",
     module: "Owner",
-    states: 136,
+    states: 1720,
     invariant: "NoUnownedResources",
     action: "ExitUnconfirmed",
     fields: [
@@ -1740,7 +1740,10 @@ const contracts: readonly ModelContract[] = [
       'resources = "present"',
     ],
     additionalControls: [
+      // --wait: the mapping is still saved at started; the release is at ready.
+      { name: "wait", negative: false, states: 806 },
       {
+        // The launcher is released at started before stop.owe committed.
         name: "detached-before-bookkeeping",
         negative: true,
         invariant: "NoPrematureReturn",
@@ -1748,16 +1751,107 @@ const contracts: readonly ModelContract[] = [
         fields: [
           'launcher = "returned"',
           "accepted = TRUE",
-          "readied = TRUE",
+          "startedSeen = TRUE",
+          'mapping = "published"',
           "bookkept = FALSE",
         ],
       },
       {
-        name: "detached-before-ready",
+        // No release gate at all: success before every container started.
+        name: "detached-before-started",
+        negative: true,
+        invariant: "NoPrematureReturn",
+        action: "Return",
+        fields: [
+          'launcher = "returned"',
+          "accepted = TRUE",
+          "startedSeen = FALSE",
+        ],
+      },
+      {
+        // The same gap under --wait: success before ready.
+        name: "detached-before-ready-wait",
         negative: true,
         invariant: "NoPrematureReturn",
         action: "Return",
         fields: ['launcher = "returned"', "accepted = TRUE", "readied = FALSE"],
+      },
+      {
+        // Finding B: the launcher is released before the run mapping is saved.
+        name: "mapping-after-line",
+        negative: true,
+        invariant: "NoReturnWithoutMapping",
+        action: "Notify",
+        fields: [
+          'launcher = "notified"',
+          'mapping = "none"',
+          "startedSeen = TRUE",
+          "bookkept = TRUE",
+        ],
+      },
+      {
+        // Finding B under --wait: released at ready with no mapping saved.
+        name: "mapping-after-line-wait",
+        negative: true,
+        invariant: "NoReturnWithoutMapping",
+        action: "Notify",
+        fields: ['launcher = "notified"', 'mapping = "none"', "readied = TRUE"],
+      },
+      {
+        // The owner accepts a stop half-way through a publication, so the stop
+        // misses its staged route.
+        name: "stop-mid-publication",
+        negative: true,
+        invariant: "NoHalfPublicationAfterStop",
+        action: "DownStop",
+        fields: [
+          'phase = "stopped"',
+          'pub = "publishing"',
+          'route = "bound"',
+          "recorded = FALSE",
+        ],
+      },
+      {
+        // The owner accepts a stop between started and ready without
+        // cancelling its wait.
+        name: "down-leaves-owner-waiting",
+        negative: true,
+        invariant: "DownCancelsWait",
+        action: "AcceptStop",
+        fields: [
+          'phase = "started"',
+          'down = "accepted"',
+          'acceptAt = "started"',
+          'wait = "waiting"',
+        ],
+      },
+      {
+        // A queued stop takes effect without the owner's acceptance.
+        name: "stop-without-accept",
+        negative: true,
+        invariant: "StoppedOwnerNotWaiting",
+        action: "DownStop",
+        fields: [
+          'phase = "stopped"',
+          'down = "done"',
+          'acceptAt = "none"',
+          'wait = "waiting"',
+        ],
+      },
+      {
+        // The owner stops the run before the frontend's own controller is
+        // aborted: the frontend still waits on a stopped owner.
+        name: "stop-before-frontend-cancel",
+        negative: true,
+        invariant: "StoppedFrontendCancelled",
+        action: "DownStop",
+        fields: [
+          'phase = "stopped"',
+          'down = "done"',
+          'acceptAt = "started"',
+          'wait = "cancelled"',
+          'frontend = "live"',
+        ],
       },
       {
         name: "refused-inspection",
@@ -2924,6 +3018,62 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-build-base-scheduling",
+    module: "BaseScheduling",
+    states: 12,
+    invariant: "NoForegroundImport",
+    action: "Cold",
+    fields: ['phase = "solving"', "foregroundDownload = TRUE"],
+    additionalControls: [
+      {
+        name: "unsafe-overlap",
+        negative: true,
+        invariant: "OnlyIdleRetention",
+        action: "Stop",
+        fields: ['phase = "stopping"', "retention = TRUE"],
+      },
+    ],
+  },
+  {
+    name: "native-build-alias",
+    module: "BuildAlias",
+    states: 23,
+    invariant: "BaseSurvives",
+    action: "Cleanup",
+    fields: ["base = FALSE", "alias = FALSE"],
+    additionalControls: [
+      {
+        name: "old-order",
+        negative: true,
+        invariant: "CanRecover",
+        action: "Refuse",
+        fields: ['phase = "blocked"', "keeper = FALSE", "alias = TRUE"],
+      },
+      {
+        name: "unsafe-remote",
+        negative: true,
+        invariant: "NoRegistryFallback",
+        action: "ResolveMissing",
+        fields: ["wire = TRUE", 'phase = "solving"'],
+      },
+      {
+        name: "unsafe-sweep",
+        negative: true,
+        invariant: "NoLiveSweep",
+        action: "Cleanup",
+        fields: ["sweptLive = TRUE", "alias = FALSE"],
+      },
+    ],
+  },
+  {
+    name: "native-keeper-reclaim",
+    module: "KeeperReclaim",
+    states: 5,
+    invariant: "PinPreservesImage",
+    action: "Reclaim",
+    fields: ['fence = "pinning"', "keeper = FALSE"],
+  },
+  {
     name: "native-build-batch",
     module: "BuildBatch",
     states: 296,
@@ -3157,6 +3307,13 @@ const contracts: readonly ModelContract[] = [
           },
           {
             action: "PoolRecover",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+          // The same stranded finalization, reported one step later: a `Listen`
+          // fault earlier in the trace leaves `ListenerExits` as the last enabled
+          // step, which `NoDeadEnd` counts as progress (seen on the B1 factory).
+          {
+            action: "ListenerExits",
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
         ],

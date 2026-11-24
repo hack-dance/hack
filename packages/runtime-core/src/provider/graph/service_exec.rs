@@ -453,7 +453,7 @@ fn binding<'a>(
     pending: bool,
     options: &ServiceExecOptions<'_>,
 ) -> Result<&'a Resource, CandidateError> {
-    if receipt.phase != "ready-observed"
+    if !matches!(receipt.phase.as_str(), "ready-observed" | STARTED_OBSERVED)
         || pending
         || boot != options.expected_boot
         || service_exec_generation(receipt)? != options.expected_generation
@@ -464,9 +464,11 @@ fn binding<'a>(
         .resources
         .get(&format!("container:{}", options.service))
         .ok_or_else(refused)?;
+    // While warming (`started-observed`, as Compose `exec`), only a started service.
     if resource.kind != Kind::Container
         || resource.key != options.service
         || resource.id.as_deref() != Some(options.expected_container)
+        || (receipt.phase == STARTED_OBSERVED && resource.phase != "started")
     {
         return Err(refused());
     }
@@ -655,6 +657,42 @@ mod tests {
         assert!(binding(&receipt, "boot-one", false, &opts).is_err());
         receipt.resources.get_mut("container:web").unwrap().id = Some(id.clone());
         receipt.phase = "cleanup-intent".into();
+        assert!(binding(&receipt, "boot-one", false, &opts).is_err());
+    }
+    #[test]
+    fn exec_reaches_a_started_service_of_a_warming_graph() {
+        let id = "e".repeat(64);
+        let mut receipt: Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"preparing","readiness":{},"resources":{"container:web":{"kind":"container","key":"web","name":"owned-web","id":id,"image":null,"phase":"started"}}})).unwrap();
+        super::super::mark_started(&mut receipt).unwrap();
+        let args = vec!["true".into()];
+        let generation = service_exec_generation(&receipt).unwrap();
+        let opts = ServiceExecOptions {
+            run: &receipt.run.clone(),
+            service: "web",
+            expected_container: &id,
+            expected_boot: "boot-one",
+            expected_generation: &generation,
+            argv: &args,
+            workdir: None,
+            timeout: Duration::from_secs(1),
+        };
+        assert!(binding(&receipt, "boot-one", false, &opts).is_ok());
+        // A service the warming graph has not started is refused.
+        receipt.resources.get_mut("container:web").unwrap().phase = "create-intent".into();
+        let generation = service_exec_generation(&receipt).unwrap();
+        let opts = ServiceExecOptions {
+            expected_generation: &generation,
+            ..opts
+        };
+        assert!(binding(&receipt, "boot-one", false, &opts).is_err());
+        // A start still in progress is refused as before.
+        receipt.set_phase("preparing");
+        receipt.resources.get_mut("container:web").unwrap().phase = "started".into();
+        let generation = service_exec_generation(&receipt).unwrap();
+        let opts = ServiceExecOptions {
+            expected_generation: &generation,
+            ..opts
+        };
         assert!(binding(&receipt, "boot-one", false, &opts).is_err());
     }
 }

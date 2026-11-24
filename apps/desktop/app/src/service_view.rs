@@ -7,7 +7,7 @@ use gpui_kit::{
 use hack_desktop_core::{
     models::{Container, ProjectRow},
     state::{Action, ServiceView},
-    viewmodel::{DetailView, InstanceKey},
+    viewmodel::{DetailView, InstanceKey, ServiceDestination},
 };
 use hack_desktop_ui::{
     components::{StyledExt as _, Ui, action_button, dot, icon, icon_button},
@@ -110,6 +110,8 @@ impl HackApp {
         }
         self.user_navigated();
         self.service_focus.focus(window, cx);
+        self.model
+            .select_service(service.clone(), ServiceDestination::Logs);
         self.service_pane = ServicePane {
             name: Some(service.clone()),
             ..Default::default()
@@ -121,6 +123,7 @@ impl HackApp {
     }
 
     pub(crate) fn clear_selected_service(&mut self) {
+        self.model.clear_service_selection();
         if self.service_pane.name.is_some() {
             #[cfg(hack_terminal)]
             self.leave_terminal_log_scope();
@@ -157,11 +160,19 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.selected_service().is_none() {
+        let Some(service) = self.selected_service().map(str::to_owned) else {
             return;
-        }
+        };
         self.service_pane.menu = None;
         if self.service_pane.tab != to {
+            let destination = match to {
+                ServiceTab::Info => ServiceDestination::Info,
+                ServiceTab::Stats => ServiceDestination::Stats,
+                ServiceTab::Logs => ServiceDestination::Logs,
+                ServiceTab::Terminal => ServiceDestination::Terminal,
+                ServiceTab::Files => ServiceDestination::Files,
+            };
+            self.model.select_service(service, destination);
             self.service_pane.tab = to;
             self.sync_service_logs(cx);
             self.service_focus.focus(window, cx);
@@ -336,7 +347,9 @@ impl HackApp {
             ServiceTab::Stats => render_service_stats(ui),
             ServiceTab::Logs => self.render_service_logs(detail, ui, cx),
             ServiceTab::Terminal => self.render_service_terminal(detail, ui, window, cx),
-            ServiceTab::Files => render_service_files(ui),
+            ServiceTab::Files => self
+                .project_files(detail, ui, window, cx)
+                .into_any_element(),
         };
         #[cfg(hack_terminal)]
         if self.service_pane.tab == ServiceTab::Terminal && self.panels.maximized(&detail.key) {
@@ -387,9 +400,11 @@ impl HackApp {
             (Status::of_service(s), label)
         });
         let copy = detail.branch.as_deref().unwrap_or("main");
-        let menu = self.service_actions_menu(detail, facts, ui, cx);
-        let can_act = self.can_act_on_service(detail);
-        let can_stop = can_act && service.is_some_and(|s| s.running);
+        let menu = self.service_actions_menu(detail, service, facts, ui, cx);
+        let can_act =
+            service.is_some_and(|row| self.can_run_service_action(detail, row, Action::Restart));
+        let can_stop =
+            service.is_some_and(|row| self.can_run_service_action(detail, row, Action::Stop));
         div()
             .flex()
             .flex_col()
@@ -482,54 +497,21 @@ impl HackApp {
             }))
     }
 
-    fn can_act_on_service(&self, detail: &DetailView) -> bool {
-        detail.backend == "compose"
-            && !detail.busy
-            && !self.machine.busy()
-            && detail.actions.contains(&Action::Restart)
-    }
-
-    fn run_service_action(&mut self, action: Action, cx: &mut Context<Self>) {
+    fn run_selected_service_action(&mut self, action: Action, cx: &mut Context<Self>) {
         let Some(name) = self.selected_service().map(str::to_owned) else {
             return;
         };
-        let Some(detail) = self.model.detail().filter(|d| self.can_act_on_service(d)) else {
+        let Some(detail) = self.model.detail() else {
             return;
-        };
-        if !detail
-            .services
-            .iter()
-            .any(|s| s.name == name && (action != Action::Stop || s.running))
-        {
-            return;
-        }
-        let Some(row) = self.model.selected_row() else {
-            return;
-        };
-        let target = hack_desktop_core::source::ServiceActionTarget {
-            compose_project: row
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.project.clone()),
-            containers: containers_for(&row, &name)
-                .iter()
-                .filter(|c| c.is_running())
-                .map(|c| {
-                    (
-                        c.id.clone().unwrap_or_default(),
-                        c.name.clone().unwrap_or_default(),
-                    )
-                })
-                .collect(),
-            name,
         };
         self.service_pane.menu = None;
-        self.run_scoped_action(action, Some(target), cx);
+        self.run_service_action(detail.key, &name, action, cx);
     }
 
     fn service_actions_menu(
         &self,
         detail: &DetailView,
+        service: Option<&ServiceView>,
         facts: &ServiceFacts,
         ui: &Ui,
         cx: &mut Context<Self>,
@@ -573,20 +555,20 @@ impl HackApp {
                 ),
             );
         }
-        if self.can_act_on_service(detail) {
+        if service.is_some_and(|row| self.can_run_service_action(detail, row, Action::Restart)) {
             menu = menu.child(menu_separator(ui)).child(
                 menu_row("service-menu-restart", Glyph::Restart, "Restart", false, ui).on_click(
-                    cx.listener(|this, _, _, cx| this.run_service_action(Action::Restart, cx)),
+                    cx.listener(|this, _, _, cx| {
+                        this.run_selected_service_action(Action::Restart, cx)
+                    }),
                 ),
             );
-            if detail
-                .services
-                .iter()
-                .any(|s| Some(s.name.as_str()) == self.selected_service() && s.running)
-            {
+            if service.is_some_and(|row| self.can_run_service_action(detail, row, Action::Stop)) {
                 menu = menu.child(
                     menu_row("service-menu-stop", Glyph::Stop, "Stop", false, ui).on_click(
-                        cx.listener(|this, _, _, cx| this.run_service_action(Action::Stop, cx)),
+                        cx.listener(|this, _, _, cx| {
+                            this.run_selected_service_action(Action::Stop, cx)
+                        }),
                     ),
                 );
             }
@@ -709,7 +691,9 @@ fn service_action_button(
     .min_w(px(84.))
     .justify_center()
     .when(enabled, |button| {
-        button.on_click(cx.listener(move |this, _, _, cx| this.run_service_action(action, cx)))
+        button.on_click(
+            cx.listener(move |this, _, _, cx| this.run_selected_service_action(action, cx)),
+        )
     })
 }
 
@@ -963,15 +947,6 @@ fn render_service_stats(ui: &Ui) -> AnyElement {
         .type_step(text::BODY)
         .text_color(ui.p.text_muted)
         .child("No usage history yet")
-        .into_any_element()
-}
-
-/// Slice 3 supplies the service's file browser here.
-fn render_service_files(ui: &Ui) -> AnyElement {
-    div()
-        .type_step(text::BODY)
-        .text_color(ui.p.text_muted)
-        .child("Files are unavailable in this preview")
         .into_any_element()
 }
 

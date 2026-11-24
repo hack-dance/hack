@@ -31,7 +31,7 @@ use gpui_kit::{
     AnyElement, App, ClickEvent, Context, Entity, IntoElement, MouseButton, ParentElement,
     SharedString, Styled, TestSupportExt as _, Window, div, prelude::*, px, relative,
 };
-use hack_desktop_core::viewmodel::{DetailView, InstanceKey};
+use hack_desktop_core::viewmodel::{DetailView, InstanceKey, RuntimeTarget};
 use hack_desktop_term::ghostty_config::{ConfigEnv, GhosttyLook};
 use hack_desktop_term::launch::{
     self, HackCli, Launch, LoginShell, Name, SessionKind, SessionPlan, TermChoice,
@@ -62,10 +62,10 @@ pub struct ProjectPanel {
     pub state: PanelState,
     pub menu: Menu,
     menu_anchor: MenuAnchor,
-    /// The checkout and backend the tabs were started in. When the
-    /// instance's checkout changes (a branch recreated from another
-    /// worktree), its sessions are ended and the panel starts again.
-    origin: Option<(PathBuf, bool)>,
+    /// The checkout and exact backend target this panel's sessions use.
+    origin: Option<RuntimeTarget>,
+    checkout: Option<(String, bool)>,
+    logs_target_changed: bool,
     /// Whether the instance was running when last drawn.
     was_active: bool,
     /// Whether the Logs session follows (`hack logs` without
@@ -272,6 +272,16 @@ pub fn container_plan(
         }
     }
     Ok(plan)
+}
+
+fn bind_compose_project(mut plan: SessionPlan, expected: Option<&str>) -> SessionPlan {
+    if let Some(expected) = expected {
+        let flag = OsString::from(format!("--expect-compose-project={expected}"));
+        for attempt in &mut plan.attempts {
+            attempt.options.args.insert(1, flag.clone());
+        }
+    }
+    plan
 }
 
 /// A host shell with an env overlay: the CLI injects the values.
@@ -518,12 +528,49 @@ impl HackApp {
     }
 
     fn instance_root(&self) -> Option<(PathBuf, bool, Option<String>)> {
-        let row = self.model.selected_row()?;
+        let target = self.model.selected_runtime_target()?;
         Some((
-            PathBuf::from(row.repo_root.as_ref()?),
-            row.is_native(),
-            row.branch.clone(),
+            PathBuf::from(target.root),
+            target.native,
+            self.model.selected_key()?.branch,
         ))
+    }
+
+    /// End stale sessions even when their drawer is not currently selected.
+    pub(crate) fn reconcile_terminal_targets(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (key, panel) in &mut self.panels.by_key {
+            let checkout = self.model.instance_checkout(key);
+            let origin = self.model.runtime_target(key);
+            let checkout_changed = checkout.is_some() && panel.checkout != checkout;
+            if !checkout_changed && panel.origin == origin {
+                continue;
+            }
+            if checkout.is_some() {
+                panel.checkout = checkout;
+            }
+            panel.origin = origin;
+            panel.logs_follow = false;
+            panel.logs_target_changed = true;
+            panel.menu = Menu::Closed;
+            panel.sessions.update(cx, |session, cx| {
+                for (i, kind) in session.kinds(cx).into_iter().enumerate().rev() {
+                    if checkout_changed || matches!(kind, SessionKind::ContainerShell { .. }) {
+                        session.close_in_place(i, window, cx);
+                    } else if kind == SessionKind::Logs {
+                        if let Ok(core) = note_core("Logs target changed.\r\n") {
+                            let replacement = cx.new(|cx| TerminalView::from_core(core, cx));
+                            session.replace_in_place(i, replacement, window, cx);
+                        } else {
+                            session.close_in_place(i, window, cx);
+                        }
+                    }
+                }
+            });
+        }
     }
 
     /// End every tab in every panel and drop the panels: they ran the
@@ -567,7 +614,9 @@ impl HackApp {
                 state: PanelState::half(),
                 menu: Menu::Closed,
                 menu_anchor: MenuAnchor::Plus,
-                origin: self.instance_root().map(|(root, native, _)| (root, native)),
+                origin: self.model.selected_runtime_target(),
+                checkout: self.model.instance_checkout(&d.key),
+                logs_target_changed: false,
                 was_active: d.state.is_active(),
                 logs_follow: false,
                 logs_scope: None,
@@ -576,20 +625,14 @@ impl HackApp {
         self.open_tab(&d, NewTab::Logs, window, cx);
     }
 
-    /// Keep the selected instance's panel in step with the snapshot: a new
-    /// checkout ends the old sessions and starts again; a stopped instance
-    /// that now runs gets a followed Logs stream (once per transition, so a
-    /// stream that keeps failing is not restarted on every frame).
+    /// Reopen Logs after a target change, or follow once a copy starts.
     fn reconcile_panel(&mut self, d: &DetailView, window: &mut Window, cx: &mut Context<Self>) {
-        let origin = self.instance_root().map(|(root, native, _)| (root, native));
         let route = self.selected_service().map(str::to_owned);
         let Some(panel) = self.panels.by_key.get_mut(&d.key) else {
             return;
         };
-        let moved = panel.origin != origin;
         let reset_scope = panel.logs_scope.as_ref().is_some_and(|scope| {
-            moved
-                || scope.route.is_none()
+            scope.route.is_none()
                 || scope.route != route
                 || !d.services.iter().any(|row| row.name == scope.service)
         });
@@ -602,19 +645,11 @@ impl HackApp {
             panel.logs_follow = false;
         }
         panel.was_active = active;
-        let follow_now = active && !panel.logs_follow;
-        if moved {
-            panel.origin = origin;
-            let sessions = panel.sessions.clone();
-            sessions.update(cx, |s, cx| {
-                for i in (0..s.tab_count()).rev() {
-                    s.close(i, window, cx);
-                }
-            });
-            self.open_tab(d, NewTab::Logs, window, cx);
-        } else if reset_scope || follow_now {
-            // A finite read (started while stopped), running or ended:
-            // replace it with a following stream, in the background.
+        if panel.sessions.read(cx).tab_count() == 0
+            || panel.logs_target_changed
+            || reset_scope
+            || (active && !panel.logs_follow)
+        {
             self.start_tab(d, NewTab::Logs, true, window, cx);
         }
     }
@@ -733,9 +768,16 @@ impl HackApp {
     }
 
     fn core_for(&self, d: &DetailView, tab: &NewTab) -> Result<TerminalCore, String> {
+        if !d.runtime_addressable && matches!(tab, NewTab::Logs | NewTab::Container(_)) {
+            return Err("The displayed runtime has no current checkout or Compose target.".into());
+        }
         // `cli_root` validates the checkout a CLI tab runs in; see there.
         let hack = self.source.hack_program();
         let root = self.instance_root();
+        let expected = self
+            .model
+            .runtime_target(&d.key)
+            .and_then(|target| target.compose_project);
         let io = |e: std::io::Error| e.to_string();
         match tab {
             NewTab::Logs => match (&hack, &root) {
@@ -745,18 +787,21 @@ impl HackApp {
                 ))
                 .map_err(io),
                 (Some(hack), Some((root, false, branch))) => TerminalCore::session(for_cli(
-                    logs_plan_for_service(
-                        hack,
-                        &cli_root(root)?,
-                        branch.as_deref(),
-                        self.panel_logs_follow(d),
-                        self.panels.by_key.get(&d.key).and_then(|panel| {
-                            panel
-                                .logs_scope
-                                .as_ref()
-                                .map(|scope| scope.service.as_str())
-                        }),
-                    )?,
+                    bind_compose_project(
+                        logs_plan_for_service(
+                            hack,
+                            &cli_root(root)?,
+                            branch.as_deref(),
+                            self.panel_logs_follow(d),
+                            self.panels.by_key.get(&d.key).and_then(|panel| {
+                                panel
+                                    .logs_scope
+                                    .as_ref()
+                                    .map(|scope| scope.service.as_str())
+                            }),
+                        )?,
+                        expected.as_deref(),
+                    ),
                     false,
                     std::env::var_os("PATH").as_deref(),
                 ))
@@ -776,15 +821,20 @@ impl HackApp {
                     return Err("A shell in a service needs the hack CLI.".into());
                 };
                 TerminalCore::session(for_cli(
-                    container_plan(hack, &cli_root(root)?, branch.as_deref(), service)?,
+                    bind_compose_project(
+                        container_plan(hack, &cli_root(root)?, branch.as_deref(), service)?,
+                        expected.as_deref(),
+                    ),
                     *native,
                     std::env::var_os("PATH").as_deref(),
                 ))
                 .map_err(io)
             }
             NewTab::Host => {
-                let root = root
-                    .map(|(r, _, _)| r)
+                let root = self
+                    .model
+                    .instance_checkout(&d.key)
+                    .map(|(root, _)| PathBuf::from(root))
                     .filter(|r| r.is_dir())
                     .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
                     .ok_or("No folder to start the shell in")?;
@@ -800,12 +850,22 @@ impl HackApp {
                 scope,
                 is_default,
             } => {
-                let (Some(hack), Some((root, native, _))) = (&hack, &root) else {
-                    return Err("A host shell with env needs the hack CLI.".into());
-                };
+                let hack = hack
+                    .as_deref()
+                    .ok_or("A host shell with env needs the hack CLI.")?;
+                let (root, native) = self
+                    .model
+                    .instance_checkout(&d.key)
+                    .ok_or("A host shell with env needs a verified checkout.")?;
                 TerminalCore::session(for_cli(
-                    host_env_plan(hack, &cli_root(root)?, overlay, scope, *is_default)?,
-                    *native,
+                    host_env_plan(
+                        hack,
+                        &cli_root(Path::new(&root))?,
+                        overlay,
+                        scope,
+                        *is_default,
+                    )?,
+                    native,
                     std::env::var_os("PATH").as_deref(),
                 ))
                 .map_err(io)
@@ -868,6 +928,7 @@ impl HackApp {
             // shown and retried by a click on the tab or the next start,
             // never on every frame.
             panel.logs_follow = follow;
+            panel.logs_target_changed = false;
         }
         if !quiet {
             panel.menu = Menu::Closed;
@@ -909,10 +970,23 @@ impl HackApp {
             v.set_look(look, cx);
             v
         });
-        if tab == NewTab::Logs && quiet && sessions.read(cx).tab_count() > 0 {
-            sessions.update(cx, |p, cx| p.replace_in_place(0, view, window, cx));
-        } else if tab == NewTab::Logs && sessions.read(cx).tab_count() > 0 {
-            sessions.update(cx, |p, cx| p.replace(0, view, window, cx));
+        let logs_index = if tab == NewTab::Logs {
+            sessions
+                .read(cx)
+                .kinds(cx)
+                .iter()
+                .position(|kind| *kind == SessionKind::Logs)
+        } else {
+            None
+        };
+        if let Some(index) = logs_index {
+            if quiet {
+                sessions.update(cx, |p, cx| p.replace_in_place(index, view, window, cx));
+            } else {
+                sessions.update(cx, |p, cx| p.replace(index, view, window, cx));
+            }
+        } else if quiet {
+            sessions.update(cx, |p, cx| p.add_tab_in_place(view, cx));
         } else {
             sessions.update(cx, |p, cx| p.add_tab(view, window, cx));
         }
@@ -1722,7 +1796,11 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) -> bool {
         self.select_instance(key.clone(), cx);
-        if self.model.detail().is_none_or(|d| d.key != *key) {
+        if self.model.detail().is_none_or(|d| {
+            d.key.project != key.project
+                || d.key.branch != key.branch
+                || (key.checkout.is_some() && d.key.checkout != key.checkout)
+        }) {
             return false;
         }
         self.ensure_panel(window, cx);
@@ -2538,8 +2616,13 @@ mod window_tests {
         cx.update(|cx| {
             app.update(cx, |a, _| {
                 let key = a.model.selected_key().unwrap();
-                a.panels.by_key.get_mut(&key).unwrap().origin =
-                    Some((PathBuf::from("/elsewhere/checkout"), false));
+                let panel = a.panels.by_key.get_mut(&key).unwrap();
+                panel.checkout = Some(("/elsewhere/checkout".into(), false));
+                panel.origin = Some(RuntimeTarget {
+                    root: "/elsewhere/checkout".into(),
+                    native: false,
+                    compose_project: Some("legacy".into()),
+                });
             });
         });
         draw(&mut cx, window, &app);
@@ -2553,6 +2636,80 @@ mod window_tests {
             first_logs.entity_id(),
             "a new Logs session"
         );
+    }
+
+    #[test]
+    fn runtime_reconciliation_preserves_host_shells_and_window_focus() {
+        for missing_checkout in [false, true] {
+            let (mut cx, window, app) = open(false);
+            draw(&mut cx, window, &app);
+            let sessions = panel(&mut cx, &app);
+            let external_focus = cx.update(|cx| app.update(cx, |_, cx| cx.focus_handle()));
+            let (host, first_logs) = cx
+                .update_window(window, |_, window, cx| {
+                    let make_tab = |kind, cx: &mut App| {
+                        let core = TerminalCore::session(SessionPlan {
+                            attempts: vec![Launch {
+                                kind,
+                                options: PtyOptions::new("/usr/bin/true"),
+                            }],
+                        })
+                        .unwrap();
+                        cx.new(|cx| TerminalView::from_core(core, cx))
+                    };
+                    let host = make_tab(SessionKind::HostShell { shell: "sh".into() }, cx);
+                    let container = make_tab(
+                        SessionKind::ContainerShell {
+                            shell: "sh".into(),
+                            service: "api".into(),
+                        },
+                        cx,
+                    );
+                    let first = sessions.read(cx).tab(0).cloned().unwrap();
+                    sessions.update(cx, |s, cx| {
+                        s.add_tab(host.clone(), window, cx);
+                        s.add_tab(container, window, cx);
+                    });
+                    window.focus(&external_focus, cx);
+                    (host, first)
+                })
+                .unwrap();
+            cx.update(|cx| {
+                app.update(cx, |app, _| {
+                    let key = app.model.selected_key().unwrap();
+                    if missing_checkout {
+                        let mut snapshot = app.model.snapshot().unwrap().clone();
+                        let project = snapshot
+                            .projects
+                            .projects
+                            .iter_mut()
+                            .find(|project| project.name == key.project)
+                            .unwrap();
+                        project.repo_root = None;
+                        app.model
+                            .apply(hack_desktop_core::viewmodel::Event::Refreshed(Ok(snapshot)));
+                    } else {
+                        app.panels
+                            .by_key
+                            .get_mut(&key)
+                            .unwrap()
+                            .origin
+                            .as_mut()
+                            .unwrap()
+                            .compose_project = Some("previous-stack".into());
+                    }
+                });
+            });
+            draw(&mut cx, window, &app);
+            cx.update_window(window, |_, window, cx| {
+                let panel = sessions.read(cx);
+                assert_eq!(panel.tab_count(), 2);
+                assert_eq!(panel.active().unwrap().entity_id(), host.entity_id());
+                assert_ne!(panel.tab(0).unwrap().entity_id(), first_logs.entity_id());
+                assert!(external_focus.contains_focused(window, cx));
+            })
+            .unwrap();
+        }
     }
 
     #[test]

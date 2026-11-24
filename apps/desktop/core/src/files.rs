@@ -14,6 +14,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(25);
 pub struct Target {
     pub root: PathBuf,
     pub branch: Option<String>,
+    pub compose_project: String,
     pub service: String,
 }
 
@@ -141,6 +142,7 @@ pub(crate) fn read(
             .map_err(|_| "Invalid branch instance name.".to_owned())?;
         args.extend(["--branch", branch]);
     }
+    args.extend(["--expect-compose-project", &target.compose_project]);
     args.extend(["--", &target.service, path]);
     let reply: Reply = runner
         .run_schema_json(&args, Some(&target.root), READ_TIMEOUT, SCHEMA)

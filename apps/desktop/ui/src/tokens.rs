@@ -71,14 +71,17 @@ pub mod size {
     use gpui_kit::{Pixels, px};
     pub const TITLE_BAR: Pixels = px(38.);
     pub const STATUS_BAR: Pixels = px(26.);
-    pub const SIDEBAR: Pixels = px(208.);
+    pub const SIDEBAR: Pixels = px(272.);
     pub const ROW: Pixels = px(28.);
     pub const TABLE_ROW: Pixels = px(32.);
+    pub const SERVICE_COL_FRACTION: f32 = 0.2;
+    pub const CPU_COL: Pixels = px(64.);
+    pub const MEMORY_COL: Pixels = px(80.);
     pub const CONTROL: Pixels = px(26.);
     pub const DOT: Pixels = px(8.);
     pub const ICON: Pixels = px(14.);
     pub const ICON_ROW: Pixels = px(15.);
-    pub const SEARCH_W: Pixels = px(240.);
+    pub const SEARCH_W: Pixels = px(280.);
     /// Leaves room for the macOS traffic lights in the title bar.
     pub const TRAFFIC_LIGHTS: Pixels = px(76.);
 }
@@ -149,6 +152,45 @@ impl Palette {
             Mode::Light => Self::light(),
             Mode::Dark => Self::dark(),
         }
+    }
+
+    /// Builtin Light and Merino Dark for the project tree and copy pane.
+    #[must_use]
+    pub fn projects(mode: Mode) -> Self {
+        let mut palette = Self::for_mode(mode);
+        let [
+            chrome,
+            surface,
+            hover,
+            selection,
+            border,
+            ink,
+            secondary,
+            muted,
+            running,
+            failed,
+        ] = match mode {
+            Mode::Light => [
+                0xF2F2F2, 0xFFFFFF, 0xF0F0F0, 0xE1E1E1, 0xE0E0E0, 0x000000, 0x2E2E2E, 0x616161,
+                0x008300, 0xBB0000,
+            ],
+            Mode::Dark => [
+                0x0B0E12, 0x0D1117, 0x1A1E24, 0x24272B, 0x2B3036, 0xE6EDF3, 0xBFC5CB, 0x8B9197,
+                0x3FB950, 0xFF7B72,
+            ],
+        };
+        palette.chrome = c(rgb(chrome));
+        palette.surface = c(rgb(surface));
+        palette.surface_1 = c(rgb(hover));
+        palette.surface_2 = c(rgb(selection));
+        palette.border = c(rgb(border));
+        palette.text_primary = c(rgb(ink));
+        palette.text_secondary = c(rgb(secondary));
+        palette.text_muted = c(rgb(muted));
+        palette.accent = palette.text_primary;
+        palette.states.running.dot = c(rgb(running));
+        palette.states.failed.dot = c(rgb(failed));
+        palette
     }
 
     #[must_use]

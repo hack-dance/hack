@@ -1330,76 +1330,64 @@ const contracts: readonly ModelContract[] = [
     module: "RouteLookup",
     states: 498,
     invariant: "LiveRouteAllowed",
-    action: "RejectPending",
     fields: [
       'lookup = "deny"',
       'pending = "claimed"',
       'committed = [a |-> "original", b |-> "absent"]',
     ],
     alternativeWitnesses: [
-      {
-        action: "RejectPending",
-        fields: [
-          'lookup = "deny"',
-          'pending = "staged"',
-          'committed = [a |-> "original", b |-> "claimed"]',
-        ],
-      },
-      {
-        action: "RejectPending",
-        fields: [
-          'lookup = "deny"',
-          'pending = "absent"',
-          'committed = [a |-> "original", b |-> "staged"]',
-        ],
-      },
+      [
+        'lookup = "deny"',
+        'pending = "staged"',
+        'committed = [a |-> "original", b |-> "claimed"]',
+      ],
+      [
+        'lookup = "deny"',
+        'pending = "absent"',
+        'committed = [a |-> "original", b |-> "staged"]',
+      ],
     ],
     additionalControls: [
       {
         name: "detached-inode",
         negative: true,
         invariant: "LiveRouteAllowed",
-        action: "RejectUnlinked",
         fields: [
           'lookup = "deny"',
           "linked = FALSE",
           'committed = [a |-> "original", b |-> "claimed"]',
         ],
-        alternativeWitnesses: ["absent", "staged"].map((phase) => ({
-          action: "RejectUnlinked",
-          fields: [
-            'lookup = "deny"',
-            "linked = FALSE",
-            `committed = [a |-> "original", b |-> "${phase}"]`,
-          ],
-        })),
+        alternativeWitnesses: ["absent", "staged"].map((phase) => [
+          'lookup = "deny"',
+          "linked = FALSE",
+          `committed = [a |-> "original", b |-> "${phase}"]`,
+        ]),
       },
       {
         name: "stale-claim",
         negative: true,
         invariant: "AllowMatchesOpenedClaim",
-        action: "ReadSecond",
         fields: [
           'lookup = "allow"',
           'selected = "original"',
           'opened = [a |-> "absent", b |-> "absent"]',
         ],
-        alternativeWitnesses: ["absent", "replacement"].flatMap((claim) =>
-          ["absent", "claimed", "staged"].map((phase) => ({
-            action: "ReadSecond",
-            fields: [
-              'lookup = "allow"',
-              'selected = "original"',
-              `opened = [a |-> "${claim}", b |-> "${phase}"]`,
-            ],
-          }))
-        ),
+        alternativeWitnesses: [
+          ["absent", "claimed"],
+          ["absent", "staged"],
+          ["replacement", "absent"],
+          ["replacement", "claimed"],
+          ["replacement", "staged"],
+        ].map(([claim, phase]) => [
+          'lookup = "allow"',
+          'selected = "original"',
+          `opened = [a |-> "${claim}", b |-> "${phase}"]`,
+        ]),
       },
       {
         name: "retirement-reachable",
         negative: true,
         invariant: "NeverDetachDuringRetirement",
-        action: "CommitSibling",
         fields: [
           'lookup = "secondOpen"',
           "linked = FALSE",

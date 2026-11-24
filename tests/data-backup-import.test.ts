@@ -1331,3 +1331,73 @@ describe("Docker references hold the targets", () => {
     expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
   });
 });
+
+describe("a timed-out create during the import", () => {
+  /** The write-hold create times out; it lands during lookup `landAt`. */
+  function timedOutHold(fake: FakeEngine, landAt: number | null) {
+    const real = fake.docker();
+    let pending: readonly string[] | null = null;
+    let lookups = 0;
+    return {
+      ...real,
+      engine: { host: "tcp://10.0.0.5:2376", context: null },
+      hackCleanupCommand: (nonce: string) =>
+        `hack data cleanup --env=staging --nonce=${nonce}`,
+      capture: async (
+        argv: readonly string[],
+        opts?: { readonly timeoutMs?: number }
+      ) => {
+        if (
+          pending === null &&
+          argv[1] === "create" &&
+          argv.some((arg) => arg.startsWith("type=bind,"))
+        ) {
+          pending = argv;
+          return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
+        }
+        if (
+          argv[2] === "inspect" &&
+          argv.some((arg) => arg.includes(".Config.Labels"))
+        ) {
+          lookups += 1;
+          if (pending !== null && lookups === landAt) {
+            await real.capture(pending, opts);
+          }
+        }
+        return await real.capture(argv, opts);
+      },
+    };
+  }
+
+  test("an unanswered timeout stays unknown, with hack data cleanup and the engine selection", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    const error = await caught(
+      importProjectData({
+        ...input(fake, dir),
+        docker: timedOutHold(fake, null),
+      })
+    );
+    const cleanup = (error.detail as { cleanup: Record<string, string> })
+      .cleanup;
+    expect(cleanup.outcome).toBe("unknown");
+    const nonce = cleanup.label?.split("=")[1] ?? "";
+    expect(cleanup.hackCommand).toBe(
+      `hack data cleanup --env=staging --nonce=${nonce}`
+    );
+    expect(cleanup.command).toStartWith(
+      "DOCKER_HOST=tcp://10.0.0.5:2376 docker ps -aq"
+    );
+    expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
+  });
+
+  test("a timeout that a later lookup finds is removed; not unknown", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    const error = await caught(
+      importProjectData({ ...input(fake, dir), docker: timedOutHold(fake, 2) })
+    );
+    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
+    expect(fake.leftovers()).toEqual([]);
+  });
+});

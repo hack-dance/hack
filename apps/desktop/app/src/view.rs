@@ -1536,6 +1536,60 @@ impl HackApp {
         )
     }
 
+    fn remote_targets(d: &DetailView, ui: &Ui) -> Option<gpui_kit::Div> {
+        if d.remotes.is_empty() {
+            return None;
+        }
+        let p = ui.p;
+        Some(
+            div()
+                .pt(space::S6)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .pb(space::S3)
+                        .type_step(text::SMALL_STRONG)
+                        .text_color(p.text_secondary)
+                        .child("Remote targets"),
+                )
+                .children(d.remotes.iter().map(|remote| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space::S2)
+                        .py(space::S4)
+                        .hairline_t(p.border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(space::S3)
+                                .child(
+                                    div()
+                                        .type_step(text::BODY_STRONG)
+                                        .child(remote.service.clone()),
+                                )
+                                .child(neutral_pill(remote.target.clone(), ui))
+                                .child(neutral_pill(remote.probe.clone(), ui)),
+                        )
+                        .child(
+                            div()
+                                .type_step(text::MONO)
+                                .font_family(ui.mono.clone())
+                                .text_color(p.text_secondary)
+                                .child(remote.address_label()),
+                        )
+                        .child(
+                            div()
+                                .type_step(text::SMALL)
+                                .text_color(p.text_secondary)
+                                .child(remote.state.clone()),
+                        )
+                })),
+        )
+    }
+
     fn detail(
         &mut self,
         d: &DetailView,
@@ -1658,6 +1712,7 @@ impl HackApp {
                             }))
                     })
                 })
+                .children(Self::remote_targets(d, ui))
                 .into_any_element(),
         };
         #[cfg(hack_terminal)]

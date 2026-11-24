@@ -42,6 +42,7 @@ pub enum Fixture {
     Stopped,
     Starting,
     Running,
+    Remotes,
     Files,
     Degraded,
     Stopping,
@@ -89,7 +90,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 52] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -112,6 +113,7 @@ impl Fixture {
         Self::Stopped,
         Self::Starting,
         Self::Running,
+        Self::Remotes,
         Self::Files,
         Self::Degraded,
         Self::Stopping,
@@ -168,6 +170,7 @@ impl Fixture {
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Remotes => "remotes",
             Self::Files => "files",
             Self::Degraded => "degraded",
             Self::Stopping => "stopping",
@@ -504,6 +507,18 @@ pub fn project(f: Fixture) -> ProjectsPayload {
                 branch: Some("fix-login".into()),
             }];
             r
+        }
+        Fixture::Remotes => {
+            let mut row = storefront(all_up(), "running");
+            row.remotes = serde_json::from_str(r#"[
+              {"service":"redis","target":"unknown","state":"declared","probe":"not checked",
+               "address":null},
+              {"service":"database","target":"staging","state":"declared","probe":"not checked",
+               "address":{"kind":"env_ref","name":"STAGING_DB_HOST","port":5432}},
+              {"service":"search","target":"preview","state":"tunnel not started by this version",
+               "probe":"not checked","address":{"kind":"hostname","hostname":"search.example.invalid","port":443}}
+            ]"#).expect("remote descriptors fixture");
+            row
         }
         Fixture::Branches => {
             let mut r = storefront(vec![], "stopped");

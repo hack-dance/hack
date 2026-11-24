@@ -3,7 +3,7 @@ import { resolveNativeStartTimeoutSeconds } from "../backends/native-graph-start
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
 import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
-import { withCommandTimings } from "../lib/command-timings.ts";
+import { beginUpTiming, withCommandTimings } from "../lib/command-timings.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
@@ -57,7 +57,7 @@ import {
   writeStartBlocker,
   writeUpHookBlocker,
 } from "../ui/start-refusal-output.ts";
-import { createTextOutput, formatDuration } from "../ui/text-output.ts";
+import { createTextOutput } from "../ui/text-output.ts";
 import { writeComposeStarted } from "./compose-lifecycle-closing.ts";
 import {
   createComposeUpProgress,
@@ -449,7 +449,9 @@ import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
   isNativeDetachedOwnerProcess,
+  nativeBuildProgressLine,
   nativeDetachedOwnerArgs,
+  nativeDetachedUpBuildProgress,
   nativeDetachedUpHookFailed,
   nativeDetachedUpKeepsHookOutput,
   nativeDetachedUpPrestart,
@@ -6712,7 +6714,7 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
       return;
     case "build-settled":
       logger.info({
-        message: `Build ${event.services.join(", ")}: ${event.outcome} in ${formatDuration(event.durationMs)}`,
+        message: nativeBuildProgressLine(event),
       });
       return;
     case "images":
@@ -6870,6 +6872,7 @@ async function handleNativeUp({
   // A detached `up` owner reports a closed refusal from here until VM work
   // starts exactly as this command prints it in the foreground (HACK-2339).
   nativeDetachedUpPrestart(!restart);
+  const composeTiming = beginUpTiming("cli.compose.resolve");
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -6963,6 +6966,7 @@ async function handleNativeUp({
   const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
     await resolveNativeInternalExtraHostSelection({ project, cfg });
   let ready = false;
+  composeTiming?.();
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -7017,6 +7021,7 @@ async function handleNativeUp({
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
     onReady: (services, addresses) => {
+      const resultTiming = beginUpTiming("cli.result.prepare");
       const primaryHost = branch
         ? applyBranchToHost({
             branch,
@@ -7027,13 +7032,15 @@ async function handleNativeUp({
             }),
           })
         : devHost;
-      nativeDetachedUpReady({
+      const data = {
         project: projectName,
         branch,
         composeProject,
         address: selectLifecycleAddress(addresses, primaryHost),
         ...services,
-      });
+      };
+      resultTiming?.();
+      nativeDetachedUpReady(data);
     },
     startTimeoutSeconds: resolveNativeStartTimeoutSeconds({
       env: process.env,
@@ -7070,7 +7077,11 @@ async function handleNativeUp({
         nativeDetachedUpPrestart(false);
       }
       // A detached launcher's clocks follow these phases (HACK-2351).
-      nativeDetachedUpProgress(event.phase);
+      if (event.phase === "build-settled") {
+        nativeDetachedUpBuildProgress(event);
+      } else {
+        nativeDetachedUpProgress(event.phase);
+      }
       if (event.phase === "ready") {
         ready = true;
       }
@@ -7611,6 +7622,7 @@ async function handleUp(
 async function runUpWithAutostart(
   input: Parameters<typeof handleUpUnlocked>[0]
 ): Promise<number> {
+  const autostartTiming = beginUpTiming("cli.autostart");
   parseRequestedTarget({ raw: input.args.options.target });
   nativeImageTagMode(input.args.options);
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
@@ -7621,6 +7633,7 @@ async function runUpWithAutostart(
     if (login) {
       await updateAutostartIntent({ ...input, action: "up" });
     }
+    autostartTiming?.();
     return await handleUpUnlocked(input);
   };
   // Foreground up owns the terminal until shutdown; its existing supervisor
@@ -7836,6 +7849,7 @@ async function handleUpUnlocked({
     if (alreadyRunning !== null) {
       return alreadyRunning;
     }
+    const ownerTiming = beginUpTiming("cli.owner.prepare");
     await reportNativeLocalDirectoriesBeforeLaunch({
       ctx,
       path: args.options.path,
@@ -7846,6 +7860,7 @@ async function handleUpUnlocked({
         mode: "start",
       },
     });
+    ownerTiming?.();
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
       args: childArgs,

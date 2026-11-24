@@ -17,6 +17,18 @@ use hack_runtime_core::{
 };
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path, time::Duration};
+#[cfg(target_os = "macos")]
+fn finish_owner_input(span: Option<hack_runtime_core::timings::Span>) {
+    if let Some(span) = span {
+        span.finish(
+            hack_runtime_core::timings::Outcome::Ok,
+            false,
+            None,
+            Default::default(),
+        );
+    }
+}
+
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
@@ -26,6 +38,13 @@ fn invalid() -> CandidateError {
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
+    };
+    #[cfg(target_os = "macos")]
+    let owner_input = if matches!(*action, "serve" | "serve-restore") {
+        use hack_runtime_core::timings::{self, Step};
+        timings::start(Step::GraphOwnerInput, None)
+    } else {
+        None
     };
     #[cfg(feature = "native-config-plan")]
     if *action == "native" {
@@ -1161,6 +1180,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     compose_file: options.project.compose_file,
                     profiles: options.project.profiles,
                 });
+                #[cfg(target_os = "macos")]
+                finish_owner_input(owner_input);
                 return normalized::command(
                     candidate,
                     action,
@@ -1243,6 +1264,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                         automatic_dependency_slots,
                     )?;
                     runtime.report_started(report_started);
+                    finish_owner_input(owner_input);
                     return encode(if let Some(managed) = &managed {
                         graph::foreground::serve_with_routes(
                             candidate,

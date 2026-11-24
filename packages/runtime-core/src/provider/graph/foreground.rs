@@ -3,6 +3,7 @@ use super::{
     Candidate, CandidateError, Engine, HostRelayRuntime, Kind, Receipt, RunOptions, startup,
 };
 use crate::error::StopFailuresDiagnostic;
+use crate::timings::{self, Outcome, Step};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -282,6 +283,7 @@ fn serve_input<'a>(
     route_slots: &BTreeMap<String, super::RouteSlot>,
     normalized: Option<(crate::project::NormalizedComposeOptions<'a>, Option<&str>)>,
 ) -> Result<Receipt, CandidateError> {
+    let startup = timings::start(Step::GraphOwnerStartup, None);
     if options.routing_enrolled != !route_slots.is_empty() {
         return Err(refused());
     }
@@ -458,6 +460,11 @@ fn serve_input<'a>(
         signals.watch_read(runtime.dependency_notification_fd())?;
         let ready =
             json!({"kind":"graph_foreground_ready","run":receipt.run,"phase":receipt.phase});
+        // Send on the timing descriptor before flushing readiness. The launcher
+        // can drain this completed span even though the graph owner keeps serving.
+        if let Some(span) = startup {
+            span.finish(Outcome::Ok, false, None, Default::default());
+        }
         let mut stdout = std::io::stdout().lock();
         serde_json::to_writer(&mut stdout, &ready).map_err(|_| refused())?;
         writeln!(stdout)

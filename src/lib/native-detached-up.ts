@@ -18,12 +18,14 @@ import {
   parseNativeProfileNotice,
   renderNativeProfileNotice,
 } from "../backends/native-profile-selection.ts";
+import type { NativeBuildSettlement } from "../backends/native-project-builds.ts";
 import {
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { writeLifecycleStarted } from "../ui/lifecycle-closing.ts";
+import { formatDuration } from "../ui/text-output.ts";
 import {
   noteActivityFailedServices,
   suppressActivityRecording,
@@ -106,6 +108,10 @@ let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
 let publishProgress:
   | ((phase: Exclude<NativeDetachedStartPhase, "launching">) => void)
   | undefined;
+type BuildProgress = NativeBuildSettlement & {
+  readonly kind: "build-settled";
+};
+let publishBuildProgress: ((event: BuildProgress) => void) | undefined;
 let workingImages: readonly string[] = [];
 export function reportNativeImageWork(images: readonly string[]): void {
   workingImages = images;
@@ -148,6 +154,49 @@ const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const FAILURE_MESSAGE = /^[\x20-\x7e]{1,400}$/;
 const FAILURE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
 const FAILED_SERVICES_LIMIT = 32;
+const MAX_BUILD_DURATION_MS = 24 * 60 * 60 * 1000;
+
+function isBuildProgress(value: unknown): value is BuildProgress {
+  return (
+    isRecord(value) &&
+    value.kind === "build-settled" &&
+    Object.keys(value).length === 4 &&
+    Array.isArray(value.services) &&
+    value.services.length > 0 &&
+    value.services.length <= FAILED_SERVICES_LIMIT &&
+    value.services.every(
+      (name: unknown) => typeof name === "string" && FAILURE_SERVICE.test(name)
+    ) &&
+    typeof value.durationMs === "number" &&
+    Number.isFinite(value.durationMs) &&
+    value.durationMs >= 0 &&
+    value.durationMs <= MAX_BUILD_DURATION_MS &&
+    (value.outcome === "built" ||
+      value.outcome === "reused" ||
+      value.outcome === "failed" ||
+      value.outcome === "cancelled")
+  );
+}
+
+export function nativeBuildProgressLine(event: NativeBuildSettlement): string {
+  return `Build ${event.services.join(", ")}: ${event.outcome} in ${formatDuration(event.durationMs)}`;
+}
+
+/** A completion event carries names and timing only, without advancing the phase clock. */
+export function nativeDetachedUpBuildProgress(
+  event: NativeBuildSettlement
+): void {
+  const packet: BuildProgress = {
+    kind: "build-settled",
+    services: event.services.slice(0, FAILED_SERVICES_LIMIT),
+    durationMs: event.durationMs,
+    outcome: event.outcome,
+  };
+  if (publishBuildProgress && isBuildProgress(packet)) {
+    publishBuildProgress(packet);
+  }
+}
+
 let failedStartupServices: readonly string[] = [];
 
 /**
@@ -779,6 +828,7 @@ export async function runNativeDetachedOwner(opts: {
         }
       | { readonly kind: "image-notice"; readonly notice: string }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
+      | BuildProgress
       | {
           readonly kind: "progress";
           readonly images?: readonly string[];
@@ -876,6 +926,11 @@ export async function runNativeDetachedOwner(opts: {
       await send({ kind: "prestart-refusal", data });
     }
   };
+  publishBuildProgress = (event) => {
+    if (!(ready || stopping)) {
+      send(event);
+    }
+  };
   publishProgress = (phase) => {
     if (ready || stopping) {
       stopProgressHeartbeat();
@@ -909,6 +964,7 @@ export async function runNativeDetachedOwner(opts: {
     prestart = false;
     failedHookLines = [];
     publishProgress = undefined;
+    publishBuildProgress = undefined;
     stopProgressHeartbeat();
     process.off("disconnect", disconnected);
     process.off("message", message);
@@ -1187,6 +1243,12 @@ export async function startNativeDetachedUp(opts: {
     if (refused) {
       failed = true;
       result.reject(refused);
+      return;
+    }
+    if (isBuildProgress(value)) {
+      if (!(ready || opts.json)) {
+        process.stderr.write(`${nativeBuildProgressLine(value)}\n`);
+      }
       return;
     }
     if (writeOwnerNotice(value)) {

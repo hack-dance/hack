@@ -932,7 +932,6 @@ async function runPendingBuilds(opts: {
       ? Math.min(MAX_CONCURRENT_PROJECT_BUILDS, cpus)
       : 1;
   const parallel = cap > 1 && opts.pending.size > 1;
-  const onBuildSettled = parallel ? opts.onBuildSettled : undefined;
   const controller = new AbortController();
   const running = new Set<Promise<void>>();
   const interrupt = () =>
@@ -1012,7 +1011,7 @@ async function runPendingBuilds(opts: {
         controller.abort(nameBuildFailure(services, error, parallel));
       }
     } finally {
-      onBuildSettled?.({
+      opts.onBuildSettled?.({
         services,
         outcome,
         durationMs: performance.now() - started,

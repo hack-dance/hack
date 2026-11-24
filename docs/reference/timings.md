@@ -146,3 +146,12 @@ admission, plan inputs and graph launch preparation. `cli.readiness.finalize`
 covers the readiness inspection, publication and hooks. The detached launcher
 also records owner launch, acceptance and result preparation. These phases
 can overlap runtime request spans.
+
+The foreground graph owner emits `graph.owner.input` and, for normalized
+inputs, `graph.owner.configure` before entering the graph. It completes
+`graph.owner.startup` on the timing descriptor before flushing the ready
+reply. This lets the launcher collect startup work while the owner remains
+alive. Between `services.ready` and that reply, `graph.ready.commit` covers
+final verification and durable receipt publication. The `graph.publish.*`
+spans distinguish probe-generation seeding, endpoint reservation, relay
+startup, and publisher readiness verification.

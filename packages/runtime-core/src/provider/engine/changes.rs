@@ -182,6 +182,28 @@ mod tests {
     fn path(name: &str) -> Socket {
         Socket(std::env::temp_dir().join(format!("hc-changes-{}-{name}.sock", std::process::id())))
     }
+    /// Whether `peer` reaches end of file within `limit`, reading nonblocking (no
+    /// socket option, which macOS refuses on a stream whose other end is shut).
+    /// A reset counts as closed.
+    fn reaches_end_within(peer: &mut UnixStream, limit: Duration) -> bool {
+        peer.set_nonblocking(true).unwrap();
+        let end = Instant::now() + limit;
+        let mut buffer = [0_u8; 512];
+        loop {
+            match peer.read(&mut buffer) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= end {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return true,
+            }
+        }
+    }
     /// A bounded accept: `None` when nothing connected in `limit`.
     fn accept_within(listener: &UnixListener, limit: Duration) -> Option<(UnixStream, ())> {
         listener.set_nonblocking(true).unwrap();
@@ -368,10 +390,11 @@ mod tests {
         // The one connection, made before the drop returned, is already shut.
         let (mut peer, _) = accept_within(&listener, Duration::from_secs(5))
             .expect("the worker made no connection");
-        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut rest = Vec::new();
+        // A shut stream reaches end of file at once. (macOS refuses socket options
+        // such as a read timeout on a stream whose other end is shut, so this
+        // reads nonblocking within a bound instead.)
         assert!(
-            peer.read_to_end(&mut rest).is_ok(),
+            reaches_end_within(&mut peer, Duration::from_secs(5)),
             "the stream was left open"
         );
         // And nothing connects after the drop.

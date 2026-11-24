@@ -504,6 +504,33 @@ test.each([
   expect((await readFile(path, "utf8")) === text).toBe(true);
 });
 
+test("show redacts a credential-bearing Compose service key and its issue path", async () => {
+  const f = await fixture();
+  const marker = "fixture-service-sentinel";
+  const name = `https://fixture:${marker}@registry.example.test`;
+  const path = join(f.project, "docker-compose.yml");
+  const text = compose.replace(
+    "services:\n",
+    `services:\n  "${name}": {ports: [70000]}\n`
+  );
+  await writeFile(path, text);
+
+  const report = await show(f.root, f.main);
+  expect(JSON.stringify(report).includes(marker)).toBe(false);
+  expect(report.services.map((service) => service.name)).toEqual([
+    "web",
+    "api",
+    "worker",
+  ]);
+  expect(report.issues[0]).toMatchObject({
+    layer: "2",
+    code: "E_CONFIG_INVALID",
+    path: ["services", "[redacted]", "ports"],
+    line: 4,
+  });
+  expect((await readFile(path, "utf8")) === text).toBe(true);
+});
+
 test("show and validation previews omit authorization headers and commands", async () => {
   const f = await fixture();
   const [projectPath, composePath] = [

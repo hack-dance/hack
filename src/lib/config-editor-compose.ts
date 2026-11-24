@@ -852,7 +852,15 @@ export function composeModel(opts: {
   if (cycle) {
     issues.push(cycle);
   }
-  return { services: rows, issues };
+  return {
+    services: rows.filter(({ name }) => !isConfigSecret("", name)),
+    issues: issues.map((issue) => ({
+      ...issue,
+      path: issue.path.map((part) =>
+        isConfigSecret("", part) ? "[redacted]" : part
+      ),
+    })),
+  };
 }
 
 function composeServiceIssues(

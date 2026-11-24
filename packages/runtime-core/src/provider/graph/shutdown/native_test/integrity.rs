@@ -282,16 +282,17 @@ fn require_virgin(candidate: &Candidate) {
         "fixture home contains non-preparation state"
     );
     let provider = run.join("smolvm");
+    // Acquiring the provider lock writes a holder label, so check it first.
+    assert_eq!(
+        fs::metadata(provider.join("operation.lock")).unwrap().len(),
+        0,
+        "preparation lock contains unexpected data"
+    );
     let _lock = state::Lock::acquire_existing(&provider).unwrap();
     assert_eq!(
         entries(&provider),
         vec![std::ffi::OsString::from("operation.lock")],
         "fixture home contains prior runtime state"
-    );
-    assert_eq!(
-        fs::metadata(provider.join("operation.lock")).unwrap().len(),
-        0,
-        "preparation lock contains unexpected data"
     );
 }
 

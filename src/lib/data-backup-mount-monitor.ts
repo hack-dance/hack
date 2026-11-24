@@ -18,6 +18,7 @@ import {
 } from "./data-backup-helper.ts";
 import {
   containersReachingVolumes,
+  uncheckedBackingError,
   type WatchedVolume,
 } from "./data-backup-volumes.ts";
 import { isRecord } from "./guards.ts";
@@ -28,8 +29,10 @@ const MARKER_TIMEOUT_MS = 30_000;
 
 /**
  * Live `docker events` subscription. Combining filters ORs values of one key
- * and ANDs the keys, so this delivers volume `mount` and container `start`
- * events (checked on a real engine). It has no `--since`/`--until`: replaying
+ * and ANDs the keys, so this delivers volume `mount`, `create` and `destroy`
+ * and container `start` events, plus container `create` and `destroy`, which
+ * are ignored (checked on Docker 29.9.2; a volume event's Actor.ID is the
+ * volume name). It has no `--since`/`--until`: replaying
  * history after the fact returns only the engine's last 256 events, so a busy
  * engine could evict a writer's mount before it is read.
  */
@@ -44,6 +47,10 @@ export const MOUNT_EVENTS_ARGV = [
   "event=mount",
   "--filter",
   "event=start",
+  "--filter",
+  "event=create",
+  "--filter",
+  "event=destroy",
   "--format",
   "{{json .}}",
 ] as const;
@@ -80,8 +87,53 @@ export interface MountMonitor {
    * already gone, or the inspect failed): what it mounted is unknown.
    */
   finish(volumes: readonly WatchedVolume[]): Promise<readonly ForeignMount[]>;
+  /**
+   * After {@link finish}: the names in `names` that a volume `destroy` or
+   * `create` event named during the window. A volume's CreatedAt has
+   * one-second resolution, so a volume removed and recreated under the same
+   * name and labels within a second passes an identity comparison; these
+   * events catch it regardless. A `create` of a name in `ownCreates` (one
+   * per successful `docker volume create` this run issued) is this run's
+   * own and is not reported; every other create, and every destroy, is.
+   */
+  changedVolumes(opts: {
+    readonly names: readonly string[];
+    readonly ownCreates?: readonly string[];
+  }): readonly string[];
   /** Stop the subscription on any other path. Idempotent. */
   stop(): Promise<void>;
+}
+
+/** One event line, classified; null when it cannot be read. */
+type WindowEvent =
+  | { readonly kind: "start"; readonly id: string }
+  | { readonly kind: "mount"; readonly id: string; readonly container: string }
+  | { readonly kind: "create" | "destroy"; readonly id: string }
+  | { readonly kind: "other" };
+
+function readEvent(line: string): WindowEvent | null {
+  const event = parseJsonText(line);
+  const actor = isRecord(event) && isRecord(event.Actor) ? event.Actor : null;
+  const attributes =
+    actor && isRecord(actor.Attributes) ? actor.Attributes : null;
+  if (
+    !(isRecord(event) && actor && attributes && typeof actor.ID === "string")
+  ) {
+    return null;
+  }
+  const id = actor.ID;
+  if (event.Type === "container") {
+    return event.Action === "start" ? { kind: "start", id } : { kind: "other" };
+  }
+  if (event.Type !== "volume") {
+    return { kind: "other" };
+  }
+  if (event.Action === "mount" && typeof attributes.container === "string") {
+    return { kind: "mount", id, container: attributes.container };
+  }
+  return event.Action === "create" || event.Action === "destroy"
+    ? { kind: event.Action, id }
+    : { kind: "other" };
 }
 
 function notPublished(command: HelperPurpose): string {
@@ -131,6 +183,7 @@ export async function startMountMonitor(opts: {
 }): Promise<MountMonitor> {
   const started = new Set<string>();
   const mounts: { volume: string; container: string }[] = [];
+  const volumeEvents: { action: "create" | "destroy"; volume: string }[] = [];
   const waiting = new Map<string, () => void>();
   let unreadable = false;
   let stopped = false;
@@ -139,25 +192,16 @@ export async function startMountMonitor(opts: {
     if (line.trim() === "") {
       return;
     }
-    const event = parseJsonText(line);
-    const actor = isRecord(event) && isRecord(event.Actor) ? event.Actor : null;
-    const attributes =
-      actor && isRecord(actor.Attributes) ? actor.Attributes : null;
-    if (
-      !(isRecord(event) && actor && attributes && typeof actor.ID === "string")
-    ) {
+    const event = readEvent(line);
+    if (event === null) {
       unreadable = true;
-      return;
-    }
-    if (event.Type === "container" && event.Action === "start") {
-      started.add(actor.ID);
-      waiting.get(actor.ID)?.();
-    } else if (
-      event.Type === "volume" &&
-      event.Action === "mount" &&
-      typeof attributes.container === "string"
-    ) {
-      mounts.push({ volume: actor.ID, container: attributes.container });
+    } else if (event.kind === "start") {
+      started.add(event.id);
+      waiting.get(event.id)?.();
+    } else if (event.kind === "mount") {
+      mounts.push({ volume: event.id, container: event.container });
+    } else if (event.kind === "create" || event.kind === "destroy") {
+      volumeEvents.push({ action: event.kind, volume: event.id });
     }
   };
   const watch: DataBackupWatch = opts.docker.watch(MOUNT_EVENTS_ARGV, onLine);
@@ -341,7 +385,33 @@ export async function startMountMonitor(opts: {
       if (unique.length === 0 && unchecked.length > 0) {
         throw uncheckedStartError(opts.purpose, unchecked);
       }
+      if (unique.length === 0 && reach.uncheckedBacking.length > 0) {
+        throw uncheckedBackingError({
+          containers: reach.uncheckedBacking,
+          consequence: `${notPublished(opts.purpose)}.`,
+        });
+      }
       return unique;
+    },
+    changedVolumes({ names, ownCreates = [] }) {
+      const watched = new Set(names);
+      const ours = new Map<string, number>();
+      for (const name of ownCreates) {
+        ours.set(name, (ours.get(name) ?? 0) + 1);
+      }
+      const changed = new Set<string>();
+      for (const { action, volume } of volumeEvents) {
+        if (!watched.has(volume)) {
+          continue;
+        }
+        const own = ours.get(volume) ?? 0;
+        if (action === "create" && own > 0) {
+          ours.set(volume, own - 1);
+          continue;
+        }
+        changed.add(volume);
+      }
+      return [...changed].sort();
     },
     stop,
   };

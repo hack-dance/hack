@@ -89,6 +89,8 @@ export const dataExportScenario: Scenario = {
     const scratch = `${project}-restore`;
     const writer = `${project}-writer-${token}`;
     const holder = `${project}-bind-holder-${token}`;
+    const alias = `${project}-alias-${token}`;
+    const aliasWriter = `${project}-alias-writer-${token}`;
     await Bun.write(
       join(fixture.hackDir, "docker-compose.yml"),
       [
@@ -334,6 +336,14 @@ export const dataExportScenario: Scenario = {
         message: "remove the stand-in project container",
       });
       await bindHolderRefuses({ ctx, fixture, out, volume: data, holder });
+      await aliasWriterRefuses({
+        ctx,
+        fixture,
+        out,
+        volume: data,
+        alias,
+        holder: aliasWriter,
+      });
 
       // A short-lived writer that starts and exits while a copy helper runs:
       // no `docker ps` check can see it, the live event subscription does.
@@ -422,6 +432,8 @@ export const dataExportScenario: Scenario = {
         stage: "before-publish",
       });
       await recreateVolume({ ctx, project, volume: data });
+      await replacedWithinOneSecond({ ctx, fixture, project, volume: data });
+      await recreateVolume({ ctx, project, volume: data });
       await removedDuringExport({
         ctx,
         fixture,
@@ -430,7 +442,8 @@ export const dataExportScenario: Scenario = {
         stage: "before-hold",
       });
     } finally {
-      await docker(ctx, ["rm", "--force", runner, writer, holder]);
+      await docker(ctx, ["rm", "--force", runner, writer, holder, aliasWriter]);
+      await docker(ctx, ["volume", "rm", alias]);
       await docker(ctx, ["volume", "rm", data, foreign, external, scratch]);
     }
   },
@@ -460,9 +473,20 @@ async function removedDuringExport(opts: {
   let removed = false;
   let copied = false;
   const at = (argv: readonly string[]): boolean =>
-    opts.stage === "before-hold"
-      ? argv[1] === "create" && argv.includes("--mount")
-      : copied && argv[1] === "ps";
+    opts.stage === "before-publish"
+      ? copied && argv[1] === "ps"
+      : argv[1] === "create" && argv.includes("--mount");
+  const createdAt = async (): Promise<string> =>
+    (
+      await docker(ctx, [
+        "volume",
+        "inspect",
+        "--format",
+        "{{.CreatedAt}}",
+        data,
+      ])
+    ).stdout.trim();
+  let before = "";
   const racingDocker: DataBackupDocker = {
     ...real,
     capture: async (argv, captureOpts) => {
@@ -471,6 +495,7 @@ async function removedDuringExport(opts: {
       }
       if (!removed && at(argv)) {
         removed = true;
+        before = await createdAt();
         expectExit({
           result: await docker(ctx, ["volume", "rm", data]),
           codes: [0],
@@ -516,10 +541,118 @@ async function removedDuringExport(opts: {
       isRecord(raceRefusal.detail) &&
       raceRefusal.detail.reason === "volume_changed" &&
       listed.exitCode === 0 &&
+      // Export never creates one: only the test's own replacement exists.
       listed.stdout.trim() === "" &&
       leftInOut.every((entry) => entry.endsWith(".partial")),
-    message: `a volume removed ${opts.stage} should refuse, publish nothing and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()}, out: ${leftInOut.join(",")})`,
+    message: `a volume removed ${opts.stage} should refuse, publish nothing and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()}, out: ${leftInOut.join(",")}, createdAt before: ${before})`,
   });
+}
+
+/**
+ * The volume is removed and created again under its name, with the same
+ * labels, between validation and the hold, within the same second as its
+ * validated creation where the host allows: the hold then binds the new
+ * volume's directory (a local volume's Mountpoint is its name's path) and
+ * every identity field matches, so only Docker's destroy/create events can
+ * refuse. A wrapper creates the volume just after a second boundary right
+ * before export validates it, and replaces it at the hold's create. Up to
+ * three attempts aim for one second; every attempt must refuse.
+ */
+async function replacedWithinOneSecond(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly project: string;
+  readonly volume: string;
+}): Promise<void> {
+  const { ctx, fixture, project, volume } = opts;
+  const create = ["volume", "create", ...labels(project, "data"), volume];
+  const createdAt = async (): Promise<string> =>
+    (
+      await docker(ctx, [
+        "volume",
+        "inspect",
+        "--format",
+        "{{.CreatedAt}}",
+        volume,
+      ])
+    ).stdout.trim();
+  const pairs: string[] = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await docker(ctx, ["volume", "rm", volume]);
+    const real = createHostDataBackupDocker({ env: {}, cwd: fixture.hackDir });
+    let validated = "";
+    let replaced = "";
+    const racing: DataBackupDocker = {
+      ...real,
+      capture: async (argv, captureOpts) => {
+        if (
+          validated === "" &&
+          argv[1] === "volume" &&
+          argv.at(-1) === volume
+        ) {
+          await Bun.sleep(1005 - (Date.now() % 1000));
+          expectExit({
+            result: await docker(ctx, create),
+            codes: [0],
+            message: "create the volume right before validation",
+          });
+          validated = await createdAt();
+        }
+        if (
+          replaced === "" &&
+          argv[1] === "create" &&
+          argv.includes("--mount")
+        ) {
+          expectExit({
+            result: await docker(ctx, ["volume", "rm", volume]),
+            codes: [0],
+            message: "remove the validated volume",
+          });
+          expectExit({
+            result: await docker(ctx, create),
+            codes: [0],
+            message: "create it again under its name",
+          });
+          replaced = await createdAt();
+        }
+        return await real.capture(argv, captureOpts);
+      },
+    };
+    const refusal = await exportProjectData({
+      docker: racing,
+      composeArgs: dataComposeArgs({
+        composeFiles: [join(fixture.hackDir, "docker-compose.yml")],
+        composeProject: null,
+        cwd: fixture.hackDir,
+        env: {},
+      }),
+      project,
+      branch: null,
+      hackHome: ctx.hackHome,
+      outDir: join(ctx.tempRoot, `replaced-out-${attempt}`),
+      hackVersion: "e2e",
+    }).then(
+      () => null,
+      (error: unknown) => error
+    );
+    pairs.push(`${validated}/${replaced}`);
+    expect({
+      that:
+        replaced !== "" &&
+        refusal instanceof HackCliError &&
+        isRecord(refusal.detail) &&
+        refusal.detail.reason === "volume_changed",
+      message: `a volume replaced under its name before the hold should refuse (attempt ${attempt}, CreatedAt validated/replaced: ${validated}/${replaced}, refusal: ${String(refusal)})`,
+    });
+    if (validated === replaced) {
+      break;
+    }
+  }
+  // Which identity the replacement had, for the report.
+  console.log(
+    `replaced-within-one-second CreatedAt validated/replaced: ${pairs.join(", ")}`
+  );
+  await docker(ctx, ["volume", "rm", volume]);
 }
 
 /** Create the `data` volume again, with Compose's labels and one file. */
@@ -612,6 +745,95 @@ async function bindHolderRefuses(opts: {
     result: await docker(ctx, ["rm", "--force", opts.holder]),
     codes: [0],
     message: "remove the bind holder",
+  });
+}
+
+/**
+ * A foreign local volume whose options bind the owned volume's Mountpoint
+ * (`--opt type=none --opt o=bind --opt device=<Mountpoint>`) aliases its
+ * storage; a container mounting it shows only the alias's own Name and
+ * Source. Export inspects the alias's backing and refuses, by short ID,
+ * printing neither name.
+ */
+async function aliasWriterRefuses(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly out: string;
+  readonly volume: string;
+  readonly alias: string;
+  readonly holder: string;
+}): Promise<void> {
+  const { ctx } = opts;
+  const mountpoint = (
+    await docker(ctx, [
+      "volume",
+      "inspect",
+      "--format",
+      "{{.Mountpoint}}",
+      opts.volume,
+    ])
+  ).stdout.trim();
+  expectExit({
+    result: await docker(ctx, [
+      "volume",
+      "create",
+      "--opt",
+      "type=none",
+      "--opt",
+      "o=bind",
+      "--opt",
+      `device=${mountpoint}`,
+      opts.alias,
+    ]),
+    codes: [0],
+    message: "create a local volume aliasing the owned Mountpoint",
+  });
+  const started = await docker(ctx, [
+    "run",
+    "--detach",
+    "--network",
+    "none",
+    "--name",
+    opts.holder,
+    "--volume",
+    `${opts.alias}:/data`,
+    "--entrypoint",
+    "sleep",
+    HELPER,
+    "300",
+  ]);
+  expectExit({
+    result: started,
+    codes: [0],
+    message: "a container mounting the alias should start",
+  });
+  const refused = await ctx.cli({
+    args: ["data", "export", "--json", "--out", opts.out],
+    cwd: opts.fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  const refusal = extractJsonObject<ExportPayload>({ text: refused.stdout });
+  expect({
+    that:
+      refused.exitCode === 1 &&
+      refusal?.error?.code === "E_PROJECT_RUNNING" &&
+      JSON.stringify(refusal.error.detail) ===
+        JSON.stringify({ running: [started.stdout.trim().slice(0, 12)] }) &&
+      !refused.stdout.includes(opts.alias) &&
+      !refused.stdout.includes(opts.holder),
+    message:
+      "a running container writing through an alias volume should refuse",
+    result: refused,
+  });
+  expectExit({
+    result: await docker(ctx, ["rm", "--force", opts.holder]),
+    codes: [0],
+    message: "remove the alias writer",
+  });
+  expectExit({
+    result: await docker(ctx, ["volume", "rm", opts.alias]),
+    codes: [0],
+    message: "remove the alias volume",
   });
 }
 

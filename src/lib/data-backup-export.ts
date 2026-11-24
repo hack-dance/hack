@@ -44,6 +44,7 @@ import {
   plainLocalInspected,
   planDeclaredVolumes,
   requireUnchangedVolume,
+  volumeReplacedError,
 } from "./data-backup-volumes.ts";
 
 export type DataExportInput = {
@@ -228,6 +229,17 @@ async function exportWithin(opts: {
       command: "export",
       consequence: `the backup was not published; the incomplete copy is in ${partial}, which you can delete.`,
       stopCommand,
+    });
+  }
+  // Export creates no volume: any destroy or create of a copied volume's
+  // name in the window is someone else's.
+  const replaced = monitor.changedVolumes({
+    names: owned.map((volume) => volume.name),
+  });
+  if (replaced.length > 0) {
+    throw volumeReplacedError({
+      keys: replaced.map((name) => keyOf.get(name) ?? name).sort(),
+      consequence: `the backup was not published; the incomplete copy is in ${partial}, which you can delete.`,
     });
   }
 

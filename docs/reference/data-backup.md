@@ -62,11 +62,30 @@ inspects each one it did not create, by ID, in one call bounded by
 `Mountpoint`, a path inside it, or a directory above it counts as using that
 volume, by the same path rule as the event check below. A running container
 that cannot be inspected refuses too (`detail.reason: unchecked_running`).
+
+A volume mount can alias an owned volume's storage: a foreign `local`
+volume created with `--opt type=none --opt o=bind --opt device=<owned
+Mountpoint>` writes into the owned directory, while a container mounting it
+shows only the alias's own name and `Source`. So for every volume mount of
+another volume (at both running checks and for every container that starts
+in the window), Hack inspects that volume, in one bounded call, and judges
+its backing storage by the same path rule:
+
+- a plain `local` volume (no options): its own `Mountpoint`;
+- a `local` volume whose `o` option includes `bind` (or `rbind`) and that
+  names a `device`: the device is the backing path;
+- a `local` `tmpfs` volume: memory only, separate by construction;
+- anything else (another volume driver, other local options such as an NFS,
+  CIFS or block-device mount, or a volume Docker cannot inspect) is treated
+  as possibly the same storage and refuses with `E_PROJECT_RUNNING`
+  (`detail.reason: unchecked_volume_backing`, `detail.unchecked`: short
+  container IDs; no volume or container names).
 `error.detail.running` lists their short (12 character) container IDs, never
 their names; stop the project with `hack down` and retry. Hack never stops anything for an export.
 
 Before its first check, the export subscribes to Docker's live event
-stream (`docker events`, volume `mount` and container `start` events, with no
+stream (`docker events`: volume `mount`, `create` and `destroy` and container
+`start` events, with no
 `--since`, so nothing depends on the engine's short event history). It proves
 the subscription live by creating and starting a no-op marker container
 (`hack-data-export-<random>-start`, no network, no logging) and waiting for
@@ -162,6 +181,15 @@ every copied volume immediately before the rename that publishes the
 backup. A volume that is gone, or replaced under the same name, refuses
 with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`) and leaves the
 copy in `<backup>.partial/`.
+
+An identity comparison alone is not enough: Docker reports a volume's
+`CreatedAt` to the second, so a volume removed and created again under the
+same name and labels within one second matches every field (checked on
+Docker 29.9.2), and the hold would bind the new volume's directory. The
+event subscription therefore also receives volume `destroy` and `create`
+events, and any destroy or create of a copied volume's name during the
+window refuses publication with `volume_changed`, whatever the timestamps
+say. Export creates no volume, so every such event is someone else's.
 
 On Docker Desktop and OrbStack the daemon runs in a VM, and the
 `Mountpoint` is a path inside that VM; the daemon resolves the bind there.

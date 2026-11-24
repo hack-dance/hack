@@ -383,6 +383,58 @@ describe("exportProjectData", () => {
 });
 
 describe("binding to the validated volume", () => {
+  /**
+   * Remove `shop_db` and create it again within the same second: same name,
+   * labels, driver, Mountpoint and (CreatedAt has one-second resolution)
+   * CreatedAt, so it passes every identity comparison.
+   */
+  function replaceWithinOneSecond(fake: FakeEngine): void {
+    const old = fake.volumes.get("shop_db");
+    fake.removeVolume("shop_db");
+    fake.volume("shop_db", {
+      ...owned("db", "impostor"),
+      createdAt: old?.createdAt,
+    });
+  }
+
+  test("a same-second replacement before the hold is refused, though its identity matches", async () => {
+    const fake = engine({ only: "db" });
+    let replaced = false;
+    fake.onPs = () => {
+      if (!replaced) {
+        replaced = true;
+        replaceWithinOneSecond(fake);
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(error.message).toContain("Docker reported it");
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
+  test("a same-second replacement during the copy is refused, though its identity matches", async () => {
+    // An empty volume: the emptied tree under the bind digests the same
+    // before and after, and the identity recheck passes, so only Docker's
+    // destroy/create events show the replacement.
+    const fake = engine({ only: "db" });
+    const volume = fake.volumes.get("shop_db");
+    if (volume) {
+      volume.content = "";
+    }
+    let replaced = false;
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar") && !replaced) {
+        replaced = true;
+        replaceWithinOneSecond(fake);
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
   test("a volume removed after the hold, before the first digest, is not published empty", async () => {
     // Docker lets `docker volume rm` succeed under a bind hold and leaves
     // the helper an empty tree, so all three digests agree on nothing.
@@ -418,7 +470,14 @@ describe("binding to the validated volume", () => {
   });
 
   test("a volume removed, or replaced under its name, between the copy and the publish is refused", async () => {
-    for (const replace of [false, true]) {
+    // `reported`: Docker's destroy/create events arrive (the window refuses
+    // first); otherwise only the identity recheck before the rename sees it.
+    for (const [replace, reported] of [
+      [false, true],
+      [true, true],
+      [false, false],
+      [true, false],
+    ] as const) {
       const fake = engine({ only: "db" });
       // The last running check runs after every copy, before the publish.
       fake.runningFromCall = null;
@@ -432,13 +491,16 @@ describe("binding to the validated volume", () => {
       fake.onPs = () => {
         if (copied && !psAfterCopy) {
           psAfterCopy = true;
+          if (!reported) {
+            fake.events.deliverVolumeChanges = false;
+          }
           fake.removeVolume("shop_db");
           if (replace) {
             fake.volume("shop_db", owned("db", "rows-db"));
           }
         }
       };
-      const out = join(root, replace ? "replaced" : "removed");
+      const out = join(root, `${replace}-${reported}`);
       const error = await caught(
         exportProjectData(input(fake, { outDir: out }))
       );
@@ -447,7 +509,9 @@ describe("binding to the validated volume", () => {
         code: "E_PROJECT_RUNNING",
         detail: { key: "db", reason: "volume_changed" },
       });
-      expect(error.message).toContain("after it was copied");
+      expect(error.message).toContain(
+        reported ? "Docker reported it" : "after it was copied"
+      );
       // Not published: the manifest and tar stay in `.partial`.
       expect(await readdir(out)).toEqual(["20261123T140501Z.partial"]);
       expect(fake.volumes.has("shop_db")).toBe(replace);
@@ -1128,10 +1192,12 @@ describe("foreign container starts are inspected by ID", () => {
 
   let runs = 0;
   async function exportWithForeignStart(
-    mounts: readonly unknown[] | null
+    mounts: readonly unknown[] | null,
+    prepare: (fake: FakeEngine) => void = () => undefined
   ): Promise<{ fake: FakeEngine; id: string; error: HackCliError | null }> {
     runs += 1;
     const fake = engine({ only: "db" });
+    prepare(fake);
     let id = "";
     fake.onExec = (_container, args) => {
       if (args.includes("tar") && id === "") {
@@ -1181,15 +1247,23 @@ describe("foreign container starts are inspected by ID", () => {
   });
 
   test("a foreign start with unrelated mounts publishes", async () => {
-    const { error, fake, id } = await exportWithForeignStart([
-      { Type: "bind", Source: "/srv/shop_db/_data", Destination: "/x" },
-      {
-        Type: "bind",
-        Source: "/var/lib/docker/volumes/shop_db_other/_data",
-        Destination: "/y",
-      },
-      { Type: "volume", Name: "other", Source: "/z", Destination: "/z" },
-    ]);
+    const { error, fake, id } = await exportWithForeignStart(
+      [
+        { Type: "bind", Source: "/srv/shop_db/_data", Destination: "/x" },
+        {
+          Type: "bind",
+          Source: "/var/lib/docker/volumes/shop_db_other/_data",
+          Destination: "/y",
+        },
+        {
+          Type: "volume",
+          Name: "other",
+          Source: "/var/lib/docker/volumes/other/_data",
+          Destination: "/z",
+        },
+      ],
+      (fake) => fake.volume("other", owned("other", "x", "else"))
+    );
     expect(error).toBeNull();
     // It was inspected, by ID.
     expect(
@@ -1271,9 +1345,16 @@ describe("containers already running are inspected for binds", () => {
 
   test("a running container with unrelated binds publishes", async () => {
     const fake = engine({ only: "db" });
+    // A plain local volume: its Mountpoint is its own directory.
+    fake.volume("other", owned("other", "x", "else"));
     fake.runningContainer("unrelated", [
       { Type: "bind", Source: "/srv/app", Destination: "/app" },
-      { Type: "volume", Name: "other", Source: "/x", Destination: "/x" },
+      {
+        Type: "volume",
+        Name: "other",
+        Source: "/var/lib/docker/volumes/other/_data",
+        Destination: "/x",
+      },
     ]);
     const result = await exportProjectData(input(fake));
     expect(result.manifest.volumes.map((volume) => volume.key)).toEqual(["db"]);
@@ -1327,5 +1408,116 @@ describe("containers already running are inspected for binds", () => {
     // The exclusion is by the full ID only, never by name.
     const byName = await caught(check(new Set(["hack-data-export-own"])));
     expect(byName.detail).toEqual({ running: [own.slice(0, 12)] });
+  });
+});
+
+describe("volume mounts are checked through their backing storage", () => {
+  const MOUNTPOINT = "/var/lib/docker/volumes/shop_db/_data";
+  /** A foreign `local` volume whose options bind `device`: an alias. */
+  function alias(fake: FakeEngine, name: string, device: string): void {
+    fake.volume(name, {
+      labels: {},
+      content: "",
+      options: { type: "none", o: "bind", device },
+    });
+  }
+  const mountOf = (name: string) => ({
+    Type: "volume",
+    Name: name,
+    Source: `/var/lib/docker/volumes/${name}/_data`,
+    Destination: "/data",
+  });
+
+  test("a running container writing through an alias of an owned Mountpoint, or a path inside it, refuses", async () => {
+    for (const device of [
+      MOUNTPOINT,
+      `${MOUNTPOINT}/pgdata`,
+      `${MOUNTPOINT}/`,
+    ]) {
+      const fake = engine({ only: "db" });
+      alias(fake, "alias", device);
+      const id = fake.runningContainer("alias-writer", [mountOf("alias")]);
+      const error = await caught(
+        exportProjectData(input(fake, { outDir: join(root, "alias") }))
+      );
+      expect({ device, code: error.code, detail: error.detail }).toEqual({
+        device,
+        code: "E_PROJECT_RUNNING",
+        detail: { running: [id.slice(0, 12)] },
+      });
+      expect(`${error.message}${JSON.stringify(error.detail)}`).not.toContain(
+        "alias"
+      );
+    }
+  });
+
+  test("an alias writer that starts during the window refuses publication", async () => {
+    const fake = engine({ only: "db" });
+    alias(fake, "alias", MOUNTPOINT);
+    let id = "";
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar") && id === "") {
+        id = fake.createForeign("short-lived", [mountOf("alias")]) ?? "";
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({
+      mounts: [{ volume: "db", container: id.slice(0, 12) }],
+    });
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
+  test("a non-local driver, or local options Hack cannot classify, refuses closed", async () => {
+    for (const [driver, options] of [
+      ["rexray/ebs", null],
+      ["local", { type: "nfs", o: "addr=10.0.0.2,rw", device: ":/export" }],
+      ["local", { type: "ext4", device: "/dev/sdb1" }],
+    ] as const) {
+      const fake = engine({ only: "db" });
+      fake.volume("opaque", { labels: {}, content: "", driver, options });
+      const id = fake.runningContainer("opaque-writer", [mountOf("opaque")]);
+      const error = await caught(
+        exportProjectData(input(fake, { outDir: join(root, "opaque") }))
+      );
+      expect({
+        driver,
+        options,
+        code: error.code,
+        detail: error.detail,
+      }).toEqual({
+        driver,
+        options,
+        code: "E_PROJECT_RUNNING",
+        detail: {
+          unchecked: [id.slice(0, 12)],
+          reason: "unchecked_volume_backing",
+        },
+      });
+      expect(error.message).not.toContain("opaque");
+    }
+  });
+
+  test("a volume Docker cannot inspect refuses closed", async () => {
+    const fake = engine({ only: "db" });
+    const id = fake.runningContainer("ghost-writer", [mountOf("ghost")]);
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.detail).toEqual({
+      unchecked: [id.slice(0, 12)],
+      reason: "unchecked_volume_backing",
+    });
+  });
+
+  test("an alias of an unrelated directory and a tmpfs volume publish", async () => {
+    const fake = engine({ only: "db" });
+    alias(fake, "elsewhere", "/srv/data");
+    fake.volume("scratch", {
+      labels: {},
+      content: "",
+      options: { type: "tmpfs", device: "tmpfs", o: "size=64m" },
+    });
+    fake.runningContainer("app", [mountOf("elsewhere"), mountOf("scratch")]);
+    const result = await exportProjectData(input(fake));
+    expect(result.manifest.volumes.map((volume) => volume.key)).toEqual(["db"]);
   });
 });

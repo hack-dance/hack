@@ -218,7 +218,7 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
           "tmux",
           "has-session",
           "-t",
-          `${fixture.name}--lifecycle-${branchName}`,
+          `=${branchComposeProject}--lifecycle`,
         ],
         cwd: fixture.root,
       });
@@ -1032,7 +1032,7 @@ export async function writeFakeDocker(opts: {
       // A failed up started nothing, unless it failed after starting some
       // services (E2E_DOCKER_FAIL_UP_PARTIAL).
       '      if [ "${E2E_DOCKER_FAIL_UP:-}" = "1" ]; then exit 0; fi',
-      '      printf \'%s\\n\' \'{"ID":"fixture-api","Service":"api","State":"running","ExitCode":0}\'',
+      '      printf \'{"ID":"fixture-api","Service":"api","State":"running","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n\' "$PWD"',
       "      exit 0",
       "      ;;",
       '    *" up "*)',

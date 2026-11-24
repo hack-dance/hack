@@ -87,6 +87,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if fixtures::loads_usage(f) {
                                 app.show_usage_now();
                             }
+                            if f.name().starts_with("catalog-") {
+                                app.show_catalog_fixture(f.name(), window, cx);
+                            }
                             if f.name().starts_with("changes-") {
                                 app.show_changes_fixture(f.name());
                             }
@@ -136,6 +139,27 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                 window.render_frame(cx);
             })
             .expect("settle");
+            if f == Fixture::GroupedSidebar {
+                cx.update_window(handle, |_, window, cx| {
+                    window.click("copy-storefront-1", cx);
+                    assert_eq!(
+                        _app.read(cx)
+                            .model
+                            .selected_key()
+                            .and_then(|key| key.branch),
+                        Some("feature-search".into()),
+                    );
+                    _app.update(cx, |app, _cx| {
+                        app.show_usage_now();
+                        #[cfg(hack_terminal)]
+                        app.toggle_panel(_cx);
+                    });
+                    window.render_frame(cx);
+                    assert!(window.find(("other-copy", 2_usize)).visible());
+                    window.hover("service-web", cx);
+                })
+                .expect("select worktree and hover a service");
+            }
             let img = cx
                 .capture_screenshot(handle)
                 .expect("offscreen rendering must be available");
@@ -147,6 +171,134 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
             let path = dir.join(format!("{name}-{suffix}.png"));
             img.save(&path).expect("write png");
             println!("{}", path.display());
+            if f == Fixture::GroupedSidebar {
+                cx.update_window(handle, |_, window, cx| {
+                    window.hover("service-api", cx);
+                    window.within("service-api").click("select-service", cx);
+                    let selected = _app
+                        .read(cx)
+                        .model
+                        .selected_service()
+                        .expect("service selected");
+                    assert_eq!(selected.name, "api");
+                    assert_eq!(
+                        selected.destination,
+                        hack_desktop_core::viewmodel::ServiceDestination::Logs
+                    );
+                    assert_eq!(_app.read(cx).selected_service(), Some("api"));
+                    {
+                        use hack_desktop_core::state::Action;
+                        let app = _app.read(cx);
+                        let detail = app.model.detail().expect("selected copy detail");
+                        let mut row = detail
+                            .services
+                            .iter()
+                            .find(|row| row.name == "api")
+                            .expect("running service")
+                            .clone();
+                        assert!(app.can_run_service_action(&detail, &row, Action::Stop));
+                        row.running = false;
+                        assert!(app.can_run_service_action(&detail, &row, Action::Restart));
+                        assert!(!app.can_run_service_action(&detail, &row, Action::Stop));
+                        row.compose_container = false;
+                        assert!(!app.can_run_service_action(&detail, &row, Action::Restart));
+                    }
+                    _app.update(cx, |app, cx| {
+                        app.set_service_tab(crate::service_view::ServiceTab::Info, window, cx);
+                    });
+                    window.within("service-api").click("service-more", cx);
+                    assert_eq!(_app.read(cx).sidebar_menu.as_deref(), Some("api"));
+                    assert!(window.try_find(("service-command", 4_usize)).is_some());
+                })
+                .expect("open the service row menu");
+                let path = dir.join(format!("service-row-menu-{suffix}.png"));
+                cx.capture_screenshot(handle)
+                    .expect("capture service row menu")
+                    .save(&path)
+                    .expect("write service menu png");
+                println!("{}", path.display());
+                cx.update_window(handle, |_, window, cx| {
+                    window.click(("service-command", 3_usize), cx);
+                    let selection = _app
+                        .read(cx)
+                        .model
+                        .selected_service()
+                        .expect("service selected");
+                    assert_eq!(selection.name, "api");
+                    assert_eq!(
+                        selection.destination,
+                        hack_desktop_core::viewmodel::ServiceDestination::Files
+                    );
+                    assert_eq!(
+                        _app.read(cx).service_pane.tab,
+                        crate::service_view::ServiceTab::Files
+                    );
+                    window.hover("service-web", cx);
+                    window.within("service-web").click("service-more", cx);
+                    window.click(("service-command", 3_usize), cx);
+                    let app = _app.read(cx);
+                    let detail = app.model.detail().expect("copy detail");
+                    assert_eq!(app.files_service(&detail).map(String::as_str), Some("web"));
+                    window.click("copy-storefront-3", cx);
+                    assert!(_app.read(cx).model.selected_service().is_none());
+                    assert!(window.try_find("service-api").is_none());
+                    assert!(window.try_find("service-deploy").is_some());
+                    assert_eq!(
+                        _app.read(cx).model.detail().and_then(|d| d.url),
+                        Some("https://release-2.storefront.hack".into())
+                    );
+                    window.click("copy-storefront-1", cx);
+                    window.hover("service-api", cx);
+                    window.within("service-api").click("service-more", cx);
+                    window.click(("service-command", 1_usize), cx);
+                    assert_eq!(_app.read(cx).logs.model.service.as_deref(), Some("api"));
+                    _app.update(cx, |app, cx| {
+                        let mut snapshot = app.model.snapshot().expect("fixture snapshot").clone();
+                        let project = snapshot
+                            .projects
+                            .projects
+                            .iter_mut()
+                            .find(|project| project.name == "storefront")
+                            .expect("fixture project");
+                        let instance = project
+                            .branch_runtime
+                            .iter_mut()
+                            .find(|runtime| runtime.branch == "feature-search")
+                            .expect("fixture branch");
+                        instance
+                            .runtime
+                            .services
+                            .retain(|service| service.service != "api");
+                        let refresh = app.model.begin_refresh();
+                        assert!(app.apply_refresh(refresh, Ok(snapshot), cx));
+                        assert!(app.model.selected_service().is_none());
+                        assert!(app.logs.model.service.is_none());
+                    });
+                    window.hover("service-web", cx);
+                    window.within("service-web").click("service-more", cx);
+                    window.click(("service-command", 3_usize), cx);
+                    _app.update(cx, |app, cx| {
+                        let mut snapshot = app.model.snapshot().expect("fixture snapshot").clone();
+                        let project = snapshot
+                            .projects
+                            .projects
+                            .iter_mut()
+                            .find(|project| project.name == "storefront")
+                            .expect("fixture project");
+                        project.defined_services = vec!["api".into(), "web".into()];
+                        project
+                            .branch_runtime
+                            .retain(|row| row.branch != "feature-search");
+                        let refresh = app.model.begin_refresh();
+                        assert!(app.apply_refresh(refresh, Ok(snapshot), cx));
+                        let detail = app.model.detail().expect("primary copy detail");
+                        assert!(detail.key.is_main());
+                        assert!(detail.services.iter().any(|service| service.name == "web"));
+                        assert_eq!(app.files_service(&detail).map(String::as_str), Some("api"));
+                    });
+                })
+                .expect("activate Files and switch to a stopped copy");
+            }
             cx.update_window(handle, |_, window, _cx| {
                 #[cfg(hack_terminal)]
                 if f == Fixture::DoctorFixAll {
@@ -407,6 +559,7 @@ pub fn service_pane(dir: &Path) {
                     match tab {
                         None => app.select_instance(key, cx),
                         Some(ServiceTab::Logs) if menu.is_none() => {
+                            let key = app.model.selected_key().expect("selected copy");
                             app.select_service(key, "api".into(), window, cx);
                             app.logs.show_service_fixture();
                         }
@@ -455,6 +608,9 @@ pub fn service_pane(dir: &Path) {
                     assert!(app.read(cx).logs.model.service.is_none());
                     assert!(app.read(cx).service_pane.menu.is_none());
                 }
+                if shot == "m06-service-info" {
+                    assert!(window.try_find("service-health-dot").is_some());
+                }
                 #[cfg(hack_terminal)]
                 if shot == "m04-service-terminal" {
                     assert_eq!(app.read(cx).drive_tab_count(cx), Some(3));
@@ -479,7 +635,63 @@ pub fn service_pane(dir: &Path) {
             })
             .expect("exercise service pane controls");
         }
+        #[cfg(hack_terminal)]
+        capture_service_shell_reopen(&mut cx, handle, &app, dir, suffix);
         cx.update_window(handle, |_, window, _| window.remove_window())
             .ok();
     }
+}
+
+#[cfg(hack_terminal)]
+fn capture_service_shell_reopen(
+    cx: &mut HeadlessAppContext,
+    handle: gpui_kit::AnyWindowHandle,
+    app: &gpui_kit::Entity<HackApp>,
+    dir: &Path,
+    suffix: &str,
+) {
+    use crate::service_view::ServiceTab;
+    use crate::terminal::ServiceShellFixture;
+    use hack_desktop_term::view::Status;
+
+    let fixture = ServiceShellFixture::new();
+    cx.update_window(handle, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.close_all_terminals(window, cx);
+            fixture.install(app, Fixture::Branches, cx);
+        });
+    })
+    .expect("install shell screenshot fixture");
+    for (shot, active) in [("service-shell-ended", 1), ("service-shell-reopened", 2)] {
+        cx.update_window(handle, |_, window, cx| {
+            window.click(("service-tab", 3_usize), cx);
+            let app = app.read(cx);
+            assert_eq!(app.service_pane.tab, ServiceTab::Terminal);
+            let key = app.model.selected_key().expect("selected branch");
+            let sessions = app.panels.by_key[&key].sessions.clone();
+            let shell = sessions.read(cx).tab(active).expect("active shell").clone();
+            if active == 1 {
+                ServiceShellFixture::exit(&shell, cx);
+            } else {
+                ServiceShellFixture::wait_for(&shell, "/app #", false, cx);
+            }
+            window.render_frame(cx);
+            let sessions = sessions.read(cx);
+            assert_eq!(sessions.tab_count(), active + 1);
+            assert_eq!(sessions.active_index(), Some(active));
+            let ended = sessions.tab(1).expect("original shell").read(cx);
+            assert!(matches!(ended.status(), Status::Ended(_)));
+        })
+        .expect("exercise service shell reopen");
+        let path = dir.join(format!("{shot}-{suffix}.png"));
+        cx.capture_screenshot(handle)
+            .expect("read shell screenshot")
+            .save(&path)
+            .expect("write shell png");
+        println!("{}", path.display());
+    }
+    cx.update_window(handle, |_, window, cx| {
+        app.update(cx, |app, cx| app.close_all_terminals(window, cx));
+    })
+    .expect("close shell screenshot PTYs");
 }

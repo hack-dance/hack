@@ -111,7 +111,10 @@ test("renamed linked worktree resolves its old owned branch before autostart pau
     { cwd: worktree, writeNotice: ({ message }) => notices.push(message) },
     dependencies([runtime("old-branch")])
   );
-  expect(target).toEqual({ branch: "old-branch" });
+  expect(target).toEqual({
+    branch: "old-branch",
+    observedComposeProject: "example--old-branch",
+  });
   expect(notices).toHaveLength(2);
   expect(notices[0]).toContain("Linked worktree detected");
   expect(notices[1]).toContain("Targeting the owned runtime");
@@ -122,7 +125,7 @@ test("owned base runtime remains an explicit null target after a linked branch r
     { cwd: worktree },
     dependencies([runtime(null)])
   );
-  expect(target).toEqual({ branch: null });
+  expect(target).toEqual({ branch: null, observedComposeProject: "example" });
 });
 
 test("ambiguous renamed-worktree runtimes refuse instead of guessing a pause or lock target", async () => {
@@ -373,12 +376,11 @@ process.exitCode = await runCli(["down", "--json", "--no-interactive"]);
         data: { branch: ownedBranch },
       });
       const downArgs = JSON.parse((await Bun.file(calls).text()).trim());
-      if (ownedBranch === null) {
-        expect(downArgs).not.toContain("--project-name");
-        expect(downArgs).not.toContain("-p");
-      } else {
-        expect(downArgs).toContain(ownedComposeProject);
-      }
+      expect(downArgs.slice(0, 3)).toEqual([
+        "compose",
+        "-p",
+        ownedComposeProject,
+      ]);
       expect(downArgs).not.toContain("example--new-branch");
       const activity = await readActivity({
         path: join(registryDir, "activity.jsonl"),

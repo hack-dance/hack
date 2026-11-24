@@ -463,6 +463,9 @@ export async function waitForNativeComposeNetworkMembers<T>(opts: {
         throw error;
       }
       await sleep(Math.min(100, remaining));
+      if (opts.deadline !== undefined && Date.now() >= opts.deadline) {
+        throw error;
+      }
     }
   }
 }
@@ -499,7 +502,7 @@ export async function observeNativeComposeStartupOwned(
     input,
     "startup",
     startupSelection(input, restartingServices),
-    (opts.membership ?? "transient") === "transient"
+    { transientMembership: (opts.membership ?? "transient") === "transient" }
   );
   return result.restarting ? null : result.observation;
 }
@@ -515,6 +518,8 @@ export async function observeNativeComposeStartupOwned(
  * permanently missing member cannot stay unready. The
  * settled query never turns a timeout into readiness; this returns `null` either way.
  * The settled query runs after the deadline, so it is bounded by the probe timeout.
+ * In-loop acquisitions use the remaining start budget. One timed-out read may
+ * restart the entire acquisition, discarding its partial proof.
  * Never use the observation as effect authority.
  */
 export async function waitNativeComposeStartupOwned(opts: {
@@ -522,38 +527,78 @@ export async function waitNativeComposeStartupOwned(opts: {
   readonly restartingServices: readonly string[];
   readonly deadline: number;
   readonly ready: (state: NativeComposeOwnershipObservation) => boolean;
+  readonly failed?: (state: NativeComposeOwnershipObservation) => boolean;
   readonly observed?: (state: NativeComposeOwnershipObservation) => void;
   /** Post-Compose callers may re-acquire a refused member-ID observation; never admits a placeholder. */
   readonly settleNetworkMembers?: boolean;
 }): Promise<NativeComposeOwnershipObservation | null> {
   const selected = startupSelection(opts.ownership, opts.restartingServices);
+  const signal = opts.ownership.signal;
+  // Storage proof exclusions can add fractional milliseconds. Docker probes
+  // take whole milliseconds and must stay within the original start deadline.
+  const deadline = Math.floor(opts.deadline);
+  let retriedTimeout = false;
+  const acquire = () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      probeRefused("E_NATIVE_COMPOSE_PROBE_TIMEOUT", "timeout");
+    }
+    return queryNativeComposeOwned(
+      {
+        ...opts.ownership,
+        timeoutMs: Math.min(
+          opts.ownership.timeoutMs ?? MAX_PROBE_TIMEOUT_MS,
+          remaining
+        ),
+      },
+      "startup",
+      selected,
+      { transientMembership: true, reserveTimeoutRetry: !retriedTimeout }
+    );
+  };
+  const read = async () => {
+    try {
+      return await acquire();
+    } catch (error: unknown) {
+      if (
+        retriedTimeout ||
+        nativeComposeProbeFailure(error) !== "timeout" ||
+        signal?.aborted ||
+        Date.now() >= deadline
+      ) {
+        throw error;
+      }
+      retriedTimeout = true;
+      return await acquire();
+    }
+  };
   let transient = false;
   const state = await waitNativeComposeReady({
-    deadline: opts.deadline,
-    signal: opts.ownership.signal,
+    deadline,
+    signal,
     observe: async () => {
-      const read = () =>
-        queryNativeComposeOwned(opts.ownership, "startup", selected, true);
       const result = opts.settleNetworkMembers
         ? await waitForNativeComposeNetworkMembers({
             read,
-            deadline: opts.deadline,
-            signal: opts.ownership.signal,
+            deadline,
+            signal,
           })
         : await read();
+      checkInterruption(signal, false);
       transient = result.restarting && result.transient;
       if (result.restarting) {
         return null;
       }
       opts.observed?.(result.observation);
-      return result.observation;
+      return Date.now() < deadline ? result.observation : null;
     },
     ready: opts.ready,
+    failed: opts.failed,
   });
-  if (state !== null || !transient || opts.ownership.signal?.aborted) {
+  if (state !== null || !transient || signal?.aborted) {
     return state;
   }
-  await queryNativeComposeOwned(opts.ownership, "startup", selected, false);
+  await queryNativeComposeOwned(opts.ownership, "startup", selected);
   return null;
 }
 
@@ -561,8 +606,14 @@ async function queryNativeComposeOwned(
   input: NativeComposeOwnershipOptions,
   mode: "saved" | "startup" | "strict",
   restartingServices: ReadonlySet<string>,
-  /** Startup only: admit the `running` restart-race shapes; see {@link NativeComposeStartupMembership}. */
-  transientMembership = false
+  {
+    transientMembership,
+    reserveTimeoutRetry,
+  }: {
+    /** Admit the `running` restart-race shapes; see {@link NativeComposeStartupMembership}. */
+    readonly transientMembership: boolean;
+    readonly reserveTimeoutRetry?: boolean;
+  } = { transientMembership: false }
 ): Promise<{
   readonly observation: NativeComposeOwnershipObservation;
   readonly restarting: boolean;
@@ -604,7 +655,10 @@ async function queryNativeComposeOwned(
           }
         : {}),
     };
-    const probe = createNativeComposeProbe(opts);
+    const probe = createNativeComposeProbe({
+      ...opts,
+      reserveTimeoutRetry,
+    });
     const expected = {
       container: new Set(
         opts.expectedServices.map(
@@ -1492,6 +1546,8 @@ export function nativeComposePreSpawnOwnershipTimeoutMs(opts: {
  */
 export function createNativeComposeProbe(
   opts: Pick<NativeComposeOwnershipOptions, "signal" | "timeoutMs"> & {
+    /** Leave time to reacquire the proof if a readiness child stalls. */
+    readonly reserveTimeoutRetry?: boolean;
     /**
      * Private Compose interpolation values (the `HACK_ENV_*` references of a
      * value-free env override) added to the child environment only. Never
@@ -1529,6 +1585,12 @@ export function createNativeComposeProbe(
     if (remainingTime <= 0) {
       probeRefused("E_NATIVE_COMPOSE_PROBE_TIMEOUT", "timeout");
     }
+    // A single request can consume at most half the acquisition's remaining
+    // time (or the former probe cap) before the retry. Progressing requests
+    // can still use the whole acquisition.
+    const childTimeoutMs = opts.reserveTimeoutRetry
+      ? Math.min(DEFAULT_TIMEOUT_MS, Math.ceil(remainingTime / 2))
+      : remainingTime;
     let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
     const ownsProcessGroup = process.platform !== "win32";
     try {
@@ -1557,7 +1619,7 @@ export function createNativeComposeProbe(
     const timer = setTimeout(() => {
       timedOut = true;
       stop();
-    }, remainingTime);
+    }, childTimeoutMs);
     opts.signal?.addEventListener("abort", stop, { once: true });
     if (opts.signal?.aborted) {
       stop();

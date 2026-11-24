@@ -19,6 +19,15 @@ export interface AutostartProjectScope {
   readonly branch: string | null;
 }
 
+/** Compose's effective name names the lock shared by CLI and login startup. */
+export function autostartProjectLockName(
+  scope: Pick<AutostartProjectScope, "composeProject" | "branch">
+): string {
+  return scope.branch
+    ? `${scope.composeProject}--${scope.branch}`
+    : scope.composeProject;
+}
+
 /**
  * Start and stop share one machine-local project/instance lock. A stop publishes
  * its pause before waiting, then holds the lock through runtime shutdown. Thus
@@ -29,6 +38,7 @@ export async function withAutostartProjectLock<T>(opts: {
   readonly scope: AutostartProjectScope;
   readonly registryPath?: string;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
   readonly run: () => Promise<T>;
 }): Promise<T> {
   const registryPath = opts.registryPath ?? resolveProjectsRegistryPath();
@@ -60,16 +70,12 @@ export async function withAutostartProjectLock<T>(opts: {
     });
   }
   const key = createHash("sha256")
-    .update(
-      JSON.stringify({
-        composeProject: opts.scope.composeProject,
-        branch: opts.scope.branch,
-      })
-    )
+    .update(autostartProjectLockName(opts.scope))
     .digest("hex");
   return await withProjectsRegistryLock({
     lockPath: join(directory, `${key}.lock`),
     timeoutMs: opts.timeoutMs ?? 180_000,
+    signal: opts.signal,
     label: "Project start/stop",
     run: opts.run,
   });

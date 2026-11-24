@@ -338,14 +338,23 @@ fn terminal_release_closes_inherited_pipes_and_unpins_leader() {
 fn supervisor_drains_without_clients_and_release_refuses_running() {
     let agent = Agent::boot("drain");
     let handle = agent.handle(1);
+    const WRITE_BYTES: u64 = 262_144;
+    const TOTAL_BYTES: u64 = 2 * WRITE_BYTES;
+    const RETAINED_BYTES: u64 = 65_536;
+
     let gate = agent.dir.join("write");
     let done = agent.dir.join("finished");
+    // Some head implementations grow the pipe to fit one write. Two writes
+    // still require the supervisor to drain before the marker can appear.
+    let script = format!(
+        "while ! test -e \"$1\"; do sleep .01; done; head -c {WRITE_BYTES} /dev/zero && head -c {WRITE_BYTES} /dev/zero && touch \"$2\""
+    );
     let cmd = start(
         &handle,
         &[
             "/bin/sh",
             "-c",
-            "while ! test -e \"$1\"; do sleep .01; done; head -c 262144 /dev/zero; touch \"$2\"",
+            &script,
             "sh",
             gate.to_str().unwrap(),
             done.to_str().unwrap(),
@@ -356,37 +365,35 @@ fn supervisor_drains_without_clients_and_release_refuses_running() {
     fs::write(gate, b"").unwrap();
     until(|| done.exists().then_some(()));
     agent.await_reply(inspect(&handle), Response::Exited { code: 0 });
-    // Exit can be observed before the supervisor drains the last pipe burst.
+
+    let stdout = |offset| Request::Output {
+        handle: handle.clone(),
+        stream: Stream::Stdout,
+        offset,
+    };
+    // Exit describes the leader. The retained window can move until the
+    // supervisor has observed pipe EOF at the exact end of the output.
     agent.await_reply(
-        Request::Output {
-            handle: handle.clone(),
-            stream: Stream::Stdout,
-            offset: 262144,
-        },
+        stdout(TOTAL_BYTES),
         Response::Output {
-            start_offset: 262144,
+            start_offset: TOTAL_BYTES,
             bytes: vec![],
             eof: true,
             truncated: true,
         },
     );
     assert!(matches!(
-        agent.request(Request::Output {
-            handle,
-            stream: Stream::Stdout,
-            offset: 0
-        }),
+        agent.request(stdout(0)),
         Response::Output {
             truncated: true,
-            start_offset: 196608,
+            start_offset,
             ..
-        }
+        } if start_offset == TOTAL_BYTES - RETAINED_BYTES
     ));
 }
 
 #[test]
 fn peer_limit_and_partial_frame_deadline() {
-    use std::io::Read;
     let agent = Agent::boot("peers");
     let mut peers = Vec::new();
     for _ in 0..16 {
@@ -401,7 +408,10 @@ fn peer_limit_and_partial_frame_deadline() {
     stalled
         .set_read_timeout(Some(Duration::from_secs(13)))
         .unwrap();
-    assert_eq!(stalled.read(&mut [0]).unwrap(), 0);
+    assert!(matches!(
+        read_frame::<Response>(&stalled),
+        Err(hack_vm_protocol::Error::Closed)
+    ));
     assert!(matches!(
         agent.request(Request::Facts {}),
         Response::Facts { .. }

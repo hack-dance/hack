@@ -606,3 +606,76 @@ fn a_stale_retirement_never_moves_a_journal_it_did_not_validate() {
     assert_eq!(read(&journal), fenced);
     assert_eq!(read(&archive), old);
 }
+
+/// HACK-2576: retired journals make room oldest first instead of refusing the next
+/// recovery; an unfinished, foreign or misnamed one is never removed and never counts.
+#[test]
+fn retired_journals_keep_the_newest_finished_and_never_block() {
+    let root = ShortRoot::new();
+    let original = original();
+    let journal = |generation: usize, finished: bool| {
+        let mut selection = selected(&original);
+        selection.receipt_sha256 = format!("{generation:064x}");
+        Journal {
+            version: 1,
+            selection_sha256: selection.digest().unwrap(),
+            selection,
+            steps: steps(&original, &[]).unwrap(),
+            cursor: 0,
+            pending: !finished,
+            graph_complete: finished,
+            publisher_retired: finished,
+            reservation_released: finished,
+            original: original.clone(),
+        }
+    };
+    let write = |record: &Journal, name: Option<&str>| {
+        let name = name.map_or_else(
+            || format!("{RETIRED_PREFIX}{}.json", record.selection_sha256),
+            str::to_owned,
+        );
+        state::write(&root.0.join(&name), record).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        name
+    };
+    let unfinished = write(&journal(900, false), None);
+    let misnamed = write(
+        &journal(901, true),
+        Some(&format!("{RETIRED_PREFIX}other.json")),
+    );
+    fs::write(root.0.join(format!("{RETIRED_PREFIX}foreign.json")), b"{").unwrap();
+    let mut names = Vec::new();
+    // Twelve recoveries, each archiving one more finished journal.
+    for generation in 0..12 {
+        super::super::retired_history::make_room(
+            &root.0,
+            RETIRED_PREFIX,
+            RETIRED_LIMIT,
+            finished_journal,
+        )
+        .unwrap();
+        names.push(write(&journal(generation, true), None));
+    }
+    let left: Vec<String> = fs::read_dir(&root.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    let proven = left
+        .iter()
+        .filter(|name| finished_journal(name, &fs::read(root.0.join(name)).unwrap()))
+        .count();
+    assert_eq!(proven, RETIRED_LIMIT);
+    for kept in names.iter().rev().take(RETIRED_LIMIT) {
+        assert!(left.contains(kept), "{kept}");
+    }
+    for gone in names.iter().take(12 - RETIRED_LIMIT) {
+        assert!(!left.contains(gone), "{gone}");
+    }
+    for never in [
+        unfinished,
+        misnamed,
+        format!("{RETIRED_PREFIX}foreign.json"),
+    ] {
+        assert!(left.contains(&never), "{never}");
+    }
+}

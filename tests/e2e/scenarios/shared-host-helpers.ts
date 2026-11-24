@@ -764,6 +764,7 @@ async function runRetainedHelperPhases(opts: {
     path: opts.path,
     branch,
     gate,
+    phase: "compose",
   });
   const beforeSignal = await opts.ownedHelper();
   signalled.kill("SIGTERM");

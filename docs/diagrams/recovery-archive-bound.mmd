@@ -1,0 +1,32 @@
+---
+title: Recovery history · bounded
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> count : prior record complete
+    state count <<choice>>
+    count --> archive : [fewer than 8 proven]
+    count --> prune : [8 proven]
+    prune --> archive : oldest proven removed
+    archive --> recovered : record moved aside
+    recovered --> [*]
+
+    note right of count
+        Counts only regular files named
+        for their own digest whose
+        contents prove them finished.
+    end note
+    note left of prune
+        Same locks as the recovery;
+        the file removed is the file
+        read (device and inode).
+    end note
+    note right of recovered
+        Before: at 8 the recovery
+        refused for ever.
+    end note
+
+    class recovered ok

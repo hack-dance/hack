@@ -2,10 +2,10 @@ import { ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { NativeImageBlocker } from "../../src/backends/native-image-policy.ts";
 import {
   batchImageFailure,
   NativeImageBatchError,
+  NativeImageBlocker,
 } from "../../src/backends/native-image-policy.ts";
 import {
   NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
@@ -33,6 +33,8 @@ import {
   setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
+
+import { NativeAuthoredAttemptLimitError } from "../../src/lib/native-up-refusals.ts";
 
 /**
  * Publish a marker file atomically. Tests poll these files, and a plain
@@ -459,6 +461,7 @@ if (role === "channel-holder") {
     });
   } catch (error) {
     process.exitCode = [
+      "authored-attempt-limit",
       "wrapped-failure",
       "wrapped-static-failure",
       "builder-missing",
@@ -566,6 +569,12 @@ if (role === "channel-holder") {
               })
             : failure
         );
+      }
+      if (mode === "authored-attempt-limit") {
+        await nativeDetachedUpFailure(new NativeAuthoredAttemptLimitError());
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
       }
       await publishFixturePrestartFailure(mode, root);
       if (

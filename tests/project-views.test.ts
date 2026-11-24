@@ -305,10 +305,11 @@ test("detailed project output includes declared remotes without observing the ru
     {
       service: "db",
       kind: "remote",
-      target: "qa",
-      address: { kind: "env_ref", name: "REMOTE_DB_HOST", port: 5432 },
+      target: "unknown",
+      defaultTarget: "qa",
+      address: null,
       via: null,
-      state: "declared",
+      state: "unknown",
       probe: "not checked",
     },
   ]);

@@ -46,6 +46,7 @@ struct Guest {
     /// Stage at which the routed service's probe exits; its container stays.
     unhealthy_at: Cell<Option<&'static str>>,
     unhealthy: Cell<bool>,
+    api_health_starting: Cell<bool>,
     fail_relays: Cell<bool>,
     gets: Cell<usize>,
     target_calls: RefCell<Vec<Vec<u32>>>,
@@ -62,6 +63,7 @@ impl Guest {
             restart_at: Cell::new(None),
             unhealthy_at: Cell::new(None),
             unhealthy: Cell::new(false),
+            api_health_starting: Cell::new(false),
             fail_relays: Cell::new(false),
             gets: Cell::new(0),
             target_calls: RefCell::default(),
@@ -132,15 +134,17 @@ impl Inspection for Guest {
         };
         let resource = &self.receipt.resources[&format!("container:{service}")];
         let restarts = self.restarts.borrow().get(service).copied().unwrap_or(0);
-        Ok(
-            json!({"Id":resource.id,"Name":format!("/{}",resource.name),"Image":resource.image,
+        let mut observed = json!({"Id":resource.id,"Name":format!("/{}",resource.name),"Image":resource.image,
             "Config":{"Labels":expected_labels(&self.receipt, resource)},
             "State":{"Running":true,"Restarting":false,"Pid":100 + 10 * restarts + u32::from(service == "api"),
                 "StartedAt":format!("2026-11-20T00:00:{restarts:02}Z")},
             "HostConfig":{"NetworkMode":network.name},
             "NetworkSettings":{"Networks":{network.name.clone():{"NetworkID":NETWORK,
-                "EndpointID":endpoint(service),"IPAddress":Self::address(service)}}}}),
-        )
+                "EndpointID":endpoint(service),"IPAddress":Self::address(service)}}}});
+        if service == "api" && self.api_health_starting.get() {
+            observed["State"]["Health"] = json!({"Status":"starting"});
+        }
+        Ok(observed)
     }
     fn probe_status(&self, id: &str) -> Result<Option<String>, CandidateError> {
         assert_eq!(id, WEB);
@@ -191,6 +195,30 @@ struct Batch {
     _fixture: super::super::tests::Fixture,
     candidate: Candidate,
     reserved: Reserved,
+}
+
+#[test]
+fn early_port_waits_for_its_healthcheck_and_refuses_a_stale_ready_id() {
+    let fixture = super::super::tests::Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let root = directory(&candidate, RUN).unwrap();
+    state::private_directory(root.parent().unwrap()).unwrap();
+    state::private_directory(&root).unwrap();
+    let mut receipt = receipt();
+    receipt.phase = "preparing".into();
+    state::write(&root.join("state.json"), &receipt).unwrap();
+    let guest = Guest::new(Candidate::discover(&fixture.0).unwrap());
+    let services = BTreeSet::from(["api"]);
+    let inspect =
+        |id| inspect_targets_scoped(&candidate, &guest, RUN, &services, Some(("api", id))).unwrap();
+    guest.api_health_starting.set(true);
+    assert!(inspect(API).pending_ports);
+    assert!(inspect(API).port_endpoints.is_empty());
+    assert!(!inspect(WEB).pending_ports);
+    assert!(inspect(WEB).port_endpoints.is_empty());
+    guest.api_health_starting.set(false);
+    assert!(!inspect(API).pending_ports);
+    assert_eq!(inspect(API).port_endpoints.len(), 1);
 }
 
 /// One registry with the whole batch reserved from one observation.
@@ -254,8 +282,11 @@ fn start(batch: &Batch, guest: &Guest) -> Result<Vec<(u8, Assignment)>, Candidat
         guest,
         guest,
         &mut store,
-        RUN,
-        &selected,
+        StartSelection {
+            run: RUN,
+            selected: &selected,
+            ready_service: None,
+        },
         &"9".repeat(64),
     )
 }
@@ -438,8 +469,11 @@ fn a_changed_or_repeated_reservation_refuses_before_any_guest_call() {
                 &guest,
                 &guest,
                 &mut store,
-                RUN,
-                &selected,
+                StartSelection {
+                    run: RUN,
+                    selected: &selected,
+                    ready_service: None
+                },
                 &"9".repeat(64),
             )
             .is_err()

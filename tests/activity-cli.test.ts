@@ -12,6 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import {
+  appendActivityRecord,
+  buildActivityRecord,
+} from "../src/lib/activity-log.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { machineData } from "./helpers/machine-output.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
@@ -146,13 +150,24 @@ async function activity(args: readonly string[] = []): Promise<Entry[]> {
   return data.entries;
 }
 
-test("up, a failed up, restart and down are recorded with names only", async () => {
+test("successful and failed up are recorded with names only", async () => {
   expect((await runCli({ args: ["up", "--json"] })).exitCode).toBe(0);
   const failed = await runCli({
     args: ["up", "--json"],
     env: { STUB_WORKER_EXITED: "1", HACK_ORIGIN: "app" },
   });
   expect(failed.exitCode).not.toBe(0);
+
+  const entries = await activity();
+  expect(entries.map((e) => [e.action, e.outcome, e.origin])).toEqual([
+    ["up", "failed", "app"],
+    ["up", "ok", "cli"],
+  ]);
+  expect(entries[0]?.failed_services).toEqual(["worker"]);
+  await expectNamesOnly(entries);
+}, 30_000);
+
+test("restart and down are recorded with names only", async () => {
   expect(
     (await runCli({ args: ["restart", "--json"], env: { HACK_ORIGIN: "x" } }))
       .exitCode
@@ -163,17 +178,16 @@ test("up, a failed up, restart and down are recorded with names only", async () 
   expect(entries.map((e) => [e.action, e.outcome, e.origin])).toEqual([
     ["down", "ok", "cli"],
     ["restart", "ok", "cli"],
-    ["up", "failed", "app"],
-    ["up", "ok", "cli"],
   ]);
+  await expectNamesOnly(entries);
+}, 30_000);
+
+async function expectNamesOnly(entries: readonly Entry[]): Promise<void> {
   for (const entry of entries) {
     expect(entry.project).toBe("activityshop");
     expect(entry.branch).toBeNull();
     expect(typeof entry.duration_ms).toBe("number");
   }
-  expect(entries[2]?.failed_services).toEqual(["worker"]);
-  expect(await activity(["--project", "other"])).toEqual([]);
-  expect(await activity(["--limit", "1"])).toHaveLength(1);
 
   // Sentinel: no value, env value, path or command line is at rest.
   const path = join(hackHome, "activity.jsonl");
@@ -191,7 +205,31 @@ test("up, a failed up, restart and down are recorded with names only", async () 
   ]) {
     expect(text).not.toContain(forbidden);
   }
-}, 30_000);
+}
+
+test("activity --json filters by project and limits the history", async () => {
+  const path = join(hackHome, "activity.jsonl");
+  for (const action of ["up", "down"] as const) {
+    await appendActivityRecord({
+      path,
+      record: buildActivityRecord({
+        action,
+        branch: null,
+        durationMs: 1,
+        exitCode: 0,
+        failedServices: [],
+        origin: "cli",
+        project: "activityshop",
+        startedAt: Date.UTC(2026, 10, 14),
+      }),
+    });
+  }
+
+  expect(await activity(["--project", "other"])).toEqual([]);
+  expect(await activity(["--limit", "1"])).toEqual([
+    expect.objectContaining({ action: "down", project: "activityshop" }),
+  ]);
+});
 
 test("a write failure does not change the exit code or the envelope", async () => {
   const baseline = await runCli({ args: ["up", "--json"] });

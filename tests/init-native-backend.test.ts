@@ -24,6 +24,7 @@ import {
 import { discoverRepo } from "../src/init/discovery.ts";
 import { findComposeBackendFeatures } from "../src/lib/native-compose-backend-features.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { markRepoBoundary } from "./helpers/repo-boundary.ts";
 
 /**
  * HACK-1916: `hack init` with the native backend selected writes a project
@@ -225,6 +226,7 @@ async function runInitAuto(opts: {
   readonly name?: string;
   readonly sharedUmask?: boolean;
 }): Promise<{ exitCode: number; output: string }> {
+  await markRepoBoundary(opts.repo);
   const proc = Bun.spawn({
     cmd: [
       ...(opts.sharedUmask ? ["sh", "-c", 'umask 002; exec "$@"', "init"] : []),
@@ -297,11 +299,16 @@ test("hack init --auto on the Compose backend keeps the Compose scaffold and nex
   const root = await createTempDir();
   const repo = join(root, "repo");
   await mkdir(repo, { recursive: true });
+  // A shared temp parent can have its own repo marker.
+  await writeFile(join(root, "package.json"), "{}\n");
 
   const result = await runInitAuto({ root, repo, backend: undefined });
   expect(result.exitCode).toBe(0);
   expect(result.output).toContain("Next: hack up --detach && hack open");
   expect(result.output).toContain("hack global install configures");
+  expect(
+    await Bun.file(join(root, ".hack", "docker-compose.yml")).exists()
+  ).toBe(false);
 
   const yaml = await Bun.file(join(repo, ".hack", "docker-compose.yml")).text();
   expect(yaml).not.toContain("x-hack");

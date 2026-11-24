@@ -33,6 +33,7 @@ import {
   isExecutor,
   kernelProviderMemory,
   main,
+  matchesDevelopmentDiskBudget,
   nativeCaRoot,
   type Options,
   parseCpuTime,
@@ -43,18 +44,61 @@ import {
   providerProcesses,
   Qualification,
   qualificationInputSizes,
+  RELAY_CYCLES_SCRIPT,
   readJson,
   readyData,
   rootProblem,
   sourceTemplatePins,
+  stoppedFixtureVolume,
   terminalRuntimeErrorCode,
   warmPhases,
 } from "../scripts/qualify-provider-pin.ts";
 import { parseNativeHttpsSelection } from "../src/backends/native-project-start.ts";
 import { formatNativeStartupLogReport } from "../src/backends/native-startup-logs.ts";
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 const repository = resolve(import.meta.dir, "..");
+
+test("relay qualification requires all 256 valid downloads", () => {
+  const run = (fault: string) =>
+    spawnSyncBounded([
+      "/bin/sh",
+      "-c",
+      `wget() {
+        if [ "$cycle" -eq 256 ] && [ "$fault" = fetch ]; then return 1; fi
+        printf '%s\\n' "$cycle" > "$5"
+      }
+      sha256sum() {
+        IFS= read -r n < "$1"
+        if [ "$n" -eq 256 ] && [ "$fault" = digest ]; then
+          printf 'invalid  %s\\n' "$1"
+        else
+          printf '%s  %s\\n' '${BLOB_SHA256}' "$1"
+        fi
+      }
+      fault=$1
+      ${RELAY_CYCLES_SCRIPT}`,
+      "relay-test",
+      fault,
+    ]);
+
+  const complete = run("none");
+  expect(complete.exitCode).toBe(0);
+  expect(complete.stdout.toString()).toBe("256\n");
+
+  const failed = run("fetch");
+  expect(failed.exitCode).toBe(1);
+  expect(failed.stderr.toString()).toContain(
+    "relay cycle 256: download failed"
+  );
+
+  const corrupt = run("digest");
+  expect(corrupt.exitCode).toBe(1);
+  expect(corrupt.stderr.toString()).toContain(
+    "relay cycle 256: payload digest mismatch"
+  );
+});
 const digest = `sha256:${"a".repeat(64)}`;
 const required = [
   "--hack",
@@ -75,6 +119,44 @@ const required = [
   `postgres@${digest}`,
 ];
 
+test("development disk probe distinguishes fresh, running and clean stopped pools", () => {
+  const gib = 1024 ** 3;
+  const probe = {
+    profile: "development",
+    host_supported: true,
+    disk_free_bytes: 57 * gib,
+    disk_budget_basis: "new-pool-storage-overlay-host-reserve",
+    minimum_disk_free_bytes: 58 * gib,
+  };
+  expect(matchesDevelopmentDiskBudget(probe, "fresh")).toBe(true);
+  expect(matchesDevelopmentDiskBudget(probe, "running")).toBe(false);
+
+  const running = {
+    ...probe,
+    disk_budget_basis: "verified-live-owned-pool-host-reserve",
+    minimum_disk_free_bytes: 16 * gib,
+  };
+  expect(matchesDevelopmentDiskBudget(running, "running")).toBe(true);
+  expect(matchesDevelopmentDiskBudget(running, "stopped")).toBe(false);
+
+  const stopped = {
+    ...running,
+    disk_budget_basis: "verified-stopped-owned-pool-host-reserve",
+  };
+  expect(matchesDevelopmentDiskBudget(stopped, "stopped")).toBe(true);
+  expect(
+    matchesDevelopmentDiskBudget(
+      { ...stopped, minimum_disk_free_bytes: 16 * gib - 1 },
+      "stopped"
+    )
+  ).toBe(false);
+  expect(
+    matchesDevelopmentDiskBudget(
+      { ...stopped, disk_free_bytes: null },
+      "stopped"
+    )
+  ).toBe(false);
+});
 function rustList(source: string, name: string): string[] {
   const start = source.indexOf(`const ${name}:`);
   const body = source.slice(start, source.indexOf("];", start));
@@ -275,7 +357,7 @@ describe("provider pin qualification", () => {
         expect(await main([...argv, "--run"])).toBe(64);
       }
       expect(await main(["--hack"])).toBe(64);
-      expect(Bun.spawnSync(["ls", "-A", root]).stdout.toString()).toBe("");
+      expect(readdirSync(root)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true });
     }
@@ -556,6 +638,67 @@ describe("provider pin qualification", () => {
       "new Uint8Array(65536).map((_, i) => i % 251)"
     );
     expect(BLOB_SHA256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("the three-service topology adds only a worker", () => {
+    const web = `busybox@${digest}`;
+    const db = `postgres@${digest}`;
+    const baseline = parseYaml(compose(web, db, "dep.test", HTTPS_ROUTE_HOST));
+    const extended = parseYaml(
+      compose(web, db, "dep.test", HTTPS_ROUTE_HOST, "web-db-worker")
+    );
+    expect(extended).toEqual({
+      ...baseline,
+      services: {
+        ...baseline.services,
+        worker: { image: web, command: ["sleep", "3600"] },
+      },
+    });
+  });
+
+  test("a topology stop requires absent compute and a present retained volume", () => {
+    const run = "1".repeat(32);
+    const services = ["web", "db", "worker"];
+    const snapshot = {
+      journal_incomplete: false,
+      receipt: {
+        run,
+        phase: "stopped-data-retained",
+        resources: {
+          "container:web": {},
+          "container:db": {},
+          "container:worker": {},
+          "network:default": {},
+          "volume:db-data": { name: "retained-db" },
+        },
+      },
+      observations: {
+        "container:web": { state: "absent" },
+        "container:db": { state: "absent" },
+        "container:worker": { state: "absent" },
+        "network:default": { state: "absent" },
+        "volume:db-data": { state: "present" },
+      },
+    };
+    expect(stoppedFixtureVolume(snapshot, run, services)).toBe("retained-db");
+    expect(stoppedFixtureVolume(snapshot, "2".repeat(32), services)).toBeNull();
+    expect(stoppedFixtureVolume(snapshot, run, ["web", "db"])).toBeNull();
+    for (const [resource, state] of [
+      ["container:worker", "running"],
+      ["network:default", "present"],
+      ["volume:db-data", "absent"],
+    ] as const) {
+      expect(
+        stoppedFixtureVolume(
+          {
+            ...snapshot,
+            observations: { ...snapshot.observations, [resource]: { state } },
+          },
+          run,
+          services
+        )
+      ).toBeNull();
+    }
   });
 });
 

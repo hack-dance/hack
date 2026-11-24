@@ -44,6 +44,7 @@ const STUB = [
   "  # After down, ps lists nothing (HACK-2340: down checks what is left).",
   '  marker="$STUB_CAPTURE/compose-down"',
   '  case " $* " in',
+  '    *" config "*) cat "$STUB_CAPTURE/build-config.json"; exit $? ;;',
   '    *" down "*)',
   '      : > "$marker"',
   "      exit 0",
@@ -239,9 +240,35 @@ async function filesHoldingCanary(dir: string): Promise<string[]> {
 }
 
 test("up delivers values through the Compose process env and keeps only references at rest; down keeps nothing literal", async () => {
+  const specific = join(projectRoot, "Dockerfile.dockerignore");
+  await Bun.write(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    "services: {web: {build: ..}, worker: {image: alpine}}\n"
+  );
+  await Bun.write(join(projectRoot, ".dockerignore"), "**\n");
+  const ignoreRules = "/.hack/.internal\n!.hack/.internal/x\n";
+  await Bun.write(specific, ignoreRules);
+  await mkdir(join(projectRoot, ".hack-staging"));
+  await Bun.write(
+    join(capture, "build-config.json"),
+    JSON.stringify({ services: { web: { build: { context: projectRoot } } } })
+  );
   const up = await runCli({ args: ["up", "--detach", "--json"] });
   expectNoCanary(up);
   expect(up.exitCode).toBe(0);
+  const warnings = up.stderr
+    .split("\n")
+    .filter((line) => line.includes("compose_build_private_files"));
+  expect(warnings).toHaveLength(1);
+  const warning = JSON.parse(warnings[0] ?? "");
+  expect(warning.message).toContain("A ! exception");
+  expect(warning.findings[0]).toEqual({
+    service: "web",
+    ignoreFile: specific,
+    lines: ["/.hack-staging", "/.hack.secret.key", "/.hack/.internal"],
+    hasExceptions: true,
+  });
+  expect(await Bun.file(specific).text()).toBe(ignoreRules);
 
   const atUp = await readFile(join(capture, "override-at-up.yml"), "utf8");
   expect(atUp).not.toContain(CANARY);

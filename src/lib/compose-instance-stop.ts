@@ -12,8 +12,8 @@ const STOP_EXECUTION_INSPECT_FORMAT =
 const STOP_CONTAINER_LIST_FORMAT =
   '{"ID":{{json .ID}},"Service":{{json (.Label "com.docker.compose.service")}},"State":{{json .State}},"Labels":{"com.docker.compose.project.working_dir":{{json (.Label "com.docker.compose.project.working_dir")}},"com.docker.compose.oneoff":{{json (.Label "com.docker.compose.oneoff")}}}}';
 
-/** Read the named project directly so Stop never loads a project-selected Compose plugin. */
-export async function listServiceStopContainers(opts: {
+/** Read the named project's container labels without loading its Compose model. */
+export async function listDockerProjectContainers(opts: {
   readonly composeProject: string;
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;

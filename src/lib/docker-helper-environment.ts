@@ -176,19 +176,48 @@ export function dockerHelperRunEnvironment(
 const DOCKER_STARTUP_ENV =
   /^(?:LD_|DYLD_|_?RLD_|LDR_|LIBPATH$|SHLIB_PATH$|GCONV_PATH$|LOCPATH$|NLSPATH$|BASH_ENV$|ENV$|ZDOTDIR$|NODE_|BUN_|DENO_|PYTHON|PERL|RUBY|GEM_|LUA_|JAVA_TOOL_OPTIONS$|JDK_JAVA_OPTIONS$|_JAVA_OPTIONS$)/;
 
-/**
- * Resolve Docker from the launcher's absolute PATH entries. Scoped Stop's
- * Docker commands need only transport variables. The synthetic Compose name
- * probe also needs interpolation values, but uses the launcher's client
- * config and drops loader and interpreter controls.
- */
-export function createServiceStopDockerExec(): typeof exec {
-  const host = dockerHelperEnvironment();
-  const path = (host.PATH ?? "")
+function launcherDockerPath(): string {
+  return (process.env.PATH ?? "")
     .split(delimiter)
     .filter(isAbsolute)
     .join(delimiter);
+}
+
+/** Keep Docker transport settings and take executable selection from the launcher. */
+export function projectDockerTransportEnvironment(
+  overrides?: Readonly<Record<string, string>>
+): Record<string, string> {
+  return dockerHelperEnvironment({
+    ...overrides,
+    HOME: process.env.HOME,
+    PATH: launcherDockerPath(),
+  });
+}
+
+function resolveLauncherDocker(path: string): string | null {
   const binary = path ? Bun.which("docker", { PATH: path }) : null;
+  return binary && isAbsolute(binary) ? binary : null;
+}
+
+/** Prepare an absolute Docker invocation for a pipe or streaming subprocess. */
+export function projectDockerTransportCommand(
+  args: readonly string[],
+  overrides?: Readonly<Record<string, string>>
+): { readonly argv: string[]; readonly env: Record<string, string> } | null {
+  const env = projectDockerTransportEnvironment(overrides);
+  const binary = resolveLauncherDocker(env.PATH ?? "");
+  return binary ? { argv: [binary, ...args], env } : null;
+}
+
+/**
+ * Read Docker metadata and stop owned containers using only transport settings.
+ * The synthetic Compose name probe also needs interpolation values, but uses
+ * the launcher's client config and drops loader and interpreter controls.
+ */
+export function createProjectDockerExec(): typeof exec {
+  const host = dockerHelperEnvironment();
+  const path = launcherDockerPath();
+  const binary = resolveLauncherDocker(path);
   return async (argv, opts) => {
     if (!binary || argv[0] !== "docker") {
       return { exitCode: 127, stdout: "", stderr: "" };
@@ -196,7 +225,7 @@ export function createServiceStopDockerExec(): typeof exec {
     const env =
       argv[1] === "compose"
         ? composeNameProbeEnvironment(host, opts?.env)
-        : dockerHelperEnvironment({ ...opts?.env, HOME: host.HOME });
+        : projectDockerTransportEnvironment(opts?.env);
     return await exec([binary, ...argv.slice(1)], {
       ...opts,
       env: { ...env, PATH: path },

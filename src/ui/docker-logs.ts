@@ -1,4 +1,6 @@
 import { childEnvironment } from "../lib/child-environment.ts";
+import { HackCliError } from "../lib/cli-result.ts";
+import { projectDockerTransportCommand } from "../lib/docker-helper-environment.ts";
 import { dockerLogsTime } from "../lib/duration.ts";
 import { pathExists } from "../lib/fs.ts";
 import {
@@ -436,8 +438,18 @@ function spawnComposeLogs(opts: {
   if (opts.composeDisabled) {
     return null;
   }
-  return Bun.spawn(buildComposeLogsCommand(opts), {
-    env: childEnvironment(process.env, opts.env),
+  const command = projectDockerTransportCommand(
+    buildComposeLogsArgs(opts),
+    opts.env
+  );
+  if (!command) {
+    throw new HackCliError({
+      code: "E_DOCKER_UNAVAILABLE",
+      message: "Docker was not found on the launcher's absolute PATH.",
+    });
+  }
+  return Bun.spawn(command.argv, {
+    env: command.env,
     cwd: opts.cwd,
     stdin: "ignore",
     stdout: "pipe",
@@ -445,7 +457,7 @@ function spawnComposeLogs(opts: {
   });
 }
 
-function buildComposeLogsCommand(opts: {
+function buildComposeLogsArgs(opts: {
   readonly composeFile: string;
   readonly follow: boolean;
   readonly tail: number;
@@ -457,11 +469,11 @@ function buildComposeLogsCommand(opts: {
   readonly until?: string;
 }): string[] {
   return [
-    "docker",
     "compose",
-    ...(opts.composeProject ? ["-p", opts.composeProject] : []),
-    "-f",
-    opts.composeFile,
+    // With a resolved name, read container labels without loading the model.
+    ...(opts.composeProject
+      ? ["-p", opts.composeProject]
+      : ["-f", opts.composeFile]),
     ...(opts.profiles
       ? opts.profiles.flatMap((profile) => ["--profile", profile] as const)
       : []),

@@ -67,6 +67,10 @@ with nonzero `n` as failure; the other reasons are a normal finish.
 
 ## Options
 
+Compose logs read the resolved project using its saved Docker connection
+settings. Application values from the project's environment overlay are
+excluded from the Docker log process.
+
 - `--services a,b`: only these services. A service given as the argument is
   added to the list. On Compose, persistent `hack up` processes in the list are
   read from the lifecycle log, and the other names are passed to

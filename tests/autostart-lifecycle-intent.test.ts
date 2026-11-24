@@ -176,6 +176,7 @@ async function installComposeNameFixture(opts?: {
   readonly refuseStagedServiceMutation?: boolean;
   readonly rememberCheckout?: boolean;
   readonly recordStartReferences?: boolean;
+  readonly checkLogEnvironment?: boolean;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
@@ -192,6 +193,15 @@ const context = process.env.DOCKER_CONTEXT || "none";
 const stackFilter = args.find((arg) => arg.startsWith("label=com.docker.compose.project="));
 const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : stackFilter?.split("=")[2] || process.env.COMPOSE_PROJECT_NAME || options.defaultStack || "sample";
 const running = fixture + (options.trackNamedStacks ? "/compose-running-" + stack : "/compose-running");
+if (options.checkLogEnvironment) {
+  const allowedInterpolation = mode === "config";
+  const blocked = ["LD_PRELOAD", "NODE_PATH", "DOCKER_CLI_PLUGIN_EXTRA_DIRS"];
+  if (!allowedInterpolation) blocked.push("APP_ONLY", "COMPOSE_PROFILES");
+  if (blocked.some((key) => key in process.env) || process.env.PATH !== fixture + "/bin") process.exit(41);
+  if (mode === "logs" && (!args.includes("observability") || args.includes("-f"))) process.exit(42);
+  const phase = args[0] === "info" ? "info" : mode;
+  if (phase) await Bun.write(fixture + "/safe-log-" + phase, "checked");
+}
 if (args[0] === "info" && args.includes("{{.ID}}")) {
   const countFile = Bun.file(fixture + "/daemon-probe-count");
   const count = (await countFile.exists() ? Number(await countFile.text()) : 0) + 1;
@@ -1977,6 +1987,45 @@ test("bound service Shell, Logs, Restart and Stop use the legacy stack's saved D
     "saved-files-context"
   );
 }, 40_000);
+
+test("bound Logs use the saved Docker context without passing project host controls or application values", async () => {
+  const projectRoot = join(root, "project");
+  const projectDir = join(projectRoot, ".hack");
+  const overlay = join(projectDir, "hack.env.qa.yaml");
+  const selection =
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n";
+  await Bun.write(join(root, "daemon-id"), "fixture-log-engine");
+  await writeInterpolatedStack(projectRoot, "STACK_A");
+  await installComposeNameFixture({ startContainers: true });
+  await writeOwnedFixture(overlay, selection);
+  const start = await run(["up", "-d", "--env", "qa", "--json"]);
+  expect(start.exitCode, start.stderr || start.stdout).toBe(0);
+
+  await writeOwnedFixture(
+    overlay,
+    selection +
+      "    LD_PRELOAD: fixture-loader-value\n" +
+      "    NODE_PATH: fixture-interpreter-value\n" +
+      "    DOCKER_CLI_PLUGIN_EXTRA_DIRS: fixture-plugin-path\n" +
+      "    PATH: /fixture/project-provided-path\n" +
+      "    APP_ONLY: fixture-application-value\n" +
+      "    COMPOSE_PROFILES: observability\n"
+  );
+  await installComposeNameFixture({ checkLogEnvironment: true });
+  const logs = await run([
+    "logs",
+    "--expect-compose-project",
+    "sample",
+    "--no-follow",
+    "--json",
+    "app",
+  ]);
+  expect(logs.exitCode, logs.stderr || logs.stdout).toBe(0);
+  expect(logs.stdout).toContain("saved-overlay-log");
+  for (const phase of ["config", "info", "ps", "logs"]) {
+    expect(await Bun.file(join(root, `safe-log-${phase}`)).exists()).toBe(true);
+  }
+}, 20_000);
 
 test("ordinary Down refuses an interpolated branch stack owned by another checkout", async () => {
   await writeInterpolatedStack(join(root, "project"), "STACK_A");

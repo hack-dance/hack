@@ -221,6 +221,7 @@ import {
   requireNativeSourceWithinLimit,
 } from "./native-project-source-size.ts";
 import { requireNativeStaticStartReview } from "./native-project-start-preflight.ts";
+import { recordNativeResourceOwner } from "./native-resource-runs.ts";
 import {
   reportNativeManagedRestartNotices,
   reportNativeRestartPolicyNotices,
@@ -3605,6 +3606,7 @@ async function startNativeProjectAttempt(
               expected: expectedMapping,
             });
             mapping = persistedMapping;
+            await recordNativeResourceOwner(opts.scope, "runtime", run);
             mapped = { readyMapping, persistedMapping, inspected };
             return mapped;
           };

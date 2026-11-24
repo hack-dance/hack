@@ -22,6 +22,7 @@ import {
   readHostCommandRecords,
   readObservedProcesses,
 } from "../lib/host-command-observation.ts";
+import { parseJsonLines } from "../lib/json-lines.ts";
 import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import {
@@ -181,6 +182,12 @@ type DockerStatsSample = {
   readonly netOutputBytes: number | null;
   readonly blockInputBytes: number | null;
   readonly blockOutputBytes: number | null;
+  readonly ioCounterErrorBytes?: {
+    readonly netInput: number | null;
+    readonly netOutput: number | null;
+    readonly blockInput: number | null;
+    readonly blockOutput: number | null;
+  };
   readonly pids: number | null;
 };
 
@@ -203,6 +210,8 @@ type ContainerUsageRow = DockerStatsSample & {
   readonly service: string;
   readonly name: string;
   readonly mounts: RuntimeContainer["mounts"];
+  readonly configuredMemoryLimitBytes: number | null;
+  readonly startedAt: string | null;
 };
 
 type UsageReport = {
@@ -826,7 +835,8 @@ function buildContainerIndex(opts: {
 async function readDockerStats(opts: {
   containerIds: readonly string[];
 }): Promise<
-  { ok: true; samples: DockerStatsSample[] } | { ok: false; error: string }
+  | { ok: true; samples: DockerStatsSample[]; sampledAtUnixMs: number }
+  | { ok: false; error: string }
 > {
   const res = await exec(
     [
@@ -839,6 +849,7 @@ async function readDockerStats(opts: {
     ],
     { stdin: "ignore" }
   );
+  const sampledAtUnixMs = Date.now();
   if (res.exitCode !== 0) {
     return { ok: false, error: res.stderr.trim() || "docker stats failed" };
   }
@@ -847,7 +858,7 @@ async function readDockerStats(opts: {
   if (samples.length === 0) {
     return { ok: false, error: "docker stats returned no samples" };
   }
-  return { ok: true, samples };
+  return { ok: true, samples, sampledAtUnixMs };
 }
 
 function parseDockerStatsOutput(opts: {
@@ -908,10 +919,16 @@ function parseDockerStatsSampleLine(opts: {
     memUsedBytes: memUsage.usedBytes,
     memLimitBytes: memUsage.limitBytes,
     memPercent,
-    netInputBytes: netIo.inputBytes,
-    netOutputBytes: netIo.outputBytes,
-    blockInputBytes: blockIo.inputBytes,
-    blockOutputBytes: blockIo.outputBytes,
+    netInputBytes: netIo.input?.bytes ?? null,
+    netOutputBytes: netIo.output?.bytes ?? null,
+    blockInputBytes: blockIo.input?.bytes ?? null,
+    blockOutputBytes: blockIo.output?.bytes ?? null,
+    ioCounterErrorBytes: {
+      netInput: netIo.input?.errorBytes ?? null,
+      netOutput: netIo.output?.errorBytes ?? null,
+      blockInput: blockIo.input?.errorBytes ?? null,
+      blockOutput: blockIo.output?.errorBytes ?? null,
+    },
     pids,
   };
 }
@@ -983,7 +1000,7 @@ async function runUsageOnce(opts: {
     : { rows: [], total: null };
   const stats =
     index.containerIds.length === 0
-      ? { ok: true as const, samples: [] }
+      ? { ok: true as const, samples: [], sampledAtUnixMs: null }
       : await readDockerStats({ containerIds: index.containerIds });
 
   if (!runtimeResult.ok) {
@@ -1008,6 +1025,10 @@ async function runUsageOnce(opts: {
     projects: filtered,
     samples: stats.samples,
     index,
+    startsAfterSample:
+      opts.args.options.json === true && opts.args.options.details === true
+        ? await readSampleStartTimes({ samples: stats.samples, index })
+        : undefined,
   });
 
   if (report.projects.length === 0 && hostReport.rows.length === 0) {
@@ -1021,6 +1042,7 @@ async function runUsageOnce(opts: {
   return await renderUsageSuccess({
     args: opts.args,
     report,
+    sampledAtUnixMs: stats.sampledAtUnixMs,
     hostReport,
     runtimeOk: runtimeResult.ok,
     runtimeError: runtimeResult.error,
@@ -1117,6 +1139,7 @@ async function renderNoSamples(opts: {
 async function renderUsageSuccess(opts: {
   readonly args: UsageArgs;
   readonly report: UsageReport;
+  readonly sampledAtUnixMs: number | null;
   readonly hostReport: HostUsageReport;
   readonly runtimeOk: boolean;
   readonly runtimeError: string | null;
@@ -1125,7 +1148,10 @@ async function renderUsageSuccess(opts: {
     writeJson({
       payload: {
         ...(opts.args.options.details
-          ? { containers: opts.report.containerDetails ?? [] }
+          ? {
+              containers: opts.report.containerDetails ?? [],
+              sampledAtUnixMs: opts.sampledAtUnixMs,
+            }
           : {}),
         projects: opts.report.projects,
         total: opts.report.total,
@@ -1239,10 +1265,67 @@ async function renderTotalUsagePanels(opts: {
   }
 }
 
+async function readSampleStartTimes(opts: {
+  readonly samples: readonly DockerStatsSample[];
+  readonly index: ContainerIndex;
+}): Promise<ReadonlyMap<string, string>> {
+  const ids = new Set<string>();
+  for (const sample of opts.samples) {
+    const container = sample.containerId
+      ? opts.index.containerById.get(sample.containerId)
+      : undefined;
+    if (container?.observation?.startedAt) {
+      ids.add(container.id);
+    }
+  }
+  if (ids.size === 0) {
+    return new Map();
+  }
+  // Certify the container run around the sample, without asking for full
+  // inspect data again. Failure leaves the point usable without I/O rates.
+  const result = await exec(
+    [
+      "docker",
+      "inspect",
+      "--type",
+      "container",
+      "--format",
+      '{"id":{{json .Id}},"startedAt":{{json .State.StartedAt}}}',
+      ...ids,
+    ],
+    { stdin: "ignore", timeoutMs: 3000 }
+  ).catch(() => null);
+  return parseSampleStartTimes({ output: result?.stdout ?? "", ids });
+}
+
+// Docker can print complete lines for survivors and still exit nonzero
+// when another requested container disappeared.
+function parseSampleStartTimes(opts: {
+  readonly output: string;
+  readonly ids: ReadonlySet<string>;
+}): ReadonlyMap<string, string> {
+  const starts = new Map<string, string>();
+  for (const row of parseJsonLines(opts.output)) {
+    const id = getString(row, "id");
+    const startedAt = getString(row, "startedAt");
+    if (id && startedAt) {
+      const shortId = id.slice(0, 12);
+      if (opts.ids.has(id)) {
+        starts.set(id, startedAt);
+      }
+      if (opts.ids.has(shortId)) {
+        starts.set(shortId, startedAt);
+      }
+    }
+  }
+  return starts;
+}
+
 function buildUsageReport(opts: {
   readonly projects: readonly RuntimeProject[];
   readonly samples: readonly DockerStatsSample[];
   readonly index: ContainerIndex;
+  readonly startsAfterSample?: ReadonlyMap<string, string>;
 }): UsageReport {
   const projectSamples = new Map<string, DockerStatsSample[]>();
   for (const sample of opts.samples) {
@@ -1287,6 +1370,7 @@ function buildUsageReport(opts: {
     const container = sample.containerId
       ? opts.index.containerById.get(sample.containerId)
       : null;
+    const startedAt = container?.observation?.startedAt;
     return container
       ? [
           {
@@ -1295,6 +1379,13 @@ function buildUsageReport(opts: {
             service: container.service,
             name: container.name,
             mounts: container.mounts,
+            configuredMemoryLimitBytes:
+              container.configuredMemoryLimitBytes ?? null,
+            startedAt:
+              startedAt &&
+              opts.startsAfterSample?.get(container.id) === startedAt
+                ? startedAt
+                : null,
           },
         ]
       : [];
@@ -1365,35 +1456,30 @@ function parsePercent(opts: { readonly value: string | null }): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+type ByteReading = { readonly bytes: number; readonly errorBytes: number };
+
 function parseIoPair(opts: { readonly value: string | null }): {
-  readonly inputBytes: number | null;
-  readonly outputBytes: number | null;
+  readonly input: ByteReading | null;
+  readonly output: ByteReading | null;
 } {
-  if (!opts.value) {
-    return { inputBytes: null, outputBytes: null };
-  }
-  const [inputRaw = "", outputRaw = ""] = opts.value
-    .split("/")
-    .map((part) => part.trim());
+  const [inputRaw = "", outputRaw = ""] = opts.value?.split("/") ?? [];
   return {
-    inputBytes: parseBytes({ value: inputRaw.length > 0 ? inputRaw : null }),
-    outputBytes: parseBytes({ value: outputRaw.length > 0 ? outputRaw : null }),
+    input: parseByteReading(inputRaw),
+    output: parseByteReading(outputRaw),
   };
 }
 
 function parseBytes(opts: { readonly value: string | null }): number | null {
-  if (!opts.value) {
-    return null;
-  }
-  const trimmed = opts.value.trim();
-  if (!trimmed) {
-    return null;
-  }
-  const match = trimmed.match(BYTES_PATTERN);
+  return parseByteReading(opts.value ?? "")?.bytes ?? null;
+}
+
+function parseByteReading(raw: string): ByteReading | null {
+  const match = raw.trim().match(BYTES_PATTERN);
   if (!match) {
     return null;
   }
-  const value = Number.parseFloat(match[1] ?? "");
+  const digits = match[1] ?? "";
+  const value = Number.parseFloat(digits);
   if (!Number.isFinite(value)) {
     return null;
   }
@@ -1403,7 +1489,14 @@ function parseBytes(opts: { readonly value: string | null }): number | null {
   if (multiplier === null) {
     return null;
   }
-  return value * multiplier;
+  const decimals = digits.split(".")[1]?.length ?? 0;
+  // Docker may trim trailing zeroes. Use the printed precision as a
+  // conservative rounding bound and allow for rounding to whole bytes.
+  const errorBytes =
+    multiplier === 1 && decimals === 0
+      ? 0
+      : Math.ceil(multiplier / 10 ** decimals / 2);
+  return { bytes: value * multiplier, errorBytes };
 }
 
 /**
@@ -1492,6 +1585,8 @@ export const __testOnlyUsage = {
   collectTrackedHostPids,
   buildHostUsageReport,
   buildServiceUsageRows,
+  parseDockerStatsSampleLine,
+  parseSampleStartTimes,
 };
 
 type UsageServiceRow = {

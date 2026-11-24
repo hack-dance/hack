@@ -453,7 +453,15 @@ Before any write it checks, in order:
    window refuse the same way, whatever the timestamps say; a `create` is
    import's own only when import's own `docker volume create` of exactly
    that name succeeded in the window (one event per create). Foreign volume
-   mounts are judged by their backing storage, as for export.
+   mounts, bind sources and alias devices are judged by their backing
+   storage, proven on the daemon, as for export. Import also holds a Docker
+   reference (a created, never started container) to every existing target
+   from the first running check, and to each target it creates right after
+   creating it, until the window's checks are done, so `docker volume rm` of
+   a target is refused while it is restored. An existing target removed
+   before its reference is recreated empty by Docker for the reference and
+   refuses as `changed`; journals are marked complete only after every
+   reference is removed.
 5. **Targets.** A backed-up key that is no longer declared here, or is
    `external` here, is skipped and reported. For each other key the target is
    its Docker volume (`name:` or `<compose project>_<key>`):

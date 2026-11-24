@@ -291,8 +291,18 @@ describe("targets", () => {
     // The extract runs in one held, logless, network-less helper, read-write.
     const create =
       fake.calls.find(
-        (argv) => argv[1] === "create" && argv.includes("--mount")
+        (argv) =>
+          argv[1] === "create" &&
+          (argv[argv.indexOf("--mount") + 1] ?? "").startsWith("type=bind,")
       ) ?? [];
+    // A Docker reference to the created target, never started.
+    expect(
+      fake.calls.some(
+        (argv) =>
+          argv[1] === "create" &&
+          argv.includes("type=volume,src=shop_db,dst=/v,volume-nocopy")
+      )
+    ).toBeTrue();
     expect(create[create.indexOf("--mount") + 1]).toBe(
       "type=bind,src=/var/lib/docker/volumes/shop_db/_data,dst=/v"
     );
@@ -772,12 +782,15 @@ describe("helper containers are tracked by ID, never by name", () => {
     process.on("SIGINT", keep);
     const before = new Set(process.listeners("SIGINT"));
     let reuser: string | null = null;
-    let holdId = "";
+    let live: string[] = [];
     let firstCall = 0;
     fake.onExec = (_container, args) => {
       if (args.includes("-xpf") && reuser === null) {
         reuser = fake.createForeign(markerNames(fake)[0] ?? "");
-        holdId = fake.created.at(-1)?.id ?? "";
+        // Live now: the target's reference, then the write hold.
+        live = fake.created
+          .filter((entry) => !entry.name.endsWith("-start"))
+          .map((entry) => entry.id);
         firstCall = fake.calls.length;
         const handler = process
           .listeners("SIGINT")
@@ -794,7 +807,8 @@ describe("helper containers are tracked by ID, never by name", () => {
     const signalRm = fake.calls
       .slice(firstCall)
       .find((argv) => argv[1] === "rm");
-    expect(signalRm).toEqual(["docker", "rm", "--force", holdId]);
+    expect(live).toHaveLength(2);
+    expect(signalRm).toEqual(["docker", "rm", "--force", ...live]);
     expect(fake.containers.has(reuser ?? "")).toBeTrue();
     for (const argv of fake.calls.filter((call) => call[1] === "rm")) {
       expect(argv).not.toContain(reuser);
@@ -962,7 +976,7 @@ describe("each target's identity is rechecked: Docker cannot pin a volume", () =
     fake.volume("shop_db", { labels: OWNED("db"), content: "" });
     fake.onExec = (_container, args) => {
       if (args.includes("-quit")) {
-        fake.removeVolume("shop_db");
+        fake.forceRemoveVolume("shop_db");
       }
     };
     const error = await caught(importProjectData(input(fake, dir)));
@@ -982,7 +996,7 @@ describe("each target's identity is rechecked: Docker cannot pin a volume", () =
     // could still be taken; the recheck refuses.
     fake.onExec = (_container, args) => {
       if (args.includes("-e")) {
-        fake.removeVolume("shop_db");
+        fake.forceRemoveVolume("shop_db");
       }
     };
     const error = await caught(importProjectData(input(fake, dir)));
@@ -999,7 +1013,7 @@ describe("each target's identity is rechecked: Docker cannot pin a volume", () =
     const fake = engine();
     fake.onExec = (_container, args) => {
       if (args.includes("-xpf")) {
-        fake.removeVolume("shop_db");
+        fake.forceRemoveVolume("shop_db");
       }
     };
     const error = await caught(importProjectData(input(fake, dir)));
@@ -1037,7 +1051,7 @@ describe("each target's identity is rechecked: Docker cannot pin a volume", () =
           if (!reported) {
             fake.events.deliverVolumeChanges = false;
           }
-          fake.removeVolume("shop_db");
+          fake.forceRemoveVolume("shop_db");
           if (replace) {
             fake.volume("shop_db", { labels: OWNED("db"), content: "rows-db" });
           }
@@ -1120,7 +1134,7 @@ describe("volume destroy and create events during the import", () => {
     const old = fake.volumes.get("shop_db");
     fake.onExec = (_container, args) => {
       if (args.includes("-xpf")) {
-        fake.removeVolume("shop_db");
+        fake.forceRemoveVolume("shop_db");
         fake.volume("shop_db", {
           labels: OWNED("db"),
           content: "",
@@ -1144,7 +1158,7 @@ describe("volume destroy and create events during the import", () => {
         // Destroyed and created again by someone else: our one create
         // accounts for one create event only.
         const ours = fake.volumes.get("shop_db");
-        fake.removeVolume("shop_db");
+        fake.forceRemoveVolume("shop_db");
         fake.volume("shop_db", {
           labels: ours?.labels ?? {},
           content: "",
@@ -1218,5 +1232,44 @@ describe("foreign volume mounts are judged by their backing storage", () => {
       reason: "unchecked_volume_backing",
     });
     expect((await journal("db"))?.state).toBe("started");
+  });
+});
+
+describe("Docker references hold the targets", () => {
+  test("a docker volume rm of an existing target during the restore is refused; the import completes", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.volume("shop_db", { labels: OWNED("db"), content: "" });
+    const removals: boolean[] = [];
+    fake.onExec = (_container, args) => {
+      if (args.includes("-xpf")) {
+        removals.push(fake.removeVolume("shop_db"));
+      }
+    };
+    const result = await importProjectData(input(fake, dir));
+    expect(removals).toEqual([false]);
+    expect(result.volumes[0]?.outcome).toBe("restored");
+    expect((await journal("db"))?.state).toBe("complete");
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("an existing target removed before its reference is refused, not written", async () => {
+    // Docker creates the missing named volume for the reference container.
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.volume("shop_db", { labels: OWNED("db"), content: "" });
+    let removed = false;
+    fake.onPs = () => {
+      if (!removed) {
+        removed = true;
+        fake.removeVolume("shop_db");
+      }
+    };
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.detail).toEqual({
+      conflicts: [{ key: "db", reason: "changed" }],
+    });
+    expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
+    expect(await journal("db")).toBeNull();
   });
 });

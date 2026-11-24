@@ -1,6 +1,10 @@
 import { join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import {
+  type BackingProver,
+  createBackingProver,
+} from "./data-backup-backing-proof.ts";
+import {
   type DataBackupDeadlines,
   resolveDataBackupDeadlines,
 } from "./data-backup-deadlines.ts";
@@ -13,7 +17,9 @@ import {
   DataHelperContainers,
   type HeldVolume,
   requireStep,
+  type VolumeReferences,
   withHeldVolume,
+  withVolumeReferences,
 } from "./data-backup-held-volume.ts";
 import { parseJsonText, refuseRunning } from "./data-backup-helper.ts";
 import {
@@ -152,6 +158,8 @@ type Context = {
   readonly identities: Map<string, InspectedVolume>;
   /** Names of the volumes this import's own `docker volume create` made. */
   readonly ownCreates: string[];
+  /** The window's volume references, while they are held. */
+  readonly references: { current: VolumeReferences | null };
   readonly now: () => Date;
 };
 
@@ -222,6 +230,7 @@ export async function importProjectData(
             mountpoints: new Map(),
             identities: new Map(),
             ownCreates: [],
+            references: { current: null },
             now: input.now ?? (() => new Date()),
           },
           selected,
@@ -253,6 +262,7 @@ async function importWithin(
   const stopCommand = input.downCommand ?? "hack down";
   // The Mountpoint of every target that exists, before any hold, so the
   // first running check can see a container binding it. Reads only.
+  const existingTargets = new Map<string, InspectedVolume>();
   for (const entry of selected) {
     const existing = await inspectVolume({
       docker: input.docker,
@@ -260,8 +270,15 @@ async function importWithin(
     });
     if (existing !== null) {
       context.mountpoints.set(entry.name, existing.mountpoint);
+      existingTargets.set(entry.name, existing);
     }
   }
+  const prove = createBackingProver({
+    docker: input.docker,
+    purpose: "import",
+    deadlines: context.deadlines,
+    helpers: context.helpers,
+  });
   const watched = (): WatchedVolume[] =>
     selected.flatMap((entry) => {
       const mountpoint = context.mountpoints.get(entry.name);
@@ -280,10 +297,80 @@ async function importWithin(
     ],
     exclude: context.helpers.created,
     timeoutMs: context.deadlines.commandMs,
+    prove,
     stopCommand,
     command: "import",
     lead: "The project is running, so its volumes cannot be restored safely; nothing was changed.",
   });
+  // A Docker reference to every existing target, and to each target this
+  // import creates, through the restore and the window's checks: Docker
+  // refuses `docker volume rm` of a volume a container references.
+  const restored = await withVolumeReferences(
+    {
+      docker: input.docker,
+      purpose: "import",
+      deadlines: context.deadlines,
+      helpers: context.helpers,
+    },
+    async (references) => {
+      context.references.current = references;
+      for (const name of existingTargets.keys()) {
+        await references.add(name);
+      }
+      // Docker creates a missing named volume for a reference: each target
+      // must still be the volume inspected now that its reference exists.
+      for (const entry of selected) {
+        const identity = existingTargets.get(entry.name);
+        if (identity !== undefined) {
+          await requireUnchangedVolume({
+            docker: input.docker,
+            name: entry.name,
+            key: entry.volume.key,
+            identity,
+            when: "before Hack could take a reference to it",
+            consequence: "nothing was changed.",
+            refusal: changedTarget(entry.volume.key),
+          });
+        }
+      }
+      return await restoreWithinWindow({
+        context,
+        selected,
+        monitor,
+        watched,
+        stopCommand,
+        prove,
+      });
+    }
+  );
+  context.references.current = null;
+  for (const target of restored.targets) {
+    if (target.kind !== "verified-complete") {
+      await writeJournal(context, target, "complete");
+    }
+  }
+  return restored.volumes;
+}
+
+/**
+ * Restore every prepared target, then run the window's last checks: the
+ * running check, the end of the event window, destroy and create events of
+ * a target's name, and each target's identity. Writes no journal as
+ * complete; the caller does, once every reference is removed.
+ */
+async function restoreWithinWindow(opts: {
+  readonly context: Context;
+  readonly selected: readonly SelectedTarget[];
+  readonly monitor: MountMonitor;
+  readonly watched: () => WatchedVolume[];
+  readonly stopCommand: string;
+  readonly prove: BackingProver;
+}): Promise<{
+  readonly volumes: readonly DataImportVolume[];
+  readonly targets: readonly Target[];
+}> {
+  const { context, selected, monitor, watched, stopCommand, prove } = opts;
+  const { input, plan } = context;
   const targets = await prepareTargets(context, selected);
   const composeVersion = targets.some((target) => target.kind === "created")
     ? await readComposeVersion(input.docker)
@@ -302,6 +389,7 @@ async function importWithin(
     volumes: watched(),
     exclude: context.helpers.created,
     timeoutMs: context.deadlines.commandMs,
+    prove,
     stopCommand,
     command: "import",
     lead: "A container started during the import, so the restore is not marked complete; rerunning hack data import after stopping it replaces its own copy.",
@@ -355,12 +443,7 @@ async function importWithin(
       });
     }
   }
-  for (const target of targets) {
-    if (target.kind !== "verified-complete") {
-      await writeJournal(context, target, "complete");
-    }
-  }
-  return volumes;
+  return { volumes, targets };
 }
 
 /** `<hack project>[--<branch>]`: names this instance in Hack's own state. */
@@ -785,6 +868,18 @@ async function restoreTarget(
       : target.identity;
   if (identity === null) {
     throw changedTarget(key)();
+  }
+  if (target.kind === "created") {
+    // This import's own volume: hold a reference to it before writing.
+    await context.references.current?.add(target.name);
+    await requireUnchangedVolume({
+      docker: context.input.docker,
+      name: target.name,
+      key,
+      identity,
+      when: "before Hack could take a reference to it",
+      consequence: "nothing was written.",
+    });
   }
   context.mountpoints.set(target.name, identity.mountpoint);
   context.identities.set(target.name, identity);

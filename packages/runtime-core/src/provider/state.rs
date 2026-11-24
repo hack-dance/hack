@@ -433,19 +433,29 @@ pub(crate) fn write_before_rename(
     value: &impl Serialize,
     before_rename: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
-    let temporary = path.with_extension("pending");
+    write_with_pending(path, &path.with_extension("pending"), value, before_rename)
+}
+
+/// Atomically publish state using a caller-owned pending sibling. Use a separate
+/// name only when the caller has a distinct recovery rule for interrupted bytes.
+pub(crate) fn write_with_pending(
+    path: &Path,
+    temporary: &Path,
+    value: &impl Serialize,
+    before_rename: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| CandidateError::new("invalid_receipt", e.to_string()))?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&temporary)
+        .open(temporary)
         .map_err(io)?;
     file.write_all(&bytes).map_err(io)?;
     file.sync_all().map_err(io)?;
     before_rename()?;
-    fs::rename(&temporary, path).map_err(io)?;
+    fs::rename(temporary, path).map_err(io)?;
     File::open(path.parent().expect("receipt parent"))
         .map_err(io)?
         .sync_all()

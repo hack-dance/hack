@@ -121,12 +121,12 @@ pub(super) fn require_scoped_root(
 
 /// Retain the raw-byte selection: parsing and reserializing must not hide an
 /// external replacement. Only canonical receipt commits from owned cleanup may
-/// advance phase; immutable run/resource/startup identities cannot change.
+/// advance phase or record a previously unacknowledged container ID.
 pub(super) fn verify_receipt(root: &Path, original: &Receipt) -> Result<(), CandidateError> {
     let bytes = host_pin_recovery::read_raw(&root.join("state.json"), 2 * 1024 * 1024)?;
     let current: Receipt = serde_json::from_slice(&bytes).map_err(|_| refused())?;
     if bytes != serde_json::to_vec_pretty(&current).map_err(|_| refused())?
-        || immutable(&current)? != immutable(original)?
+        || !cleanup_enrollment::matches_cleanup_progress(original, &current)?
         || (current.phase != original.phase
             && !matches!(
                 current.phase.as_str(),

@@ -11,7 +11,7 @@ standalone Rust binary exercised by a fake caller; the CLI remains unchanged.
 | `GuardDeath`, `Retry`; `NoDuplicate` | Retained session census refuses a retry even if separately killed guard released its flock | Guard-loss retry and identity refusal regression |
 | `Stop`, `Kill`; `NoForeignSignal` | Model assumes identity remains valid across signaling; source performs native rechecks | Wrong-owner/stale-identity refusal; TERM-ignore escalation |
 | `ProcessExit`, `Reap` | Session census ignores zombies; reap direct/adopted children; release lock after no live members | Zombie liveness; child changes process group within session |
-| `StopUnknown` | Bounded confirmation can report uncertainty while live members remain | Honest unknown recovery outcome, never successful absence |
+| `StopUnknown` | Bounded confirmation can report uncertainty while live members remain | `unresponsive_guard_stop_remains_unknown` checks a frozen guard. `stop_confirms_kill_after_guard_is_delayed_past_old_budget` checks a resumed guard and confirmed absence. |
 
 Positive TLC exploration: 426 distinct states, queue exhausted, depth 14. Negative
 control sets `SkipLiveFence = TRUE`; `Retry` then violates `NoDuplicate` with live,

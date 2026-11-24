@@ -992,7 +992,7 @@ test.each([
       expect(await result).toEqual(new Set([...builds.keys()]));
       expect(started).toEqual(names);
       expect(specs.duplicate).toEqual({ image: IMAGE });
-      expect(settlements).toHaveLength(cap > 1 ? names.length : 0);
+      expect(settlements).toHaveLength(names.length);
     } else {
       if (outcome === "failure") {
         releases.get("worker")?.resolve(true);

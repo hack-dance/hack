@@ -286,7 +286,7 @@ impl CacheReceipt {
         Ok(())
     }
 }
-fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
+fn open_receipt(path: &Path) -> Result<fs::File, CandidateError> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -301,6 +301,11 @@ fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
     {
         return Err(refused("Unsafe image cache receipt."));
     }
+    Ok(file)
+}
+
+fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
+    let file = open_receipt(path)?;
     let mut bytes = Vec::new();
     file.take(4097).read_to_end(&mut bytes).map_err(state::io)?;
     if bytes.len() > 4096 {
@@ -1241,6 +1246,11 @@ fn ensure_pinned_coordinated(
     // Keep the import lease and the loader’s own live recheck unchanged.
     let _import = coordinator.importer.lock().unwrap();
     load(candidate, &dir.join("image.tar"), &receipt, reused)?;
+    // The reference pin and cache lease still protect this receipt.
+    // Recency is advisory once the requested archive has been verified.
+    if reused && let Ok(file) = open_receipt(&dir.join("receipt.json")) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
     Ok(EnsuredImage {
         pinned_reference: reference,
         image_id: receipt.image_id,
@@ -1647,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_count_retires_oldest_unreferenced_archive_at_64() {
+    fn cache_count_retires_least_recently_used_unreferenced_archive_at_64() {
         let f = Fixture::new();
         let root = f.1.state_root.join("artifacts/images");
         let slot = |n| root.join(entry_key(&pin(n), ImagePlatform::LinuxArm64));
@@ -1677,12 +1687,14 @@ mod tests {
         state::private_directory(&archived).unwrap();
         let receipt = archived.join("state.json");
         fs::write(&receipt, pin(0)).unwrap();
+        assert!(cache(2).unwrap().archive_reused);
         let importing = coordinator.pins.lock().unwrap()[&pin(1)].clone();
         let active_import = importing.lock().unwrap();
         cache(99).unwrap();
         assert!(slot(0).exists());
         assert!(slot(1).exists());
-        assert!(!slot(2).exists());
+        assert!(slot(2).exists());
+        assert!(!slot(3).exists());
         drop(active_import);
         assert!(slot(99).exists());
         assert_eq!(usage(&f.1, &root).unwrap(), (64, 448));

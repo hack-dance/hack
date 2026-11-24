@@ -602,6 +602,45 @@ test("HACK-2339: a refusal before VM work reaches the launcher as the foreground
   }
 }, 30_000);
 
+test.each([
+  true,
+  false,
+])("detached build names stay on the text progress stream (json=%s)", async (json) => {
+  const root = await fixtureRoot("native-detached-builds-");
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "build-progress"],
+    {
+      env: {
+        ...fixtureEnv(root),
+        ...(json ? {} : { FIXTURE_TEXT_OUTPUT: "1" }),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 8000,
+    }
+  );
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+      new Response(launcher.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(stdout + stderr).not.toContain("private-build-line");
+    if (json) {
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout).error.message).toContain("native_build_failed");
+    } else {
+      expect(stderr).toMatch(
+        /^Build worker: failed in 1.5s\nBuild web: cancelled in 2.0s\n/
+      );
+      expect(stderr).toContain("native_build_failed");
+    }
+  } finally {
+    await removeFixture(root);
+  }
+});
+
 test("detached native up closes with its served address or no address", async () => {
   for (const address of ["https://sample.hack.local:8443", ""]) {
     const root = await fixtureRoot("native-detached-closing-");

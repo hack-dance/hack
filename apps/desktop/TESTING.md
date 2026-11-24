@@ -14,6 +14,14 @@ Mac, run `HACK_DESKTOP_TEST_REPETITIONS=200 bash scripts/test.sh`; preserve the
 complete output and exact commit. Three consecutive green hosted macOS desktop
 jobs are a separate acceptance gate.
 
+## Service Stats screenshots
+
+From `apps/desktop`, run `bash scripts/build.sh --features screenshots`, then
+`target/debug/hack-desktop --fixtures usage --screenshots <directory>`. The
+`usage-*.png` frames show the Services table. The `service-stats-*.png` frames
+show the Stats body with ten minutes of fixture samples fed through the same
+history as live data. The command renders each in light and dark.
+
 The default threaded libtest runner is not the qualification route. Tests can
 write executables and create descriptors concurrently within a single process;
 Rust 1.98.1 on Apple creates a pipe and sets close-on-exec in later calls. Linux

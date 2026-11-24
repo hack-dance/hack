@@ -150,6 +150,8 @@ mod export;
 pub use export::{Export, export};
 mod journal;
 mod retention;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod retired_history;
 mod storage;
 mod storage_inventory;
 pub use retention::{prune, reconcile_export};

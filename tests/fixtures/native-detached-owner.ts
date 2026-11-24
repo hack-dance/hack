@@ -38,6 +38,8 @@ import {
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
 
+import { NativeAuthoredAttemptLimitError } from "../../src/lib/native-up-refusals.ts";
+
 /**
  * Publish a marker file atomically. Tests poll these files, and a plain
  * writeFile is visible empty before its contents land.
@@ -468,6 +470,7 @@ if (role === "channel-holder") {
         : await launch();
   } catch (error) {
     process.exitCode = [
+      "authored-attempt-limit",
       "wrapped-failure",
       "wrapped-static-failure",
       "builder-missing",
@@ -575,6 +578,12 @@ if (role === "channel-holder") {
               })
             : failure
         );
+      }
+      if (mode === "authored-attempt-limit") {
+        await nativeDetachedUpFailure(new NativeAuthoredAttemptLimitError());
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
       }
       await publishFixturePrestartFailure(mode, root);
       if (

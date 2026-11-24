@@ -1169,6 +1169,12 @@ impl Driver for Session<'_, '_> {
                 } else {
                     "create-intent"
                 };
+                // A fresh service with managed values stages them right after this
+                // write: its durable attachment marker goes in the same write
+                // instead of a second one (see `start`).
+                if !self.restarting && self.environments.contains_key(service) {
+                    self.receipt.environment_attached = true;
+                }
                 crate::timings::measure_candidate(
                     crate::timings::Step::StartWaveRecord,
                     None,
@@ -1289,19 +1295,32 @@ impl Driver for Session<'_, '_> {
         let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
-            self.receipt.environment_attached = true;
-            self.save()?;
+            // The marker is durable before any bound intent. It is normally already
+            // in this service's start-intent write; only a caller that skipped it
+            // pays a write of its own here.
+            if !self.receipt.environment_attached {
+                self.receipt.environment_attached = true;
+                crate::timings::measure_candidate(
+                    crate::timings::Step::StartWaveRecord,
+                    None,
+                    |_| self.save(),
+                )?;
+            }
             let (uid, gid) = launcher::identity(&self.configs[service])?;
-            let lease = pending.with_identity(uid, gid).stage_bound(
-                self.engine.guest(),
-                Some(super::environment_recovery::GraphBinding {
-                    run: self.receipt.run.clone(),
-                    container: resource.name.clone(),
-                }),
-            )?;
-            #[cfg(test)]
-            self.fault_pause("after-environment-stage")?;
-            let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+            let (lease, path) =
+                crate::timings::measure_candidate(crate::timings::Step::EnvStage, None, |_| {
+                    let lease = pending.with_identity(uid, gid).stage_bound(
+                        self.engine.guest(),
+                        Some(super::environment_recovery::GraphBinding {
+                            run: self.receipt.run.clone(),
+                            container: resource.name.clone(),
+                        }),
+                    )?;
+                    #[cfg(test)]
+                    self.fault_pause("after-environment-stage")?;
+                    let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+                    Ok((lease, path))
+                })?;
             let files = lease.file_mounts();
             let wraps = lease.wraps_process();
             self.leases.insert(service.into(), lease);

@@ -402,12 +402,13 @@ async function startBlocksReplacement(opts: {
  * go on; null too when no job is loaded.
  */
 export async function refuseLaunchdBeforeReplacing(
-  hooks: LaunchdStartHooks
+  hooks: LaunchdStartHooks & { readonly onManagedStart?: () => void }
 ): Promise<number | null> {
   const status = await readStatus(hooks);
   if (!status?.loaded) {
     return null;
   }
+  hooks.onManagedStart?.();
   const blocked = await launchdJobBlocksReplacement({ hooks, status });
   if (blocked === null) {
     return null;

@@ -181,13 +181,44 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "project-remote-selection",
+    module: "ProjectRemoteSelection",
+    states: 11,
+    invariant: "TeardownUsesStartedTarget",
+    action: "Teardown",
+    fields: ['hook = "pending"', 'started = "none"', 'record = "none"'],
+    additionalControls: [
+      {
+        name: "stale-negative",
+        negative: true,
+        invariant: "ActiveLabelWins",
+        action: "Teardown",
+        fields: ["stale = TRUE", 'label = "qa"', 'hook = "none"'],
+      },
+    ],
+  },
+  {
     name: "guest-execution",
     module: "GuestAgent",
-    states: 3900,
+    states: 6860,
     invariant: "ResultBeforeRelease",
-    action: "Release",
+    action: "Next",
     fields: ['job = "released"', 'saved = "none"'],
     additionalControls: [
+      {
+        name: "unclean-restart",
+        negative: true,
+        invariant: "NoOrphan",
+        action: "AgentRestart",
+        fields: ['agent = "online"', "survivor = TRUE", "epoch = 1"],
+      },
+      {
+        name: "wait-eof",
+        negative: true,
+        invariant: "TerminalReleasable",
+        action: "Next",
+        fields: ['job = "exit37"', 'saved = "exit37"', "writerOpen = TRUE"],
+      },
       {
         name: "duplicate",
         negative: true,
@@ -199,7 +230,7 @@ const contracts: readonly ModelContract[] = [
         name: "record-running",
         negative: true,
         invariant: "SavedOutcome",
-        action: "Record",
+        action: "Next",
         fields: ['belief = "running"', 'saved = "running"'],
       },
     ],
@@ -2546,7 +2577,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "per-service-publication",
     module: "PerServicePublication",
-    states: 669,
+    states: 811,
     invariant: "Safe",
     action: "Record",
     fields: [
@@ -2633,6 +2664,18 @@ const contracts: readonly ModelContract[] = [
         ],
       },
     ],
+  },
+  {
+    // HACK-2576: one run's recovery history across repeated pool stops. Positive:
+    // the oldest proven finished record makes room, and files that cannot be
+    // proven finished are not counted. `negative` is the refusal at the bound
+    // (counting every file with the prefix), which strands the stopped run.
+    name: "recovery-archive-bound",
+    module: "ArchiveBound",
+    states: 75,
+    invariant: "AlwaysRecoverable",
+    action: "PoolStop",
+    fields: ['phase = "stopped"', 'intent = "complete"'],
   },
   {
     name: "publication",

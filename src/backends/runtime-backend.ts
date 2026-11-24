@@ -1,6 +1,7 @@
 import { dirname } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
+import { warnComposeBuildPrivacy } from "../lib/compose-build-privacy.ts";
 import { resolveComposeDownCapMs } from "../lib/compose-down-budget.ts";
 import {
   effectiveComposeProfiles,
@@ -506,6 +507,9 @@ async function watchStartProgress(input: {
 export const composeRuntimeBackend: RuntimeBackend = {
   name: "compose",
   async up(opts) {
+    if (!opts.unattended) {
+      await warnComposeBuildPrivacy({ ...opts, argv: buildComposeArgs(opts) });
+    }
     if (opts.unattended && !opts.detach) {
       throw new HackCliError({
         code: "E_PERMISSION",
@@ -741,6 +745,11 @@ export const composeRuntimeBackend: RuntimeBackend = {
     return await run(cmd, { cwd: opts.cwd, env: opts.env });
   },
   async run(opts) {
+    await warnComposeBuildPrivacy({
+      ...opts,
+      services: [opts.service],
+      argv: buildComposeArgs(opts),
+    });
     const cmd = buildComposeRunCommand({ options: opts, disableTty: false });
     return await run(cmd, {
       cwd: opts.cwd,

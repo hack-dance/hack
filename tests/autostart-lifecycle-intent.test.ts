@@ -156,6 +156,7 @@ async function installComposeNameFixture(opts?: {
   readonly holdStart?: boolean;
   readonly holdRestart?: boolean;
   readonly holdBeforePin?: boolean;
+  readonly holdBeforePinStack?: string;
   readonly foreignCheckout?: string;
   readonly foreignStack?: string;
   readonly foreignContext?: string;
@@ -235,7 +236,7 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
 } else if (mode === "ps" || mode === "inspect") {
   if (options.requireEngineHook && !(await Bun.file(fixture + "/engine-hook-ready").exists())) process.exit(9);
   if (options.failPs) process.exit(9);
-  if (options.holdBeforePin && mode === "ps" && stack === "sample" && !(await Bun.file(fixture + "/release-start").exists())) {
+  if (options.holdBeforePin && mode === "ps" && stack === (options.holdBeforePinStack || "sample") && !(await Bun.file(fixture + "/release-start").exists())) {
     await Bun.write(fixture + "/before-pin", "entered");
     const deadline = Date.now() + 12000;
     while (!(await Bun.file(fixture + "/release-start").exists())) {
@@ -857,7 +858,9 @@ test.each([
   const locked = join(root, "before-pin");
   const release = join(root, "release-start");
   const locks = join(root, "home", ".hack", "autostart-locks");
-  const lockKey = createHash("sha256").update("sample").digest("hex");
+  const lockKey = createHash("sha256")
+    .update(isForeign ? "sample" : `checkout:${otherHack}\0`)
+    .digest("hex");
   if (isForeign) {
     await mkdirOwnedFixture(otherHack, true);
     await writeOwnedFixture(
@@ -900,7 +903,7 @@ test.each([
           (file) =>
             file.startsWith(`${lockKey}.lock.`) && file.endsWith(".owner")
         ),
-      "Ordinary Start did not wait on the Compose name"
+      "Ordinary Start did not wait for the active copy"
     );
     await Bun.write(release, "release");
     const first = await desktop;
@@ -1217,6 +1220,47 @@ process.exit(await child.exited);
   expect(await Bun.file(join(root, "compose-running")).text()).toBe("sample");
 }, 30_000);
 
+test.each([
+  "before",
+  "after",
+] as const)("ordinary Start can stop the same copy in an up.%s hook", async (phase) => {
+  const projectDir = join(root, "project", ".hack");
+  const down = [
+    process.execPath,
+    "--preload",
+    DOCKER_TRUST_PRELOAD,
+    cli,
+    "--no-interactive",
+    "down",
+    "--json",
+  ]
+    .map(quoteShellWord)
+    .join(" ");
+  const hook = phase === "after" ? `${down} && exit 7` : down;
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        up: { [phase]: [{ name: "stop-same-copy", command: hook }] },
+      },
+    })
+  );
+  await installComposeNameFixture({ startContainers: true });
+  const result = await run(["up", "-d", "--json"], false, undefined, {
+    PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+  });
+  expect(result.exitCode, result.stderr + result.stdout).toBe(
+    phase === "before" ? 0 : 7
+  );
+  const invoked = await Bun.file(join(root, "compose-down")).json();
+  expect(invoked).toContain("down");
+  expect(invoked).toContain(projectDir);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(
+    phase === "before"
+  );
+}, 20_000);
+
 test("parallel sibling writes keep each copy's runtime pin and overlay", async () => {
   const projectDir = join(root, "project", ".hack");
   const entries = Array.from({ length: 8 }, (_, index) => ({
@@ -1233,21 +1277,26 @@ test("parallel sibling writes keep each copy's runtime pin and overlay", async (
   expect(await readProjectRuntimeState({ projectDir })).toEqual(entries);
 });
 
-test("ordinary Down waits for desktop Start to publish its pin before selecting the stack", async () => {
+test.each([
+  "desktop",
+  "ordinary",
+] as const)("ordinary Down waits for %s Start to publish its pin before selecting the stack", async (mode) => {
+  const desktop = mode === "desktop";
+  const stack = desktop ? "sample" : "alternate";
   const projectDir = join(root, "project", ".hack");
-  await configureManagedNameOverlay({ defaultOverlay: true });
+  await configureManagedNameOverlay({ defaultOverlay: desktop });
   await writeRegistry(false);
   await installComposeNameFixture({
     startContainers: true,
     holdBeforePin: true,
+    holdBeforePinStack: stack,
   });
   const start = run([
     "up",
     "-d",
-    "--target",
-    "local",
-    "--expect-compose-project",
-    "sample",
+    ...(desktop
+      ? ["--target", "local", "--expect-compose-project", "sample"]
+      : ["--env", "qa"]),
     "--json",
   ]);
   const release = Bun.file(join(root, "release-start"));
@@ -1260,7 +1309,7 @@ test("ordinary Down waits for desktop Start to publish its pin before selecting 
     expect(
       await readProjectRuntimeStateEntry({
         projectDir,
-        composeProject: "sample",
+        composeProject: stack,
       })
     ).toBeNull();
     down = run(["down", "--json"]);
@@ -1277,7 +1326,7 @@ test("ordinary Down waits for desktop Start to publish its pin before selecting 
     expect(stopped.exitCode, stopped.stderr || stopped.stdout).toBe(0);
     expect(
       (await Bun.file(join(root, "compose-down")).json()).slice(0, 3)
-    ).toEqual(["compose", "-p", "sample"]);
+    ).toEqual(["compose", "-p", stack]);
     expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
   } finally {
     await Bun.write(release, "release");

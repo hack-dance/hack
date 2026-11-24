@@ -131,14 +131,29 @@ export async function withComposeCheckoutLock<T>(
   if (opts.selectedCopy || selection?.explicitBranch || copy.branch === null) {
     await opts.beforeLock?.(copy);
   }
+  return await withComposeCopyLock({
+    projectDir: project.projectDir,
+    branch: copy.branch,
+    run: () => opts.run(copy),
+  });
+}
+
+/** Serialize selection and publication for an already resolved checkout and branch. */
+export async function withComposeCopyLock<T>(opts: {
+  readonly projectDir: string;
+  readonly branch: string | null;
+  readonly signal?: AbortSignal;
+  readonly run: () => Promise<T>;
+}): Promise<T> {
   return await withAutostartProjectLock({
     scope: {
       projectId: "",
       // Delimit the branch so a checkout path cannot alias a sibling copy.
-      composeProject: `checkout:${await realpath(project.projectDir)}\0${copy.branch ?? ""}`,
+      composeProject: `checkout:${await realpath(opts.projectDir)}\0${opts.branch ?? ""}`,
       branch: null,
     },
-    run: () => opts.run(copy),
+    signal: opts.signal,
+    run: opts.run,
   });
 }
 

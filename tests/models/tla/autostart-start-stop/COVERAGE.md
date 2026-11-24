@@ -100,9 +100,11 @@ publishes only the captured engine evidence. Start and Restart recheck that
 evidence after the write. Restart settles its publication before after-hooks
 and cancels those hooks as owned process groups. Scoped readiness uses the same
 captured-engine check, and the explicit default socket matches the implicit one.
-Ordinary detached Compose startup holds the final-name lock through cache
-initialization and Compose dispatch. Checkout ownership is reread under that
-lock, as is saved engine evidence. Login startup hands its held name to the
+Ordinary detached Compose startup holds the logical checkout lock and then
+the final-name lock through cache initialization and Compose dispatch. The
+locks are released for attached hooks. Saved engine evidence and checkout
+ownership are checked on readmission before managed-process or Compose effects.
+Login startup hands its held name to the
 same flow even when no Compose name override is required. Canceling a queued
 Start removes its lock candidate while the owner remains active. Detached
 startup serializes writes and Compose reads of the generated environment

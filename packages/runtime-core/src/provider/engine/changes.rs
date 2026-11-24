@@ -101,10 +101,12 @@ impl Drop for EngineChanges {
     }
 }
 
-/// How long the worker tries to reach the engine socket, under the lock a drop also
-/// takes. The socket normally exists, so the connect is immediate; this bounds the
-/// wait a drop can have when it does not.
-const CONNECT: Duration = Duration::from_millis(200);
+/// The bound on the worker's one connect attempt, made under the lock a drop also
+/// takes. A Unix-socket connect completes or fails at once; it only waits (in
+/// progress) when the engine's listen queue is full. This is all a teardown can
+/// wait for the worker, so it stays a few milliseconds; a connect that does not
+/// finish within it leaves the waiter sleeping, as when the socket is absent.
+const CONNECT: Duration = Duration::from_millis(5);
 
 /// Connect and send the subscription, on the reader thread. The check of `closed`
 /// and the connect happen under one lock (see [`Stream`]): a waiter already dropped
@@ -179,6 +181,25 @@ mod tests {
     }
     fn path(name: &str) -> Socket {
         Socket(std::env::temp_dir().join(format!("hc-changes-{}-{name}.sock", std::process::id())))
+    }
+    /// A bounded accept: `None` when nothing connected in `limit`.
+    fn accept_within(listener: &UnixListener, limit: Duration) -> Option<(UnixStream, ())> {
+        listener.set_nonblocking(true).unwrap();
+        let end = Instant::now() + limit;
+        let accepted = loop {
+            match listener.accept() {
+                Ok((peer, _)) => break Some((peer, ())),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= end {
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        listener.set_nonblocking(false).unwrap();
+        accepted.inspect(|(peer, _)| peer.set_nonblocking(false).unwrap())
     }
     fn socket(name: &str) -> (Socket, std::path::PathBuf, UnixListener) {
         let socket = path(name);
@@ -345,7 +366,8 @@ mod tests {
         dropper.join().unwrap();
         let _ = worker.join().unwrap();
         // The one connection, made before the drop returned, is already shut.
-        let (mut peer, _) = listener.accept().unwrap();
+        let (mut peer, _) = accept_within(&listener, Duration::from_secs(5))
+            .expect("the worker made no connection");
         peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut rest = Vec::new();
         assert!(
@@ -357,6 +379,30 @@ mod tests {
         assert_eq!(
             listener.accept().map(|_| ()).unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn teardown_while_the_worker_subscribes_returns_at_once_and_nothing_connects_later() {
+        // No engine socket yet: the worker's connect fails within its bound. A
+        // teardown at any point returns within a few milliseconds (it waits for at
+        // most that one bounded attempt), and nothing connects once it has.
+        let late = path("teardown");
+        for _ in 0..20 {
+            let changes = EngineChanges::follow(&late.0, RUN);
+            let started = Instant::now();
+            drop(changes);
+            assert!(
+                started.elapsed() < Duration::from_millis(50),
+                "teardown waited {:?}",
+                started.elapsed()
+            );
+        }
+        let _ = std::fs::remove_file(&late.0);
+        let listener = UnixListener::bind(&late.0).unwrap();
+        assert!(
+            accept_within(&listener, Duration::from_millis(200)).is_none(),
+            "a worker connected after its waiter was dropped"
         );
     }
 

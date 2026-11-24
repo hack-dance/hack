@@ -479,6 +479,18 @@ impl HackApp {
             if self.tab == 2 {
                 self.read_env(cx);
             }
+        } else if let Some(name) = self.selected_service()
+            && self.model.project_list_readable()
+            && self
+                .model
+                .snapshot()
+                .is_some_and(|s| !s.projects.engine_down())
+            && self
+                .model
+                .detail()
+                .is_some_and(|detail| !detail.services.iter().any(|service| service.name == name))
+        {
+            self.clear_selected_service();
         }
         if self.shows_json_logs() && selection_changed {
             self.open_logs(cx);

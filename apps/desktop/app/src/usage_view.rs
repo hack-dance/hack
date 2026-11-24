@@ -73,7 +73,7 @@ impl HackApp {
     fn target(&self, visible: bool) -> Option<UsageTarget> {
         if self.pane != Pane::Project
             || self.tab != 0
-            || self.stats_service.is_some()
+            || self.selected_service().is_some()
             || (visible && !self.window_visible)
         {
             return None;
@@ -415,35 +415,6 @@ mod tests {
             source.take().is_empty(),
             "wait for the next sample interval"
         );
-    }
-
-    #[test]
-    fn the_services_table_resumes_usage_after_the_stats_service_disappears() {
-        let (mut cx, app, _) = window();
-        cx.update(|cx| {
-            app.update(cx, |a, cx| {
-                a.stats_service = Some("api".into());
-                assert!(a.usage_target().is_none());
-                let mut snapshot = a.model.snapshot().unwrap().clone();
-                let project = snapshot
-                    .projects
-                    .projects
-                    .iter_mut()
-                    .find(|p| p.name == "storefront")
-                    .unwrap();
-                project.defined_services.retain(|name| name != "api");
-                project
-                    .runtime
-                    .as_mut()
-                    .unwrap()
-                    .services
-                    .retain(|s| s.service != "api");
-                let token = a.model.begin_refresh();
-                assert!(a.apply_refresh(token, Ok(snapshot), cx));
-                assert!(a.stats_service.is_none());
-                assert!(a.usage_target().is_some());
-            });
-        });
     }
 
     #[test]

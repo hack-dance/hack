@@ -282,16 +282,17 @@ fn require_virgin(candidate: &Candidate) {
         "fixture home contains non-preparation state"
     );
     let provider = run.join("smolvm");
+    // Acquiring the provider lock writes a holder label, so check it first.
+    assert_eq!(
+        fs::metadata(provider.join("operation.lock")).unwrap().len(),
+        0,
+        "preparation lock contains unexpected data"
+    );
     let _lock = state::Lock::acquire_existing(&provider).unwrap();
     assert_eq!(
         entries(&provider),
         vec![std::ffi::OsString::from("operation.lock")],
         "fixture home contains prior runtime state"
-    );
-    assert_eq!(
-        fs::metadata(provider.join("operation.lock")).unwrap().len(),
-        0,
-        "preparation lock contains unexpected data"
     );
 }
 
@@ -385,8 +386,8 @@ fn owned_named_volume_integrity_survives_container_restart() {
     for cycle in 1..=2 {
         {
             let engine = Engine::connect(&candidate).unwrap();
-            let (selected, graph_root) = load(&candidate, &engine, &run_id).unwrap();
-            super::super::stop_owned(&engine, &selected, &graph_root).unwrap();
+            let (mut selected, graph_root) = load(&candidate, &engine, &run_id).unwrap();
+            super::super::stop_owned(&engine, &mut selected, &graph_root, &|| Ok(())).unwrap();
             let container =
                 inspect_resource(&engine, &selected, &selected.resources["container:probe"])
                     .unwrap()

@@ -167,6 +167,10 @@ renders the window after each step of a short click-through on fixtures
 method its click handler calls; it is not a synthetic mouse event.
 [Click-through](screenshots/window/click-through.png).
 
+To capture the grouped sidebar and row menu in both themes, run
+`hack-desktop --screenshots <dir> --fixtures grouped-sidebar` with the
+screenshots build. This fixture drives the sidebar and menu through GPUI clicks.
+
 ## Window
 
 The window follows [DESIGN-V1.md](DESIGN-V1.md).
@@ -182,17 +186,16 @@ The window follows [DESIGN-V1.md](DESIGN-V1.md).
 - **Live data only.** Without `--fixtures` everything comes from hackd and the
   CLI. What the CLI does not report is not invented: CPU and memory are a dash
   with a tooltip; the always-on switch is disabled with its reason (HACK-2213).
-- **Branch instances** (`hack up --branch <name>`) are listed under their
-  project from `/v1/projects` `branch_runtime`, with their own state,
-  services and routes (from each container's `caddy` label). Its URL is
-  `<branch>.<dev host>`, the host `hack open --branch` opens, never a service
-  route. Selecting one runs Start, Stop, Restart, Open and Logs with
-  `--branch <name>` in the checkout that started it (a registered linked
-  worktree or the main checkout, from Compose's `working_dir`, compared as
-  canonical paths so a checkout reached through a link still matches); when
-  that checkout is not one the project registered, the app offers no actions. A project
-  whose only running instances are branches is in the Running group. Native
-  branch instances are not in that read yet (DESIGN.md R19).
+- **Projects and copies.** The project tree shows `main`, registered
+  worktrees and Hack branches. Only the selected copy expands to show its
+  services. The Services tab lists Other copies and their routes, including
+  copies with no running containers. hackd and the CLI report configuration
+  in `branch_copies` and runtime observations in `branch_runtime`.
+- **Service actions.** Hover a service to open its route or stop it. Its
+  menu also opens filtered logs, opens the existing Ghostty drawer for a
+  shell, restarts the service, and copies its route. Selection and Files
+  navigation use the service pane's instance-scoped navigation target.
+  Use the copy header's menu to inspect the full copies report.
 - **Daemon match.** Equal version strings match. Otherwise the core asks the
   CLI (`hack daemon status --json`, `api_compatible`) once per version pair.
   When they do not match, the banner says which side to update: an older
@@ -854,9 +857,9 @@ Drop's reader join completes. These test allowances do not change CLI timeouts.
 
 ## Service details
 
-Select a service from the Services table to open its detail pane. The pane opens
-on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
-Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
+Select a service from the sidebar or Services table to open its detail pane.
+The pane opens on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
+Info, Stats, Logs, Terminal and Files. Stats shows recent Compose resource use.
 
 - **Info** shows copyable route, health, image, mount, container name and
   startup information reported for the selected service. A Compose ownership
@@ -871,14 +874,13 @@ Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
   the last shell exits. The ended tab retains its scrollback. Terminal tabs
   stay open when you switch detail tabs, and the drawer keeps Ghostty’s
   configured appearance.
-- **Restart** calls Hack for the selected service. **Stop** targets its
-  observed running Compose containers and confirms their identity with Docker
-  before stopping by full ID. On macOS, the explicit service action accepts
-  Docker CLI installs under the standard system Applications directory when
-  that directory is writable only by root and the local administrators group.
-  The project’s **Stop** still runs instance-wide
-  `hack down`.
+- **Files** opens the existing file browser on the selected service.
+- **Restart** and **Stop** call Hack with the selected checkout, Compose
+  project and service. Hack checks checkout ownership and stops containers by
+  full ID. The project’s **Stop** still runs instance-wide `hack down`.
 
 With the screenshots feature enabled, run `hack-desktop --service-screenshots
 <dir>` to render the pane’s light and dark fixtures and exercise its tab
-shortcuts through the app keymap.
+shortcuts through the app keymap. The dark window chrome and service pane
+use the HTP design system's Merino Dark palette. The terminal captures include
+the ended shell and the fresh session opened from it.

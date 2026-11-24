@@ -72,7 +72,7 @@ impl Field {
             Kind::Options(options) if options.contains(&value) => Ok(value),
             Kind::Options(_) => Err("Choose a listed value."),
             Kind::Overlay
-                if !value.is_empty()
+                if value.bytes().any(|b| b.is_ascii_alphanumeric())
                     && !value.starts_with('-')
                     && value
                         .bytes()
@@ -107,10 +107,7 @@ pub struct Report {
 impl Report {
     pub fn command(&self, field: Field, input: &str) -> Result<String, &'static str> {
         let arg = field.argv_value(input)?;
-        let mut words = command_args(self.root.as_deref(), field, Some(&arg));
-        if let Some(root) = self.root.as_deref() {
-            words.extend(["--path", root.to_str().ok_or("Checkout path unavailable")?]);
-        }
+        let words = command_args(self.root.as_deref(), field, Some(&arg))?;
         let executable = self.executable.to_str().ok_or("CLI path unavailable")?;
         Ok(std::iter::once(executable)
             .chain(words)
@@ -120,14 +117,21 @@ impl Report {
     }
 }
 
-fn command_args<'a>(root: Option<&Path>, field: Field, value: Option<&'a str>) -> Vec<&'a str> {
+fn command_args<'a>(
+    root: Option<&'a Path>,
+    field: Field,
+    value: Option<&'a str>,
+) -> Result<Vec<&'a str>, &'static str> {
     let mut args = vec!["config", if value.is_some() { "set" } else { "get" }];
     if root.is_none() {
         args.push("--global");
     }
     args.push(field.key);
     args.extend(value);
-    args
+    if let Some(root) = root {
+        args.extend(["--path", root.to_str().ok_or("Checkout path unavailable")?]);
+    }
+    Ok(args)
 }
 
 pub(crate) fn read(
@@ -140,7 +144,7 @@ pub(crate) fn read(
         .map_err(|_| "Hack CLI unavailable")?;
     let (out, err, code) = runner
         .run_raw(
-            &command_args(root.as_deref(), field, None),
+            &command_args(root.as_deref(), field, None)?,
             root.as_deref(),
             Duration::from_secs(10),
         )
@@ -169,7 +173,7 @@ pub(crate) fn write(
     let raw = field.argv_value(input)?;
     let (_, _, code) = runner
         .run_raw(
-            &command_args(report.root.as_deref(), field, Some(&raw)),
+            &command_args(report.root.as_deref(), field, Some(&raw))?,
             report.root.as_deref(),
             Duration::from_secs(20),
         )
@@ -274,5 +278,8 @@ esac
             "'hack-next' 'config' 'set' '--global' 'logging.enabled' 'false'"
         );
         assert!(GLOBAL[2].parse("local").is_err());
+        for invalid in [".", "_", "._-"] {
+            assert!(PROJECT[0].parse(invalid).is_err());
+        }
     }
 }

@@ -33,6 +33,9 @@ const MIN_TIMEOUT_MS = 1000;
 const MAX_STARTUP_TIMEOUT_MS = 3_600_000;
 const MAX_STARTUP_CEILING_MS = 14_400_000;
 const MAX_IMAGE_TIMEOUT_MS = 14_400_000;
+/** One detached Compose attempt can occupy its generated reference file for both phases. */
+export const COMPOSE_ENV_OVERRIDE_WAIT_MS =
+  MAX_IMAGE_TIMEOUT_MS + MAX_STARTUP_CEILING_MS + 60_000;
 const MAX_NATIVE_STORAGE_TIMEOUT_MS = 600_000;
 const INTEGER_TEXT = /^[0-9]+$/;
 

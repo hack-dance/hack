@@ -30,7 +30,7 @@ pub(crate) const FILES_TAB: usize = 4;
 
 #[derive(Default)]
 pub(crate) struct ProjectFiles {
-    service: Option<String>,
+    service: Option<(InstanceKey, String)>,
     pane: Option<(InstanceKey, u64, Entity<FilesPane>)>,
 }
 
@@ -49,19 +49,15 @@ impl HackApp {
                 .text_color(ui.p.text_secondary)
                 .child(text)
         };
-        let Some((root, native)) = self.selected_root() else {
-            return message("The service checkout is unavailable.");
-        };
-        if native {
+        if detail.backend == "native" {
             return message("Files are available for Compose services.");
         }
         let Some(service) = self.files_service(detail).cloned() else {
             return message("No services reported for this project.");
         };
-        let target = Target {
-            root,
-            branch: detail.key.branch.clone(),
-            service: service.clone(),
+        let Some(target) = self.files_target(detail, service) else {
+            self.files.pane = None;
+            return message("The service's Compose project is unavailable.");
         };
         let epoch = self.model.source_epoch();
         if self
@@ -85,11 +81,29 @@ impl HackApp {
             .children(self.files.pane.iter().map(|(_, _, pane)| pane.clone()))
     }
 
-    fn files_service<'a>(&'a self, detail: &'a DetailView) -> Option<&'a String> {
+    fn files_target(&self, detail: &DetailView, service: String) -> Option<Target> {
+        let runtime = self.model.runtime_target(&detail.key)?;
+        Some(Target {
+            root: PathBuf::from(runtime.root),
+            branch: detail.key.branch.clone(),
+            compose_project: runtime.compose_project?,
+            service,
+        })
+    }
+
+    pub(crate) fn files_service<'a>(&'a self, detail: &'a DetailView) -> Option<&'a String> {
         let services = &detail.services;
+        if let Some(selected) = self.model.selected_service().filter(|selected| {
+            selected.instance == detail.key
+                && selected.destination == hack_desktop_core::viewmodel::ServiceDestination::Files
+        }) {
+            return Some(&selected.name);
+        }
         self.files
             .service
             .as_ref()
+            .filter(|(key, _)| key == &detail.key)
+            .map(|(_, service)| service)
             .filter(|name| services.iter().any(|service| &service.name == *name))
             .or_else(|| services.iter().find(|s| s.running).map(|s| &s.name))
             .or_else(|| services.first().map(|s| &s.name))
@@ -98,11 +112,15 @@ impl HackApp {
     pub(crate) fn project_files_picker(&self, detail: &DetailView, cx: &Context<Self>) -> Div {
         let mut picker = div().ml_auto().flex().items_center();
         if detail.services.len() > 1
-            && self.selected_root().is_some_and(|(_, native)| !native)
+            && self
+                .model
+                .runtime_target(&detail.key)
+                .is_some_and(|target| target.compose_project.is_some())
             && let Some(service) = self.files_service(detail).cloned()
         {
             let app = cx.entity().downgrade();
             let names: Vec<_> = detail.services.iter().map(|s| s.name.clone()).collect();
+            let key = detail.key.clone();
             picker = picker.child(
                 Button::new("files-service")
                     .outline()
@@ -112,13 +130,17 @@ impl HackApp {
                         names.iter().fold(menu, |menu, name| {
                             let app = app.clone();
                             let choice = name.clone();
+                            let key = key.clone();
                             menu.item(
                                 PopupMenuItem::new(name.clone())
                                     .checked(*name == service)
                                     .on_click(move |_, _, cx| {
                                         let _ = app.update(cx, |app, cx| {
-                                            app.files.service = Some(choice.clone());
-                                            cx.notify();
+                                            if app.model.selected_key().as_ref() == Some(&key) {
+                                                app.files.service =
+                                                    Some((key.clone(), choice.clone()));
+                                                cx.notify();
+                                            }
                                         });
                                     }),
                             )
@@ -131,24 +153,24 @@ impl HackApp {
 
     pub(crate) fn show_files_fixture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use hack_desktop_core::viewmodel::Event;
-        let key = InstanceKey::branch("storefront", "feature-search");
-        self.model.apply(Event::SelectInstance(key.clone()));
+        self.model.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "feature-search",
+        )));
         self.tab = FILES_TAB;
-        let Some((root, _)) = self.selected_root() else {
+        let Some(detail) = self.model.detail() else {
             return;
         };
-        let target = Target {
-            root,
-            branch: key.branch.clone(),
-            service: "api".into(),
+        let Some(target) = self.files_target(&detail, "api".into()) else {
+            return;
         };
         let pane = cx.new(|cx| {
             let mut pane = FilesPane::new(target, self.source.clone(), window, cx);
             pane.show_fixture();
             pane
         });
-        self.files.service = Some("api".into());
-        self.files.pane = Some((key, self.model.source_epoch(), pane));
+        self.files.service = Some((detail.key.clone(), "api".into()));
+        self.files.pane = Some((detail.key, self.model.source_epoch(), pane));
     }
 }
 

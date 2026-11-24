@@ -5,7 +5,10 @@
 Four distinct image jobs share three workers, an archive coordinator and one
 importer. A failed fetch or import prevents graph start. Cancel stops the
 workers and preserves an in-flight import as unknown until reconciliation.
-TLC explores 3,233 states. Removing importer exclusion violates Safe.
+TLC explores 3,233 states. Removing importer exclusion violates `Safe` when any
+two jobs are importing at the same time. The verifier checks their phases and
+verified archives in the final state, including when either remaining job has
+finished or failed.
 
 | Model action | Runtime transition |
 | --- | --- |

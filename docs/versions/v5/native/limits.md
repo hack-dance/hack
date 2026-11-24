@@ -22,7 +22,7 @@ when a new run needs the room. Runs that keep their data are never archived; whe
 remove the data of a project you no longer use.
 
 The host image cache keeps up to 64 verified registry archives. An online
-acquisition at the slot limit can discard the oldest archive that retained
+acquisition at the slot limit can discard the least recently used archive that retained
 graph state does not reference. Images already loaded in the pool stay loaded.
 If every archive is referenced, the acquisition refuses.
 

@@ -692,6 +692,8 @@ fn restore_inputs(
             )?;
             superseded = true;
         }
+        // The restoring receipt is committed: the previous start's record is superseded.
+        super::startup_failure::clear_after_started(&session.root)?;
         // Every prior slot was re-retired under this lease and each prior container is absent:
         // compact that history before the new generation allocates, so restore and the next
         // cleanup scan only active allocations. A refusal retains the records.
@@ -704,9 +706,13 @@ fn restore_inputs(
             );
         }
         session.create_resources(true)?;
-        execution::run(&prepared.graph, &mut session, options.timeout)
+        let changes = session.engine_changes();
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
     })();
     if let Err(failure) = result {
+        super::startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         retain_restore_failure(
             &session.root,
             &mut session.receipt,

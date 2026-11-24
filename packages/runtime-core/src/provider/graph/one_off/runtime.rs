@@ -92,6 +92,7 @@ pub fn begin(
         .insert(service.clone(), Condition::Started);
     receipt.set_phase("restoring");
     state::write(&root.join("state.json"), &receipt)?;
+    super::super::startup_failure::clear_after_started(&root)?;
     runtime.enroll_job(&engine, &mut receipt, &root, &selection.service, &service)?;
     let mut session = Session {
         startup: Some(runtime),

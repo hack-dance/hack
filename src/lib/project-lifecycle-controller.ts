@@ -94,6 +94,23 @@ export function resolveLifecycleSessionName(opts: {
   return buildLifecycleSessionName(opts);
 }
 
+function resolveMuxLifecycleSessionName(composeProject: string): string {
+  return buildLifecycleSessionName({
+    projectName: composeProject,
+    branch: null,
+  });
+}
+
+function recordedLifecycleSessionName(
+  entry: LifecycleStateEntry | null,
+  current: string
+): string {
+  if (entry && entry.sessionName === resolveLifecycleSessionName(entry)) {
+    return entry.sessionName;
+  }
+  return current;
+}
+
 export function resolveLifecycleCwd(opts: {
   readonly projectRoot: string;
   readonly cwd: string | undefined;
@@ -276,6 +293,8 @@ export function createLifecycleProcessController(opts: {
     readonly cleanup: LifecycleOperationCleanup;
   }) => { readonly dispose: () => void };
   readonly assertFresh?: () => Promise<void>;
+  /** The caller releases copy admission for attached hooks. Recheck before resuming effects. */
+  readonly revalidateSession?: boolean;
   /**
    * Shared helper session ownership (projects with `sharedHelpers`). The
    * session decision (inspect, adopt or replace) and session creation run
@@ -323,10 +342,10 @@ export function createLifecycleProcessController(opts: {
         }),
     });
   }
-  const sessionName = resolveLifecycleSessionName({
-    projectName: opts.projectName,
-    branch: opts.branch,
-  });
+  const currentSessionName = resolveMuxLifecycleSessionName(
+    opts.composeProject
+  );
+  let sessionName = currentSessionName;
   const startedProcesses: StartedLifecycleProcess[] = [];
   const retireSession =
     opts.retireSession ??
@@ -335,6 +354,7 @@ export function createLifecycleProcessController(opts: {
   let sessionReady = false;
   let sessionDispositionResolved = false;
   let createdOwnershipToken: string | null = null;
+  let cleanupEpoch: string | undefined;
   let adoptedEntry: LifecycleStateEntry | null = null;
   let operationSignalCleanup: { readonly dispose: () => void } | null = null;
   let sessionCreationSettled: Promise<void> = Promise.resolve();
@@ -387,21 +407,26 @@ export function createLifecycleProcessController(opts: {
       entries.find(
         (candidate) => candidate.composeProject === opts.composeProject
       ) ?? null;
+    const recordedName = recordedLifecycleSessionName(
+      persistedEntry,
+      currentSessionName
+    );
     const entry = await reconcileChangedLifecycleBackend({
       mux,
       entry: persistedEntry,
       resolvedBackend,
-      sessionName,
+      sessionName: recordedName,
       projectRoot: opts.project.projectRoot,
       projectDir: opts.project.projectDir,
       composeProject: opts.composeProject,
       definitionHash: opts.definitionHash,
     });
+    const inspectionName = entry ? recordedName : currentSessionName;
     backendName = resolvedBackend;
     const inspection = await inspectLifecycleSession({
       backend,
       entry,
-      expectedSessionName: sessionName,
+      expectedSessionName: inspectionName,
       expectedProjectRoot: opts.project.projectRoot,
       expectedDefinitionHash: opts.definitionHash,
     });
@@ -409,7 +434,16 @@ export function createLifecycleProcessController(opts: {
       throw new Error(inspection.decision.reason);
     }
     if (inspection.decision.kind === "adopt") {
+      sessionName = inspectionName;
       adoptedEntry = inspection.decision.entry;
+      if (opts.revalidateSession || adoptedEntry.cleanupEpoch) {
+        cleanupEpoch = createLifecycleOwnershipToken();
+        adoptedEntry = { ...adoptedEntry, cleanupEpoch };
+        await upsertLifecycleStateEntry({
+          projectDir: opts.project.projectDir,
+          entry: adoptedEntry,
+        });
+      }
       startedProcesses.push(...inspection.decision.entry.processes);
       sessionReady = true;
       sessionDispositionResolved = true;
@@ -420,7 +454,7 @@ export function createLifecycleProcessController(opts: {
       await replaceInspectedLifecycleSession({
         backend,
         inspection,
-        sessionName,
+        sessionName: inspectionName,
         projectDir: opts.project.projectDir,
         composeProject: opts.composeProject,
       });
@@ -441,6 +475,9 @@ export function createLifecycleProcessController(opts: {
       throw new Error("Lifecycle mux backend became unavailable");
     }
     const ownershipToken = createLifecycleOwnershipToken();
+    if (opts.revalidateSession) {
+      cleanupEpoch = createLifecycleOwnershipToken();
+    }
     let settleSessionCreation = (): void => undefined;
     sessionCreationSettled = new Promise<void>((resolvePromise) => {
       settleSessionCreation = resolvePromise;
@@ -457,6 +494,7 @@ export function createLifecycleProcessController(opts: {
       sessionName,
       backend: backendName,
       ownershipToken,
+      ...(cleanupEpoch ? { cleanupEpoch } : {}),
       definitionHash: opts.definitionHash,
       processes: [],
       updatedAt: new Date().toISOString(),
@@ -557,14 +595,33 @@ export function createLifecycleProcessController(opts: {
     const expected =
       createdOwnershipToken ?? adoptedEntry?.ownershipToken ?? null;
     const persistedOurs =
-      entry !== null && (entry.ownershipToken ?? null) === expected;
-    const liveOurs =
-      expected === null || !backend?.readLifecycleOwnerToken
-        ? true
-        : (await backend
-            .readLifecycleOwnerToken({ name: sessionName })
-            .catch(() => undefined)) === expected;
-    return persistedOurs && liveOurs;
+      entry !== null &&
+      (entry.ownershipToken ?? null) === expected &&
+      (!(opts.revalidateSession && cleanupEpoch) ||
+        entry.cleanupEpoch === cleanupEpoch);
+    if (!(persistedOurs && backend?.available)) {
+      return false;
+    }
+    if (expected !== null && backend.readLifecycleOwnerToken) {
+      return (
+        (await backend
+          .readLifecycleOwnerToken({ name: sessionName })
+          .catch(() => undefined)) === expected
+      );
+    }
+    if (!opts.revalidateSession) {
+      return true;
+    }
+    if (backend.readSessionPresence) {
+      return (
+        (await backend
+          .readSessionPresence({ name: sessionName })
+          .catch(() => "unknown")) === "present"
+      );
+    }
+    return (await backend.listSessions().catch(() => [])).some(
+      (session) => session.name === sessionName
+    );
   };
 
   /** Give up cleanup and finalize authority over a replaced session. */
@@ -662,6 +719,7 @@ export function createLifecycleProcessController(opts: {
         sessionName,
         backend: backendName,
         ...(ownershipToken ? { ownershipToken } : {}),
+        ...(cleanupEpoch ? { cleanupEpoch } : {}),
         definitionHash: opts.definitionHash,
         processes: startedProcesses,
         updatedAt: new Date().toISOString(),
@@ -731,6 +789,13 @@ export function createLifecycleProcessController(opts: {
     process: ProjectLifecycleProcess
   ): Promise<void> => {
     await resolveSessionDisposition();
+    if (
+      opts.revalidateSession &&
+      sessionReady &&
+      !(await sessionStillOwned())
+    ) {
+      relinquishDisplacedSession();
+    }
     if (adoptedEntry?.processes.some((entry) => entry.name === process.name)) {
       return;
     }
@@ -756,7 +821,10 @@ export function createLifecycleProcessController(opts: {
     // and only while the session still carries this start's token, so a
     // displaced start never adds windows or panes to its replacement.
     const started = await underInstanceLock(async () => {
-      if (opts.sessionOwnership && !(await sessionStillOwned())) {
+      if (
+        (opts.sessionOwnership || opts.revalidateSession) &&
+        !(await sessionStillOwned())
+      ) {
         relinquishDisplacedSession();
       }
       return await startLifecycleProcess({
@@ -779,7 +847,9 @@ export function createLifecycleProcessController(opts: {
   };
 
   return {
-    sessionName,
+    get sessionName() {
+      return sessionName;
+    },
     startFromCommand: async ({ command, serviceName }) => {
       await startProcess({
         name: serviceName,
@@ -797,7 +867,11 @@ export function createLifecycleProcessController(opts: {
     finalize: async () => {
       const ownership = opts.sessionOwnership;
       if (!ownership) {
-        await publishFinalEntry();
+        if (opts.revalidateSession && sessionReady) {
+          await publishFinalEntryIfStillOwned();
+        } else {
+          await publishFinalEntry();
+        }
         return;
       }
       // Conditional publication under the instance lock: another start may
@@ -873,6 +947,16 @@ export function createLifecycleProcessController(opts: {
   }): Promise<undefined | typeof LIFECYCLE_SESSION_RETAINED> {
     if (!(createdOwnershipToken && backendName)) {
       return undefined;
+    }
+    if (cleanupEpoch) {
+      const entries = await readLifecycleState(opts.project);
+      const entry = entries.find(
+        (candidate) => candidate.composeProject === opts.composeProject
+      );
+      if (entry?.cleanupEpoch !== cleanupEpoch) {
+        createdOwnershipToken = null;
+        return undefined;
+      }
     }
     const backend = (await opts.mux()).backends.get(backendName);
     let stopped = false;
@@ -1207,10 +1291,6 @@ export async function stopLifecycleProcessController(opts: {
   readonly readIdentities?: typeof readProcessIdentities;
 }): Promise<void> {
   await opts.assertFresh?.();
-  const sessionName = resolveLifecycleSessionName({
-    projectName: opts.projectName,
-    branch: opts.branch,
-  });
   const lifecycleEntries = await readLifecycleState({
     projectDir: opts.project.projectDir,
   });
@@ -1218,6 +1298,10 @@ export async function stopLifecycleProcessController(opts: {
     lifecycleEntries.find(
       (entry) => entry.composeProject === opts.composeProject
     ) ?? null;
+  const sessionName = recordedLifecycleSessionName(
+    lifecycleEntry,
+    resolveMuxLifecycleSessionName(opts.composeProject)
+  );
 
   if (lifecycleEntry?.backend === "supervisor") {
     await stopSupervisorEntry(opts, lifecycleEntry);

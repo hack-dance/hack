@@ -11,6 +11,7 @@ export const MACHINE_SCHEMAS = {
   globalUp: "hack.global-up.v1",
   usageByService: "hack.usage.by-service.v1",
   files: "hack.files.v1",
+  serviceAdd: "hack.service-add.v1",
   updateCheck: "hack.update-check.v1",
   daemonStart: "hack.daemon-start.v1",
   daemonStop: "hack.daemon-stop.v1",

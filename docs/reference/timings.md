@@ -97,15 +97,17 @@ its role to declare the mode.
 
 Start-graph steps are `start.observe`, `start.decide`, `start.wave.record`,
 `container.create`, `container.start`, `container.remove`, `container.ready`,
-`container.publish`, and `spec.digest`. Kept services use `ok` with `cached:true`;
+`container.publish`, `spec.digest`, and `env.stage`. Kept services use `ok` with `cached:true`;
 created/recreated services use `ok` without `cached`. Dependency-blocked work uses
 `skipped` with `attrs.blocked:true`. A still-warming service has no completed
 `container.ready` span until readiness is observed; the owner may outlive the CLI.
 Between a dependency's gate and its dependent's create, a fresh start records
 `start.wave.record` (the durable start-intent receipt write), `container.inspect`
 (the check that no container already has the planned name) and `container.create`
-(the create request). Managed-environment staging, when the service has managed
-values, runs between `spec.digest` and `container.create` without a span of its own.
+(the create request). A service with managed values also records `env.stage`
+(staging its values into the guest and checking the staged path) between
+`spec.digest` and `container.create`. Its durable attachment marker is part of the
+start-intent write; a second `start.wave.record` appears only when it was not.
 
 Numeric keys include `service_index`, `attempt`, `engine_requests`, `dropped`,
 `services`, `wave`, `syncs`, `waited_on_index`, and `generation`. Boolean keys include
@@ -137,3 +139,27 @@ for the full attribute vocabulary there. Linux datagram payload capacity is
 queried from `SO_SNDBUF` minus its 32-byte kernel reservation. No global socket
 settings are changed. Diagnostic writes never wait for the reader; saturation
 can drop records and is reported by the truncation marker when it can be sent.
+
+For native startup, `cli.project.selection` and `cli.compose.resolve` cover
+selection in the launcher and configuration resolution in the owner.
+`cli.env.overlay` covers startup input and environment preparation.
+`cli.graph.preflight`, `cli.graph.resolve` and `cli.graph.prepare` cover
+admission, plan inputs and graph launch preparation. `cli.readiness.finalize`
+covers the readiness inspection, publication and hooks. The detached launcher
+also records owner launch, acceptance and result preparation. These phases
+can overlap runtime request spans.
+
+The foreground graph owner emits `graph.owner.input` and, for normalized
+inputs, `graph.owner.configure` before entering the graph. It completes
+`graph.owner.startup` on the timing descriptor before flushing the ready
+reply. This lets the launcher collect startup work while the owner remains
+alive. Between `services.ready` and that reply, `graph.ready.commit` covers
+final verification and durable receipt publication. The `graph.publish.*`
+spans distinguish probe-generation seeding, endpoint reservation, relay
+startup, and publisher readiness verification.
+
+Before provider spawn, `vm.startup.lease` covers acquiring the startup lease,
+`vm.admission.wait` covers the remaining Development host-sampling window
+when it actually sleeps, and `vm.release.verify` covers verifying the retained
+pool's provider release. The existing `vm.ensure` reuse attribute distinguishes
+a recorded sample that replaced the wait. The sampling interval is unchanged.

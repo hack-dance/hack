@@ -7,24 +7,26 @@ import type {
 import { defineCommand, withHandler } from "../cli/command.ts";
 import { optBranch, optJson, optPath, optProject } from "../cli/options.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
-import {
-  branchComposeProjectName,
-  resolveComposeProjectName,
-} from "../lib/compose-project-name.ts";
-import { resolveHackEnv } from "../lib/hack-env.ts";
-import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
-import { readProjectConfig, sanitizeProjectSlug } from "../lib/project.ts";
-import { resolveProjectEnvConfig } from "../lib/project-env-config.ts";
+import { readProjectConfig } from "../lib/project.ts";
 import { readServiceFiles } from "../lib/service-files.ts";
 import { TARGET_SERVICE_PATTERN } from "../lib/target-inspect.ts";
 import {
+  assertSavedDockerEngine,
+  optExpectComposeProject,
+  resolveComposeCommandTarget,
   resolveEffectiveBranchForCommand,
+  resolveProjectExecutionEnv,
   resolveProjectForArgs,
-  resolveStoredRuntimeEnvName,
 } from "./project.ts";
 
-const options = [optBranch, optPath, optProject, optJson] as const;
+const options = [
+  optBranch,
+  optPath,
+  optProject,
+  optExpectComposeProject,
+  optJson,
+] as const;
 const positionals = [
   { name: "service", required: true },
   { name: "container-path", required: true },
@@ -76,41 +78,37 @@ async function runFiles(
     noticeToStderr: args.options.json === true,
   });
   const cfg = await readProjectConfig(project);
-  const base = await resolveComposeProjectName({ project, cfg });
-  const projectName = sanitizeProjectSlug(base);
-  const composeProject = branch
-    ? branchComposeProjectName({ base, branch })
-    : null;
-  const envName = await resolveStoredRuntimeEnvName({
-    requestedEnvName: undefined,
-    projectDir: project.projectDir,
-    composeProject: resolveLifecycleComposeProjectName({ projectName, branch }),
-  });
-  // Compose's project selection can come from either the invoked environment
-  // or its own .env. Use the environment sources used by exec without its
-  // migration prompts or generated-file writes.
-  const modern = await resolveProjectEnvConfig({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
-    envName,
+  const target = await resolveComposeCommandTarget({
+    project,
+    cfg,
+    branch,
+    options: args.options,
+    readOnly: true,
     serviceNames: [service],
   });
-  const env =
-    modern?.globalEnv ??
-    (
-      await resolveHackEnv({
-        projectDir: project.projectDir,
-        projectName,
-        envName,
-        allowKeyProvisioning: false,
-      })
-    ).envForCompose;
+  const { env } =
+    target.selected ??
+    (await resolveProjectExecutionEnv({
+      project,
+      projectName: target.lifecycle.projectName,
+      envName: target.envName,
+      readOnly: true,
+      serviceNames: [service],
+    }));
+  if (args.options.expectComposeProject !== undefined) {
+    await assertSavedDockerEngine({
+      projectDir: project.projectDir,
+      lifecycleComposeProject: target.lifecycle.lifecycleComposeProject,
+      env,
+    });
+  }
   const result = await readServiceFiles({
     operation,
     project,
+    expectedProject: target.expected,
     composeArgs: buildComposeArgs({
       composeFiles: [project.composeFile],
-      composeProject,
+      composeProject: target.composeProjectName,
       cwd: project.projectDir,
       profiles: ["*"],
     }),

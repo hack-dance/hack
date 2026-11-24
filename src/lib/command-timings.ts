@@ -61,7 +61,7 @@ class CommandTimings {
 
   private record(
     span: string,
-    step: TimingStep,
+    step: TimingStep | UpTimingStep,
     start_us: number,
     outcome: Outcome
   ): TimingRecord {
@@ -170,6 +170,18 @@ class CommandTimings {
     ) {
       this.add(record);
     }
+  }
+
+  beginPhase(step: UpTimingStep) {
+    if (this.snapshot) {
+      return;
+    }
+    const start = this.now();
+    const span = id();
+    this.cliSpans.add(span);
+    return () => {
+      this.add(this.record(span, step, start, "ok"));
+    };
   }
 
   startupRelay() {
@@ -282,13 +294,87 @@ export function timedNativeSpawn(command: string[], options: RuntimeOptions) {
 }
 
 const OWNER_ARGUMENT = "--internal-up-timing=";
-const OWNER_ID = /^[0-9a-f]{32}:[0-9a-f]{16}$/;
-let inheritedRelay: ReturnType<CommandTimings["startupRelay"]>;
+const OWNER_ID = /^([0-9a-f]{32}:[0-9a-f]{16}):([0-9]{1,16})$/;
+type UpTimingStep =
+  | "cli.autostart"
+  | "cli.project.selection"
+  | "cli.owner.prepare"
+  | "cli.owner.launch"
+  | "cli.compose.resolve"
+  | "cli.env.overlay"
+  | "cli.graph.preflight"
+  | "cli.start.inputs"
+  | "cli.graph.resolve"
+  | "cli.graph.prepare"
+  | "cli.readiness.finalize"
+  | "cli.owner.accept"
+  | "cli.result.prepare";
 
-/** The detached launcher transfers only a timing socket and opaque span IDs. */
+type Relay = NonNullable<ReturnType<CommandTimings["startupRelay"]>>;
+let inheritedRelay:
+  | (Relay & {
+      send: typeof import("./native-timing-transport.ts").sendTimingLine;
+      origin: number;
+      unix: number;
+    })
+  | undefined;
+
+/** Startup phases describe frontend work, including any nested runtime spans. */
+export function beginUpTiming(step: UpTimingStep): (() => void) | undefined {
+  const owner = inheritedRelay;
+  if (!owner) {
+    return context.getStore()?.beginPhase(step);
+  }
+  const start = owner.clock();
+  if (start !== undefined) {
+    return () => {
+      if (inheritedRelay === owner) {
+        emitOwnerTiming(owner, step, start);
+      }
+    };
+  }
+}
+
+function emitOwnerTiming(
+  owner: NonNullable<typeof inheritedRelay>,
+  step: UpTimingStep,
+  start: number
+) {
+  const end = owner.clock();
+  if (end === undefined || end < start) {
+    return;
+  }
+  const [trace, parent] = owner.identity.split(":");
+  owner.send(
+    owner.fd,
+    `${JSON.stringify({
+      schema: TIMING_SCHEMA,
+      trace,
+      parent,
+      span: id(),
+      step,
+      proc: "owner",
+      clock: "host",
+      origin_unix_us: owner.unix,
+      origin_mono_us: owner.origin,
+      start_us: start - owner.origin,
+      dur_us: end - start,
+      outcome: "ok",
+      attrs: {},
+    })}\n`
+  );
+}
+
+/** The launcher transfers the socket, trace identity and monotonic launch time. */
 export function upTimingOwnerRelay() {
   const relay = context.getStore()?.startupRelay();
-  return relay && { fd: relay.fd, argument: OWNER_ARGUMENT + relay.identity };
+  const start = relay?.clock();
+  if (relay && start !== undefined) {
+    return {
+      fd: relay.fd,
+      argument: `${OWNER_ARGUMENT}${relay.identity}:${start}`,
+    };
+  }
 }
 
 export async function acceptUpTimingOwnerRelay(args: string[]) {
@@ -297,15 +383,30 @@ export async function acceptUpTimingOwnerRelay(args: string[]) {
     return args;
   }
   const fd = 4; // fd 3 belongs to the owner's existing IPC protocol.
-  const identity = argument.slice(OWNER_ARGUMENT.length);
+  const match = OWNER_ID.exec(argument.slice(OWNER_ARGUMENT.length));
+  const identity = match?.[1];
+  const origin = Number(match?.[2]);
   try {
     const transport = await import("./native-timing-transport.ts");
     if (
-      OWNER_ID.test(identity) &&
+      identity &&
+      Number.isSafeInteger(origin) &&
       fstatSync(fd).isSocket() &&
       transport.protectTimingFd(fd)
     ) {
-      inheritedRelay = { fd, identity, clock: transport.hostMonotonicUs };
+      const clock = transport.hostMonotonicUs;
+      const now = clock();
+      if (now !== undefined && origin <= now) {
+        inheritedRelay = {
+          fd,
+          identity,
+          clock,
+          origin,
+          unix: Date.now() * 1000 - (now - origin),
+          send: transport.sendTimingLine,
+        };
+        emitOwnerTiming(inheritedRelay, "cli.owner.launch", origin);
+      }
     }
   } catch {
     // An unavailable relay must not prevent the owner from starting.

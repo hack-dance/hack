@@ -117,7 +117,7 @@ pub struct RemoteStatus {
     pub target: String,
     pub state: String,
     pub probe: String,
-    pub address: RemoteAddress,
+    pub address: Option<RemoteAddress>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -137,6 +137,15 @@ pub enum RemoteAddress {
     },
     #[serde(other)]
     Unknown,
+}
+
+impl RemoteStatus {
+    #[must_use]
+    pub fn address_label(&self) -> String {
+        self.address
+            .as_ref()
+            .map_or_else(|| "unknown".into(), RemoteAddress::label)
+    }
 }
 
 impl RemoteAddress {
@@ -710,6 +719,24 @@ impl CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projects_accept_null_remote_addresses_from_the_daemon() {
+        let payload = ProjectsPayload::from_value(serde_json::json!({
+            "projects": [
+                { "name": "storefront", "remotes": [{
+                    "kind": "remote", "service": "db", "target": "unknown",
+                    "state": "declared", "probe": "not checked", "address": null
+                }] },
+                { "name": "docs-site" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(payload.projects.len(), 2);
+        let remote = &payload.projects[0].remotes[0];
+        assert!(remote.address.is_none());
+        assert_eq!(remote.address_label(), "unknown");
+    }
 
     #[test]
     fn container_status_parsing() {

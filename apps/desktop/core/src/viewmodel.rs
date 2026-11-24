@@ -1032,7 +1032,7 @@ mod tests {
         model.apply(Event::Refreshed(Ok(snap)));
         model.apply(Event::Select("storefront".into()));
         let detail = model.detail().unwrap();
-        assert_eq!(detail.remotes[0].address.label(), "$DB_HOST:5432");
+        assert_eq!(detail.remotes[0].address_label(), "$DB_HOST:5432");
         assert_eq!(detail.remotes[0].probe, "not checked");
         assert!(!format!("{detail:?}").contains("fixture-value"));
         model.apply(Event::SelectInstance(InstanceKey {

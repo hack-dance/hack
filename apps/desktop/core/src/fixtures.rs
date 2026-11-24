@@ -496,8 +496,8 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         Fixture::Remotes => {
             let mut row = storefront(all_up(), "running");
             row.remotes = serde_json::from_str(r#"[
-              {"service":"redis","target":"local","state":"declared","probe":"not checked",
-               "address":{"kind":"service","service":"cache","port":6379}},
+              {"service":"redis","target":"unknown","state":"declared","probe":"not checked",
+               "address":null},
               {"service":"database","target":"staging","state":"declared","probe":"not checked",
                "address":{"kind":"env_ref","name":"STAGING_DB_HOST","port":5432}},
               {"service":"search","target":"preview","state":"tunnel not started by this version",

@@ -1562,7 +1562,7 @@ impl HackApp {
                                 .type_step(text::MONO)
                                 .font_family(ui.mono.clone())
                                 .text_color(p.text_secondary)
-                                .child(remote.address.label()),
+                                .child(remote.address_label()),
                         )
                         .child(
                             div()

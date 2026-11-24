@@ -529,7 +529,7 @@ pub(in crate::provider::graph) mod tests {
                 }
                 "no-previous" => owner.previous_guest_boot_id = None,
                 _ => {
-                    owner.process.as_mut().unwrap().pid = i32::try_from(std::process::id()).unwrap()
+                    owner.process = Some(identity::observe(std::process::id() as i32).unwrap());
                 }
             }
             owner.save(&fixture.candidate).unwrap();

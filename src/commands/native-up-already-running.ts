@@ -1,3 +1,9 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  type NativeAuthoredProjectStatus,
+  nativeAuthoredProjectPs,
+} from "../backends/native-authored-project-observe.ts";
 import { declaredComposeProfiles } from "../backends/native-profile-selection.ts";
 import {
   type NativeProjectPsResult,
@@ -19,12 +25,14 @@ import { getString, isRecord } from "../lib/guards.ts";
 import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { quoteShellWord } from "../lib/logs.ts";
 import { readNativeComposeDocument } from "../lib/native-compose-backend-features.ts";
+import { selectNativeComposeProject } from "../lib/native-compose-selection.ts";
 import { warmingItem } from "../lib/native-start-wait.ts";
 import {
   canPrintStartSelection,
   scopedHackCommand,
 } from "../lib/printed-shell-command.ts";
 import { type ProjectContext, readProjectConfig } from "../lib/project.ts";
+import { runtimeHostMetadataComposeProject } from "../lib/runtime-host-metadata.ts";
 
 /**
  * `hack up --detach` on a native project that is already up (HACK-2102).
@@ -303,17 +311,35 @@ export async function answerNativeAlreadyRunning(opts: {
     saved: NativeProjectRun,
     project: ProjectContext
   ) => Promise<void>;
+  /**
+   * The authored (`.hack/hack.project.json`) project this `up` selects, or
+   * null for a Compose-file project. Authored projects are resolved before
+   * `resolveProject`, which refuses them. Omitted: no authored answer.
+   */
+  readonly resolveAuthored?: () => Promise<NativeAuthoredUpSelection | null>;
+  /** Test seam for the authored read-only observation. */
+  readonly authoredPs?: typeof nativeAuthoredProjectPs;
 }): Promise<number | null> {
   const startedAtMs = Date.now();
-  let observed: {
-    state: NativeAlreadyRunning;
-    projectName: string;
-    branch: string | null;
-    matches: boolean;
-    saved: NativeProjectRun;
-    project: ProjectContext;
-    scope: NativeProjectRunScope;
-  };
+  const authored = await opts.resolveAuthored?.().catch(() => null);
+  if (authored) {
+    return await answerAuthoredAlreadyRunning({
+      ...opts,
+      authored,
+      startedAtMs,
+    });
+  }
+  let observed:
+    | {
+        state: NativeAlreadyRunning;
+        projectName: string;
+        branch: string | null;
+        matches: boolean;
+        saved: NativeProjectRun;
+        project: ProjectContext;
+        scope: NativeProjectRunScope;
+      }
+    | undefined;
   try {
     const selectionTiming = beginUpTiming("cli.project.selection");
     const project = await opts.resolveProject();
@@ -371,6 +397,9 @@ export async function answerNativeAlreadyRunning(opts: {
     }
     return null;
   }
+  if (observed === undefined) {
+    return null;
+  }
   const selection = {
     ...opts.selection,
     branch: observed.branch ?? opts.selection.branch,
@@ -413,5 +442,131 @@ export async function answerNativeAlreadyRunning(opts: {
       restartCommand,
     });
   }
+  return 0;
+}
+
+/** An authored project's root and instance, as authored dispatch selects them. */
+export type NativeAuthoredUpSelection = {
+  readonly projectRoot: string;
+  /** `--branch` as given: authored commands use it unresolved. */
+  readonly branch: string | null;
+};
+
+/**
+ * The admitted project name of an authored project: the plan's `name`, the
+ * `name` of `.hack/hack.project.json`. Null when it cannot be read, so the
+ * start reports its own reason as before.
+ */
+export async function nativeAuthoredProjectName(
+  projectRoot: string
+): Promise<string | null> {
+  try {
+    const manifest: unknown = JSON.parse(
+      await readFile(join(projectRoot, ".hack", "hack.project.json"), "utf8")
+    );
+    const name = isRecord(manifest) ? getString(manifest, "name") : undefined;
+    return name && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The authored selection of an `up`, before Compose-file project resolution. */
+export async function selectNativeAuthoredUp(opts: {
+  readonly cwd: string;
+  readonly path?: string;
+  readonly project?: string;
+  readonly branch?: string;
+}): Promise<NativeAuthoredUpSelection | null> {
+  const selected = await selectNativeComposeProject(opts);
+  return selected
+    ? { projectRoot: selected.projectRoot, branch: opts.branch ?? null }
+    : null;
+}
+
+/** Authored status in the shape the already-running classifier reads. */
+function authoredPsResult(
+  status: NativeAuthoredProjectStatus
+): NativeProjectPsResult {
+  return {
+    backend: "native",
+    status: status.status === "observed" ? "observed" : "not_started",
+    run: status.run,
+    phase: status.phase,
+    items: status.items.map((item) => ({
+      ...item,
+      phase: status.phase ?? "",
+    })),
+  };
+}
+
+/**
+ * HACK-2620: `hack up -d` on an authored project that is already running.
+ * The detached child refuses the live generation, and the launcher used to
+ * report only `E_STARTUP_INCOMPLETE`. Answer from the same read-only status
+ * `hack ps` makes, in the Compose-file path's shape. Anything but a confirmed
+ * live, ready generation launches as before, and so does an env or profile
+ * selection, which authored up refuses itself.
+ */
+async function answerAuthoredAlreadyRunning(opts: {
+  readonly native: NativeRuntimeSelection;
+  readonly json: boolean;
+  readonly selection: NativeUpSelection;
+  readonly authored: NativeAuthoredUpSelection;
+  readonly startedAtMs: number;
+  readonly authoredPs?: typeof nativeAuthoredProjectPs;
+}): Promise<number | null> {
+  if (
+    opts.selection.env !== undefined ||
+    opts.selection.profiles !== undefined
+  ) {
+    return null;
+  }
+  const { projectRoot, branch } = opts.authored;
+  const projectName = await nativeAuthoredProjectName(projectRoot);
+  if (projectName === null) {
+    return null;
+  }
+  let state: NativeAlreadyRunning;
+  try {
+    state = classifyNativeAlreadyRunning(
+      authoredPsResult(
+        await (opts.authoredPs ?? nativeAuthoredProjectPs)({
+          runtime: opts.native,
+          scope: {
+            projectRoot,
+            projectDir: join(projectRoot, ".hack"),
+            nativeHome: opts.native.home,
+            branch,
+          },
+          includeReadiness: true,
+        })
+      )
+    );
+  } catch {
+    return null;
+  }
+  if (state.kind === "launch") {
+    return null;
+  }
+  const restartCommand = nativeScopedCommand({
+    action: "restart",
+    selection: { ...opts.selection, branch: branch ?? opts.selection.branch },
+  });
+  if (state.kind === "partial") {
+    throw nativePartiallyRunningRefusal(state.down, restartCommand);
+  }
+  reportNativeAlreadyRunning({
+    json: opts.json,
+    project: projectName,
+    branch,
+    composeProject: runtimeHostMetadataComposeProject({ projectName, branch }),
+    started: state.started,
+    completed: state.completed,
+    warming: state.warming,
+    readiness: state.readiness,
+    startedAtMs: opts.startedAtMs,
+    restartCommand,
+  });
   return 0;
 }

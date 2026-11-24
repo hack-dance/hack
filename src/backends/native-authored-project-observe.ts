@@ -57,6 +57,10 @@ export async function nativeAuthoredProjectPs(input: {
   readonly invoke?: typeof invokeNativeRuntime;
   /** Control seam; production always uses the held saved-status owner. */
   readonly withStatus?: typeof withNativeAuthoredProjectStatus;
+  /** Control seam for the authenticated completed-recovery history check. */
+  readonly completedRecoveryIsEmpty?: (
+    scope: NativeAuthoredProjectRunScope
+  ) => Promise<boolean>;
 }): Promise<NativeAuthoredProjectStatus> {
   const runtime = { ...input.runtime },
     scope = { ...input.scope },
@@ -67,110 +71,141 @@ export async function nativeAuthoredProjectPs(input: {
   if (runtime.home !== scope.nativeHome) {
     return refused();
   }
-  const result = await withStatus<NativeAuthoredProjectStatus>(
-    scope,
-    async (saved) => {
-      active(signal);
-      if (!saved.ready) {
-        return {
-          backend: "native",
-          status: saved.pending ? "pending" : "not_started",
-          run: null,
-          phase: null,
-          items: [],
-        };
-      }
-      const receipt = saved.ready.record.receipt;
-      if (
-        receipt.review.provenance.namespace !==
-        nativeAuthoredProjectNamespace(scope)
-      ) {
-        return refused();
-      }
-      return await withPinnedRuntimeBinary(
-        { binary: runtime.binary, signal, refused },
-        async (pin) => {
-          const check = async () => {
-            await pin.check();
-            await saved.assertFresh();
-            active(signal);
+  let result: NativeAuthoredProjectStatus;
+  try {
+    result = await withStatus<NativeAuthoredProjectStatus>(
+      scope,
+      async (saved) => {
+        active(signal);
+        if (!saved.ready) {
+          return {
+            backend: "native",
+            status: saved.pending ? "pending" : "not_started",
+            run: null,
+            phase: null,
+            items: [],
           };
-          await check();
-          let value: unknown;
-          try {
-            value = await invoke({
-              runtime,
-              cwd: scope.projectRoot,
-              args: [
-                "graph",
-                "native",
-                "control",
-                "--run-id",
-                receipt.review.provenance.run,
-                "--action",
-                "observe",
-                "--json",
-              ],
-              timeoutMs: 15_000,
-              signal,
-              boundNativeStatusDrain: true,
-            });
-          } catch (error: unknown) {
-            const changed =
-              error instanceof NativeRuntimeRequestError &&
-              (error.nativeCode === "graph_status_changed" ||
-                (error.nativeCode === "native_graph_foreground" &&
-                  error.nativeCauseCode === "graph_status_changed"));
-            if (!(changed || isNativeRuntimeNotRunning(error))) {
-              throw error;
+        }
+        const receipt = saved.ready.record.receipt;
+        if (
+          receipt.review.provenance.namespace !==
+          nativeAuthoredProjectNamespace(scope)
+        ) {
+          return refused();
+        }
+        return await withPinnedRuntimeBinary(
+          { binary: runtime.binary, signal, refused },
+          async (pin) => {
+            const check = async () => {
+              await pin.check();
+              await saved.assertFresh();
+              active(signal);
+            };
+            await check();
+            let value: unknown;
+            try {
+              value = await invoke({
+                runtime,
+                cwd: scope.projectRoot,
+                args: [
+                  "graph",
+                  "native",
+                  "control",
+                  "--run-id",
+                  receipt.review.provenance.run,
+                  "--action",
+                  "observe",
+                  "--json",
+                ],
+                timeoutMs: 15_000,
+                signal,
+                boundNativeStatusDrain: true,
+              });
+            } catch (error: unknown) {
+              const changed =
+                error instanceof NativeRuntimeRequestError &&
+                (error.nativeCode === "graph_status_changed" ||
+                  (error.nativeCode === "native_graph_foreground" &&
+                    error.nativeCauseCode === "graph_status_changed"));
+              if (!(changed || isNativeRuntimeNotRunning(error))) {
+                throw error;
+              }
+              // A stopped runtime is a status, not a refusal; the same saved
+              // selection and executable must still hold.
+              await check();
+              return {
+                backend: "native",
+                status: changed ? "runtime_busy" : "runtime_not_running",
+                run: receipt.review.provenance.run,
+                phase: null,
+                items: [],
+              };
             }
-            // A stopped runtime is a status, not a refusal; the same saved
-            // selection and executable must still hold.
+            await check();
+            const current = parseNativeAuthoredControl(
+              value,
+              receipt,
+              "observe"
+            );
+            const items: Item[] = Object.entries(current.receipt.readiness).map(
+              ([service]) => {
+                const observation = current.observations?.[service];
+                const resource =
+                  current.receipt.resources[`container:${service}`];
+                if (!resource?.id) {
+                  return refused();
+                }
+                return {
+                  service,
+                  ...(input.includeReadiness
+                    ? { readiness: current.receipt.readiness[service] }
+                    : {}),
+                  container: resource.id,
+                  state: observation?.state ?? "absent",
+                  health:
+                    observation?.state === "running"
+                      ? observation.health
+                      : null,
+                  exitCode:
+                    observation?.state === "exited" ? observation.code : null,
+                };
+              }
+            );
             await check();
             return {
               backend: "native",
-              status: changed ? "runtime_busy" : "runtime_not_running",
+              status: "observed",
               run: receipt.review.provenance.run,
-              phase: null,
-              items: [],
+              phase: current.receipt.phase,
+              items,
             };
           }
-          await check();
-          const current = parseNativeAuthoredControl(value, receipt, "observe");
-          const items: Item[] = Object.entries(current.receipt.readiness).map(
-            ([service]) => {
-              const observation = current.observations?.[service];
-              const resource =
-                current.receipt.resources[`container:${service}`];
-              if (!resource?.id) {
-                return refused();
-              }
-              return {
-                service,
-                ...(input.includeReadiness
-                  ? { readiness: current.receipt.readiness[service] }
-                  : {}),
-                container: resource.id,
-                state: observation?.state ?? "absent",
-                health:
-                  observation?.state === "running" ? observation.health : null,
-                exitCode:
-                  observation?.state === "exited" ? observation.code : null,
-              };
-            }
-          );
-          await check();
-          return {
-            backend: "native",
-            status: "observed",
-            run: receipt.review.provenance.run,
-            phase: current.receipt.phase,
-            items,
-          };
-        }
-      );
+        );
+      }
+    );
+  } catch (error) {
+    // HACK-2619: after `down --recover`, only the authenticated completed
+    // recovery record remains, and the saved-status owner refuses its path.
+    // That is history with nothing saved, so it reads as not started, as
+    // `recover` already treats it. A Ready run or any other evidence keeps
+    // the refusal: the history check requires all of it absent.
+    active(signal);
+    const isEmpty =
+      input.completedRecoveryIsEmpty ??
+      (await import("./native-authored-project-recovery.ts"))
+        .nativeAuthoredCompletedRecoveryIsEmpty;
+    if (!(await isEmpty(scope).catch(() => false))) {
+      throw error;
     }
-  );
+    active(signal);
+    return {
+      backend: "native",
+      status: "not_started",
+      run: null,
+      phase: null,
+      items: [],
+    };
+  }
   active(signal);
   return result;
 }

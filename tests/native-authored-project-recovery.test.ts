@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-graph-protocol.ts";
 import * as incarnation from "../src/backends/native-authored-process-incarnation.ts";
+import { nativeAuthoredProjectPs } from "../src/backends/native-authored-project-observe.ts";
 import { recoverNativeAuthoredProject } from "../src/backends/native-authored-project-recovery.ts";
 import {
   loadNativeAuthoredProjectRun,
@@ -681,6 +682,54 @@ test("dead frontend recovery binds the stored run, holds startup, retires only a
   const completedFiles = await readdir(current.paths.dir);
   const calls = current.calls.length;
   expect(await nativeAuthoredProjectNothingToRecover(current.scope)).toBe(true);
+  // HACK-2619: ps reads completed recovery history as not started, invoking
+  // nothing and changing nothing, as the reference says.
+  const ps = () =>
+    nativeAuthoredProjectPs({
+      runtime: current.options.runtime,
+      scope: current.scope,
+      invoke: () => Promise.reject(new Error("ps must not invoke the runtime")),
+    });
+  expect(await ps()).toEqual({
+    backend: "native",
+    status: "not_started",
+    run: null,
+    phase: null,
+    items: [],
+  });
+  if (process.platform === "darwin") {
+    const stdout: string[] = [];
+    const write = spyOn(process.stdout, "write").mockImplementation(
+      (chunk: string | Uint8Array) => {
+        stdout.push(String(chunk));
+        return true;
+      }
+    );
+    let code: number | null;
+    try {
+      code = await tryNativeAuthoredCommand({
+        selected: { kind: "native", projectRoot: current.root },
+        options: {
+          cwd: current.root,
+          operation: "ps",
+          json: true,
+          instance: current.scope.branch ?? undefined,
+        },
+        env: {
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_BINARY: current.options.runtime.binary,
+          HACK_NATIVE_HOME: current.scope.nativeHome,
+        },
+      });
+    } finally {
+      write.mockRestore();
+    }
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      ok: true,
+      data: { status: "not_started", run: null, items: [] },
+    });
+  }
   expect(current.calls.length).toBe(calls);
   expect(await Bun.file(current.paths.intent).text()).toBe(completedHistory);
   expect(await readdir(current.paths.dir)).toEqual(completedFiles);
@@ -692,6 +741,8 @@ test("dead frontend recovery binds the stored run, holds startup, retires only a
     expect(await nativeAuthoredProjectNothingToRecover(current.scope)).toBe(
       false
     );
+    // Recovery that is not complete stays a refusal, not a false "not started".
+    await expect(ps()).rejects.toThrow();
   }
   await files.writeFile(current.paths.intent, completedHistory);
   expect(await nativeAuthoredProjectNothingToRecover(current.scope)).toBe(true);

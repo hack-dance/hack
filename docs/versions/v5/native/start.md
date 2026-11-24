@@ -158,7 +158,8 @@ If the foreground owner exited during startup, run `"$CANDIDATE" down --recover
 retains project data and requires matching records for this run. If those
 records cannot prove ownership, keep the old home and use a separate checkout
 with a [fresh manual native home](setup.md#manual-homes). This starts a separate
-run without transferring the old run’s data.
+run without transferring the old run’s data. After a recovery that completed,
+`"$CANDIDATE" ps` reports `not_started` until the next `up`.
 
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the

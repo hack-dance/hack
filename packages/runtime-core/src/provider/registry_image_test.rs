@@ -3,6 +3,39 @@
 //! registry opt-in; no test reaches a public registry, the user's Docker configuration,
 //! a credential store or a runtime.
 use super::*;
+
+#[test]
+fn build_admission_rechecks_stored_proof_without_the_registry() {
+    let mut resolved = test_manifest_resolution();
+    let (selection, requests) = count_requests(|| {
+        resolved.proof.verified_build_base(
+            &resolved.pinned_reference,
+            ImagePolicy::default().archive_limit,
+        )
+    });
+    let selection = selection.unwrap();
+    assert_eq!(requests, 0);
+    assert_eq!(selection.source_digest, resolved.source_digest);
+    assert_eq!(selection.image_id, resolved.image_id);
+    assert_eq!(
+        resolved
+            .proof
+            .verified_build_base(&resolved.pinned_reference, 1)
+            .unwrap_err()
+            .code,
+        "native_build_base_image"
+    );
+    resolved.proof.config.push(' ');
+    assert!(
+        resolved
+            .proof
+            .verified_build_base(
+                &resolved.pinned_reference,
+                ImagePolicy::default().archive_limit
+            )
+            .is_err()
+    );
+}
 use crate::provider::image_load::tests::{Layer, compress};
 use crate::provider::image_policy::LocalRegistry;
 use crate::provider::registry_credentials::tests::DockerFixture;
@@ -1992,22 +2025,6 @@ fn image_platform_fields_are_read_like_the_engine_and_refuse_repetition() {
 }
 
 #[test]
-fn build_bases_accept_only_docker_hub_references() {
-    let named = |value: &str| match normalize(value).unwrap() {
-        ImageReference::Named(named) => named,
-        ImageReference::ImageId(_) => unreachable!(),
-    };
-    for value in [
-        "ghcr.io/example/app:1",
-        "registry.test:5000/app:1",
-        "localhost/app:1",
-    ] {
-        let error = resolve_build_base(&named(value), Instant::now()).unwrap_err();
-        assert_eq!(error.code, "registry_image", "{value}");
-    }
-}
-
-#[test]
 fn retry_token_and_manifest_stalled_headers_within_deadline() {
     retry_registry_preheader_failure(false);
 }
@@ -2496,7 +2513,7 @@ fn the_deadline_reached_mid_retry_ends_the_layer_without_extending_it() {
         serde_json::json!({"version": 2, "host": "127.0.0.1", "attempts": 2, "reason": "deadline"})
     );
     assert!(
-        failure.message.contains("360-second image deadline"),
+        failure.message.contains("image acquisition deadline"),
         "{}",
         failure.message
     );

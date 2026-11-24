@@ -80,8 +80,9 @@ fn environment_crash_child() {
     .unwrap();
     panic!("fault helper unexpectedly completed");
 }
-/// The helper child's stdout and stderr, kept in one file next to its fixture so a
-/// failure can show why the child exited (the helper's values are synthetic).
+/// The helper child's stdout and stderr, kept in one file in a directory of its own
+/// (never the project's) so a failure can show why the child exited (the helper's
+/// values are synthetic).
 fn child_log(path: &Path) -> Result<(Stdio, Stdio), CandidateError> {
     let file = fs::File::create(path).map_err(state::io)?;
     let other = file.try_clone().map_err(state::io)?;
@@ -135,7 +136,10 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
         (true, "after-start"),
     ] {
         let fixture = tests::Fixture::new();
-        let log = fixture.0.join("helper-child.log");
+        // Outside the project directory: the project is reviewed as source, and a
+        // log growing inside it changes that review between run and recovery.
+        let logs = tests::Fixture::new();
+        let log = logs.0.join("helper-child.log");
         let run = format!(
             "{:032x}",
             std::time::SystemTime::now()
@@ -282,7 +286,10 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let fixture = tests::Fixture::new();
-    let log = fixture.0.join("helper-child.log");
+    // Outside the project directory: the project is reviewed as source, and a
+    // log growing inside it changes that review between run and recovery.
+    let logs = tests::Fixture::new();
+    let log = logs.0.join("helper-child.log");
     let run = format!(
         "{:032x}",
         std::time::SystemTime::now()
@@ -388,7 +395,10 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let fixture = tests::Fixture::new();
-    let log = fixture.0.join("helper-child.log");
+    // Outside the project directory: the project is reviewed as source, and a
+    // log growing inside it changes that review between run and recovery.
+    let logs = tests::Fixture::new();
+    let log = logs.0.join("helper-child.log");
     let run = format!(
         "{:032x}",
         std::time::SystemTime::now()

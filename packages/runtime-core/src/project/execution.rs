@@ -40,7 +40,7 @@ pub enum Observation {
     Restarting,
 }
 impl Observation {
-    fn satisfies(self, condition: Condition) -> bool {
+    pub(crate) fn satisfies(self, condition: Condition) -> bool {
         match condition {
             Condition::Started => matches!(self, Self::Running { .. } | Self::Exited { code: 0 }),
             Condition::Healthy => {
@@ -661,9 +661,16 @@ mod tests {
     struct Siblings {
         inner: Fake,
         slow: std::rc::Rc<std::cell::Cell<Observation>>,
+        fast_listener: Option<std::net::TcpListener>,
+        fast_address: std::rc::Rc<std::cell::Cell<Option<std::net::SocketAddr>>>,
     }
     impl Driver for Siblings {
         fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+            if matches!(&event, Event::ServiceReady { service: "fast" }) {
+                let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                self.fast_address.set(Some(listener.local_addr().unwrap()));
+                self.fast_listener = Some(listener);
+            }
             self.inner.record(event)
         }
         fn start(&mut self, service: &str) -> Result<(), CandidateError> {
@@ -699,6 +706,7 @@ mod tests {
         let slow = std::rc::Rc::new(std::cell::Cell::new(Observation::Running {
             health: Health::Starting,
         }));
+        let fast_address = std::rc::Rc::new(std::cell::Cell::new(None));
         let mut driver = Siblings {
             inner: Fake {
                 states: BTreeMap::from([(
@@ -710,11 +718,16 @@ mod tests {
                 ..Fake::default()
             },
             slow: slow.clone(),
+            fast_listener: None,
+            fast_address: fast_address.clone(),
         };
         let mut waits = 0;
         let outcome = run_with_wait(&graph, &mut driver, Duration::from_secs(1), |_| {
             waits += 1;
             if waits == 3 {
+                let address = fast_address.get().expect("fast publisher admitted");
+                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1))
+                    .expect("fast port accepts connections before slow becomes ready");
                 slow.set(later);
             }
         });

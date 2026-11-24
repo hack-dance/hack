@@ -34,6 +34,18 @@ fn main() {
             "pretty_logs_keep_the_clis_colours_and_styles",
             pretty_logs_keep_the_clis_colours_and_styles,
         ),
+        (
+            "selection_background_covers_find_highlights",
+            selection_background_covers_find_highlights,
+        ),
+        (
+            "custom_selection_background_keeps_the_cell_foreground",
+            custom_selection_background_keeps_the_cell_foreground,
+        ),
+        (
+            "custom_cursor_color_keeps_block_cursor_text_visible",
+            custom_cursor_color_keeps_block_cursor_text_visible,
+        ),
     ]);
 }
 
@@ -113,11 +125,15 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{TempHome, sh_source};
+use common::{TempHome, sh, sh_source};
+use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AppContext as _, Bounds, HeadlessAppContext, WindowBounds, WindowOptions, px, size,
+    AppContext as _, Bounds, Context, Focusable as _, HeadlessAppContext, Window, WindowBounds,
+    WindowOptions, px, size,
 };
+use hack_desktop_term::emulator::TermTheme;
+use hack_desktop_term::ghostty_config::{CursorShape, GhosttyLook};
 use hack_desktop_term::glyphs::{self, BundledSymbols};
 use hack_desktop_term::stream::StreamSource;
 use hack_desktop_term::view::{GridMetrics, TermFont, TerminalView};
@@ -284,11 +300,41 @@ fn capture_sized(
     dump: &str,
     (width, height): (f32, f32),
 ) -> Option<Capture> {
-    let required = std::env::var_os("HACK_TERM_REQUIRE_RENDERER").is_some_and(|v| v == "1");
+    capture_with_view(text, font, dump, (width, height), |_, _| {})
+}
+
+fn capture_with_view(
+    text: &str,
+    font: Option<TermFont>,
+    dump: &str,
+    size: (f32, f32),
+    prepare: impl FnOnce(&mut TerminalView, &mut Context<TerminalView>),
+) -> Option<Capture> {
     let home = TempHome::new();
     let log = home.path().join("glyphs.log");
     std::fs::write(&log, text).unwrap();
+    capture_terminal(
+        dump,
+        size,
+        |cx| {
+            let mut view =
+                TerminalView::new_stream(&StreamSource::File(log), 1_000, cx).expect("open log");
+            if let Some(font) = font {
+                view.set_font(font);
+            }
+            view
+        },
+        |view, _, cx| prepare(view, cx),
+    )
+}
 
+fn capture_terminal(
+    dump: &str,
+    (width, height): (f32, f32),
+    create: impl FnOnce(&mut Context<TerminalView>) -> TerminalView,
+    prepare: impl FnOnce(&mut TerminalView, &mut Window, &mut Context<TerminalView>),
+) -> Option<Capture> {
+    let required = std::env::var_os("HACK_TERM_REQUIRE_RENDERER").is_some_and(|v| v == "1");
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
         Arc::new(gpui_kit::assets::Assets),
@@ -305,28 +351,18 @@ fn capture_sized(
         ..WindowOptions::default()
     };
     let (window, view) = cx
-        .update(|cx| {
-            gpui_kit::open_window(options, cx, |_, cx| {
-                cx.new(|cx| {
-                    let mut view = TerminalView::new_stream(&StreamSource::File(log), 1_000, cx)
-                        .expect("open");
-                    if let Some(font) = font {
-                        view.set_font(font);
-                    }
-                    view
-                })
-            })
-        })
+        .update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(create)))
         .expect("open an offscreen window");
     cx.update_window(window, |_, w, cx| w.render_frame(cx))
         .unwrap();
-    cx.update(|cx| {
+    cx.update_window(window, |_, window, cx| {
         view.update(cx, |v, cx| {
             v.settle(Duration::from_millis(100), Duration::from_secs(20), cx);
+            prepare(v, window, cx);
         });
-    });
-    cx.update_window(window, |_, w, cx| w.render_frame(cx))
-        .unwrap();
+        window.render_frame(cx);
+    })
+    .unwrap();
     let image = match cx.capture_screenshot(window) {
         Ok(image) => image,
         Err(error) if !required => {
@@ -357,6 +393,102 @@ fn capture_sized(
         fallback,
         frame,
     })
+}
+
+fn selection_background_covers_find_highlights() {
+    let Some(shot) = capture_with_view(
+        " MMMM  MMMM\n",
+        None,
+        "selection-and-find.png",
+        (560., 120.),
+        |view, cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+            assert_eq!(view.search("MMMM", cx).total, 2);
+            view.emulator().select_start(1, 0);
+            view.emulator().select_to(4, 0);
+            cx.notify();
+        },
+    ) else {
+        return;
+    };
+    assert_eq!(shot.frame.matches.len(), 2, "both matches are visible");
+    assert_eq!(shot.frame.selection[0], Some((1, 4)));
+    let color = TermTheme::DARK.selection_bg;
+    let selected = [color.r, color.g, color.b];
+    let overlap = shot.cells(1, 0, 4).all_ink(selected);
+    assert!(
+        (0.01..0.5).contains(&overlap),
+        "selected text should have visible ink on the selection background ({overlap})"
+    );
+    assert!(
+        shot.cells(7, 0, 4).all_ink(shot.background()) > 0.8,
+        "the unselected match should retain its Find highlight"
+    );
+}
+
+fn custom_selection_background_keeps_the_cell_foreground() {
+    let dark = TermTheme::DARK;
+    let Some(shot) = capture_with_view(
+        " MMMM\n",
+        None,
+        "selection-custom-background.png",
+        (560., 120.),
+        |view, cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+            view.set_look(
+                GhosttyLook {
+                    selection_background: dark.selection_fg,
+                    ..GhosttyLook::default()
+                },
+                cx,
+            );
+            view.emulator().select_start(1, 0);
+            view.emulator().select_to(4, 0);
+            cx.notify();
+        },
+    ) else {
+        return;
+    };
+    assert_eq!(shot.frame.selection[0], Some((1, 4)));
+    let ink = shot.cells(1, 0, 4).all_ink(shot.background());
+    assert!(
+        (0.01..0.5).contains(&ink),
+        "selected text should have visible ink on the custom background ({ink})"
+    );
+}
+
+fn custom_cursor_color_keeps_block_cursor_text_visible() {
+    let home = TempHome::new();
+    let opts = sh("IFS= read -r unused", &home);
+    let color = TermTheme::DARK.cursor_fg.expect("Merino block cursor text");
+    let Some(shot) = capture_terminal(
+        "cursor-custom-color.png",
+        (560., 120.),
+        |cx| TerminalView::new_pty(&opts, cx).expect("open PTY"),
+        |view, window, cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+            view.set_look(
+                GhosttyLook {
+                    cursor_color: Some(color),
+                    cursor_style: Some(CursorShape::Block),
+                    ..GhosttyLook::default()
+                },
+                cx,
+            );
+            // Put the cursor on the glyph independently of PTY scheduling.
+            view.emulator().feed(b" M\x1b[D");
+            window.focus(&view.focus_handle(cx), cx);
+        },
+    ) else {
+        return;
+    };
+    assert_eq!(shot.frame.cursor, Some((1, 0)));
+    assert_eq!(shot.frame.cursor_color, color);
+    let ink = shot.cells(1, 0, 1).all_ink([color.r, color.g, color.b]);
+    assert!(
+        (0.01..0.5).contains(&ink),
+        "the focused block cursor should have visible text ({ink})"
+    );
 }
 
 /// How a sample is expected to be drawn.

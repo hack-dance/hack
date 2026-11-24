@@ -486,7 +486,7 @@ impl MainWindow {
                 .is_some_and(|t| *t != TabKind::Logs),
             menu: self.panel_menu.then(|| new_tab_menu(d)),
             font: self.term_font.clone().unwrap_or_else(|| ui.mono.clone()),
-            term: TermPalette::fallback(),
+            term: TermPalette::for_mode(ui.p.mode),
         };
         div()
             .flex_1()

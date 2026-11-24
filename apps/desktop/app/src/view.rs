@@ -15,6 +15,8 @@ use gpui_kit::component::{
     ActiveTheme, Sizable as _,
     input::{Input, InputEvent, InputState},
 };
+#[cfg(all(test, feature = "screenshots", hack_terminal))]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, KeyBinding, ParentElement,
     Render, SharedString, Styled, Task, Window, div, prelude::*, px,
@@ -26,6 +28,7 @@ use hack_desktop_core::source::{
 };
 
 use crate::doctor_view::Pane;
+use crate::setup_view::{evidence_status, routing_evidence};
 use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 
 use hack_desktop_core::source::target_keys;
@@ -1124,7 +1127,7 @@ impl HackApp {
         let p = ui.p;
         gpui_kit::component::TitleBar::new()
             .h(size::TITLE_BAR)
-            .bg(p.chrome)
+            .bg(p.title_bar())
             .border_color(p.border)
             .child(
                 div()
@@ -1233,6 +1236,8 @@ impl HackApp {
             }
             Phase::Empty | Phase::CliMissing | Phase::Error { .. } => {}
         }
+        let routing = self.routing_status();
+        let hackd = self.hackd_sidebar_status();
         let machine = div()
             .flex_none()
             .flex()
@@ -1245,29 +1250,31 @@ impl HackApp {
                     "routing",
                     Glyph::Globe,
                     "Routing and DNS",
-                    dot(self.routing_status().unwrap_or(Status::Unknown), ui),
+                    dot(routing, ui),
                     ui,
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
+                .aria_label(format!(
+                    "Routing and DNS: {}",
+                    machine_status_label(routing)
+                ))
+                .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx)))
+                .map(|row| {
+                    #[cfg(all(test, feature = "screenshots", hack_terminal))]
+                    let row = row.test_support();
+                    row
+                }),
             )
-            .child({
-                let tone = self
-                    .hackd_card()
-                    .map(|c| c.tone)
-                    .or_else(|| self.hackd_tone_from_snapshot());
-                machine_row(
-                    "hackd",
-                    Glyph::Power,
-                    "hackd",
-                    dot(
-                        tone.map_or(Status::Unknown, crate::machine_view::status_of),
-                        ui,
-                    ),
-                    ui,
-                )
-                .when(self.pane == Pane::Hackd, |d| d.bg(p.surface_1))
-                .on_click(cx.listener(|this, _, _, cx| this.open_hackd(cx)))
-            })
+            .child(
+                machine_row("hackd", Glyph::Power, "hackd", dot(hackd, ui), ui)
+                    .aria_label(format!("hackd: {}", machine_status_label(hackd)))
+                    .when(self.pane == Pane::Hackd, |d| d.bg(p.selection))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_hackd(cx)))
+                    .map(|row| {
+                        #[cfg(all(test, feature = "screenshots", hack_terminal))]
+                        let row = row.test_support();
+                        row
+                    }),
+            )
             .child(
                 machine_row(
                     "upgrade",
@@ -1276,7 +1283,7 @@ impl HackApp {
                     dot(self.upgrade_status(), ui),
                     ui,
                 )
-                .when(self.pane == Pane::Upgrade, |d| d.bg(p.surface_1))
+                .when(self.pane == Pane::Upgrade, |d| d.bg(p.selection))
                 .on_click(cx.listener(|this, _, _, cx| this.open_upgrade(cx))),
             )
             .child(
@@ -1287,7 +1294,7 @@ impl HackApp {
                     self.doctor_trailing(list, ui),
                     ui,
                 )
-                .when(self.pane == Pane::Doctor, |d| d.bg(p.surface_1))
+                .when(self.pane == Pane::Doctor, |d| d.bg(p.selection))
                 .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
             );
         div()
@@ -1302,17 +1309,66 @@ impl HackApp {
             .child(machine)
     }
 
-    /// Routing and DNS: from the last completed Doctor run when there is
-    /// one, else from Doctor checks in the snapshot. `None` (a ring) until
-    /// either has reported.
-    fn routing_status(&self) -> Option<Status> {
-        if let DoctorStateView::Loaded(v) = &self.doctor.result {
-            return routing_from_doctor(v);
+    fn hackd_sidebar_status(&self) -> Status {
+        if self.pane == Pane::Setup
+            && let Some(card) = self
+                .setup
+                .report
+                .cards
+                .iter()
+                .find(|card| card.id == "daemon")
+        {
+            return evidence_status(card.status).0;
         }
-        let checks = &self.model.snapshot()?.doctor.as_ref()?.checks;
-        hack_desktop_ui::window::routing_status(
-            checks.iter().map(|c| (c.id.as_str(), c.status.as_str())),
-        )
+        self.hackd_card()
+            .map(|card| card.tone)
+            .or_else(|| self.hackd_tone_from_snapshot())
+            .map_or(Status::Unknown, crate::machine_view::status_of)
+    }
+
+    /// Setup owns its visible cards and dots. Elsewhere use the newest
+    /// current report, ordered by read start so a slow older Doctor run
+    /// cannot replace a post-command Setup check.
+    fn routing_status(&self) -> Status {
+        let setup = routing_evidence(&self.setup.report).map(|s| evidence_status(s).0);
+        if self.pane == Pane::Setup
+            && let Some(status) = setup
+        {
+            return status;
+        }
+
+        let now = Instant::now();
+        let setup = setup.zip(self.setup.observed_at).filter(|_| {
+            self.setup.checked_at.is_some_and(|at| {
+                now.saturating_duration_since(at) < hack_desktop_core::setup::RECHECK_EVERY
+            })
+        });
+        let doctor = self.doctor.fresh_observation(now);
+        if let Some((status, start)) = setup
+            && doctor.is_none_or(|other| start >= other)
+        {
+            return status;
+        }
+        if doctor.is_some() {
+            return match &self.doctor.result {
+                DoctorStateView::Loaded(view) => routing_from_doctor(view),
+                _ => None,
+            }
+            .unwrap_or(Status::Unknown);
+        }
+        self.model
+            .snapshot()
+            .filter(|_| self.model.project_list_readable())
+            .and_then(|snapshot| snapshot.doctor.as_ref())
+            .and_then(|report| {
+                hack_desktop_ui::window::routing_status(
+                    report
+                        .checks
+                        .iter()
+                        .map(|c| (c.id.as_str(), c.status.as_str())),
+                )
+            })
+            .unwrap_or(Status::Unknown)
     }
 
     /// The Doctor row's trailing mark (see [`doctor_mark`]).
@@ -1839,6 +1895,17 @@ impl HackApp {
     }
 }
 
+fn machine_status_label(status: Status) -> &'static str {
+    match status {
+        Status::Running => "Passed",
+        Status::Degraded => "Needs attention",
+        Status::Failed => "Failed",
+        Status::Unknown => "Unknown",
+        Status::Busy => "In progress",
+        Status::Stopped => "Off",
+    }
+}
+
 impl HackApp {
     /// The panel's window-level handlers: drag the handle, and the panel
     /// actions wherever focus is.
@@ -2030,7 +2097,7 @@ impl Render for HackApp {
             .size_full()
             .flex()
             .flex_col()
-            .bg(p.surface)
+            .bg(p.window)
             .text_color(p.text_primary)
             .font_family(ui.font.clone())
             .child(self.title_bar(&ui))
@@ -2179,6 +2246,110 @@ mod tests {
         assert_eq!(
             doctor_mark(&never, &m.list()),
             DoctorMark::Dot(Status::Unknown)
+        );
+    }
+}
+
+#[cfg(all(test, feature = "screenshots", hack_terminal))]
+mod machine_status_render_tests {
+    use super::*;
+    use crate::command_control::screenshots::tests::{assert_rendered_status, open};
+    use hack_desktop_core::models::{DoctorCheck, DoctorReport};
+    use hack_desktop_core::{
+        doctor::{DoctorRun, Finish},
+        setup::Status,
+    };
+
+    #[test]
+    fn rendered_dns_tracks_a_fresh_setup_check_and_rejects_older_and_stale_reads() {
+        let (mut cx, window, app) = open(1);
+        assert_rendered_status(
+            &mut cx,
+            window,
+            "routing",
+            "Routing and DNS: Needs attention",
+            Some("Needs attention"),
+        );
+        let warn = DoctorRun::machine(Ok(DoctorReport {
+            checks: vec![DoctorCheck {
+                id: "resolver:hack".into(),
+                status: "warn".into(),
+                detail: "Resolver missing".into(),
+                fix: None,
+            }],
+            ..Default::default()
+        }));
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let older_doctor = a.doctor.begin(Some(&[]));
+                let stale_setup = a.setup.begin();
+                let generation = a.setup.begin();
+                let before = a.setup.report.clone();
+                let mut after = before.clone();
+                after.cards[1].status = Status::Passed;
+                a.setup_checked(generation, after, cx);
+                a.setup_checked(stale_setup, before, cx);
+                assert_eq!(
+                    a.doctor.finish(
+                        older_doctor,
+                        std::slice::from_ref(&warn),
+                        Some(&[]),
+                        Instant::now()
+                    ),
+                    Finish::Applied
+                );
+            })
+        });
+        assert_rendered_status(
+            &mut cx,
+            window,
+            "routing",
+            "Routing and DNS: Passed",
+            Some("Passed"),
+        );
+
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.show_project();
+                cx.notify();
+            })
+        });
+        assert_rendered_status(&mut cx, window, "routing", "Routing and DNS: Passed", None);
+
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let newer_doctor = a.doctor.begin(None);
+                assert_eq!(
+                    a.doctor.finish(
+                        newer_doctor,
+                        std::slice::from_ref(&warn),
+                        Some(&[]),
+                        Instant::now()
+                    ),
+                    Finish::AppliedStale
+                );
+                cx.notify();
+            })
+        });
+        assert_rendered_status(&mut cx, window, "routing", "Routing and DNS: Passed", None);
+
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let newer_doctor = a.doctor.begin(Some(&[]));
+                assert_eq!(
+                    a.doctor
+                        .finish(newer_doctor, &[warn], Some(&[]), Instant::now()),
+                    Finish::Applied
+                );
+                cx.notify();
+            })
+        });
+        assert_rendered_status(
+            &mut cx,
+            window,
+            "routing",
+            "Routing and DNS: Needs attention",
+            None,
         );
     }
 }

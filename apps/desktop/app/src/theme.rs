@@ -1,28 +1,12 @@
 //! Native component colors and deterministic fonts for design captures.
 
-use gpui_kit::{App, component::Theme};
-use std::rc::Rc;
-
-pub fn init(cx: &mut App) {
-    gpui_kit::init(cx);
-    Theme::update(cx, |theme| {
-        let dark = Rc::make_mut(&mut theme.dark_theme);
-        dark.name = "Merino Dark".into();
-        dark.colors.background = Some("#0d1117".into());
-        dark.colors.foreground = Some("#e6edf3".into());
-        dark.colors.selection = Some("#24272b".into());
-        dark.colors.border = Some("#2b3036".into());
-        dark.colors.muted = Some("#1a1e24".into());
-        dark.colors.muted_foreground = Some("#8b9197".into());
-        dark.colors.primary = Some("#e6edf3".into());
-        dark.colors.primary_foreground = Some("#0d1117".into());
-    });
-    Theme::change(Theme::global(cx).mode, None, cx);
-}
+pub use hack_desktop_ui::tokens::init;
 
 #[cfg(all(feature = "screenshots", target_os = "linux"))]
-pub fn capture_fonts(cx: &mut App) {
+pub fn capture_fonts(cx: &mut gpui_kit::App) {
+    use gpui_kit::component::Theme;
     use std::borrow::Cow;
+    use std::rc::Rc;
 
     // Geist 1.4.2, bundled under the SIL Open Font License for Linux captures.
     let fonts: [&'static [u8]; 2] = [

@@ -89,33 +89,38 @@ Detail content is inset 20 left and right; the sidebar list 6.
 
 ## Colour
 
-The dark desktop palette uses Merino Dark from the HACK-2595 frames.
-
 | Token | Light | Dark | Used for |
 |---|---|---|---|
-| `surface` | `#FFFFFF` | `#0D1117` | Detail pane |
-| `chrome` | `#F7F7F5` | `#090C10` | Title bar, sidebar, status bar |
+| `window` | `#FFFFFF` | `#090C10` | Window background |
+| `surface` | `#FFFFFF` | `#0D1117` | Cards and controls |
+| `chrome` | `#F7F7F5` | `#06080A` | Sidebar, status bar |
+| `raised` | `#EFEFEC` | `#1C2026` | Menus and tooltips |
+| `selection` | `#EFEFEC` | `#24272B` | Selected navigation and tabs, selected file row in dark mode |
+| `attention` | `#EFEFEC` | `#21252B` | Running command box |
 | `surface_1` | `#EFEFEC` | `#1A1E24` | Hover, panel handle, neutral pill |
-| `surface_2` | `#E6E6E2` | `#24272B` | Pressed, selected file row in light mode |
-| `selection` | `#EFEFEC` | `#24272B` | Selected navigation, selected file row in dark mode |
+| `surface_2` | `#E6E6E2` | `#23272D` | Pressed, selected file row in light mode |
 | `preview_surface` | `#EFEFEC` | `#1E2329` | Read-only file preview body |
-| `border` | black 9% | `#1E2329` | Hairlines |
+| `border` | black 9% | `#2B3036` | Hairlines |
 | `border_strong` | black 18% | `#2B3036` | Button and field outlines |
 | `text_primary` | `#1C1C1A` | `#E6EDF3` | |
 | `text_secondary` | `#5C5B57` | `#BFC5CB` | URL, stopped names, inactive tabs |
 | `text_muted` | `#8B8A85` | `#8B9197` | Captions, table header, timestamps |
 | `accent` | `#2F6FDB` | `#E6EDF3` | Switch on, focus ring |
 
+The dark palette uses Merino Dark from the HACK-2595 desktop frames. GPUI components such as the search field,
+title bar, tooltips and scrollbars use the same palette. The dark title bar uses
+the window color.
+
 State colours (dot / pill background / pill text):
 
 | State | Light | Dark | Shown as |
 |---|---|---|---|
-| Running | `#1D9E75` / `#E2F3EC` / `#146B50` | `#3FB950` / `#152C20` / `#56D364` | solid dot |
-| Busy (starting, stopping) | `#378ADD` / `#E5EEFA` / `#235E9E` | `#58A6FF` / dot at 19% / `#79C0FF` | solid dot |
-| Degraded | `#EF9F27` / `#FBEFDA` / `#8A5608` | `#D29922` / dot at 18% / `#E3B341` | solid dot |
-| Failed (failed start, needs attention) | `#E24B4A` / `#FBE6E5` / `#A82E2D` | `#FF7B72` / `#2F2024` / `#FFA198` | solid dot |
-| Stopped | `#BDBCB6` / `surface_1` / secondary | `#686D73` / `surface_1` / secondary | solid grey dot, name in secondary |
-| Unknown | `#9C9B95` / `surface_1` / secondary | `#8B9197` / `surface_1` / secondary | **ring**, never a solid dot |
+| Running | `#1D9E75` / `#E2F3EC` / `#146B50` | `#3FB950` / `#12221D` / `#3FB950` | solid dot |
+| Busy (starting, stopping) | `#378ADD` / `#E5EEFA` / `#235E9E` | `#BFC5CB` / `#1F2329` / `#BFC5CB` | solid dot |
+| Degraded | `#EF9F27` / `#FBEFDA` / `#8A5608` | `#D29922` / `#211F18` / `#D29922` | solid dot |
+| Failed (failed start, needs attention) | `#E24B4A` / `#FBE6E5` / `#A82E2D` | `#FF7B72` / `#251C20` / `#FF7B72` | solid dot |
+| Stopped | `#BDBCB6` / `surface_1` / secondary | `#686D73` / `surface_1` / muted | solid grey dot, name in secondary |
+| Unknown | `#9C9B95` / `surface_1` / secondary | `#686D73` / `surface_1` / muted | **ring** |
 
 Unknown is a ring so an unobserved project never reads as stopped.
 
@@ -278,21 +283,13 @@ above the strip when the panel is docked, below it when maximized.
 
 Closing a tab, or the window, ends that tab's whole process session.
 
-Terminal look: the user's Ghostty config when it exists (font family and
-size, theme or palette, cursor style, padding), mapped onto the component.
-Without one, the fallback terminal theme (`TermPalette::fallback`), dark in
-both app modes as in the approved mockup, 12.5 / 19 in the app's mono font:
+Terminal look: the user's Ghostty config overrides the terminal's default
+font, padding, palette, foreground, background, cursor and selection settings
+where provided. In dark mode the grid defaults to Merino Dark, with
+`#0D1117` background, `#E6EDF3` foreground and `#2F81F7` cursor. The terminal
+panel chrome uses the app palette. Its controls never inherit the user's
+Ghostty colors. The light grid follows the light GPUI theme by default.
 
-| Token | Value | | Token | Value |
-|---|---|---|---|---|
-| `bg` | `#1C1C1A` | | `green` | `#5DCAA5` |
-| `fg`, `cursor` | `#E8E6DC` | | `bright_green` | `#97C459` |
-| `dim` | `#8B8A85` | | `blue` | `#85B7EB` |
-| `strip` | `#2A2A28` | | `magenta` | `#AFA9EC` |
-| `strip_border` | `#3A3A37` | | `yellow` | `#EF9F27` |
-| `tab_fg` | `#B4B2A9` | | `red` | `#F07B7A` |
-| `badge_warn_bg` / `_fg` | `#633806` / `#FAC775` | | `cyan` | `#6CCFD9` |
-| `badge_bg` / `_fg` | `#3A3A37` / `#D3D1C7` | | | |
 
 Prompt themes (zsh, oh-my-zsh, starship) come from the real shell in a
 real PTY (`TERM`, `COLORTERM=truecolor`); tmux is not involved.

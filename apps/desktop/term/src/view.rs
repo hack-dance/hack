@@ -742,27 +742,18 @@ impl TerminalView {
     /// theme for the rest.
     fn sync_theme(&mut self, cx: &App) {
         let t = cx.theme();
-        let mut theme = TermTheme {
-            foreground: rgb_of(t.foreground),
-            background: rgb_of(t.background),
-            cursor: rgb_of(t.foreground),
-            selection_bg: rgb_of(t.selection),
-            ..if t.is_dark() {
-                TermTheme::DARK
-            } else {
-                TermTheme::LIGHT
+        let fallback = if t.is_dark() {
+            TermTheme::DARK
+        } else {
+            TermTheme {
+                foreground: rgb_of(t.foreground),
+                background: rgb_of(t.background),
+                cursor: rgb_of(t.foreground),
+                selection_bg: rgb_of(t.selection),
+                ..TermTheme::LIGHT
             }
         };
-        if let Some(fg) = self.look.foreground {
-            theme.foreground = fg;
-            theme.cursor = fg;
-        }
-        if let Some(bg) = self.look.background {
-            theme.background = bg;
-        }
-        for (index, color) in self.look.palette.range(..16) {
-            theme.ansi[usize::from(*index)] = *color;
-        }
+        let theme = apply_ghostty_colors(fallback, &self.look);
         if self.applied_theme != Some(theme) || self.look_pending {
             let extra: Vec<(u8, Rgb)> = self
                 .look
@@ -848,6 +839,65 @@ impl TerminalView {
         self.fallback_symbols = from_symbols.iter().copied().collect();
         self.fallback_symbols.sort_unstable();
         Some((frame, from_symbols))
+    }
+}
+
+fn apply_ghostty_colors(mut theme: TermTheme, look: &GhosttyLook) -> TermTheme {
+    if let Some(fg) = look.foreground {
+        theme.foreground = fg;
+    }
+    if let Some(bg) = look.background {
+        theme.background = bg;
+    }
+    // The foreground supplies the cursor color unless Ghostty sets one.
+    if let Some(color) = look.cursor_color.or(look.foreground) {
+        theme.cursor = color;
+        // A custom cursor uses the terminal background for its text
+        // unless Ghostty explicitly supplies cursor-text.
+        theme.cursor_fg = None;
+    }
+    theme.cursor_fg = look.cursor_text.or(theme.cursor_fg);
+    if let Some(bg) = look.selection_background {
+        theme.selection_bg = bg;
+        // Keep the cell's foreground unless the custom palette pairs the
+        // background with an explicit selection foreground.
+        theme.selection_fg = None;
+    }
+    theme.selection_fg = look.selection_foreground.or(theme.selection_fg);
+    for (index, color) in look.palette.range(..16) {
+        theme.ansi[usize::from(*index)] = *color;
+    }
+    theme
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+
+    #[test]
+    fn ghostty_colors_override_merino_per_setting() {
+        let dark = TermTheme::DARK;
+        assert_eq!(apply_ghostty_colors(dark, &GhosttyLook::default()), dark);
+
+        let look = GhosttyLook {
+            background: Some(Rgb::from_u32(0x171717)),
+            foreground: Some(Rgb::from_u32(0xFAFAFA)),
+            cursor_color: Some(Rgb::from_u32(0xFFFF00)),
+            cursor_text: Some(Rgb::from_u32(0x222222)),
+            selection_background: Some(Rgb::from_u32(0x335577)),
+            selection_foreground: Some(Rgb::from_u32(0xFFFFFF)),
+            palette: [(1, Rgb::from_u32(0xFF2222)), (100, Rgb::from_u32(0x332211))].into(),
+            ..Default::default()
+        };
+        let theme = apply_ghostty_colors(dark, &look);
+        assert_eq!(Some(theme.background), look.background);
+        assert_eq!(Some(theme.foreground), look.foreground);
+        assert_eq!(Some(theme.cursor), look.cursor_color);
+        assert_eq!(theme.cursor_fg, look.cursor_text);
+        assert_eq!(Some(theme.selection_bg), look.selection_background);
+        assert_eq!(theme.selection_fg, look.selection_foreground);
+        assert_eq!(theme.ansi[1], look.palette[&1]);
+        assert_eq!(theme.ansi[2..], dark.ansi[2..]);
     }
 }
 
@@ -1264,10 +1314,6 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
             let n = u16::try_from(x - start).unwrap_or(u16::MAX);
             window.paint_quad(fill(rect(start as u16, y, n), hsla(bg)));
         }
-        if let Some(Some((s, e))) = a.frame.selection.get(y) {
-            let sel = hsla(a.theme.selection_bg).opacity(0.45);
-            window.paint_quad(fill(rect(*s, y, e - s + 1), sel));
-        }
     }
     for &(row, s, e, active) in &a.frame.matches {
         let c = if active {
@@ -1280,8 +1326,19 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
             hsla(c).opacity(0.9),
         ));
     }
-    // A block cursor covers its cell, so the glyph under it is drawn in the
-    // background colour. Bar, underline and hollow cursors leave it as is.
+    // Keep selected glyphs paired with their selection background even
+    // when a Find highlight crosses the selection.
+    let mut selection = hsla(a.theme.selection_bg);
+    if a.theme.selection_fg.is_none() {
+        selection = selection.opacity(0.45);
+    }
+    for (row, span) in a.frame.selection.iter().enumerate() {
+        if let Some((start, end)) = span {
+            window.paint_quad(fill(rect(*start, row, end - start + 1), selection));
+        }
+    }
+    // A block cursor covers its cell. Bar, underline and hollow cursors
+    // leave the lettering as it is.
     let shape = a.frame.cursor_shape.unwrap_or(CursorShape::Block);
     let block_cursor = a.show_cursor && a.focused && shape == CursorShape::Block;
     if let Some((cx_, cy)) = a.frame.cursor.filter(|_| a.show_cursor) {
@@ -1310,6 +1367,19 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
         }
     }
 
+    let glyph_fg = |x: usize, y: usize, fg: Rgb| {
+        let col = x as u16;
+        if block_cursor && a.frame.cursor == Some((col, y as u16)) {
+            return a.theme.cursor_fg.unwrap_or(a.frame.background);
+        }
+        if let Some(selection_fg) = a.theme.selection_fg
+            && let Some(Some((start, end))) = a.frame.selection.get(y)
+            && (*start..=*end).contains(&col)
+        {
+            return selection_fg;
+        }
+        fg
+    };
     let ts = window.text_system().clone();
     for (y, row) in a.frame.rows.iter().enumerate() {
         let mut x = 0usize;
@@ -1320,8 +1390,7 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
             }
             if let Some(kind) = special(&row[x]) {
                 let c = &row[x];
-                let on_cursor = block_cursor && a.frame.cursor == Some((x as u16, y as u16));
-                let mut color = hsla(if on_cursor { a.frame.background } else { c.fg });
+                let mut color = hsla(glyph_fg(x, y, c.fg));
                 if c.faint {
                     color = color.opacity(0.6);
                 }
@@ -1352,9 +1421,7 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
                 } else {
                     c.text.as_str()
                 };
-                let on_cursor = block_cursor && a.frame.cursor == Some((x as u16, y as u16));
-                let fg = if on_cursor { a.frame.background } else { c.fg };
-                let mut color = hsla(fg);
+                let mut color = hsla(glyph_fg(x, y, c.fg));
                 if c.faint {
                     color = color.opacity(0.6);
                 }

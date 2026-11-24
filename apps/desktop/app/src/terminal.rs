@@ -479,6 +479,12 @@ impl HackApp {
             .clone()
     }
 
+    /// Keep the native evidence independent of machine-local Ghostty settings.
+    #[cfg(feature = "screenshots")]
+    pub(crate) fn use_default_terminal_look(&mut self) {
+        self.panels.look = Some(GhosttyLook::default());
+    }
+
     fn panel_logs_follow(&self, detail: &DetailView) -> bool {
         logs_should_follow(
             detail,
@@ -1119,7 +1125,7 @@ impl HackApp {
         ui: &Ui,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut t = TermPalette::fallback();
+        let mut t = TermPalette::for_mode(ui.p.mode);
         if docked {
             t.strip = ui.p.chrome;
             t.bg = ui.p.surface;
@@ -1546,7 +1552,7 @@ impl HackApp {
         let surface = div()
             .flex_1()
             .min_h_0()
-            .bg(TermPalette::fallback().bg)
+            .bg(TermPalette::for_mode(ui.p.mode).bg)
             .child(sessions)
             .into_any_element();
         let base = div().flex().flex_col().min_h_0().relative();

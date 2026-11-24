@@ -110,6 +110,9 @@ pub struct Pane {
     pub result: Option<String>,
     pub skipped: std::collections::BTreeSet<String>,
     generation: u64,
+    started_at: Option<std::time::Instant>,
+    /// Start time of the accepted report, used to order it against Doctor.
+    pub observed_at: Option<std::time::Instant>,
     pub checked_at: Option<std::time::Instant>,
     /// Bumped when the app switches CLI: an action started under the
     /// previous one compares it on completion and is dropped.
@@ -118,6 +121,7 @@ pub struct Pane {
 impl Pane {
     pub fn begin(&mut self) -> u64 {
         self.generation += 1;
+        self.started_at = Some(std::time::Instant::now());
         self.loading = true;
         if !self.pending_fix {
             self.result = None;
@@ -128,6 +132,7 @@ impl Pane {
         if generation == self.generation {
             self.report = report;
             self.loading = false;
+            self.observed_at = self.started_at;
             self.checked_at = Some(std::time::Instant::now());
         }
     }

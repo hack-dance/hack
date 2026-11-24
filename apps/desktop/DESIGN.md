@@ -238,6 +238,12 @@ run from a banner. Use `command_control::render_history` when a passing check
 removes its Run and Copy buttons. Closing the drawer retains the latest output until
 the next command starts or the CLI changes.
 
+While Setup is visible, the `hackd` and Routing and DNS sidebar indicators use
+the same evidence as the Setup cards. Skipping a card leaves its evidence
+intact. Elsewhere, the DNS indicator uses the latest current Setup or Doctor
+report, ordered by when each check started. A Doctor result for an old project
+set cannot replace a current check.
+
 Source: `hack doctor --json --path <root>` per registered project, plus
 `hack doctor --machine --json` for machine findings, on open and every 10
 minutes while visible. The project audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; the machine variant uses the same envelope with `data.schema: "hack.doctor.machine.v1"` (R7c). Checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a). Until the app switches to the machine variant, it still runs one plain `hack doctor --json` outside any project and de-duplicates machine checks.

@@ -401,7 +401,7 @@ pub fn title_bar(show_traffic_lights: bool, ui: &Ui) -> Div {
         .flex_none()
         .flex()
         .items_center()
-        .bg(p.chrome)
+        .bg(p.title_bar())
         .hairline_b(p.border)
         .child(lights)
         .child(

@@ -2569,6 +2569,14 @@ An owner that is ending can read for a moment as neither running nor exited (its
 process exited but is not yet reaped, or its publication is read mid-change); the
 runtime reports that as `graph_foreground_owner_uncertain`, and the same wait covers it. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
+Each such recovery moves the run's earlier completed recovery record aside as history
+(`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
+`interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the
+eight newest records of each kind: the next one removes the oldest record that is
+proven finished, under the recovery's own locks (HACK-2576). A file there that cannot
+be proven finished is never removed and does not count. Earlier versions refused the
+ninth recovery instead, and every later `up`, `down` and pool stop refused with the
+data intact; a home left that way recovers with a plain `hack up` on this version.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

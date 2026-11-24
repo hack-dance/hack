@@ -482,8 +482,8 @@ Before any write it checks, in order:
    from the first running check, and to each target it creates right after
    creating it, until the window's checks are done, so `docker volume rm` of
    a target is refused while it is restored. An existing target removed
-   before its reference is recreated empty by Docker for the reference and
-   refuses as `changed`; journals are marked complete only after every
+   before its reference is refused at the reference (Docker is not allowed
+   to recreate it) as `changed`, and no volume is left behind; journals are marked complete only after every
    reference is removed.
 5. **Targets.** A backed-up key that is no longer declared here, or is
    `external` here, is skipped and reported. For each other key the target is

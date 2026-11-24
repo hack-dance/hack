@@ -314,11 +314,19 @@ async function importWithin(
     },
     async (references) => {
       context.references.current = references;
+      const keyOfTarget = new Map(
+        selected.map((entry) => [entry.name, entry.volume.key])
+      );
       for (const name of existingTargets.keys()) {
-        await references.add(name);
+        // A reference never creates a volume: a target removed since its
+        // inspection refuses here, before any write.
+        await references.add(
+          name,
+          changedTarget(keyOfTarget.get(name) ?? name)
+        );
       }
-      // Docker creates a missing named volume for a reference: each target
-      // must still be the volume inspected now that its reference exists.
+      // A target replaced under its name before its reference existed is
+      // referenced as it now is: it must still be the volume inspected.
       for (const entry of selected) {
         const identity = existingTargets.get(entry.name);
         if (identity !== undefined) {
@@ -871,7 +879,15 @@ async function restoreTarget(
   }
   if (target.kind === "created") {
     // This import's own volume: hold a reference to it before writing.
-    await context.references.current?.add(target.name);
+    await context.references.current?.add(
+      target.name,
+      () =>
+        new HackCliError({
+          code: "E_PROJECT_RUNNING",
+          message: `The volume for ${key} that this import just created was removed before Hack could take a reference to it, so nothing was written. Make sure nothing removes the project's volumes, then retry.`,
+          detail: { key, reason: "volume_changed" },
+        })
+    );
     await requireUnchangedVolume({
       docker: context.input.docker,
       name: target.name,

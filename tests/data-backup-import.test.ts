@@ -300,7 +300,9 @@ describe("targets", () => {
       fake.calls.some(
         (argv) =>
           argv[1] === "create" &&
-          argv.includes("type=volume,src=shop_db,dst=/v,volume-nocopy")
+          argv.includes(
+            "type=volume,src=shop_db,dst=/v,volume-nocopy,volume-driver=local,volume-opt=type=none"
+          )
       )
     ).toBeTrue();
     expect(create[create.indexOf("--mount") + 1]).toBe(
@@ -1253,8 +1255,9 @@ describe("Docker references hold the targets", () => {
     expect(fake.leftovers()).toEqual([]);
   });
 
-  test("an existing target removed before its reference is refused, not written", async () => {
-    // Docker creates the missing named volume for the reference container.
+  test("an existing target removed before its reference is refused, not written or recreated", async () => {
+    // The reference's driver options make Docker refuse a missing name
+    // instead of creating it.
     const dir = await writeBackup({ keys: ["db"] });
     const fake = engine();
     fake.volume("shop_db", { labels: OWNED("db"), content: "" });
@@ -1271,5 +1274,60 @@ describe("Docker references hold the targets", () => {
     });
     expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
     expect(await journal("db")).toBeNull();
+    // No volume of that name exists: import did not create one.
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("an unreconciled reference create gives the unknown cleanup outcome", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.volume("shop_db", { labels: OWNED("db"), content: "" });
+    const real = fake.docker();
+    let lost = false;
+    const docker = {
+      ...real,
+      capture: async (
+        argv: readonly string[],
+        opts?: { readonly timeoutMs?: number }
+      ) => {
+        if (
+          !lost &&
+          argv[1] === "create" &&
+          argv.some((arg) => arg.startsWith("type=volume,"))
+        ) {
+          lost = true;
+          await real.capture(argv, opts);
+          return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
+        }
+        if (
+          argv[2] === "inspect" &&
+          argv.some((arg) => arg.includes(".Config.Labels"))
+        ) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "error during connect: the engine stopped answering",
+          };
+        }
+        return await real.capture(argv, opts);
+      },
+    };
+    const error = await caught(
+      importProjectData({ ...input(fake, dir), docker })
+    );
+    const [left] = fake.leftovers();
+    const nonce =
+      fake.containers.get(left ?? "")?.labels["io.hack.data-backup.nonce"] ??
+      "";
+    expect(nonce).toMatch(/^[a-f0-9]{32}$/);
+    expect(error.detail).toMatchObject({
+      cleanup: {
+        outcome: "unknown",
+        label: `io.hack.data-backup.nonce=${nonce}`,
+        command: `docker ps -aq --filter label=io.hack.data-backup.nonce=${nonce} | xargs -r docker rm -f`,
+      },
+    });
+    expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
   });
 });

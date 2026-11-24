@@ -1011,10 +1011,17 @@ describe("each target's identity is rechecked: Docker cannot pin a volume", () =
   });
 
   test("a target removed, or replaced, after the restore and before completion is not marked complete", async () => {
-    for (const replace of [false, true]) {
+    // `reported`: Docker's destroy/create events arrive; otherwise only the
+    // identity recheck before completion sees it.
+    for (const [replace, reported] of [
+      [false, true],
+      [true, true],
+      [false, false],
+      [true, false],
+    ] as const) {
       const dir = await writeBackup({
         keys: ["db"],
-        name: replace ? "replaced" : "removed",
+        name: `${replace}-${reported}`,
       });
       const fake = engine();
       let restored = false;
@@ -1027,13 +1034,16 @@ describe("each target's identity is rechecked: Docker cannot pin a volume", () =
       fake.onPs = () => {
         if (restored && !removed) {
           removed = true;
+          if (!reported) {
+            fake.events.deliverVolumeChanges = false;
+          }
           fake.removeVolume("shop_db");
           if (replace) {
             fake.volume("shop_db", { labels: OWNED("db"), content: "rows-db" });
           }
         }
       };
-      const hackHome = join(root, replace ? "h-replace" : "h-remove");
+      const hackHome = join(root, `h-${replace}-${reported}`);
       const error = await caught(
         importProjectData(input(fake, dir, { hackHome }))
       );
@@ -1042,7 +1052,9 @@ describe("each target's identity is rechecked: Docker cannot pin a volume", () =
         code: "E_PROJECT_RUNNING",
         detail: { key: "db", reason: "volume_changed" },
       });
-      expect(error.message).toContain("after it was restored");
+      expect(error.message).toContain(
+        reported ? "Docker reported it" : "after it was restored"
+      );
       const state = await readDataImportJournal(
         dataImportJournalPath({ hackHome, composeProject: PROJECT, key: "db" })
       );
@@ -1083,5 +1095,128 @@ describe("each target's identity is rechecked: Docker cannot pin a volume", () =
     ]);
     const result = await importProjectData(input(fake, dir));
     expect(result.volumes[0]?.outcome).toBe("restored");
+  });
+});
+
+describe("volume destroy and create events during the import", () => {
+  test("import's own create of an absent target is not a replacement", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    const result = await importProjectData(input(fake, dir));
+    expect(result.volumes[0]?.outcome).toBe("restored");
+    // Its create really reached the window as an event.
+    expect(
+      fake.calls.some((argv) => argv[1] === "volume" && argv[2] === "create")
+    ).toBeTrue();
+    expect((await journal("db"))?.state).toBe("complete");
+  });
+
+  test("a same-second replacement of an existing target during the restore is not marked complete", async () => {
+    // Same name, labels and (one-second resolution) CreatedAt: every
+    // identity check passes; the extract lands in the replaced directory.
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.volume("shop_db", { labels: OWNED("db"), content: "" });
+    const old = fake.volumes.get("shop_db");
+    fake.onExec = (_container, args) => {
+      if (args.includes("-xpf")) {
+        fake.removeVolume("shop_db");
+        fake.volume("shop_db", {
+          labels: OWNED("db"),
+          content: "",
+          createdAt: old?.createdAt,
+        });
+      }
+    };
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect((await journal("db"))?.state).toBe("started");
+  });
+
+  test("someone else's create of a target name after import's own is refused", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    let raced = false;
+    fake.onExec = (_container, args) => {
+      if (args.includes("-xpf") && !raced) {
+        raced = true;
+        // Destroyed and created again by someone else: our one create
+        // accounts for one create event only.
+        const ours = fake.volumes.get("shop_db");
+        fake.removeVolume("shop_db");
+        fake.volume("shop_db", {
+          labels: ours?.labels ?? {},
+          content: "",
+          createdAt: ours?.createdAt,
+        });
+      }
+    };
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect((await journal("db"))?.state).toBe("started");
+  });
+});
+
+describe("foreign volume mounts are judged by their backing storage", () => {
+  test("a running container writing through an alias of a target refuses before any write", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.volume("shop_db", { labels: OWNED("db"), content: "" });
+    fake.volume("alias", {
+      labels: {},
+      content: "",
+      options: {
+        type: "none",
+        o: "bind",
+        device: "/var/lib/docker/volumes/shop_db/_data",
+      },
+    });
+    const id = fake.runningContainer("alias-writer", [
+      {
+        Type: "volume",
+        Name: "alias",
+        Source: "/var/lib/docker/volumes/alias/_data",
+        Destination: "/data",
+      },
+    ]);
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ running: [id.slice(0, 12)] });
+    expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
+    expect(`${error.message}${JSON.stringify(error.detail)}`).not.toContain(
+      "alias"
+    );
+  });
+
+  test("a non-local volume mounted during the restore refuses closed", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    fake.volume("remote", {
+      labels: {},
+      content: "",
+      driver: "rexray/ebs",
+      options: null,
+    });
+    let id = "";
+    fake.onExec = (_container, args) => {
+      if (args.includes("-xpf") && id === "") {
+        id =
+          fake.createForeign("short-lived", [
+            {
+              Type: "volume",
+              Name: "remote",
+              Source: "/var/lib/docker/plugins/x",
+              Destination: "/data",
+            },
+          ]) ?? "";
+      }
+    };
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.detail).toEqual({
+      unchecked: [id.slice(0, 12)],
+      reason: "unchecked_volume_backing",
+    });
+    expect((await journal("db"))?.state).toBe("started");
   });
 });

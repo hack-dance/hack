@@ -407,6 +407,11 @@ Before any write it checks, in order:
    every target immediately before any journal is marked complete (a
    mismatch refuses with `volume_changed` and leaves the journal
    unfinished). Import never creates a volume except an absent target.
+   Volume `destroy` and `create` events of a target's name during the
+   window refuse the same way, whatever the timestamps say; a `create` is
+   import's own only when import's own `docker volume create` of exactly
+   that name succeeded in the window (one event per create). Foreign volume
+   mounts are judged by their backing storage, as for export.
 5. **Targets.** A backed-up key that is no longer declared here, or is
    `external` here, is skipped and reported. For each other key the target is
    its Docker volume (`name:` or `<compose project>_<key>`):

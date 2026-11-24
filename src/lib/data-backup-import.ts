@@ -34,6 +34,7 @@ import {
   plainLocalVolume,
   planDeclaredVolumes,
   requireUnchangedVolume,
+  volumeReplacedError,
   type WatchedVolume,
 } from "./data-backup-volumes.ts";
 import {
@@ -149,6 +150,8 @@ type Context = {
   readonly mountpoints: Map<string, string>;
   /** The identity of each target once validated or created, by Docker name. */
   readonly identities: Map<string, InspectedVolume>;
+  /** Names of the volumes this import's own `docker volume create` made. */
+  readonly ownCreates: string[];
   readonly now: () => Date;
 };
 
@@ -218,6 +221,7 @@ export async function importProjectData(
             helpers,
             mountpoints: new Map(),
             identities: new Map(),
+            ownCreates: [],
             now: input.now ?? (() => new Date()),
           },
           selected,
@@ -319,6 +323,20 @@ async function importWithin(
       consequence:
         "the restore is not marked complete; rerunning hack data import replaces its own copy.",
       stopCommand,
+    });
+  }
+  // Any destroy or create of a target's name in the window, except a
+  // create import itself issued and Docker confirmed, is a replacement an
+  // identity comparison can miss (CreatedAt has one-second resolution).
+  const replaced = monitor.changedVolumes({
+    names: selected.map((entry) => entry.name),
+    ownCreates: context.ownCreates,
+  });
+  if (replaced.length > 0) {
+    throw volumeReplacedError({
+      keys: replaced.map((name) => keyOf.get(name) ?? name).sort(),
+      consequence:
+        "the restore is not marked complete; rerunning hack data import replaces its own copy.",
     });
   }
   // Immediately before any target is marked complete: every target is
@@ -734,6 +752,8 @@ async function createTarget(
       redactValues: docker.redactValues,
     });
   }
+  // This create's own `create` event is not a replacement of the target.
+  context.ownCreates.push(target.name);
   const inspected = await inspectVolume({ docker, name: target.name });
   if (
     !(

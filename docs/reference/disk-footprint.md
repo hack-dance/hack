@@ -41,6 +41,11 @@ objects as attribution within those disks when measuring host space.
 
 ## Additional host storage
 
+Use `hack-local runtime disk-usage --scope image-archives --json` to measure
+the native host image archive store separately from other provider artifacts.
+The report includes file sizes and allocated bytes. It does not identify which
+archives can be removed.
+
 | Location | Writer and owner | Growth bound | Cleanup and interrupted operations |
 | --- | --- | --- | --- |
 | Prerelease channel `versions/<version>` | [Channel installer](../../scripts/installer/channel.ts). A receipt binds each bundle and its per-version CLI and native homes. | The selection reader accepts at most 256 registered versions. This is a validation limit. Retained versions can contain their own VM disks. | Installer recovery preserves published versions and their homes. An interrupted install can leave an unselected version for validation. |

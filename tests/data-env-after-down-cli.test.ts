@@ -163,3 +163,38 @@ test("hack up --env staging, hack down, then a bare hack data export refuses wit
   expect(explicit.stdout).not.toContain("E_USAGE");
   expect(await configCalls()).toHaveLength(1);
 });
+
+test("a dotenv-overlay-only project: hack up --env staging, hack down, then a bare export refuses", async () => {
+  const hackDir = join(projectRoot, ".hack");
+  for (const env of ["default", "staging"]) {
+    await rm(join(hackDir, `hack.env.${env}.yaml`));
+  }
+  await writeFile(
+    join(hackDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: "VOL_SUFFIX", source: "plain_env", required: false }],
+    })}\n`
+  );
+  await writeFile(join(hackDir, ".env"), "VOL_SUFFIX=base\n");
+  await writeFile(join(hackDir, ".env.staging"), "VOL_SUFFIX=staging\n");
+
+  const up = await hack(["up", "--env", "staging", "--json"]);
+  expect({ exitCode: up.exitCode, stderr: up.stderr }).toMatchObject({
+    exitCode: 0,
+  });
+  // Recorded: export uses staging and gets to the model read.
+  const recorded = await hack(["data", "export", "--json"]);
+  expect(recorded.stdout).not.toContain("E_USAGE");
+  expect(await configCalls()).toHaveLength(1);
+
+  expect((await hack(["down", "--json"])).exitCode).toBe(0);
+  await writeFile(log, "");
+  const bare = await hack(["data", "export", "--json"]);
+  expect(bare.exitCode).not.toBe(0);
+  expect(bare.stdout).toContain("E_USAGE");
+  expect(bare.stdout).toContain(
+    "This project has environment overlays (staging); the environment `hack up` used is no longer recorded."
+  );
+  expect(await readFile(log, "utf8")).toBe("");
+});

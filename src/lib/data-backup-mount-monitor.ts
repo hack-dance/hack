@@ -1,4 +1,5 @@
 import { HackCliError } from "./cli-result.ts";
+import { createBackingProver } from "./data-backup-backing-proof.ts";
 import type { DataBackupDeadlines } from "./data-backup-deadlines.ts";
 import type {
   DataBackupDocker,
@@ -374,6 +375,12 @@ export async function startMountMonitor(opts: {
         ),
         volumes,
         timeoutMs: opts.deadlines.commandMs,
+        prove: createBackingProver({
+          docker: opts.docker,
+          purpose: opts.purpose,
+          deadlines: opts.deadlines,
+          helpers: opts.helpers,
+        }),
       });
       found.push(...reach.mounts);
       const { unchecked } = reach;

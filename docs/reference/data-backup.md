@@ -21,7 +21,13 @@ startup. A successful `hack down` removes that record, so after
 `hack up --env staging` then `hack down` the selection is no longer known:
 when the project has env overlays the command refuses with `E_USAGE`, naming
 them, before any Docker call; pass `--env <name>` (or `--env base` for base
-layers only). A project without overlays uses its base layers. Every Docker call (Compose, the
+layers only). The overlays are every one `hack up` could have selected: env
+layers (`hack.env.<name>.yaml`, machine-local and inherited layers, the
+configured default) and, for a legacy dotenv project, `.hack/.env.<name>`
+files and overlays that only the encrypted file secret store holds values
+for. When a legacy project's overlays cannot all be listed (its contract
+values live in the keychain, say), it refuses the same way. A project
+without overlays uses its base layers. Every Docker call (Compose, the
 volume and container reads and the helper runs) gets the same managed Compose
 env `hack up` gives the project, so a project that selects its engine with a
 managed `DOCKER_HOST` or `DOCKER_CONTEXT` is read on that engine. The command
@@ -80,6 +86,26 @@ its backing storage by the same path rule:
   as possibly the same storage and refuses with `E_PROJECT_RUNNING`
   (`detail.reason: unchecked_volume_backing`, `detail.unchecked`: short
   container IDs; no volume or container names).
+
+Text alone cannot prove two paths separate: `/proc/self/root/<Mountpoint>`
+or a symlink to a Mountpoint names the same directory under another
+spelling. Text that already shows an overlap refuses as above. Every other
+bind `Source` of a foreign container, and every bind alias's `device`, is
+proven on the daemon: one pinned helper (no network, no logging, a
+read-only root, tracked by ID) gets each such path and each copied
+`Mountpoint` bind-mounted read-only, so the daemon resolves symlinks and
+`/proc/self/root` as it does for any bind. The helper reads its own
+`/proc/self/mountinfo` and compares each mount's filesystem (major:minor)
+and its root within that filesystem, submounts included: the same
+filesystem with either root inside the other overlaps (equal, inside or
+above). For a path that is not a directory it also looks for the same
+device and inode in the copied tree (a hard link). A plain local volume's
+own directory is separate by construction and is not proven. A proof that
+cannot be made (the helper fails or times out, or a path does not exist)
+refuses with `unchecked_volume_backing`. On a host with busy containers
+this adds one short helper run to each running check and to the end of
+the window.
+
 `error.detail.running` lists their short (12 character) container IDs, never
 their names; stop the project with `hack down` and retry. Hack never stops anything for an export.
 
@@ -170,17 +196,33 @@ mountpoint, options and Compose labels, and the container's mount must be
 that directory. A volume replaced or relabeled in between refuses the same
 way and is not read.
 
-Hack cannot pin a volume against removal. A bind of its `Mountpoint` is not
-a Docker volume reference, so `docker volume rm` succeeds while the helper
-holds it: on Docker 29.9.2 the removal exits 0, `docker volume inspect` then
-fails, and the helper's `/v` is left an empty tree. Every digest taken after
-such a removal agrees on that empty tree. Hack therefore rechecks the
-volume's identity (by inspect only; it never creates a volume) right after
-the hold, again after the copy and the second digest, and once more for
-every copied volume immediately before the rename that publishes the
-backup. A volume that is gone, or replaced under the same name, refuses
-with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`) and leaves the
-copy in `<backup>.partial/`.
+A bind of the `Mountpoint` is not a Docker volume reference, so on its own
+it does not stop `docker volume rm`: on Docker 29.9.2 the removal exits 0,
+`docker volume inspect` then fails, and the helper's `/v` is left an empty
+tree that every later digest agrees on. Hack therefore also holds a Docker
+reference to each copied volume for the whole copy and the window's checks:
+right after the first running check, it creates (and never starts) one
+reference container per volume (`--mount
+type=volume,src=<name>,dst=/v,volume-nocopy`, no network, no logging, a
+read-only root, the run's nonce label), tracked by the ID its create
+returned. While it exists Docker refuses the removal, `--force` included
+("volume is in use"); it runs nothing and emits no mount event. Each
+reference is removed by its ID once the window's checks are done, before
+the publish, and its removal is confirmed; an unconfirmed removal is
+reported like a helper's (`detail.cleanup`). Hack never removes a volume.
+
+Docker creates a missing named volume when a container that references it
+is created, so a volume removed between validation and the reference comes
+back empty under the same name. Hack rechecks every volume's identity (by
+inspect) as soon as its references exist, and the window's volume `create`
+events (below) see the recreation too: either refuses with `volume_changed`,
+and the empty volume Docker created is left in place. Identity is also
+rechecked right after each hold, after each copy and its second digest, and
+for every copied volume immediately before the rename that publishes the
+backup, in case a reference was removed by someone else. A volume that is
+gone, or replaced under the same name, refuses with `E_PROJECT_RUNNING`
+(`detail.reason: volume_changed`) and leaves the copy in
+`<backup>.partial/`.
 
 An identity comparison alone is not enough: Docker reports a volume's
 `CreatedAt` to the second, so a volume removed and created again under the

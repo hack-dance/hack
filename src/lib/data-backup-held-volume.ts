@@ -454,45 +454,13 @@ export async function withTrackedContainer<T>(
   },
   work: (container: string) => Promise<T>
 ): Promise<T> {
-  const nonce = randomBytes(16).toString("hex");
-  const created = await opts.docker.capture(
-    [
-      "docker",
-      "create",
-      "--name",
-      opts.name,
-      "--label",
-      `${HELPER_NONCE_LABEL}=${nonce}`,
-      ...opts.createArgs,
-    ],
-    { timeoutMs: opts.createTimeoutMs }
-  );
+  const { created, printed, container } = await createTracked(opts);
   let failure: unknown;
   let value: T | undefined;
   let ok = false;
-  const printed =
-    created.exitCode === 0 ? createdContainerId(created.stdout) : null;
-  const container =
-    printed ??
-    (await findOwnCreated({
-      docker: opts.docker,
-      name: opts.name,
-      nonce,
-      deadlines: opts.deadlines,
-    }).catch(() => null));
-  if (container !== null) {
-    opts.helpers.add(container);
-  }
   try {
-    opts.checkCreate(created);
-    if (printed === null) {
-      throw new HackCliError({
-        code: "E_UNEXPECTED",
-        message:
-          "docker create did not print a container ID, so Hack cannot track the helper container; nothing was changed.",
-      });
-    }
-    value = await work(printed);
+    requireCreated({ created, printed, checkCreate: opts.checkCreate });
+    value = await work(printed as string);
     ok = true;
   } catch (error: unknown) {
     failure = error;
@@ -507,6 +475,194 @@ export async function withTrackedContainer<T>(
       throw withUnconfirmedCleanup(ok ? undefined : failure, released);
     }
     opts.helpers.retire(container);
+  }
+  if (!ok) {
+    throw failure;
+  }
+  return value as T;
+}
+
+/**
+ * `docker create` a container this run owns, under `name` with a fresh nonce
+ * label, and register its ID in `helpers` (the ID the create printed, or,
+ * when the outcome is unknown, the one a container under the name carries
+ * with this nonce). `container` is null when nothing of this run exists.
+ */
+async function createTracked(opts: {
+  readonly docker: DataBackupDocker;
+  readonly name: string;
+  readonly createArgs: readonly string[];
+  readonly createTimeoutMs: number;
+  readonly deadlines: DataBackupDeadlines;
+  readonly helpers: DataHelperContainers;
+}): Promise<{
+  readonly created: DataBackupProcessResult;
+  readonly printed: string | null;
+  readonly container: string | null;
+}> {
+  const nonce = randomBytes(16).toString("hex");
+  const created = await opts.docker.capture(
+    [
+      "docker",
+      "create",
+      "--name",
+      opts.name,
+      "--label",
+      `${HELPER_NONCE_LABEL}=${nonce}`,
+      ...opts.createArgs,
+    ],
+    { timeoutMs: opts.createTimeoutMs }
+  );
+  const printed =
+    created.exitCode === 0 ? createdContainerId(created.stdout) : null;
+  const container =
+    printed ??
+    (await findOwnCreated({
+      docker: opts.docker,
+      name: opts.name,
+      nonce,
+      deadlines: opts.deadlines,
+    }).catch(() => null));
+  if (container !== null) {
+    opts.helpers.add(container);
+  }
+  return { created, printed, container };
+}
+
+/** Throw the refusal for a failed or untrackable create. */
+function requireCreated(opts: {
+  readonly created: DataBackupProcessResult;
+  readonly printed: string | null;
+  readonly checkCreate: (result: DataBackupProcessResult) => void;
+}): void {
+  opts.checkCreate(opts.created);
+  if (opts.printed === null) {
+    throw new HackCliError({
+      code: "E_UNEXPECTED",
+      message:
+        "docker create did not print a container ID, so Hack cannot track the helper container; nothing was changed.",
+    });
+  }
+}
+
+/**
+ * Docker references to named volumes, held while a data command reads or
+ * writes them through binds. A bind of a Mountpoint is no volume reference,
+ * so `docker volume rm` would succeed under it and leave the helper an
+ * empty tree. Each reference is a container that is created and never
+ * started (`--mount type=volume,src=<name>,dst=/v,volume-nocopy`, no
+ * network, no logging, the run's nonce label), tracked by the ID its create
+ * returned. While it exists Docker refuses to remove the volume, `--force`
+ * included ("volume is in use"; checked on Docker 29.9.2); it starts
+ * nothing and emits no mount event. Docker creates a missing named volume
+ * when such a container is created, so a caller must take a reference only
+ * after validating the volume, and treat a create event for the name in its
+ * window, or a changed identity after the reference exists, as a refusal.
+ * Hack never removes a volume: only the reference containers, by ID, with
+ * removal confirmed.
+ */
+export type VolumeReferencesOptions = {
+  readonly docker: DataBackupDocker;
+  readonly purpose: HelperPurpose;
+  readonly deadlines: DataBackupDeadlines;
+  readonly helpers: DataHelperContainers;
+};
+
+export class VolumeReferences {
+  private readonly held: string[] = [];
+  private readonly opts: VolumeReferencesOptions;
+
+  constructor(opts: VolumeReferencesOptions) {
+    this.opts = opts;
+  }
+
+  /** Take a reference to the volume `name` (a Docker name, never printed). */
+  async add(name: string): Promise<void> {
+    const { docker, deadlines, helpers, purpose } = this.opts;
+    const { created, printed, container } = await createTracked({
+      docker,
+      name: `${helperContainerName(purpose)}-ref`,
+      createArgs: [
+        "--network",
+        "none",
+        "--log-driver",
+        "none",
+        "--pull",
+        "missing",
+        "--read-only",
+        "--security-opt",
+        "no-new-privileges",
+        "--label",
+        `io.hack.data-backup=${purpose}`,
+        "--mount",
+        `type=volume,src=${name},dst=/v,volume-nocopy`,
+        "--entrypoint",
+        "true",
+        dataBackupHelperImage(),
+      ],
+      createTimeoutMs: deadlines.stepMs,
+      deadlines,
+      helpers,
+    });
+    if (container !== null) {
+      this.held.push(container);
+    }
+    requireCreated({
+      created,
+      printed,
+      checkCreate: (result) => {
+        if (result.exitCode !== 0) {
+          throw dockerReadError({
+            result,
+            command: "docker create",
+            redactValues: docker.redactValues,
+          });
+        }
+      },
+    });
+  }
+
+  /** Remove every reference by ID; the first unconfirmed removal, or null. */
+  async releaseAll(): Promise<HeldVolumeRelease | null> {
+    let unconfirmed: HeldVolumeRelease | null = null;
+    for (const container of this.held.splice(0)) {
+      const released = await release({
+        docker: this.opts.docker,
+        container,
+        deadlines: this.opts.deadlines,
+      }).catch((): HeldVolumeRelease => ({ container, removed: false }));
+      if (released.removed) {
+        this.opts.helpers.retire(container);
+      } else {
+        unconfirmed ??= released;
+      }
+    }
+    return unconfirmed;
+  }
+}
+
+/**
+ * Run `work` with a {@link VolumeReferences} registry and remove every
+ * reference it took on every path; an unconfirmed removal is reported like
+ * a helper's (`detail.cleanup`).
+ */
+export async function withVolumeReferences<T>(
+  opts: VolumeReferencesOptions,
+  work: (references: VolumeReferences) => Promise<T>
+): Promise<T> {
+  const references = new VolumeReferences(opts);
+  let failure: unknown;
+  let value: T | undefined;
+  let ok = false;
+  try {
+    value = await work(references);
+    ok = true;
+  } catch (error: unknown) {
+    failure = error;
+  }
+  const unconfirmed = await references.releaseAll();
+  if (unconfirmed) {
+    throw withUnconfirmedCleanup(ok ? undefined : failure, unconfirmed);
   }
   if (!ok) {
     throw failure;

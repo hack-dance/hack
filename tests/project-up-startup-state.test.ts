@@ -202,8 +202,9 @@ const runtimeBackendMock = await registerScopedModuleMock({
         if (psDurationMs) {
           await Bun.sleep(psDurationMs);
         }
+        const exitCode = opts.noTrunc && !composeUpReturned ? 0 : psExitCode;
         return {
-          exitCode: opts.noTrunc ? 0 : psExitCode,
+          exitCode,
           stdout: (opts.noTrunc ? psRows : (psSnapshots.shift() ?? psRows))
             .map((row) => {
               const entry = JSON.parse(row);
@@ -214,10 +215,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
               });
             })
             .join("\n"),
-          stderr:
-            !opts.noTrunc && psExitCode
-              ? "Cannot connect to the Docker daemon"
-              : "",
+          stderr: exitCode ? "Cannot connect to the Docker daemon" : "",
         };
       },
       ps: async () => 0,
@@ -1814,9 +1812,9 @@ test("full restart cleans the lifecycle owner and retains the launch after a Doc
   await expect(runRestart({ projectRoot })).rejects.toMatchObject({
     code: "E_DOCKER_UNAVAILABLE",
   });
-  // Two reads: the one-shot interruption guard's (HACK-2310), whose failure
-  // finds nothing to interrupt and changes nothing, then the readiness read
-  // that reports E_DOCKER_UNAVAILABLE once, after the same cleanup.
+  // The one-shot interruption guard's read finds nothing to interrupt.
+  // After dispatch, Docker inspection stays unavailable through readiness
+  // and the ownership probe that would otherwise let cleanup discard the launch.
   expect(psEnvs).toHaveLength(2);
   expect(lifecycleStops.filter((entry) => entry.afterUp)).toEqual([
     {

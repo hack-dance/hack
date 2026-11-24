@@ -174,6 +174,7 @@ fn job_resource(parent: &Resource, service: &str, name: String) -> Resource {
     resource.key = service.into();
     resource.name = name;
     resource.id = None;
+    resource.cleanup_observed_create = false;
     resource.phase = "reserved".into();
     resource.routing = None;
     resource.loopback_ports = Vec::new();

@@ -33,6 +33,7 @@ fn receipt(index: usize) -> Receipt {
                 key: "web".into(),
                 name: "owned-web".into(),
                 id: Some(format!("{index:064x}")),
+                cleanup_observed_create: false,
                 image: None,
                 phase: "absent".into(),
                 amd64_emulation: None,

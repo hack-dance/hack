@@ -843,6 +843,8 @@ pub struct DoctorCheck {
     /// `ok | warn | error`.
     #[serde(deserialize_with = "null_default")]
     pub status: String,
+    #[serde(rename = "nativePool", skip_serializing_if = "Option::is_none")]
+    pub native_pool: Option<NativePoolReport>,
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<DoctorCheckFix>,
@@ -853,6 +855,26 @@ pub struct DoctorCheck {
 pub struct DoctorCheckFix {
     pub kind: String,
     pub args: Vec<String>,
+}
+
+/// The machine Doctor check for this CLI's selected native home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePoolReport {
+    pub state: NativePoolState,
+    pub graph_runs: Option<u64>,
+    pub memory_bytes: Option<u64>,
+    pub guest_memory_mib: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePoolState {
+    Idle,
+    InUse,
+    Stopped,
+    #[serde(other)]
+    Unknown,
 }
 
 impl DoctorReport {

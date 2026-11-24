@@ -74,6 +74,10 @@ pub enum Fixture {
     Doctor,
     /// Every check passed.
     DoctorClean,
+    PoolUnknown,
+    PoolStopped,
+    PoolRunning,
+    PoolIdle,
     /// A project whose header links to its doctor findings.
     DoctorLink,
     /// No projects registered: the Doctor pane still shows machine checks.
@@ -149,6 +153,10 @@ impl Fixture {
         Self::CopiesReady,
         Self::Doctor,
         Self::DoctorClean,
+        Self::PoolUnknown,
+        Self::PoolStopped,
+        Self::PoolRunning,
+        Self::PoolIdle,
         Self::DoctorLink,
         Self::DoctorEmpty,
         Self::BannerDns,
@@ -215,6 +223,10 @@ impl Fixture {
             Self::CopiesReady => "copies-ready",
             Self::Doctor => "doctor",
             Self::DoctorClean => "doctor-clean",
+            Self::PoolUnknown => "pool-unknown",
+            Self::PoolStopped => "pool-stopped",
+            Self::PoolRunning => "pool-running",
+            Self::PoolIdle => "pool-idle",
             Self::DoctorLink => "doctor-link",
             Self::DoctorEmpty => "doctor-empty",
             Self::BannerDns => "h17-app-banner-dns",
@@ -666,6 +678,7 @@ pub fn local(f: Fixture) -> LocalContext {
 fn doctor(f: Fixture) -> DoctorReport {
     let mut checks = vec![
         DoctorCheck {
+            native_pool: None,
             id: "docker daemon".into(),
             status: if f == Fixture::EngineDown {
                 "error"
@@ -677,6 +690,7 @@ fn doctor(f: Fixture) -> DoctorReport {
             fix: None,
         },
         DoctorCheck {
+            native_pool: None,
             id: "caddy local ca".into(),
             status: "warn".into(),
             detail: "Local CA is not trusted by the system".into(),
@@ -685,6 +699,7 @@ fn doctor(f: Fixture) -> DoctorReport {
     ];
     if f == Fixture::NeedsAttention {
         checks.push(DoctorCheck {
+            native_pool: None,
             id: "project config".into(),
             status: "error".into(),
             detail: "notes: hack.config.json is not valid JSON".into(),
@@ -807,7 +822,13 @@ pub fn log_tail(f: Fixture) -> Vec<LogEntry> {
 pub fn opens_doctor(f: Fixture) -> bool {
     matches!(
         f,
-        Fixture::Doctor | Fixture::DoctorClean | Fixture::DoctorEmpty
+        Fixture::Doctor
+            | Fixture::DoctorClean
+            | Fixture::DoctorEmpty
+            | Fixture::PoolIdle
+            | Fixture::PoolRunning
+            | Fixture::PoolStopped
+            | Fixture::PoolUnknown
     )
 }
 
@@ -1045,6 +1066,7 @@ pub fn loads_doctor(f: Fixture) -> bool {
 pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
     use crate::doctor::DoctorRun;
     let c = |id: &str, status: &str, detail: &str| DoctorCheck {
+        native_pool: None,
         id: id.into(),
         status: status.into(),
         detail: detail.into(),
@@ -1068,6 +1090,41 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
             c("dnsmasq:53", "ok", ""),
         ]
     };
+    use crate::models::{NativePoolReport, NativePoolState};
+    let pool = match f {
+        Fixture::PoolIdle => Some((NativePoolState::Idle, "warn", "The native VM pool is idle.")),
+        Fixture::PoolRunning => Some((
+            NativePoolState::InUse,
+            "ok",
+            "The native VM pool is in use.",
+        )),
+        Fixture::PoolStopped => Some((
+            NativePoolState::Stopped,
+            "ok",
+            "The native VM pool is stopped.",
+        )),
+        Fixture::PoolUnknown => Some((
+            NativePoolState::Unknown,
+            "warn",
+            "Native VM pool status unavailable.",
+        )),
+        _ => None,
+    };
+    if let Some((state, status, detail)) = pool {
+        let running = matches!(state, NativePoolState::Idle | NativePoolState::InUse);
+        let mut check = c("native pool idle", status, detail);
+        check.native_pool = Some(NativePoolReport {
+            state,
+            graph_runs: if running {
+                Some(u64::from(state == NativePoolState::InUse))
+            } else {
+                None
+            },
+            memory_bytes: running.then_some(512 * 1024 * 1024),
+            guest_memory_mib: running.then_some(4096),
+        });
+        return vec![DoctorRun::machine(report(vec![check]))];
+    }
     if f == Fixture::DoctorEmpty {
         let mut machine = ok_machine();
         machine[5] = c(

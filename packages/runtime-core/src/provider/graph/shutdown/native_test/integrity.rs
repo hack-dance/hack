@@ -386,8 +386,8 @@ fn owned_named_volume_integrity_survives_container_restart() {
     for cycle in 1..=2 {
         {
             let engine = Engine::connect(&candidate).unwrap();
-            let (selected, graph_root) = load(&candidate, &engine, &run_id).unwrap();
-            super::super::stop_owned(&engine, &selected, &graph_root).unwrap();
+            let (mut selected, graph_root) = load(&candidate, &engine, &run_id).unwrap();
+            super::super::stop_owned(&engine, &mut selected, &graph_root, &|| Ok(())).unwrap();
             let container =
                 inspect_resource(&engine, &selected, &selected.resources["container:probe"])
                     .unwrap()

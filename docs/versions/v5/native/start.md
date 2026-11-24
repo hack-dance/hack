@@ -139,6 +139,8 @@ During startup, `hack ps` shows verified loopback publications, and
 Other services can still be starting. If the start fails or is cancelled,
 the owner retires the ports it has already published. HTTPS addresses still
 depend on the HTTPS frontend being ready.
+Once HTTPS is ready for a project, starting or stopping another project in the
+same native home leaves its routes available.
 Text output reports each build as it finishes, including its service names,
 outcome and elapsed time. Build output stays with foreground `hack up`.
 See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
@@ -163,6 +165,13 @@ run without transferring the old run’s data.
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
 [cleanup reference](full-reference.md#manual-candidate-upgrade-and-rollback).
+
+If startup was interrupted just after creating a container, cleanup records
+the container it verified before removing it. Once cleanup finishes with data
+retained, `hack up` can restore the run with its existing named volumes.
+This applies when cleanup records the ID. Runs already stopped with a missing
+container ID still refuse restore. Earlier builds cannot read receipts that
+contain the new cleanup observation field. Native homes are per version.
 
 After installing a newer version, its native home is new, but the project still
 records its last run in the old one. If you did not stop the project with the old

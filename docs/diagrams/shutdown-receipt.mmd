@@ -1,0 +1,31 @@
+---
+title: ShutdownReceipt · recovery
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> CreateLost
+    CreateLost --> CleanupIntent : BeginCleanup
+    CleanupIntent --> TerminalObserved : ObserveTerminal
+    TerminalObserved --> ReceiptWritten : WriteReceipt
+    ReceiptWritten --> ShutdownWritten : WriteShutdown
+    ShutdownWritten --> ComputeAbsent : RemoveCompute
+    ComputeAbsent --> Stopped : FinishCleanup
+    CleanupIntent --> ComputeAbsent : RetryAbsent [ID absent]
+    TerminalObserved --> CleanupIntent : Crash
+    ReceiptWritten --> CleanupIntent : Crash
+    ShutdownWritten --> CleanupIntent : Crash
+    ComputeAbsent --> CleanupIntent : Crash
+    Stopped --> Stopped : ReplaceAtName
+    Stopped --> Restored : Restore [absent, IDs match]
+    Stopped --> Refused : Refuse [presence or mismatch]
+
+    note right of ShutdownWritten
+        INV IdentifiableByRestore
+        Receipt ID equals stop ID.
+    end note
+
+    class Restored ok
+    class Refused fail

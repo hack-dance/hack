@@ -1,0 +1,28 @@
+---
+title: Removed run · retention chain
+---
+stateDiagram-v2
+    direction LR
+    classDef ok stroke-width:1.6px
+
+    [*] --> active : run removed
+    active --> archived : 64 active, oldest
+    archived --> pruned : 256 archived, oldest
+    pruned --> gone : 4096 tombstones, oldest
+    gone --> [*]
+
+    note right of archived
+        Proof: every owned
+        resource absent.
+    end note
+    note right of pruned
+        Exported first; tombstone
+        kept; export 7 days.
+    end note
+    note right of gone
+        Fresh ids are 128 random
+        bits; restore needs a
+        receipt, long gone.
+    end note
+
+    class gone ok

@@ -31,7 +31,7 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 ## What it is not
 
 - **Backend selection.** Set `HACK_RUNTIME_BACKEND=compose` to run project
-  commands through the macOS candidate on Compose. Native is the planned default
+  commands through the macOS prerelease on Compose. Native is the planned default
   for stable v5.
 - **Not in stable Hack.** It ships only through the separate `hack-next` channel.
   The stable release archives and the Homebrew formula do not contain it.
@@ -65,7 +65,7 @@ architecture-beta
   group host[Host]
   service frontend[Native frontend] in host
   service compiler[Config compiler] in host
-  service provider[SmolVM provider] in host
+  service provider[VM provider] in host
   service client[Local client] in host
   service publisher[Loopback publisher] in host
   group pool[VM pool]
@@ -86,6 +86,11 @@ architecture-beta
 The compiler does not carry application traffic. This picture covers published
 TCP ports, not every routing mode or the authored frontend's separate capability
 limits; see the [reference](reference.md) before selecting a workload.
+
+The VM provider is a pinned third-party release today. Setup lists it, with its
+hash and source, before it downloads anything; see
+[prepare the native runtime](setup.md). Hack's own VM launcher is planned to
+replace it.
 
 A native home can also run one small control process, the runtime service
 (`hack-native service serve|status|stop`). It only answers who it is and whether

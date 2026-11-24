@@ -20,7 +20,7 @@ spec.loader.exec_module(sessions)
 
 
 def shared_cohort(adapter, backend_binary, count, owner=None):
-    with tempfile.TemporaryDirectory(prefix="hack-mb-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="hack-mb-") as root:
         root = str(Path(root).resolve())
         os.chmod(root, 0o700)
         env = {key: value for key, value in os.environ.items() if key in ("PATH", "LANG", "TMPDIR")}

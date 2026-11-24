@@ -376,7 +376,9 @@ adapters using the compiled `scripts/fixtures/mcp-benchmark-backend.ts` observer
 It records startup readiness, settled RSS, idle CPU and cleanup. The observer adds
 private process/exit receipts and uses a one-second fixture retirement timeout;
 include these differences when interpreting results. Executable hashes are checked
-before and after each cohort.
+before and after each cohort. Set `TMPDIR` to an existing, private scratch
+directory when running this benchmark on a separate volume. Use a short path
+so the managed Unix socket fits the platform's path limit.
 
 Tool schemas must match exactly by default. For the stable 4.2.0 comparison,
 `--allow-optional-output-truncation` permits only the known additive, optional

@@ -116,6 +116,8 @@ impl Proof<'_> {
         let (current, root) = load(self.candidate, &self.engine, &self.selected.run)?;
         let context = host_relay::context(&self.selected.owner, &self.selected.boot)?;
         let marker = current.relay_cleanup.as_ref().ok_or_else(refused)?;
+        // Selection required an exact ID for every created container. This
+        // recovery can retire those IDs, but does not discover new ones.
         if root != self.root
             || !["cleanup-intent", "stopped-data-retained"].contains(&current.phase.as_str())
             || dead_owner_cleanup::immutable(&current)?
@@ -510,6 +512,8 @@ fn select_ignoring<'a>(
     if let Some(record) = &prior {
         record.validate_phase(&current)?;
     }
+    // Resuming keeps the IDs that selection proved below. A reserved
+    // container without an ID had to be absent at admission.
     if current.relay_startup.is_none()
         || current.normalized_input.is_none()
         || current

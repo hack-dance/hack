@@ -395,12 +395,13 @@ impl ProjectRow {
         owner.is_some() && owner == self.repo_root
     }
 
-    /// Match observations and configuration by slug and checkout together.
-    #[must_use]
-    pub fn instance_at(&self, branch: &str, checkout: Option<&str>) -> Option<ProjectRow> {
-        let copy = self.branch_copy_at(Some(branch), checkout);
-        let Some(br) = self
-            .branch_runtime
+    pub(crate) fn branch_observation_at(
+        &self,
+        branch: &str,
+        checkout: Option<&str>,
+        copy: Option<&BranchCopy>,
+    ) -> Option<&BranchRuntime> {
+        self.branch_runtime
             .iter()
             .filter(|b| b.branch == branch && self.branch_owner(b).as_deref() == checkout)
             .min_by_key(|b| {
@@ -409,7 +410,13 @@ impl ProjectRow {
                     .or(b.compose_project.as_ref());
                 expected.is_some() && expected != b.runtime.project.as_ref()
             })
-        else {
+    }
+
+    /// Match observations and configuration by slug and checkout together.
+    #[must_use]
+    pub fn instance_at(&self, branch: &str, checkout: Option<&str>) -> Option<ProjectRow> {
+        let copy = self.branch_copy_at(Some(branch), checkout);
+        let Some(br) = self.branch_observation_at(branch, checkout, copy) else {
             return Some(self.configured_instance(copy?));
         };
         // The instance's own host, by the rule `hack open --branch <b>` uses
@@ -612,15 +619,17 @@ pub struct RuntimeService {
 pub struct Container {
     pub id: Option<String>,
     pub name: Option<String>,
+    pub image: Option<String>,
+    #[serde(deserialize_with = "port_text")]
+    pub ports: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub mounts: Vec<ContainerMount>,
     /// Docker state: `running`, `exited`, `created`, `restarting`, ...
     #[serde(deserialize_with = "null_default")]
     pub state: String,
     /// Docker status text, for example `Up 5 minutes (healthy)`.
     #[serde(deserialize_with = "null_default")]
     pub status: String,
-    pub image: Option<String>,
-    #[serde(deserialize_with = "null_default")]
-    pub mounts: Vec<ContainerMount>,
     /// Container labels. Branch instances carry their routes in `caddy`.
     #[serde(deserialize_with = "null_default")]
     pub labels: std::collections::BTreeMap<String, String>,
@@ -629,14 +638,23 @@ pub struct Container {
     pub started_at: Option<String>,
 }
 
+// Older branch payloads used an array here. An unrecognized port shape
+// leaves the Info row unknown and must not discard the whole project read.
+fn port_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(ports) => Some(ports),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ContainerMount {
+    #[serde(rename = "type")]
+    pub kind: String,
     pub name: Option<String>,
     pub source: String,
     pub destination: String,
-    #[serde(rename = "type")]
-    pub kind: String,
 }
 
 impl Container {

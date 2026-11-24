@@ -111,6 +111,14 @@ async function tree(): Promise<string> {
     spawnSyncBounded(["mkfifo", join(dir, "fifo")], { timeout: 10_000 })
       .exitCode
   ).toBe(0);
+  // Two names for one FIFO and for one symlink: tar stores the second name
+  // of each as a hard link to a non-regular entry.
+  await link(join(dir, "fifo"), join(dir, "fifo2"));
+  expect(
+    spawnSyncBounded(["ln", "-P", join(dir, "link"), join(dir, "link2")], {
+      timeout: 10_000,
+    }).exitCode
+  ).toBe(0);
   // A listening socket, like mysql.sock in a datadir; closed after the test.
   const server = createServer();
   servers.push(server);

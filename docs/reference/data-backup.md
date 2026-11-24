@@ -139,7 +139,10 @@ runs. A step past its bound is stopped and refuses with
 disk or any other failure the helper container is removed; if Docker cannot
 confirm the removal, the outcome says so (`detail.cleanup: {container,
 removed: false}` and the `docker rm -f` command to run) instead of claiming
-cleanup, and nothing is published.
+cleanup, and nothing is published. Ctrl-C or SIGTERM stops the event
+subscription, force-removes the run's helper containers by name and reports
+`E_CANCELLED`; removal is confirmed with a few short retries, since Docker
+may still be tearing a container down.
 
 ## What "consistent" means
 

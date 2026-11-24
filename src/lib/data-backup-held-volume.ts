@@ -117,6 +117,13 @@ export function requireStep<T extends { readonly exitCode: number }>(opts: {
   if (opts.result.exitCode === DATA_BACKUP_TIMEOUT_EXIT) {
     throw stepTimeout(opts);
   }
+  // 130/143: the client was interrupted (Ctrl-C or SIGTERM reached it).
+  if (opts.result.exitCode === 130 || opts.result.exitCode === 143) {
+    throw new HackCliError({
+      code: "E_CANCELLED",
+      message: `Interrupted while the backup helper was working on volume ${opts.label}; ${opts.consequence}`,
+    });
+  }
   if (opts.result.exitCode !== 0) {
     throw helperFailure({
       volume: opts.label,
@@ -155,22 +162,37 @@ function heldMountMatches(opts: {
   );
 }
 
+/** Attempts at confirming removal, 200 ms apart (a removal already in flight). */
+const REMOVAL_CHECKS = 10;
+
+/**
+ * Force-remove the helper and confirm with Docker that it is gone. A
+ * concurrent removal (the signal cleanup, or Docker still tearing the
+ * container down) can make one `rm` fail or one inspect still see it, so
+ * the absence check is retried a few times before removal is reported as
+ * unconfirmed.
+ */
 async function release(opts: {
   readonly docker: DataBackupDocker;
   readonly container: string;
   readonly deadlines: DataBackupDeadlines;
 }): Promise<HeldVolumeRelease> {
-  await opts.docker.capture(["docker", "rm", "--force", opts.container], {
-    timeoutMs: opts.deadlines.commandMs,
-  });
-  const gone = await opts.docker.capture(
-    ["docker", "container", "inspect", "--format", "{{.Id}}", opts.container],
-    { timeoutMs: opts.deadlines.commandMs }
-  );
-  return {
-    container: opts.container,
-    removed: gone.exitCode === 1 && NO_SUCH_CONTAINER.test(gone.stderr),
-  };
+  for (let attempt = 0; attempt < REMOVAL_CHECKS; attempt += 1) {
+    if (attempt > 0) {
+      await Bun.sleep(200);
+    }
+    await opts.docker.capture(["docker", "rm", "--force", opts.container], {
+      timeoutMs: opts.deadlines.commandMs,
+    });
+    const gone = await opts.docker.capture(
+      ["docker", "container", "inspect", "--format", "{{.Id}}", opts.container],
+      { timeoutMs: opts.deadlines.commandMs }
+    );
+    if (gone.exitCode === 1 && NO_SUCH_CONTAINER.test(gone.stderr)) {
+      return { container: opts.container, removed: true };
+    }
+  }
+  return { container: opts.container, removed: false };
 }
 
 /** Add the unconfirmed cleanup to a refusal (or make one) and name the fix. */

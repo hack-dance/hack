@@ -266,21 +266,25 @@ function yamlSecretRanges(
   }
   const ranges: Range[] = [];
   let aliases = false;
-  let hiddenComment = false;
+  let hiddenSource = false;
   // Check even nodes underneath a private parent which the masking pass skips.
-  visit(doc, (_, node) => {
+  visit(doc, (index, node) => {
     if (isAlias(node)) {
       aliases = true;
     }
     if (
-      (isAlias(node) || isMap(node) || isScalar(node) || isSeq(node)) &&
-      privateYamlComment(node)
+      (compose &&
+        index === "key" &&
+        isScalar(node) &&
+        isConfigSecret("", node.value)) ||
+      ((isAlias(node) || isMap(node) || isScalar(node) || isSeq(node)) &&
+        privateYamlComment(node))
     ) {
-      hiddenComment = true;
+      hiddenSource = true;
       return visit.BREAK;
     }
   });
-  if (hiddenComment) {
+  if (hiddenSource) {
     return null;
   }
   visit(doc, {

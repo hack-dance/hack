@@ -801,8 +801,8 @@ export function composeModel(opts: {
       );
       return [];
     }
-    const depends_on = serviceNames(service.depends_on);
-    issues.push(...composeServiceIssues(source, name, service, depends_on));
+    const dependencies = serviceNames(service.depends_on);
+    issues.push(...composeServiceIssues(source, name, service, dependencies));
     const labels = composeLabels(service);
     const { routes, droppedAll } = resolveRoutes
       ? serviceRoutes({
@@ -839,7 +839,7 @@ export function composeModel(opts: {
             ? service.image
             : null,
         ports: composePorts(service.ports),
-        depends_on,
+        depends_on: dependencies.filter((name) => !isConfigSecret("", name)),
         routes,
         route_edit: directlyEditable ? simpleRoute(service, labels) : null,
         source_fields: COMPOSE_EDIT_FIELDS.filter(

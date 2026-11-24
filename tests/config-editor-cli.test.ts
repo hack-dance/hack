@@ -475,6 +475,35 @@ test("Source saves surrounding edits while preserving private slots", async () =
   }
 });
 
+test.each([
+  "list",
+  "map",
+] as const)("show omits credential-bearing dependency names in Compose %s syntax", async (syntax) => {
+  const f = await fixture();
+  const marker = "fixture-dependency-sentinel";
+  const dependency = `https://fixture:${marker}@registry.example.test`;
+  const field =
+    syntax === "list"
+      ? `    depends_on: [api, "${dependency}"]`
+      : `    depends_on:\n      api: {condition: service_started}\n      "${dependency}": {condition: service_started}`;
+  const path = join(f.project, "docker-compose.yml");
+  const text = compose.replace("    depends_on: [api]", field);
+  await writeFile(path, text);
+
+  const report = await show(f.root, f.main);
+  expect(JSON.stringify(report).includes(marker)).toBe(false);
+  expect(
+    report.services.find((service) => service.name === "web")?.depends_on
+  ).toEqual(["api"]);
+  expect(report.issues[0]).toMatchObject({
+    layer: "2",
+    code: "E_CONFIG_INVALID",
+    path: ["services", "web", "depends_on"],
+    line: syntax === "list" ? 10 : 11,
+  });
+  expect((await readFile(path, "utf8")) === text).toBe(true);
+});
+
 test("show and validation previews omit authorization headers and commands", async () => {
   const f = await fixture();
   const [projectPath, composePath] = [

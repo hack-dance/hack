@@ -20,6 +20,7 @@ import {
   COMPOSE,
   FAKE_TIMEOUT_EXIT,
   FakeEngine,
+  fakePsId,
 } from "./helpers/data-backup-fake-engine.ts";
 
 const PROJECT = "shop";
@@ -298,11 +299,17 @@ describe("targets", () => {
     expect(create[create.indexOf("--log-driver") + 1]).toBe("none");
     expect(create[create.indexOf("--network") + 1]).toBe("none");
     const tar = fake.calls.find((argv) => argv.includes("-xpf")) ?? [];
+    // By the ID its create returned, never by name.
+    const helperId =
+      fake.created.find(
+        (entry) => entry.name === create[create.indexOf("--name") + 1]
+      )?.id ?? "";
+    expect(helperId).toMatch(/^[a-f0-9]{64}$/);
     expect(tar.slice(0, 4)).toEqual([
       "docker",
       "exec",
       "--interactive",
-      create[create.indexOf("--name") + 1] ?? "",
+      helperId,
     ]);
     expect(fake.leftovers()).toEqual([]);
     expect(renderDataImportText(result)).toBe(
@@ -723,43 +730,170 @@ describe("running refusal and the event fence", () => {
     const error = await caught(importProjectData(input(fake, dir)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.detail).toEqual({
-      mounts: [
-        { volume: "db", container: "f".repeat(64), name: "adhoc-writer" },
-      ],
+      mounts: [{ volume: "db", container: "f".repeat(12) }],
     });
     expect((await journal("db"))?.state).toBe("started");
     expect(fake.events.open).toBeFalse();
   });
 });
 
-describe("helper names are never trusted", () => {
+describe("helper containers are tracked by ID, never by name", () => {
+  const markerNames = (fake: FakeEngine): string[] =>
+    fake.calls
+      .filter((argv) => argv[1] === "create" && !argv.includes("--mount"))
+      .map((argv) => argv[argv.indexOf("--name") + 1] ?? "");
+
   test("a container reusing a removed marker's name and mounting a target is refused", async () => {
     const dir = await writeBackup({ keys: ["db"] });
     const fake = engine();
+    let reuser: string | null = null;
     fake.onExec = (_container, args) => {
-      if (args.includes("-xpf")) {
+      if (args.includes("-xpf") && reuser === null) {
         // The start marker was removed before the restore; its name is free.
-        const reused =
-          fake.calls
-            .filter((argv) => argv[1] === "create" && !argv.includes("--mount"))
-            .map((argv) => argv[argv.indexOf("--name") + 1])[0] ?? "";
+        const reused = markerNames(fake)[0] ?? "";
         expect(reused).toMatch(/^hack-data-import-[a-f0-9]{24}-start$/);
-        fake.events.start("9".repeat(64), reused);
-        fake.events.mount("shop_db", "9".repeat(64));
+        reuser = fake.createForeign(reused);
+        fake.events.mount("shop_db", reuser ?? "");
       }
     };
     const error = await caught(importProjectData(input(fake, dir)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(reuser).toMatch(/^[a-f0-9]{64}$/);
     expect(error.detail).toEqual({
-      mounts: [
-        {
-          volume: "db",
-          container: "9".repeat(64),
-          name: expect.stringMatching(/-start$/),
-        },
-      ],
+      mounts: [{ volume: "db", container: (reuser ?? "").slice(0, 12) }],
     });
     expect((await journal("db"))?.state).toBe("started");
+  });
+
+  test("an interrupt removes the live write hold by ID and spares a container that reused a removed marker's name", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    const keep = (): void => undefined;
+    process.on("SIGINT", keep);
+    const before = new Set(process.listeners("SIGINT"));
+    let reuser: string | null = null;
+    let holdId = "";
+    let firstCall = 0;
+    fake.onExec = (_container, args) => {
+      if (args.includes("-xpf") && reuser === null) {
+        reuser = fake.createForeign(markerNames(fake)[0] ?? "");
+        holdId = fake.created.at(-1)?.id ?? "";
+        firstCall = fake.calls.length;
+        const handler = process
+          .listeners("SIGINT")
+          .find((listener) => !before.has(listener));
+        (handler as () => void)();
+      }
+    };
+    try {
+      await importProjectData(input(fake, dir)).catch(() => undefined);
+    } finally {
+      process.off("SIGINT", keep);
+    }
+    expect(reuser).toMatch(/^[a-f0-9]{64}$/);
+    const signalRm = fake.calls
+      .slice(firstCall)
+      .find((argv) => argv[1] === "rm");
+    expect(signalRm).toEqual(["docker", "rm", "--force", holdId]);
+    expect(fake.containers.has(reuser ?? "")).toBeTrue();
+    for (const argv of fake.calls.filter((call) => call[1] === "rm")) {
+      expect(argv).not.toContain(reuser);
+      expect(argv).not.toContain(markerNames(fake)[0]);
+    }
+    expect(fake.leftovers()).toEqual([reuser ?? ""]);
+  });
+});
+
+describe("container names never reach output", () => {
+  // Not a credential: a recognizable stand-in for a managed value that a
+  // service interpolates into `container_name: db-${TOKEN}`.
+  const TOKEN = "managed-token-canary-2b9e";
+
+  test("running and mount refusals list short IDs, not names", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const running = engine();
+    running.running[`label=com.docker.compose.project=${PROJECT}`] = [
+      `db-${TOKEN}`,
+    ];
+    const refused = await caught(importProjectData(input(running, dir)));
+    expect(refused.code).toBe("E_PROJECT_RUNNING");
+    expect(refused.detail).toEqual({ running: [fakePsId(`db-${TOKEN}`)] });
+
+    const mounting = engine();
+    mounting.onExec = (_container, args) => {
+      if (args.includes("-xpf")) {
+        const id = mounting.createForeign(`db-${TOKEN}`) ?? "";
+        mounting.events.mount("shop_db", id);
+      }
+    };
+    const mounted = await caught(
+      importProjectData(input(mounting, dir, { hackHome: join(root, "h2") }))
+    );
+    expect(mounted.code).toBe("E_PROJECT_RUNNING");
+    for (const error of [refused, mounted]) {
+      expect(`${error.message}${JSON.stringify(error.detail)}`).not.toContain(
+        TOKEN
+      );
+    }
+  });
+});
+
+describe("foreign container starts during the import are inspected by ID", () => {
+  let runs = 0;
+  async function importWithForeignStart(
+    mounts: readonly unknown[] | null
+  ): Promise<{ id: string; error: HackCliError | null; state?: string }> {
+    runs += 1;
+    const dir = await writeBackup({ keys: ["db"], name: `b-${runs}` });
+    const fake = engine();
+    let id = "";
+    fake.onExec = (_container, args) => {
+      if (args.includes("-xpf") && id === "") {
+        if (mounts === null) {
+          id = "7".repeat(64);
+          fake.events.start(id, "short-lived");
+        } else {
+          id = fake.createForeign("binder", mounts) ?? "";
+        }
+      }
+    };
+    const hackHome = join(root, `home-${runs}`);
+    const error = await importProjectData(input(fake, dir, { hackHome })).then(
+      () => null,
+      (caughtError: unknown) => caughtError as HackCliError
+    );
+    return { id, error };
+  }
+
+  test("a bind of the target's Mountpoint, or a path inside it, keeps the journal unfinished", async () => {
+    for (const source of [
+      "/var/lib/docker/volumes/shop_db/_data",
+      "/var/lib/docker/volumes/shop_db/_data/sub",
+    ]) {
+      const { id, error } = await importWithForeignStart([
+        { Type: "bind", Source: source, Destination: "/x" },
+      ]);
+      expect({ source, detail: error?.detail }).toEqual({
+        source,
+        detail: { mounts: [{ volume: "db", container: id.slice(0, 12) }] },
+      });
+    }
+  });
+
+  test("unrelated mounts complete the import; a vanished start refuses closed", async () => {
+    const unrelated = await importWithForeignStart([
+      { Type: "bind", Source: "/srv/data", Destination: "/x" },
+    ]);
+    expect(unrelated.error).toBeNull();
+    const vanished = await importWithForeignStart(null);
+    expect(vanished.error?.code).toBe("E_PROJECT_RUNNING");
+    expect(vanished.error?.detail).toEqual({
+      unchecked: ["7".repeat(12)],
+      reason: "unchecked_start",
+    });
+    expect(vanished.error?.message).toContain(
+      "the restore is not marked complete"
+    );
   });
 });
 

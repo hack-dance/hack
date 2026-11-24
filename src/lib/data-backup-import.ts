@@ -5,12 +5,12 @@ import {
   resolveDataBackupDeadlines,
 } from "./data-backup-deadlines.ts";
 import type { DataBackupDocker } from "./data-backup-docker.ts";
-import { redactComposeProject } from "./data-backup-export.ts";
 import {
   type DataBackupVolume,
   dataBackupNameSha256,
 } from "./data-backup-format.ts";
 import {
+  DataHelperContainers,
   type HeldVolume,
   requireStep,
   withHeldVolume,
@@ -138,7 +138,13 @@ type Context = {
   readonly backup: VerifiedBackup;
   readonly plan: DeclaredVolumePlan;
   readonly deadlines: DataBackupDeadlines;
-  readonly helperNames: Set<string>;
+  /** This run's containers, by the IDs their creates returned. */
+  readonly helpers: DataHelperContainers;
+  /**
+   * The Mountpoint of each target, by Docker name, once known (inspected,
+   * or created by this import), for the window's foreign-start check.
+   */
+  readonly mountpoints: Map<string, string>;
   readonly now: () => Date;
 };
 
@@ -189,12 +195,12 @@ export async function importProjectData(
     composeProject: instanceDir(input),
     timeoutMs: input.lockTimeoutMs,
     run: async () => {
-      const helperNames = new Set<string>();
+      const helpers = new DataHelperContainers();
       // Subscribe and prove coverage before the first running-container check.
       const monitor = await startMountMonitor({
         docker: input.docker,
         purpose: "import",
-        helperNames,
+        helpers,
         deadlines,
         markerTimeoutMs: input.markerTimeoutMs,
       });
@@ -205,7 +211,8 @@ export async function importProjectData(
             backup,
             plan,
             deadlines,
-            helperNames,
+            helpers,
+            mountpoints: new Map(),
             now: input.now ?? (() => new Date()),
           },
           selected,
@@ -236,14 +243,12 @@ async function importWithin(
   const { input, plan } = context;
   const stopCommand = input.downCommand ?? "hack down";
   const volumeNames = selected.map((entry) => entry.name);
-  const redact = redactComposeProject(plan.composeProject);
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
     volumeNames,
     stopCommand,
     command: "import",
-    redact,
     lead: "The project is running, so its volumes cannot be restored safely; nothing was changed.",
   });
   const targets = await prepareTargets(context, selected);
@@ -264,17 +269,26 @@ async function importWithin(
     volumeNames,
     stopCommand,
     command: "import",
-    redact,
     lead: "A container started during the import, so the restore is not marked complete; rerunning hack data import after stopping it replaces its own copy.",
   });
   // Stop and drain the subscription, then decide.
   const keyOf = new Map(
     selected.map((entry) => [entry.name, entry.volume.key])
   );
-  const mounts = (await monitor.finish(volumeNames)).map((mount) => ({
+  // Every target's Mountpoint is known by now: inspected, or created and
+  // restored above.
+  const mounts = (
+    await monitor.finish(
+      selected.flatMap((entry) => {
+        const mountpoint = context.mountpoints.get(entry.name);
+        return mountpoint === undefined
+          ? []
+          : [{ name: entry.name, mountpoint }];
+      })
+    )
+  ).map((mount) => ({
     ...mount,
     volume: keyOf.get(mount.volume) ?? mount.volume,
-    name: mount.name === null ? null : redact(mount.name),
   }));
   if (mounts.length > 0) {
     throw foreignMountError({
@@ -428,7 +442,7 @@ async function existingIsEmpty(
       readOnly: true,
       purpose: "import",
       deadlines: context.deadlines,
-      helperNames: context.helperNames,
+      helpers: context.helpers,
       changed: changedTarget(entry.volume.key),
       consequence: "nothing was changed.",
     },
@@ -451,7 +465,7 @@ async function existingMatches(
       readOnly: true,
       purpose: "import",
       deadlines: context.deadlines,
-      helperNames: context.helperNames,
+      helpers: context.helpers,
       changed: changedTarget(entry.volume.key),
       consequence: "nothing was changed.",
     },
@@ -507,6 +521,7 @@ async function classifyTarget(
   if (!plainLocalVolume(inspected)) {
     return { key, reason: "unsupported_driver" };
   }
+  context.mountpoints.set(entry.name, inspected.mountpoint);
   const target = { ...entry, journalPath, identity: inspected };
   const journal = await readDataImportJournal(journalPath);
   const sameRestore =
@@ -683,6 +698,7 @@ async function restoreTarget(
   if (identity === null) {
     throw changedTarget(key)();
   }
+  context.mountpoints.set(target.name, identity.mountpoint);
   const recoverable = target.kind !== "empty";
   const partialNote = recoverable
     ? `the volume for ${key} may hold a partial copy; rerunning hack data import replaces it.`
@@ -696,7 +712,7 @@ async function restoreTarget(
       readOnly: false,
       purpose: "import",
       deadlines: context.deadlines,
-      helperNames: context.helperNames,
+      helpers: context.helpers,
       changed: changedTarget(key),
       consequence: partialNote,
     },

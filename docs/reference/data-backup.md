@@ -344,7 +344,14 @@ Before any write it checks, in order:
    `E_PROJECT_RUNNING` refuses when a container of the instance, or any
    container mounting a target, runs, or when any container mounts a target
    during the import (this run's helpers hold targets by bind, which emits
-   no volume `mount` event; no container name is exempt).
+   no volume `mount` event). As for export, every container that starts in
+   the window and is not one this import created is inspected by ID: a
+   volume mount of a target or a bind of a target's `Mountpoint` (including
+   one the import just created), a path inside it or a directory above it
+   refuses, and a start that cannot be inspected refuses with
+   `detail.reason: unchecked_start` (retry if it was unrelated). Containers
+   are tracked and removed by ID and reported by short ID only. Each
+   refusal leaves the journal unfinished.
 5. **Targets.** A backed-up key that is no longer declared here, or is
    `external` here, is skipped and reported. For each other key the target is
    its Docker volume (`name:` or `<compose project>_<key>`):

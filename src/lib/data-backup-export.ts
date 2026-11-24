@@ -1,4 +1,4 @@
-import { mkdir, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, rename, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import { createBackingProver } from "./data-backup-backing-proof.ts";
@@ -49,6 +49,7 @@ import {
   volumeReplacedError,
   type WatchedVolume,
 } from "./data-backup-volumes.ts";
+import { isRecord } from "./guards.ts";
 
 export type DataExportInput = {
   readonly docker: DataBackupDocker;
@@ -190,18 +191,17 @@ async function exportWithin(opts: {
       DATA_BACKUPS_DIR_NAME,
       input.branch ? `${input.project}--${input.branch}` : input.project
     );
-  const backup = join(parent, dataBackupTimestamp(now));
-  const partial = `${backup}${DATA_BACKUP_PARTIAL_SUFFIX}`;
   // Directories this export creates; their entries are flushed at the end.
   const createdDirs = await missingDirectories(parent);
   await fsStep({ path: parent, operation: "create_directory" }, () =>
     mkdir(parent, { recursive: true, mode: 0o700 })
   );
-  await refuseExisting(backup);
-  await refuseExisting(partial);
-  await fsStep({ path: partial, operation: "create_directory" }, () =>
-    mkdir(partial, { mode: 0o700 })
-  );
+  const { backup, partial } = await claimBackupPath({
+    parent,
+    stamp: dataBackupTimestamp(now),
+    // An explicit --out names exactly this parent; refuse a collision there.
+    nextFreeName: input.outDir === undefined,
+  });
 
   const helperImage = dataBackupHelperImage();
   const notPublishedNote = `the backup was not published; the incomplete copy is in ${partial}, which you can delete.`;
@@ -369,6 +369,72 @@ async function missingDirectories(path: string): Promise<readonly string[]> {
     current = up;
   }
   return missing;
+}
+
+/** How many `<UTC>-<n>` names a default-path export tries in one second. */
+const MAX_BACKUP_NAME_SUFFIX = 100;
+
+/**
+ * Claim this export's backup name under `parent`: `<stamp>`, or with
+ * `nextFreeName` the first free of `<stamp>-2`, `<stamp>-3`, ... (a
+ * refused export leaves its `.partial`, and a quick retry lands in the same
+ * second). The claim is `mkdir <name>.partial` itself: its EEXIST is the
+ * signal to move on, never a check followed by a create, so two exports in
+ * one second never share a name. A name whose final directory already
+ * exists is skipped as well (the empty `.partial` this run just made is
+ * removed first). Never reuses or replaces an existing backup or
+ * `.partial`. Without `nextFreeName` (an explicit --out), any collision
+ * refuses with E_PATH_CONFLICT as before.
+ */
+async function claimBackupPath(opts: {
+  readonly parent: string;
+  readonly stamp: string;
+  readonly nextFreeName: boolean;
+}): Promise<{ readonly backup: string; readonly partial: string }> {
+  const tries = opts.nextFreeName ? MAX_BACKUP_NAME_SUFFIX : 1;
+  for (let index = 1; index <= tries; index += 1) {
+    const backup = join(
+      opts.parent,
+      index === 1 ? opts.stamp : `${opts.stamp}-${index}`
+    );
+    const partial = `${backup}${DATA_BACKUP_PARTIAL_SUFFIX}`;
+    if (!opts.nextFreeName) {
+      await refuseExisting(backup);
+    }
+    const claimed = await fsStep(
+      { path: partial, operation: "create_directory" },
+      () =>
+        mkdir(partial, { mode: 0o700 }).then(
+          () => true,
+          (error: unknown) => {
+            if (isRecord(error) && error.code === "EEXIST") {
+              return false;
+            }
+            throw error;
+          }
+        )
+    );
+    if (!claimed) {
+      if (!opts.nextFreeName) {
+        await refuseExisting(partial);
+      }
+      continue;
+    }
+    if ((await stat(backup).catch(() => null)) === null) {
+      return { backup, partial };
+    }
+    // The final name is taken: release the empty claim this run made.
+    await fsStep({ path: partial, operation: "create_directory" }, () =>
+      rmdir(partial)
+    );
+    if (!opts.nextFreeName) {
+      await refuseExisting(backup);
+    }
+  }
+  throw new HackCliError({
+    code: "E_PATH_CONFLICT",
+    message: `${join(opts.parent, opts.stamp)} and its next ${MAX_BACKUP_NAME_SUFFIX - 1} names already exist; Hack never writes into or replaces an existing backup. Retry in a second, or choose another --out.`,
+  });
 }
 
 async function refuseExisting(path: string): Promise<void> {

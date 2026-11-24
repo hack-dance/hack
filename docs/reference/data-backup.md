@@ -175,17 +175,33 @@ mountpoint, options and Compose labels, and the container's mount must be
 that directory. A volume replaced or relabeled in between refuses the same
 way and is not read.
 
-Hack cannot pin a volume against removal. A bind of its `Mountpoint` is not
-a Docker volume reference, so `docker volume rm` succeeds while the helper
-holds it: on Docker 29.9.2 the removal exits 0, `docker volume inspect` then
-fails, and the helper's `/v` is left an empty tree. Every digest taken after
-such a removal agrees on that empty tree. Hack therefore rechecks the
-volume's identity (by inspect only; it never creates a volume) right after
-the hold, again after the copy and the second digest, and once more for
-every copied volume immediately before the rename that publishes the
-backup. A volume that is gone, or replaced under the same name, refuses
-with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`) and leaves the
-copy in `<backup>.partial/`.
+A bind of the `Mountpoint` is not a Docker volume reference, so on its own
+it does not stop `docker volume rm`: on Docker 29.9.2 the removal exits 0,
+`docker volume inspect` then fails, and the helper's `/v` is left an empty
+tree that every later digest agrees on. Hack therefore also holds a Docker
+reference to each copied volume for the whole copy and the window's checks:
+right after the first running check, it creates (and never starts) one
+reference container per volume (`--mount
+type=volume,src=<name>,dst=/v,volume-nocopy`, no network, no logging, a
+read-only root, the run's nonce label), tracked by the ID its create
+returned. While it exists Docker refuses the removal, `--force` included
+("volume is in use"); it runs nothing and emits no mount event. Each
+reference is removed by its ID once the window's checks are done, before
+the publish, and its removal is confirmed; an unconfirmed removal is
+reported like a helper's (`detail.cleanup`). Hack never removes a volume.
+
+Docker creates a missing named volume when a container that references it
+is created, so a volume removed between validation and the reference comes
+back empty under the same name. Hack rechecks every volume's identity (by
+inspect) as soon as its references exist, and the window's volume `create`
+events (below) see the recreation too: either refuses with `volume_changed`,
+and the empty volume Docker created is left in place. Identity is also
+rechecked right after each hold, after each copy and its second digest, and
+for every copied volume immediately before the rename that publishes the
+backup, in case a reference was removed by someone else. A volume that is
+gone, or replaced under the same name, refuses with `E_PROJECT_RUNNING`
+(`detail.reason: volume_changed`) and leaves the copy in
+`<backup>.partial/`.
 
 An identity comparison alone is not enough: Docker reports a volume's
 `CreatedAt` to the second, so a volume removed and created again under the

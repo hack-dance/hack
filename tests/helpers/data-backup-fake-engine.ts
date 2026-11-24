@@ -42,6 +42,8 @@ type FakeContainer = {
   running: boolean;
   /** `{{json .Mounts}}` of a foreign container; helpers derive theirs. */
   mounts?: readonly unknown[];
+  /** The named volume a `--mount type=volume` references. */
+  references?: string;
 };
 
 export const COMPOSE = [
@@ -135,11 +137,17 @@ export class FakeEngine {
   }
 
   /**
-   * `docker volume rm` as Docker does it while a helper holds a bind of the
-   * Mountpoint (checked on Docker 29.9.2): the removal succeeds, inspect then
-   * fails, and the holder keeps a mount whose tree is now empty.
+   * `docker volume rm` as Docker does it (checked on Docker 29.9.2). While
+   * a container references the volume by name, created or running, the
+   * removal is refused ("volume is in use", `--force` included) and this
+   * returns false. A bind of the Mountpoint is no reference: the removal
+   * succeeds, inspect then fails, and a bind holder keeps a mount whose tree
+   * is now empty.
    */
-  removeVolume(name: string): void {
+  removeVolume(name: string): boolean {
+    if (this.referencing(name).length > 0) {
+      return false;
+    }
     const volume = this.volumes.get(name);
     if (volume) {
       // The local driver deletes the data under any bind holder.
@@ -148,6 +156,25 @@ export class FakeEngine {
       this.volumes.delete(name);
       this.events.volume("destroy", name);
     }
+    return true;
+  }
+
+  /**
+   * Someone else removes every container that references `name` (Hack's
+   * own reference included, by ID), then the volume.
+   */
+  forceRemoveVolume(name: string): void {
+    for (const id of this.referencing(name)) {
+      this.containers.delete(id);
+    }
+    this.removeVolume(name);
+  }
+
+  /** IDs of the containers that reference the volume `name` by name. */
+  referencing(name: string): string[] {
+    return [...this.containers]
+      .filter(([, container]) => container.references === name)
+      .map(([id]) => id);
   }
 
   /** `{{json .Mounts}}` of a container. */
@@ -409,7 +436,14 @@ export class FakeEngine {
         ? (args[args.indexOf("--mount") + 1] ?? "")
         : null;
       let volume: string | null = null;
-      if (mount !== null) {
+      let references: string | undefined;
+      if (mount?.startsWith("type=volume,")) {
+        // A reference by name: Docker creates a missing named volume.
+        references = /src=([^,]+)/.exec(mount)?.[1] ?? "";
+        if (!this.volumes.has(references)) {
+          this.volume(references, { labels: {}, content: "" });
+        }
+      } else if (mount !== null) {
         // A bind of a Mountpoint: a missing path fails, nothing is created.
         const src = /src=([^,]+)/.exec(mount)?.[1] ?? "";
         volume =
@@ -431,6 +465,7 @@ export class FakeEngine {
         bound: volume === null ? undefined : this.volumes.get(volume),
         readOnly: mount?.includes(",readonly") ?? true,
         running: false,
+        references,
       });
       return ok(`${id}\n`);
     }

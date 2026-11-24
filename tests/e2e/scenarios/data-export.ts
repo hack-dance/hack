@@ -6,7 +6,10 @@ import {
   createHostDataBackupDocker,
   type DataBackupDocker,
 } from "../../../src/lib/data-backup-docker.ts";
-import { exportProjectData } from "../../../src/lib/data-backup-export.ts";
+import {
+  type DataExportResult,
+  exportProjectData,
+} from "../../../src/lib/data-backup-export.ts";
 import {
   DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
   DATA_BACKUP_DIGEST_SCRIPT,
@@ -421,26 +424,12 @@ export const dataExportScenario: Scenario = {
         result: raced,
       });
 
-      // Removed after every copy, right before the publish: Docker allows
-      // the removal (a bind is no volume reference), so only the identity
-      // recheck before the rename can refuse.
-      await removedDuringExport({
-        ctx,
-        fixture,
-        project,
-        volume: data,
-        stage: "before-publish",
-      });
-      await recreateVolume({ ctx, project, volume: data });
+      // During the copy Hack holds a Docker reference to the volume: its
+      // removal is refused and the export completes with the right digest.
+      await removalRefusedDuringCopy({ ctx, fixture, project, volume: data });
       await replacedWithinOneSecond({ ctx, fixture, project, volume: data });
       await recreateVolume({ ctx, project, volume: data });
-      await removedDuringExport({
-        ctx,
-        fixture,
-        project,
-        volume: data,
-        stage: "before-hold",
-      });
+      await removedBeforeReference({ ctx, fixture, project, volume: data });
     } finally {
       await docker(ctx, ["rm", "--force", runner, writer, holder, aliasWriter]);
       await docker(ctx, ["volume", "rm", alias]);
@@ -449,33 +438,115 @@ export const dataExportScenario: Scenario = {
   },
 };
 
+/** Export through a wrapper around the real engine that `before` sees. */
+async function exportThrough(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly project: string;
+  readonly outDir: string;
+  readonly before: (argv: readonly string[]) => Promise<void>;
+}): Promise<{ result: DataExportResult | null; refusal: unknown }> {
+  const real = createHostDataBackupDocker({
+    env: {},
+    cwd: opts.fixture.hackDir,
+  });
+  const racing: DataBackupDocker = {
+    ...real,
+    capture: async (argv, captureOpts) => {
+      await opts.before(argv);
+      return await real.capture(argv, captureOpts);
+    },
+  };
+  try {
+    const result = await exportProjectData({
+      docker: racing,
+      composeArgs: dataComposeArgs({
+        composeFiles: [join(opts.fixture.hackDir, "docker-compose.yml")],
+        composeProject: null,
+        cwd: opts.fixture.hackDir,
+        env: {},
+      }),
+      project: opts.project,
+      branch: null,
+      hackHome: opts.ctx.hackHome,
+      outDir: opts.outDir,
+      hackVersion: "e2e",
+    });
+    return { result, refusal: null };
+  } catch (error: unknown) {
+    return { result: null, refusal: error };
+  }
+}
+
 /**
- * The volume is removed during the export: export refuses and Docker
- * creates nothing, since the hold binds the Mountpoint and never mounts the
- * volume by name. A wrapper around the real engine removes the volume right
- * before the helper's create (`before-hold`), or after every copy, at the
- * last running check (`before-publish`), where only the identity recheck
- * before the rename can see it.
+ * `docker volume rm` while the copy reads the volume through its bind:
+ * Hack's reference container (created, never started) makes Docker refuse
+ * the removal ("volume is in use"), and the export completes with the
+ * content digest of the volume's real tree.
  */
-async function removedDuringExport(opts: {
+async function removalRefusedDuringCopy(opts: {
   readonly ctx: ScenarioContext;
   readonly fixture: MonorepoFixture;
   readonly project: string;
   readonly volume: string;
-  readonly stage: "before-hold" | "before-publish";
 }): Promise<void> {
-  const { ctx, fixture, project } = opts;
-  const data = opts.volume;
-  const real = createHostDataBackupDocker({
-    env: {},
-    cwd: fixture.hackDir,
+  const { ctx } = opts;
+  let removal: Awaited<ReturnType<typeof docker>> | null = null;
+  const { result, refusal } = await exportThrough({
+    ...opts,
+    outDir: join(ctx.tempRoot, "removal-refused-out"),
+    before: async (argv) => {
+      if (removal === null && argv[1] === "exec") {
+        removal = await docker(ctx, ["volume", "rm", opts.volume]);
+      }
+    },
   });
-  let removed = false;
-  let copied = false;
-  const at = (argv: readonly string[]): boolean =>
-    opts.stage === "before-publish"
-      ? copied && argv[1] === "ps"
-      : argv[1] === "create" && argv.includes("--mount");
+  const digest = await docker(ctx, [
+    "run",
+    "--rm",
+    "--network",
+    "none",
+    "--read-only",
+    "--tmpfs",
+    "/tmp",
+    "--env",
+    "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
+    "--volume",
+    `${opts.volume}:/v:ro`,
+    "--entrypoint",
+    "bun",
+    HELPER,
+    "-e",
+    DATA_BACKUP_DIGEST_SCRIPT,
+  ]);
+  const refused = removal as Awaited<ReturnType<typeof docker>> | null;
+  expect({
+    that:
+      refused !== null &&
+      refused.exitCode !== 0 &&
+      /in use/i.test(refused.stderr) &&
+      refusal === null &&
+      result !== null &&
+      digest.exitCode === 0 &&
+      JSON.parse(digest.stdout).digest ===
+        result.manifest.volumes[0]?.contentDigest,
+    message: `a volume removal during the copy should be refused and the export complete with the volume's digest (removal: ${refused?.exitCode} ${refused?.stderr.trim()}, refusal: ${String(refusal)})`,
+  });
+}
+
+/**
+ * The volume is removed after validation, before Hack takes its reference
+ * (at the first running check). Docker creates a missing named volume for
+ * the reference container, so the identity no longer matches: export
+ * refuses, publishes nothing and never removes the volume Docker created.
+ */
+async function removedBeforeReference(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly project: string;
+  readonly volume: string;
+}): Promise<void> {
+  const { ctx } = opts;
   const createdAt = async (): Promise<string> =>
     (
       await docker(ctx, [
@@ -483,79 +554,48 @@ async function removedDuringExport(opts: {
         "inspect",
         "--format",
         "{{.CreatedAt}}",
-        data,
+        opts.volume,
       ])
     ).stdout.trim();
   let before = "";
-  const racingDocker: DataBackupDocker = {
-    ...real,
-    capture: async (argv, captureOpts) => {
-      if (argv[1] === "exec") {
-        copied = true;
-      }
-      if (!removed && at(argv)) {
-        removed = true;
+  const outDir = join(ctx.tempRoot, "removed-before-reference-out");
+  const { refusal } = await exportThrough({
+    ...opts,
+    outDir,
+    before: async (argv) => {
+      if (before === "" && argv[1] === "ps") {
         before = await createdAt();
         expectExit({
-          result: await docker(ctx, ["volume", "rm", data]),
+          result: await docker(ctx, ["volume", "rm", opts.volume]),
           codes: [0],
-          message: `remove the validated volume (${opts.stage})`,
+          message: "remove the validated volume before the reference",
         });
       }
-      return await real.capture(argv, captureOpts);
     },
-  };
-  const outDir = join(ctx.tempRoot, `race-out-${opts.stage}`);
-  let raceRefusal: unknown = null;
-  try {
-    await exportProjectData({
-      docker: racingDocker,
-      composeArgs: dataComposeArgs({
-        composeFiles: [join(fixture.hackDir, "docker-compose.yml")],
-        composeProject: null,
-        cwd: fixture.hackDir,
-        env: {},
-      }),
-      project,
-      branch: null,
-      hackHome: ctx.hackHome,
-      outDir,
-      hackVersion: "e2e",
-    });
-  } catch (error: unknown) {
-    raceRefusal = error;
-  }
-  const listed = await docker(ctx, [
-    "volume",
-    "ls",
-    "--quiet",
-    "--filter",
-    `name=^${data}$`,
-  ]);
-  // Nothing was published: at most the `.partial` directory is left.
+  });
+  const after = await createdAt();
   const leftInOut = await readdir(outDir).catch(() => [] as string[]);
   expect({
     that:
-      removed &&
-      raceRefusal instanceof HackCliError &&
-      isRecord(raceRefusal.detail) &&
-      raceRefusal.detail.reason === "volume_changed" &&
-      listed.exitCode === 0 &&
-      // Export never creates one: only the test's own replacement exists.
-      listed.stdout.trim() === "" &&
+      before !== "" &&
+      refusal instanceof HackCliError &&
+      isRecord(refusal.detail) &&
+      refusal.detail.reason === "volume_changed" &&
+      // Docker's own volume for the reference, left in place.
+      after !== "" &&
       leftInOut.every((entry) => entry.endsWith(".partial")),
-    message: `a volume removed ${opts.stage} should refuse, publish nothing and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()}, out: ${leftInOut.join(",")}, createdAt before: ${before})`,
+    message: `a volume removed before the reference should refuse and publish nothing (refusal: ${String(refusal)}, CreatedAt before/after: ${before}/${after}, out: ${leftInOut.join(",")})`,
   });
 }
 
 /**
  * The volume is removed and created again under its name, with the same
- * labels, between validation and the hold, within the same second as its
+ * labels, between validation and Hack's reference, within the same second as its
  * validated creation where the host allows: the hold then binds the new
  * volume's directory (a local volume's Mountpoint is its name's path) and
  * every identity field matches, so only Docker's destroy/create events can
  * refuse. A wrapper creates the volume just after a second boundary right
- * before export validates it, and replaces it at the hold's create. Up to
+ * before export validates it, and replaces it at the first running check. Up to
  * three attempts aim for one second; every attempt must refuse.
  */
 async function replacedWithinOneSecond(opts: {
@@ -598,11 +638,9 @@ async function replacedWithinOneSecond(opts: {
           });
           validated = await createdAt();
         }
-        if (
-          replaced === "" &&
-          argv[1] === "create" &&
-          argv.includes("--mount")
-        ) {
+        // At the first running check: after validation, before Hack's
+        // reference (which would refuse the removal) exists.
+        if (replaced === "" && validated !== "" && argv[1] === "ps") {
           expectExit({
             result: await docker(ctx, ["volume", "rm", volume]),
             codes: [0],

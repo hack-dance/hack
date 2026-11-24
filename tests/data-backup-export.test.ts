@@ -109,9 +109,21 @@ async function caught(promise: Promise<unknown>): Promise<HackCliError> {
 const partialDir = (): string =>
   join(root, "home", "data-backups", PROJECT, "20261123T140501Z.partial");
 
-/** Every helper `docker create` a run issued (markers mount nothing). */
+/** Every bind-hold helper `docker create` a run issued. */
 const creates = (fake: FakeEngine): string[][] =>
-  fake.calls.filter((argv) => argv[1] === "create" && argv.includes("--mount"));
+  fake.calls.filter(
+    (argv) =>
+      argv[1] === "create" &&
+      (argv[argv.indexOf("--mount") + 1] ?? "").startsWith("type=bind,")
+  );
+
+/** Every volume-reference `docker create` (never started) a run issued. */
+const references = (fake: FakeEngine): string[][] =>
+  fake.calls.filter(
+    (argv) =>
+      argv[1] === "create" &&
+      (argv[argv.indexOf("--mount") + 1] ?? "").startsWith("type=volume,")
+  );
 
 /** Every event-stream marker `docker create`. */
 const markers = (fake: FakeEngine): string[][] =>
@@ -209,6 +221,13 @@ describe("exportProjectData", () => {
       { key: "hijacked", reason: "foreign" },
       { key: "later", reason: "absent" },
       { key: "shared", reason: "external" },
+    ]);
+    // A reference by name to each owned volume, never started.
+    expect(
+      references(fake).map((argv) => argv[argv.indexOf("--mount") + 1])
+    ).toEqual([
+      "type=volume,src=custom-cache,dst=/v,volume-nocopy",
+      "type=volume,src=shop_db,dst=/v,volume-nocopy",
     ]);
     // Only owned volumes are held; external is never even inspected.
     expect(
@@ -381,6 +400,57 @@ describe("exportProjectData", () => {
 });
 
 describe("binding to the validated volume", () => {
+  test("a docker volume rm during the copy is refused by Hack's reference; the export completes", async () => {
+    const fake = engine({ only: "db" });
+    const removals: boolean[] = [];
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        // Docker: "volume is in use" while the reference container exists.
+        removals.push(fake.removeVolume("shop_db"));
+      }
+    };
+    const result = await exportProjectData(input(fake));
+    expect(removals).toEqual([false]);
+    const content = fake.volumes.get("shop_db")?.content ?? "";
+    expect(content).not.toBe("");
+    expect(result.manifest.volumes[0]?.contentDigest).toBe(sha(content));
+    // The reference was created, never started, and removed by its ID.
+    const [reference] = references(fake);
+    expect(reference).toBeDefined();
+    const id =
+      fake.created.find(
+        (entry) => entry.name === reference?.[reference.indexOf("--name") + 1]
+      )?.id ?? "";
+    expect(
+      fake.calls.some((argv) => argv[1] === "start" && argv.includes(id))
+    ).toBe(false);
+    expect(fake.calls).toContainEqual(["docker", "rm", "--force", id]);
+    expect(fake.leftovers()).toEqual([]);
+    // Hack never removes a volume.
+    expect(
+      fake.calls.some((argv) => argv[1] === "volume" && argv[2] === "rm")
+    ).toBe(false);
+  });
+
+  test("a reference whose removal Docker cannot confirm is reported, not claimed", async () => {
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        for (const id of fake.referencing("shop_db")) {
+          fake.rmFails.add(id);
+        }
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    const [left] = fake.leftovers();
+    expect(left).toMatch(/^[a-f0-9]{64}$/);
+    expect(error.message).toContain(`docker rm -f ${left}`);
+    expect(error.detail).toEqual({
+      cleanup: { container: left, removed: false },
+    });
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
   /**
    * Remove `shop_db` and create it again within the same second: same name,
    * labels, driver, Mountpoint and (CreatedAt has one-second resolution)
@@ -388,7 +458,8 @@ describe("binding to the validated volume", () => {
    */
   function replaceWithinOneSecond(fake: FakeEngine): void {
     const old = fake.volumes.get("shop_db");
-    fake.removeVolume("shop_db");
+    // Hack's reference blocks a plain removal: someone removes it first.
+    fake.forceRemoveVolume("shop_db");
     fake.volume("shop_db", {
       ...owned("db", "impostor"),
       createdAt: old?.createdAt,
@@ -434,14 +505,15 @@ describe("binding to the validated volume", () => {
   });
 
   test("a volume removed after the hold, before the first digest, is not published empty", async () => {
-    // Docker lets `docker volume rm` succeed under a bind hold and leaves
-    // the helper an empty tree, so all three digests agree on nothing.
+    // If Hack's reference container is removed first, Docker lets the
+    // volume's removal succeed under the bind and leaves the helper an
+    // empty tree, so all three digests agree on nothing.
     const fake = engine({ only: "db" });
     let removed = false;
     fake.onExec = () => {
       if (!removed) {
         removed = true;
-        fake.removeVolume("shop_db");
+        fake.forceRemoveVolume("shop_db");
       }
     };
     const error = await caught(exportProjectData(input(fake)));
@@ -458,7 +530,7 @@ describe("binding to the validated volume", () => {
     const fake = engine({ only: "db" });
     fake.onExec = (_container, args) => {
       if (args.includes("tar")) {
-        fake.removeVolume("shop_db");
+        fake.forceRemoveVolume("shop_db");
       }
     };
     const error = await caught(exportProjectData(input(fake)));
@@ -492,7 +564,7 @@ describe("binding to the validated volume", () => {
           if (!reported) {
             fake.events.deliverVolumeChanges = false;
           }
-          fake.removeVolume("shop_db");
+          fake.forceRemoveVolume("shop_db");
           if (replace) {
             fake.volume("shop_db", owned("db", "rows-db"));
           }
@@ -535,20 +607,25 @@ describe("binding to the validated volume", () => {
     expect(fake.leftovers()).toEqual([]);
   });
 
-  test("a volume removed after validation is refused, not copied empty", async () => {
+  test("a volume removed after validation is refused when the reference recreates it", async () => {
+    // Removed before Hack's reference exists: Docker creates a missing named
+    // volume for the reference container, so the identity no longer matches.
     const fake = engine({ only: "db" });
     let removed = false;
     fake.onPs = () => {
       if (!removed) {
         removed = true;
-        fake.volumes.delete("shop_db");
+        fake.removeVolume("shop_db");
       }
     };
     const error = await caught(exportProjectData(input(fake)));
-    expect(error.detail).toMatchObject({ reason: "volume_changed" });
-    expect(error.message).toContain("nothing was created");
-    // The bind of the vanished Mountpoint failed: no volume was created.
-    expect(fake.volumes.has("shop_db")).toBeFalse();
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(error.message).toContain("before Hack could take a reference");
+    // Nothing was read: no bind hold ran.
+    expect(creates(fake)).toEqual([]);
+    // Docker's auto-created volume is left in place: Hack never removes one.
+    expect(fake.volumes.get("shop_db")?.content).toBe("");
     expect(fake.leftovers()).toEqual([]);
   });
 
@@ -1059,23 +1136,27 @@ async function exportInterruptedDuringCopy(
 }
 
 describe("helper containers are tracked by ID, never by name", () => {
-  test("an interrupt removes our live helper by ID and spares a container that reused a removed marker's name", async () => {
+  test("an interrupt removes our live helper and reference by ID and spares a container that reused a removed marker's name", async () => {
     const fake = engine({ only: "db" });
     let reuser: string | null = null;
-    let helperId = "";
+    let live: string[] = [];
     let firstCall = 0;
     await exportInterruptedDuringCopy(fake, (interrupt) => {
       reuser = fake.createForeign(markerNames(fake)[0] ?? "");
-      helperId = fake.created.at(-1)?.id ?? "";
+      // Live now: the volume reference, then the bind hold.
+      live = fake.created
+        .filter((entry) => !entry.name.endsWith("-start"))
+        .map((entry) => entry.id);
       firstCall = fake.calls.length;
       interrupt();
     });
     expect(reuser).toMatch(/^[a-f0-9]{64}$/);
-    // The signal cleanup's own removal: exactly the live helper, by ID.
+    expect(live).toHaveLength(2);
+    // The signal cleanup's own removal: exactly the live containers, by ID.
     const signalRm = fake.calls
       .slice(firstCall)
       .find((argv) => argv[1] === "rm");
-    expect(signalRm).toEqual(["docker", "rm", "--force", helperId]);
+    expect(signalRm).toEqual(["docker", "rm", "--force", ...live]);
     // The replacement survives: nothing ever named it, by ID or by name.
     expect(fake.containers.has(reuser ?? "")).toBeTrue();
     const markerName = markerNames(fake)[0] ?? "";
@@ -1281,7 +1362,8 @@ describe("foreign container starts are inspected by ID", () => {
     const fake = engine({ only: "db" });
     await exportProjectData(input(fake));
     const ours = new Set(fake.created.map((entry) => entry.id));
-    expect(ours.size).toBe(3);
+    // Start marker, volume reference, bind hold, end marker.
+    expect(ours.size).toBe(4);
     // Only the hold's own mount proof inspects one of our containers.
     const inspected = fake.calls.filter(
       (argv) => argv[2] === "inspect" && argv.includes("{{json .Mounts}}")

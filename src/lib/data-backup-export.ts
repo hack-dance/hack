@@ -23,6 +23,7 @@ import {
   DataHelperContainers,
   requireStep,
   withHeldVolume,
+  withVolumeReferences,
 } from "./data-backup-held-volume.ts";
 import {
   fsStep,
@@ -45,6 +46,7 @@ import {
   planDeclaredVolumes,
   requireUnchangedVolume,
   volumeReplacedError,
+  type WatchedVolume,
 } from "./data-backup-volumes.ts";
 
 export type DataExportInput = {
@@ -195,53 +197,41 @@ async function exportWithin(opts: {
   );
 
   const helperImage = dataBackupHelperImage();
-  const volumes: DataBackupVolume[] = [];
-  for (const volume of owned) {
-    volumes.push(
-      await copyVolume({
-        docker: input.docker,
-        volume,
+  const notPublishedNote = `the backup was not published; the incomplete copy is in ${partial}, which you can delete.`;
+  // A Docker reference to every copied volume for the whole copy and its
+  // checks, so `docker volume rm` is refused while the binds read it.
+  const volumes = await withVolumeReferences(
+    { docker: input.docker, purpose: "export", deadlines, helpers },
+    async (references) => {
+      for (const volume of owned) {
+        await references.add(volume.name);
+      }
+      // Docker creates a missing named volume for a reference: the volume
+      // must still be the one validated now that the reference exists.
+      for (const volume of owned) {
+        await requireUnchangedVolume({
+          docker: input.docker,
+          name: volume.name,
+          key: volume.key,
+          identity: volume.identity,
+          when: "before Hack could take a reference to it",
+          consequence: notPublishedNote,
+        });
+      }
+      return await copyWithinWindow({
+        input,
+        owned,
+        watched,
         partial,
+        monitor,
         helpers,
         deadlines,
-      })
-    );
-  }
-  await refuseRunning({
-    docker: input.docker,
-    composeProject: plan.composeProject,
-    volumes: watched,
-    exclude: helpers.created,
-    timeoutMs: deadlines.commandMs,
-    stopCommand,
-    command: "export",
-    lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
-  });
-  // Stop and drain the subscription, then decide.
-  const keyOf = new Map(owned.map((volume) => [volume.name, volume.key]));
-  const mounts = (await monitor.finish(watched)).map((mount) => ({
-    ...mount,
-    volume: keyOf.get(mount.volume) ?? mount.volume,
-  }));
-  if (mounts.length > 0) {
-    throw foreignMountError({
-      mounts,
-      command: "export",
-      consequence: `the backup was not published; the incomplete copy is in ${partial}, which you can delete.`,
-      stopCommand,
-    });
-  }
-  // Export creates no volume: any destroy or create of a copied volume's
-  // name in the window is someone else's.
-  const replaced = monitor.changedVolumes({
-    names: owned.map((volume) => volume.name),
-  });
-  if (replaced.length > 0) {
-    throw volumeReplacedError({
-      keys: replaced.map((name) => keyOf.get(name) ?? name).sort(),
-      consequence: `the backup was not published; the incomplete copy is in ${partial}, which you can delete.`,
-    });
-  }
+        composeProject: plan.composeProject,
+        stopCommand,
+        consequence: notPublishedNote,
+      });
+    }
+  );
 
   const manifest: DataBackupManifest = {
     schema: DATA_BACKUP_SCHEMA,
@@ -278,6 +268,76 @@ async function exportWithin(opts: {
     },
   });
   return { backup, manifest };
+}
+
+/**
+ * Copy every owned volume, then run the window's last checks: the running
+ * check, the end of the event window (foreign mounts and starts), and any
+ * destroy or create of a copied volume's name.
+ */
+async function copyWithinWindow(opts: {
+  readonly input: DataExportInput;
+  readonly owned: readonly OwnedVolume[];
+  readonly watched: readonly WatchedVolume[];
+  readonly partial: string;
+  readonly monitor: MountMonitor;
+  readonly helpers: DataHelperContainers;
+  readonly deadlines: DataBackupDeadlines;
+  readonly composeProject: string;
+  readonly stopCommand: string;
+  readonly consequence: string;
+}): Promise<DataBackupVolume[]> {
+  const { input, owned, watched, partial, monitor, helpers, deadlines } = opts;
+  const { stopCommand, consequence } = opts;
+  const volumes: DataBackupVolume[] = [];
+  for (const volume of owned) {
+    volumes.push(
+      await copyVolume({
+        docker: input.docker,
+        volume,
+        partial,
+        helpers,
+        deadlines,
+      })
+    );
+  }
+  await refuseRunning({
+    docker: input.docker,
+    composeProject: opts.composeProject,
+    volumes: watched,
+    exclude: helpers.created,
+    timeoutMs: deadlines.commandMs,
+    stopCommand,
+    command: "export",
+    lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
+  });
+  // Stop and drain the subscription, then decide.
+  const keyOf = new Map(owned.map((volume) => [volume.name, volume.key]));
+  const mounts = (await monitor.finish(watched)).map((mount) => ({
+    ...mount,
+    volume: keyOf.get(mount.volume) ?? mount.volume,
+  }));
+  if (mounts.length > 0) {
+    throw foreignMountError({
+      mounts,
+      command: "export",
+      consequence,
+      stopCommand,
+    });
+  }
+  // Export creates no volume: any destroy or create of a copied volume's
+  // name in the window is someone else's.
+  const replaced = monitor.changedVolumes({
+    names: owned.map((volume) => volume.name),
+  });
+  if (replaced.length > 0) {
+    throw volumeReplacedError({
+      keys: replaced.map((name) => keyOf.get(name) ?? name).sort(),
+      consequence,
+    });
+  }
+
+  return volumes;
 }
 
 /**

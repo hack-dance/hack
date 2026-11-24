@@ -12,7 +12,6 @@ import {
   optProject,
 } from "../cli/options.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
-import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { resolveDataBackupDeadlines } from "../lib/data-backup-deadlines.ts";
 import { createHostDataBackupDocker } from "../lib/data-backup-docker.ts";
@@ -23,7 +22,7 @@ import {
 import { HACK_VERSION } from "../lib/hack-version.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { scopedHackCommand } from "../lib/printed-shell-command.ts";
-import { readProjectConfig } from "../lib/project.ts";
+import { resolveEffectiveProjectName } from "../lib/project.ts";
 import {
   type ComposeRuntimeModel,
   resolveComposeRuntimeModel,
@@ -37,7 +36,7 @@ const optOut = defineOption({
   long: "--out",
   valueHint: "<dir>",
   description:
-    "Parent directory for the backup (default: $HACK_HOME/data-backups/<compose project>)",
+    "Parent directory for the backup (default: $HACK_HOME/data-backups/<hack project>[--<branch>])",
 } as const);
 
 const exportSpec = defineCommand({
@@ -94,10 +93,6 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
     branchOption: args.options.branch,
     noticeToStderr: json,
   });
-  const base = await resolveComposeProjectName({
-    project,
-    cfg: await readProjectConfig(project),
-  });
   // Exactly the Compose invocation `hack up` builds for this instance (files,
   // project name, project directory and managed env, which can select the
   // engine), with every profile active so a profile-gated service's volume
@@ -117,7 +112,7 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
     }),
     deadlines,
     composeArgs: dataComposeArgs(model),
-    project: base,
+    project: await resolveEffectiveProjectName(project),
     branch,
     hackHome: resolveGlobalHackDir(),
     outDir:

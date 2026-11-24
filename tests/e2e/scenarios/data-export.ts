@@ -35,7 +35,7 @@ type ExportPayload = {
     readonly backup?: string;
     readonly manifest?: {
       readonly schema?: string;
-      readonly composeProject?: string;
+      readonly composeProjectSha256?: string;
       readonly helperImage?: string;
       readonly volumes?: readonly {
         readonly key: string;
@@ -164,7 +164,8 @@ export const dataExportScenario: Scenario = {
         that:
           payload?.data?.schema === "hack.data-export.v1" &&
           manifest?.schema === "hack.data-backup.v1" &&
-          manifest.composeProject === project &&
+          manifest.composeProjectSha256 ===
+            new Bun.CryptoHasher("sha256").update(project).digest("hex") &&
           manifest.helperImage === HELPER &&
           manifest.volumes?.length === 1 &&
           volume?.key === "data" &&
@@ -315,7 +316,7 @@ export const dataExportScenario: Scenario = {
           refused.exitCode === 1 &&
           refusal?.error?.code === "E_PROJECT_RUNNING" &&
           JSON.stringify(refusal.error.detail) ===
-            JSON.stringify({ running: [runner] }),
+            JSON.stringify({ running: ["<compose project>-web-1"] }),
         message: "a running project container should refuse the export",
         result: refused,
       });
@@ -386,7 +387,8 @@ export const dataExportScenario: Scenario = {
           aimed &&
           raced.exitCode === 1 &&
           race?.error?.code === "E_PROJECT_RUNNING" &&
-          mounts?.some((mount) => mount.name === writer) === true,
+          mounts?.some((mount) => mount.name === "<compose project>-writer") ===
+            true,
         message:
           "a writer that started and exited during the copy should refuse publication",
         result: raced,

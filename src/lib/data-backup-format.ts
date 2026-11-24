@@ -41,8 +41,12 @@ export type DataBackupVolume = {
    */
   readonly nameSha256: string;
   readonly driver: string;
-  /** The Compose labels that proved ownership. */
-  readonly labels: {
+  /**
+   * sha256 of each Compose label that proved ownership: the project label's
+   * value is the resolved Compose project name, which can carry
+   * interpolated env values, so no value is stored in the clear.
+   */
+  readonly labelsSha256: {
     readonly "com.docker.compose.project": string;
     readonly "com.docker.compose.volume": string;
   };
@@ -78,11 +82,15 @@ export function dataBackupNameSha256(name: string): string {
 
 export type DataBackupManifest = {
   readonly schema: typeof DATA_BACKUP_SCHEMA;
-  /** Hack's project name. */
+  /** Hack's project name (hack.config.json `name`, else the checkout's). */
   readonly project: string;
   /** Branch instance slug, or null for the default instance. */
   readonly branch: string | null;
-  readonly composeProject: string;
+  /**
+   * sha256 of the resolved Compose project name (which can carry
+   * interpolated env values); a restore compares hashes.
+   */
+  readonly composeProjectSha256: string;
   /** UTC ISO-8601 time the export started. */
   readonly createdAt: string;
   readonly hackVersion: string;

@@ -196,10 +196,24 @@ the service recreates when it starts.
 
 ## Redaction
 
-A resolved Docker volume name can carry interpolated env values (for example
-`name: app-${TOKEN}`). The manifest, the `--json` output, the text summary and
-error messages name volumes by Compose key only; the manifest keeps a sha256
-of the resolved name so a restore can tell whether it changed.
+Compose resolves names with interpolated env values: a volume's `name:`
+(`app-${TOKEN}`) and the top-level project `name:` (`${STORAGE_TOKEN}`), which
+Docker then copies into every container name and ownership label. No such
+resolved value is written or printed:
+
+- volumes are named by Compose key in the manifest, the `--json` output, the
+  text summary and error messages; the manifest keeps `nameSha256`, the
+  sha256 of the resolved Docker name;
+- the manifest keeps `composeProjectSha256` instead of the Compose project
+  name, and `labelsSha256` (the sha256 of each ownership label value)
+  instead of the labels;
+- the default backup path is named after Hack's project name
+  (`hack.config.json` `name`, else the checkout directory) and the branch
+  slug, never the Compose project;
+- container names in refusals (`detail.running`, `detail.mounts[].name`)
+  have the resolved Compose project name replaced by `<compose project>`.
+
+A restore compares these hashes instead of the values.
 
 ## Format
 
@@ -209,18 +223,19 @@ of the resolved name so a restore can tell whether it changed.
   <key>.tar                        one per copied volume
 ```
 
-The default parent is `$HACK_HOME/data-backups/<compose project>` (Hack's home
-is `~/.hack` unless `HACK_HOME` is set). `--out <dir>` replaces the parent.
+The default parent is `$HACK_HOME/data-backups/<hack project>` for the default
+instance and `$HACK_HOME/data-backups/<hack project>--<branch>` for a branch
+instance (Hack's home is `~/.hack` unless `HACK_HOME` is set). `--out <dir>` replaces the parent.
 Directories and files are created private to your user (0700 and 0600).
 
 `manifest.json` (schema `hack.data-backup.v1`):
 
 | Field | Meaning |
 | --- | --- |
-| `project`, `branch`, `composeProject` | Hack project name, branch slug or null, Compose project name |
+| `project`, `branch`, `composeProjectSha256` | Hack project name, branch slug or null, sha256 of the resolved Compose project name |
 | `createdAt` | UTC start time, ISO 8601 |
 | `hackVersion`, `helperImage`, `digestAlgorithm` | Version that wrote it, pinned helper reference, `hack.tree-digest.v1` |
-| `volumes[]` | `key`, `nameSha256` (sha256 of the Docker volume name, never the name itself), `driver`, the two ownership `labels`, `file`, `tarBytes`, `tarSha256`, `entries` (the root included, sockets not), `excludedSockets`, `contentDigest` |
+| `volumes[]` | `key`, `nameSha256` (sha256 of the Docker volume name, never the name itself), `driver`, `labelsSha256` (sha256 of the two ownership label values), `file`, `tarBytes`, `tarSha256`, `entries` (the root included, sockets not), `excludedSockets`, `contentDigest` |
 | `skipped[]` | `key` and `reason`: `external`, `foreign` or `absent` |
 
 `--json` prints the standard envelope with `data.schema` `hack.data-export.v1`,

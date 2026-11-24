@@ -150,18 +150,24 @@ async function exportWithin(opts: {
     });
   }
   const volumeNames = owned.map((volume) => volume.name);
+  const redact = redactComposeProject(plan.composeProject);
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
     volumeNames,
     stopCommand,
     command: "export",
+    redact,
     lead: "The project is running, so its volumes cannot be copied consistently; nothing was backed up.",
   });
 
   const parent =
     input.outDir ??
-    join(input.hackHome, DATA_BACKUPS_DIR_NAME, plan.composeProject);
+    join(
+      input.hackHome,
+      DATA_BACKUPS_DIR_NAME,
+      input.branch ? `${input.project}--${input.branch}` : input.project
+    );
   const backup = join(parent, dataBackupTimestamp(now));
   const partial = `${backup}${DATA_BACKUP_PARTIAL_SUFFIX}`;
   // Directories this export creates; their entries are flushed at the end.
@@ -194,6 +200,7 @@ async function exportWithin(opts: {
     volumeNames,
     stopCommand,
     command: "export",
+    redact,
     lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
   });
   // Stop and drain the subscription, then decide.
@@ -201,6 +208,7 @@ async function exportWithin(opts: {
   const mounts = (await monitor.finish(volumeNames)).map((mount) => ({
     ...mount,
     volume: keyOf.get(mount.volume) ?? mount.volume,
+    name: mount.name === null ? null : redact(mount.name),
   }));
   if (mounts.length > 0) {
     throw foreignMountError({
@@ -215,7 +223,7 @@ async function exportWithin(opts: {
     schema: DATA_BACKUP_SCHEMA,
     project: input.project,
     branch: input.branch,
-    composeProject: plan.composeProject,
+    composeProjectSha256: dataBackupNameSha256(plan.composeProject),
     createdAt: now.toISOString(),
     hackVersion: input.hackVersion,
     helperImage,
@@ -250,6 +258,16 @@ async function missingDirectories(path: string): Promise<readonly string[]> {
     current = up;
   }
   return missing;
+}
+
+/**
+ * Replace the resolved Compose project name (which can carry interpolated
+ * env values) wherever it appears in a reported container name.
+ */
+export function redactComposeProject(
+  composeProject: string
+): (text: string) => string {
+  return (text) => text.replaceAll(composeProject, "<compose project>");
 }
 
 async function refuseExisting(path: string): Promise<void> {
@@ -348,7 +366,14 @@ async function copyVolume(opts: {
         key: volume.key,
         nameSha256: dataBackupNameSha256(volume.name),
         driver: volume.driver,
-        labels: volume.labels,
+        labelsSha256: {
+          "com.docker.compose.project": dataBackupNameSha256(
+            volume.labels["com.docker.compose.project"]
+          ),
+          "com.docker.compose.volume": dataBackupNameSha256(
+            volume.labels["com.docker.compose.volume"]
+          ),
+        },
         file,
         tarBytes: tar.bytes,
         tarSha256: tar.sha256,

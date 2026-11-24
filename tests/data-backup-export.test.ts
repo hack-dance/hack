@@ -177,7 +177,7 @@ describe("exportProjectData", () => {
       schema: "hack.data-backup.v1",
       project: PROJECT,
       branch: null,
-      composeProject: PROJECT,
+      composeProjectSha256: sha(PROJECT),
       createdAt: "2026-11-23T14:05:01.250Z",
       hackVersion: "9.9.9",
       helperImage: PINNED,
@@ -188,9 +188,9 @@ describe("exportProjectData", () => {
       key: "db",
       nameSha256: sha("shop_db"),
       driver: "local",
-      labels: {
-        "com.docker.compose.project": PROJECT,
-        "com.docker.compose.volume": "db",
+      labelsSha256: {
+        "com.docker.compose.project": sha(PROJECT),
+        "com.docker.compose.volume": sha("db"),
       },
       file: "db.tar",
       tarBytes: tar.byteLength,
@@ -317,6 +317,46 @@ describe("exportProjectData", () => {
     expect(
       `${error.message}${JSON.stringify(error.detail ?? null)}`
     ).not.toContain(secret);
+  });
+
+  test("an interpolated Compose project name reaches no path, manifest, label copy, text or JSON", async () => {
+    const secret = "s3cr3t-tok3n-9f8e7d";
+    // As `name: ${STORAGE_TOKEN}` resolves: the Compose project is the value.
+    const fake = new FakeEngine();
+    fake.model = { name: secret, services: {}, volumes: { db: {} } };
+    fake.volume(`${secret}_db`, owned("db", "rows", secret));
+    const result = await exportProjectData(input(fake));
+    expect(result.backup).toBe(
+      join(root, "home", "data-backups", PROJECT, "20261123T140501Z")
+    );
+    const manifest = await readFile(
+      join(result.backup, "manifest.json"),
+      "utf8"
+    );
+    for (const text of [
+      result.backup,
+      manifest,
+      JSON.stringify(result),
+      renderDataExportText(result),
+    ]) {
+      expect(text).not.toContain(secret);
+    }
+    expect(result.manifest.composeProjectSha256).toBe(sha(secret));
+    expect(
+      result.manifest.volumes[0]?.labelsSha256["com.docker.compose.project"]
+    ).toBe(sha(secret));
+
+    // A refusal naming running containers redacts it too.
+    const running = new FakeEngine();
+    running.model = fake.model;
+    running.volume(`${secret}_db`, owned("db", "rows", secret));
+    running.running[`label=com.docker.compose.project=${secret}`] = [
+      `${secret}-web-1`,
+    ];
+    const error = await caught(exportProjectData(input(running)));
+    expect(`${error.message}${JSON.stringify(error.detail)}`).not.toContain(
+      secret
+    );
   });
 
   test("a volume labeled for this project but another key is foreign", async () => {
@@ -535,7 +575,8 @@ describe("running containers and the live event fence", () => {
     );
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.message).toContain("`hack down --branch=x`");
-    expect(error.detail).toEqual({ running: ["shop-web-1"] });
+    // Container names carry the resolved Compose project name: redacted.
+    expect(error.detail).toEqual({ running: ["<compose project>-web-1"] });
     expect(creates(fake)).toEqual([]);
     expect(fake.events.open).toBeFalse();
     expect(await readdir(root)).toEqual([]);

@@ -135,8 +135,11 @@ export async function refuseRunning(opts: {
   /** First sentence: what the refusal means for this command. */
   readonly lead: string;
   readonly command: "export" | "import";
+  /** Redacts interpolated identifiers from reported container names. */
+  readonly redact?: (text: string) => string;
 }): Promise<void> {
-  const running = await runningContainers(opts);
+  const redact = opts.redact ?? ((text: string) => text);
+  const running = (await runningContainers(opts)).map(redact);
   if (running.length === 0) {
     return;
   }

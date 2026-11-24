@@ -1,4 +1,5 @@
 import { childEnvironment } from "./child-environment.ts";
+import { hasControllingTerminal } from "./tty-process-group.ts";
 
 /** SIGTERM-to-SIGKILL grace, and the output-drain bound after cancellation. */
 const CANCEL_GRACE_MS = 2000;
@@ -24,45 +25,48 @@ function interruptible(stream: ReadableStream<Uint8Array>) {
   };
 }
 
-/**
- * Run one finite lifecycle command with `sh -c` and drain its output.
- *
- * Without a signal the command keeps the caller's process group and terminal
- * stdin, as lifecycle hooks always have, and its output is drained until the
- * pipes close.
- *
- * With a signal the command owns a process-group cancellation boundary. The
- * shell leads a new process group, so the terminal's interrupt reaches only
- * the caller, which decides when to cancel; stdin is closed because a
- * background group cannot read the terminal. Abort sends SIGTERM to the whole
- * group, then SIGKILL once the shell exits or the grace period ends, so a
- * descendant such as `sleep` in `sleep 600; echo finished` cannot outlive the
- * cancellation. Output draining after cancellation is bounded by the same
- * grace period, so a process that escaped the group and still holds the pipes
- * cannot delay a forced stop. The listener stays installed until draining
- * finishes. The result is 130 when the signal aborted before the shell exited.
- */
-export async function runLifecycleCommandChild(opts: {
+interface LifecycleCommandOptions {
   readonly command: string;
   readonly cwd: string;
   readonly env: Record<string, string>;
   readonly signal?: AbortSignal;
+  readonly inheritStdin?: boolean;
   readonly drain: (
     stream: ReadableStream<Uint8Array>,
     source: "stdout" | "stderr"
   ) => Promise<void>;
   /** Test seam; defaults to {@link CANCEL_GRACE_MS}. */
   readonly graceMs?: number;
-}): Promise<number> {
+}
+
+/**
+ * Run one finite lifecycle command and drain its output. Without cancellation,
+ * the shell keeps the caller's process group and inherits stdin.
+ *
+ * A cancellable command gets an owned process group. The terminal supervisor
+ * makes that group foreground when the hook inherits an attached terminal.
+ * Without a terminal, an inheriting hook receives the existing input descriptor.
+ * Abort terminates the group and bounds output draining for escaped descendants.
+ */
+export async function runLifecycleCommandChild(
+  opts: LifecycleCommandOptions
+): Promise<number> {
   const signal = opts.signal;
   if (signal?.aborted) {
     return 130;
   }
   const owned = signal !== undefined;
+  if (
+    owned &&
+    opts.inheritStdin &&
+    (process.stdin.isTTY || hasControllingTerminal())
+  ) {
+    return await runTerminalLifecycleCommand(opts);
+  }
   const proc = Bun.spawn(["sh", "-c", opts.command], {
     cwd: opts.cwd,
     env: childEnvironment(opts.env),
-    stdin: owned ? "ignore" : "inherit",
+    stdin: !owned || opts.inheritStdin ? "inherit" : "ignore",
     stdout: "pipe",
     stderr: "pipe",
     detached: owned,
@@ -117,5 +121,54 @@ export async function runLifecycleCommandChild(opts: {
     signal?.removeEventListener("abort", cancel);
     clearTimeout(kill);
     clearTimeout(release);
+  }
+}
+
+async function runTerminalLifecycleCommand(
+  opts: LifecycleCommandOptions
+): Promise<number> {
+  const { runWithTerminalGroup } = await import("./tty-run.ts");
+  let output:
+    | { readonly drained: Promise<unknown>; readonly stop: () => void }
+    | undefined;
+  const code = await runWithTerminalGroup({
+    command: ["sh", "-c", opts.command],
+    cwd: opts.cwd,
+    env: opts.env,
+    signal: opts.signal,
+    onOutput: (streams) => {
+      const stdout = interruptible(streams.stdout);
+      const stderr = interruptible(streams.stderr);
+      const drained = Promise.all([
+        opts.drain(stdout.stream, "stdout"),
+        opts.drain(stderr.stream, "stderr"),
+      ]);
+      drained.catch(() => undefined);
+      output = {
+        drained,
+        stop: () => {
+          stdout.stop();
+          stderr.stop();
+        },
+      };
+    },
+  });
+  const stop = output?.stop;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stopAfterGrace = () => {
+    if (stop) {
+      timer ??= setTimeout(stop, opts.graceMs ?? CANCEL_GRACE_MS);
+    }
+  };
+  opts.signal?.addEventListener("abort", stopAfterGrace, { once: true });
+  if (opts.signal?.aborted || code === 130 || code === 143) {
+    stopAfterGrace();
+  }
+  try {
+    await output?.drained;
+    return opts.signal?.aborted ? 130 : code;
+  } finally {
+    opts.signal?.removeEventListener("abort", stopAfterGrace);
+    clearTimeout(timer);
   }
 }

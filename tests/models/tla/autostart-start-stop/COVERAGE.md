@@ -100,6 +100,12 @@ publishes only the captured engine evidence. Start and Restart recheck that
 evidence after the write. Restart settles its publication before after-hooks
 and cancels those hooks as owned process groups. Scoped readiness uses the same
 captured-engine check, and the explicit default socket matches the implicit one.
+Ordinary detached Compose startup holds the final-name lock through cache
+initialization and Compose dispatch. Checkout ownership is reread under that
+lock. Signal handling for Start now settles staged launch publication before
+re-raising. The CLI regressions cover both two-checkout name contention and
+SIGTERM before dispatch. These checks assume cooperating Hack commands. The
+model does not represent direct Docker CLI writes or terminal job control.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

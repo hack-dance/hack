@@ -21,6 +21,10 @@ export async function runWithTerminalGroup(opts: {
   readonly beforeSpawn?: RunOptions["beforeSpawn"];
   readonly onSpawn?: RunOptions["onSpawn"];
   readonly onExit?: RunOptions["onExit"];
+  readonly onOutput?: (output: {
+    readonly stdout: ReadableStream<Uint8Array>;
+    readonly stderr: ReadableStream<Uint8Array>;
+  }) => void;
 }): Promise<number> {
   // Awaited supervisor setup must not retain mutable caller options or argv.
   const options = { ...opts, command: [...opts.command], env: { ...opts.env } };
@@ -60,14 +64,16 @@ export async function runWithTerminalGroup(opts: {
     terminal.close();
     return 143;
   }
+  const stdout =
+    options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit");
   const child = Bun.spawn([...invocation, TTY_SUPERVISOR_ARGUMENT], {
     cwd: options.cwd,
     env: options.hackReexec
       ? hackReexecEnvironment(options.env)
       : childEnvironment(options.env),
     stdin: options.stdin ?? "inherit",
-    stdout: options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit"),
-    stderr: options.stderr ?? "inherit",
+    stdout: options.onOutput ? "pipe" : stdout,
+    stderr: options.onOutput ? "pipe" : (options.stderr ?? "inherit"),
     ipc(message: unknown) {
       if (
         typeof message !== "object" ||
@@ -97,6 +103,9 @@ export async function runWithTerminalGroup(opts: {
       }
     },
   });
+  if (typeof child.stdout === "object" && child.stdout && child.stderr) {
+    options.onOutput?.({ stdout: child.stdout, stderr: child.stderr });
+  }
   function finishCommand(message: object): void {
     clearTimeout(timeout);
     measurements.accounting = readAccounting(message);

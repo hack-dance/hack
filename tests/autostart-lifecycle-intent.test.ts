@@ -169,6 +169,8 @@ async function installComposeNameFixture(opts?: {
   readonly requireEngineHook?: boolean;
   readonly daemonProbeFailures?: number;
   readonly daemonAfterStart?: string;
+  readonly daemonDuringOwnershipCheck?: string;
+  readonly rememberCheckout?: boolean;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
@@ -244,7 +246,12 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
   const inSavedContext = !options.savedContextOnly || context === "saved-files-context";
   const isRunning = await Bun.file(running).exists() && (await Bun.file(running).text()) === stack;
   const isCreated = await Bun.file(created).exists();
-  const directory = (foreign ? options.foreignCheckout : undefined) ?? (inSavedContext && (isRunning || isCreated) ? process.cwd() : null);
+  const remembered = Bun.file(fixture + "/running-checkout");
+  const directory = (foreign ? options.foreignCheckout : undefined) ?? (inSavedContext && (isRunning || isCreated) ?
+    (options.rememberCheckout && await remembered.exists() ? await remembered.text() : process.cwd()) : null);
+  if (options.daemonDuringOwnershipCheck && args.includes("--all")) {
+    await Bun.write(fixture + "/daemon-id", options.daemonDuringOwnershipCheck);
+  }
   process.stdout.write(JSON.stringify(directory ? [{
     ID: "fixture-container", Service: "app", State: isCreated || options.failAfterCreate ? "created" : "running",
     Labels: "com.docker.compose.project.working_dir=" + directory
@@ -281,6 +288,7 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
   if (args.includes("-d")) {
     await rm(created, { force: true });
     await Bun.write(running, stack);
+    if (options.rememberCheckout) await Bun.write(fixture + "/running-checkout", process.cwd());
     if (options.daemonAfterStart) await Bun.write(fixture + "/daemon-id", options.daemonAfterStart);
   }
 } else if (mode === "down") {
@@ -813,6 +821,81 @@ test("targeted Restart does not report readiness from a replacement daemon", asy
     },
   });
   expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+}, 40_000);
+
+test("targeted Restart rechecks the daemon after the ownership read", async () => {
+  await Bun.write(join(root, "daemon-id"), "fixture-engine-one");
+  await installComposeNameFixture({ startContainers: true });
+  const started = await run(["up", "-d", "--json"]);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  await installComposeNameFixture({
+    startContainers: true,
+    daemonDuringOwnershipCheck: "fixture-engine-two",
+  });
+  const restarted = await run(["restart", "app", "--json"]);
+  expect(restarted.exitCode).toBe(1);
+  expect(restarted.stdout).toContain("different Docker daemon");
+  expect(await Bun.file(join(root, "restart-stack")).exists()).toBe(false);
+}, 40_000);
+
+test("ordinary Start waits for the desktop Compose name lock and refuses the other checkout's stack", async () => {
+  const desktopRoot = join(root, "project");
+  const otherRoot = join(root, "other");
+  const otherHack = join(otherRoot, ".hack");
+  const locked = join(root, "compose-start");
+  const release = join(root, "release-start");
+  const locks = join(root, "home", ".hack", "autostart-locks");
+  const lockKey = createHash("sha256").update("sample").digest("hex");
+  await mkdirOwnedFixture(otherHack, true);
+  await writeOwnedFixture(
+    join(otherHack, "hack.config.json"),
+    '{"name":"sample"}'
+  );
+  await writeOwnedFixture(
+    join(otherHack, "docker-compose.yml"),
+    await Bun.file(join(desktopRoot, ".hack", "docker-compose.yml")).text()
+  );
+  await installComposeNameFixture({
+    holdStart: true,
+    startContainers: true,
+    rememberCheckout: true,
+  });
+  const desktop = run([
+    "up",
+    "--target",
+    "local",
+    "--expect-compose-project",
+    "sample",
+    "--json",
+  ]);
+  let ordinary: ReturnType<typeof run> | undefined;
+  try {
+    await waitForCondition(
+      () => Bun.file(locked).exists(),
+      "Desktop Start did not reach creation"
+    );
+    ordinary = run(["up", "-d", "--json"], false, otherRoot);
+    await waitForCondition(
+      async () =>
+        (await readdir(locks)).some(
+          (file) =>
+            file.startsWith(`${lockKey}.lock.`) && file.endsWith(".owner")
+        ),
+      "Ordinary Start did not wait on the Compose name"
+    );
+    await Bun.write(release, "release");
+    const first = await desktop;
+    expect(first.exitCode, first.stderr + first.stdout).toBe(0);
+    const second = await ordinary;
+    expect(second.exitCode).toBe(1);
+    expect(second.stdout).toContain("do not all belong to this checkout");
+    expect(await Bun.file(join(root, "running-checkout")).text()).toBe(
+      join(desktopRoot, ".hack")
+    );
+  } finally {
+    await Bun.write(release, "release");
+    await Promise.allSettled([desktop, ordinary]);
+  }
 }, 40_000);
 
 test("targeted Restart rechecks its daemon between creation and startup", async () => {
@@ -1757,7 +1840,7 @@ test("SIGTERM stops a blocked Restart after-hook and skips the remaining hooks",
       lifecycle: {
         up: {
           after: [
-            `trap '' TERM; printf %s $$ > ${quoteShellWord(entered)}; exec /bin/sleep 20`,
+            `read -r word && [ "$word" = fixture-stdin ] || exit 7; trap '' TERM; printf %s $$ > ${quoteShellWord(entered)}; exec /bin/sleep 20`,
             `printf ran > ${quoteShellWord(later)}`,
           ],
         },
@@ -1781,7 +1864,7 @@ test("SIGTERM stops a blocked Restart after-hook and skips the remaining hooks",
         home: join(root, "home"),
         env: { PATH: `${join(root, "bin")}:/usr/bin:/bin` },
       }),
-      stdin: "ignore",
+      stdin: new Blob(["fixture-stdin\n"]),
       stdout: "ignore",
       stderr: "ignore",
     }
@@ -1808,7 +1891,10 @@ test("SIGTERM stops a blocked Restart after-hook and skips the remaining hooks",
   }
 }, 40_000);
 
-test("a signalled Restart restores the previous launch if Compose was never dispatched", async () => {
+test.each([
+  "up",
+  "restart",
+])("a signalled %s restores the previous launch if Compose was never dispatched", async (verb) => {
   const projectRoot = join(root, "project");
   const projectDir = join(projectRoot, ".hack");
   const staged = join(root, "restart-staged");
@@ -1850,7 +1936,7 @@ composeRuntimeBackend.up = (opts) => up({ ...opts, beforeCreate: async () => {
       preload,
       cli,
       "--no-interactive",
-      "restart",
+      verb,
       "--env",
       "qa",
       "--json",
@@ -1870,13 +1956,13 @@ composeRuntimeBackend.up = (opts) => up({ ...opts, beforeCreate: async () => {
   try {
     await waitForCondition(
       () => Bun.file(staged).exists(),
-      "Restart did not stage a launch"
+      `${verb} did not stage a launch`
     );
     expect((await readProjectRuntimeStateEntry(launch))?.envName).toBe("qa");
     child.kill("SIGTERM");
     await waitForCondition(
       () => Bun.file(cancelled).exists(),
-      "Restart did not receive cancellation"
+      `${verb} did not receive cancellation`
     );
     await Bun.write(release, "release");
     expect(await child.exited).toBe(143);

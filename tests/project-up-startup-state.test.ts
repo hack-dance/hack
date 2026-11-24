@@ -203,7 +203,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
           await Bun.sleep(psDurationMs);
         }
         return {
-          exitCode: psExitCode,
+          exitCode: opts.noTrunc ? 0 : psExitCode,
           stdout: (opts.noTrunc ? psRows : (psSnapshots.shift() ?? psRows))
             .map((row) => {
               const entry = JSON.parse(row);
@@ -214,7 +214,10 @@ const runtimeBackendMock = await registerScopedModuleMock({
               });
             })
             .join("\n"),
-          stderr: psExitCode ? "Cannot connect to the Docker daemon" : "",
+          stderr:
+            !opts.noTrunc && psExitCode
+              ? "Cannot connect to the Docker daemon"
+              : "",
         };
       },
       ps: async () => 0,

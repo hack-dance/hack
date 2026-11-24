@@ -2587,6 +2587,7 @@ function runLifecycleChild(opts: {
   readonly composeProject: string;
   readonly service: string;
   readonly signal?: AbortSignal;
+  readonly inheritStdin?: boolean;
   /** The hook's log sink, shared with its end record. */
   readonly sink: LifecycleLogSink;
   readonly beforeOutput?: () => void;
@@ -2599,6 +2600,7 @@ function runLifecycleChild(opts: {
     cwd: opts.cwd,
     env: opts.env,
     signal: opts.signal,
+    inheritStdin: opts.inheritStdin,
     drain: (stream, source) =>
       drainLifecycleOutput({
         stream,
@@ -2639,6 +2641,7 @@ export async function runLifecycleCommands(opts: {
    * result is then 130.
    */
   readonly signal?: AbortSignal;
+  readonly inheritStdin?: boolean;
   /** Report a stop during native startup after the attached hook settles. */
   readonly startupSignal?: AbortSignal;
 }): Promise<number> {
@@ -2739,6 +2742,7 @@ export async function runLifecycleCommands(opts: {
       composeProject: opts.composeProject,
       service: serviceName,
       signal: opts.signal,
+      inheritStdin: opts.inheritStdin,
     }).finally(clear);
 
     await sink.append({
@@ -8197,11 +8201,18 @@ async function runUpCommand({
   const composeProjectName = desktopComposeTarget({
     expected: args.options.expectComposeProject,
     base: baseProjectName,
-    computed: branchProjectName ?? pinnedBase,
+    computed:
+      branchProjectName ?? pinnedBase ?? (detach ? baseProjectName : null),
   });
   const expectedComposeProject =
     args.options.expectComposeProject ??
-    (pinnedBase ? (composeProjectName ?? undefined) : undefined);
+    (detach || pinnedBase ? (composeProjectName ?? undefined) : undefined);
+  const lockName =
+    detach &&
+    args.options.expectComposeProject === undefined &&
+    loginComposeBase === undefined
+      ? (composeProjectName ?? undefined)
+      : undefined;
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
 
   // Preserve the owner of a live upgraded session. Its controller must see
@@ -8242,8 +8253,25 @@ async function runUpCommand({
   });
   let publishedLaunch: RuntimeLaunchPublication | undefined;
   let composeDispatched = false;
+  const cancellation = new AbortController();
+  const publicationSettled = Promise.withResolvers<void>();
+  const settlePublication = async () => {
+    try {
+      if (publishedLaunch && !composeDispatched) {
+        await restoreUndispatchedRuntimeLaunch({
+          ...publishedLaunch,
+          projectDir: project.projectDir,
+          composeProject: lifecycleComposeProject,
+        });
+        publishedLaunch = undefined;
+      }
+    } finally {
+      publicationSettled.resolve();
+    }
+  };
   const publishRuntimeSelection = async () => {
     const captured = await engine.capture();
+    cancellation.signal.throwIfAborted();
     if (serviceScoped) {
       return;
     }
@@ -8391,15 +8419,23 @@ async function runUpCommand({
     guard: ReturnType<typeof installForegroundTerminationGuard> | null;
   } = { guard: null };
   let detachedComposeSucceeded = false;
+  let afterHooks: Promise<number> | undefined;
+  const cleanupOnSignal = signalCleanupKeepingStartedHelpers({
+    cleanup: lifecycleCleanup,
+    containerStartBegun: () => containerStartBegun,
+    keepSharedHelpers: () => keepSharedHelpers,
+  });
   const installOperationSignalCleanup = () =>
     installLifecycleSignalCleanup({
-      cleanup: signalCleanupKeepingStartedHelpers({
-        cleanup: lifecycleCleanup,
-        containerStartBegun: () => containerStartBegun,
-        keepSharedHelpers: () => keepSharedHelpers,
-      }),
+      cleanup: async (cleanupOptions) => {
+        cancellation.abort();
+        await publicationSettled.promise;
+        await afterHooks?.catch(() => undefined);
+        return await cleanupOnSignal?.(cleanupOptions);
+      },
     });
-  let signalCleanup = lifecycleSignalCleanup ?? installOperationSignalCleanup();
+  lifecycleSignalCleanup?.dispose();
+  let signalCleanup = installOperationSignalCleanup();
   try {
     // After `up.before` hooks, which may start the engine, open the tunnel
     // DOCKER_HOST needs or create a shared network, and before any pull: name
@@ -8487,27 +8523,113 @@ async function runUpCommand({
     if (!progress) {
       reportComposeStartupBudget({ budgets, detach });
     }
-    await engine.capture();
-    if (serviceScoped) {
-      await updateProjectRuntimeServiceEnvFingerprints({
-        projectDir: project.projectDir,
-        composeProject: lifecycleComposeProject,
-        effectiveEnvName: envOverrides.effectiveEnvName,
-        services: targetServices,
-        envByService: envOverrides.preflightEnvByService,
-        outcome: "applied",
+    const verifyOwnership = () =>
+      assertDesktopComposeOwnership({
+        expected: expectedComposeProject,
+        project,
+        composeProjectName,
+        profiles,
+        env: envOverrides.env,
+        composeFiles: composeFilesWithEnv,
+        action: "start",
       });
-    }
-    const bootstrapCode = await bootstrapDependencyCaches({
-      timeoutMs: detach ? startupTimeoutMs : undefined,
-      services: cacheBootstrapServices,
-      composeFiles: composeFilesWithEnv,
-      composeProject: composeProjectName,
-      profiles,
-      cwd: dirname(project.composeFile),
-      env: envOverrides.env,
-    });
-    if (bootstrapCode !== 0) {
+    const upPhase = trackComposeStartupPhase();
+    const launch = async () => {
+      cancellation.signal.throwIfAborted();
+      await engine.capture();
+      if (serviceScoped) {
+        await updateProjectRuntimeServiceEnvFingerprints({
+          projectDir: project.projectDir,
+          composeProject: lifecycleComposeProject,
+          effectiveEnvName: envOverrides.effectiveEnvName,
+          services: targetServices,
+          envByService: envOverrides.preflightEnvByService,
+          outcome: "applied",
+        });
+      }
+      const bootstrapCode = await bootstrapDependencyCaches({
+        timeoutMs: detach ? startupTimeoutMs : undefined,
+        services: cacheBootstrapServices,
+        composeFiles: composeFilesWithEnv,
+        composeProject: composeProjectName,
+        profiles,
+        cwd: dirname(project.composeFile),
+        env: envOverrides.env,
+        beforeService: async () => {
+          await verifyOwnership();
+          await engine.verify();
+          cancellation.signal.throwIfAborted();
+        },
+      });
+      if (bootstrapCode !== 0) {
+        return { bootstrapCode };
+      }
+      containerStartBegun = true;
+      return await composeUpGuardedBySharedHelpers({
+        assertCurrent: assertHelpersCurrent,
+        up: (beforeStart) =>
+          composeRuntimeBackend.up({
+            signal: cancellation.signal,
+            unattended:
+              process.env.HACK_AUTOSTART_LOGIN === "1" ? true : undefined,
+            unattendedTrustedBinds:
+              process.env.HACK_AUTOSTART_LOGIN === "1"
+                ? resolveAutostartTrustedTlsBinds
+                : undefined,
+            beforeCreate: async () => {
+              await verifyOwnership();
+              await publishRuntimeSelection();
+              await engine.verify();
+            },
+            onCreateDispatched: () => {
+              composeDispatched = true;
+              if (!detach) {
+                // From dispatch, Compose owns foreground signal forwarding.
+                foregroundTermination.guard =
+                  installForegroundTerminationGuard();
+                signalCleanup.dispose();
+              }
+            },
+            beforeStart: async () => {
+              await verifyOwnership();
+              await assertLoginAutostartCurrent(branch, project.projectRoot);
+              await beforeStart?.();
+              if (detach) {
+                await engine.verify();
+              } else {
+                await publishRuntimeSelection();
+                await engine.verify();
+              }
+            },
+            dependencyProgress: resolveDependencyCacheProgress({
+              cache: dependencyCache,
+              project: composeProjectName,
+              baseProject: baseProjectName,
+            }),
+            startupTimeoutMs,
+            imageTimeoutMs: budgets.imageTimeoutMs,
+            startupCeilingMs: budgets.startupCeilingMs,
+            onStartupPhase: upPhase.onStartupPhase,
+            onStartupProgress: upPhase.onStartupProgress,
+            onStartupStalled: upPhase.onStartupStalled,
+            composeFiles: composeFilesWithEnv,
+            composeProject: composeProjectName,
+            profiles,
+            detach,
+            cwd: dirname(project.composeFile),
+            env: envOverrides.env,
+            routeStdoutToStderr: json,
+            services: serviceScoped ? targetServices : undefined,
+            noDeps: serviceScoped,
+          }),
+      });
+    };
+    const guarded = await withComposeNameLock(lockName, () =>
+      launch().finally(settlePublication)
+    );
+    cancellation.signal.throwIfAborted();
+    if ("bootstrapCode" in guarded) {
+      const { bootstrapCode } = guarded;
       // Release whatever this operation started, like every later failure.
       // (Today the cache bootstrap only runs for a service-scoped up, which
       // starts no lifecycle work, so this cleanup is null there.)
@@ -8525,80 +8647,6 @@ async function runUpCommand({
       logger.error({ message: failure.message });
       return bootstrapCode;
     }
-    const upPhase = trackComposeStartupPhase();
-    containerStartBegun = true;
-    const guarded = await composeUpGuardedBySharedHelpers({
-      assertCurrent: assertHelpersCurrent,
-      up: (beforeStart) =>
-        composeRuntimeBackend.up({
-          unattended:
-            process.env.HACK_AUTOSTART_LOGIN === "1" ? true : undefined,
-          unattendedTrustedBinds:
-            process.env.HACK_AUTOSTART_LOGIN === "1"
-              ? resolveAutostartTrustedTlsBinds
-              : undefined,
-          beforeCreate: async () => {
-            await assertDesktopComposeOwnership({
-              expected: expectedComposeProject,
-              project,
-              composeProjectName,
-              profiles,
-              env: envOverrides.env,
-              composeFiles: composeFilesWithEnv,
-              action: "start",
-            });
-            await publishRuntimeSelection();
-            await engine.verify();
-          },
-          onCreateDispatched: () => {
-            composeDispatched = true;
-          },
-          beforeStart: async () => {
-            await assertDesktopComposeOwnership({
-              expected: expectedComposeProject,
-              project,
-              composeProjectName,
-              profiles,
-              env: envOverrides.env,
-              composeFiles: composeFilesWithEnv,
-              action: "start",
-            });
-            await assertLoginAutostartCurrent(branch, project.projectRoot);
-            await beforeStart?.();
-            if (detach) {
-              await engine.verify();
-            } else {
-              await publishRuntimeSelection();
-              await engine.verify();
-              // Compose owns foreground shutdown. Lifecycle cleanup runs after
-              // it settles; re-raising here would turn one Ctrl-C into two.
-              // Keep an owner until the caller's cleanup has also settled.
-              foregroundTermination.guard = installForegroundTerminationGuard();
-              signalCleanup.dispose();
-            }
-          },
-          dependencyProgress: resolveDependencyCacheProgress({
-            cache: dependencyCache,
-            project: composeProjectName,
-            baseProject: baseProjectName,
-          }),
-          startupTimeoutMs,
-          imageTimeoutMs: budgets.imageTimeoutMs,
-          startupCeilingMs: budgets.startupCeilingMs,
-          onStartupPhase: upPhase.onStartupPhase,
-          onStartupProgress: upPhase.onStartupProgress,
-          onStartupStalled: upPhase.onStartupStalled,
-          composeFiles: composeFilesWithEnv,
-          composeProject: composeProjectName,
-          profiles,
-          detach,
-          cwd: dirname(project.composeFile),
-          env: envOverrides.env,
-          routeStdoutToStderr: json,
-          services: serviceScoped ? targetServices : undefined,
-          noDeps: serviceScoped,
-        }),
-    });
     if ("superseded" in guarded) {
       const error = guarded.superseded;
       await lifecycleCleanup?.();
@@ -8714,19 +8762,23 @@ async function runUpCommand({
         );
       }
     }
-    const afterCode = serviceScoped
-      ? 0
-      : await runLifecycleCommands({
-          title: "Lifecycle (up after)",
-          onHookStart: progress?.afterStart,
-          onHookComplete: progress?.after,
-          summarizeFailure,
-          commands: cfg.lifecycle?.up?.after,
-          projectRoot: project.projectRoot,
-          env: envOverrides.lifecycleEnv,
-          projectDir: project.projectDir,
-          composeProject: lifecycleComposeProject,
-        });
+    if (!serviceScoped) {
+      afterHooks = runLifecycleCommands({
+        title: "Lifecycle (up after)",
+        onHookStart: progress?.afterStart,
+        onHookComplete: progress?.after,
+        summarizeFailure,
+        commands: cfg.lifecycle?.up?.after,
+        projectRoot: project.projectRoot,
+        env: envOverrides.lifecycleEnv,
+        projectDir: project.projectDir,
+        composeProject: lifecycleComposeProject,
+        signal: cancellation.signal,
+        inheritStdin: true,
+      });
+    }
+    const afterCode = (await afterHooks) ?? 0;
+    cancellation.signal.throwIfAborted();
 
     if (afterCode !== 0) {
       await engine.verify();
@@ -8843,8 +8895,8 @@ async function runUpCommand({
     });
   } catch (error: unknown) {
     if (
-      detachedComposeSucceeded &&
-      error instanceof DockerLaunchConnectionError
+      cancellation.signal.aborted ||
+      (detachedComposeSucceeded && error instanceof DockerLaunchConnectionError)
     ) {
       throw error;
     }
@@ -8854,13 +8906,7 @@ async function runUpCommand({
     throw error;
   } finally {
     try {
-      if (publishedLaunch && !composeDispatched) {
-        await restoreUndispatchedRuntimeLaunch({
-          ...publishedLaunch,
-          projectDir: project.projectDir,
-          composeProject: lifecycleComposeProject,
-        });
-      }
+      await settlePublication();
     } finally {
       foregroundTermination.guard?.dispose();
       signalCleanup.dispose();
@@ -11377,6 +11423,7 @@ async function runRestartUpPhase(opts: {
       projectDir: opts.project.projectDir,
       composeProject: opts.lifecycleComposeProject,
       signal: cancellation.signal,
+      inheritStdin: true,
     });
     const upAfter = await afterHooks;
     if (upAfter !== 0) {
@@ -11554,16 +11601,17 @@ async function runTargetedServiceRestart(opts: {
     ...envOverrides.composeFiles,
   ];
   const verifyOwnership = async (services: readonly string[]) => {
-    await engine.verify();
-    await requireOwnedServiceContainers({
-      project: opts.project,
-      composeProjectName: opts.composeProjectName,
-      composeFiles: composeFilesWithEnv,
-      profiles: opts.profiles,
-      env: envOverrides.env,
-      action: "restart",
-      services,
-    });
+    await readOnCapturedDockerEngine(engine.verify, () =>
+      requireOwnedServiceContainers({
+        project: opts.project,
+        composeProjectName: opts.composeProjectName,
+        composeFiles: composeFilesWithEnv,
+        profiles: opts.profiles,
+        env: envOverrides.env,
+        action: "restart",
+        services,
+      })
+    );
   };
   await verifyOwnership(preparedServices);
   const bootstrapCode = await bootstrapDependencyCaches({
@@ -11574,6 +11622,7 @@ async function runTargetedServiceRestart(opts: {
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
     env: envOverrides.env,
+    beforeService: engine.verify,
   });
   if (bootstrapCode !== 0) {
     const failure = dependencyCacheBootstrapFailure({

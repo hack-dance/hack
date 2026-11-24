@@ -943,6 +943,25 @@ const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 /** A candidate home's provider `$HOME` (the runtime's `run/smolvm/home`). */
 const PROVIDER_HOME = join(".hack-local", "run", "smolvm", "home");
 
+/** Each wget invocation opens a fresh connection through the same relay. */
+export const RELAY_CYCLES_SCRIPT = `set -eu
+payload=$(mktemp)
+trap 'rm -f "$payload"' EXIT
+cycle=1
+while [ "$cycle" -le 256 ]; do
+  if ! wget -q -T 3 -O "$payload" http://dependency.qualification.test/blob; then
+    echo "relay cycle $cycle: download failed" >&2
+    exit 1
+  fi
+  sum=$(sha256sum "$payload")
+  if [ "\${sum%% *}" != "${BLOB_SHA256}" ]; then
+    echo "relay cycle $cycle: payload digest mismatch" >&2
+    exit 1
+  fi
+  cycle=$((cycle + 1))
+done
+printf '%s\\n' "$((cycle - 1))"`;
+
 export class Qualification {
   /** Read boundary for testing a stale diagnostic snapshot racing with child exit. */
   readStartupOutput = startupOutput;
@@ -2144,6 +2163,15 @@ export class Qualification {
     );
   }
 
+  relayCycles(): void {
+    const result = this.inContainer("relay-cycles", "web", RELAY_CYCLES_SCRIPT);
+    this.check(
+      "relay: 256 successive connections return the complete payload",
+      result.trim() === "256",
+      result.trim()
+    );
+  }
+
   async run(): Promise<number> {
     mkdirSync(this.evidence, { mode: 0o700 });
     for (const directory of ["user-home", "cli-home", "tmp"]) {
@@ -2208,6 +2236,7 @@ export class Qualification {
         async () => {
           const ready = await this.upForeground("up-relay", "up");
           this.relay("relay");
+          this.relayCycles();
           await this.upForeground(
             "restart-relay",
             "restart",

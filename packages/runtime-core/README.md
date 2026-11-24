@@ -918,6 +918,11 @@ With `--keep-going`, recorded and thrown step failures both settle owned process
 before advancing; unconfirmed cleanup skips later steps. Restart keeps the previous
 foreground tracked through replacement failure and its bounded exit wait.
 
+The mount-socket step verifies a 64 KiB transfer in each direction, then opens
+256 successive connections through one running relay and checks every
+download's digest. The step repeats the bidirectional transfer after restart.
+Look for the 256-connection check in the qualification evidence.
+
 `--caddy`, `--caddy-sha256` and `--https-port` together select native HTTPS. They also
 route the fixture's `web` service at `web.provider-qual.hack.local`. The web and
 database step then fetches that route with `curl`, resolved to loopback and trusting
@@ -1717,8 +1722,9 @@ Candidate provider launches explicitly set `SMOLVM_DISK_TRIM=0`, including
 restart and recovery; ambient values cannot enable automatic guest trim. Pinned
 Smol accepts `0` as disabled and forwards it to its guest agent. Its imago discard
 path can truncate backing files, conflicting with the candidate's exact retained
-disk-size identity. Automatic trim remains disabled until safe disk reclamation
-is supported and qualified. This does not relax disk identity checks or repair
+disk-size identity. Explicit image reclaim can request a single discard of guest
+storage under its verified operation lease after freeing at least 256 MiB.
+Periodic trim remains disabled. This does not relax disk identity checks or repair
 previously shortened files, and does not change the separate memory-reclamation
 policy. Already running providers require an owned stop/start to receive the setting.
 

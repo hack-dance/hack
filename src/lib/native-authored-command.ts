@@ -60,7 +60,11 @@ import {
   createNativeEnvFingerprintSession,
   type NativeEnvFingerprintSession,
 } from "./native-env-fingerprint-state.ts";
-import { nativeForegroundDetachRefusal } from "./native-up-refusals.ts";
+import {
+  NATIVE_AUTHORED_ATTEMPT_LIMIT,
+  NativeAuthoredAttemptLimitError,
+  nativeForegroundDetachRefusal,
+} from "./native-up-refusals.ts";
 import { runtimeHostMetadataComposeProject } from "./runtime-host-metadata.ts";
 
 function unsupported(): never {
@@ -286,6 +290,9 @@ function startupFailure(error: unknown): number {
     }
     if (nativeCodesReportRuntimeNotRunning(error)) {
       throw stoppedRuntimeStartup(error);
+    }
+    if (error.nativeCode === NATIVE_AUTHORED_ATTEMPT_LIMIT) {
+      throw new NativeAuthoredAttemptLimitError();
     }
     let code: HackCliError["code"] = "E_STARTUP_INCOMPLETE";
     if (error.nativeCode === "native_graph_subset") {

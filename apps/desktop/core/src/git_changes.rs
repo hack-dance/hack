@@ -114,6 +114,7 @@ impl Changes {
             "--ignore-submodules=dirty",
             "--",
             ".hack/",
+            ".dev/docker-compose.yml",
         ]);
         let (out, _, code) = runner
             .run_raw(&args, None, Duration::from_secs(5))

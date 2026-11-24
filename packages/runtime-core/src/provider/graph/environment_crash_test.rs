@@ -109,6 +109,19 @@ fn report_child<T, E: std::fmt::Debug>(
         );
     }
 }
+/// Ordinary removal cleanup without its trailing history compaction. Since HACK-1193
+/// ordinary `cleanup` compacts the retired records it just retired, leaving archive nothing
+/// to move. Enrolled relay cleanup (every environment-bound CLI graph) and a retained
+/// compaction refusal instead leave the last generation's retired records active until
+/// archive moves them; this reproduces that state with the same cleanup effect (HACK-2627).
+fn cleanup_without_compaction(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
+    let receipt = cleanup_owned(candidate, &engine, receipt, &root, true)?;
+    explicit_cleanup_done(&root);
+    Ok(receipt)
+}
 struct OwnedChild(Option<Child>);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
@@ -218,14 +231,10 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
                     engine.guest(),
                     &run,
                 )?;
-                assert_eq!(
-                    slots.len(),
-                    if restore && point != "restore-intent" {
-                        2
-                    } else {
-                        1
-                    }
-                );
+                // Ordinary cleanup compacts the retired initial generation (HACK-1193), so a
+                // restore's prior slots are retained history, never active inventory: only the
+                // interrupted attempt's own allocation, if it reached one, is active.
+                assert_eq!(slots.len(), usize::from(point != "restore-intent"));
                 if point == "restore-intent" || point == "after-environment-stage" {
                     assert!(present.is_none());
                 } else {
@@ -269,7 +278,9 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
         ));
         let cleaned = cleanup(&candidate, &run, true);
         report_child(&outcome, &log, &format!("restore={restore} point={point}"));
-        report_child(&outcome, &log, "cleanup-after-remove");
+        if let Err(error) = &cleaned {
+            eprintln!("restore={restore} point={point} final cleanup: {error:?}");
+        }
         outcome.unwrap()?;
         cleaned?;
         cleanup(&candidate, &run, true)?;
@@ -380,6 +391,7 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
         },
     ));
     let cleaned = cleanup(&candidate, &run, true);
+    report_child(&outcome, &log, "cleanup-after-remove");
     outcome.unwrap()?;
     cleaned?;
     cleanup(&candidate, &run, true)?;
@@ -429,7 +441,12 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
                 .join("run/environment-leases")
                 .join(format!("{slot}.json"));
             let original = fs::read(&source).map_err(state::io)?;
-            cleanup(&candidate, &run, true)?;
+            // Archive moves only records a cleanup left active; ordinary cleanup compacts them.
+            assert_eq!(
+                cleanup_without_compaction(&candidate, &run)?.phase,
+                "removed"
+            );
+            assert_eq!(fs::read(&source).map_err(state::io)?, original);
             let output = child_log(&log)?;
             let mut child = OwnedChild(Some(
                 Command::new(std::env::current_exe().map_err(state::io)?)
@@ -442,6 +459,7 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
                     .env("HACK_LOCAL_GRAPH_ACTION", "archive")
                     .env("HACK_LOCAL_GRAPH_RUN", &run)
                     .env("HACK_LOCAL_GRAPH_FAULT", "archive-after-environment-move")
+                    .stdin(Stdio::null())
                     .stdout(output.0)
                     .stderr(output.1)
                     .spawn()
@@ -539,6 +557,7 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
             Ok(())
         },
     ));
+    report_child(&outcome, &log, "archive-after-environment-move");
     if root.exists() {
         cleanup(&candidate, &run, true)?;
     }

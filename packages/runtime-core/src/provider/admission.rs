@@ -595,8 +595,16 @@ pub(super) fn recheck_after_lease(
         }
     }
     // Judge by the clock, not by having asked to sleep: an early wake sleeps again.
-    while let Some(rest) = due() {
-        clock.sleep(rest);
+    if let Some(first) = due() {
+        use crate::timings::{self, Outcome, Step};
+        let wait = timings::start(Step::VmAdmissionWait, None);
+        clock.sleep(first);
+        while let Some(rest) = due() {
+            clock.sleep(rest);
+        }
+        if let Some(span) = wait {
+            span.finish(Outcome::Ok, false, None, Default::default());
+        }
     }
     // A refused or failed sample also removes the record, so the retry waits its window.
     let refused = |error: CandidateError| {

@@ -250,15 +250,18 @@ fn released(
     lease: &state::Lock,
     audit: Audit,
 ) -> Result<(), StoppedRefusal> {
-    let check = |error: CandidateError| StoppedRefusal::from_check(&error);
-    lease.verify_path(&root(candidate)).map_err(check)?;
-    lock_absent_disks_within(candidate, owner, disk_handles::RELEASE_HANDLE_WAIT).map_err(check)?;
-    sockets_absent(owner).map_err(check)?;
-    match audit {
-        Audit::BeforeRepair => config_audit::verify_before_translation_repair(candidate, owner),
-        Audit::Exact => config_audit::verify(candidate, owner),
-    }
-    .map_err(check)
+    crate::timings::measure(crate::timings::Step::VmReleaseVerify, None, |_| {
+        let check = |error: CandidateError| StoppedRefusal::from_check(&error);
+        lease.verify_path(&root(candidate)).map_err(check)?;
+        lock_absent_disks_within(candidate, owner, disk_handles::RELEASE_HANDLE_WAIT)
+            .map_err(check)?;
+        sockets_absent(owner).map_err(check)?;
+        match audit {
+            Audit::BeforeRepair => config_audit::verify_before_translation_repair(candidate, owner),
+            Audit::Exact => config_audit::verify(candidate, owner),
+        }
+        .map_err(check)
+    })
 }
 
 /// How a release check audits the provider's persisted configuration.

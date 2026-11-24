@@ -212,7 +212,8 @@ Historical remote guides are excluded from the supported documentation.
 - `--json` on `hack up`/`down`/`restart`/`doctor` emits a `{ok, data | error: {code, message}}`
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
 - A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
-  from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
+  from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `files ls`, `files cat`,
+  `open`, `tui`, `branch ...`,
   `config get`/`set`, `data export`/`import`, `env ...`, `host exec`/`shell`, `usage --by-service` and
   `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one

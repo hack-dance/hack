@@ -31,6 +31,8 @@ pub enum Pane {
     #[default]
     Project,
     Doctor,
+    Resources,
+    /// Setup checks (`setup_view`).
     Setup,
     Hackd,
     Upgrade,
@@ -494,6 +496,60 @@ pub fn render(app: &HackApp, ui: &Ui, window: &Window, cx: &mut Context<HackApp>
         .into_any_element()
 }
 
+pub(crate) fn native_pool_card(
+    report: hack_desktop_core::models::NativePoolReport,
+    ui: &Ui,
+) -> gpui_kit::Div {
+    use hack_desktop_core::models::NativePoolState;
+    use hack_desktop_ui::{components::dot, status::Status};
+    let (status, label) = match report.state {
+        NativePoolState::Idle => (Status::Degraded, "Running · idle"),
+        NativePoolState::InUse => (Status::Running, "Running · in use"),
+        NativePoolState::Stopped => (Status::Stopped, "Stopped"),
+        NativePoolState::Unknown => (Status::Unknown, "Status unknown"),
+    };
+    let p = ui.p;
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::S3)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(space::S4)
+                .child(div().type_step(text::BODY_STRONG).child("Native VM pool"))
+                .child(dot(status, ui))
+                .child(
+                    div()
+                        .type_step(text::SMALL)
+                        .text_color(p.text_secondary)
+                        .child(label),
+                ),
+        )
+        .children(report.graph_runs.map(|count| {
+            div()
+                .type_step(text::BODY)
+                .text_color(p.text_secondary)
+                .child(format!("Recorded project graphs · {count}"))
+        }))
+        .children(report.memory_bytes.map(|bytes| {
+            div()
+                .type_step(text::BODY)
+                .text_color(p.text_secondary)
+                .child(format!(
+                    "Provider memory · {}",
+                    hack_desktop_core::usage::bytes(bytes)
+                ))
+        }))
+        .children(report.guest_memory_mib.map(|mib| {
+            div()
+                .type_step(text::BODY)
+                .text_color(p.text_secondary)
+                .child(format!("Guest memory · {mib} MiB"))
+        }))
+}
+
 fn groups(
     app: &HackApp,
     view: &DoctorView,
@@ -547,6 +603,9 @@ fn groups(
                 .text_color(p.states.degraded.fg)
                 .child(coverage),
         );
+    }
+    if let Some(report) = view.native_pool.filter(|_| app.doctor.filter.is_none()) {
+        body = body.child(native_pool_card(report, ui));
     }
     for (title, rows) in [("Machine", &machine), ("Projects", &projects)] {
         if rows.is_empty() {

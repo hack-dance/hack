@@ -429,6 +429,19 @@ impl From<RunError> for CopiesError {
 }
 
 pub trait Source: Send + Sync {
+    /// Preview a catalog edit, or save the exact revision previously previewed.
+    ///
+    /// # Errors
+    /// The Compose file or CLI cannot perform the requested edit.
+    fn catalog_edit(
+        &self,
+        _root: &Path,
+        _id: &str,
+        _revision: Option<&str>,
+    ) -> Result<crate::service_catalog::CatalogEdit, String> {
+        Err("Service editing is unavailable for this source".into())
+    }
+
     /// Observe the project family in the selected checkout.
     fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, CopiesError> {
         Err(RunError::NotFound.into())
@@ -1187,6 +1200,7 @@ fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
     }
     let mut coverage = DoctorRun::machine(Ok(crate::models::DoctorReport {
         checks: vec![crate::models::DoctorCheck {
+            native_pool: None,
             id: "desktop tool coverage".into(),
             status: "unknown".into(),
             detail: note,
@@ -1331,6 +1345,7 @@ impl LiveSource {
                 let why = format!("Could not check Doctor executable discovery: {reason}");
                 let report = crate::models::DoctorReport {
                     checks: vec![crate::models::DoctorCheck {
+                        native_pool: None,
                         id: "desktop preflight".into(),
                         status: "unknown".into(),
                         detail: why.clone(),
@@ -2291,6 +2306,29 @@ impl Source for LiveSource {
         })
     }
 
+    fn catalog_edit(
+        &self,
+        root: &Path,
+        id: &str,
+        revision: Option<&str>,
+    ) -> Result<crate::service_catalog::CatalogEdit, String> {
+        let root = trusted_root(root)
+            .map_err(|_| "Can’t edit this checkout. Verify ownership and write permissions.")?;
+        let mut args = vec!["service", "add", id, "--json"];
+        if let Some(revision) = revision {
+            args.extend(["--expect-revision", revision]);
+        } else {
+            args.push("--dry-run");
+        }
+        self.runner
+            .run_schema_json(&args, Some(&root), Self::READ, "hack.service-add.v1")
+            .map_err(|error| match error {
+                RunError::Cli(error) => format!("{} ({})", error.message, error.code),
+                _ => "Could not run hack service add. Check that the selected CLI supports it."
+                    .into(),
+            })
+    }
+
     fn act_on_service(
         &self,
         repo_root: &Path,
@@ -2312,6 +2350,11 @@ impl Source for LiveSource {
                 "local",
                 &stop_option,
             ],
+            Action::Start if !service.is_empty() && !service.starts_with('-') => {
+                let mut args = Action::Start.cli_args().to_vec();
+                args.extend(["--target", "local", service]);
+                args
+            }
             Action::Restart if !service.is_empty() && !service.starts_with('-') => {
                 vec![
                     "restart",
@@ -4009,9 +4052,9 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(tools.unchecked.contains("docker"));
         for native in [false, true] {
             let checks = vec![
-                crate::models::DoctorCheck { id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()), fix: None },
-                crate::models::DoctorCheck { id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into(), fix: None },
-                crate::models::DoctorCheck { id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into(), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into(), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into(), fix: None },
             ];
             let mut run = DoctorRun::project(
                 "fixture",
@@ -4058,6 +4101,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(!tools.unchecked.contains("docker"));
         let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
             checks: vec![crate::models::DoctorCheck {
+                native_pool: None,
                 id: "docker daemon".into(),
                 status: "error".into(),
                 detail: "validated Docker reported an engine error".into(),
@@ -4105,6 +4149,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             ("host tls trust", "missing host trust bundle"),
         ]
         .map(|(id, detail)| crate::models::DoctorCheck {
+            native_pool: None,
             id: id.into(),
             status: "error".into(),
             detail: detail.into(),
@@ -4258,6 +4303,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                 "project",
             ]
             .map(|id| crate::models::DoctorCheck {
+                native_pool: None,
                 id: id.into(),
                 status: "ok".into(),
                 detail: "independently observed".into(),

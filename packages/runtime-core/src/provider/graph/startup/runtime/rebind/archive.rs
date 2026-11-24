@@ -196,7 +196,7 @@ fn after_cleanup_fenced(
         || original.resources.iter().any(|(key, prior)| {
             cleaned.resources.get(key).is_none_or(|current| {
                 prior.kind != current.kind
-                    || prior.id != current.id
+                    || !prior.matches_cleanup_id(current, &cleaned.phase)
                     || prior.name != current.name
                     || (current.kind != Kind::Volume && current.phase != "absent")
                     || (cleaned.phase == "removed" && current.phase != "absent")

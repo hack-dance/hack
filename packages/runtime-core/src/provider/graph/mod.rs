@@ -286,6 +286,10 @@ pub struct Resource {
     pub key: String,
     pub name: String,
     pub id: Option<String>,
+    /// Cleanup verified and recorded the ID from an unacknowledged create.
+    /// Cleanup authorizations selected before that observation bound a missing ID.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_observed_create: bool,
     pub image: Option<String>,
     pub phase: String,
     /// The service's reviewed opt-in policy for running a `linux/amd64` image under Rosetta
@@ -294,6 +298,38 @@ pub struct Resource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amd64_emulation: Option<crate::project::Amd64Emulation>,
 }
+
+impl Resource {
+    fn has_unacknowledged_create(&self) -> bool {
+        // The execution driver records "uncertain" if the engine create call
+        // fails before returning the ID, including when its reply is lost.
+        self.kind == Kind::Container
+            && self.id.is_none()
+            && matches!(self.phase.as_str(), "create-intent" | "uncertain")
+    }
+
+    fn has_cleanup_observed_id(&self, graph_phase: &str) -> bool {
+        self.cleanup_observed_create
+            && self.kind == Kind::Container
+            && self.id.as_deref().is_some_and(|id| hex(id, 64))
+            && matches!(
+                (graph_phase, self.phase.as_str()),
+                (
+                    "cleanup-intent" | "reconciled-cleanup-only",
+                    "create-intent" | "uncertain" | "absent"
+                ) | ("stopped-data-retained" | "removed", "absent")
+            )
+    }
+
+    /// Cleanup may resolve a missing create ID once. It still must match a
+    /// known ID when checking a receipt-bound authorization or archive.
+    #[cfg(any(target_os = "macos", test))]
+    fn matches_cleanup_id(&self, current: &Self, graph_phase: &str) -> bool {
+        self.id == current.id
+            || (self.has_unacknowledged_create() && current.has_cleanup_observed_id(graph_phase))
+    }
+}
+
 /// The phases of a start in progress, before every service has started: fresh,
 /// restore and restart.
 pub(super) const START_PHASES: [&str; 3] = ["preparing", "restoring", "restarting"];
@@ -789,6 +825,7 @@ fn load_at(
             )
             || (r.phase == "released" && r.cache.is_none())
             || r.id.as_deref().is_some_and(|id| !hex(id, 64))
+            || (r.cleanup_observed_create && !r.has_cleanup_observed_id(&receipt.phase))
             || (r.kind == Kind::Container && !r.image.as_deref().is_some_and(image_id))
             || (r.kind != Kind::Container && r.image.is_some())
             || (r.kind == Kind::Volume && r.id.is_some())
@@ -987,6 +1024,15 @@ impl Session<'_, '_> {
         }
         Ok(())
     }
+    /// The start loop's wait between passes: woken by an engine event for one of
+    /// this run's containers, else the whole pass interval (see `engine::changes`).
+    fn engine_changes(&self) -> crate::provider::engine::changes::EngineChanges {
+        use crate::provider::engine::changes::EngineChanges;
+        self.engine.guest().engine_socket().map_or_else(
+            |_| EngineChanges::sleeping(),
+            |socket| EngineChanges::follow(&socket, &self.receipt.run),
+        )
+    }
     fn save(&self) -> Result<(), CandidateError> {
         state::write(&self.root.join("state.json"), &self.receipt)
     }
@@ -1169,6 +1215,12 @@ impl Driver for Session<'_, '_> {
                 } else {
                     "create-intent"
                 };
+                // A fresh service with managed values stages them right after this
+                // write: its durable attachment marker goes in the same write
+                // instead of a second one (see `start`).
+                if !self.restarting && self.environments.contains_key(service) {
+                    self.receipt.environment_attached = true;
+                }
                 crate::timings::measure_candidate(
                     crate::timings::Step::StartWaveRecord,
                     None,
@@ -1289,19 +1341,32 @@ impl Driver for Session<'_, '_> {
         let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
-            self.receipt.environment_attached = true;
-            self.save()?;
+            // The marker is durable before any bound intent. It is normally already
+            // in this service's start-intent write; only a caller that skipped it
+            // pays a write of its own here.
+            if !self.receipt.environment_attached {
+                self.receipt.environment_attached = true;
+                crate::timings::measure_candidate(
+                    crate::timings::Step::StartWaveRecord,
+                    None,
+                    |_| self.save(),
+                )?;
+            }
             let (uid, gid) = launcher::identity(&self.configs[service])?;
-            let lease = pending.with_identity(uid, gid).stage_bound(
-                self.engine.guest(),
-                Some(super::environment_recovery::GraphBinding {
-                    run: self.receipt.run.clone(),
-                    container: resource.name.clone(),
-                }),
-            )?;
-            #[cfg(test)]
-            self.fault_pause("after-environment-stage")?;
-            let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+            let (lease, path) =
+                crate::timings::measure_candidate(crate::timings::Step::EnvStage, None, |_| {
+                    let lease = pending.with_identity(uid, gid).stage_bound(
+                        self.engine.guest(),
+                        Some(super::environment_recovery::GraphBinding {
+                            run: self.receipt.run.clone(),
+                            container: resource.name.clone(),
+                        }),
+                    )?;
+                    #[cfg(test)]
+                    self.fault_pause("after-environment-stage")?;
+                    let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+                    Ok((lease, path))
+                })?;
             let files = lease.file_mounts();
             let wraps = lease.wraps_process();
             self.leases.insert(service.into(), lease);
@@ -1863,10 +1928,12 @@ fn run_inputs(
             )?;
         }
         session.create_resources(false)?;
-        execution::run(
+        let changes = session.engine_changes();
+        execution::run_with_wait(
             &prepared.graph,
             &mut session,
             admission_deadline.saturating_duration_since(std::time::Instant::now()),
+            |interval| changes.wait(interval),
         )
     })();
     if let Err(failure) = result {
@@ -2491,7 +2558,7 @@ fn cleanup_owned_fenced(
         slots
     };
     fence()?;
-    shutdown::stop_owned(engine, &receipt, root)?;
+    shutdown::stop_owned(engine, &mut receipt, root, &fence)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
         if kind == Kind::Volume && !remove_data {
             continue;
@@ -2781,10 +2848,13 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         launcher: None,
     };
     session.save()?;
+    let changes = session.engine_changes();
     // The restarting receipt is committed: the previous start's record is superseded.
-    if let Err(failure) = startup_failure::clear_after_started(&session.root)
-        .and_then(|_| execution::run(&prepared.graph, &mut session, options.timeout))
-    {
+    if let Err(failure) = startup_failure::clear_after_started(&session.root).and_then(|_| {
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
+    }) {
         startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;

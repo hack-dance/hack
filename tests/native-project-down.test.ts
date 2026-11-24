@@ -1999,6 +1999,70 @@ test.each([
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
+// HACK-2579: the pool's provider was killed; inspection refuses the dead recorded
+// provider until `runtime recover` records the pool stopped.
+test("down on a pool whose provider exited under a running record recovers the pool, then recovers the run", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let runtimeRecovered = false;
+  let pool = false;
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "status") {
+        return runtimeRecovered
+          ? { phase: "recovered-unclean", process_alive: false }
+          : { phase: "process-exited", process_alive: false };
+      }
+      if (command === "recover") {
+        runtimeRecovered = true;
+        return { phase: "recovered-unclean", process_alive: false };
+      }
+      if (command === "up") {
+        pool = true;
+        return { phase: "running" };
+      }
+      if (command === "foreground-owner") {
+        return {
+          ...ownerSelection("exited"),
+          dead_owner_recovery: pool ? "7".repeat(64) : null,
+        };
+      }
+      if (!runtimeRecovered) {
+        throw new NativeRuntimeRequestError({
+          nativeCode: "process_identity_unavailable",
+          message: "Cannot establish native provider process identity.",
+        });
+      }
+      if (!pool) {
+        throw poolStoppedError();
+      }
+      if (command === "recover-cleanup") {
+        cleaned = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (command === "retire-recovered-publisher") {
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped", runtimeStarted: true });
+  expect(calls.slice(0, 5)).toEqual([
+    "inspect",
+    "status",
+    "recover",
+    "inspect",
+    "foreground-owner",
+  ]);
+  expect(calls.filter((call) => call === "recover")).toHaveLength(1);
+  expect(calls.filter((call) => call === "recover-cleanup")).toHaveLength(1);
+});
+
 // HACK-2572: right after the pool stopped, the run's detached owner is still exiting.
 test("down --recover waits for the owner of an ended pool boot to go, then recovers as before", async () => {
   const opts = await fixture();

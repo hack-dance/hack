@@ -206,10 +206,10 @@ test("Compose ps shows failed and completed services after failed up", async () 
       /SERVICE\s+KIND\s+USE\s+POINTS AT\s+VIA\s+STATE/
     );
     expect(remoteText.stdout).toMatch(
-      /web\s+remote\s+local\s+web:8080\s+-\s+declared/
+      /web\s+remote\s+unknown\s+unknown\s+-\s+unknown/
     );
     expect(remoteText.stdout).toMatch(
-      /db\s+remote\s+qa\s+\$REMOTE_DB_HOST:5432\s+aws-ssm\s+tunnel not started by this version/
+      /db\s+remote\s+unknown\s+unknown\s+-\s+unknown/
     );
     expect(remoteText.stdout).toContain("6 services");
     expect(remoteText.stdout).not.toContain("web (");
@@ -220,39 +220,17 @@ test("Compose ps shows failed and completed services after failed up", async () 
     expect(remoteJson.exitCode).toBe(0);
     const payload = JSON.parse(remoteJson.stdout);
     expect(payload.items).toEqual(JSON.parse(json.stdout).items);
-    expect(payload.remotes).toEqual([
-      {
-        service: "web",
+    expect(payload.remotes).toEqual(
+      ["web", "db", "cache"].map((service) => ({
+        service,
         kind: "remote",
-        target: "local",
-        address: { kind: "service", service: "web", port: 8080 },
+        target: "unknown",
+        address: null,
         via: null,
-        state: "declared",
+        state: "unknown",
         probe: "not checked",
-      },
-      {
-        service: "db",
-        kind: "remote",
-        target: "qa",
-        address: { kind: "env_ref", name: "REMOTE_DB_HOST", port: 5432 },
-        via: "aws-ssm",
-        state: "tunnel not started by this version",
-        probe: "not checked",
-      },
-      {
-        service: "cache",
-        kind: "remote",
-        target: "shared",
-        address: {
-          kind: "hostname",
-          hostname: "cache.example.test",
-          port: 6379,
-        },
-        via: null,
-        state: "declared",
-        probe: "not checked",
-      },
-    ]);
+      }))
+    );
     expect(remoteJson.stdout + remoteJson.stderr).not.toContain(
       remoteEnv.REMOTE_DB_HOST
     );

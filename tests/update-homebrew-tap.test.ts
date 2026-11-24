@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   FORMULA_CONFIG_COMPILER,
@@ -119,4 +120,57 @@ describe("Homebrew formula", () => {
       }
     }
   );
+});
+
+test("renders a temporary formula from local archives and fails on a missing archive", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hack formula rehearsal-"));
+  try {
+    const targets = ["darwin-arm64", "darwin-x86_64", "linux-x86_64"];
+    const formulaPath = join(directory, "Formula", "hack.rb");
+    const args = [
+      process.execPath,
+      "scripts/update-homebrew-tap.ts",
+      "--tag=v5.0.0",
+      "--version=5.0.0",
+      "--tap-dir",
+      directory,
+      "--archive-dir",
+      directory,
+    ];
+    for (const target of targets.slice(0, 2)) {
+      await Bun.write(join(directory, `hack-5.0.0-${target}.tar.gz`), target);
+    }
+
+    const run = () =>
+      Bun.spawnSync(args, { env: { PATH: "" }, timeout: 10_000 });
+    const missing = run();
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr.toString()).toContain(
+      "Missing local archive: expected hack-5.0.0-linux-x86_64.tar.gz."
+    );
+    expect(await Bun.file(formulaPath).exists()).toBe(false);
+
+    await Bun.write(
+      join(directory, "hack-5.0.0-linux-x86_64.tar.gz"),
+      "linux-x86_64"
+    );
+    const rendered = run();
+    expect(rendered.stderr.toString()).toBe("");
+    expect(rendered.exitCode).toBe(0);
+    const localFormula = await Bun.file(formulaPath).text();
+    for (const target of targets) {
+      const name = `hack-5.0.0-${target}.tar.gz`;
+      const sha = new Bun.CryptoHasher("sha256").update(target).digest("hex");
+      expect(localFormula).toContain(
+        `url "${pathToFileURL(join(directory, name)).href}"`
+      );
+      expect(localFormula).toContain(`sha256 "${sha}"`);
+    }
+    expect(localFormula).toContain('libexec.install "hack-config-compiler"');
+    expect(localFormula).toContain(
+      'assert_equal "hack v#{version}", shell_output("#{bin}/hack --version").strip'
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

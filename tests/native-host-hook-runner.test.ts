@@ -9,6 +9,7 @@ import {
   selectNativeFiniteHooks,
 } from "../src/lib/native-host-hook-runner.ts";
 import { createNativeFixtureCases } from "./helpers/native-fixture-cases.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 /**
  * Each case owns its roots; a failed case retains only its own roots and never
@@ -28,7 +29,7 @@ async function fixture() {
   cases.current().root(root);
   const projectDir = join(root, ".hack");
   const nativeHome = join(root, "candidate");
-  await mkdir(projectDir);
+  await mkdirOwnedFixture(projectDir);
   await mkdir(nativeHome, { mode: 0o700 });
   return { projectRoot: root, projectDir, nativeHome, branch: null };
 }

@@ -112,6 +112,13 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+**Build base registry refusal (`registry_image`).** Foreground and detached
+starts can report `Image unavailable: could not resolve build base` when the
+registry cannot resolve a Dockerfile base. Check the reported reason, restore
+registry access, then retry `hack up`. `Already present` lists images Hack
+confirmed in the running guest. It does not confirm that the named build base
+can be resolved offline.
+
 Since next.17, use
 `"$CANDIDATE" exec api -- /bin/sh` from a foreground terminal for a live shell.
 Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`
@@ -122,6 +129,12 @@ launchers if requested. After an uncertain outcome, inspect
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
 Native `up --detach` and `up --json` wait for the background owner to report ready.
+A loopback port can accept connections as soon as its own service is ready.
+During startup, `hack ps` shows verified loopback publications, and
+`hack open <service>` can open a service with one verified loopback address.
+Other services can still be starting. If the start fails or is cancelled,
+the owner retires the ports it has already published. HTTPS addresses still
+depend on the HTTPS frontend being ready.
 See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
 separate detached and graph readiness limits. If detached startup times out,
 run `down` next. It waits up to two minutes for a pending owner and stops what
@@ -133,6 +146,13 @@ Stop with the **same version and native home**:
 ```sh
 "$CANDIDATE" down --path /absolute/project
 ```
+
+If the foreground owner exited during startup, run `"$CANDIDATE" down --recover
+--path /absolute/project` while the original pool is still running. Recovery
+retains project data and requires matching records for this run. If those
+records cannot prove ownership, keep the old home and use a separate checkout
+with a [fresh manual native home](setup.md#manual-homes). This starts a separate
+run without transferring the old run’s data.
 
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
@@ -146,6 +166,17 @@ message names the exact command that releases the old mapping
 (`hack doctor --native-run-mapping release --expect-selection <sha> [--branch <name>]`);
 run it, then `hack up` again. The project's data stays in the old home. If the old
 run is still live or its stop cannot be proven, stop it with the old version first.
+
+If the old home is no longer at its path (deleted, or on a disk that is not
+mounted), its records cannot be read there. The same refusal then names the same
+release command: it releases the mapping once no process of this user still names
+the old home's path or works inside it, and keeps the mapping in an audit file
+beside it. If the home is on a disk that is not mounted (the message names a missing
+directory under `/Volumes`, `/mnt` or `/media` when it can tell), mount it and stop
+the run there instead; its data is still on that disk. A home that was moved rather
+than deleted, and started again from its new path, has processes that name only the
+new path, so this check cannot see it; in that case release again from the moved
+home afterwards.
 
 ## Back to Compose
 

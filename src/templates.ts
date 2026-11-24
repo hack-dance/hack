@@ -27,6 +27,7 @@ import {
 } from "./constants.ts";
 import { parseDefaultDomain } from "./lib/default-domain.ts";
 import { PROXY_PORTS, renderProxyPortMapping } from "./lib/proxy-bind.ts";
+import projectPrivateFiles from "./project-private-files.json";
 
 /**
  * A Compose `healthcheck` block for a global stack service. `hack global up`
@@ -540,20 +541,9 @@ export const HACK_DIR_GITIGNORE_END_MARKER = "# end managed by hack" as const;
  * machine-local values, so it must never be staged.
  */
 export const HACK_DIR_GITIGNORE_ENTRIES = [
-  ".internal/",
-  ".branch/",
-  ".env",
-  ".env.*",
-  "!.env.example",
-  "!.env.sample",
-  "!.env.template",
-  "!.env.dist",
-  ".env.state.json",
-  "hack.env.local.yaml",
-  "hack.env.*.local.yaml",
-  ".hack.env*.tmp",
-  "tickets/",
-] as const;
+  ...projectPrivateFiles.generatedStateDirs.map((directory) => `${directory}/`),
+  ...projectPrivateFiles.hackDirIgnore,
+];
 
 /**
  * Built-in (non-discovery) compose templates.

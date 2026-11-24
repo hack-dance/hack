@@ -139,8 +139,10 @@ fn no_pending(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
 /// Advisory selection only. Recovery repeats the settled binding and journal
 /// checks under the provider lease and exact dead-publication witnesses.
 pub(super) fn failed_start_recoverable(root: &Path, receipt: &Receipt) -> bool {
-    receipt.phase == "failed-retained"
-        && recoverable_settled(receipt).is_ok()
+    matches!(
+        receipt.phase.as_str(),
+        "failed-retained" | "preparing" | "restoring"
+    ) && recoverable_settled(receipt).is_ok()
         && no_pending(root, receipt).is_ok()
 }
 
@@ -156,13 +158,18 @@ fn recoverable_settled(receipt: &Receipt) -> Result<(), CandidateError> {
 // recoveries; this predicate is never a readiness check for up or restore.
 fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
-    if !["ready-observed", "failed-retained"].contains(&receipt.phase.as_str())
+    let starting = matches!(receipt.phase.as_str(), "preparing" | "restoring");
+    if (!starting
+        && !matches!(
+            receipt.phase.as_str(),
+            "ready-observed" | STARTED_OBSERVED | "failed-retained"
+        ))
         || !startup.valid(receipt)
         || startup.services.values().any(|s| {
             !matches!(
                 s.phase,
                 startup::Phase::Released | startup::Phase::Completed
-            )
+            ) && !(starting && s.phase == startup::Phase::Prepared)
         })
     {
         return Err(refused());
@@ -171,7 +178,12 @@ fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
 }
 fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
     let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    value.as_object_mut().ok_or_else(refused)?.remove("phase");
+    {
+        // `started_from` is part of the phase (`Receipt::set_phase`).
+        let value = value.as_object_mut().ok_or_else(refused)?;
+        value.remove("phase");
+        value.remove("started_from");
+    }
     for group in ["resources", "probes"] {
         if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
             for item in items.values_mut() {
@@ -235,7 +247,12 @@ fn stop_listeners(
 ) -> Result<(), CandidateError> {
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     for (name, service) in &startup.services {
-        if service.phase == startup::Phase::Completed {
+        // Validated Prepared bindings have no process. ProvisionIntent is
+        // deliberately excluded because a listener could lack a durable identity.
+        if matches!(
+            service.phase,
+            startup::Phase::Prepared | startup::Phase::Completed
+        ) {
             continue;
         }
         let resource = receipt
@@ -346,7 +363,7 @@ fn prior_bridges(
     let selected = bridges::cleanup::read(engine, &stopped, root)?;
     Ok(Some(serde_json::to_value(selected).map_err(|_| refused())?))
 }
-/// Explicitly recover only a fully ready dead owner in the currently running
+/// Explicitly recover a provably owned dead run in the currently running
 /// pool. Sibling graphs and persistent data are not selected. Completed recovery
 /// retires the selected stale publications before releasing the provider lease.
 pub fn recover_live_owner(
@@ -805,6 +822,44 @@ mod tests {
     }
 
     #[test]
+    fn a_started_graph_is_recovered_on_the_same_boot_like_a_ready_one() {
+        // `settled_startup`, then the relay check `recover_live_owner` repeats
+        // before and after its cleanup moves the receipt on.
+        let mut started = receipt();
+        started.phase = "preparing".into();
+        mark_started(&mut started).unwrap();
+        assert_eq!(started.phase, STARTED_OBSERVED);
+        recoverable_settled(&started).unwrap();
+        let fixture = super::super::tests::Fixture::new();
+        state::write(&fixture.0.join("state.json"), &started).unwrap();
+        relay::verify_receipt(&fixture.0, &started).unwrap();
+        let mut moved = started.clone();
+        moved.set_phase("preparing");
+        state::write(&fixture.0.join("state.json"), &moved).unwrap();
+        assert!(relay::verify_receipt(&fixture.0, &started).is_err());
+        moved.set_phase("cleanup-intent");
+        state::write(&fixture.0.join("state.json"), &moved).unwrap();
+        relay::verify_receipt(&fixture.0, &started).unwrap();
+        let mut restarting = receipt();
+        restarting.phase = "restarting".into();
+        assert!(recoverable_settled(&restarting).is_err());
+    }
+
+    #[test]
+    fn unfinished_start_recovery_requires_an_enrolled_relay_receipt() {
+        let fixture = super::super::tests::Fixture::new();
+        for phase in ["preparing", "restoring"] {
+            let mut enrolled = receipt();
+            enrolled.phase = phase.into();
+            recoverable_settled(&enrolled).unwrap();
+            assert!(failed_start_recoverable(&fixture.0, &enrolled));
+
+            enrolled.relay_startup = None;
+            assert!(recoverable_settled(&enrolled).is_err(), "{phase}");
+            assert!(!failed_start_recoverable(&fixture.0, &enrolled));
+        }
+    }
+    #[test]
     fn ready_and_failed_receipts_require_settled_startup_bindings() {
         let fixture = super::super::tests::Fixture::new();
         let mut value = receipt();
@@ -837,7 +892,28 @@ mod tests {
         );
         assert!(unsettled.relay_startup.as_ref().unwrap().valid(&unsettled));
         assert!(!failed_start_recoverable(&fixture.0, &unsettled));
-        for phase in ["preparing", "cleanup-intent", "stopped-data-retained"] {
+        for phase in ["preparing", "restoring"] {
+            unsettled.phase = phase.into();
+            assert!(failed_start_recoverable(&fixture.0, &unsettled));
+            let binding = unsettled
+                .relay_startup
+                .as_mut()
+                .unwrap()
+                .services
+                .get_mut("web")
+                .unwrap();
+            binding.phase = startup::Phase::ProvisionIntent;
+            assert!(!failed_start_recoverable(&fixture.0, &unsettled));
+            unsettled
+                .relay_startup
+                .as_mut()
+                .unwrap()
+                .services
+                .get_mut("web")
+                .unwrap()
+                .phase = startup::Phase::Prepared;
+        }
+        for phase in ["cleanup-intent", "stopped-data-retained"] {
             value.phase = phase.into();
             assert!(recoverable_settled(&value).is_err());
         }
@@ -1155,7 +1231,8 @@ mod tests {
     #[test]
     fn absence_receipt_fence_rejects_changed_bytes_and_resources() {
         let fixture = super::super::tests::Fixture::new();
-        let original = receipt();
+        let mut original = receipt();
+        original.phase = "preparing".into();
         let path = fixture.0.join("state.json");
         state::write(&path, &original).unwrap();
         relay::verify_receipt(&fixture.0, &original).unwrap();
@@ -1164,6 +1241,9 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         assert!(relay::verify_receipt(&fixture.0, &original).is_err());
         let mut changed = original.clone();
+        changed.phase = "ready-observed".into();
+        state::write(&path, &changed).unwrap();
+        assert!(relay::verify_receipt(&fixture.0, &original).is_err());
         changed.phase = "cleanup-intent".into();
         state::write(&path, &changed).unwrap();
         relay::verify_receipt(&fixture.0, &original).unwrap();

@@ -77,6 +77,10 @@ import {
   buildDaemonServiceCheck,
   decideDaemonServiceFix,
 } from "../src/lib/doctor-daemon-service.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 
 /**
  * The systemd path through a fake `systemctl`/`loginctl` runner (HACK-2052).
@@ -615,8 +619,8 @@ linuxTest(
   "install rewrites a drifted unit and reports the drift first",
   async () => {
     const fake = fakeSystemd();
-    await mkdir(join(root, "config", "systemd", "user"), { recursive: true });
-    await writeFile(
+    await mkdirOwnedFixture(join(root, "config", "systemd", "user"), true);
+    await writeOwnedFixture(
       unitPath,
       unitText().replace("RestartSec=2", "RestartSec=30")
     );

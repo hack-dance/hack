@@ -96,6 +96,7 @@ fn build_runtime_identity() {
         "Cargo.toml",
         "Cargo.lock",
         "../config-compiler/src",
+        "../../src/project-private-files.json",
         "../config-compiler/Cargo.toml",
     ] {
         hash_path(&mut hash, Path::new(path));

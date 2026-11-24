@@ -356,6 +356,7 @@ hack up [services...] [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--use <remote=target>` | Select a remote target for this Compose start |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--detach, -d` | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
@@ -452,12 +453,40 @@ hack ps [options]
 
 | Option | Description |
 | --- | --- |
+| `--copies` | Show all checkouts and branch instances of the project |
 | `--wide` | Include container, exit code, port and native image pin details |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack use [selection]`
+
+List remote selections or save a target for the next Compose start
+
+### Usage
+
+```bash
+hack use [selection] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `selection` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1444,6 +1473,7 @@ hack global install [options]
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
 | `--plan` | Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json) |
+| `--install-brew-deps` | Allow installation of missing macOS Homebrew dependencies |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

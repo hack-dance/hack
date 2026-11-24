@@ -47,6 +47,7 @@ import {
   type NativeComposeStorageXattrInvocation,
 } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
 import { refuseNativeComposeStorageXattr } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const roots: string[] = [],
   stores: NativeComposeGenerationStore[] = [];
@@ -118,7 +119,7 @@ async function withBinding(
     await mkdtemp(join(tmpdir(), "native-storage-docker-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({ schema_version: 1, name: "storage" })

@@ -535,6 +535,8 @@ export const STATIC_GUARD_TESTS: Readonly<Record<string, string>> = {
 };
 
 export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
+  "tests/ci-symlink-temp.test.ts":
+    "The fixed-list workflow is checked on both hosts, and exact Linux routing is checked on Linux.",
   ...STATIC_GUARD_TESTS,
   "tests/lifecycle-fifo-retirement.test.ts":
     "FIFO retirement needs Linux process groups and macOS zombie-probe EPERM coverage",

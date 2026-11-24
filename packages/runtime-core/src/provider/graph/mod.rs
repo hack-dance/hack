@@ -987,6 +987,15 @@ impl Session<'_, '_> {
         }
         Ok(())
     }
+    /// The start loop's wait between passes: woken by an engine event for one of
+    /// this run's containers, else the whole pass interval (see `engine::changes`).
+    fn engine_changes(&self) -> crate::provider::engine::changes::EngineChanges {
+        use crate::provider::engine::changes::EngineChanges;
+        self.engine.guest().engine_socket().map_or_else(
+            |_| EngineChanges::sleeping(),
+            |socket| EngineChanges::follow(&socket, &self.receipt.run),
+        )
+    }
     fn save(&self) -> Result<(), CandidateError> {
         state::write(&self.root.join("state.json"), &self.receipt)
     }
@@ -1169,6 +1178,12 @@ impl Driver for Session<'_, '_> {
                 } else {
                     "create-intent"
                 };
+                // A fresh service with managed values stages them right after this
+                // write: its durable attachment marker goes in the same write
+                // instead of a second one (see `start`).
+                if !self.restarting && self.environments.contains_key(service) {
+                    self.receipt.environment_attached = true;
+                }
                 crate::timings::measure_candidate(
                     crate::timings::Step::StartWaveRecord,
                     None,
@@ -1289,19 +1304,32 @@ impl Driver for Session<'_, '_> {
         let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
-            self.receipt.environment_attached = true;
-            self.save()?;
+            // The marker is durable before any bound intent. It is normally already
+            // in this service's start-intent write; only a caller that skipped it
+            // pays a write of its own here.
+            if !self.receipt.environment_attached {
+                self.receipt.environment_attached = true;
+                crate::timings::measure_candidate(
+                    crate::timings::Step::StartWaveRecord,
+                    None,
+                    |_| self.save(),
+                )?;
+            }
             let (uid, gid) = launcher::identity(&self.configs[service])?;
-            let lease = pending.with_identity(uid, gid).stage_bound(
-                self.engine.guest(),
-                Some(super::environment_recovery::GraphBinding {
-                    run: self.receipt.run.clone(),
-                    container: resource.name.clone(),
-                }),
-            )?;
-            #[cfg(test)]
-            self.fault_pause("after-environment-stage")?;
-            let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+            let (lease, path) =
+                crate::timings::measure_candidate(crate::timings::Step::EnvStage, None, |_| {
+                    let lease = pending.with_identity(uid, gid).stage_bound(
+                        self.engine.guest(),
+                        Some(super::environment_recovery::GraphBinding {
+                            run: self.receipt.run.clone(),
+                            container: resource.name.clone(),
+                        }),
+                    )?;
+                    #[cfg(test)]
+                    self.fault_pause("after-environment-stage")?;
+                    let path = lease.verified_path_with_guest(self.engine.guest(), service)?;
+                    Ok((lease, path))
+                })?;
             let files = lease.file_mounts();
             let wraps = lease.wraps_process();
             self.leases.insert(service.into(), lease);
@@ -1863,10 +1891,12 @@ fn run_inputs(
             )?;
         }
         session.create_resources(false)?;
-        execution::run(
+        let changes = session.engine_changes();
+        execution::run_with_wait(
             &prepared.graph,
             &mut session,
             admission_deadline.saturating_duration_since(std::time::Instant::now()),
+            |interval| changes.wait(interval),
         )
     })();
     if let Err(failure) = result {
@@ -2781,10 +2811,13 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         launcher: None,
     };
     session.save()?;
+    let changes = session.engine_changes();
     // The restarting receipt is committed: the previous start's record is superseded.
-    if let Err(failure) = startup_failure::clear_after_started(&session.root)
-        .and_then(|_| execution::run(&prepared.graph, &mut session, options.timeout))
-    {
+    if let Err(failure) = startup_failure::clear_after_started(&session.root).and_then(|_| {
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
+    }) {
         startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;

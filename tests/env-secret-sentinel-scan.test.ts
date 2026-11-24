@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
 
+import { quoteShellWord } from "../src/lib/logs.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 import {
   createSecretWorktreeFixture,
@@ -48,9 +49,11 @@ import {
  * sentinel, and the Compose env override exists with references.
  *
  * Isolation: private HOME/HACK_HOME/Docker client config (privateCliEnv), a
- * `docker` shim first on PATH that only records its argv and fails, so no real
- * engine, OrbStack, keychain or client configuration is reached. Sentinels are
- * random per run and are never printed; failures report paths and forms only.
+ * `docker` shim first on PATH that records argv, identifies a synthetic
+ * daemon, and reports an empty project for `compose ps`. Other calls fail
+ * locally, so no real engine, OrbStack, keychain or client configuration is
+ * reached. Sentinels are random per run and are never printed; failures
+ * report paths and forms only.
  */
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
@@ -100,6 +103,10 @@ function home(): string {
 
 function spawnLogPath(): string {
   return join(root, "logs", "spawn.jsonl");
+}
+
+function dockerArgvLogDir(): string {
+  return join(root, "logs", "docker-argv");
 }
 
 function sha256(text: string): string {
@@ -246,14 +253,23 @@ function commitEverything(cwd: string, message: string): void {
 beforeAll(async () => {
   // Canonical path, so paths reported by git compare equal to walked paths.
   root = await realpath(await mkdtemp(join(tmpdir(), "hack-sentinel-scan-")));
-  await mkdir(join(root, "logs"), { recursive: true });
+  await mkdir(dockerArgvLogDir(), { recursive: true });
   await mkdir(join(root, "shim"), { recursive: true });
   const shim = join(root, "shim", "docker");
   await writeFile(
     shim,
     [
       "#!/bin/sh",
-      `for arg in "$@"; do printf '%s\\n' "$arg" >> '${join(root, "logs", "docker-argv.log")}'; done`,
+      // Parallel probes each own their argv record.
+      `record=$(mktemp ${quoteShellWord(join(dockerArgvLogDir(), "call.XXXXXX"))}) || exit 1`,
+      'printf "%s\\n" "$@" > "$record" || exit 1',
+      'if [ "$*" = "info --format {{.ID}}" ]; then',
+      "  printf '%s\\n' sentinel-scan-daemon",
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "compose" ]; then',
+      '  case " $* " in *" ps "*) exit 0 ;; esac',
+      "fi",
       "echo 'docker shim: no engine' >&2",
       "exit 1",
       "",
@@ -507,12 +523,17 @@ test("no sentinel or key appears in CLI output or captured child argv", async ()
     )
   );
   expect(argvHits).toEqual([]);
-  const dockerArgv = await readFile(
-    join(root, "logs", "docker-argv.log"),
-    "utf8"
+  const dockerArgvDir = dockerArgvLogDir();
+  const dockerCalls = await Promise.all(
+    (await readdir(dockerArgvDir)).map((entry) =>
+      readFile(join(dockerArgvDir, entry), "utf8")
+    )
   );
-  expect(dockerArgv).toContain("compose");
-  expect(findHits(dockerArgv, needles)).toEqual([]);
+  expect(dockerCalls.some((argv) => argv.startsWith("compose\n"))).toBe(true);
+  expect(dockerCalls.some((argv) => argv.startsWith("network\nls\n"))).toBe(
+    true
+  );
+  expect(dockerCalls.flatMap((argv) => findHits(argv, needles))).toEqual([]);
 });
 
 test("no sentinel or key is tracked or stored in any Git object after a careless commit", async () => {
@@ -641,7 +662,7 @@ test("secret values reach child environments only for runtime delivery", async (
   const shimDir = join(root, "shim");
   const unexpected: string[] = [];
   let execDeliveries = 0;
-  let composeDeliveries = 0;
+  let composeUpDeliveries = 0;
   for (const record of records) {
     const argv = Array.isArray(record.argv)
       ? record.argv.map((part) => String(part))
@@ -665,7 +686,9 @@ test("secret values reach child environments only for runtime delivery", async (
       continue;
     }
     if (basename(program) === "docker" && argv[1] === "compose") {
-      composeDeliveries += 1;
+      if (argv.includes("up")) {
+        composeUpDeliveries += 1;
+      }
       continue;
     }
     unexpected.push(`${record.via} ${basename(program)} ${argv[1] ?? ""}`);
@@ -673,5 +696,5 @@ test("secret values reach child environments only for runtime delivery", async (
   expect(unexpected).toEqual([]);
   expect(execDeliveries).toBe(2);
   // The value-free override resolves only through the Compose client env.
-  expect(composeDeliveries).toBeGreaterThan(0);
+  expect(composeUpDeliveries).toBeGreaterThan(0);
 });

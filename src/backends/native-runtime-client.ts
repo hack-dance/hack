@@ -852,6 +852,8 @@ export async function invokeNativeRuntime(opts: {
     maxTimeoutMs = 3_600_000;
   } else if (runtimeCommand === "retain-build-bases") {
     maxTimeoutMs = NATIVE_BUILD_RETENTION_TIMEOUT_MS;
+  } else if (opts.args[0] === "graph" && opts.args[1] === "extend") {
+    maxTimeoutMs = 615_000;
   }
   if (
     !Number.isSafeInteger(timeoutMs) ||

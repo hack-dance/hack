@@ -63,7 +63,7 @@ export function refuseUnsupportedNativeUpOptions(opts: {
       `Native \`${command}\` does not support --target; it starts the selected project on this host. Run it without --target.`
     );
   }
-  if (opts.services && opts.services.length > 0) {
+  if (opts.restart && opts.services && opts.services.length > 0) {
     refuse(
       `Native \`${command}\` starts the whole project; service selection is not supported. Run it without service names.`
     );

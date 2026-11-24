@@ -139,6 +139,22 @@ pub(super) fn command(
         } else {
             None
         };
+        if action == "extend" {
+            if options.run.live_source || !options.run.release_initializer_cache.is_empty() {
+                return Err(invalid());
+            }
+            let generation = singles
+                .get("--expect-generation")
+                .copied()
+                .ok_or_else(invalid)?;
+            return graph::foreground::extend_request(
+                candidate,
+                options,
+                generation,
+                route_slots,
+                managed.as_ref(),
+            );
+        }
         let empty = BTreeMap::new();
         let no_files = graph::ManagedFiles::new();
         let values = managed.as_ref().map_or(&empty, |managed| managed.values());

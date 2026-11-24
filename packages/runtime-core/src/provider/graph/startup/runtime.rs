@@ -681,6 +681,14 @@ impl HostRelayRuntime {
     pub fn report_started(&mut self, enabled: bool) {
         self.report_started = enabled;
     }
+
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider::graph) fn remember_extensions(
+        &mut self,
+        configs: BTreeMap<String, Value>,
+    ) {
+        self.templates.extend(configs);
+    }
     /// Serve the owner's transport between the start loop's operations (see
     /// [`StartupRequests`]); `None` once the attempt has returned.
     pub(in crate::provider::graph) fn set_startup_requests(

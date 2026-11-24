@@ -173,6 +173,7 @@ import {
 } from "../backends/native-runtime-client.ts";
 import { requireNativeSetup } from "../backends/native-runtime-setup.ts";
 import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
+import { NativeUnknownServiceError } from "../backends/native-service-selection.ts";
 import {
   buildComposeArgs,
   composeRuntimeBackend,
@@ -1032,7 +1033,7 @@ export const initCommand = withHandler(initSpec, handleInit);
 
 const upSpec = defineCommand({
   name: "up",
-  summary: "Start project services (docker compose up)",
+  summary: "Start the project or selected services",
   group: "Project",
   options: upOptions,
   positionals: serviceLifecyclePositionals,
@@ -6895,6 +6896,9 @@ async function handleNativeUp({
     ReturnType<typeof resolveNativeRuntimeSelection>
   >;
 }): Promise<number> {
+  const targets = args.positionals.services?.length
+    ? [...new Set(args.positionals.services)]
+    : undefined;
   refuseUnsupportedNativeUpOptions({
     restart,
     detach: args.options.detach,
@@ -6912,6 +6916,13 @@ async function handleNativeUp({
     projectOpt: args.options.project,
     touchRegistration: false,
   });
+  if (targets) {
+    const available = await readComposeServiceNames(project.composeFile);
+    const unknown = targets.find((target) => !available.includes(target));
+    if (available.length > 0 && unknown !== undefined) {
+      throw new NativeUnknownServiceError(unknown);
+    }
+  }
   // HACK-2358: refuse an invalid setting before anything starts or stops,
   // and say what is kept local. A detached owner's output is not shown; its
   // launcher printed these already.
@@ -6938,20 +6949,24 @@ async function handleNativeUp({
     env: process.env,
     projectDir: project.projectDir,
   });
-  await refuseNativeComposeBackendFeatures({
-    composeFile: project.composeFile,
-    adaptationCandidates: nativeAdaptationCandidates({
-      selection: adaptation,
-      requestedEnvName,
-    }),
-    restart,
-    buildsEnabled: nativeBuildsEnabled(),
-    // The printed Compose fallback selects the same project and branch.
-    projectRoot: project.projectRoot,
-    branch:
-      typeof args.options.branch === "string" ? args.options.branch : undefined,
-    env: typeof args.options.env === "string" ? args.options.env : undefined,
-  });
+  if (!targets) {
+    await refuseNativeComposeBackendFeatures({
+      composeFile: project.composeFile,
+      adaptationCandidates: nativeAdaptationCandidates({
+        selection: adaptation,
+        requestedEnvName,
+      }),
+      restart,
+      buildsEnabled: nativeBuildsEnabled(),
+      // The printed Compose fallback selects the same project and branch.
+      projectRoot: project.projectRoot,
+      branch:
+        typeof args.options.branch === "string"
+          ? args.options.branch
+          : undefined,
+      env: typeof args.options.env === "string" ? args.options.env : undefined,
+    });
+  }
   const branchIdentity = await resolveEffectiveBranchIdentityForCommand({
     project,
     branchOption: args.options.branch,
@@ -7009,6 +7024,7 @@ async function handleNativeUp({
       branch,
     },
     composeFile: project.composeFile,
+    targets,
     imageTagMode: nativeImageTagMode(args.options),
     envName: requestedEnvName,
     // An explicit --profile only; otherwise native start resolves Compose's
@@ -7079,11 +7095,13 @@ async function handleNativeUp({
       env: process.env,
       project: cfg.native?.startTimeoutSeconds,
     }),
-    waitForReady: nativeUpWaitsForReady({
-      wait: args.options.wait,
-      json: args.options.json,
-      interactive: canPrompt(),
-    }),
+    waitForReady:
+      targets !== undefined ||
+      nativeUpWaitsForReady({
+        wait: args.options.wait,
+        json: args.options.json,
+        interactive: canPrompt(),
+      }),
     // HACK-2456: the pool stopped under this run; `hack down --recover`
     // starts it and stops the run with data retained before this start.
     // Restart keeps its own refusals.
@@ -7697,6 +7715,7 @@ async function launchNativeDetachedUp(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly json: boolean;
+  readonly targeted?: boolean;
   readonly action?: "up" | "restart";
   readonly scope: Parameters<
     typeof explainUnconfirmedNativeDetachedStart
@@ -7707,6 +7726,7 @@ async function launchNativeDetachedUp(opts: {
       cwd: opts.cwd,
       args: opts.args,
       json: opts.json,
+      targeted: opts.targeted,
       action: opts.action,
     });
   } catch (error) {
@@ -7802,6 +7822,21 @@ async function handleUpUnlocked({
       action: "up",
       options: args.options,
     });
+    if (args.positionals.services?.length) {
+      await reportNativeLocalDirectoriesBeforeLaunch({
+        ctx,
+        path: args.options.path,
+        project: args.options.project,
+        json: args.options.json === true,
+      });
+      return await launchNativeDetachedUp({
+        cwd: ctx.cwd,
+        args: [...childArgs, "--", ...args.positionals.services],
+        json: args.options.json === true,
+        targeted: true,
+        scope: null,
+      });
+    }
     // The instance the child will start, for explaining an unconfirmed start.
     let launchScope: Parameters<
       typeof explainUnconfirmedNativeDetachedStart

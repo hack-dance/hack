@@ -777,6 +777,7 @@ mod tests {
             config::prepare(executable, &goals, &run, &owner, Some(&baseline_inputs)).unwrap();
         let receipt = Receipt {
             started_from: None,
+            extending: BTreeSet::new(),
             normalized_input: None,
             version: 1,
             run,
@@ -873,6 +874,7 @@ mod tests {
         let owner = "c".repeat(32);
         let mut receipt = Receipt {
             started_from: None,
+            extending: BTreeSet::new(),
             normalized_input: None,
             version: 1,
             run: run.clone(),

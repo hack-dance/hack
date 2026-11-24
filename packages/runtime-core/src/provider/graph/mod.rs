@@ -9,6 +9,8 @@ pub use service_exec::{
     ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,
     service_exec_with_environment,
 };
+#[cfg(any(test, target_os = "macos"))]
+mod extend;
 mod hostname_change;
 mod normalized;
 mod plan_reconcile;
@@ -308,6 +310,9 @@ impl Receipt {
     pub(super) fn set_phase(&mut self, phase: &str) {
         self.phase = phase.into();
         self.started_from = None;
+        if matches!(phase, "removed" | "stopped-data-retained") {
+            self.extending.clear();
+        }
     }
 }
 
@@ -359,6 +364,10 @@ pub struct Receipt {
     /// `restoring` or `restarting`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_from: Option<String>,
+    /// Newly enrolled services whose targeted start has not committed. The
+    /// original graph stays ready and retains ownership of both sets.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub extending: BTreeSet<String>,
     /// Most recent observed startup failure; retained after cleanup and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_failure: Option<startup_failure::Failure>,
@@ -719,6 +728,9 @@ fn load_at(
             .values()
             .any(|r| r.outbound && r.kind != Kind::Network)
         || receipt.resources.is_empty()
+        || (!receipt.extending.is_empty()
+            && (!matches!(receipt.phase.as_str(), "ready-observed" | "cleanup-intent")
+                || !receipt.extending.iter().all(|service| receipt.readiness.contains_key(service))))
         || !resource_counts_fit(&receipt.resources)
         || !network_bindings_valid(&receipt.resources)
         || receipt.resources.values().any(|resource| {
@@ -1000,8 +1012,6 @@ impl Session<'_, '_> {
         one_off::record_effect(&self.root, key, &self.receipt.resources[key])
     }
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
-        // Restore reattaches every settled volume. A volume still `reserved` never
-        // received a create intent; it is created exclusively, never adopted.
         let mut created_volumes = BTreeSet::new();
         let keys: Vec<_> = self
             .receipt
@@ -1011,16 +1021,35 @@ impl Session<'_, '_> {
             .map(|(k, _)| k.clone())
             .collect();
         for key in keys {
-            self.check_cancelled()?;
-            let resource = self.receipt.resources[&key].clone();
-            if retain_data && plan_reconcile::retained_volume(&resource) {
-                if inspect_resource(&self.engine, &self.receipt, &resource)?.is_none() {
-                    return Err(error(
-                        "graph_data_missing",
-                        "Retained data disappeared; restore will not recreate it.",
-                    ));
-                }
-                cache_provenance::verify(&self.engine, &self.receipt, &resource)?;
+            self.create_storage_resource(&key, retain_data, &mut created_volumes)?;
+        }
+        self.apply_created_volume_cadence(&created_volumes);
+        Ok(())
+    }
+
+    fn create_storage_resource(
+        &mut self,
+        key: &str,
+        retain_data: bool,
+        created_volumes: &mut BTreeSet<String>,
+    ) -> Result<(), CandidateError> {
+        // Restore reattaches every settled volume. A volume still `reserved` never
+        // received a create intent; it is created exclusively, never adopted.
+        self.check_cancelled()?;
+        let resource = self.receipt.resources[key].clone();
+        if retain_data && plan_reconcile::retained_volume(&resource) {
+            if inspect_resource(&self.engine, &self.receipt, &resource)?.is_none() {
+                return Err(error(
+                    "graph_data_missing",
+                    "Retained data disappeared; restore will not recreate it.",
+                ));
+            }
+            cache_provenance::verify(&self.engine, &self.receipt, &resource)?;
+            volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, false)?;
+            return Ok(());
+        }
+        if inspect_resource(&self.engine, &self.receipt, &resource)?.is_some() {
+            if resource.cache.is_some() {
                 volume_subpaths::prepare(
                     &self.engine,
                     &self.receipt,
@@ -1028,81 +1057,70 @@ impl Session<'_, '_> {
                     &self.configs,
                     false,
                 )?;
-                continue;
+                self.capture_cache_provenance(key, false)?;
+                self.reserve(key, "created")?;
+                return Ok(());
             }
-            if inspect_resource(&self.engine, &self.receipt, &resource)?.is_some() {
-                if resource.cache.is_some() {
-                    volume_subpaths::prepare(
-                        &self.engine,
-                        &self.receipt,
-                        &resource,
-                        &self.configs,
-                        false,
-                    )?;
-                    self.capture_cache_provenance(&key, false)?;
-                    self.reserve(&key, "created")?;
-                    continue;
-                }
-                return Err(error(
-                    "graph_resource_exists",
-                    "Fresh graph cannot adopt an existing resource.",
-                ));
-            }
-            if resource.cache.is_some() {
-                let run_dir = self.engine.guest().candidate().state_root.join("run");
-                check_cache_capacity(&self.engine, &self.receipt.owner, &run_dir)?;
-            }
-            self.check_cancelled()?;
-            self.reserve(&key, "create-intent")?;
-            let labels = expected_labels(&self.receipt, &resource);
-            let body = if resource.kind == Kind::Network {
-                json!({"Name":resource.name,"Driver":"bridge","Internal":!resource.outbound,"Labels":labels})
-            } else {
-                json!({"Name":resource.name,"Driver":"local","Labels":labels})
-            };
-            let value = self.engine.request(
-                Method::POST,
-                &format!("/v1.53/{}/create", resource.kind.collection()),
-                Some(&body),
-            )?;
-            if resource.kind == Kind::Network {
-                self.receipt.resources.get_mut(&key).expect("resource").id = Some(
-                    value["Id"]
-                        .as_str()
-                        .filter(|v| hex(v, 64))
-                        .ok_or_else(|| {
-                            error(
-                                "graph_resource_identity",
-                                "Missing created network identity.",
-                            )
-                        })?
-                        .into(),
-                );
-            }
-            if inspect_resource(&self.engine, &self.receipt, &self.receipt.resources[&key])?
-                .is_none()
-            {
-                return Err(error(
-                    "graph_resource_missing",
-                    "Created graph resource is missing.",
-                ));
-            }
-            volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, true)?;
-            self.capture_cache_provenance(&key, true)?;
-            self.reserve(&key, "created")?;
-            if resource.kind == Kind::Volume {
-                created_volumes.insert(resource.name);
-            }
+            return Err(error(
+                "graph_resource_exists",
+                "Fresh graph cannot adopt an existing resource.",
+            ));
         }
+        if resource.cache.is_some() {
+            let run_dir = self.engine.guest().candidate().state_root.join("run");
+            check_cache_capacity(&self.engine, &self.receipt.owner, &run_dir)?;
+        }
+        self.check_cancelled()?;
+        self.reserve(key, "create-intent")?;
+        let labels = expected_labels(&self.receipt, &resource);
+        let body = if resource.kind == Kind::Network {
+            json!({"Name":resource.name,"Driver":"bridge","Internal":!resource.outbound,"Labels":labels})
+        } else {
+            json!({"Name":resource.name,"Driver":"local","Labels":labels})
+        };
+        let value = self.engine.request(
+            Method::POST,
+            &format!("/v1.53/{}/create", resource.kind.collection()),
+            Some(&body),
+        )?;
+        if resource.kind == Kind::Network {
+            self.receipt.resources.get_mut(key).expect("resource").id = Some(
+                value["Id"]
+                    .as_str()
+                    .filter(|v| hex(v, 64))
+                    .ok_or_else(|| {
+                        error(
+                            "graph_resource_identity",
+                            "Missing created network identity.",
+                        )
+                    })?
+                    .into(),
+            );
+        }
+        if inspect_resource(&self.engine, &self.receipt, &self.receipt.resources[key])?.is_none() {
+            return Err(error(
+                "graph_resource_missing",
+                "Created graph resource is missing.",
+            ));
+        }
+        volume_subpaths::prepare(&self.engine, &self.receipt, &resource, &self.configs, true)?;
+        self.capture_cache_provenance(key, true)?;
+        self.reserve(key, "created")?;
+        if resource.kind == Kind::Volume {
+            created_volumes.insert(resource.name);
+        }
+        Ok(())
+    }
+
+    fn apply_created_volume_cadence(&mut self, created_volumes: &BTreeSet<String>) {
         if !created_volumes.is_empty() {
             for (service, cadence) in &self.default_health_cadence {
                 cadence.apply(
                     self.configs.get_mut(service).expect("compiled service"),
-                    &created_volumes,
+                    created_volumes,
                 );
             }
         }
-        Ok(())
     }
 }
 
@@ -1214,6 +1232,7 @@ impl Driver for Session<'_, '_> {
                     startup.verify(&self.engine, &mut self.receipt, &self.root)?;
                 }
                 self.receipt.set_phase("ready-observed");
+                self.receipt.extending.clear();
                 self.save()
             }
         }
@@ -1393,13 +1412,15 @@ impl Driver for Session<'_, '_> {
         let resource = &self.receipt.resources[&format!("container:{service}")];
         let value = inspect_resource(&self.engine, &self.receipt, resource)?
             .ok_or_else(|| error("graph_resource_missing", "Owned service disappeared."))?;
-        Self::verify_config(
-            &self.receipt,
-            service,
-            &self.configs[service],
-            &self.expected_environment[service],
-            &value,
-        )?;
+        if let Some(config) = self.configs.get(service) {
+            Self::verify_config(
+                &self.receipt,
+                service,
+                config,
+                &self.expected_environment[service],
+                &value,
+            )?;
+        }
         let (observation, found) =
             probes::observe_finding(&self.engine, &self.receipt, service, &value)?;
         match found {
@@ -1813,6 +1834,7 @@ fn run_inputs(
     let probe_states = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     let receipt = Receipt {
         started_from: None,
+        extending: BTreeSet::new(),
         startup_failure: None,
         normalized_input,
         relay_startup: None,

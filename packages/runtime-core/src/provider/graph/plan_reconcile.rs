@@ -583,6 +583,7 @@ mod tests {
         }
         Receipt {
             started_from: None,
+            extending: BTreeSet::new(),
             startup_failure: None,
             normalized_input: Some(identity.clone()),
             relay_startup: None,

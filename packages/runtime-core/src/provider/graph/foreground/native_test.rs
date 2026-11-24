@@ -486,6 +486,7 @@ fn private_owner_restore_preserves_data_and_retires_values() {
         &mut socket,
         &WireRequest {
             version: 1,
+            extend: None,
             refresh_dependencies: None,
             run: run.clone(),
             remove_data: None,

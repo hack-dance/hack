@@ -112,6 +112,20 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+For a native project backed by a Compose file, use `hack up redis` or pass
+several service names to start that selection and its `depends_on` dependencies.
+Hack adds them to the current run if the project is already up. Running services
+keep their container IDs and publications, and `hack ps` shows the combined run.
+`hack up redis --json` uses the same lifecycle fields as a targeted Compose
+start. An unknown service returns `E_SERVICE_NOT_FOUND`.
+
+If a targeted start is interrupted after admission, `ps` can report the run as
+degraded and show the service states it can confirm. `hack down` stops the whole
+run, including any services created midway, and keeps named data. If the owner
+exited before confirming cleanup, use `hack down --recover`. The runtime keeps
+the creation and publication records needed to identify those resources, even if
+the start's reply was lost.
+
 **Build base registry refusal (`registry_image`).** Foreground and detached
 starts can report `Image unavailable: could not resolve build base` when the
 registry cannot resolve a Dockerfile base. Check the reported reason, restore

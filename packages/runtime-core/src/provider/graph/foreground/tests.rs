@@ -304,6 +304,7 @@ fn cross_process_status_waits_for_request_after_accept() {
             &mut stream,
             &transport::WireRequest {
                 version: 1,
+                extend: None,
                 refresh_dependencies: None,
                 run: run.clone(),
                 remove_data: None,

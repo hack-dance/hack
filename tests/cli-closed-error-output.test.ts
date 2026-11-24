@@ -294,8 +294,8 @@ test.each([
   },
   {
     refusal: () =>
-      refuseUnsupportedNativeUpOptions({ restart: false, services: ["web"] }),
-    text: "E_USAGE: Native `hack up` starts the whole project; service selection is not supported.",
+      refuseUnsupportedNativeUpOptions({ restart: true, services: ["web"] }),
+    text: "E_USAGE: Native `hack restart` starts the whole project; service selection is not supported.",
   },
 ])("native up option refusal prints one closed line: $text", async ({
   refusal,
@@ -316,7 +316,7 @@ test("supported native up options are not refused", () => {
         restart: false,
         detach: false,
         json: false,
-        services: [],
+        services: ["web"],
       })
     )
   ).toBeUndefined();

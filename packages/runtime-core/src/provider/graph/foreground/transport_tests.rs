@@ -601,6 +601,7 @@ fn maximum_private_text_roundtrips_with_bounded_escaped_frame() {
     let private = "\\".repeat(PRIVATE_LIMIT);
     let request = WireRequest {
         version: 1,
+        extend: None,
         refresh_dependencies: None,
         run: "a".repeat(32),
         remove_data: None,

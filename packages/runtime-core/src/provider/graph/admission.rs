@@ -49,7 +49,16 @@ pub(super) fn check(
     except: Option<&str>,
     requested: &BTreeMap<String, Value>,
 ) -> Result<(), CandidateError> {
-    check_using(candidate, engine, except, requested, None)
+    check_using(candidate, engine, except, requested, None, except.is_none())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn check_extension(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    requested: &BTreeMap<String, Value>,
+) -> Result<(), CandidateError> {
+    check_using(candidate, engine, None, requested, None, false)
 }
 #[cfg(feature = "native-config-plan")]
 pub(super) fn check_native_reserved(
@@ -58,7 +67,7 @@ pub(super) fn check_native_reserved(
     receipt: &native::Receipt,
     requested: &BTreeMap<String, Value>,
 ) -> Result<(), CandidateError> {
-    check_using(candidate, engine, None, requested, Some(receipt))
+    check_using(candidate, engine, None, requested, Some(receipt), true)
 }
 fn check_using(
     candidate: &Candidate,
@@ -67,16 +76,17 @@ fn check_using(
     requested: &BTreeMap<String, Value>,
     #[cfg(feature = "native-config-plan")] native_except: Option<&native::Receipt>,
     #[cfg(not(feature = "native-config-plan"))] _native_except: Option<&()>,
+    new_graph: bool,
 ) -> Result<(), CandidateError> {
     let mut budget = Budget::default();
     for config in requested.values() {
         budget.add(config)?;
     }
-    if except.is_none() {
+    if new_graph {
         super::archive::make_room(candidate, engine)?;
     }
     let runs = storage_inventory::runs(&candidate.state_root.join("run/graphs"))?;
-    if runs.len() == 64 && except.is_none() {
+    if runs.len() == 64 && new_graph {
         return Err(error(
             "graph_retention_budget",
             "64 graph attempts that keep data are retained, so no fresh run fits; remove the data of a project you no longer use (`hack down --remove-data` there) and start again.",
@@ -117,9 +127,7 @@ fn check_using(
             budget.add(config)
         })?;
     } else {
-        native::reservations(candidate, engine, except.is_none(), |config| {
-            budget.add(config)
-        })?;
+        native::reservations(candidate, engine, new_graph, |config| budget.add(config))?;
     }
     #[cfg(not(feature = "native-config-plan"))]
     if !storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?.is_empty() {

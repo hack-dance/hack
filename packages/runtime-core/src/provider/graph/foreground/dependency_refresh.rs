@@ -31,6 +31,7 @@ pub fn request(candidate: &Candidate, run: &str) -> Result<Value, CandidateError
             job: None,
             restore: None,
             refresh_dependencies: Some(selected),
+            extend: None,
         },
         Duration::from_secs(5),
     )?;

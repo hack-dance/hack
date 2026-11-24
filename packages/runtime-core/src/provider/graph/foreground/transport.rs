@@ -33,6 +33,8 @@ pub(super) struct WireRequest {
     pub job: Option<JobRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_dependencies: Option<DependencyRefreshRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend: Option<super::service_start::ExtendRequest>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +50,7 @@ impl WireRequest {
             self.restore.is_some(),
             self.job.is_some(),
             self.refresh_dependencies.is_some(),
+            self.extend.is_some(),
         ]
         .into_iter()
         .filter(|selected| *selected)
@@ -74,7 +77,7 @@ pub(super) struct JobCommand {
 }
 const PRIVATE_LIMIT: usize = crate::provider::managed_environment::MAX_INPUT_BYTES;
 // JSON string escaping may double the private envelope, plus fixed routing metadata.
-pub(super) const REQUEST_LIMIT: usize = 2 * PRIVATE_LIMIT + 4096;
+pub(super) const REQUEST_LIMIT: usize = 4 * PRIVATE_LIMIT + 32 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

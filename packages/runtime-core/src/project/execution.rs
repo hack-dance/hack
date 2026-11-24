@@ -373,6 +373,24 @@ pub fn run(
     run_with_wait(graph, driver, timeout, std::thread::sleep)
 }
 
+/// Extend a graph using existing services only as dependency witnesses.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn run_seeded(
+    graph: &Graph,
+    driver: &mut impl Driver,
+    timeout: Duration,
+    existing: &BTreeSet<String>,
+) -> Result<(), CandidateError> {
+    run_with_clock_seeded(
+        graph,
+        driver,
+        timeout,
+        std::thread::sleep,
+        Instant::now,
+        existing,
+    )
+}
+
 fn run_with_wait(
     graph: &Graph,
     driver: &mut impl Driver,
@@ -386,8 +404,19 @@ fn run_with_clock(
     graph: &Graph,
     driver: &mut impl Driver,
     timeout: Duration,
+    wait: impl FnMut(Duration),
+    now: impl FnMut() -> Instant,
+) -> Result<(), CandidateError> {
+    run_with_clock_seeded(graph, driver, timeout, wait, now, &BTreeSet::new())
+}
+
+fn run_with_clock_seeded(
+    graph: &Graph,
+    driver: &mut impl Driver,
+    timeout: Duration,
     mut wait: impl FnMut(Duration),
     mut now: impl FnMut() -> Instant,
+    existing: &BTreeSet<String>,
 ) -> Result<(), CandidateError> {
     let order = graph.execution_order()?;
     if timeout.is_zero() || timeout > Duration::from_secs(600) {
@@ -400,7 +429,7 @@ fn run_with_clock(
     use crate::timings::{self, Outcome, Step};
     let mut started_timing = timings::start(Step::ContainersStarted, None);
     let all_ready = timings::start(Step::ServicesReady, None);
-    let mut started = BTreeSet::<String>::new();
+    let mut started = existing.clone();
     let mut seen = Seen::default();
     loop {
         before_deadline(deadline, now())?;
@@ -412,7 +441,7 @@ fn run_with_clock(
         let mut pass = BTreeMap::new();
         // Every started service is observed on every pass, so its own goal is
         // reported while siblings are still starting.
-        for name in &started {
+        for name in started.difference(existing) {
             let goal = graph.services[name].ready;
             observe_started(driver, name, goal, &mut seen, &mut pass, deadline, &mut now)?;
         }
@@ -436,9 +465,19 @@ fn run_with_clock(
                     ready = false;
                     break;
                 }
-                let state = observe_started(
-                    driver, dependency, goal, &mut seen, &mut pass, deadline, &mut now,
-                )?;
+                let state = if existing.contains(dependency) {
+                    let observation = driver.observe(dependency)?;
+                    before_deadline(deadline, now())?;
+                    pass.insert(dependency.clone(), observation);
+                    if observation.failed() {
+                        return Err(driver.service_failure(dependency, observation));
+                    }
+                    observation
+                } else {
+                    observe_started(
+                        driver, dependency, goal, &mut seen, &mut pass, deadline, &mut now,
+                    )?
+                };
                 if !state.satisfies(*condition) {
                     ready = false;
                     break;
@@ -472,6 +511,9 @@ fn run_with_clock(
             let mut ready = true;
             let mut all_started = true;
             for (name, service) in &graph.services {
+                if existing.contains(name) {
+                    continue;
+                }
                 let state = observe_started(
                     driver,
                     name,
@@ -547,6 +589,58 @@ mod tests {
         fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
             Ok(self.states[service])
         }
+    }
+
+    #[test]
+    fn targeted_scheduler_observes_existing_dependencies_without_starting_or_publishing_them() {
+        let started = |dependencies| Service {
+            dependencies,
+            ready: Condition::Started,
+        };
+        let graph = Graph::from_services(BTreeMap::from([
+            ("web".into(), started(BTreeMap::new())),
+            (
+                "cache".into(),
+                started(BTreeMap::from([("web".into(), Condition::Healthy)])),
+            ),
+            (
+                "redis".into(),
+                started(BTreeMap::from([("cache".into(), Condition::Started)])),
+            ),
+        ]))
+        .unwrap();
+        let mut fake = Fake {
+            states: BTreeMap::from([
+                (
+                    "web".into(),
+                    Observation::Running {
+                        health: Health::Healthy,
+                    },
+                ),
+                (
+                    "cache".into(),
+                    Observation::Running {
+                        health: Health::None,
+                    },
+                ),
+                (
+                    "redis".into(),
+                    Observation::Running {
+                        health: Health::None,
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        run_seeded(
+            &graph,
+            &mut fake,
+            Duration::from_secs(1),
+            &BTreeSet::from(["web".into()]),
+        )
+        .unwrap();
+        assert_eq!(fake.starts, ["cache", "redis"]);
+        assert!(fake.events.iter().all(|event| !event.contains("web")));
     }
     struct CancelledDriver<'a> {
         inner: Fake,

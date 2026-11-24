@@ -545,9 +545,16 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     }
     let (arguments, normalized_selection) = crate::normalized_cli::extract(
         args,
-        ["run", "serve", "serve-restore", "source-compatibility"].contains(action),
+        [
+            "run",
+            "serve",
+            "serve-restore",
+            "extend",
+            "source-compatibility",
+        ]
+        .contains(action),
     )?;
-    if *action == "source-compatibility" && normalized_selection.is_none() {
+    if ["source-compatibility", "extend"].contains(action) && normalized_selection.is_none() {
         return Err(invalid());
     }
     let args = arguments.as_slice();
@@ -718,6 +725,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "serve",
         "serve-restore",
         "source-compatibility",
+        "extend",
         "restore-selection",
         "retained-preflight",
         "owner-status",
@@ -776,7 +784,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         if key == "--shared-source" {
             if shared_source
                 || live_source
-                || !["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+                || ![
+                    "run",
+                    "serve",
+                    "serve-restore",
+                    "extend",
+                    "restart",
+                    "restore",
+                ]
+                .contains(action)
             {
                 return Err(invalid());
             }
@@ -786,7 +802,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         if key == "--live-source" {
             if live_source
                 || shared_source
-                || !["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+                || ![
+                    "run",
+                    "serve",
+                    "serve-restore",
+                    "extend",
+                    "restart",
+                    "restore",
+                ]
+                .contains(action)
             {
                 return Err(invalid());
             }
@@ -808,7 +832,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             continue;
         }
         if key == "--environment-stdin" {
-            if environment_stdin || !["serve", "serve-restore"].contains(action) {
+            if environment_stdin || !["serve", "serve-restore", "extend"].contains(action) {
                 return Err(invalid());
             }
             environment_stdin = true;
@@ -855,7 +879,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             {
                 return Err(invalid());
             }
-        } else if key == "--route-slot" && ["serve", "serve-restore"].contains(action) {
+        } else if key == "--route-slot" && ["serve", "serve-restore", "extend"].contains(action) {
             routes::insert(&mut route_slots, value)?;
         } else if key == "--hostname" && *action == "publish-bridge" {
             if hostnames.len() >= 8 {
@@ -866,7 +890,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     .map_err(|_| invalid())?,
             );
         } else if key == "--ready"
-            && ["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+            && [
+                "run",
+                "serve",
+                "serve-restore",
+                "extend",
+                "restart",
+                "restore",
+            ]
+            .contains(action)
         {
             let (service, condition) = value.split_once('=').ok_or_else(invalid)?;
             let condition = match condition {
@@ -884,6 +916,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 "serve",
                 "serve-restore",
                 "source-compatibility",
+                "extend",
                 "restart",
                 "restore",
             ]
@@ -910,7 +943,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             || (*action == "publish-bridge" && key == "--port")
             || (["serve", "serve-restore"].contains(action)
                 && ["--dependencies", "--expect-dependencies"].contains(&key))
-            || (*action == "serve-restore" && key == "--expect-generation")
+            || (["serve-restore", "extend"].contains(action) && key == "--expect-generation")
             || (*action == "recover-cleanup" && key == "--expect-receipt")
             || (*action == "retire-recovered-publisher" && key == "--expect-owner")
             || key == "--run-id"
@@ -919,6 +952,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 "serve",
                 "serve-restore",
                 "source-compatibility",
+                "extend",
                 "restart",
                 "restore",
             ]
@@ -1165,7 +1199,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             let values = BTreeMap::new();
             let options = graph::RunOptions {
                 routing_enrolled: !route_slots.is_empty(),
-                loopback_ports: ["serve", "serve-restore"].contains(action),
+                loopback_ports: ["serve", "serve-restore", "extend"].contains(action),
                 project: PlanOptions {
                     branch: singles.get("--branch").copied(),
                     project: Path::new(project),

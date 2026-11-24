@@ -59,6 +59,7 @@ fn send(
         &mut stream,
         &WireRequest {
             version: 1,
+            extend: None,
             refresh_dependencies: None,
             run: run.into(),
             remove_data: None,

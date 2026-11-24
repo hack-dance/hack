@@ -22,6 +22,10 @@ import {
   nativePrivateEnvironmentPayload,
 } from "./native-private-environment-payload.ts";
 import type { NativeEmulationPolicy } from "./native-project-platform.ts";
+import {
+  NativeUnknownServiceError,
+  selectNativeServices,
+} from "./native-service-selection.ts";
 import { shellDeliveryProblem } from "./native-shell-environment.ts";
 
 const LIMIT = 256 * 1024;
@@ -68,6 +72,8 @@ export type NativeProjectInput = {
   readonly effectiveEnvName: string | null;
   readonly environmentFiles: readonly string[];
   readonly serviceNames: readonly string[];
+  /** Authored services outside this start or represented by a live witness. */
+  readonly omittedServiceSpecs?: ReadonlySet<string>;
   /** Names-only activation expectation, checked against the runtime before effects. */
   readonly environmentFileServices?: Readonly<Record<string, boolean>>;
   /**
@@ -259,13 +265,17 @@ export function nativeServiceEnvironment(
 
 function normalizeManagedEnvironment(
   services: Record<string, unknown>,
-  resolved: Awaited<ReturnType<typeof resolveProjectEnvConfig>>
+  resolved: Awaited<ReturnType<typeof resolveProjectEnvConfig>>,
+  existing?: ReadonlyMap<string, string>
 ): Record<string, Record<string, string>> {
   const managedEnvironment: Record<
     string,
     Record<string, string>
   > = Object.create(null);
   for (const name of Object.keys(services)) {
+    if (existing?.has(name)) {
+      continue;
+    }
     const service = services[name];
     if (!isRecord(service)) {
       throw refused(`${serviceLabel(name)} must be a mapping`);
@@ -484,6 +494,8 @@ export async function prepareNativeProjectInput(opts: {
   readonly composeFile: string;
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
+  readonly targets?: readonly string[];
+  readonly existingImages?: ReadonlyMap<string, string>;
   /** Fresh exec restricts file acquisition to the selected running service. */
   readonly selectedServices?: readonly string[];
   /** Advisory managed fingerprints do not acquire ephemeral file/shell inputs. */
@@ -509,10 +521,20 @@ export async function prepareNativeProjectInput(opts: {
     if (!(isRecord(compose) && isRecord(compose.services))) {
       throw refused("the Compose file has no services mapping");
     }
-    const serviceNames = Object.keys(compose.services);
+    const declaredNames = Object.keys(compose.services);
+    const scoped = opts.targets?.length
+      ? selectNativeServices({
+          services: compose.services,
+          targets: opts.targets,
+          profiles: opts.profiles ?? [],
+          existingImages: opts.existingImages,
+        })
+      : compose.services;
+    compose.services = scoped;
+    const serviceNames = Object.keys(scoped);
     const services: Record<string, NativeComposeEnvironmentService> =
       Object.create(null);
-    for (const [name, service] of Object.entries(compose.services)) {
+    for (const [name, service] of Object.entries(scoped)) {
       if (!isRecord(service)) {
         throw refused(`${serviceLabel(name)} must be a mapping`);
       }
@@ -525,8 +547,9 @@ export async function prepareNativeProjectInput(opts: {
       throw environmentRefused(error);
     });
     const managedEnvironment = normalizeManagedEnvironment(
-      compose.services,
-      resolved
+      scoped,
+      resolved,
+      opts.existingImages
     );
     for (const [name, service] of Object.entries(services)) {
       services[name] = {
@@ -587,6 +610,16 @@ export async function prepareNativeProjectInput(opts: {
       effectiveEnvName: selection.effectiveEnv,
       environmentFiles: resolved?.files ?? [],
       serviceNames,
+      ...(opts.targets?.length
+        ? {
+            omittedServiceSpecs: new Set(
+              declaredNames.filter(
+                (name) =>
+                  !Object.hasOwn(scoped, name) || opts.existingImages?.has(name)
+              )
+            ),
+          }
+        : {}),
       environmentFileServices: shell.fileServices,
       shellEnvironment: shell.shellEnvironment,
       forwardedShellVariables: shell.forwardedNames,
@@ -597,7 +630,8 @@ export async function prepareNativeProjectInput(opts: {
   } catch (error: unknown) {
     // Only this module's closed refusals carry a cause; anything else stays generic.
     throw error instanceof NativeProjectInputRefusal ||
-      error instanceof NativeEnvFileRefusal
+      error instanceof NativeEnvFileRefusal ||
+      error instanceof NativeUnknownServiceError
       ? error
       : refused();
   }

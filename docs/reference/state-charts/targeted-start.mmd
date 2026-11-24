@@ -1,0 +1,25 @@
+---
+title: TargetedStart · Same graph owner
+---
+stateDiagram-v2
+    direction TB
+    [*] --> Ready
+    Ready --> Extending : Reserve
+    Extending --> Ready : Commit
+    Extending --> Interrupted : Crash
+    Ready --> Cleaning : Down
+    Interrupted --> Cleaning : Down
+    Cleaning --> Stopped : FinishDown
+    note right of Extending
+      Create, Start, Publish
+      INV: Keep existing IDs
+    end note
+    note right of Cleaning
+      Remove owned resources
+    end note
+    classDef live stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+    classDef ok stroke-width:1.6px
+    class Extending live
+    class Interrupted fail
+    class Stopped ok

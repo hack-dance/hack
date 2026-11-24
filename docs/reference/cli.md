@@ -335,7 +335,7 @@ Runs the command array in .hack/dev.json from its repository root. The runner ow
 
 ## `hack up [services...]`
 
-Start project services (docker compose up)
+Start the project or selected services
 
 ### Usage
 

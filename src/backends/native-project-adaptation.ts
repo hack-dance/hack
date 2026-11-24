@@ -183,10 +183,24 @@ export function adaptNativeProject(opts: {
   if (!(isRecord(compose) && isRecord(compose.services))) {
     throw refused();
   }
+  const perService = (value: unknown) => {
+    const omitted = opts.input.omittedServiceSpecs;
+    return omitted && isRecord(value)
+      ? Object.fromEntries(
+          Object.entries(value).filter(([name]) => !omitted.has(name))
+        )
+      : value;
+  };
   replaceNetworks(compose, selection.isolatedNetworks);
-  applyNativeWorkspaceCache({ compose, selection: selection.workspaceCache });
+  const cache = selection.workspaceCache;
+  if (
+    !(opts.input.omittedServiceSpecs && isRecord(cache)) ||
+    workspaceCacheTargets(selection, compose).size > 0
+  ) {
+    applyNativeWorkspaceCache({ compose, selection: cache });
+  }
   for (const [name, value] of Object.entries(
-    selectedMap(selection.httpProbes)
+    selectedMap(perService(selection.httpProbes))
   )) {
     const spec = service(compose.services, name);
     if (spec.healthcheck !== undefined) {
@@ -194,14 +208,14 @@ export function adaptNativeProject(opts: {
     }
     spec.healthcheck = { "x-hack-http": probe(value) };
   }
-  addHostnames(compose.services, selection.additionalHostnames);
+  addHostnames(compose.services, perService(selection.additionalHostnames));
   addNativeHostAliases({
     services: compose.services,
-    selection: selection.additionalHostAliases,
+    selection: perService(selection.additionalHostAliases),
   });
   const amd64Emulation = applyNativeAmd64Emulation({
     services: compose.services,
-    selection: selection.amd64Emulation,
+    selection: perService(selection.amd64Emulation),
   });
   const normalizedComposeJson = JSON.stringify(compose);
   if (Buffer.byteLength(normalizedComposeJson) > 256 * 1024) {

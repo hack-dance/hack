@@ -255,6 +255,19 @@ fn command(
 }
 
 impl Publishers {
+    pub(super) fn absorb(
+        &mut self,
+        other: Self,
+        signals: &signals::Events,
+    ) -> Result<(), CandidateError> {
+        let first = self.children.len();
+        self.children.extend(other.children);
+        for owned in &self.children[first..] {
+            signals.watch_child(&owned.child)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn finish_early_start(
         &mut self,
         candidate: &Candidate,

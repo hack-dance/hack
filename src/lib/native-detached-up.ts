@@ -785,6 +785,7 @@ export async function runNativeDetachedOwner(opts: {
   let ready = false;
   let accepted = false;
   let stopping = false;
+  const handoff = Promise.withResolvers<void>();
   const requestStop = () => {
     if (!stopping) {
       stopping = true;
@@ -792,6 +793,7 @@ export async function runNativeDetachedOwner(opts: {
     }
   };
   const disconnected = () => {
+    handoff.resolve();
     if (!accepted) {
       requestStop();
     }
@@ -855,6 +857,7 @@ export async function runNativeDetachedOwner(opts: {
     });
   const message = (value: unknown) => {
     if (value === "cancel") {
+      handoff.resolve();
       requestStop();
       return;
     }
@@ -862,7 +865,7 @@ export async function runNativeDetachedOwner(opts: {
       return;
     }
     accepted = true;
-    send("accepted");
+    void send("accepted").then(handoff.resolve);
   };
   process.on("disconnect", disconnected);
   process.on("message", message);
@@ -945,7 +948,13 @@ export async function runNativeDetachedOwner(opts: {
     });
   };
   try {
-    return await opts.run(await acceptUpTimingOwnerRelay(opts.args));
+    const code = await opts.run(await acceptUpTimingOwnerRelay(opts.args));
+    // A targeted append returns while the original graph owner stays alive.
+    // Keep this IPC channel until the launcher acknowledges its ready frame.
+    if (ready) {
+      await handoff.promise;
+    }
+    return code;
   } finally {
     stopping = true;
     closeUpTimingOwnerRelay();
@@ -1120,7 +1129,7 @@ async function settleWithin(
 }
 
 /**
- * Launch only parsed, whole-project native `up` or `restart` arguments; no
+ * Launch only parsed native `up` or `restart` arguments; no
  * shell or secret argv. The child becomes the detached owner; this launcher
  * returns once the child reports durable readiness. With `json`, it prints
  * one result envelope with the same fields as Compose (`data.action`,
@@ -1130,6 +1139,7 @@ export async function startNativeDetachedUp(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly json: boolean;
+  readonly targeted?: boolean;
   /** The command the child runs, reported as `data.action`. Defaults to `up`. */
   readonly action?: "up" | "restart";
   /** Synthetic process fixtures may replace the CLI invocation. */
@@ -1314,11 +1324,12 @@ export async function startNativeDetachedUp(opts: {
       const services = {
         started: [...data.started].sort(),
         completed: [...(data.completed ?? [])].sort(),
-        warming: [...(data.warming ?? [])].sort(),
+        ...(opts.targeted ? {} : { warming: [...(data.warming ?? [])].sort() }),
         stopped: [],
         failed: [],
       };
       resultTiming?.();
+      const timings = completeUpTimings();
       emitCliResult({
         result: okResult({
           data: {
@@ -1327,9 +1338,9 @@ export async function startNativeDetachedUp(opts: {
             branch: data.branch,
             composeProject: data.composeProject,
             services,
-            readiness: data.readiness ?? "ready",
+            ...(opts.targeted ? {} : { readiness: data.readiness ?? "ready" }),
             durationMs,
-            timings: completeUpTimings(),
+            ...(opts.targeted ? {} : { timings }),
           },
         }),
       });

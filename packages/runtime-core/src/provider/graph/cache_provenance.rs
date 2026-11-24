@@ -404,6 +404,7 @@ mod tests {
         };
         let mut receipt = Receipt {
             started_from: None,
+            extending: BTreeSet::new(),
             normalized_input: None,
             relay_startup: None,
             relay_cleanup: None,

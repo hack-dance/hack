@@ -3455,6 +3455,30 @@ const contracts: readonly ModelContract[] = [
       },
     ],
   },
+  {
+    name: "targeted-start",
+    module: "TargetedStart",
+    states: 52,
+    invariant: "OwnedEffects",
+    action: "Create",
+    fields: [
+      'phase = "Extending"',
+      'receipt = {"web", "redis"}',
+      "containers = [web |-> 1, cache |-> 2, redis |-> 0, unused |-> 0]",
+    ],
+    additionalControls: [
+      {
+        name: "replace-existing",
+        negative: true,
+        invariant: "PreserveExisting",
+        action: "Reserve",
+        fields: [
+          'phase = "Extending"',
+          "containers = [web |-> 2, cache |-> 0, redis |-> 0, unused |-> 0]",
+        ],
+      },
+    ],
+  },
   // The CI tier bounds one VM boot with two specs; positive-reboot covers two
   // boots with one spec. Witnesses omit `cur` and `intents`: the initial spec
   // value is free and two-worker TLC reports either one.

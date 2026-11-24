@@ -73,6 +73,7 @@ import {
   nativeRuntimeFailure,
 } from "../src/backends/native-runtime-client.ts";
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
+import { selectNativeServices } from "../src/backends/native-service-selection.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -85,6 +86,41 @@ import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
+
+test("targeted selection keeps transitive conditions and omits unrelated service specs", () => {
+  const selected = selectNativeServices({
+    targets: ["redis", "job"],
+    profiles: [],
+    existingImages: new Map([["web", `sha256:${"a".repeat(64)}`]]),
+    services: {
+      redis: { image: "redis", profiles: ["cache"], depends_on: ["cache"] },
+      cache: {
+        image: "alpine",
+        depends_on: {
+          web: { condition: "service_started" },
+          unused: { condition: "service_started", required: false },
+        },
+      },
+      web: { image: "changed", ports: ["8080:80"], env_file: "web.env" },
+      job: { image: "alpine" },
+      unused: { image: "alpine", profiles: ["other"] },
+    },
+  });
+  expect(Object.keys(selected).sort()).toEqual([
+    "cache",
+    "job",
+    "redis",
+    "web",
+  ]);
+  expect(selected.redis).toMatchObject({ image: "redis" });
+  expect(selected.cache).toEqual({
+    image: "alpine",
+    profiles: undefined,
+    depends_on: { web: { condition: "service_started" } },
+  });
+  expect(selected.web).toEqual({ image: `sha256:${"a".repeat(64)}` });
+});
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))

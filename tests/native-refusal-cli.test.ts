@@ -246,6 +246,110 @@ async function scriptUpThroughReview(
 const SHARED = { HACK_NATIVE_SHARED_SOURCE: "1" };
 
 test(
+  "targeted native up refuses an unknown service before any graph request",
+  async () => {
+    const f = await fixture();
+    const result = await cli({
+      fixture: f,
+      args: ["up", "missing", "--json"],
+      env: SHARED,
+    });
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_SERVICE_NOT_FOUND",
+        message: "Unknown Compose service: missing.",
+      },
+    });
+    expect(await f.calls()).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "targeted native up uses the mapped owner and emits the Compose lifecycle shape",
+  async () => {
+    const image = `sha256:${"e".repeat(64)}`;
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: { image },
+          redis: { image, depends_on: ["cache"] },
+          cache: { image },
+          unused: { image, ports: ["18080:80/udp"] },
+        },
+      })
+    );
+    await saveNativeProjectRun({ ...f.scope, run });
+    const receipt = {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan_id: run.planId,
+      phase: "ready-observed",
+      readiness: { web: "started" },
+    };
+    const generation = "1".repeat(64);
+    await f.reply("graph inspect", { journal_incomplete: false, receipt });
+    await f.reply("graph owner-status", {
+      ok: true,
+      run: run.run,
+      plan: run.planId,
+      phase: "ready-observed",
+      foreground_alive: true,
+      runtime_verified: true,
+      generation,
+      service_images: { web: image },
+    });
+    await f.reply("runtime status", { phase: "running", process_alive: true });
+    await scriptUpThroughReview(f, {
+      services: { cache: { active: true }, redis: { active: true } },
+    });
+    await f.reply("graph extend", {
+      ok: true,
+      phase: "ready-observed",
+      receipt: {
+        ...receipt,
+        readiness: { ...receipt.readiness, cache: "started", redis: "started" },
+      },
+    });
+
+    const result = await cli({
+      fixture: f,
+      args: ["up", "redis", "--json"],
+      env: SHARED,
+    });
+    expect(result.code, result.output).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      data: {
+        action: "up",
+        project: "refusal-fixture",
+        branch: null,
+        composeProject: "refusal-fixture",
+        services: {
+          started: ["cache", "redis"],
+          completed: [],
+          stopped: [],
+          failed: [],
+        },
+        durationMs: expect.any(Number),
+      },
+    });
+    const calls = await f.calls();
+    expect(calls.filter((request) => request === "graph extend")).toHaveLength(
+      1
+    );
+    expect(calls).not.toContain("runtime up");
+    expect(calls).not.toContain("graph serve");
+    expect(calls).not.toContain("graph cleanup");
+    expect(await loadNativeProjectRun(f.scope)).toEqual(run);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "detached static UDP refusal names its fix and reports no start through the source CLI",
   async () => {
     const f = await fixture(

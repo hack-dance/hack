@@ -20,7 +20,9 @@ pub use dependency_refresh::request as refresh_dependencies_request;
 #[cfg(all(test, feature = "native-stream-relay"))]
 mod lifetime_tests;
 mod retained_data;
+mod service_start;
 pub(in crate::provider::graph) mod signals;
+pub use service_start::request as extend_request;
 #[cfg(test)]
 mod tests;
 pub(in crate::provider::graph) mod transport;
@@ -66,7 +68,8 @@ impl startup::StartupRequests for StartupServer {
             }
             let plain = request.restore.is_none()
                 && request.job.is_none()
-                && request.refresh_dependencies.is_none();
+                && request.refresh_dependencies.is_none()
+                && request.extend.is_none();
             let reply = match request.remove_data {
                 Some(false) if plain => {
                     *self.stop.borrow_mut() = Some(stream);
@@ -473,7 +476,7 @@ fn serve_input<'a>(
         drop(stdout);
         publishers.announce();
         let mut queued = None;
-        let supervise_restarts = receipt.resources.values().any(|r| {
+        let mut supervise_restarts = receipt.resources.values().any(|r| {
             r.restart_policy.is_some() && (r.routing.is_some() || !r.loopback_ports.is_empty())
         });
         let mut restart_tick = Instant::now() + Duration::from_secs(1);
@@ -563,6 +566,26 @@ fn serve_input<'a>(
                 continue;
             }
             publication.verify()?;
+            if let Some(extend) = request.extend {
+                let response = match service_start::handle(
+                    candidate,
+                    &mut runtime,
+                    &mut publishers,
+                    &signals,
+                    &receipt.run,
+                    extend,
+                    &stream,
+                ) {
+                    Ok(value) => {
+                        // An added route or port may introduce the first restart-supervised service.
+                        supervise_restarts = true;
+                        value
+                    }
+                    Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),
+                };
+                let _ = transport::write(&mut stream, &response, Duration::from_secs(5));
+                continue;
+            }
             if let Some(refresh) = request.refresh_dependencies {
                 let response = match dependency_refresh::handle(
                     candidate,
@@ -683,7 +706,6 @@ fn serve_input<'a>(
                     );
                 }
                 let publisher_error = publishers.observe_readonly(candidate)?;
-                let publishers_live = publisher_error.is_none();
                 if let Some(code) = publisher_error {
                     return Ok(
                         json!({"ok":true,"run":receipt.run,"phase":receipt.phase,"plan":receipt.plan_id,"generation":redelivery::generation(&receipt)?,"foreground_alive":true,"runtime_verified":false,"runtime_error":code,"publisher_ports":publishers.port_status()}),
@@ -696,8 +718,21 @@ fn serve_input<'a>(
                     let checked = runtime.check_readonly(&observer, &snapshot.receipt, &root);
                     Ok((snapshot, checked))
                 })?;
+                let images = snapshot
+                    .receipt
+                    .resources
+                    .values()
+                    .filter_map(|resource| {
+                        resource.image.as_ref().map(|image| (&resource.key, image))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let runtime_error = if snapshot.receipt.extending.is_empty() {
+                    checked.err().map(|error| error.code)
+                } else {
+                    Some("graph_extend_incomplete")
+                };
                 Ok::<_, CandidateError>(
-                    json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":publishers_live && checked.is_ok(),"runtime_error":if !publishers_live {Some("publisher_exited")} else {checked.err().map(|error|error.code)},"publisher_ports":publishers.port_status()}),
+                    json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":runtime_error.is_none(),"runtime_error":runtime_error,"publisher_ports":publishers.port_status(),"service_images":images}),
                 )
             })();
             let value = match status {
@@ -782,6 +817,7 @@ pub fn request(
         &mut stream,
         &WireRequest {
             version: 1,
+            extend: None,
             refresh_dependencies: None,
             run: run.to_owned(),
             remove_data,
@@ -955,6 +991,7 @@ pub fn restore_request(
     let bytes = managed.forward(plan, run)?;
     let request = WireRequest {
         version: 1,
+        extend: None,
         refresh_dependencies: None,
         run: run.into(),
         remove_data: None,

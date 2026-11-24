@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
 import { childEnvironment } from "./child-environment.ts";
+import { composeEnvValuesToRedact } from "./compose-ps-result.ts";
 import { exec } from "./shell.ts";
 
 /** Default bound for a capture that names none (model and metadata reads). */
@@ -32,6 +33,12 @@ export type DataBackupStreamResult = {
  * caller's to remove (see data-backup-held-volume.ts).
  */
 export interface DataBackupDocker {
+  /**
+   * Values the project's managed env adds to the client's environment (see
+   * `composeEnvValuesToRedact`), such as a managed `DOCKER_HOST`. Every
+   * refusal that quotes an engine line redacts them, in text and JSON.
+   */
+  readonly redactValues: readonly string[];
   /** Run `argv` and capture its UTF-8 output. */
   capture(
     argv: readonly string[],
@@ -126,6 +133,7 @@ export function createHostDataBackupDocker(opts: {
       stderr: "pipe",
     }) as Bun.Subprocess<"ignore" | Blob, "pipe", "pipe">;
   return {
+    redactValues: composeEnvValuesToRedact({ env }),
     async capture(argv, captureOpts) {
       const result = await exec(argv, {
         cwd,

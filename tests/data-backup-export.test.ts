@@ -828,6 +828,7 @@ describe("publication", () => {
 
   test("an unreachable engine is E_DOCKER_UNAVAILABLE", async () => {
     const docker: DataBackupDocker = {
+      redactValues: [],
       capture: () =>
         Promise.resolve({
           exitCode: 1,

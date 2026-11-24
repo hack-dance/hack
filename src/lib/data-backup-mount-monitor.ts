@@ -224,6 +224,7 @@ export async function startMountMonitor(opts: {
             action: argv[1] === "create" ? "create" : "start",
             timeoutMs: commandMs,
             consequence: "nothing was changed.",
+            redactValues: opts.docker.redactValues,
           });
         }
         let timer: ReturnType<typeof setTimeout> | undefined;

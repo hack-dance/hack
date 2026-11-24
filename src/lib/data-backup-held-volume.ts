@@ -119,6 +119,8 @@ export function requireStep<T extends { readonly exitCode: number }>(opts: {
   readonly action: string;
   readonly timeoutMs: number;
   readonly consequence: string;
+  /** The managed values to redact from a quoted engine line. */
+  readonly redactValues: readonly string[];
 }): T {
   if (opts.result.exitCode === DATA_BACKUP_TIMEOUT_EXIT) {
     throw stepTimeout(opts);
@@ -142,6 +144,7 @@ export function requireStep<T extends { readonly exitCode: number }>(opts: {
             : "",
       },
       consequence: opts.consequence,
+      redactValues: opts.redactValues,
     });
   }
   return opts.result;
@@ -276,7 +279,11 @@ async function holdVolume(
   if (created.exitCode !== 0) {
     throw MISSING_BIND.test(created.stderr)
       ? opts.changed()
-      : dockerReadError({ result: created, command: "docker create" });
+      : dockerReadError({
+          result: created,
+          command: "docker create",
+          redactValues: docker.redactValues,
+        });
   }
   const started = await docker.capture(["docker", "start", container], {
     timeoutMs: deadlines.commandMs,
@@ -284,7 +291,11 @@ async function holdVolume(
   if (started.exitCode !== 0) {
     throw MISSING_BIND.test(started.stderr)
       ? opts.changed()
-      : dockerReadError({ result: started, command: "docker start" });
+      : dockerReadError({
+          result: started,
+          command: "docker start",
+          redactValues: docker.redactValues,
+        });
   }
   // The container holds the mount now: the volume it holds must be the one
   // validated, unchanged.
@@ -347,6 +358,7 @@ async function holdVolume(
         action: "digest",
         timeoutMs: deadlines.stepMs,
         consequence,
+        redactValues: docker.redactValues,
       });
       return parseTreeDigest({
         stdout: result.stdout,

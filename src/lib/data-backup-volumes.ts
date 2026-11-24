@@ -95,11 +95,14 @@ export function planDeclaredVolumes(model: unknown): DeclaredVolumePlan {
 export function dockerReadError(opts: {
   readonly result: DataBackupProcessResult;
   readonly command: string;
+  /** The managed values to redact from a quoted engine line. */
+  readonly redactValues: readonly string[];
 }): HackCliError {
   return (
     dockerEngineFailureError({
       result: opts.result,
       command: opts.command,
+      redactValues: opts.redactValues,
     }) ??
     new HackCliError({
       code: "E_UNEXPECTED",
@@ -145,7 +148,11 @@ export async function inspectVolume(opts: {
     if (result.exitCode === 1 && NO_SUCH_VOLUME.test(result.stderr)) {
       return null;
     }
-    throw dockerReadError({ result, command: "docker volume inspect" });
+    throw dockerReadError({
+      result,
+      command: "docker volume inspect",
+      redactValues: opts.docker.redactValues,
+    });
   }
   const value = parseInspect(result.stdout);
   if (
@@ -315,7 +322,11 @@ export async function runningContainers(opts: {
       "{{.Names}}",
     ]);
     if (result.exitCode !== 0) {
-      throw dockerReadError({ result, command: "docker ps" });
+      throw dockerReadError({
+        result,
+        command: "docker ps",
+        redactValues: opts.docker.redactValues,
+      });
     }
     for (const name of names(result.stdout)) {
       found.add(name);

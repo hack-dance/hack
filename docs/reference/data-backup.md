@@ -215,7 +215,11 @@ resolved value is written or printed:
   (`hack.config.json` `name`, else the checkout directory) and the branch
   slug, never the Compose project;
 - container names in refusals (`detail.running`, `detail.mounts[].name`)
-  have the resolved Compose project name replaced by `<compose project>`.
+  have the resolved Compose project name replaced by `<compose project>`;
+- an engine line quoted in a refusal (`Engine said: …`, in text and JSON)
+  has every value the project's managed env adds, such as a managed
+  `DOCKER_HOST` or `DOCKER_CONTEXT`, replaced by `[REDACTED]`, as
+  `hack up` does.
 
 A restore compares these hashes instead of the values.
 

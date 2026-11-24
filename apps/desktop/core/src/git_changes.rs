@@ -17,24 +17,30 @@ pub struct ChangedFile {
     pub state: String,
 }
 
+fn git_runner(root: &Path) -> Result<CliRunner, &'static str> {
+    let path_git = resolve_on_path("git", std::env::var_os("PATH").as_deref());
+    path_git
+        .into_iter()
+        .chain([std::path::PathBuf::from("/usr/bin/git")])
+        .map(|git| CliRunner::verified(git).with_clean_env().with_cwd(root))
+        .find(|runner| runner.resolve_program().is_ok())
+        .ok_or("Verified Git is unavailable")
+}
+
 impl Changes {
     /// A path-limited status read with no optional index update.
     pub fn read(root: &Path) -> Result<Self, &'static str> {
         if !root.is_absolute() {
             return Err("Checkout path unavailable");
         }
-        let git = resolve_on_path("git", std::env::var_os("PATH").as_deref())
-            .ok_or("Git is unavailable")?;
         let checkout = root
             .file_name()
             .ok_or("Checkout name unavailable")?
             .to_string_lossy()
             .into_owned();
-        let (out, _, code) = CliRunner::verified(git)
-            .with_clean_env()
+        let (out, _, code) = git_runner(root)?
             .with_env("GIT_OPTIONAL_LOCKS", "0")
             .with_env("LC_ALL", "C")
-            .with_cwd(root)
             .run_raw(
                 &[
                     "-c",
@@ -119,8 +125,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("desktop-git-status-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let root = std::fs::canonicalize(root).unwrap();
-        let git = resolve_on_path("git", std::env::var_os("PATH").as_deref()).unwrap();
-        let runner = CliRunner::verified(git).with_clean_env().with_cwd(&root);
+        let runner = git_runner(&root).unwrap();
         let run = |args: &[&str]| {
             let (_, err, code) = runner.run_raw(args, None, Duration::from_secs(5)).unwrap();
             assert_eq!(code, Some(0), "{err}");

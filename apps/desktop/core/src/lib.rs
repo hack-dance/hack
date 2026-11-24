@@ -28,6 +28,7 @@ mod process;
 pub mod resource_inventory;
 pub mod resources;
 pub mod runner;
+pub mod service_catalog;
 pub mod setup;
 pub mod setup_fixtures;
 pub mod setup_io;

@@ -58,9 +58,13 @@ pub enum Fixture {
     ResourcesConfirm,
     GroupedSidebar,
     CatalogNative,
+    CatalogNativeSaved,
     CatalogAll,
     CatalogEmpty,
     CatalogPreview,
+    CatalogSearch,
+    CatalogDiff,
+    CatalogSaved,
     ChangesError,
     ChangesLoading,
     ChangesClean,
@@ -141,9 +145,13 @@ impl Fixture {
         Self::ResourcesConfirm,
         Self::GroupedSidebar,
         Self::CatalogNative,
+        Self::CatalogNativeSaved,
         Self::CatalogAll,
         Self::CatalogEmpty,
         Self::CatalogPreview,
+        Self::CatalogSearch,
+        Self::CatalogDiff,
+        Self::CatalogSaved,
         Self::ChangesError,
         Self::ChangesLoading,
         Self::ChangesClean,
@@ -212,9 +220,13 @@ impl Fixture {
             Self::ResourcesConfirm => "resources-confirm",
             Self::GroupedSidebar => "grouped-sidebar",
             Self::CatalogNative => "catalog-native",
+            Self::CatalogNativeSaved => "catalog-native-saved",
             Self::CatalogAll => "catalog-all",
             Self::CatalogEmpty => "catalog-empty",
             Self::CatalogPreview => "catalog-preview",
+            Self::CatalogSearch => "catalog-search",
+            Self::CatalogDiff => "catalog-diff",
+            Self::CatalogSaved => "catalog-saved",
             Self::ChangesError => "changes-error",
             Self::ChangesLoading => "changes-loading",
             Self::ChangesClean => "changes-clean",
@@ -548,9 +560,15 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             }];
             r
         }
-        Fixture::CatalogNative => {
+        Fixture::CatalogNative | Fixture::CatalogNativeSaved => {
             let mut row = storefront(vec![], "stopped");
             row.backend = Some("native".into());
+            if f == Fixture::CatalogNative {
+                row.input_diagnostic = Some(crate::models::InputDiagnostic {
+                    code: crate::models::NATIVE_PROJECT_CODE.into(),
+                    message: "This project declares native workloads.".into(),
+                });
+            }
             row
         }
         Fixture::Remotes => {

@@ -24,6 +24,7 @@ export const JSON_COMMAND_SHAPES = {
   "files cat": "schema-envelope",
   "resources list": "schema-envelope",
   "resources remove": "schema-envelope",
+  "service add": "schema-envelope",
   "exec-sessions": "legacy-object",
   "commands read": "ndjson",
   "commands show": "envelope",
@@ -118,6 +119,7 @@ export const SCHEMA_JSON_VARIANTS = [
   { command: "files cat", flags: [], schema: "hack.files.v1" },
   { command: "resources list", flags: [], schema: "hack.resources.v1" },
   { command: "resources remove", flags: [], schema: "hack.resource-remove.v1" },
+  { command: "service add", flags: [], schema: "hack.service-add.v1" },
   { command: "env overlay add", flags: [], schema: "hack.env-overlays.v1" },
   { command: "env overlay list", flags: [], schema: "hack.env-overlays.v1" },
   {

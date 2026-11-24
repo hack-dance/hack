@@ -11,6 +11,7 @@ import {
   upsertProjectRuntimeStateEntry,
 } from "../../src/lib/project-runtime-state.ts";
 import {
+  runDocker,
   sweepComplete,
   sweepOwnedComposeResources,
 } from "./docker-ownership.ts";
@@ -298,6 +299,7 @@ test.skipIf(process.platform !== "linux" || !Bun.which("docker"))(
     } finally {
       try {
         const cleanup = await sweepOwnedComposeResources({
+          docker: runDocker,
           names: new Set([...names, "forged"].map(project)),
         });
         expect(sweepComplete(cleanup)).toBe(true);

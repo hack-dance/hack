@@ -19,7 +19,7 @@ use gpui_kit::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, KeyBinding, ParentElement,
     Render, SharedString, Styled, Task, Window, div, prelude::*, px,
 };
-use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
+use hack_desktop_core::doctor::{DoctorPane, TargetKey, should_auto_refresh};
 use hack_desktop_core::machine_gate::{Holder, MachineGate};
 use hack_desktop_core::source::{
     ActionOutcome, DaemonRecovery, DoctorTarget, NATIVE_PS_PARALLEL, Snapshot, Source, SourceError,
@@ -31,13 +31,12 @@ use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 use hack_desktop_core::source::target_keys;
 use hack_desktop_core::state::{Action, ProjectState};
 use hack_desktop_core::viewmodel::{
-    AppModel, Banner, BranchRow, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken,
-    Row, UpdateSide,
+    AppModel, Banner, BranchRow, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken, Row,
 };
 use hack_desktop_ui::components::{
-    BannerTone, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, banner, caption,
-    count_pill, dot, empty_pane, icon_button, machine_row, neutral_pill, pill_tab, primary_button,
-    project_row, services_table, skeleton, state_pill, status_bar,
+    ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, caption, count_pill, dot,
+    empty_pane, icon_button, machine_row, neutral_pill, pill_tab, primary_button, project_row,
+    services_table, skeleton, state_pill, status_bar,
 };
 use hack_desktop_ui::icons::Glyph;
 use hack_desktop_ui::status::{Status, project_label, service_label};
@@ -153,7 +152,8 @@ pub struct HackApp {
     /// When the URL was last copied, for the check mark.
     copied: Option<Instant>,
     pub(crate) pane: Pane,
-    doctor: DoctorPane,
+    pub(crate) doctor: DoctorPane,
+    pub(crate) health: crate::health_model::Health,
     /// Is the window visible (not minimised or hidden)? Automatic doctor
     /// runs wait for it.
     pub(crate) window_visible: bool,
@@ -219,6 +219,7 @@ impl HackApp {
             files: Default::default(),
             pane: Pane::Project,
             doctor: DoctorPane::default(),
+            health: Default::default(),
             window_visible: true,
             _visibility: None,
             _activation: None,
@@ -297,17 +298,12 @@ impl HackApp {
         let runs = self
             .source
             .doctor_runs(targets.as_deref().unwrap_or_default());
-        self.doctor.finish(
-            generation,
-            &runs,
-            names.as_deref(),
-            std::time::Instant::now(),
-        );
+        self.accept_health_report(generation, runs, self.source.setup());
     }
 
     /// `None` when the project list has not been read: doctor then runs
     /// machine checks only and reports the projects as not checked.
-    fn doctor_targets(&self) -> Option<Vec<DoctorTarget>> {
+    pub(crate) fn doctor_targets(&self) -> Option<Vec<DoctorTarget>> {
         if !self.model.project_list_readable() {
             return None;
         }
@@ -316,45 +312,8 @@ impl HackApp {
             .map(|s| DoctorTarget::from_projects(&s.projects))
     }
 
-    fn doctor_target_keys(&self) -> Option<Vec<TargetKey>> {
+    pub(crate) fn doctor_target_keys(&self) -> Option<Vec<TargetKey>> {
         self.doctor_targets().map(|t| target_keys(&t))
-    }
-
-    /// Run doctor (machine run plus one per project) off the UI thread.
-    /// A newer run supersedes an older one; a result whose project set no
-    /// longer matches is shown as stale and checked again.
-    pub fn load_doctor(&mut self, cx: &mut Context<Self>) {
-        if !self.live {
-            self.show_doctor_now();
-            cx.notify();
-            return;
-        }
-        let targets = self.doctor_targets().unwrap_or_default();
-        let generation = self.doctor.begin(self.doctor_target_keys().as_deref());
-        cx.notify();
-        let source = self.source.clone();
-        cx.spawn(async move |this, cx| {
-            let runs = cx
-                .background_executor()
-                .spawn(async move { source.doctor_runs(&targets) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                let current = this.doctor_target_keys();
-                let outcome = this.doctor.finish(
-                    generation,
-                    &runs,
-                    current.as_deref(),
-                    std::time::Instant::now(),
-                );
-                if outcome == Finish::AppliedStale {
-                    // Re-run now only if someone can see it; otherwise the
-                    // stale result re-runs when the window is shown again.
-                    this.maybe_auto_refresh(cx);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     /// Open the Doctor pane, optionally filtered to one project, and run
@@ -371,13 +330,14 @@ impl HackApp {
 
     /// Start a doctor run if the pane is shown in a visible window and the
     /// result is missing, old or stale. Returns whether it started one.
-    fn maybe_auto_refresh(&mut self, cx: &mut Context<Self>) -> bool {
-        let start = should_auto_refresh(
-            self.pane == Pane::Doctor,
-            self.window_visible,
-            &self.doctor,
-            std::time::Instant::now(),
-        );
+    pub(crate) fn maybe_auto_refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        let start = self.health.queue.is_none()
+            && should_auto_refresh(
+                self.pane == Pane::Doctor,
+                self.window_visible,
+                &self.doctor,
+                std::time::Instant::now(),
+            );
         if start {
             self.load_doctor(cx);
         }
@@ -414,6 +374,7 @@ impl HackApp {
 
     /// Once a minute: refresh an old Doctor or Setup result on screen.
     pub(crate) fn minute_tick(&mut self, cx: &mut Context<Self>) {
+        self.refresh_update_notice(cx);
         if hack_desktop_core::setup::should_recheck_periodically(
             self.pane == Pane::Setup,
             self.window_visible,
@@ -517,6 +478,10 @@ impl HackApp {
         let current = self.doctor_target_keys();
         self.doctor.targets_seen(current.as_deref());
         self.maybe_auto_refresh(cx);
+        self.refresh_update_notice(cx);
+        if self.health.follow_ups.has_dismissals() {
+            crate::follow_up_view::reconcile(self, &self.model.list());
+        }
         cx.notify();
         true
     }
@@ -682,7 +647,7 @@ impl HackApp {
         .detach();
     }
 
-    fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
         let source = self.source.clone();
         let token = self.model.begin_refresh();
         cx.spawn(async move |this, cx| {
@@ -1047,6 +1012,7 @@ impl HackApp {
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();
+            self.health = Default::default();
             // Setup's report and bound commands were the previous CLI's.
             self.setup.source_changed();
             self.setup_flow = Default::default();
@@ -1055,6 +1021,8 @@ impl HackApp {
                     crate::setup_flow::Step::Cli,
                 ));
                 self.load_setup(cx);
+            } else if self.pane == Pane::Doctor {
+                self.load_doctor(cx);
             }
             #[cfg(hack_terminal)]
             self.close_all_terminals(window, cx);
@@ -1284,6 +1252,14 @@ impl HackApp {
 
     /// The Doctor row's trailing mark (see [`doctor_mark`]).
     fn doctor_trailing(&self, list: &ListView, ui: &Ui) -> AnyElement {
+        if !self.doctor.stale
+            && let DoctorStateView::Loaded(v) = &self.doctor.result
+        {
+            let count = crate::doctor_view::attention_count(self, v);
+            if count > 0 {
+                return count_pill(count, ui).into_any_element();
+            }
+        }
         match doctor_mark(&self.doctor, list) {
             DoctorMark::Count(n) => count_pill(n, ui).into_any_element(),
             DoctorMark::Dot(s) => dot(s, ui).into_any_element(),
@@ -1315,98 +1291,6 @@ impl HackApp {
         )
         .on_click(cx.listener(move |this, _, _, cx| this.select_instance(key.clone(), cx)))
         .into_any_element()
-    }
-
-    fn banners(&self, list: &ListView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
-        let daemon_banner = list
-            .banners
-            .iter()
-            .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }));
-        let mut col = div().flex().flex_col();
-        let recovery = self.model.daemon_recovery();
-        let mut recovery_shown = false;
-        for b in &list.banners {
-            // The hackd pane's card says the same and offers the same action.
-            if self.pane == Pane::Hackd
-                && matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. })
-            {
-                continue;
-            }
-            let (tone, msg, offers_recovery) = match b {
-                Banner::DaemonOff => (
-                    BannerTone::Warn,
-                    "hackd is not running. Project states are not observed.".to_owned(),
-                    true,
-                ),
-                Banner::DaemonMismatch { .. } => (BannerTone::Warn, b.text(), true),
-                Banner::EngineDown { error } => (
-                    BannerTone::Error,
-                    format!("Docker is not reachable: {error}"),
-                    false,
-                ),
-                Banner::DaemonReadFailed { error } => (BannerTone::Warn, error.clone(), false),
-                // Another install's hackd: name both, offer nothing to do.
-                Banner::SharedHome { message } => (BannerTone::Warn, message.clone(), false),
-                // With a daemon banner, the stale banner repeats its cause.
-                // Otherwise it is the only sign the latest read failed.
-                Banner::Stale { .. } if daemon_banner => continue,
-                Banner::Stale { error } => (
-                    BannerTone::Warn,
-                    format!("Showing last known state. The latest read failed: {error}"),
-                    false,
-                ),
-            };
-            let mut row = banner(tone, msg, None, ui);
-            // A daemon newer than the CLI: the remedy is updating the CLI,
-            // never restarting hackd.
-            if let Banner::DaemonMismatch {
-                update: UpdateSide::Cli,
-                ..
-            } = b
-            {
-                row = row.child(
-                    action_button("copy-update", Glyph::Copy, "Copy hack update", true, ui)
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string("hack update".into()));
-                        })),
-                );
-            }
-            if offers_recovery
-                && !recovery_shown
-                && let Some(action) = recovery
-            {
-                recovery_shown = true;
-                let glyph = match action {
-                    DaemonRecovery::Start => Glyph::Power,
-                    DaemonRecovery::Restart => Glyph::Restart,
-                };
-                let label = if self.machine.held_by(Holder::Recovery) {
-                    "Working…"
-                } else {
-                    action.label()
-                };
-                row = row.child(
-                    action_button("recover-hackd", glyph, label, !self.machine.busy(), ui)
-                        .when(self.machine.held_by(Holder::Command), |button| {
-                            button.tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(if cfg!(target_os = "macos") {
-                                    "A terminal command is running. Press ⌘J to show it."
-                                } else {
-                                    "A terminal command is running. Press Ctrl+Shift+J to show it."
-                                }).build(window, cx)
-                            })
-                        })
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
-                        ),
-                );
-            }
-            col = col.child(row);
-        }
-        if let Some(e) = &self.recovery_error {
-            col = col.child(banner(BannerTone::Error, e.clone(), None, ui));
-        }
-        col
     }
 
     fn header(
@@ -1912,17 +1796,29 @@ impl Render for HackApp {
             .font_family(ui.font.clone())
             .child(self.title_bar(&ui));
 
+        let list = self.model.list();
+        // Setup renders independently of the project list phase.
         if self.pane == Pane::Setup {
+            crate::follow_up_view::reconcile(self, &list);
             return root.child(crate::setup_screen::render(self, &ui, window, cx));
         }
-        let list = self.model.list();
+        let follow_up = if self.pane == Pane::Project {
+            crate::follow_up_view::render(self, &list, &ui, cx)
+        } else {
+            crate::follow_up_view::reconcile(self, &list);
+            None
+        };
         let main: AnyElement = match &list.phase {
+            _ if self.pane == Pane::BannersSheet => crate::health_fixtures::banners(&ui, cx),
+            _ if self.pane == Pane::ErrorsSheet => {
+                crate::health_fixtures::errors(self, &ui, window, cx)
+            }
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.
-            _ if self.pane == Pane::Doctor => crate::doctor_view::render(&self.doctor, &ui, cx),
+            _ if self.pane == Pane::Doctor => crate::doctor_view::render(self, &ui, window, cx),
             Phase::CliMissing => crate::setup_screen::not_connected(&ui, cx),
             Phase::Error { code, message } => empty_pane(
                 Glyph::CircleAlert,
@@ -1955,42 +1851,49 @@ impl Render for HackApp {
         };
         #[cfg(hack_terminal)]
         let command_drawer = self.render_command_drawer(&ui, cx);
-        #[cfg(hack_terminal)]
-        let main = if command_drawer.is_some() {
-            div()
-                .flex_1()
-                .min_h_0()
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .child(main)
-                .into_any_element()
-        } else {
-            main
-        };
+        #[cfg(not(hack_terminal))]
+        let command_drawer: Option<AnyElement> = None;
+        let sheet = matches!(self.pane, Pane::BannersSheet | Pane::ErrorsSheet);
+        let right_pane = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .when(
+                        self.health.fixture.is_some()
+                            || self.pane == Pane::Doctor
+                            || follow_up.is_some(),
+                        |main| {
+                            main.mx(space::S4)
+                                .my(space::S2)
+                                .rounded(radius::PANEL)
+                                .hairline(p.border)
+                        },
+                    )
+                    .children(follow_up)
+                    .child(main),
+            )
+            .children(command_drawer);
         root.child(
             div()
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .child(self.sidebar(&list, &ui, cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .h_full()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(self.banners(&list, &ui, cx))
-                        .child(main)
-                        .map(|pane| {
-                            #[cfg(hack_terminal)]
-                            let pane = pane.children(command_drawer);
-                            pane
-                        }),
-                ),
+                .when(!sheet, |d| d.child(self.sidebar(&list, &ui, cx)))
+                .child(right_pane),
         )
-        .child(self.status_bar_with_cli(&list, &ui, cx))
+        .when(!sheet, |d| {
+            d.child(self.status_bar_with_cli(&list, &ui, cx))
+        })
     }
 }
 

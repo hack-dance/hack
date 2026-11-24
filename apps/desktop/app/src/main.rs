@@ -28,6 +28,10 @@ mod doctor_view;
 mod drive;
 mod env_view;
 mod files_view;
+mod follow_up_view;
+mod health_commands;
+mod health_fixtures;
+mod health_model;
 mod logs_view;
 mod machine_view;
 #[cfg(feature = "screenshots")]
@@ -270,10 +274,10 @@ fn main() {
                 WindowOptions {
                     focus: false,
                     show: false,
-                    ..window_options()
+                    ..health_fixtures::window_options(fixture)
                 }
             } else {
-                window_options()
+                health_fixtures::window_options(fixture)
             };
             let (window, app) = gpui_kit::open_window(options, cx, move |window, cx| {
                 match theme {
@@ -285,6 +289,7 @@ fn main() {
                     app.watch_window(window, cx);
                     if let Some(f) = fixture {
                         app.select(fixtures::selected(f));
+                        health_fixtures::open(&mut app, f, window, cx);
                         if fixtures::loads_doctor(f) {
                             app.show_doctor_now();
                             if !fixtures::opens_doctor(f) {

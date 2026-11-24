@@ -289,7 +289,9 @@ Machine-wide autostart progress is exposed locally, not through the unsupported 
 Lifecycle host processes can opt into `lifecycle.runner: "supervisor"` when the
 Rust supervisor executable is installed alongside the CLI. The default stays
 `"mux"`. This mode has no terminal: use noninteractive commands and
-`hack logs -f <name>` to watch output. See the
+`hack logs -f <name>` to watch output. On stop, commands get five seconds to
+respond to TERM. Hack gives the supervisor extra time to confirm they exited on
+a busy host. See the
 [lifecycle runner implementation contract](https://github.com/hack-dance/hack/blob/next/docs/lifecycle-supervisor.md) for prerequisites and
 recovery behavior.
 

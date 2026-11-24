@@ -3,8 +3,9 @@
 Unsupported preview of a minimal native window for Hack: every
 project, its state and services, and Start / Stop / Restart / Open. It is a view
 over the `hack` CLI and the `hackd` socket; it keeps no state beyond window
-layout, holds no credentials and runs `hack` as you for every action. Not part
-of the release or onboarding yet.
+layout and holds no credentials. Project actions run `hack` as you. Service
+Stop uses Docker to target an individual Compose service. This app is outside
+the release and onboarding workflows.
 
 | Crate | What |
 |---|---|
@@ -479,12 +480,29 @@ after the read, plus a known project-only check. A machine-only or ancestor-proj
 report cannot establish Compose project coverage.
 Machine diagnostics remain visible even when a checkout cannot be verified.
 
-Cards group findings by area and offer one copied command or documentation link.
-Project commands include the checkout path. The app never runs a Doctor fix:
-one-click fixes remain blocked on the CLI's explicit safe-fix metadata (R7a/R7b).
-The probes do not use `hack global status`, which can start Docker.
-Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
-[dark](screenshots/doctor-dark.png).
+Doctor groups machine and project findings and folds the passed checks. The
+project pane shows one follow-up at a time. Dismissing it hides that finding
+for the session until its evidence changes.
+
+**Fix all** runs the available repairs in row order in the shared terminal
+drawer. It checks again after each command exits. A failed command or a check
+that cannot confirm the repair stops the queue and keeps the terminal output.
+**Stop** interrupts the current command and cancels the remaining queue. Some
+machine repairs ask for your password inside the terminal. Project repairs
+require the CLI's scoped safe-fix metadata and exact checkout evidence. Guide
+links, manual commands and upgrades stay outside the queue.
+
+The probes do not use `hack global status`, which can start Docker. The update
+banner and Doctor's **Upgrade** row open the Upgrade pane for an available
+release. The pane shows the target version and the CLI's install command for
+copying, when available, alongside its readiness check.
+If hackd is newer than the selected CLI, the banner and Doctor's hackd row
+offer Run and Copy for the CLI update command, or installation guidance. This works
+while release checks are offline.
+The wrong-CLI banner accepts version and replacement evidence as inputs. Its
+examples are fixtures until HACK-2597 supplies that evidence for live checks.
+The fixtures `h17-app-banner-dns`, `h18-banners-sheet`, `h19-doctor`,
+`h20-doctor-fix-all` and `h25-errors-sheet` render both themes.
 
 For integrations, `Card.authored_remedy` exposes an `AuthoredRemedy`: `argv()`
 returns authored arguments without an executable or environment, including each
@@ -635,9 +653,10 @@ each run by the selected CLI in its checked context:
 
 - **Check** (read-only; when the pane opens and on Check again): the CLI's own
   verdict (`ready`: no blockers and nothing incomplete), each blocker and
-  each check that could not run, and the plan with one row per step. A
-  step's command is for copying: the app never runs `hack upgrade apply` or
-  a plan command.
+  each check that could not run, and the plan with one row per step. **Run**
+  opens the selected command in the shared terminal drawer and refreshes the
+  plan on exit. **Copy** is available for running it in another terminal.
+  Reports without structured arguments can still supply copy text.
 - **Save snapshot** keeps a private copy of the files an upgrade changes,
   under the CLI's home, and says what it did not cover.
 - **Review findings** (read-only) lists the findings that cannot be applied
@@ -700,6 +719,23 @@ The Activity tab, per-process CPU and memory for native projects, onboarding, ch
 running an upgrade (`hack upgrade apply`, installing a new version) come in
 later units. The design and the CLI/daemon requests they need
 are in `DESIGN.md` (PR #800).
+
+## Files tab
+
+Choose a running Compose service to browse its working directory. Use the
+parent row, open a directory, or type a path into **Go to file** and press
+Enter. **Show hidden** includes dotfiles.
+
+Worktree files open in the host's text editor. Container and named-volume
+files have read-only previews. **Copy path** copies the path inside the
+container. The app calls `hack files ls|cat --json` for the selected service
+and branch instance and reads the `hack.files.v1` response.
+
+On Linux, **Open in editor** uses the default `text/plain` handler through
+`xdg-mime` and `gtk-launch`. Both tools are needed for this action.
+
+Use `--fixtures files --screenshots <dir>` with the screenshots build to
+render the Files tab in both themes.
 
 ## Logs tab
 
@@ -821,3 +857,34 @@ Process-cleanup regression tests use a generous 60-second scheduling deadline,
 then check process retirement rather than enforcing a short wall-clock latency.
 The stream-drop test also proves the reader was waiting before Drop and that
 Drop's reader join completes. These test allowances do not change CLI timeouts.
+
+## Service details
+
+Select a service from the Services table to open its detail pane. The pane opens
+on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
+Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
+
+- **Info** shows copyable route, health, image, mount, container name and
+  startup information reported for the selected service. A Compose ownership
+  label identifies Docker Compose. The daemon does not report who invoked
+  Compose or the exact start command.
+- **Logs** uses the selected copy’s Hack JSON stream. Switch to any service in
+  that copy or show all services there. Search highlights matching rows. Use
+  **Only matching lines** to hide the rest. The menu also controls wrap and
+  JSON key highlighting and opens the same scope in the terminal drawer.
+- **Terminal** docks the instance’s existing Ghostty drawer in the pane. It
+  reselects a running shell in the chosen service or starts a new one after
+  the last shell exits. The ended tab retains its scrollback. Terminal tabs
+  stay open when you switch detail tabs, and the drawer keeps Ghostty’s
+  configured appearance.
+- **Restart** calls Hack for the selected service. **Stop** targets its
+  observed running Compose containers and confirms their identity with Docker
+  before stopping by full ID. On macOS, the explicit service action accepts
+  Docker CLI installs under the standard system Applications directory when
+  that directory is writable only by root and the local administrators group.
+  The project’s **Stop** still runs instance-wide
+  `hack down`.
+
+With the screenshots feature enabled, run `hack-desktop --service-screenshots
+<dir>` to render the pane’s light and dark fixtures and exercise its tab
+shortcuts through the app keymap.

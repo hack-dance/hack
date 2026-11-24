@@ -568,6 +568,32 @@ export interface Options {
   run: boolean;
 }
 
+const DEVELOPMENT_DISK_BUDGETS = {
+  fresh: ["new-pool-storage-overlay-host-reserve", 58 * GIB],
+  running: ["verified-live-owned-pool-host-reserve", 16 * GIB],
+  stopped: ["verified-stopped-owned-pool-host-reserve", 16 * GIB],
+} as const;
+
+type DevelopmentPool = keyof typeof DEVELOPMENT_DISK_BUDGETS;
+
+/** Verify the public probe's budget independently of the runtime's constants. */
+export function matchesDevelopmentDiskBudget(
+  probe: Record<string, unknown>,
+  pool: DevelopmentPool
+): boolean {
+  const [basis, minimum] = DEVELOPMENT_DISK_BUDGETS[pool];
+  const free = probe.disk_free_bytes;
+  return (
+    probe.profile === "development" &&
+    probe.host_supported === true &&
+    probe.disk_budget_basis === basis &&
+    probe.minimum_disk_free_bytes === minimum &&
+    typeof free === "number" &&
+    Number.isSafeInteger(free) &&
+    free >= 0
+  );
+}
+
 const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hack-v5 --home /abs/empty-private-root \\
   --provider-archive /abs/smolvm-<v>-darwin-arm64.tar.gz --engine-archive /abs/docker-<v>.tgz \\
   --builder-archive /abs/pinned-buildx --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
@@ -1323,20 +1349,10 @@ export class Qualification {
       this.runtime(this.aux, `aux-${name}`, [...args]);
       this.runtime(this.isolated, `isolated-${name}`, [...args]);
     }
-    const probe = this.runtime(this.main, "probe", [
-      "runtime",
-      "probe",
-      "--profile",
-      "development",
-      "--json",
-    ]);
+    const probe = this.probeDevelopmentBudget("fresh");
     writeFileSync(
       join(this.evidence, "probe.json"),
       JSON.stringify(probe, null, 2)
-    );
-    this.check(
-      "runtime probe answers for the development profile",
-      typeof probe === "object"
     );
     const templates = join(this.main, PROVIDER_HOME, ".smolvm");
     this.check(
@@ -1345,6 +1361,25 @@ export class Qualification {
         existsSync(join(templates, name))
       )
     );
+  }
+
+  probeDevelopmentBudget(pool: DevelopmentPool): Record<string, unknown> {
+    const probe = this.runtime(
+      this.main,
+      `probe-development-${pool}`,
+      ["runtime", "probe", "--profile", "development", "--json"],
+      60
+    );
+    this.check(
+      `development disk budget matches the ${pool} pool`,
+      matchesDevelopmentDiskBudget(probe, pool),
+      JSON.stringify({
+        basis: probe.disk_budget_basis,
+        minimum: probe.minimum_disk_free_bytes,
+        free: probe.disk_free_bytes,
+      })
+    );
+    return probe;
   }
 
   /**
@@ -2013,6 +2048,7 @@ export class Qualification {
     Record<string, { size: number; ino: number; dev: number }>
   > {
     this.step = "4 disk identity";
+    this.probeDevelopmentBudget("running");
     const identity = this.diskIdentity();
     const expected = PROFILE_DISKS.development;
     this.check(
@@ -2190,6 +2226,7 @@ export class Qualification {
           // admission never has to fit both pools.
           await this.ensureDown("down-before-network");
           this.stopMainPool("network");
+          this.probeDevelopmentBudget("stopped");
           this.networkModes();
         },
       ],

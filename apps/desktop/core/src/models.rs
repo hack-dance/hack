@@ -559,6 +559,8 @@ pub struct NativePsItem {
     pub service: String,
     #[serde(deserialize_with = "null_default")]
     pub state: String,
+    #[serde(rename = "container")]
+    pub container_id: Option<String>,
     pub health: Option<String>,
     #[serde(rename = "exitCode")]
     pub exit_code: Option<i32>,
@@ -619,6 +621,8 @@ pub struct RuntimeService {
 pub struct Container {
     pub id: Option<String>,
     pub name: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub networks: Vec<ContainerNetwork>,
     pub image: Option<String>,
     #[serde(deserialize_with = "port_text")]
     pub ports: Option<String>,
@@ -647,6 +651,10 @@ fn port_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ContainerNetwork {
+    pub name: String,
+}
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ContainerMount {

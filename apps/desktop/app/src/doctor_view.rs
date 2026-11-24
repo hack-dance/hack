@@ -31,6 +31,8 @@ pub enum Pane {
     #[default]
     Project,
     Doctor,
+    Resources,
+    /// Setup checks (`setup_view`).
     Setup,
     Hackd,
     Upgrade,
@@ -494,7 +496,10 @@ pub fn render(app: &HackApp, ui: &Ui, window: &Window, cx: &mut Context<HackApp>
         .into_any_element()
 }
 
-fn native_pool_card(report: hack_desktop_core::models::NativePoolReport, ui: &Ui) -> gpui_kit::Div {
+pub(crate) fn native_pool_card(
+    report: hack_desktop_core::models::NativePoolReport,
+    ui: &Ui,
+) -> gpui_kit::Div {
     use hack_desktop_core::models::NativePoolState;
     use hack_desktop_ui::{components::dot, status::Status};
     let (status, label) = match report.state {

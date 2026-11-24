@@ -99,7 +99,7 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly beforeStart?: () => Promise<void>;
   /** Recheck ownership before detached Compose can create or replace containers. */
   readonly beforeCreate?: () => Promise<void>;
-  /** The detached create process was spawned and may now affect the runtime. */
+  /** A Compose process that can create containers was spawned. */
   readonly onCreateDispatched?: () => void;
   /** Cancels admission, including while asynchronous startup checks are running. */
   readonly signal?: AbortSignal;
@@ -661,6 +661,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       // forwards each interrupt once, including a second one during shutdown.
       detached: true,
     });
+    opts.onCreateDispatched?.();
 
     let interrupted: number | null = null;
     const forwardInterrupt = (): void => {

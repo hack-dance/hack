@@ -507,8 +507,8 @@ import {
   removeProjectRuntimeStateEntry,
   resolveComposeExecStaleEnvWarning,
   restoreUndispatchedRuntimeLaunch,
+  stageProjectRuntimeLaunch,
   updateProjectRuntimeServiceEnvFingerprints,
-  upsertProjectRuntimeStateEntry,
 } from "../lib/project-runtime-state.ts";
 import {
   captureSharedHelperShutdownGeneration,
@@ -2645,6 +2645,9 @@ export async function runLifecycleCommands(opts: {
   const commands = opts.commands ?? [];
   assertAutostartHostCommandsAllowed({ hasCommands: commands.length > 0 });
   for (const [index, cmd] of commands.entries()) {
+    if (opts.signal?.aborted || opts.startupSignal?.aborted) {
+      return 130;
+    }
     const label = cmd.name ? `${cmd.name}: ${cmd.command}` : cmd.command;
     const startedAt = opts.onHookComplete ? performance.now() : 0;
     if (!opts.onHookComplete) {
@@ -8237,13 +8240,14 @@ async function runUpCommand({
     env: envOverrides.env,
     action: "start",
   });
-  let publishedLaunchId: string | undefined;
+  let publishedLaunch: RuntimeLaunchPublication | undefined;
+  let composeDispatched = false;
   const publishRuntimeSelection = async () => {
-    const daemon = await engine.capture();
+    const captured = await engine.capture();
     if (serviceScoped) {
       return;
     }
-    publishedLaunchId = await persistProjectRuntimeEnvSelection({
+    publishedLaunch ??= await persistProjectRuntimeEnvSelection({
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
       launchComposeBase: baseProjectName,
@@ -8255,8 +8259,7 @@ async function runUpCommand({
           : savedLifecycleKey,
       pinnedComposeBase: expectedComposeProject ? baseProjectName : undefined,
       envName: envOverrides.effectiveEnvName,
-      dockerEnv: envOverrides.env,
-      daemon,
+      engine: captured,
       services: preparedServices,
       envByService: envOverrides.preflightEnvByService,
       composeProfiles: resolveEffectiveComposeProfiles({
@@ -8271,7 +8274,7 @@ async function runUpCommand({
       composeProject: composeProjectName ?? baseProjectName,
       lifecycleComposeProject,
       env: envOverrides.env,
-      launchId: publishedLaunchId,
+      launchId: composeDispatched ? publishedLaunch?.launchId : undefined,
     });
 
   const progress =
@@ -8545,6 +8548,10 @@ async function runUpCommand({
               action: "start",
             });
             await publishRuntimeSelection();
+            await engine.verify();
+          },
+          onCreateDispatched: () => {
+            composeDispatched = true;
           },
           beforeStart: async () => {
             await assertDesktopComposeOwnership({
@@ -8562,6 +8569,7 @@ async function runUpCommand({
               await engine.verify();
             } else {
               await publishRuntimeSelection();
+              await engine.verify();
               // Compose owns foreground shutdown. Lifecycle cleanup runs after
               // it settles; re-raising here would turn one Ctrl-C into two.
               // Keep an owner until the caller's cleanup has also settled.
@@ -8721,6 +8729,7 @@ async function runUpCommand({
         });
 
     if (afterCode !== 0) {
+      await engine.verify();
       await lifecycleCleanup?.();
       if (!json) {
         writeUpHookBlocker("after", afterCode, failedHook, retryCommand);
@@ -8844,8 +8853,18 @@ async function runUpCommand({
     await discardPublishedRuntimeSelection();
     throw error;
   } finally {
-    foregroundTermination.guard?.dispose();
-    signalCleanup.dispose();
+    try {
+      if (publishedLaunch && !composeDispatched) {
+        await restoreUndispatchedRuntimeLaunch({
+          ...publishedLaunch,
+          projectDir: project.projectDir,
+          composeProject: lifecycleComposeProject,
+        });
+      }
+    } finally {
+      foregroundTermination.guard?.dispose();
+      signalCleanup.dispose();
+    }
   }
 }
 
@@ -11078,6 +11097,7 @@ async function runRestartUpPhase(opts: {
   readonly publishLaunch: () => Promise<void>;
   readonly onCreateDispatched: () => void;
   readonly publicationSettled: Promise<void>;
+  readonly settlePublication: () => Promise<void>;
   readonly discardAbsentLaunch: () => Promise<void>;
   readonly detach?: boolean;
   readonly routeStdoutToStderr?: boolean;
@@ -11167,6 +11187,8 @@ async function runRestartUpPhase(opts: {
   // keeps the shared helpers: a start still in flight can start services
   // after any snapshot, so no probe could prove them absent.
   let containerStartBegun = false;
+  let detachedComposeSucceeded = false;
+  let afterHooks: Promise<number> | undefined;
   const cleanupOnSignal = signalCleanupKeepingStartedHelpers({
     cleanup: lifecycleCleanup,
     containerStartBegun: () => containerStartBegun,
@@ -11177,6 +11199,7 @@ async function runRestartUpPhase(opts: {
     cleanup: async (cleanupOptions) => {
       cancellation.abort();
       await opts.publicationSettled;
+      await afterHooks?.catch(() => undefined);
       return await cleanupOnSignal?.(cleanupOptions);
     },
   });
@@ -11256,6 +11279,7 @@ async function runRestartUpPhase(opts: {
             await verifyOwnership();
             cancellation.signal.throwIfAborted();
             await opts.publishLaunch();
+            await opts.assertEngine();
           },
           onCreateDispatched: opts.onCreateDispatched,
           beforeStart: async () => {
@@ -11307,6 +11331,7 @@ async function runRestartUpPhase(opts: {
               await verifyOwnership();
               cancellation.signal.throwIfAborted();
               await opts.publishLaunch();
+              await opts.assertEngine();
             },
             onCreateDispatched: opts.onCreateDispatched,
             beforeStart: async () => {
@@ -11334,6 +11359,7 @@ async function runRestartUpPhase(opts: {
     }
 
     if (opts.detach === true) {
+      detachedComposeSucceeded = true;
       // The containers now run: a later failure keeps their helpers.
       keepSharedHelpers?.();
     }
@@ -11341,15 +11367,21 @@ async function runRestartUpPhase(opts: {
       0,
       opts.budgets.startupTimeoutMs - (performance.now() - upPhase.progressAt())
     );
-    const upAfter = await runLifecycleCommands({
+    await opts.settlePublication();
+    cancellation.signal.throwIfAborted();
+    afterHooks = runLifecycleCommands({
       title: "Lifecycle (restart up after)",
       commands: opts.cfg.lifecycle?.up?.after,
       projectRoot: opts.project.projectRoot,
       env: envOverrides.lifecycleEnv,
       projectDir: opts.project.projectDir,
       composeProject: opts.lifecycleComposeProject,
+      signal: cancellation.signal,
     });
+    const upAfter = await afterHooks;
     if (upAfter !== 0) {
+      cancellation.signal.throwIfAborted();
+      await opts.assertEngine();
       await lifecycleCleanup?.();
       await opts.discardAbsentLaunch();
     }
@@ -11359,7 +11391,13 @@ async function runRestartUpPhase(opts: {
       observationBudgetMs,
     };
   } catch (error: unknown) {
-    if (!cancellation.signal.aborted) {
+    if (
+      !(
+        cancellation.signal.aborted ||
+        (detachedComposeSucceeded &&
+          error instanceof DockerLaunchConnectionError)
+      )
+    ) {
       await retainHelpersIfContainersMayRun();
       await lifecycleCleanup?.();
       await opts.discardAbsentLaunch();
@@ -11458,13 +11496,15 @@ async function runTargetedServiceRestart(opts: {
     allServiceNames: opts.allServiceNames,
     envName: opts.envName,
   });
-  const assertEngine = () =>
-    assertSavedDockerEngine({
+  const engine = createDockerLaunchGuard({
+    projectDir: opts.project.projectDir,
+    record: await readProjectRuntimeStateEntry({
       projectDir: opts.project.projectDir,
-      lifecycleComposeProject: opts.lifecycleComposeProject,
-      env: envOverrides.env,
-    });
-  await assertEngine();
+      composeProject: opts.lifecycleComposeProject,
+    }),
+    env: envOverrides.env,
+  });
+  await engine.capture();
   await assertRegistryCredentialsAvailable({
     projectRoot: opts.project.projectRoot,
     composeFile: opts.project.composeFile,
@@ -11514,7 +11554,7 @@ async function runTargetedServiceRestart(opts: {
     ...envOverrides.composeFiles,
   ];
   const verifyOwnership = async (services: readonly string[]) => {
-    await assertEngine();
+    await engine.verify();
     await requireOwnedServiceContainers({
       project: opts.project,
       composeProjectName: opts.composeProjectName,
@@ -11626,14 +11666,16 @@ async function runTargetedServiceRestart(opts: {
     successfulCompletionServices,
     deadlineMs: upPhase.progressAt() + opts.budgets.startupTimeoutMs,
     read: () =>
-      readComposeServiceStates({
-        project: opts.project,
-        composeProjectName: opts.composeProjectName,
-        profiles: opts.profiles,
-        services: opts.services,
-        env: envOverrides.env,
-        strict: true,
-      }),
+      readOnCapturedDockerEngine(engine.verify, () =>
+        readComposeServiceStates({
+          project: opts.project,
+          composeProjectName: opts.composeProjectName,
+          profiles: opts.profiles,
+          services: opts.services,
+          env: envOverrides.env,
+          strict: true,
+        })
+      ),
   });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
     return {
@@ -12050,7 +12092,7 @@ async function runLocalRestart({
     env: preflightEnv.env,
     projectDir: project.projectDir,
   });
-  const daemon = await engine.capture();
+  const captured = await engine.capture();
   const assertEngine = engine.verify;
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
@@ -12135,21 +12177,14 @@ async function runLocalRestart({
     cliProfiles: profiles,
     composeEnv: preflightEnv.env,
   });
-  const previousLaunches = (
-    await readProjectRuntimeState({ projectDir: project.projectDir })
-  ).filter(
-    (entry) =>
-      entry.composeProject === nextLifecycleKey ||
-      entry.composeProject === lifecycleComposeProject
-  );
-  let launchId: string | undefined;
+  let publishedLaunch: RuntimeLaunchPublication | undefined;
   let dispatched = false;
   const publicationSettled = Promise.withResolvers<void>();
   const onCreateDispatched = () => {
     dispatched = true;
   };
   const publishLaunch = async () => {
-    launchId ??= await persistProjectRuntimeEnvSelection({
+    publishedLaunch ??= await persistProjectRuntimeEnvSelection({
       projectDir: project.projectDir,
       composeProject: nextLifecycleKey,
       replaceComposeProject:
@@ -12161,8 +12196,7 @@ async function runLocalRestart({
       envProjectName: projectName,
       pinnedComposeBase: baseProjectName,
       envName: preflightEnv.effectiveEnvName,
-      dockerEnv: preflightEnv.env,
-      daemon,
+      engine: captured,
       services: allServiceNames,
       envByService: preflightEnv.preflightEnvByService,
       composeProfiles: effectiveProfiles,
@@ -12177,10 +12211,24 @@ async function runLocalRestart({
       composeProject: composeProjectName,
       lifecycleComposeProject: nextLifecycleKey,
       env: preflightEnv.env,
-      launchId,
+      launchId: publishedLaunch?.launchId,
     });
   };
 
+  const settlePublication = async () => {
+    try {
+      if (publishedLaunch && !dispatched) {
+        await restoreUndispatchedRuntimeLaunch({
+          ...publishedLaunch,
+          projectDir: project.projectDir,
+          composeProject: nextLifecycleKey,
+        });
+        publishedLaunch = undefined;
+      }
+    } finally {
+      publicationSettled.resolve();
+    }
+  };
   const upOutcome = await runRestartUpPhase({
     expectComposeProject: compose.expected,
     budgets,
@@ -12197,23 +12245,11 @@ async function runLocalRestart({
     publishLaunch,
     onCreateDispatched,
     publicationSettled: publicationSettled.promise,
+    settlePublication,
     discardAbsentLaunch,
     detach: true,
     routeStdoutToStderr: json,
-  }).finally(async () => {
-    try {
-      if (launchId && !dispatched) {
-        await restoreUndispatchedRuntimeLaunch({
-          projectDir: project.projectDir,
-          composeProject: nextLifecycleKey,
-          launchId,
-          previous: previousLaunches,
-        });
-      }
-    } finally {
-      publicationSettled.resolve();
-    }
-  });
+  }).finally(settlePublication);
 
   const upCode = upOutcome.code;
   if (upCode !== 0) {
@@ -12395,35 +12431,27 @@ async function persistProjectRuntimeEnvSelection(opts: {
   readonly replaceComposeProject?: string;
   readonly pinnedComposeBase?: string;
   readonly envName: string | null;
-  readonly dockerEnv: Readonly<Record<string, string>>;
-  readonly daemon: AdmittedDockerDaemon;
+  readonly engine: CapturedDockerEngine;
   readonly services: readonly string[];
   readonly envByService: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
   /** Profiles Compose activated, so `down` can enable them (HACK-2340). */
   readonly composeProfiles: readonly string[];
-}): Promise<string> {
-  const launchId = crypto.randomUUID();
-  const previous = await readProjectRuntimeStateEntry({
+}): Promise<RuntimeLaunchPublication> {
+  const { launchId, settings, daemon } = opts.engine;
+  const previous = await stageProjectRuntimeLaunch({
     projectDir: opts.projectDir,
-    composeProject: opts.replaceComposeProject ?? opts.composeProject,
-  });
-  await upsertProjectRuntimeStateEntry({
-    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
     replaceComposeProject: opts.replaceComposeProject,
-    entry: {
+    buildEntry: (displaced) => ({
       composeProject: opts.composeProject,
       launchId,
-      dockerEngineSelection: await dockerEngineSelectionFingerprint({
-        env: opts.dockerEnv,
-        cwd: opts.projectDir,
-        launchId,
-      }),
-      ...(opts.daemon.kind === "verified"
+      dockerEngineSelection: settings,
+      ...(daemon.kind === "verified"
         ? {
             dockerDaemonIdentity: dockerDaemonIdentityFingerprint(
-              opts.daemon.id,
+              daemon.id,
               launchId
             ),
           }
@@ -12442,13 +12470,18 @@ async function persistProjectRuntimeEnvSelection(opts: {
         envByService: opts.envByService,
       }),
       composeProfiles: unionProfiles([
-        ...(previous?.composeProfiles ?? []),
+        ...(displaced?.composeProfiles ?? []),
         ...opts.composeProfiles,
       ]),
-    },
+    }),
   });
-  return launchId;
+  return { launchId, previous };
 }
+
+type RuntimeLaunchPublication = {
+  readonly launchId: string;
+  readonly previous: readonly ProjectRuntimeStateEntry[];
+};
 
 export async function assertSavedDockerEngine(opts: {
   readonly projectDir: string;
@@ -12522,6 +12555,12 @@ type AdmittedDockerDaemon = Exclude<
   { readonly kind: "unverified" }
 >;
 
+type CapturedDockerEngine = {
+  readonly launchId: string;
+  readonly settings: string;
+  readonly daemon: AdmittedDockerDaemon;
+};
+
 class DockerLaunchConnectionError extends HackCliError {
   constructor(message: string) {
     super({ code: "E_DOCKER_UNAVAILABLE", message });
@@ -12546,7 +12585,7 @@ function createDockerLaunchGuard(opts: {
   readonly projectDir: string;
   readonly env: Readonly<Record<string, string>>;
 }): {
-  readonly capture: () => Promise<AdmittedDockerDaemon>;
+  readonly capture: () => Promise<CapturedDockerEngine>;
   readonly verify: () => Promise<void>;
 } {
   const selection = {
@@ -12554,9 +12593,7 @@ function createDockerLaunchGuard(opts: {
     env: opts.env,
     launchId: crypto.randomUUID(),
   };
-  let captured:
-    | { readonly settings: string; readonly daemon: AdmittedDockerDaemon }
-    | undefined;
+  let captured: CapturedDockerEngine | undefined;
   const assertSettings = async (settings: string) => {
     if ((await dockerEngineSelectionFingerprint(selection)) !== settings) {
       throw new DockerLaunchConnectionError(
@@ -12584,7 +12621,7 @@ function createDockerLaunchGuard(opts: {
   const capture = async () => {
     if (captured) {
       await verify();
-      return captured.daemon;
+      return captured;
     }
     const settings = await dockerEngineSelectionFingerprint(selection);
     const daemon = await assertDockerLaunchEngine({
@@ -12597,8 +12634,8 @@ function createDockerLaunchGuard(opts: {
       );
     }
     await assertSettings(settings);
-    captured = { settings, daemon };
-    return daemon;
+    captured = { launchId: selection.launchId, settings, daemon };
+    return captured;
   };
   return { capture, verify };
 }

@@ -99,7 +99,10 @@ export async function dockerEngineSelectionFingerprint(opts: {
         ) || "default");
   const endpoint =
     context === "default"
-      ? env.DOCKER_HOST || null
+      ? env.DOCKER_HOST ||
+        (process.platform === "win32"
+          ? "npipe:////./pipe/docker_engine"
+          : "unix:///var/run/docker.sock")
       : await readDockerContextEndpoint({ configDir, context });
   return createHmac("sha256", opts.launchId)
     .update("hack.docker-engine-selection.v1\0")

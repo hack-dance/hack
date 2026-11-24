@@ -95,6 +95,11 @@ If Restart staged a launch before a child could spawn, it restores the previous
 association using the staged launch ID. Successful detached startup accepts
 readiness only while the captured engine matches on both sides of the read.
 Explicit and implicit selection of the same Docker context share a fingerprint.
+Staging captures displaced launch records under the runtime-state lock and
+publishes only the captured engine evidence. Start and Restart recheck that
+evidence after the write. Restart settles its publication before after-hooks
+and cancels those hooks as owned process groups. Scoped readiness uses the same
+captured-engine check, and the explicit default socket matches the implicit one.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

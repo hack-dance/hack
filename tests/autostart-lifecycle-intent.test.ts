@@ -168,6 +168,7 @@ async function installComposeNameFixture(opts?: {
   readonly failAfterCreate?: boolean;
   readonly requireEngineHook?: boolean;
   readonly daemonProbeFailures?: number;
+  readonly daemonAfterStart?: string;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
@@ -280,6 +281,7 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
   if (args.includes("-d")) {
     await rm(created, { force: true });
     await Bun.write(running, stack);
+    if (options.daemonAfterStart) await Bun.write(fixture + "/daemon-id", options.daemonAfterStart);
   }
 } else if (mode === "down") {
   await Bun.write(fixture + "/compose-down", JSON.stringify(args));
@@ -791,6 +793,28 @@ test("unbound service Stop rechecks its daemon after waiting for the Compose loc
   }
 }, 40_000);
 
+test("targeted Restart does not report readiness from a replacement daemon", async () => {
+  const daemon = join(root, "daemon-id");
+  await Bun.write(daemon, "fixture-engine-one");
+  await installComposeNameFixture({ startContainers: true });
+  const started = await run(["up", "-d", "--json"]);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  await installComposeNameFixture({
+    startContainers: true,
+    daemonAfterStart: "fixture-engine-two",
+  });
+  const restarted = await run(["restart", "app", "--json"]);
+  expect(restarted.exitCode).toBe(1);
+  expect(JSON.parse(restarted.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_DOCKER_UNAVAILABLE",
+      message: expect.stringContaining("different Docker daemon"),
+    },
+  });
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+}, 40_000);
+
 test("targeted Restart rechecks its daemon between creation and startup", async () => {
   const daemon = join(root, "daemon-id");
   const release = join(root, "release-start");
@@ -1178,65 +1202,91 @@ test("ordinary Down refuses an interpolated branch stack owned by another checko
 });
 
 const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
-test.skipIf(!supervisorBinary)(
-  "Start reports a daemon change after up.after and preserves the running owner",
-  async () => {
-    const projectRoot = join(root, "project");
-    const projectDir = join(projectRoot, ".hack");
-    const daemon = join(root, "daemon-id");
-    await writeOwnedFixture(
-      join(projectDir, "hack.config.json"),
-      JSON.stringify({
-        name: "sample",
-        lifecycle: {
-          runner: "supervisor",
-          processes: [{ name: "sleeper", command: "exec /bin/sleep 120" }],
-          up: {
-            after: [`printf fixture-engine-two > ${quoteShellWord(daemon)}`],
-          },
-        },
-      })
-    );
-    await installComposeNameFixture({ startContainers: true });
-    const env = {
-      PATH: `${join(root, "bin")}:/usr/bin:/bin`,
-      HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
-    };
-    await Bun.write(daemon, "fixture-engine-one");
-    try {
-      const started = await run(
-        ["up", "-d", "--json"],
-        false,
-        projectRoot,
-        env
-      );
-      expect(started.exitCode).toBe(1);
-      expect(JSON.parse(started.stdout)).toMatchObject({
-        ok: false,
-        error: {
-          code: "E_DOCKER_UNAVAILABLE",
-          message: expect.stringContaining("different Docker daemon"),
-        },
-      });
-      const group =
-        (await readLifecycleState({ projectDir }))[0]?.processes[0]
-          ?.processGroupId ?? 0;
-      expect(group).toBeGreaterThan(1);
-      expect(() => process.kill(-group, 0)).not.toThrow();
-      expect(
-        await readProjectRuntimeStateEntry({
-          projectDir,
-          composeProject: "sample",
-        })
-      ).toMatchObject({ launchComposeBase: "sample" });
-      expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
-    } finally {
+for (const { action, hookExit } of [
+  { action: "up", hookExit: 0 },
+  { action: "up", hookExit: 23 },
+  { action: "restart", hookExit: 23 },
+]) {
+  test.skipIf(!supervisorBinary)(
+    `${action} reports a daemon change after up.after exits ${hookExit} and preserves the running owner`,
+    async () => {
+      const projectRoot = join(root, "project");
+      const projectDir = join(projectRoot, ".hack");
+      const daemon = join(root, "daemon-id");
+      const configure = (withHook: boolean) =>
+        writeOwnedFixture(
+          join(projectDir, "hack.config.json"),
+          JSON.stringify({
+            name: "sample",
+            lifecycle: {
+              runner: "supervisor",
+              processes: [{ name: "sleeper", command: "exec /bin/sleep 120" }],
+              ...(withHook
+                ? {
+                    up: {
+                      after: [
+                        `printf fixture-engine-two > ${quoteShellWord(daemon)}; exit ${hookExit}`,
+                      ],
+                    },
+                  }
+                : {}),
+            },
+          })
+        );
+      await installComposeNameFixture({ startContainers: true });
+      const env = {
+        PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+        HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
+      };
       await Bun.write(daemon, "fixture-engine-one");
-      await run(["down", "--json"], false, projectRoot, env);
-    }
-  },
-  40_000
-);
+      try {
+        if (action === "restart") {
+          await configure(false);
+          const initial = await run(
+            ["up", "-d", "--json"],
+            false,
+            projectRoot,
+            env
+          );
+          expect(initial.exitCode, initial.stderr + initial.stdout).toBe(0);
+        }
+        await configure(true);
+        const started = await run(
+          action === "up" ? ["up", "-d", "--json"] : ["restart", "--json"],
+          false,
+          projectRoot,
+          env
+        );
+        expect(started.exitCode).toBe(1);
+        expect(JSON.parse(started.stdout)).toMatchObject({
+          ok: false,
+          error: {
+            code: "E_DOCKER_UNAVAILABLE",
+            message: expect.stringContaining("different Docker daemon"),
+          },
+        });
+        const group =
+          (await readLifecycleState({ projectDir }))[0]?.processes[0]
+            ?.processGroupId ?? 0;
+        expect(group).toBeGreaterThan(1);
+        expect(() => process.kill(-group, 0)).not.toThrow();
+        expect(
+          await readProjectRuntimeStateEntry({
+            projectDir,
+            composeProject: "sample",
+          })
+        ).toMatchObject({ launchComposeBase: "sample" });
+        expect(await Bun.file(join(root, "compose-running")).exists()).toBe(
+          true
+        );
+      } finally {
+        await Bun.write(daemon, "fixture-engine-one");
+        await run(["down", "--json"], false, projectRoot, env);
+      }
+    },
+    40_000
+  );
+}
 
 test.skipIf(!supervisorBinary)(
   "Start verifies the daemon before reconciling a changed host process",
@@ -1692,6 +1742,72 @@ test("Down and bound readers reject a replacement Docker daemon at the same conn
   expect(down.exitCode, down.stderr + down.stdout).toBe(0);
 }, 40_000);
 
+test("SIGTERM stops a blocked Restart after-hook and skips the remaining hooks", async () => {
+  const projectRoot = join(root, "project");
+  const projectDir = join(projectRoot, ".hack");
+  const entered = join(root, "after-hook-pid");
+  const later = join(root, "later-hook");
+  await installComposeNameFixture({ startContainers: true });
+  const started = await run(["up", "-d", "--json"]);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        up: {
+          after: [
+            `trap '' TERM; printf %s $$ > ${quoteShellWord(entered)}; exec /bin/sleep 20`,
+            `printf ran > ${quoteShellWord(later)}`,
+          ],
+        },
+      },
+    })
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--preload",
+      DOCKER_TRUST_PRELOAD,
+      cli,
+      "--no-interactive",
+      "restart",
+      "--json",
+    ],
+    {
+      cwd: projectRoot,
+      env: privateCliEnv({
+        root,
+        home: join(root, "home"),
+        env: { PATH: `${join(root, "bin")}:/usr/bin:/bin` },
+      }),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    }
+  );
+  try {
+    await waitForCondition(
+      () => Bun.file(entered).exists(),
+      "Restart did not enter up.after"
+    );
+    const pid = Number(await Bun.file(entered).text());
+    expect(pid).toBeGreaterThan(1);
+    child.kill("SIGTERM");
+    expect(
+      await Promise.race([child.exited, Bun.sleep(8000).then(() => null)])
+    ).toBe(143);
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(await Bun.file(later).exists()).toBe(false);
+    expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+    }
+    await child.exited;
+  }
+}, 40_000);
+
 test("a signalled Restart restores the previous launch if Compose was never dispatched", async () => {
   const projectRoot = join(root, "project");
   const projectDir = join(projectRoot, ".hack");
@@ -1794,6 +1910,24 @@ test("Down accepts the same Docker context when its selection changes from expli
   const started = await run(["up", "-d", "--json"], false, undefined, {
     DOCKER_CONFIG: dockerConfig,
     DOCKER_CONTEXT: context,
+  });
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  const stopped = await run(["down", "--json"], false, undefined, {
+    DOCKER_CONFIG: dockerConfig,
+  });
+  expect(stopped.exitCode, stopped.stderr + stopped.stdout).toBe(0);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
+}, 40_000);
+
+test("Down accepts explicit and implicit selection of the default Docker socket", async () => {
+  const dockerConfig = join(root, "home", ".docker");
+  await mkdirOwnedFixture(dockerConfig, true);
+  await writeOwnedFixture(join(dockerConfig, "config.json"), "{}\n");
+  await Bun.write(join(root, "daemon-id"), "fixture-engine-one");
+  await installComposeNameFixture({ startContainers: true });
+  const started = await run(["up", "-d", "--json"], false, undefined, {
+    DOCKER_CONFIG: dockerConfig,
+    DOCKER_HOST: "unix:///var/run/docker.sock",
   });
   expect(started.exitCode, started.stderr + started.stdout).toBe(0);
   const stopped = await run(["down", "--json"], false, undefined, {

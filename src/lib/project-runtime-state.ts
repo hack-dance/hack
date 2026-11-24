@@ -143,6 +143,37 @@ export async function upsertProjectRuntimeStateEntry(opts: {
   );
 }
 
+/** Replace the launch and return the records displaced by this same write. */
+export async function stageProjectRuntimeLaunch(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly replaceComposeProject?: string;
+  readonly buildEntry: (
+    previous: ProjectRuntimeStateEntry | undefined
+  ) => ProjectRuntimeStateEntry;
+}): Promise<readonly ProjectRuntimeStateEntry[]> {
+  let displaced: readonly ProjectRuntimeStateEntry[] = [];
+  await mutateProjectRuntimeState(opts.projectDir, (entries) => {
+    displaced = entries.filter(
+      (entry) =>
+        entry.composeProject === opts.composeProject ||
+        entry.composeProject === opts.replaceComposeProject
+    );
+    const previous = displaced.find(
+      (entry) =>
+        entry.composeProject ===
+        (opts.replaceComposeProject ?? opts.composeProject)
+    );
+    return replaceRuntimeEntry(
+      entries.filter(
+        (entry) => entry.composeProject !== opts.replaceComposeProject
+      ),
+      opts.buildEntry(previous)
+    );
+  });
+  return displaced;
+}
+
 export async function removeProjectRuntimeStateEntry(opts: {
   readonly projectDir: string;
   readonly composeProject: string;

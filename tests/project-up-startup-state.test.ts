@@ -20,10 +20,12 @@ import {
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
 import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
+import { dockerEngineSelectionFingerprint } from "../src/lib/docker-helper-environment.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import {
   readProjectRuntimeState,
   readProjectRuntimeStateEntry,
+  stageProjectRuntimeLaunch,
   upsertProjectRuntimeStateEntry,
 } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -63,6 +65,9 @@ const upStartupTimeouts: Array<number | undefined> = [];
 let upExitCode = 0;
 let cancelRestartBeforeDispatch = false;
 let stagedRestartOverlay: string | null | undefined;
+let replaceLaunchBeforeStaging = false;
+let activeFixtureDaemon: string | undefined;
+let switchDaemonAfterStaging = false;
 let psExitCode = 0;
 let upDurationMs = 0;
 let psDurationMs = 0;
@@ -115,6 +120,27 @@ const runtimeBackendMock = await registerScopedModuleMock({
       name: "compose",
       up: async (opts: RuntimeUpOptions) => {
         if (opts.detach) {
+          if (replaceLaunchBeforeStaging && opts.cwd && opts.composeProject) {
+            const key = {
+              projectDir: opts.cwd,
+              composeProject: opts.composeProject,
+            };
+            const original = await readProjectRuntimeStateEntry(key);
+            if (original) {
+              const launchId = "newer-fixture-launch";
+              await upsertProjectRuntimeStateEntry({
+                projectDir: opts.cwd,
+                entry: {
+                  ...original,
+                  launchId,
+                  envName: "newer",
+                  dockerEngineSelection: await dockerEngineSelectionFingerprint(
+                    { cwd: opts.cwd, env: opts.env ?? {}, launchId }
+                  ),
+                },
+              });
+            }
+          }
           await opts.beforeCreate?.();
           if (
             cancelRestartBeforeDispatch &&
@@ -136,6 +162,9 @@ const runtimeBackendMock = await registerScopedModuleMock({
           opts.onCreateDispatched?.();
         }
         await opts.beforeStart?.();
+        if (!opts.detach) {
+          opts.onCreateDispatched?.();
+        }
         runtimeCalls.push({ kind: "up", opts });
         upComposeContents.push(
           (
@@ -244,7 +273,29 @@ const engineIdentityMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/lib/docker-helper-environment.ts",
   overrides: {
-    readDockerDaemonIdentity: () => Promise.resolve({ kind: "unsupported" }),
+    readDockerDaemonIdentity: () =>
+      Promise.resolve(
+        activeFixtureDaemon
+          ? { kind: "verified", id: activeFixtureDaemon }
+          : { kind: "unsupported" }
+      ),
+  },
+});
+
+const realStageProjectRuntimeLaunch = stageProjectRuntimeLaunch;
+const runtimeStateMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/project-runtime-state.ts",
+  overrides: {
+    stageProjectRuntimeLaunch: async (
+      opts: Parameters<typeof stageProjectRuntimeLaunch>[0]
+    ) => {
+      const displaced = await realStageProjectRuntimeLaunch(opts);
+      if (switchDaemonAfterStaging) {
+        activeFixtureDaemon = "fixture-two";
+      }
+      return displaced;
+    },
   },
 });
 
@@ -279,6 +330,7 @@ beforeAll(() => {
   shellMock.activate();
   enginePreflightMock.activate();
   engineIdentityMock.activate();
+  runtimeStateMock.activate();
   loggerMock.activate();
 });
 
@@ -305,6 +357,9 @@ afterEach(async () => {
   upExitCode = 0;
   cancelRestartBeforeDispatch = false;
   stagedRestartOverlay = undefined;
+  replaceLaunchBeforeStaging = false;
+  activeFixtureDaemon = undefined;
+  switchDaemonAfterStaging = false;
   psExitCode = 0;
   upDurationMs = 0;
   psDurationMs = 0;
@@ -341,6 +396,7 @@ afterAll(() => {
   shellMock.deactivate();
   enginePreflightMock.deactivate();
   engineIdentityMock.deactivate();
+  runtimeStateMock.deactivate();
   loggerMock.deactivate();
 });
 
@@ -1711,13 +1767,42 @@ test("a pre-create cancellation restores the previous Restart overlay before dis
   const original = await readProjectRuntimeStateEntry(launch);
   expect(original?.envName).toBeNull();
   cancelRestartBeforeDispatch = true;
+  replaceLaunchBeforeStaging = true;
   await expect(runRestart({ projectRoot, env: "qa" })).rejects.toMatchObject({
     name: "AbortError",
   });
   expect(stagedRestartOverlay).toBe("qa");
-  expect(await readProjectRuntimeStateEntry(launch)).toEqual(original);
+  expect(await readProjectRuntimeStateEntry(launch)).toMatchObject({
+    envName: "newer",
+    launchId: "newer-fixture-launch",
+  });
   expect(runtimeCalls.filter((call) => call.kind === "up")).toHaveLength(1);
 });
+
+for (const action of ["up", "restart"] as const) {
+  test(`${action} restores the displaced record if the daemon changes while staging`, async () => {
+    const projectRoot = await createProject();
+    const projectDir = resolve(projectRoot, ".hack");
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+    activeFixtureDaemon = "fixture-one";
+    expect(await runDetachedUp({ projectRoot })).toBe(0);
+    const launch = { projectDir, composeProject: "startup-state-test" };
+    const original = await readProjectRuntimeStateEntry(launch);
+    switchDaemonAfterStaging = true;
+    const attempt =
+      action === "up"
+        ? runDetachedUp({ projectRoot })
+        : runRestart({ projectRoot });
+    await expect(attempt).rejects.toMatchObject({
+      code: "E_DOCKER_UNAVAILABLE",
+      message: expect.stringContaining("different Docker daemon"),
+    });
+    expect(await readProjectRuntimeStateEntry(launch)).toEqual(original);
+    expect(runtimeCalls.filter((call) => call.kind === "up")).toHaveLength(1);
+  });
+}
 
 test("full restart cleans the lifecycle owner and retains the launch after a Docker inspection failure", async () => {
   const projectRoot = await createProject();

@@ -35,6 +35,18 @@ import {
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
+import {
+  extendRemoteEnv,
+  observedRemoteChoices,
+  prepareRemoteDown,
+  prepareRemoteStartup,
+  recordStartedRemotes,
+  remotePrerequisites,
+} from "../lib/project-remote-compose.ts";
+import {
+  prepareRemoteChoices,
+  refuseRemoteStart,
+} from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import { printUpTimings } from "../lib/up-timings-output.ts";
 import {
@@ -120,6 +132,7 @@ import {
   nativeProjectLogServices,
   nativeProjectLogs,
   nativeProjectPs,
+  nativeStartupProjectPs,
   requireComposeOperationAvailable,
 } from "../backends/native-project-observe.ts";
 import {
@@ -140,6 +153,7 @@ import {
 import {
   type NativeProjectRunScope,
   nativeForeignHomeRefusal,
+  nativeProjectStartupPending,
 } from "../backends/native-project-run.ts";
 import {
   nativeAdaptationCandidates,
@@ -186,6 +200,7 @@ import {
   optSince,
   optTail,
   optUntil,
+  optUse,
 } from "../cli/options.ts";
 import {
   parseProjectSelectorOption,
@@ -768,6 +783,7 @@ const upOptions = [
   optPath,
   optProject,
   optEnv,
+  optUse,
   optBranch,
   optDetach,
   optProfile,
@@ -7668,6 +7684,9 @@ async function handleUpUnlocked({
   if (args.options.refreshImages && args.options.offline) {
     throw new CliUsageError("Use either --refresh-images or --offline.");
   }
+  if (native && args.options.use !== undefined) {
+    throw new CliUsageError("--use requires the Compose backend.");
+  }
   if (native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,
@@ -7904,9 +7923,15 @@ async function runUpCommand({
     throw error;
   }
   const cfg = await readProjectConfig(project);
+  const choices = await prepareRemoteChoices({
+    projectDir: project.projectDir,
+    defaults: cfg.prerequisites?.config?.selected ?? [],
+    services: args.positionals.services,
+    use: args.options.use,
+  });
   if (
     !(await enforceProjectPrerequisites(
-      cfg.prerequisites,
+      remotePrerequisites(cfg, choices),
       json,
       project.projectRoot,
       { composeFile: project.composeFile, services: args.positionals.services }
@@ -8012,7 +8037,17 @@ async function runUpCommand({
         composeFile: project.composeFile,
       })
     : null;
-  const targetServices = serviceScoped ? requestedServices : allServiceNames;
+  const remoteStartup = await prepareRemoteStartup({
+    project,
+    baseProjectName,
+    composeProject: composeProjectName,
+    profiles,
+    envName,
+    choices,
+  });
+  const targetServices =
+    remoteStartup?.targets ??
+    (serviceScoped ? requestedServices : allServiceNames);
   const cacheBootstrapServices = scopedDependencyCache
     ? await resolveDependencyCacheBootstrapServices({
         composeFile: project.composeFile,
@@ -8023,7 +8058,7 @@ async function runUpCommand({
   const preparedServices = [
     ...new Set([...targetServices, ...cacheBootstrapServices]),
   ];
-  const envOverrides = await resolveComposeEnvOverrides({
+  const managedOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
     targetServices: preparedServices,
@@ -8031,6 +8066,11 @@ async function runUpCommand({
     envName,
   });
 
+  const envOverrides = extendRemoteEnv(
+    managedOverrides,
+    remoteStartup,
+    choices
+  );
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
@@ -8296,6 +8336,7 @@ async function runUpCommand({
       return bootstrapCode;
     }
     const upPhase = trackComposeStartupPhase();
+    await remoteStartup?.stopInactive();
     containerStartBegun = true;
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,
@@ -8336,7 +8377,7 @@ async function runUpCommand({
           cwd: dirname(project.composeFile),
           env: envOverrides.env,
           routeStdoutToStderr: json,
-          services: serviceScoped ? targetServices : undefined,
+          services: serviceScoped || remoteStartup ? targetServices : undefined,
           noDeps: serviceScoped,
         }),
     });
@@ -8526,6 +8567,11 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
+    await recordStartedRemotes(
+      project.projectDir,
+      lifecycleComposeProject,
+      choices
+    );
     if (!showBeforeAfter) {
       progress?.services(startup);
     }
@@ -9151,6 +9197,13 @@ async function runDownCommand({
     envName: effectiveEnvName,
   });
 
+  const hookEnv = await prepareRemoteDown({
+    project,
+    cfg,
+    composeProjectName,
+    lifecycleComposeProject,
+    env: lifecycleEnv,
+  });
   const interruptionCheck = await checkOneShotInterruption({
     project,
     composeProjectName,
@@ -9215,7 +9268,7 @@ async function runDownCommand({
       title: "Lifecycle (down before)",
       commands: cfg.lifecycle?.down?.before,
       projectRoot: project.projectRoot,
-      env: lifecycleEnv,
+      env: hookEnv,
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
     });
@@ -9379,7 +9432,7 @@ async function runDownCommand({
     title: "Lifecycle (down after)",
     commands: cfg.lifecycle?.down?.after,
     projectRoot: project.projectRoot,
-    env: lifecycleEnv,
+    env: hookEnv,
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
@@ -10450,6 +10503,7 @@ async function handleRestart({
         ...args,
         options: {
           ...args.options,
+          use: undefined,
           detach: false,
           always: false,
           refreshImages: false,
@@ -10517,6 +10571,7 @@ async function runRestartCommand({
     projectOpt: args.options.project,
   });
   const cfg = await readProjectConfig(project);
+  refuseRemoteStart(cfg.prerequisites?.config?.selected, "hack restart");
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
@@ -11471,7 +11526,10 @@ async function handlePs({
     }),
     entries,
   });
-  const remotes = projectRemoteStatuses(cfg.prerequisites?.config?.selected);
+  const remotes = projectRemoteStatuses(
+    cfg.prerequisites?.config?.selected,
+    await observedRemoteChoices(project, cfg, composeProjectName, entries)
+  );
   if (json) {
     const payload = {
       project: baseProjectName,
@@ -11646,6 +11704,7 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
+  refuseRemoteStart(cfg.prerequisites?.config?.selected, "hack run");
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
@@ -13369,6 +13428,14 @@ async function handleOpen({
   const baseHosts = resolveProjectRouteBaseHosts({ devHost, aliasHost });
 
   const targetRaw = (args.positionals.target ?? "").trim();
+  const startupOrigin = await startupOpenOrigin({
+    target: targetRaw,
+    project,
+    branch,
+  });
+  if (startupOrigin !== null) {
+    return await emitOpenOrigin({ url: startupOrigin, json, origin: "native" });
+  }
   const preferenceRaw = args.options.prefer;
   const optionPreference = parseOpenHostPreference(preferenceRaw);
   if (preferenceRaw !== undefined && !optionPreference) {
@@ -13599,6 +13666,40 @@ export function resolveOpenUrl(opts: {
  * frontend, which may listen on another port (for example 18443). The target
  * is checked first: Grafana and full URLs never consult the native runtime.
  */
+async function startupOpenOrigin(opts: {
+  readonly target: string;
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly branch: string | null;
+}): Promise<string | null> {
+  const runtime = resolveNativeRuntimeSelection();
+  if (!(runtime && openTargetIsProjectHost(opts.target))) {
+    return null;
+  }
+  const scope = {
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    nativeHome: runtime.home,
+    branch: opts.branch,
+  };
+  if (!(await nativeProjectStartupPending(scope))) {
+    return null;
+  }
+  const snapshot = await nativeStartupProjectPs({ runtime, scope });
+  const ports = snapshot?.ports?.filter(
+    (port) =>
+      port.state === "observed" &&
+      (!opts.target || port.service === opts.target)
+  );
+  if (ports?.length === 1) {
+    return `http://127.0.0.1:${ports[0]?.port}`;
+  }
+  throw new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message:
+      "Native project is still starting. The requested address is not available yet.",
+  });
+}
+
 async function resolveNativeOpenPort(opts: {
   readonly targetRaw: string;
   readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;

@@ -40,8 +40,10 @@ use std::{
     io::Read,
     os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     path::Path,
+    time::Instant,
 };
 
+const TRIM_MIN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SCAN_ENTRIES: usize = 20_000;
 const MAX_SCAN_DEPTH: usize = 8;
 const MAX_SCAN_FILE: u64 = 16 * 1024 * 1024;
@@ -70,6 +72,16 @@ pub struct ReclaimReport {
     pub retained: BTreeMap<String, Retained>,
     /// Build cache bytes reclaimed; `None` when the prune failed (images unaffected).
     pub cache_reclaimed_bytes: Option<u64>,
+    /// Present only for a confirmed discard. The byte count is guest free-space
+    /// growth during reclaim, not a measurement of host blocks returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trim: Option<TrimReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrimReport {
+    pub guest_bytes_freed: u64,
+    pub seconds: f64,
 }
 
 /// Engine effects reclamation needs beyond a build pool.
@@ -80,6 +92,7 @@ pub(super) trait ReclaimPool: BuildPool {
     fn base_images(&self, lease: &Self::Lease) -> Result<Vec<Value>, CandidateError>;
     /// Remove one image by content ID without force. `Ok(false)` when the engine refuses.
     fn remove(&self, lease: &Self::Lease, image: &str) -> Result<bool, CandidateError>;
+    fn trim(&self, lease: &Self::Lease) -> Result<(), CandidateError>;
 }
 
 fn unprovable() -> CandidateError {
@@ -359,6 +372,7 @@ pub(super) fn plan(
 pub(super) fn run<P: ReclaimPool>(
     candidate: &Candidate,
     pool: &P,
+    allow_trim: bool,
 ) -> Result<ReclaimReport, CandidateError> {
     let _fence = image_fence(candidate, libc::LOCK_EX)?;
     let (lease, identity) = pool.lease()?;
@@ -379,6 +393,9 @@ pub(super) fn run<P: ReclaimPool>(
         &current.builds,
         &referenced,
     )?;
+    let free_before = allow_trim
+        .then(|| pool.storage_available(&lease).ok())
+        .flatten();
     let mut removed = Vec::new();
     for id in candidates {
         match pool.remove(&lease, &id) {
@@ -410,10 +427,27 @@ pub(super) fn run<P: ReclaimPool>(
         }
     }
     let cache_reclaimed_bytes = pool.prune_cache(&lease, CACHE_BUDGET).ok();
+    let trim = (|| {
+        let before = free_before?;
+        if removed.is_empty() && cache_reclaimed_bytes.unwrap_or_default() == 0 {
+            return None;
+        }
+        let guest_bytes_freed = pool.storage_available(&lease).ok()?.saturating_sub(before);
+        if guest_bytes_freed < TRIM_MIN_BYTES {
+            return None;
+        }
+        let started = Instant::now();
+        pool.trim(&lease).ok()?;
+        Some(TrimReport {
+            guest_bytes_freed,
+            seconds: started.elapsed().as_secs_f64(),
+        })
+    })();
     Ok(ReclaimReport {
         removed,
         retained,
         cache_reclaimed_bytes,
+        trim,
     })
 }
 
@@ -441,6 +475,16 @@ impl ReclaimPool for LivePool<'_> {
         .cloned()
         .ok_or_else(|| refusal("engine_protocol", "The engine image list is not an array."))
     }
+
+    fn trim(&self, lease: &Self::Lease) -> Result<(), CandidateError> {
+        // execute_cleanup checks the live boot, owner and ext4 mount. Keep the
+        // same operation lease held across the guest command and its result.
+        lease
+            .guest()
+            .execute_cleanup("fstrim /storage", &[])
+            .map(drop)
+    }
+
     fn remove(&self, lease: &Self::Lease, image: &str) -> Result<bool, CandidateError> {
         match lease.request(reqwest::Method::DELETE, &removal_path(image), None) {
             Ok(_) => Ok(true),
@@ -465,6 +509,7 @@ pub fn reclaim_build_images(candidate: &Candidate) -> Result<ReclaimReport, Cand
             candidate,
             build_deadline: None,
         },
+        true,
     )
 }
 
@@ -490,7 +535,8 @@ pub struct BestEffortReport {
 /// or error becomes `skipped` in the report instead. Bounded like [`run`]: a
 /// non-blocking lease, bounded scans and one removal call per candidate image.
 pub(super) fn best_effort<P: ReclaimPool>(candidate: &Candidate, pool: &P) -> BestEffortReport {
-    match run(candidate, pool) {
+    // The frontend invokes this form during project up. Only manual reclaim trims.
+    match run(candidate, pool, false) {
         Ok(report) => BestEffortReport {
             report,
             skipped: None,
@@ -500,6 +546,7 @@ pub(super) fn best_effort<P: ReclaimPool>(candidate: &Candidate, pool: &P) -> Be
                 removed: Vec::new(),
                 retained: BTreeMap::new(),
                 cache_reclaimed_bytes: None,
+                trim: None,
             },
             skipped: Some(Skipped {
                 code: error.code,

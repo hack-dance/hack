@@ -201,3 +201,68 @@ test("a dotenv-overlay-only project: hack up --env staging, hack down, then a ba
   );
   expect(await readFile(log, "utf8")).toBe("");
 });
+
+/** A one-volume backup, as export writes it (verified before any engine call). */
+async function writeBackup(): Promise<string> {
+  const sha = (text: string): string =>
+    new Bun.CryptoHasher("sha256").update(text).digest("hex");
+  const dir = join(root, "backups", "20261124T090000Z");
+  await mkdir(dir, { recursive: true });
+  const bytes = "tar bytes";
+  await writeFile(join(dir, "data.tar"), bytes);
+  await writeFile(
+    join(dir, "manifest.json"),
+    `${JSON.stringify({
+      schema: "hack.data-backup.v1",
+      project: "envshop",
+      branch: null,
+      composeProjectSha256: sha("hack"),
+      createdAt: "2026-11-24T09:00:00.000Z",
+      hackVersion: "9.9.9",
+      helperImage: "oven/bun@sha256:x",
+      digestAlgorithm: "hack.tree-digest.v1",
+      volumes: [
+        {
+          key: "data",
+          nameSha256: sha("envshop_data-staging"),
+          driver: "local",
+          labelsSha256: {
+            "com.docker.compose.project": sha("hack"),
+            "com.docker.compose.volume": sha("data"),
+          },
+          file: "data.tar",
+          tarBytes: bytes.length,
+          tarSha256: sha(bytes),
+          entries: 2,
+          excludedSockets: 0,
+          contentDigest: "a".repeat(64),
+        },
+      ],
+      skipped: [],
+    })}\n`
+  );
+  return dir;
+}
+
+test("hack data import finds the directory-keyed record after up --env staging, and refuses after down", async () => {
+  // `.hack/` holds an unnamed Compose file, so next's up keys the record by
+  // the directory-based project (`hack`), not the config name (`envshop`).
+  const backup = await writeBackup();
+  expect((await hack(["up", "--env", "staging", "--json"])).exitCode).toBe(0);
+
+  const recorded = await hack(["data", "import", backup, "--json"]);
+  expect(recorded.exitCode).not.toBe(0);
+  expect(recorded.stdout).not.toContain("E_USAGE");
+  // Past the env selection, to the Compose model read (which the stub fails).
+  expect(await configCalls()).toHaveLength(1);
+
+  expect((await hack(["down", "--json"])).exitCode).toBe(0);
+  await writeFile(log, "");
+  const bare = await hack(["data", "import", backup, "--json"]);
+  expect(bare.exitCode).not.toBe(0);
+  expect(bare.stdout).toContain("E_USAGE");
+  expect(bare.stdout).toContain(
+    "This project has environment overlays (staging); the environment `hack up` used is no longer recorded."
+  );
+  expect(await readFile(log, "utf8")).toBe("");
+});

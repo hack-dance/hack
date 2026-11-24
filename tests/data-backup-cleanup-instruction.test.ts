@@ -32,13 +32,13 @@ test("a managed context is carried on both sides of the pipe", () => {
 
 test("a context name carrying another managed value has it redacted", () => {
   // Not a credential: a stand-in for a managed secret.
-  const secret = "ctx-secret-canary-91ab";
+  const managed = "ctx-managed-canary-91ab";
   const { command } = rawCleanupInstruction({
     nonce: NONCE,
-    engine: { host: null, context: `team-${secret}` },
-    redactValues: [`team-${secret}`, secret],
+    engine: { host: null, context: `team-${managed}` },
+    redactValues: [`team-${managed}`, managed],
   });
-  expect(command).not.toContain(secret);
+  expect(command).not.toContain(managed);
   expect(command).toContain("--context team-[REDACTED]");
 });
 

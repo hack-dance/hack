@@ -95,14 +95,16 @@ test.each(
     volumes?: Record<string, object>;
   };
   const mounts = config.services[recipe.name]?.volumes ?? [];
-  expect(Object.values(recipe.volumes).sort()).toEqual(
-    IMAGE_VOLUMES[recipe.image]
-  );
-  expect(mounts.map((mount) => mount.split(":")[1]).sort()).toEqual(
-    IMAGE_VOLUMES[recipe.image]
-  );
-  expect(Object.keys(config.volumes ?? {}).sort()).toEqual(
-    mounts.map((mount) => mount.split(":")[0]).sort()
+  const expected = IMAGE_VOLUMES[recipe.image];
+  if (!expected) {
+    throw new Error(`Missing image-volume inventory for ${recipe.image}`);
+  }
+  expect(Object.values(recipe.volumes).sort()).toEqual([...expected]);
+  expect(mounts.map((mount) => mount.split(":")[1]).sort()).toEqual([
+    ...expected,
+  ]);
+  expect(mounts.map((mount) => mount.split(":")[0]).sort()).toEqual(
+    Object.keys(config.volumes ?? {}).sort()
   );
 });
 

@@ -7683,11 +7683,15 @@ async function handleUp(
   if (!login) {
     await updateAutostartIntent({ ...input, action: "up" });
   }
-  const run = async (loginComposeBase?: string) => {
+  const run = async (loginComposeBase?: string, lockedComposeName?: string) => {
     if (login) {
       await updateAutostartIntent({ ...input, action: "up" });
     }
-    return await handleUpUnlocked({ ...input, loginComposeBase });
+    return await handleUpUnlocked({
+      ...input,
+      loginComposeBase,
+      lockedComposeName,
+    });
   };
   // Foreground up owns the terminal until shutdown; its existing supervisor
   // handles stopping. Never hold this startup lock for that whole lifetime.
@@ -7771,10 +7775,12 @@ async function handleUpUnlocked({
   ctx,
   args,
   loginComposeBase,
+  lockedComposeName,
 }: {
   readonly ctx: CliContext;
   readonly args: UpArgs;
   readonly loginComposeBase?: string;
+  readonly lockedComposeName?: string;
 }): Promise<number> {
   prepareLifecycleProgress({
     action: "up",
@@ -7947,7 +7953,13 @@ async function handleUpUnlocked({
   }
   const json = args.options.json === true;
   if (!json) {
-    return await runUpCommand({ ctx, args, json: false, loginComposeBase });
+    return await runUpCommand({
+      ctx,
+      args,
+      json: false,
+      loginComposeBase,
+      lockedComposeName,
+    });
   }
 
   // `--json`: keep stdout reserved for the result envelope.
@@ -7960,6 +7972,7 @@ async function handleUpUnlocked({
       json: true,
       startedAtMs,
       loginComposeBase,
+      lockedComposeName,
     });
   } catch (error: unknown) {
     return emitLifecycleResult({
@@ -8001,19 +8014,21 @@ function printedUpRetry(argv: readonly string[]): string {
   return printedShellCommand(words);
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: `up` orchestrates remote routing, lifecycle hooks, compose, and the JSON envelope in one linear flow.
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: `up` resolves remote routing and local launch inputs in one flow.
 async function runUpCommand({
   ctx,
   args,
   json,
   startedAtMs,
   loginComposeBase,
+  lockedComposeName,
 }: {
   readonly ctx: CliContext;
   readonly args: UpArgs;
   readonly json: boolean;
   readonly startedAtMs?: number;
   readonly loginComposeBase?: string;
+  readonly lockedComposeName?: string;
 }): Promise<number> {
   const detach = args.options.detach || json;
   const startedAt = performance.now();
@@ -8051,7 +8066,6 @@ async function runUpCommand({
     return 1;
   }
   budgets = await withProjectComposeBudgets({ budgets, detach, project });
-  const { startupTimeoutMs } = budgets;
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -8167,6 +8181,7 @@ async function runUpCommand({
     targetServices: preparedServices,
     allServiceNames,
     envName,
+    persist: !detach,
   });
   const baseProjectName = await resolveUpComposeBase({
     project,
@@ -8178,10 +8193,138 @@ async function runUpCommand({
       args.options.expectComposeProject !== undefined ||
       loginComposeBase !== undefined,
   });
+  const target = resolveRestartTarget({ baseProjectName, branch });
+  const finalName = target.composeProjectName ?? baseProjectName;
+  if (lockedComposeName !== undefined && lockedComposeName !== finalName) {
+    throw new HackCliError({
+      code: "E_CANCELLED",
+      message: "The Compose project changed during startup. Retry the command.",
+    });
+  }
+  const lockName =
+    detach && lockedComposeName === undefined ? finalName : undefined;
+  return await withCancellableComposeStartLock(lockName, () =>
+    runResolvedComposeUp({
+      args,
+      json,
+      startedAtMs,
+      startedAt,
+      detach,
+      budgets,
+      project,
+      cfg,
+      branch,
+      profiles,
+      projectName,
+      rawComposeBase,
+      baseProjectName,
+      loginComposeBase,
+      target,
+      devHost,
+      aliasHost,
+      allServiceNames,
+      requestedServices,
+      targetServices,
+      preparedServices,
+      cacheBootstrapServices,
+      scopedDependencyCache,
+      envOverrides,
+    })
+  );
+}
+
+/** A canceled waiter removes its owner candidate before re-raising the signal. */
+async function withCancellableComposeStartLock<T>(
+  name: string | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  if (name === undefined) {
+    return await run();
+  }
+  const cancellation = new AbortController();
+  const settled = Promise.withResolvers<void>();
+  const signals = installLifecycleSignalCleanup({
+    cleanup: async () => {
+      cancellation.abort();
+      await settled.promise;
+    },
+  });
+  try {
+    return await withComposeNameLock(
+      name,
+      () => {
+        signals.dispose();
+        return run();
+      },
+      cancellation.signal
+    );
+  } finally {
+    settled.resolve();
+    signals.dispose();
+  }
+}
+
+/** Resolve saved launch and process ownership only after name-lock admission. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Compose startup settles hooks, managed processes and detached dispatch in one flow.
+async function runResolvedComposeUp({
+  args,
+  json,
+  startedAtMs,
+  startedAt,
+  detach,
+  budgets,
+  project,
+  cfg,
+  branch,
+  profiles,
+  projectName,
+  rawComposeBase,
+  baseProjectName,
+  loginComposeBase,
+  target,
+  devHost,
+  aliasHost,
+  allServiceNames,
+  requestedServices,
+  targetServices,
+  preparedServices,
+  cacheBootstrapServices,
+  scopedDependencyCache,
+  envOverrides,
+}: {
+  readonly args: UpArgs;
+  readonly json: boolean;
+  readonly startedAtMs?: number;
+  readonly startedAt: number;
+  readonly detach: boolean;
+  readonly budgets: ReturnType<typeof resolveDetachedComposeBudgets>;
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly branch: string | null;
+  readonly profiles: readonly string[];
+  readonly projectName: string;
+  readonly rawComposeBase: string;
+  readonly baseProjectName: string;
+  readonly loginComposeBase?: string;
+  readonly target: ReturnType<typeof resolveRestartTarget>;
+  readonly devHost: Awaited<ReturnType<typeof resolveRuntimeDevHost>>;
+  readonly aliasHost: ReturnType<typeof resolveBranchAliasHost>;
+  readonly allServiceNames: readonly string[];
+  readonly requestedServices: readonly string[];
+  readonly targetServices: readonly string[];
+  readonly preparedServices: readonly string[];
+  readonly cacheBootstrapServices: readonly string[];
+  readonly scopedDependencyCache: Awaited<
+    ReturnType<typeof resolveDependencyCacheOverride>
+  > | null;
+  readonly envOverrides: Awaited<ReturnType<typeof resolveComposeEnvOverrides>>;
+}): Promise<number> {
+  const { startupTimeoutMs } = budgets;
   const {
     lifecycleComposeProject: exactLifecycleKey,
     composeProjectName: branchProjectName,
-  } = resolveRestartTarget({ baseProjectName, branch });
+  } = target;
+  const serviceScoped = requestedServices.length > 0;
   const savedLifecycle = await resolveStoredComposeLifecycleKey({
     project,
     branch,
@@ -8207,12 +8350,6 @@ async function runUpCommand({
   const expectedComposeProject =
     args.options.expectComposeProject ??
     (detach || pinnedBase ? (composeProjectName ?? undefined) : undefined);
-  const lockName =
-    detach &&
-    args.options.expectComposeProject === undefined &&
-    loginComposeBase === undefined
-      ? (composeProjectName ?? undefined)
-      : undefined;
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
 
   // Preserve the owner of a live upgraded session. Its controller must see
@@ -8515,26 +8652,25 @@ async function runUpCommand({
       aliasHost,
       composeProject: composeProjectName ?? baseProjectName,
     });
-    const composeFilesWithEnv = [
+    const composeFilesWithMetadata = [
       ...composeFilesWithRuntimeOverrides,
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-      ...envOverrides.composeFiles,
     ];
     if (!progress) {
       reportComposeStartupBudget({ budgets, detach });
     }
-    const verifyOwnership = () =>
-      assertDesktopComposeOwnership({
-        expected: expectedComposeProject,
-        project,
-        composeProjectName,
-        profiles,
-        env: envOverrides.env,
-        composeFiles: composeFilesWithEnv,
-        action: "start",
-      });
     const upPhase = trackComposeStartupPhase();
-    const launch = async () => {
+    const launch = async (composeFilesWithEnv: readonly string[]) => {
+      const verifyOwnership = () =>
+        assertDesktopComposeOwnership({
+          expected: expectedComposeProject,
+          project,
+          composeProjectName,
+          profiles,
+          env: envOverrides.env,
+          composeFiles: composeFilesWithEnv,
+          action: "start",
+        });
       cancellation.signal.throwIfAborted();
       await engine.capture();
       if (serviceScoped) {
@@ -8624,9 +8760,25 @@ async function runUpCommand({
           }),
       });
     };
-    const guarded = await withComposeNameLock(lockName, () =>
-      launch().finally(settlePublication)
-    );
+    const launchWithEnv = async () => {
+      if (!detach) {
+        return await launch([
+          ...composeFilesWithMetadata,
+          ...envOverrides.composeFiles,
+        ]);
+      }
+      if (!envOverrides.referenceText) {
+        await clearComposeEnvOverride({ projectDir: project.projectDir });
+        return await launch(composeFilesWithMetadata);
+      }
+      return await withComposeEnvOverride({
+        projectDir: project.projectDir,
+        text: envOverrides.referenceText,
+        signal: cancellation.signal,
+        run: (path) => launch([...composeFilesWithMetadata, path]),
+      });
+    };
+    const guarded = await launchWithEnv().finally(settlePublication);
     cancellation.signal.throwIfAborted();
     if ("bootstrapCode" in guarded) {
       const { bootstrapCode } = guarded;

@@ -171,6 +171,7 @@ async function installComposeNameFixture(opts?: {
   readonly daemonAfterStart?: string;
   readonly daemonDuringOwnershipCheck?: string;
   readonly rememberCheckout?: boolean;
+  readonly recordStartReferences?: boolean;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
@@ -285,6 +286,13 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
     }
   }
   if (!options.startContainers) process.exit(1);
+  if (options.recordStartReferences) {
+    const references = args.find((arg) => arg.endsWith("/compose.env.override.yml"));
+    const app = YAML.parse(await Bun.file(references).text()).services.app.environment;
+    const keys = Object.entries(app).map(([key, reference]) => [key, process.env[reference.slice(2, -1)] !== undefined]);
+    const phase = args.includes("--no-start") ? "create" : "start";
+    await Bun.write(fixture + "/references-" + stack + "-" + phase, JSON.stringify(Object.fromEntries(keys)));
+  }
   if (args.includes("-d")) {
     await rm(created, { force: true });
     await Bun.write(running, stack);
@@ -838,25 +846,31 @@ test("targeted Restart rechecks the daemon after the ownership read", async () =
   expect(await Bun.file(join(root, "restart-stack")).exists()).toBe(false);
 }, 40_000);
 
-test("ordinary Start waits for the desktop Compose name lock and refuses the other checkout's stack", async () => {
+test.each([
+  "checkout",
+  "connection",
+] as const)("ordinary Start waits for Desktop Start and checks the saved %s", async (mismatch) => {
+  const isForeign = mismatch === "checkout";
   const desktopRoot = join(root, "project");
-  const otherRoot = join(root, "other");
+  const otherRoot = isForeign ? join(root, "other") : desktopRoot;
   const otherHack = join(otherRoot, ".hack");
-  const locked = join(root, "compose-start");
+  const locked = join(root, "before-pin");
   const release = join(root, "release-start");
   const locks = join(root, "home", ".hack", "autostart-locks");
   const lockKey = createHash("sha256").update("sample").digest("hex");
-  await mkdirOwnedFixture(otherHack, true);
-  await writeOwnedFixture(
-    join(otherHack, "hack.config.json"),
-    '{"name":"sample"}'
-  );
-  await writeOwnedFixture(
-    join(otherHack, "docker-compose.yml"),
-    await Bun.file(join(desktopRoot, ".hack", "docker-compose.yml")).text()
-  );
+  if (isForeign) {
+    await mkdirOwnedFixture(otherHack, true);
+    await writeOwnedFixture(
+      join(otherHack, "hack.config.json"),
+      '{"name":"sample"}'
+    );
+    await writeOwnedFixture(
+      join(otherHack, "docker-compose.yml"),
+      await Bun.file(join(desktopRoot, ".hack", "docker-compose.yml")).text()
+    );
+  }
   await installComposeNameFixture({
-    holdStart: true,
+    holdBeforePin: true,
     startContainers: true,
     rememberCheckout: true,
   });
@@ -872,9 +886,14 @@ test("ordinary Start waits for the desktop Compose name lock and refuses the oth
   try {
     await waitForCondition(
       () => Bun.file(locked).exists(),
-      "Desktop Start did not reach creation"
+      "Desktop Start did not reach ownership preflight"
     );
-    ordinary = run(["up", "-d", "--json"], false, otherRoot);
+    ordinary = run(
+      ["up", "-d", "--json"],
+      false,
+      otherRoot,
+      isForeign ? {} : { DOCKER_CONTEXT: "other-context" }
+    );
     await waitForCondition(
       async () =>
         (await readdir(locks)).some(
@@ -888,7 +907,11 @@ test("ordinary Start waits for the desktop Compose name lock and refuses the oth
     expect(first.exitCode, first.stderr + first.stdout).toBe(0);
     const second = await ordinary;
     expect(second.exitCode).toBe(1);
-    expect(second.stdout).toContain("do not all belong to this checkout");
+    expect(second.stdout).toContain(
+      isForeign
+        ? "do not all belong to this checkout"
+        : "different Docker connection settings"
+    );
     expect(await Bun.file(join(root, "running-checkout")).text()).toBe(
       join(desktopRoot, ".hack")
     );
@@ -897,6 +920,72 @@ test("ordinary Start waits for the desktop Compose name lock and refuses the oth
     await Promise.allSettled([desktop, ordinary]);
   }
 }, 40_000);
+
+test("login Start reuses its held lock for a literal Compose name", async () => {
+  await installComposeNameFixture({ startContainers: true });
+  await writeRegistry(false);
+  const started = await run(["up", "-d", "--json"], true);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  expect(await Bun.file(join(root, "compose-running")).text()).toBe("sample");
+}, 20_000);
+
+test("SIGTERM cancels a queued Start while the Compose name is still locked", async () => {
+  await installComposeNameFixture({ startContainers: true });
+  const home = join(root, "home");
+  const locks = join(home, ".hack", "autostart-locks");
+  const name = createHash("sha256").update("sample").digest("hex");
+  const acquired = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const held = withAutostartProjectLock({
+    registryPath: join(home, ".hack", "projects.json"),
+    scope: { projectId: "", composeProject: "sample", branch: null },
+    run: async () => {
+      acquired.resolve();
+      await release.promise;
+    },
+  });
+  await Promise.race([acquired.promise, held]);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--preload",
+      DOCKER_TRUST_PRELOAD,
+      cli,
+      "--no-interactive",
+      "up",
+      "-d",
+      "--json",
+    ],
+    {
+      cwd: join(root, "project"),
+      env: privateCliEnv({ root, home, env: { PATH: join(root, "bin") } }),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    }
+  );
+  const waiters = async () =>
+    (await readdir(locks)).filter(
+      (filename) =>
+        filename.startsWith(`${name}.lock.`) && filename.endsWith(".owner")
+    );
+  try {
+    await waitForCondition(
+      async () => (await waiters()).length === 1,
+      "Start did not queue for the name lock"
+    );
+    child.kill("SIGTERM");
+    expect(
+      await Promise.race([child.exited, Bun.sleep(5000).then(() => null)])
+    ).toBe(143);
+    expect(await waiters()).toEqual([]);
+    expect(await Bun.file(join(locks, `${name}.lock`)).exists()).toBe(true);
+    expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
+  } finally {
+    release.resolve();
+    await Promise.allSettled([held, child.exited]);
+  }
+}, 25_000);
 
 test("targeted Restart rechecks its daemon between creation and startup", async () => {
   const daemon = join(root, "daemon-id");
@@ -2151,6 +2240,83 @@ test("Restart delivers its frozen references after a hook starts a sibling with 
   expect(await Bun.file(join(root, "restart-env-references")).json()).toEqual({
     QA_ONLY: true,
   });
+}, 40_000);
+
+test("detached sibling Starts keep their own overlay references through both Compose phases", async () => {
+  const projectDir = join(root, "project", ".hack");
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    '{"name":"sample","dev_host":"sample.hack"}'
+  );
+  for (const [envName, key] of [
+    ["qa", "QA_ONLY"],
+    ["staging", "STAGING_ONLY"],
+  ] as const) {
+    await writeOwnedFixture(
+      join(projectDir, `hack.env.${envName}.yaml`),
+      `version: 1\nenvironment: ${envName}\nsecretsprovider: project_key\nvalues:\n  global:\n    ${key}: fixture\n`
+    );
+  }
+  await installComposeNameFixture({
+    startContainers: true,
+    trackNamedStacks: true,
+    holdStart: true,
+    recordStartReferences: true,
+  });
+  const start = (branch: string, env: string) =>
+    run(
+      ["up", "-d", "--branch", branch, "--env", env, "--json"],
+      false,
+      undefined,
+      {
+        PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+      }
+    );
+  const first = start("first", "qa");
+  const release = Bun.file(join(root, "release-start"));
+  let sibling: ReturnType<typeof start> | undefined;
+  try {
+    await Promise.race([
+      waitForCondition(
+        () => Bun.file(join(root, "compose-start")).exists(),
+        "First Start did not reach Compose creation"
+      ),
+      first.then(({ stdout, stderr }) => {
+        throw new Error(
+          `Start exited before Compose creation: ${stdout || stderr}`
+        );
+      }),
+    ]);
+    sibling = start("sibling", "staging");
+    await waitForCondition(
+      async () =>
+        (await readdir(join(projectDir, ".internal"))).some(
+          (file) =>
+            file.startsWith("compose.env.override.yml.lock.") &&
+            file.endsWith(".owner")
+        ),
+      "Sibling Start did not wait for the first overlay"
+    );
+    await Bun.write(release, "release");
+    for (const result of await Promise.all([first, sibling])) {
+      expect(result.exitCode, result.stderr + result.stdout).toBe(0);
+    }
+    for (const [branch, key] of [
+      ["first", "QA_ONLY"],
+      ["sibling", "STAGING_ONLY"],
+    ] as const) {
+      for (const phase of ["create", "start"]) {
+        expect(
+          await Bun.file(
+            join(root, `references-sample--${branch}-${phase}`)
+          ).json()
+        ).toEqual({ [key]: true });
+      }
+    }
+  } finally {
+    await Bun.write(release, "release");
+    await Promise.allSettled([first, sibling]);
+  }
 }, 40_000);
 
 test("a failed Restart and repair preserve an overlay launch for bare Down", async () => {

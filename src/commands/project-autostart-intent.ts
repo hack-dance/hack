@@ -11,6 +11,7 @@ import { assertAutostartCheckoutTrusted } from "../lib/autostart-checkout-trust.
 import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";
 import {
   assertAutostartProjectCurrent,
+  autostartProjectLockName,
   withAutostartProjectLock,
 } from "../lib/autostart-project-lock.ts";
 import { assertAutostartAdoptionAllowed } from "../lib/autostart-refusal.ts";
@@ -144,13 +145,15 @@ export async function withComposeCheckoutLock<T>(
 /** A checkout lock protects selection; the name lock serializes Compose effects across checkouts. */
 export async function withComposeNameLock<T>(
   name: string | undefined,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  signal?: AbortSignal
 ): Promise<T> {
   if (name === undefined) {
     return await run();
   }
   return await withAutostartProjectLock({
     scope: { projectId: "", composeProject: name, branch: null },
+    signal,
     run,
   });
 }
@@ -451,7 +454,7 @@ export async function withAutostartCommandLock<T>(opts: {
     readonly cfg: ProjectConfig;
     readonly branch: string | null;
   }) => Promise<string | undefined>;
-  readonly run: (loginComposeBase?: string) => Promise<T>;
+  readonly run: (loginComposeBase?: string, lockedName?: string) => Promise<T>;
 }): Promise<T> {
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
   if (!login) {
@@ -459,7 +462,8 @@ export async function withAutostartCommandLock<T>(opts: {
       // The desktop sends the full name, including any branch suffix.
       // Execution revalidates it under this lock before mutating Compose.
       const name = opts.expectComposeProject;
-      const run = () => withComposeNameLock(name, opts.run);
+      const run = () =>
+        withComposeNameLock(name, () => opts.run(undefined, name));
       if (opts.action === "up") {
         return await withComposeCheckoutLock({ ...opts, run });
       }
@@ -528,7 +532,7 @@ export async function withAutostartCommandLock<T>(opts: {
           expectedRoot: project.projectRoot,
         });
       }
-      return await opts.run(loginComposeBase);
+      return await opts.run(loginComposeBase, autostartProjectLockName(scope));
     },
   });
 }

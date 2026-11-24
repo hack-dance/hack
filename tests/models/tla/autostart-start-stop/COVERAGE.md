@@ -102,7 +102,11 @@ and cancels those hooks as owned process groups. Scoped readiness uses the same
 captured-engine check, and the explicit default socket matches the implicit one.
 Ordinary detached Compose startup holds the final-name lock through cache
 initialization and Compose dispatch. Checkout ownership is reread under that
-lock. Signal handling for Start now settles staged launch publication before
+lock, as is saved engine evidence. Login startup hands its held name to the
+same flow even when no Compose name override is required. Canceling a queued
+Start removes its lock candidate while the owner remains active. Detached
+startup serializes writes and Compose reads of the generated environment
+references. Signal handling for Start settles staged launch publication before
 re-raising. The CLI regressions cover both two-checkout name contention and
 SIGTERM before dispatch. These checks assume cooperating Hack commands. The
 model does not represent direct Docker CLI writes or terminal job control.

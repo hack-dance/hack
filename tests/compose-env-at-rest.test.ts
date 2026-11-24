@@ -178,6 +178,60 @@ test("a Compose operation holds its reference file against another writer", asyn
   expect(await readFile(path, "utf8")).toBe(second);
 }, 30_000);
 
+test("a cancelled Compose waiter cannot enter while its lifecycle cleanup is pending", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const cleanup = Promise.withResolvers<void>();
+  const cleanupStarted = Promise.withResolvers<void>();
+  const owner = withComposeEnvOverride({
+    projectDir,
+    text: "",
+    run: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  await entered.promise;
+  const cancel = new AbortController();
+  let enteredAfterCancel = false;
+  const waiter = withComposeEnvOverride({
+    projectDir,
+    text: "",
+    signal: cancel.signal,
+    run: async () => {
+      enteredAfterCancel = true;
+    },
+  }).catch(async (error: unknown) => {
+    cleanupStarted.resolve();
+    await cleanup.promise;
+    return error;
+  });
+  try {
+    const directory = join(projectDir, ".internal");
+    const deadline = Date.now() + 2000;
+    while (
+      !(await readdir(directory)).some((name) => name.endsWith(".owner"))
+    ) {
+      if (Date.now() >= deadline) {
+        throw new Error("Restart did not queue for the reference lock");
+      }
+      await Bun.sleep(10);
+    }
+    cancel.abort();
+    release.resolve();
+    await owner;
+    await cleanupStarted.promise;
+    expect(enteredAfterCancel).toBe(false);
+  } finally {
+    cancel.abort();
+    release.resolve();
+    cleanup.resolve();
+    await Promise.allSettled([owner, waiter]);
+  }
+  expect(await waiter).toMatchObject({ name: "AbortError" });
+  expect(enteredAfterCancel).toBe(false);
+});
+
 test("writer leaves a value-free 0600 file and tightens an existing loose mode", async () => {
   const rendered = renderComposeEnvReferenceOverride({
     targetServices: ["web"],

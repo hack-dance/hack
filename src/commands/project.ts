@@ -360,6 +360,7 @@ import {
   removeDisposableCacheVolumes,
 } from "../lib/disposable-cache-volumes.ts";
 import {
+  type DockerDaemonObservation,
   dockerDaemonIdentityFingerprint,
   dockerEngineSelectionFingerprint,
   dockerHelperEnvironment,
@@ -499,6 +500,7 @@ import {
   assertLegacyProjectInputFamily,
 } from "../lib/project-input-selection.ts";
 import {
+  confirmProjectRuntimeDaemon,
   type ProjectRuntimeStateEntry,
   readProjectRuntimeCopyLaunch,
   readProjectRuntimeState,
@@ -2871,6 +2873,7 @@ function hasPersistentLifecycleCommands(
 }
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
+  readonly beforeManagedProcesses?: () => Promise<unknown>;
   readonly title: string;
   readonly startupSignal?: AbortSignal;
   readonly onHookStart?: HookStart;
@@ -2960,6 +2963,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
         signalCleanup: null,
       };
     }
+    await opts.beforeManagedProcesses?.();
     const lifecycleStart = await startWithSharedHelpers({
       ...opts,
       shutdownGeneration,
@@ -3009,6 +3013,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProject,
     onPersistentCommand: async ({ command, serviceName }) => {
+      await opts.beforeManagedProcesses?.();
       await starter.startFromCommand({
         command,
         serviceName,
@@ -3024,6 +3029,11 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
       signalCleanup: null,
     };
   }
+
+  await opts.beforeManagedProcesses?.().catch(async (error: unknown) => {
+    await starter.abort();
+    throw error;
+  });
 
   const started = await startWithSharedHelpers({
     ...opts,
@@ -8187,15 +8197,19 @@ async function runUpCommand({
     projectDir: project.projectDir,
     composeProject: savedLifecycleKey,
   });
-  const assertOriginalLaunchEngine = (settingsOnly = false) =>
+  const assertOriginalLaunchEngine = (
+    opts: {
+      readonly settingsOnly?: boolean;
+      readonly captureIdentity?: boolean;
+    } = {}
+  ) =>
     assertDockerLaunchEngine({
       record: originalLaunch,
       projectDir: project.projectDir,
       env: envOverrides.env,
-      settingsOnly,
-      captureIdentity: !settingsOnly,
+      ...opts,
     });
-  await assertOriginalLaunchEngine(true);
+  await assertOriginalLaunchEngine({ settingsOnly: true });
 
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
@@ -8212,21 +8226,15 @@ async function runUpCommand({
     env: envOverrides.env,
     action: "start",
   });
-  if (serviceScoped) {
-    await updateProjectRuntimeServiceEnvFingerprints({
-      projectDir: project.projectDir,
-      composeProject: lifecycleComposeProject,
-      effectiveEnvName: envOverrides.effectiveEnvName,
-      services: targetServices,
-      envByService: envOverrides.preflightEnvByService,
-      outcome: "applied",
-    });
-  }
   let publishedLaunchId: string | undefined;
-  const publishRuntimeSelection = async (daemonId: string | null) => {
+  let publishedDaemon: DockerDaemonObservation | undefined;
+  const publishRuntimeSelection = async (
+    daemon: DockerDaemonObservation | undefined
+  ) => {
     if (serviceScoped) {
       return;
     }
+    publishedDaemon = daemon;
     publishedLaunchId = await persistProjectRuntimeEnvSelection({
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
@@ -8240,7 +8248,7 @@ async function runUpCommand({
       pinnedComposeBase: expectedComposeProject ? baseProjectName : undefined,
       envName: envOverrides.effectiveEnvName,
       dockerEnv: envOverrides.env,
-      daemonId,
+      daemon,
       services: preparedServices,
       envByService: envOverrides.preflightEnvByService,
       composeProfiles: resolveEffectiveComposeProfiles({
@@ -8312,6 +8320,7 @@ async function runUpCommand({
           env: envOverrides.lifecycleEnv,
           effectiveEnvName: envOverrides.effectiveEnvName,
           composeProject: lifecycleComposeProject,
+          beforeManagedProcesses: () => assertOriginalLaunchEngine(),
         });
     if (lifecycleUp.code !== 0) {
       if (json) {
@@ -8465,6 +8474,19 @@ async function runUpCommand({
     if (!progress) {
       reportComposeStartupBudget({ budgets, detach });
     }
+    if (serviceScoped || cacheBootstrapServices.length > 0) {
+      await assertOriginalLaunchEngine();
+    }
+    if (serviceScoped) {
+      await updateProjectRuntimeServiceEnvFingerprints({
+        projectDir: project.projectDir,
+        composeProject: lifecycleComposeProject,
+        effectiveEnvName: envOverrides.effectiveEnvName,
+        services: targetServices,
+        envByService: envOverrides.preflightEnvByService,
+        outcome: "applied",
+      });
+    }
     const bootstrapCode = await bootstrapDependencyCaches({
       timeoutMs: detach ? startupTimeoutMs : undefined,
       services: cacheBootstrapServices,
@@ -8514,7 +8536,11 @@ async function runUpCommand({
               composeFiles: composeFilesWithEnv,
               action: "start",
             });
-            await publishRuntimeSelection(await assertOriginalLaunchEngine());
+            await publishRuntimeSelection(
+              await assertOriginalLaunchEngine({
+                captureIdentity: !serviceScoped,
+              })
+            );
           },
           beforeStart: async () => {
             if (publishedLaunchId) {
@@ -8522,6 +8548,7 @@ async function runUpCommand({
                 projectDir: project.projectDir,
                 lifecycleComposeProject,
                 env: envOverrides.env,
+                settingsOnly: publishedDaemon?.kind === "unverified",
               });
             }
             await assertDesktopComposeOwnership({
@@ -8536,7 +8563,11 @@ async function runUpCommand({
             await assertLoginAutostartCurrent(branch, project.projectRoot);
             await beforeStart?.();
             if (!detach) {
-              await publishRuntimeSelection(await assertOriginalLaunchEngine());
+              await publishRuntimeSelection(
+                await assertOriginalLaunchEngine({
+                  captureIdentity: !serviceScoped,
+                })
+              );
               // Compose owns foreground shutdown. Lifecycle cleanup runs after
               // it settles; re-raising here would turn one Ctrl-C into two.
               // Keep an owner until the caller's cleanup has also settled.
@@ -8745,6 +8776,12 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
+    await retryUnverifiedLaunchDaemon({
+      projectDir: project.projectDir,
+      lifecycleComposeProject,
+      launchId: publishedLaunchId,
+      env: envOverrides.env,
+    });
     if (!showBeforeAfter) {
       progress?.services(startup);
     }
@@ -9226,11 +9263,12 @@ async function handleServiceDown({
         projectName: lifecycle.projectName,
         envName,
       }));
-    await assertSavedDockerEngine({
-      projectDir: project.projectDir,
-      lifecycleComposeProject: lifecycle.lifecycleComposeProject,
-      env,
-    });
+    const assertEngine = () =>
+      assertSavedDockerEngine({
+        projectDir: project.projectDir,
+        lifecycleComposeProject: lifecycle.lifecycleComposeProject,
+        env,
+      });
     const { profiles } = await resolveInstanceStopSelection({
       projectDir: project.projectDir,
       lifecycleComposeProject: lifecycle.lifecycleComposeProject,
@@ -9256,6 +9294,7 @@ async function handleServiceDown({
           service,
           timeoutSeconds,
           json: json === true,
+          assertEngine,
         })
     );
   } catch (error) {
@@ -9276,9 +9315,11 @@ async function runServiceStop(
     readonly service: string;
     readonly timeoutSeconds: number | undefined;
     readonly json: boolean;
+    readonly assertEngine: () => Promise<unknown>;
   }
 ): Promise<number> {
   const startedAt = Date.now();
+  await opts.assertEngine();
   const owned = await requireOwnedServiceContainers({
     ...opts,
     action: "stop",
@@ -9315,6 +9356,7 @@ async function runServiceStop(
     stoppedAt: new Date().toISOString(),
   });
   if (active.length) {
+    await opts.assertEngine();
     const result = await exec(
       [
         "docker",
@@ -11059,14 +11101,20 @@ async function runRestartUpPhase(opts: {
   const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
 
   const { envOverrides } = opts;
+  const cancellation = new AbortController();
+  const abortOverrideWait = () => cancellation.abort();
   const restartComposeUp = (
     upOpts: Parameters<typeof composeRuntimeBackend.up>[0]
   ) => {
-    const run = () => composeRuntimeBackend.up(upOpts);
+    const run = () => {
+      cancellation.signal.throwIfAborted();
+      return composeRuntimeBackend.up(upOpts);
+    };
     return envOverrides.referenceText
       ? withComposeEnvOverride({
           projectDir: opts.project.projectDir,
           text: envOverrides.referenceText,
+          signal: cancellation.signal,
           run,
         })
       : run();
@@ -11097,6 +11145,7 @@ async function runRestartUpPhase(opts: {
       env: envOverrides.lifecycleEnv,
       effectiveEnvName: envOverrides.effectiveEnvName,
       composeProject: opts.lifecycleComposeProject,
+      beforeManagedProcesses: opts.assertEngine,
     });
     if (lifecycleUp.code !== 0) {
       return { code: lifecycleUp.code, phase: "lifecycle" };
@@ -11122,12 +11171,15 @@ async function runRestartUpPhase(opts: {
   const signalCleanup =
     lifecycleSignalCleanup ??
     installLifecycleSignalCleanup({
-      cleanup: signalCleanupKeepingStartedHelpers({
-        cleanup: lifecycleCleanup,
-        containerStartBegun: () => containerStartBegun,
-        keepSharedHelpers: () => keepSharedHelpers,
-      }),
+      cleanup:
+        signalCleanupKeepingStartedHelpers({
+          cleanup: lifecycleCleanup,
+          containerStartBegun: () => containerStartBegun,
+          keepSharedHelpers: () => keepSharedHelpers,
+        }) ?? (() => Promise.resolve()),
     });
+  process.once("SIGINT", abortOverrideWait);
+  process.once("SIGTERM", abortOverrideWait);
   try {
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
@@ -11308,6 +11360,8 @@ async function runRestartUpPhase(opts: {
     await opts.discardAbsentLaunch();
     throw error;
   } finally {
+    process.off("SIGINT", abortOverrideWait);
+    process.off("SIGTERM", abortOverrideWait);
     signalCleanup.dispose();
   }
 }
@@ -11400,11 +11454,13 @@ async function runTargetedServiceRestart(opts: {
     allServiceNames: opts.allServiceNames,
     envName: opts.envName,
   });
-  await assertSavedDockerEngine({
-    projectDir: opts.project.projectDir,
-    lifecycleComposeProject: opts.lifecycleComposeProject,
-    env: envOverrides.env,
-  });
+  const assertEngine = () =>
+    assertSavedDockerEngine({
+      projectDir: opts.project.projectDir,
+      lifecycleComposeProject: opts.lifecycleComposeProject,
+      env: envOverrides.env,
+    });
+  await assertEngine();
   await assertRegistryCredentialsAvailable({
     projectRoot: opts.project.projectRoot,
     composeFile: opts.project.composeFile,
@@ -11453,8 +11509,9 @@ async function runTargetedServiceRestart(opts: {
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
-  const verifyOwnership = (services: readonly string[]) =>
-    requireOwnedServiceContainers({
+  const verifyOwnership = async (services: readonly string[]) => {
+    await assertEngine();
+    await requireOwnedServiceContainers({
       project: opts.project,
       composeProjectName: opts.composeProjectName,
       composeFiles: composeFilesWithEnv,
@@ -11463,6 +11520,7 @@ async function runTargetedServiceRestart(opts: {
       action: "restart",
       services,
     });
+  };
   await verifyOwnership(preparedServices);
   const bootstrapCode = await bootstrapDependencyCaches({
     timeoutMs: opts.budgets.startupTimeoutMs,
@@ -11980,7 +12038,7 @@ async function runLocalRestart({
     allServiceNames,
     envName: effectiveEnvName,
   });
-  const daemonId = await assertSavedDockerEngine({
+  const daemon = await assertSavedDockerEngine({
     projectDir: project.projectDir,
     lifecycleComposeProject,
     env: preflightEnv.env,
@@ -12000,10 +12058,13 @@ async function runLocalRestart({
         "Docker connection settings changed during Restart. Restore the connection and retry."
       );
     }
-    if (daemonId && (await readDockerDaemonIdentity(selection)) !== daemonId) {
-      throw new CliUsageError(
-        "The Docker daemon changed or could not be verified during Restart."
-      );
+    if (daemon?.kind === "verified") {
+      const observed = await readDockerDaemonIdentity(selection);
+      if (observed.kind !== "verified" || observed.id !== daemon.id) {
+        throw new CliUsageError(
+          "The Docker daemon changed or could not be verified during Restart."
+        );
+      }
     }
   };
   await assertRegistryCredentialsAvailable({
@@ -12104,7 +12165,7 @@ async function runLocalRestart({
       pinnedComposeBase: baseProjectName,
       envName: preflightEnv.effectiveEnvName,
       dockerEnv: preflightEnv.env,
-      daemonId,
+      daemon,
       services: allServiceNames,
       envByService: preflightEnv.preflightEnvByService,
       composeProfiles: effectiveProfiles,
@@ -12233,6 +12294,12 @@ async function runLocalRestart({
       exitCode: 1,
     });
   }
+  await retryUnverifiedLaunchDaemon({
+    projectDir: project.projectDir,
+    lifecycleComposeProject: nextLifecycleKey,
+    launchId,
+    env: preflightEnv.env,
+  });
   if (!json) {
     return 0;
   }
@@ -12317,7 +12384,7 @@ async function persistProjectRuntimeEnvSelection(opts: {
   readonly pinnedComposeBase?: string;
   readonly envName: string | null;
   readonly dockerEnv: Readonly<Record<string, string>>;
-  readonly daemonId: string | null;
+  readonly daemon: DockerDaemonObservation | undefined;
   readonly services: readonly string[];
   readonly envByService: Readonly<
     Record<string, Readonly<Record<string, string>>>
@@ -12341,14 +12408,14 @@ async function persistProjectRuntimeEnvSelection(opts: {
         cwd: opts.projectDir,
         launchId,
       }),
-      ...(opts.daemonId
+      ...(opts.daemon?.kind === "verified"
         ? {
             dockerDaemonIdentity: dockerDaemonIdentityFingerprint(
-              opts.daemonId,
+              opts.daemon.id,
               launchId
             ),
           }
-        : {}),
+        : { dockerDaemonIdentityState: opts.daemon?.kind ?? "unverified" }),
       launchComposeBase: opts.launchComposeBase,
       launchBranch: opts.launchBranch,
       envProjectName: opts.envProjectName,
@@ -12376,7 +12443,8 @@ export async function assertSavedDockerEngine(opts: {
   readonly lifecycleComposeProject: string;
   readonly env: Readonly<Record<string, string>>;
   readonly captureIdentity?: boolean;
-}): Promise<string | null> {
+  readonly settingsOnly?: boolean;
+}): Promise<DockerDaemonObservation | undefined> {
   const record = await readProjectRuntimeStateEntry({
     projectDir: opts.projectDir,
     composeProject: opts.lifecycleComposeProject,
@@ -12390,7 +12458,7 @@ async function assertDockerLaunchEngine(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly settingsOnly?: boolean;
   readonly captureIdentity?: boolean;
-}): Promise<string | null> {
+}): Promise<DockerDaemonObservation | undefined> {
   const { record } = opts;
   if (
     record?.dockerEngineSelection &&
@@ -12406,28 +12474,73 @@ async function assertDockerLaunchEngine(opts: {
       "This copy was started with different Docker connection settings. Restore those settings before changing the running copy."
     );
   }
-  if (
-    opts.settingsOnly ||
-    !(opts.captureIdentity || record?.dockerDaemonIdentity)
-  ) {
-    return null;
+  if (opts.settingsOnly) {
+    return undefined;
   }
-  const daemonId = await readDockerDaemonIdentity({
+  if (record?.dockerDaemonIdentityState === "unverified") {
+    throw new CliUsageError(
+      "The Docker daemon could not be verified when this copy started."
+    );
+  }
+  if (!(opts.captureIdentity || record?.dockerDaemonIdentity)) {
+    return undefined;
+  }
+  const daemon = await readDockerDaemonIdentity({
     cwd: opts.projectDir,
     env: opts.env,
   });
   if (
     record?.dockerDaemonIdentity &&
     record.launchId &&
-    (!daemonId ||
-      dockerDaemonIdentityFingerprint(daemonId, record.launchId) !==
+    (daemon.kind !== "verified" ||
+      dockerDaemonIdentityFingerprint(daemon.id, record.launchId) !==
         record.dockerDaemonIdentity)
   ) {
     throw new CliUsageError(
       "This copy was started on a different Docker daemon or the daemon could not be verified."
     );
   }
-  return daemonId;
+  return daemon;
+}
+
+async function retryUnverifiedLaunchDaemon(opts: {
+  readonly projectDir: string;
+  readonly lifecycleComposeProject: string;
+  readonly launchId: string | undefined;
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<void> {
+  if (!opts.launchId) {
+    return;
+  }
+  const { projectDir, launchId } = opts;
+  const composeProject = opts.lifecycleComposeProject;
+  const record = await readProjectRuntimeStateEntry({
+    projectDir,
+    composeProject,
+  });
+  if (
+    record?.launchId !== launchId ||
+    record.dockerDaemonIdentityState !== "unverified"
+  ) {
+    return;
+  }
+  await assertDockerLaunchEngine({ ...opts, record, settingsOnly: true });
+  const daemon = await readDockerDaemonIdentity({
+    cwd: projectDir,
+    env: opts.env,
+  });
+  if (daemon.kind !== "unverified") {
+    await assertDockerLaunchEngine({ ...opts, record, settingsOnly: true });
+    await confirmProjectRuntimeDaemon({
+      projectDir,
+      composeProject,
+      launchId,
+      dockerDaemonIdentity:
+        daemon.kind === "verified"
+          ? dockerDaemonIdentityFingerprint(daemon.id, launchId)
+          : undefined,
+    });
+  }
 }
 
 /** A failed launch remains selectable until all runtime owners are absent. */

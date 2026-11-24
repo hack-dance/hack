@@ -24,6 +24,7 @@ export type ProjectRuntimeStateEntry = {
   readonly dockerEngineSelection?: string;
   /** Digest of the responding Docker daemon's ID when it was available. */
   readonly dockerDaemonIdentity?: string;
+  readonly dockerDaemonIdentityState?: "unsupported" | "unverified";
   /** Effective Compose base name when this instance last started. */
   readonly launchComposeBase?: string;
   /** Logical copy in this checkout. Missing on records predating copy association. */
@@ -157,6 +158,33 @@ export async function removeProjectRuntimeStateEntry(opts: {
   });
 }
 
+/** Upgrade only this operation's unverified launch, even if another writer superseded it. */
+export async function confirmProjectRuntimeDaemon(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly launchId: string;
+  readonly dockerDaemonIdentity: string | undefined;
+}): Promise<void> {
+  await mutateProjectRuntimeState(opts.projectDir, (entries) => {
+    const entry = entries.find(
+      (item) => item.composeProject === opts.composeProject
+    );
+    if (
+      entry?.launchId !== opts.launchId ||
+      entry.dockerDaemonIdentityState !== "unverified"
+    ) {
+      return null;
+    }
+    return replaceRuntimeEntry(entries, {
+      ...entry,
+      dockerDaemonIdentity: opts.dockerDaemonIdentity,
+      dockerDaemonIdentityState: opts.dockerDaemonIdentity
+        ? undefined
+        : "unsupported",
+    });
+  });
+}
+
 /**
  * Refresh or forget the env digests of `services` after a service-scoped
  * (re)create, preserving the rest of the stack's entry.
@@ -251,6 +279,10 @@ function parseProjectRuntimeStateEntry(
   const launchId = getString(value, "launchId");
   const dockerEngineSelection = getString(value, "dockerEngineSelection");
   const dockerDaemonIdentity = getString(value, "dockerDaemonIdentity");
+  const dockerDaemonIdentityState = getString(
+    value,
+    "dockerDaemonIdentityState"
+  );
   const launchBranch = value.launchBranch;
   const envProjectName = getString(value, "envProjectName");
   const composeProfiles = Array.isArray(value.composeProfiles)
@@ -267,6 +299,10 @@ function parseProjectRuntimeStateEntry(
     ...(launchId ? { launchId } : {}),
     ...(dockerEngineSelection ? { dockerEngineSelection } : {}),
     ...(dockerDaemonIdentity ? { dockerDaemonIdentity } : {}),
+    ...(dockerDaemonIdentityState === "unsupported" ||
+    dockerDaemonIdentityState === "unverified"
+      ? { dockerDaemonIdentityState }
+      : {}),
     ...(launchComposeBase ? { launchComposeBase } : {}),
     ...(launchBranch === null || typeof launchBranch === "string"
       ? { launchBranch }

@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   realpath,
   rm,
   stat,
@@ -166,6 +167,7 @@ async function installComposeNameFixture(opts?: {
   readonly failPs?: boolean;
   readonly failAfterCreate?: boolean;
   readonly requireEngineHook?: boolean;
+  readonly daemonProbeFailures?: number;
 }) {
   await writeFile(
     join(root, "bin", "docker"),
@@ -182,6 +184,10 @@ const context = process.env.DOCKER_CONTEXT || "none";
 const stack = args.includes("-p") ? args[args.indexOf("-p") + 1] : process.env.COMPOSE_PROJECT_NAME || options.defaultStack || "sample";
 const running = fixture + (options.trackNamedStacks ? "/compose-running-" + stack : "/compose-running");
 if (args[0] === "info" && args.includes("{{.ID}}")) {
+  const countFile = Bun.file(fixture + "/daemon-probe-count");
+  const count = (await countFile.exists() ? Number(await countFile.text()) : 0) + 1;
+  await Bun.write(countFile, String(count));
+  if (count <= (options.daemonProbeFailures ?? 0)) process.exit(124);
   const identity = Bun.file(fixture + "/daemon-id");
   if (await identity.exists()) process.stdout.write((await identity.text()) + "\\n");
 } else if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
@@ -744,6 +750,73 @@ test("unbound service Stop finds the desktop-pinned stack even with a managed na
   expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
 }, 40_000);
 
+test("unbound service Stop rechecks its daemon after waiting for the Compose lock", async () => {
+  const daemon = join(root, "daemon-id");
+  await Bun.write(daemon, "fixture-engine-one");
+  await installComposeNameFixture({ startContainers: true });
+  const started = await run(["up", "-d", "--json"]);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  const locks = join(root, "home", ".hack", "autostart-locks");
+  const lockKey = createHash("sha256").update("sample").digest("hex");
+  const acquired = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const held = withAutostartProjectLock({
+    registryPath: join(root, "home", ".hack", "projects.json"),
+    scope: { projectId: "", composeProject: "sample", branch: null },
+    run: async () => {
+      acquired.resolve();
+      await release.promise;
+    },
+  });
+  await Promise.race([acquired.promise, held]);
+  const stopping = run(["down", "--service", "app", "--json"]);
+  try {
+    await waitForCondition(
+      async () =>
+        (await readdir(locks)).some(
+          (file) =>
+            file.startsWith(`${lockKey}.lock.`) && file.endsWith(".owner")
+        ),
+      "Service Stop did not reach the Compose lock"
+    );
+    await Bun.write(daemon, "fixture-engine-two");
+    release.resolve();
+    const stopped = await stopping;
+    expect(stopped.exitCode).toBe(1);
+    expect(stopped.stdout).toContain("different Docker daemon");
+    expect(await Bun.file(join(root, "stop-context")).exists()).toBe(false);
+  } finally {
+    release.resolve();
+    await Promise.allSettled([held, stopping]);
+  }
+}, 40_000);
+
+test("targeted Restart rechecks its daemon between creation and startup", async () => {
+  const daemon = join(root, "daemon-id");
+  const release = join(root, "release-start");
+  await Bun.write(daemon, "fixture-engine-one");
+  await installComposeNameFixture({ holdRestart: true, startContainers: true });
+  const started = await run(["up", "-d", "--json"]);
+  expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+  const restart = run(["restart", "app", "--json"]);
+  try {
+    await waitForCondition(
+      () => Bun.file(join(root, "compose-created")).exists(),
+      "Targeted Restart did not reach creation"
+    );
+    await Bun.write(daemon, "fixture-engine-two");
+    await Bun.write(release, "release");
+    const result = await restart;
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("different Docker daemon");
+    expect(await Bun.file(join(root, "compose-created")).exists()).toBe(true);
+    expect(await Bun.file(join(root, "compose-running")).exists()).toBe(false);
+  } finally {
+    await Bun.write(release, "release");
+    await Promise.allSettled([restart]);
+  }
+}, 40_000);
+
 test("bound service Stop waits for ordinary Restart after it creates the containers", async () => {
   const projectDir = join(root, "project", ".hack");
   await writeOwnedFixture(
@@ -1105,6 +1178,67 @@ test("ordinary Down refuses an interpolated branch stack owned by another checko
 });
 
 const supervisorBinary = process.env.HACK_TEST_SUPERVISOR_BINARY;
+test.skipIf(!supervisorBinary)(
+  "Start verifies the daemon before reconciling a changed host process",
+  async () => {
+    const projectRoot = join(root, "project");
+    const projectDir = join(projectRoot, ".hack");
+    const daemon = join(root, "daemon-id");
+    const ready = join(root, "engine-opening-hook-ran");
+    const config = (seconds: number) =>
+      writeOwnedFixture(
+        join(projectDir, "hack.config.json"),
+        JSON.stringify({
+          name: "sample",
+          lifecycle: {
+            runner: "supervisor",
+            up: { before: [`printf ready > ${quoteShellWord(ready)}`] },
+            processes: [
+              { name: "sleeper", command: `exec /bin/sleep ${seconds}` },
+            ],
+          },
+        })
+      );
+    const env = {
+      PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+      HACK_LIFECYCLE_SUPERVISOR_BINARY: supervisorBinary ?? "",
+    };
+    await config(120);
+    await installComposeNameFixture({ startContainers: true });
+    await Bun.write(daemon, "fixture-engine-one");
+    try {
+      const started = await run(
+        ["up", "-d", "--json"],
+        false,
+        projectRoot,
+        env
+      );
+      expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+      const before = await readLifecycleState({ projectDir });
+      const group = before[0]?.processes[0]?.processGroupId ?? 0;
+      expect(group).toBeGreaterThan(1);
+      await Bun.file(ready).delete();
+      await config(121);
+      await Bun.write(daemon, "fixture-engine-two");
+      const refused = await run(
+        ["up", "-d", "--json"],
+        false,
+        projectRoot,
+        env
+      );
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stdout).toContain("different Docker daemon");
+      expect(await Bun.file(ready).exists()).toBe(true);
+      expect(await readLifecycleState({ projectDir })).toEqual(before);
+      expect(() => process.kill(-group, 0)).not.toThrow();
+    } finally {
+      await Bun.write(daemon, "fixture-engine-one");
+      await run(["down", "--json"], false, projectRoot, env);
+    }
+  },
+  40_000
+);
+
 async function seedUnderscoreLegacyRecord(envName: string | null) {
   const projectDir = join(root, "project", ".hack");
   await writeOwnedFixture(
@@ -1497,6 +1631,38 @@ test("Down and bound readers reject a replacement Docker daemon at the same conn
   const down = await run(["down", "--json"]);
   expect(down.exitCode, down.stderr + down.stdout).toBe(0);
 }, 40_000);
+
+for (const failures of [1, 2]) {
+  test(`Start retries daemon verification after ${failures} failed identity reads`, async () => {
+    const projectDir = join(root, "project", ".hack");
+    await Bun.write(join(root, "daemon-id"), "fixture-engine-original");
+    await installComposeNameFixture({
+      startContainers: true,
+      daemonProbeFailures: failures,
+    });
+    const started = await run(["up", "-d", "--json"]);
+    expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+    const entry = await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "sample",
+    });
+    if (failures === 1) {
+      expect(entry?.dockerDaemonIdentity).toMatch(/^[a-f0-9]{64}$/);
+      expect(entry?.dockerDaemonIdentityState).toBeUndefined();
+      const stopped = await run(["down", "--json"]);
+      expect(stopped.exitCode, stopped.stderr + stopped.stdout).toBe(0);
+      return;
+    }
+    expect(entry?.dockerDaemonIdentity).toBeUndefined();
+    expect(entry?.dockerDaemonIdentityState).toBe("unverified");
+    const refused = await run(["down", "--json"]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stdout).toContain(
+      "could not be verified when this copy started"
+    );
+    expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+  }, 40_000);
+}
 
 test("unnamed Start runs the engine hook before its implicit ownership probe and Logs finds the host output", async () => {
   const projectDir = join(root, "project", ".hack");

@@ -174,12 +174,23 @@ export function dockerHelperRunEnvironment(
 }
 
 const DOCKER_DAEMON_ID = /^[a-zA-Z0-9:-]{4,160}$/;
+const UNSUPPORTED_DOCKER_DAEMON_ID = new Set([
+  "",
+  "null",
+  "<no value>",
+  "<nil>",
+]);
+
+export type DockerDaemonObservation =
+  | { readonly kind: "verified"; readonly id: string }
+  | { readonly kind: "unsupported" }
+  | { readonly kind: "unverified" };
 
 /** A bounded read of the responding daemon's ID, independent of socket or context names. */
 export async function readDockerDaemonIdentity(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly cwd: string;
-}): Promise<string | null> {
+}): Promise<DockerDaemonObservation> {
   const result = await exec(["docker", "info", "--format", "{{.ID}}"], {
     cwd: opts.cwd,
     ...dockerHelperRunEnvironment(opts.env),
@@ -188,8 +199,16 @@ export async function readDockerDaemonIdentity(opts: {
     maxStdoutBytes: 1024,
     maxStderrBytes: 1024,
   }).catch(() => null);
-  const id = result?.exitCode === 0 ? result.stdout.trim() : "";
-  return DOCKER_DAEMON_ID.test(id) && id !== "null" ? id : null;
+  if (result?.exitCode !== 0) {
+    return { kind: "unverified" };
+  }
+  const id = result.stdout.trim();
+  if (UNSUPPORTED_DOCKER_DAEMON_ID.has(id)) {
+    return { kind: "unsupported" };
+  }
+  return DOCKER_DAEMON_ID.test(id)
+    ? { kind: "verified", id }
+    : { kind: "unverified" };
 }
 
 export function dockerDaemonIdentityFingerprint(

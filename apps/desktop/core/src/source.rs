@@ -395,6 +395,19 @@ impl From<RunError> for CopiesError {
 }
 
 pub trait Source: Send + Sync {
+    /// Preview a catalog edit, or save the exact revision previously previewed.
+    ///
+    /// # Errors
+    /// The Compose file or CLI cannot perform the requested edit.
+    fn catalog_edit(
+        &self,
+        _root: &Path,
+        _id: &str,
+        _revision: Option<&str>,
+    ) -> Result<crate::service_catalog::CatalogEdit, String> {
+        Err("Service editing is unavailable for this source".into())
+    }
+
     /// Observe the project family in the selected checkout.
     fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, CopiesError> {
         Err(RunError::NotFound.into())
@@ -2215,6 +2228,29 @@ impl Source for LiveSource {
         })
     }
 
+    fn catalog_edit(
+        &self,
+        root: &Path,
+        id: &str,
+        revision: Option<&str>,
+    ) -> Result<crate::service_catalog::CatalogEdit, String> {
+        let root = trusted_root(root)
+            .map_err(|_| "Can’t edit this checkout. Verify ownership and write permissions.")?;
+        let mut args = vec!["service", "add", id, "--json"];
+        if let Some(revision) = revision {
+            args.extend(["--expect-revision", revision]);
+        } else {
+            args.push("--dry-run");
+        }
+        self.runner_for(false)
+            .run_schema_json(&args, Some(&root), Self::READ, "hack.service-add.v1")
+            .map_err(|error| match error {
+                RunError::Cli(error) => format!("{} ({})", error.message, error.code),
+                _ => "Could not run hack service add. Check that the selected CLI supports it."
+                    .into(),
+            })
+    }
+
     fn act_on_service(
         &self,
         root: &Path,
@@ -2226,7 +2262,7 @@ impl Source for LiveSource {
         let branch = branch.map(validate_branch).transpose()?;
         let root = trusted_root(root)?;
         match action {
-            Action::Restart => {
+            Action::Start | Action::Restart => {
                 let mut args = with_branch(action.cli_args(), branch);
                 args.push(&target.name);
                 let result = self

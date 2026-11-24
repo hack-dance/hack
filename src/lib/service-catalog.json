@@ -1,0 +1,21 @@
+[
+  { "name": "redis", "image": "redis:7-alpine", "env_names": [] },
+  {
+    "name": "postgres",
+    "image": "postgres:17-alpine",
+    "env_names": ["POSTGRES_PASSWORD"]
+  },
+  {
+    "name": "mysql",
+    "image": "mysql:8.4",
+    "env_names": ["MYSQL_ROOT_PASSWORD"]
+  },
+  { "name": "mongodb", "image": "mongo:8", "env_names": [] },
+  {
+    "name": "minio",
+    "image": "minio/minio",
+    "command": "server /data",
+    "env_names": ["MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"]
+  },
+  { "name": "mailpit", "image": "axllent/mailpit", "env_names": [] }
+]

@@ -107,9 +107,17 @@ async function caught(promise: Promise<unknown>): Promise<HackCliError> {
 const partialDir = (): string =>
   join(root, "home", "data-backups", PROJECT, "20261123T140501Z.partial");
 
-/** Every `docker create` a run issued. */
+/** Every helper `docker create` a run issued (markers mount nothing). */
 const creates = (fake: FakeEngine): string[][] =>
-  fake.calls.filter((argv) => argv[1] === "create");
+  fake.calls.filter(
+    (argv) => argv[1] === "create" && argv.includes("--volume")
+  );
+
+/** Every event-stream marker `docker create`. */
+const markers = (fake: FakeEngine): string[][] =>
+  fake.calls.filter(
+    (argv) => argv[1] === "create" && !argv.includes("--volume")
+  );
 
 describe("planDeclaredVolumes", () => {
   test("maps keys to Docker names, sorts them and skips external volumes", () => {
@@ -256,7 +264,7 @@ describe("exportProjectData", () => {
     expect(fake.calls).toContainEqual(["docker", "rm", "--force", name]);
     expect(fake.leftovers()).toEqual([]);
     // Markers log nothing either.
-    for (const argv of fake.calls.filter((a) => a[1] === "run")) {
+    for (const argv of markers(fake)) {
       expect(argv[argv.indexOf("--log-driver") + 1]).toBe("none");
     }
   });
@@ -419,6 +427,41 @@ describe("deadlines and cleanup", () => {
     expect(fake.leftovers()).toEqual([]);
   });
 
+  test("a marker whose start times out is removed and the export refused", async () => {
+    const fake = engine({ only: "db" });
+    fake.startExit = (name) =>
+      name.endsWith("-start") ? FAKE_TIMEOUT_EXIT : undefined;
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).toContain("start marker");
+    expect(creates(fake)).toEqual([]);
+    expect(fake.leftovers()).toEqual([]);
+    expect(fake.events.open).toBeFalse();
+  });
+
+  test("an interrupted end marker is removed and the export cancelled", async () => {
+    const fake = engine({ only: "db" });
+    fake.startExit = (name) => (name.endsWith("-end") ? 130 : undefined);
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_CANCELLED");
+    expect(fake.leftovers()).toEqual([]);
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
+  test("an unclassified write error plus a failed cleanup keeps the helper name and status", async () => {
+    const fake = engine({ only: "db" });
+    fake.tarThrows.shop_db = Object.assign(new Error("input/output error"), {
+      code: "EIO",
+    });
+    fake.onExec = (container) => fake.rmFails.add(container);
+    const error = await caught(exportProjectData(input(fake)));
+    const [container] = fake.leftovers();
+    expect(container).toMatch(/^hack-data-export-[a-f0-9]{24}$/);
+    expect(error.message).toContain("input/output error");
+    expect(error.message).toContain(`docker rm -f ${container}`);
+    expect(error.detail).toEqual({ cleanup: { container, removed: false } });
+  });
+
   test("a full disk while writing the tar removes the helper container", async () => {
     const fake = engine({ only: "db" });
     fake.tarThrows.shop_db = Object.assign(new Error("no space"), {
@@ -539,7 +582,9 @@ describe("running containers and the live event fence", () => {
       ],
     });
     // The subscription was live before that check: the start marker ran first.
-    const marker = fake.calls.findIndex((argv) => argv[1] === "run");
+    const marker = fake.calls.findIndex(
+      (argv) => argv[1] === "create" && !argv.includes("--volume")
+    );
     const ps = fake.calls.findIndex((argv) => argv[1] === "ps");
     expect(marker).toBeLessThan(ps);
   });
@@ -585,12 +630,20 @@ describe("running containers and the live event fence", () => {
   test("our own held helper's mount publishes; markers bracket the copy", async () => {
     const fake = engine({ only: "db" });
     await exportProjectData(input(fake));
-    const markers = fake.calls
-      .filter((argv) => argv[1] === "run")
-      .map((argv) => argv[argv.indexOf("--name") + 1]);
-    expect(markers).toHaveLength(2);
-    expect(markers[0]).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
-    expect(markers[1]).toMatch(/^hack-data-export-[a-f0-9]{24}-end$/);
+    const names = markers(fake).map((argv) => argv[argv.indexOf("--name") + 1]);
+    expect(names).toHaveLength(2);
+    expect(names[0]).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
+    expect(names[1]).toMatch(/^hack-data-export-[a-f0-9]{24}-end$/);
+    // Markers are removed and confirmed, like helpers.
+    for (const name of names) {
+      expect(fake.calls).toContainEqual([
+        "docker",
+        "rm",
+        "--force",
+        name ?? "",
+      ]);
+    }
+    expect(fake.leftovers()).toEqual([]);
     expect(fake.events.watches).toBe(1);
     expect(fake.events.open).toBeFalse();
     expect(fake.calls.some((argv) => argv[1] === "events")).toBeFalse();

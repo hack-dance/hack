@@ -25,7 +25,12 @@ export type FakeVolume = {
   sockets?: number;
 };
 
-type FakeContainer = { volume: string; readOnly: boolean; running: boolean };
+type FakeContainer = {
+  /** Null for an event-stream marker, which mounts nothing. */
+  volume: string | null;
+  readOnly: boolean;
+  running: boolean;
+};
 
 export const COMPOSE = [
   "docker",
@@ -67,6 +72,8 @@ export class FakeEngine {
   tarExit: Record<string, number> = {};
   /** The tar stream throws (a full disk) for these volumes. */
   tarThrows: Record<string, Error> = {};
+  /** A `docker start` answer instead of success (124 timeout, 130 interrupt). */
+  startExit: ((name: string) => number | undefined) | null = null;
   /** `docker rm` leaves these containers in place. */
   rmFails = new Set<string>();
   /** Extra content appended by an extract (a restore that differs). */
@@ -110,7 +117,7 @@ export class FakeEngine {
 
   private exec(container: string, args: readonly string[]) {
     const held = this.containers.get(container);
-    const volume = held ? this.volumes.get(held.volume) : undefined;
+    const volume = held?.volume ? this.volumes.get(held.volume) : undefined;
     this.onExec?.(container, args);
     return { held, volume };
   }
@@ -136,7 +143,7 @@ export class FakeEngine {
         if (!(held?.running && volume)) {
           return { exitCode: 1, stderr: "no container", bytes: 0, sha256: "" };
         }
-        const thrown = this.tarThrows[held.volume];
+        const thrown = this.tarThrows[held.volume ?? ""];
         const bytes = Buffer.from(`tar:${volume.content}`);
         await writeFile(path, thrown ? bytes.subarray(0, 2) : bytes, {
           flag: "wx",
@@ -146,7 +153,7 @@ export class FakeEngine {
           throw thrown;
         }
         return {
-          exitCode: this.tarExit[held.volume] ?? 0,
+          exitCode: this.tarExit[held.volume ?? ""] ?? 0,
           stderr: "",
           bytes: bytes.byteLength,
           sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -171,7 +178,8 @@ export class FakeEngine {
             algorithm: "hack.tree-digest.v1",
             entries: 3,
             excludedSockets: 0,
-            digest: this.archiveDigestOverride[held.volume] ?? sha(content),
+            digest:
+              this.archiveDigestOverride[held.volume ?? ""] ?? sha(content),
           })}\n`
         );
       },
@@ -221,21 +229,21 @@ export class FakeEngine {
       return ok(names.map((n) => `${n}\n`).join(""));
     }
     if (args[0] === "run") {
-      // Event-stream markers.
-      this.events.run(argv);
-      return ok();
+      return fail("data commands never use docker run", 99);
     }
     if (args[0] === "create") {
       const name = args[args.indexOf("--name") + 1] ?? "";
-      const mount = args[args.indexOf("--volume") + 1] ?? "";
-      const volume = mount.slice(0, mount.indexOf(":"));
-      if (!this.volumes.has(volume)) {
+      const mount = args.includes("--volume")
+        ? (args[args.indexOf("--volume") + 1] ?? "")
+        : null;
+      const volume = mount === null ? null : mount.slice(0, mount.indexOf(":"));
+      if (volume !== null && !this.volumes.has(volume)) {
         // Like Docker: mounting a missing name creates an empty volume.
         this.volume(volume, { labels: {}, content: "" });
       }
       this.containers.set(name, {
         volume,
-        readOnly: mount.endsWith(":ro"),
+        readOnly: mount?.endsWith(":ro") ?? true,
         running: false,
       });
       return ok(`${"c".repeat(64)}\n`);
@@ -246,14 +254,17 @@ export class FakeEngine {
       if (!held) {
         return fail(`Error response from daemon: No such container: ${name}`);
       }
+      const exit = this.startExit?.(name);
+      if (exit !== undefined) {
+        return fail("start did not finish", exit);
+      }
       held.running = true;
       this.events.run([
         "docker",
         "run",
         "--name",
         name,
-        "--volume",
-        `${held.volume}:/v`,
+        ...(held.volume ? ["--volume", `${held.volume}:/v`] : []),
       ]);
       return ok(`${name}\n`);
     }

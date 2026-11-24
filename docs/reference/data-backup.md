@@ -52,9 +52,11 @@ with `hack down` and retry. Hack never stops anything for an export.
 Before its first check, the export subscribes to Docker's live event
 stream (`docker events`, volume `mount` and container `start` events, with no
 `--since`, so nothing depends on the engine's short event history). It proves
-the subscription live by running a no-op marker container
-(`hack-data-export-<random>-start`) and waiting for that container's start
-event; only then does it check for running containers and copy. Every helper
+the subscription live by creating and starting a no-op marker container
+(`hack-data-export-<random>-start`, no network, no logging) and waiting for
+that container's start event. Markers are tracked like the volume helpers:
+their create and start are bounded by `HACK_DATA_COMMAND_TIMEOUT_MS`, and
+each is removed and its removal confirmed on every path, a signal included; only then does it check for running containers and copy. Every helper
 runs under a unique name (`hack-data-export-<random>`), so its own mounts are
 told apart from anything else's. After the last copy it lists running
 containers again, runs an end marker and waits for its start event (the

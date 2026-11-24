@@ -219,7 +219,17 @@ function withUnconfirmedCleanup(
       },
     });
   }
-  return failure;
+  // An unclassified failure (an EIO on the tar write, say) keeps the
+  // container name and cleanup status too.
+  const reason =
+    failure instanceof Error && failure.message
+      ? failure.message
+      : String(failure);
+  return new HackCliError({
+    code: "E_UNEXPECTED",
+    message: `The data command failed (${reason}); nothing was published. ${note}`,
+    detail: { cleanup },
+  });
 }
 
 async function holdVolume(
@@ -340,24 +350,29 @@ async function holdVolume(
 }
 
 /**
- * Hold `opts.volume` in one helper container, run `work` against it, and
- * remove the container on every path. Removal is confirmed with Docker; an
- * unconfirmed removal is added to the outcome (`detail.cleanup`) and turns a
- * success into a refusal, never a silent claim of cleanup.
+ * Run `work` with a container this run owns, named `container`, and remove
+ * it on every path: the name is registered first (so the signal cleanup and
+ * the mount monitor know it, even if `work` fails halfway through creating
+ * it), and removal is confirmed with Docker. An unconfirmed removal is added
+ * to the outcome (`detail.cleanup`) and turns a success into a refusal,
+ * never a silent claim of cleanup.
  */
-export async function withHeldVolume<T>(
-  opts: HoldVolumeOptions,
-  work: (held: HeldVolume) => Promise<T>
+export async function withTrackedContainer<T>(
+  opts: {
+    readonly docker: DataBackupDocker;
+    readonly container: string;
+    readonly deadlines: DataBackupDeadlines;
+    readonly helperNames: Set<string>;
+  },
+  work: () => Promise<T>
 ): Promise<T> {
-  // Named and registered before `docker create`, so a create or start that
-  // failed halfway is removed too, and the mount monitor knows the name.
-  const container = helperContainerName(opts.purpose);
+  const { container } = opts;
   opts.helperNames.add(container);
   let failure: unknown;
   let value: T | undefined;
   let ok = false;
   try {
-    value = await work(await holdVolume({ ...opts, container }));
+    value = await work();
     ok = true;
   } catch (error: unknown) {
     failure = error;
@@ -374,4 +389,18 @@ export async function withHeldVolume<T>(
     throw failure;
   }
   return value as T;
+}
+
+/**
+ * Hold `opts.volume` in one helper container, run `work` against it, and
+ * remove the container on every path (see {@link withTrackedContainer}).
+ */
+export async function withHeldVolume<T>(
+  opts: HoldVolumeOptions,
+  work: (held: HeldVolume) => Promise<T>
+): Promise<T> {
+  const container = helperContainerName(opts.purpose);
+  return await withTrackedContainer({ ...opts, container }, async () =>
+    work(await holdVolume({ ...opts, container }))
+  );
 }

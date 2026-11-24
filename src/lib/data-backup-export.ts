@@ -100,14 +100,23 @@ export async function exportProjectData(
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
   const helperNames = new Set<string>();
   // Subscribe and prove coverage before the first running-container check.
+  const deadlines = input.deadlines ?? resolveDataBackupDeadlines();
   const monitor = await startMountMonitor({
     docker: input.docker,
     purpose: "export",
     helperNames,
+    deadlines,
     markerTimeoutMs: input.markerTimeoutMs,
   });
   try {
-    return await exportWithin({ input, now, plan, monitor, helperNames });
+    return await exportWithin({
+      input,
+      now,
+      plan,
+      monitor,
+      helperNames,
+      deadlines,
+    });
   } finally {
     await monitor.stop();
   }
@@ -119,9 +128,9 @@ async function exportWithin(opts: {
   readonly plan: DeclaredVolumePlan;
   readonly monitor: MountMonitor;
   readonly helperNames: Set<string>;
+  readonly deadlines: DataBackupDeadlines;
 }): Promise<DataExportResult> {
-  const { input, now, plan, monitor, helperNames } = opts;
-  const deadlines = input.deadlines ?? resolveDataBackupDeadlines();
+  const { input, now, plan, monitor, helperNames, deadlines } = opts;
   const stopCommand = input.downCommand ?? "hack down";
   const { owned, skipped } = await classifyDeclaredVolumes({
     docker: input.docker,

@@ -108,7 +108,6 @@ test("a managed DOCKER_HOST reaches every docker argv of an export", async () =>
       "volume inspect",
       "ps",
       "events",
-      "run",
       "create",
       "start",
       "container inspect",

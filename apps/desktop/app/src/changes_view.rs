@@ -131,7 +131,7 @@ impl HackApp {
     }
 
     pub(crate) fn show_changes_fixture(&mut self, name: &str) {
-        self.tab = 4;
+        self.tab = 6;
         self.changes.result = match name {
             "changes-loading" => None,
             "changes-error" => Some(Err("Git status could not be read")),

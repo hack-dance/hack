@@ -9,6 +9,7 @@
 //! needle and returns [`SearchState`]; [`Emulator::search_step`] moves the
 //! selected match and scrolls it into view. Matches cover the scrollback.
 
+use ghostty_vt::fmt::{Formatter, FormatterOptions};
 use ghostty_vt::key;
 use ghostty_vt::render::{CellIterator, Dirty, RowIterator};
 use ghostty_vt::screen::CellWide;
@@ -606,6 +607,21 @@ impl Emulator {
             .ok()
             .flatten()?;
         let text = String::from_utf8_lossy(&bytes).into_owned();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Copy the screen and its retained scrollback without changing selection.
+    pub fn output_text(&self) -> Option<String> {
+        let selection = self.term.select_all().ok().flatten()?;
+        let options = FormatterOptions::new()
+            .with_selection(&selection)
+            .with_unwrap(true)
+            .with_trim(true);
+        let bytes = Formatter::new(&self.term, options)
+            .ok()?
+            .format_alloc()
+            .ok()?;
+        let text = String::from_utf8_lossy(&bytes).trim_end().to_owned();
         (!text.is_empty()).then_some(text)
     }
 

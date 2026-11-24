@@ -213,3 +213,12 @@ fn cold_boot_observation_includes_provider_start_and_its_early_errors() {
     assert!(span < provider && provider < readiness && readiness < cleanup);
     assert!(cold.trim_end().ends_with("})\n}"));
 }
+
+#[test]
+fn parses_typescript_command_span() {
+    // Captured from the Bun collector, with normalized IDs and clock anchors.
+    let line = r#"{"schema":"hack.timings/1","trace":"11111111111111111111111111111111","span":"2222222222222222","parent":null,"proc":"cli","clock":"host","origin_unix_us":1,"origin_mono_us":1,"step":"command.total","start_us":0,"dur_us":1030674,"outcome":"ok","attrs":{}}"#;
+    let record = Record::parse_line(line).expect("TypeScript command span");
+    assert_eq!(record.step.as_str(), "command.total");
+    assert_eq!(record.outcome, Outcome::Ok);
+}

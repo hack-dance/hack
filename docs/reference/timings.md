@@ -60,9 +60,11 @@ that fails later still carries it. It is absent when no such sample was accepted
 a pool that was already running, a Research pool, or a start refused before or at
 that sample.
 
-This slice implements the Rust contract and transport only. The TypeScript reader,
-public `--timings`/`--json` integration, long-lived child transport wiring and measured
-command coverage follow separately. No CLI join or performance acceptance is claimed.
+Native `hack up` joins startup records from its runtime children under
+`command.total`. `containers.started` ends when the final container start
+is recorded. `services.ready` ends when all observed readiness conditions
+hold. A milestone without a successful record has no observed time for
+this invocation.
 
 For image acquisition, `image.engine.preflight` measures the initial guest
 check and `image.tag.resolve` measures mutable tag resolution.
@@ -99,6 +101,11 @@ Start-graph steps are `start.observe`, `start.decide`, `start.wave.record`,
 created/recreated services use `ok` without `cached`. Dependency-blocked work uses
 `skipped` with `attrs.blocked:true`. A still-warming service has no completed
 `container.ready` span until readiness is observed; the owner may outlive the CLI.
+Between a dependency's gate and its dependent's create, a fresh start records
+`start.wave.record` (the durable start-intent receipt write), `container.inspect`
+(the check that no container already has the planned name) and `container.create`
+(the create request). Managed-environment staging, when the service has managed
+values, runs between `spec.digest` and `container.create` without a span of its own.
 
 Numeric keys include `service_index`, `attempt`, `engine_requests`, `dropped`,
 `services`, `wave`, `syncs`, `waited_on_index`, and `generation`. Boolean keys include
@@ -130,3 +137,12 @@ for the full attribute vocabulary there. Linux datagram payload capacity is
 queried from `SO_SNDBUF` minus its 32-byte kernel reservation. No global socket
 settings are changed. Diagnostic writes never wait for the reader; saturation
 can drop records and is reported by the truncation marker when it can be sent.
+
+For native startup, `cli.project.selection` and `cli.compose.resolve` cover
+selection in the launcher and configuration resolution in the owner.
+`cli.env.overlay` covers startup input and environment preparation.
+`cli.graph.preflight`, `cli.graph.resolve` and `cli.graph.prepare` cover
+admission, plan inputs and graph launch preparation. `cli.readiness.finalize`
+covers the readiness inspection, publication and hooks. The detached launcher
+also records owner launch, acceptance and result preparation. These phases
+can overlap runtime request spans.

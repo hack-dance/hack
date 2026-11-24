@@ -5080,9 +5080,18 @@ linuxTest(
     // home's hackd directly, so the replacement may go on.
     fake.environmentFiles = "";
     fake.unitEnvironment = `PATH=${sysBin} HACK_HOME=${join(root, "other", ".hack")}`;
+    let managedStarts = 0;
+    const onManagedStart = () => {
+      managedStarts += 1;
+    };
     expect(
-      await refuseSystemdStartBeforeReplacing({ paths, deps: fake.deps })
+      await refuseSystemdStartBeforeReplacing({
+        paths,
+        deps: fake.deps,
+        onManagedStart,
+      })
     ).toBeNull();
+    expect(managedStarts).toBe(0);
 
     // A missing program that read-only mode may not repair.
     fake.unitEnvironment = `PATH=${sysBin} HACK_NO_INTERACTIVE=1`;
@@ -5110,8 +5119,13 @@ linuxTest(
       },
     });
     expect(
-      await refuseSystemdStartBeforeReplacing({ paths, deps: fake.deps })
+      await refuseSystemdStartBeforeReplacing({
+        paths,
+        deps: fake.deps,
+        onManagedStart,
+      })
     ).toBeNull();
+    expect(managedStarts).toBe(1);
   }
 );
 

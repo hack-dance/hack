@@ -405,8 +405,12 @@ async function buildRegisteredProjectView(opts: {
       })
     : null;
   const lifecycle = resolveProjectLifecycleView({ config });
-  const remotes = projectRemoteStatuses(
-    config?.prerequisites?.config?.selected
+  const defaults = config?.prerequisites?.config?.selected ?? [];
+  const remotes = defaults.flatMap((entry) =>
+    projectRemoteStatuses([entry]).map((status) => ({
+      ...status,
+      defaultTarget: entry.target,
+    }))
   );
 
   return {

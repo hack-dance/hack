@@ -129,6 +129,12 @@ launchers if requested. After an uncertain outcome, inspect
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
 Native `up --detach` and `up --json` wait for the background owner to report ready.
+A loopback port can accept connections as soon as its own service is ready.
+During startup, `hack ps` shows verified loopback publications, and
+`hack open <service>` can open a service with one verified loopback address.
+Other services can still be starting. If the start fails or is cancelled,
+the owner retires the ports it has already published. HTTPS addresses still
+depend on the HTTPS frontend being ready.
 Text output reports each build as it finishes, including its service names,
 outcome and elapsed time. Build output stays with foreground `hack up`.
 See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
@@ -142,6 +148,13 @@ Stop with the **same version and native home**:
 ```sh
 "$CANDIDATE" down --path /absolute/project
 ```
+
+If the foreground owner exited during startup, run `"$CANDIDATE" down --recover
+--path /absolute/project` while the original pool is still running. Recovery
+retains project data and requires matching records for this run. If those
+records cannot prove ownership, keep the old home and use a separate checkout
+with a [fresh manual native home](setup.md#manual-homes). This starts a separate
+run without transferring the old run’s data.
 
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
@@ -182,3 +195,17 @@ in Compose volumes. This switch does not copy either database.
 
 [The command contract](authored-commands.md) and
 [full reference](full-reference.md) cover advanced configuration and recovery.
+
+### Read the startup timeline
+
+Run `hack up --detach --timings` to see the native startup timeline on stderr.
+It shows when every container started and when all services met their readiness
+conditions. A service with a health check must pass it. A completed one-shot
+service must exit successfully. A milestone appears only when this invocation
+observed it. A project that is still warming may have a start time without a
+readiness time.
+
+Native `hack up --json` includes the same `hack.timings/1` records
+in `data.timings`. Add `--timings-file <file>` to save those records as JSONL
+in a new file. Times overlap when steps run together, so use `command.total`
+for elapsed startup time.

@@ -218,7 +218,7 @@ impl GuestClient for Session<'_> {
             Request::Facts {} | Request::List {} => None,
         };
         if handle.is_some_and(|h| h.boot != self.boot || h.incarnation != self.incarnation) {
-            return Ok(Response::Unknown {});
+            return Err(Error::StaleHandle);
         }
         let channel = self.next.take().ok_or(Error::Closed)?;
         let mut io = Exchange {

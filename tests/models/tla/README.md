@@ -686,6 +686,19 @@ not prove the kqueue exit delivery, timer accuracy, provider lease acquisition
 or that a replacement listener appears; it abstracts the listener as live, gone
 or replaced, and the retry delays as an ordered bound.
 
+
+### recovery-archive-bound
+
+`recovery-archive-bound/ArchiveBound.tla` checks HACK-2576: each pool stop under a
+running project ends a boot, the next `up` recovers the run, and a recovery that finds
+an earlier completed record moves it aside as bounded history. The bound once
+refused the recovery for ever.
+
+| Configuration | What it checks | Result |
+| --- | --- | --- |
+| `positive` | the oldest proven finished record makes room (`DropOldest`) and files that cannot be proven finished are not counted, over twelve pool stops with a bound of eight | passes: `AlwaysRecoverable`, `Bounded`, `Recovers` |
+| `negative` | today: the archive step refuses at the bound and counts every file with the prefix | `AlwaysRecoverable` fails: the stopped run can no longer be recovered |
+
 ## Native pool stop under a live run
 
 `native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down`)
@@ -1894,3 +1907,46 @@ Not covered:
 - readiness (healthchecks, their bounds and the end-to-end route probe are in `tests/global-stack-state.test.ts` and `tests/global-readiness.test.ts`);
 - the login path, which only reads the setting and starts routing;
 - a home whose whole logging directory is removed before its first manual start, which then counts as new.
+
+## Native build base aliases
+
+`native-build-alias/BuildAlias.tla` models one loaded base, one attempt and a
+possible restart in a different runtime incarnation. The positive run visits 23
+states. The `old-order` control reaches `blocked`, where every retry sees the
+same missing keeper and refuses. The other controls allow deleting the last tag,
+registry fallback, or sweeping while the child holds the key lock.
+
+| Model action | Code or external step |
+| --- | --- |
+| `Record` | `Aliases::prepare` verifies the keeper and writes the alias journal |
+| `Tag` | `Aliases::prepare` installs the attempt alias after journal publication |
+| `Solve` | `run_with_bases` starts the client with the key lock |
+| `ResolveMissing` | Negative control for a registry request forbidden by the builder source policy |
+| `Finish` | The supervised client exits and the build can publish a verified receipt |
+| `Crash` | The coordinator exits before alias cleanup |
+| `ChildExits` | The surviving client exits and releases its inherited lock |
+| `LoseKeeper` | An external deletion removes the keeper tag and leaves the alias |
+| `RestoreKeeper` | `aliases::sweep` verifies the alias ID and restores its keeper |
+| `Cleanup` | `Aliases::drop` or `aliases::sweep_stranded` untags and removes the journal after the worker releases the key |
+| `Reuse` | `run_with_bases` decides verified reuse before a best-effort alias sweep |
+| `Refuse`, `Retry` | Old sweep runs before reuse and leaves the same journal on every refusal |
+| `ChangeIncarnation` | The guest is replaced after the attempt ends |
+| `DiscardJournal` | `aliases::sweep` discards the journal without using its tags in the replacement guest |
+
+The verified flag abstracts a receipt already available to a retry. The model
+leaves out Docker transport, filesystem durability, and tag identity races
+outside the provider lease. The Rust regressions exercise journal and tag
+recovery, and the classic worker wire count exercises registry isolation.
+
+[Build alias state chart](native-build-alias/build-alias.svg)
+
+## Keeper reclamation
+
+`native-keeper-reclaim/KeeperReclaim.tla` models a superseded base whose keeper
+is its last engine tag. `BeginPin` takes the shared image fence in
+`image_ensure`; `PublishPin` publishes a tag resolution or immutable service ID
+before the shared fence drops. `Reclaim` represents exclusive fence acquisition before taking the provider lease, followed by the
+protected-ID scan and keeper removal. The negative
+control removes the fence guard and can remove the base while pinning. The model
+abstracts failed requests, multiple IDs, graph and build receipts, and Docker's
+last-tag deletion behavior.

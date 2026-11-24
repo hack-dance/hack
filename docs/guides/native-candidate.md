@@ -509,11 +509,14 @@ With it:
   an unchanged context is not read again. The cache misses only a change that keeps the
   size, inode, modification time and change time identical, which needs a deliberate
   clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
-- Only those inputs count. A changed network response (a download in a `RUN` step),
-  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
-  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
-  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
-  `hack restart` to build every image again; base-image tags then resolve again too.
+- A changed network response in a `RUN` step or changed cache mount contents do
+  not trigger a rebuild. Native checks base-image tags according to the image tag
+  policy and rebuilds when the selected base digest changes. `hack up --offline`
+  uses locally recorded selections even after they expire. `hack up --refresh-images`
+  checks the registry for current tags. Ordinary expiry is checked after readiness.
+  `HACK_NATIVE_REBUILD=1` forces BuildKit to run with the recorded selection.
+  Cold solves let BuildKit fetch missing bases by digest. Background retention
+  tags a verified local base or downloads and loads it after readiness.
 - When an image is actually built, BuildKit reads a private copy of the included
   context, made and checked against the build key right before it runs, so edits during
   a build never reach the image. The copy keeps hard links as links and gives every
@@ -1527,11 +1530,14 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the resolved base references that the receipt and the result report. Never pass a
   secret as a build argument. BuildKit build secrets are the right mechanism for
   secrets; native builds do not support them yet.
-- Every build runs under a BuildKit source policy: only the pinned base images
-  resolve as images, and network sources (`ADD` of an `http`, `https` or git URL, and
-  image blob sources) are denied. The engine would otherwise fetch those from outside
-  the isolated build network. The policy also covers sources that a base image's
-  stored `ONBUILD` triggers add; such bases refuse before the build anyway.
+- A fresh recorded base resolution whose verified image is in the guest makes
+  no registry request. An expired resolution checks the registry and can use the
+  proven loaded base if the registry is unavailable. `hack pull` refreshes build
+  bases as well as service images. The build key includes each base digest.
+- BuildKit receives only attempt-owned local references to the verified bases.
+  The source policy denies other image sources and remote `ADD`, git and image
+  blob sources. A private cache tag keeps the base while attempt aliases are
+  removed, including on recovery after an interrupted build.
 - Argument values reach the client only through a private definition file (mode
   `0600`, removed after the build), never its command line or its environment; the
   client's environment is a fixed list of its own settings. Names must be plain
@@ -1572,6 +1578,13 @@ it with `--best-effort` once the project is ready: that form never fails, report
 refusal as `skipped`, and never delays or fails the start. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
+
+When explicit reclaim frees at least 256 MiB on the guest storage filesystem,
+it also attempts a discard on `/storage` while holding the same pool lease.
+A confirmed trim adds `trim.guest_bytes_freed` and `trim.seconds` to the JSON.
+The byte count measures guest free space gained during reclaim. Host allocation
+can fall by a different amount. A failed or interrupted trim does not undo
+reclaim. The automatic `--best-effort` path does not trim.
 
 ### Network tool packages
 
@@ -1843,7 +1856,19 @@ provider lease it already holds and with the same proof `graph archive` uses (ev
 owned resource absent, no pending journal). Runs that keep data are never archived;
 when they alone fill the inventory, `hack up` refuses with `graph_retention_budget`
 and says to remove the data of a project you no longer use. The archive keeps up to
-256 runs; past that the refusal is `graph_archive_budget`. A project whose removed
+256 runs; at that bound the oldest archived removed runs are exported (as
+`graph export` does, into the home's `exports/graphs`) and pruned (as `graph prune`
+does), and each keeps a consumed-ID tombstone so its run ID cannot start a fresh run
+again. The store keeps 4096 tombstones; at that bound the oldest tombstones of fully
+pruned runs go. That is safe because a tombstone only refuses a fresh start with
+that ID, the CLI makes every fresh run ID from 128 random bits at the start, and a
+restore needs the run's receipt, which pruning already removed. The export of a
+fully pruned run is diagnostics: it is kept seven days, and at most 256 of them,
+oldest first. An interrupted export or prune is resumed the next time. A removed run
+archived under an earlier guest incarnation is pruned the same way: it holds nothing,
+and its export, which proves every owned resource absent, is the evidence. Only runs
+that cannot be proven removed keep their place; if 256 of those fill the archive,
+`graph_archive_budget` refuses and says to inspect them. A project whose removed
 run was archived this way before its `hack down --remove-data` confirmed the removal
 still confirms it: inspection reads a removed run from the archive.
 For a shared-source graph that reconciliation does not select (live source, a
@@ -2562,6 +2587,22 @@ An owner that is ending can read for a moment as neither running nor exited (its
 process exited but is not yet reaped, or its publication is read mid-change); the
 runtime reports that as `graph_foreground_owner_uncertain`, and the same wait covers it. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
+A provider that dies while the pool record still says `running` (killed, crashed, or
+lost across a sleep) leaves the pool `process-exited` in `runtime status`, and
+`runtime down` refuses it (`process_identity_unavailable`). The run's detached start
+notices that its provider's process is gone and ends as for an ended boot, and
+`hack up` and `hack down` run `runtime recover` first (under the provider lease,
+with the recorded provider proven gone by its identity), say so in one line, and
+continue as after any pool stop (HACK-2579).
+
+Each such recovery moves the run's earlier completed recovery record aside as history
+(`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
+`interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the
+eight newest records of each kind: the next one removes the oldest record that is
+proven finished, under the recovery's own locks (HACK-2576). A file there that cannot
+be proven finished is never removed and does not count. Earlier versions refused the
+ninth recovery instead, and every later `up`, `down` and pool stop refused with the
+data intact; a home left that way recovers with a plain `hack up` on this version.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

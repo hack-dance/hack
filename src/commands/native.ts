@@ -17,6 +17,7 @@ import { optJson } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
+import { nativeDiskUsage } from "./native-disk-usage.ts";
 
 const setupSpec = defineCommand({
   name: "setup",
@@ -346,6 +347,6 @@ export const nativeCommand = defineCommand({
   group: "Global",
   options: [],
   positionals: [],
-  subcommands: [setup, recover, tempAliases],
+  subcommands: [setup, recover, tempAliases, nativeDiskUsage],
   expandInRootHelp: true,
 } as const);

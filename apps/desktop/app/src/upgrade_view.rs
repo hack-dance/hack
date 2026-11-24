@@ -2,8 +2,8 @@
 //! rollback`, opened from the sidebar's Machine group.
 //!
 //! - **Check** (read-only) shows the CLI's own verdict, what blocks it, what
-//!   could not be checked, and the plan. Plan commands are for copying: the
-//!   app never runs `hack upgrade apply` or a step's command.
+//!   could not be checked, and the plan. Run starts the selected command in
+//!   the shared drawer, then refreshes the check.
 //! - **Save snapshot** keeps a private copy of the files an upgrade changes,
 //!   under the CLI's home.
 //! - **Review** (read-only) explains the findings that cannot be applied
@@ -22,7 +22,12 @@ use gpui_kit::{
 };
 
 use hack_desktop_core::machine_gate::Holder;
-use hack_desktop_core::upgrade::{CheckReport, Review, Rollback, Snapshot, SnapshotList};
+use hack_desktop_core::terminal::CommandSpec;
+#[cfg(hack_terminal)]
+use hack_desktop_core::terminal::{CommandAvailability, CommandControl, CommandControlSize};
+use hack_desktop_core::upgrade::{
+    CheckReport, ReleaseUpdate, Review, Rollback, Snapshot, SnapshotList,
+};
 use hack_desktop_ui::components::{StyledExt as _, Ui, action_button, dot, empty_pane};
 use hack_desktop_ui::icons::Glyph;
 use hack_desktop_ui::status::Status;
@@ -45,9 +50,8 @@ pub(crate) struct UpgradePane {
     pub restore: Option<Result<Rollback, String>>,
     /// A snapshot or restore is running (it holds the machine gate).
     pub working: Option<&'static str>,
-    /// Bumped when a snapshot or restore finishes: a check started before
-    /// describes the files before it, so its result is dropped and the
-    /// check runs again.
+    /// Bumped when a command, snapshot, or restore finishes. Reads from an
+    /// earlier generation are discarded and retried.
     pub generation: u64,
 }
 
@@ -94,7 +98,6 @@ impl HackApp {
                 }
                 this.upgrade.checking = false;
                 if this.upgrade.generation != generation {
-                    // A snapshot or restore finished meanwhile: read again.
                     this.load_upgrade(cx);
                     return;
                 }
@@ -118,6 +121,7 @@ impl HackApp {
         self.upgrade.reviewing = true;
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let epoch = self.model.source_epoch();
+        let generation = self.upgrade.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let review = cx
@@ -128,12 +132,25 @@ impl HackApp {
                 if this.model.source_epoch() != epoch {
                     return;
                 }
-                this.upgrade.reviewing = false;
-                this.upgrade.review = Some(review);
-                cx.notify();
+                this.finish_upgrade_review(generation, review, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_upgrade_review(
+        &mut self,
+        generation: u64,
+        review: Result<Review, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.upgrade.reviewing = false;
+        if self.upgrade.generation != generation {
+            self.review_upgrade(cx);
+            return;
+        }
+        self.upgrade.review = Some(review);
+        cx.notify();
     }
 
     /// Keep a snapshot, then list the snapshots again.
@@ -368,7 +385,7 @@ pub fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
             .py(space::S6)
             .gap(space::S7)
             .child(verdict(r, ui))
-            .child(plan(r, ui, cx))
+            .child(plan(app, r, ui, cx))
             .child(snapshot(app, ui, cx))
             .child(review(app, ui, cx))
             .child(restore(app, ui, cx))
@@ -381,7 +398,100 @@ pub fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
         .flex()
         .flex_col()
         .child(header)
+        .children(
+            app.health
+                .signals
+                .update
+                .as_ref()
+                .map(|release| release_review(app, release, ui, cx)),
+        )
         .child(body)
+        .into_any_element()
+}
+
+fn release_review(
+    app: &HackApp,
+    release: &ReleaseUpdate,
+    ui: &Ui,
+    cx: &mut Context<HackApp>,
+) -> gpui_kit::Div {
+    let panel = div()
+        .flex()
+        .flex_col()
+        .gap(space::S3)
+        .px(space::S8)
+        .py(space::S5)
+        .hairline_b(ui.p.border)
+        .child(section("Release update", ui).child(line(
+            Status::Unknown,
+            format!("Hack {} is available", release.latest),
+            ui,
+        )));
+    if let Some(command) = release.terminal_command() {
+        panel.child(upgrade_command(
+            app,
+            "release-update".into(),
+            &command,
+            release.command(app.health_report()),
+            true,
+            ui,
+            cx,
+        ))
+    } else {
+        panel.child(note(
+            "Update Hack using the method you used to install it.",
+            ui,
+        ))
+    }
+}
+
+fn upgrade_command(
+    app: &HackApp,
+    id: String,
+    label: &str,
+    spec: Option<CommandSpec>,
+    expects_password: bool,
+    ui: &Ui,
+    cx: &mut Context<HackApp>,
+) -> AnyElement {
+    #[cfg(hack_terminal)]
+    if let Some(spec) = spec {
+        let release = id == "release-update";
+        let control = CommandControl {
+            id,
+            label: label.into(),
+            title: "Upgrade".into(),
+            availability: CommandAvailability::Ready(spec),
+            size: CommandControlSize::Standard,
+            cwd: None,
+            expects_password,
+        };
+        let busy = app.upgrade.checking || app.upgrade.reviewing;
+        return crate::command_control::render(
+            control,
+            busy,
+            app,
+            ui,
+            cx,
+            move |app, result, cx| {
+                app.command_output_ready(result.run, cx);
+                app.upgrade.generation += 1;
+                app.load_upgrade(cx);
+                if app.upgrade.review.is_some() {
+                    app.review_upgrade(cx);
+                }
+                if release {
+                    app.health.update_started = None;
+                    app.refresh_update_notice(cx);
+                    app.refresh_now_async(cx);
+                }
+            },
+        );
+    }
+    #[cfg(not(hack_terminal))]
+    let _ = (app, spec, expects_password);
+    copy_chip(format!("copy-{id}"), label, ui, cx)
+        .flex_wrap()
         .into_any_element()
 }
 
@@ -420,6 +530,7 @@ fn copy_chip(
 ) -> gpui_kit::Div {
     let p = ui.p;
     let to_copy = command.to_owned();
+    let id = id.into();
     div()
         .flex()
         .items_center()
@@ -435,8 +546,15 @@ fn copy_chip(
                 .text_color(p.text_primary)
                 .child(command.to_owned()),
         )
+        .child(action_button(
+            format!("{id}-run"),
+            Glyph::Play,
+            "Run",
+            false,
+            ui,
+        ))
         .child(
-            action_button(id.into(), Glyph::Copy, "Copy", true, ui).on_click(cx.listener(
+            action_button(id, Glyph::Copy, "Copy", true, ui).on_click(cx.listener(
                 move |_, _, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(to_copy.clone()));
                 },
@@ -500,7 +618,7 @@ fn verdict(r: &CheckReport, ui: &Ui) -> AnyElement {
     card.into_any_element()
 }
 
-fn plan(r: &CheckReport, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
+fn plan(app: &HackApp, r: &CheckReport, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
     let mut col = section("Plan", ui);
     if r.plan.is_empty() {
         return col.child(note("Nothing to change.", ui)).into_any_element();
@@ -530,12 +648,22 @@ fn plan(r: &CheckReport, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
             detail = detail.child(note(action.to_owned(), ui));
         }
         if let Some(cmd) = step.command.as_deref().filter(|_| step.id != "snapshot") {
-            detail = detail.child(copy_chip(format!("upgrade-copy-{}", step.id), cmd, ui, cx));
+            detail = detail.child(upgrade_command(
+                app,
+                format!("upgrade-step-{}", step.id),
+                cmd,
+                step.args
+                    .as_ref()
+                    .and_then(|args| app.health_report().command(args.clone()).ok()),
+                step.kind == "admin",
+                ui,
+                cx,
+            ));
         }
         col = col.child(row.child(detail));
     }
     col.child(note(
-        "The app runs none of these: copy a command to run it in a terminal.",
+        "Run opens the command in Hack’s terminal drawer. Copy lets you run it in your own terminal.",
         ui,
     ))
     .into_any_element()
@@ -643,9 +771,14 @@ fn review(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
                         remedy = remedy.child(note(action.to_owned(), ui));
                     }
                     if let Some(cmd) = f.command.as_deref().filter(|c| !c.is_empty()) {
-                        remedy = remedy.child(copy_chip(
-                            format!("upgrade-review-copy-{}-{}", c.scope, f.id),
+                        remedy = remedy.child(upgrade_command(
+                            app,
+                            format!("upgrade-review-{}-{}", c.scope, f.id),
                             cmd,
+                            f.args
+                                .as_ref()
+                                .and_then(|args| app.health_report().command(args.clone()).ok()),
+                            f.kind.as_deref() == Some("admin"),
                             ui,
                             cx,
                         ));
@@ -804,6 +937,89 @@ mod tests {
     use hack_desktop_core::source::FixtureSource;
     use std::sync::Arc;
 
+    #[cfg(hack_terminal)]
+    #[test]
+    fn plan_run_preserves_argv_in_the_drawer_and_refreshes_the_plan() {
+        use gpui_kit::test::TestWindowExt as _;
+        use hack_desktop_core::execution::ExecutionContext;
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{Duration, Instant},
+        };
+
+        let home = std::env::temp_dir().join(format!("hack-upgrade-drawer-{}", std::process::id()));
+        fs::create_dir(&home).unwrap();
+        let program = home.join("hack");
+        fs::write(
+            &program,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/invocation\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut report = hack_desktop_core::setup_fixtures::load("ready").unwrap();
+        report.cli_program = Some(program.to_str().unwrap().into());
+        report.context = Some(
+            ExecutionContext::from_values(&[("HOME".into(), home.to_str().unwrap().into())])
+                .unwrap(),
+        );
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_kit::NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let (handle, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(crate::window_options(), cx, |window, cx| {
+                    cx.new(|cx| {
+                        let mut app = HackApp::new(
+                            Arc::new(FixtureSource(Fixture::Upgrade)),
+                            false,
+                            window,
+                            cx,
+                        );
+                        app.show_setup_now(report);
+                        app.show_upgrade_now();
+                        app.live = true;
+                        app
+                    })
+                })
+            })
+            .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("command-upgrade-step-env-format")
+                .click("run", cx);
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.update(|cx| app.update(cx, |app, cx| app.settle_command_fixture(cx)));
+            cx.run_until_parked();
+            if cx.update(|cx| app.read(cx).upgrade.generation > 0 && !app.read(cx).upgrade.checking)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "upgrade drawer run did not settle"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(home.join("invocation")).unwrap(),
+            "upgrade\nreview\n--only\nenv-format\n",
+        );
+        cx.update(|cx| assert!(app.read(cx).panels.command.visible()));
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.reset_command_drawer(window, cx));
+            window.remove_window();
+        })
+        .unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
     fn window(f: Fixture) -> (HeadlessAppContext, gpui_kit::Entity<HackApp>) {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_kit::NoopTextSystem::new()),
@@ -931,6 +1147,22 @@ mod tests {
             finding.action.as_deref(),
             Some("Check the converted layers before committing them.")
         );
+    }
+
+    #[test]
+    fn a_review_read_before_a_command_finished_is_retried() {
+        let (mut cx, app) = window(Fixture::Upgrade);
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.upgrade.generation = 1;
+                app.upgrade.reviewing = true;
+                app.finish_upgrade_review(0, Err("stale result".into()), cx);
+
+                let review = app.upgrade.review.as_ref().unwrap().as_ref().unwrap();
+                assert_eq!(review.status, "review");
+                assert!(!app.upgrade.reviewing);
+            });
+        });
     }
 
     #[test]

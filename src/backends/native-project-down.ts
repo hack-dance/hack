@@ -47,6 +47,7 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { recoverExitedNativeRuntime } from "./native-runtime-preflight.ts";
 
 function refused(): Error {
   return new ClosedCliError(
@@ -224,7 +225,7 @@ function optionalBoolean(value: unknown): boolean {
 
 /**
  * After selected predecessor recovery is handled, dispatch a live/absent owner
- * to ordinary authenticated cleanup, or a dead ready owner to same-boot
+ * to ordinary authenticated cleanup, or a provably recoverable dead owner to same-boot
  * recovery. The runtime revalidates process death and exact inventories itself;
  * this observation grants no recovery authority.
  */
@@ -421,10 +422,10 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
   if (
     selection.foreground === "exited" &&
     !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
-    !(selection.phase === "failed-retained" && selection.failedStartRecoverable)
+    !selection.failedStartRecoverable
   ) {
     throw new ClosedCliError(
-      "Native down --recover found a foreground owner that exited before its start was confirmed. Nothing was changed. Run hack ps --json to inspect this run's retained state."
+      `Native down --recover found a foreground owner that exited before its start was confirmed. The runtime could not prove which resources to retire. ${nativeRecoveryGuidance("graph_live_owner_recovery")}`
     );
   }
 }
@@ -657,6 +658,20 @@ async function inspectOrStartStoppedPool(opts: {
   try {
     return await opts.inspect();
   } catch (error) {
+    // HACK-2579: the pool's provider exited while its record still says running.
+    // `runtime recover` records it stopped (under the lease, identity checked);
+    // the down then begins again on a stopped pool.
+    if (
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCode === "process_identity_unavailable" &&
+      (await recoverExitedNativeRuntime({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        invoke: opts.invoke,
+      }))
+    ) {
+      throw new ExitedPoolRecovered();
+    }
     if (!isNativeRuntimeNotRunning(error)) {
       throw error;
     }
@@ -691,6 +706,15 @@ async function inspectOrStartStoppedPool(opts: {
     args: [...nativeProjectRuntimeUpArgs(opts.projectRoot), "--json"],
   });
   throw new StoppedPoolStarted();
+}
+
+/** Raised inside a down that recovered a pool whose provider exited (HACK-2579). */
+class ExitedPoolRecovered extends Error {
+  constructor() {
+    super(
+      "The native runtime's provider had exited and the pool was recovered, but this down still found it unavailable; nothing else was changed. Run hack down again."
+    );
+  }
 }
 
 /** Whether an inspected graph is stopped with its data retained. */
@@ -1033,6 +1057,7 @@ export async function nativeProjectDown(
   let started = false;
   let startupWaitMs = opts.startupWaitMs;
   let resumed = false;
+  let recovered = false;
   for (;;) {
     try {
       const result = await nativeProjectDownOnce({
@@ -1044,6 +1069,10 @@ export async function nativeProjectDown(
     } catch (error) {
       if (error instanceof StoppedPoolStarted && !started) {
         started = true;
+        continue;
+      }
+      if (error instanceof ExitedPoolRecovered && !recovered) {
+        recovered = true;
         continue;
       }
       if (error instanceof RetainedRunResumed && !resumed) {

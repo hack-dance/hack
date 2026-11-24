@@ -81,6 +81,11 @@ and is shared by the services that use it. A build may use `context`, `dockerfil
 `ssh` or `dockerfile_inline`, keeps the project on the Compose backend: `up` names
 the service and the field, and prints the command that runs it there.
 
+On the Compose backend, Hack warns before a build if its context can send Hack's
+machine-local files to Docker. Add the suggested lines to the effective ignore
+file, which is `<Dockerfile>.dockerignore` if present or the context's
+`.dockerignore` otherwise. With `--json`, the warning is a JSON line on stderr.
+
 An image is reused while its build inputs are unchanged: the Dockerfile, the ignore
 file, the target, the args, and every file in the build context the ignore file lets
 the build read. Native always leaves Hack's machine-local files out of its build
@@ -90,11 +95,24 @@ Dockerfile fails. Change any included input and the next `up` builds again, also
 `hack down`; the run's containers are then recreated from the new image and named
 volumes are kept. `hack restart` checks the same inputs before it stops anything: a
 build that fails leaves the current project running, and a rebuilt image is what the
-restarted project runs. A download in a `RUN` step, a cache mount and a moved base
-image tag do not count; `HACK_NATIVE_REBUILD=1` on `up` or `hack restart` builds every
-image again and looks the tags up now. After an `up` that built, native removes the
-older images of each build, keeping the current one, the one before it and any image
-a run still uses.
+restarted project runs. A changed download in a `RUN` step or changed cache mount
+contents do not trigger a rebuild. A changed base digest does. An unchanged build
+verifies its receipt from local state before acquiring any base. Ordinary tag expiry
+is checked in the background after readiness. Use `hack up --refresh-images` to
+check base tags during startup. `HACK_NATIVE_REBUILD=1` forces a build with the
+recorded selection.
+
+For a cold build, BuildKit fetches any missing base by digest during the solve. After
+readiness, native tries to retain the exact bases from current and previous builds,
+one at a time. It tags a matching local engine image when available and otherwise
+downloads and imports the base. It defers when startup, stop, build, or reclamation
+already holds the required locks. Downloads stage outside the provider lease and
+stop when they observe a foreground operation. An admitted import keeps the provider
+lease until verification settles. Retention has a 30-minute budget and logs failures
+without changing the startup result. `hack up --offline` can reuse an unchanged
+build. An edited build also needs its verified base loaded in the guest. After an
+`up` that built, native removes superseded build images while keeping the current
+and previous image and any image a run still uses.
 
 **Host aliases** (`extra_hosts` with `host-gateway`, or `internal.extra_hosts`).
 Native's VM has no route to your machine except through a binding to one host

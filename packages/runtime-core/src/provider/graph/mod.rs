@@ -150,6 +150,8 @@ mod export;
 pub use export::{Export, export};
 mod journal;
 mod retention;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod retired_history;
 mod storage;
 mod storage_inventory;
 pub use retention::{prune, reconcile_export};
@@ -393,6 +395,8 @@ pub struct Snapshot {
     #[cfg(target_os = "macos")]
     pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub startup_observed_ports: Vec<u16>,
     pub guest_endpoints: BTreeMap<String, GuestEndpoint>,
     /// Ready containers' loopback publication targets, keyed by
     /// [`port_endpoint_key`]. Independent of HTTP probes: a published port
@@ -851,7 +855,7 @@ struct Session<'a, 's> {
     /// diagnostic (HACK-2416).
     probe_findings: BTreeMap<String, crate::ProbeFinding>,
 }
-#[cfg(test)]
+#[cfg(any(test, all(debug_assertions, target_os = "macos")))]
 pub(super) fn fault_pause(
     root: &std::path::Path,
     run: &str,
@@ -868,7 +872,7 @@ pub(super) fn fault_pause(
     }
     Ok(())
 }
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(any(test, debug_assertions), target_os = "macos"))]
 pub(super) fn publisher_recovery_fault(
     candidate: &Candidate,
     run: &str,
@@ -1155,13 +1159,16 @@ impl Driver for Session<'_, '_> {
                         "Existing service intent cannot be replayed.",
                     ));
                 }
-                self.reserve(
-                    &key,
-                    if self.restarting {
-                        "start-intent"
-                    } else {
-                        "create-intent"
-                    },
+                // The durable intent write between a met gate and the create.
+                let phase = if self.restarting {
+                    "start-intent"
+                } else {
+                    "create-intent"
+                };
+                crate::timings::measure_candidate(
+                    crate::timings::Step::StartWaveRecord,
+                    None,
+                    |_| self.reserve(&key, phase),
                 )
             }
             Event::Started { service } => self.reserve(&format!("container:{service}"), "started"),
@@ -1193,7 +1200,7 @@ impl Driver for Session<'_, '_> {
                             "A ready service has no confirmed container ID.",
                         )
                     })?;
-                startup.service_ready(service, id)
+                startup.service_ready_leased(&self.engine, &self.receipt, service, id)
             }
             Event::AllStarted => {
                 record_all_started(&mut self.receipt, &self.root, self.startup.as_deref_mut())
@@ -1244,7 +1251,11 @@ impl Driver for Session<'_, '_> {
                 "Container creation cannot be replayed.",
             ));
         }
-        if inspect_resource(&self.engine, &self.receipt, &resource)?.is_some() {
+        if crate::timings::measure_candidate(crate::timings::Step::ContainerInspect, None, |_| {
+            inspect_resource(&self.engine, &self.receipt, &resource)
+        })?
+        .is_some()
+        {
             return Err(error(
                 "graph_resource_exists",
                 "Fresh graph cannot adopt an existing container.",
@@ -1312,11 +1323,14 @@ impl Driver for Session<'_, '_> {
         }
         self.check_cancelled()?;
         let body = spec::stamped(&self.configs[service], &spec);
-        let value = self.engine.request(
-            Method::POST,
-            &format!("/v1.53/containers/create?name={}", resource.name),
-            Some(&body),
-        )?;
+        let value =
+            crate::timings::measure_candidate(crate::timings::Step::ContainerCreate, None, |_| {
+                self.engine.request(
+                    Method::POST,
+                    &format!("/v1.53/containers/create?name={}", resource.name),
+                    Some(&body),
+                )
+            })?;
         #[cfg(test)]
         self.fault_pause("after-create")?;
         let id = value["Id"]
@@ -2301,6 +2315,7 @@ fn inspect_using(
         #[cfg(target_os = "macos")]
         interrupted_start_cleanup_incomplete,
         observations,
+        startup_observed_ports: Vec::new(),
         guest_endpoints,
         port_endpoints,
         storage_references,

@@ -18,6 +18,10 @@ on:
         type: boolean
         required: true
         default: true
+      compose_upgrade_trial:
+        description: Add one Compose signal and MCP SDK release trial
+        type: boolean
+        default: false
       rust_repetitions:
         description: Consecutive macOS Rust qualification passes (stops on first failure)
         type: choice
@@ -725,6 +729,28 @@ jobs:
       - name: Smoke slim runtime mounted-project env flow
         run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
 
+  compose-upgrade-trial:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.compose_upgrade_trial }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Prepare Compose fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
+          docker pull alpine:3.20
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bun run build:config-compiler
+      - run: bash scripts/check-compose-upgrade-sweep.sh --trial
+
   docker-e2e-shard:
     # One deterministic slice of the default e2e set per runner (tests/e2e/shard.ts).
     name: docker-e2e shard ${{ matrix.shard }}/4
@@ -1069,6 +1095,18 @@ jobs:
           cargo fmt --check --manifest-path packages/hack-vm-protocol/Cargo.toml
           cargo clippy --locked --all-targets --manifest-path packages/hack-vm-protocol/Cargo.toml -- -D warnings
           cargo test --locked --manifest-path packages/hack-vm-protocol/Cargo.toml
+
+      - name: Check guest agent and replay job recovery
+        if: runner.os == 'Linux'
+        working-directory: packages/hack-vm-agent
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+            cargo build --locked --release --target aarch64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          cargo test --locked --target x86_64-unknown-linux-musl
 
   test:
     # The required `test` check (repository ruleset) for `next` and `main`. It

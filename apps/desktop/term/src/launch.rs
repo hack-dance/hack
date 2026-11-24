@@ -32,6 +32,12 @@ pub const CONTAINER_SHELLS: [&str; 2] = ["bash", "sh"];
 pub enum SessionKind {
     /// A read-only log stream.
     Logs,
+    /// A single authored command in the shared bottom drawer.
+    Command {
+        label: String,
+        expects_password: bool,
+        project: bool,
+    },
     /// A shell inside a running service container.
     ContainerShell { service: String, shell: String },
     /// The user's login shell on the host, in the project root.
@@ -66,6 +72,7 @@ impl SessionKind {
     pub fn label(&self) -> String {
         match self {
             Self::Logs => "logs".into(),
+            Self::Command { label, .. } => label.clone(),
             Self::ContainerShell { service, shell } => format!("{service} · {shell}"),
             Self::HostShell { shell } | Self::HostShellWithEnv { shell, .. } => {
                 format!("host · {shell}")

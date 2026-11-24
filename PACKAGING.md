@@ -65,6 +65,34 @@ Flags:
 - `--skip-tests`: skip `bun test`
 - `--no-clean`: keep existing release dir
 
+## Stable release rehearsal
+
+The **Stable Release Rehearsal** workflow builds packages on Linux x64, Linux
+arm64, macOS arm64, and macOS x64. It runs the installed compiler and lifecycle
+supervisor checks and stores the archives, installer scripts, package file list,
+SHA-256 digests, and source revision as Actions artifacts. Use those artifacts
+to qualify a release candidate before tagging it.
+
+To qualify the Homebrew formula on a disposable Mac with Homebrew installed,
+collect the macOS arm64, macOS x64, and Linux x64 archives from the same rehearsal
+into one directory. Set `archive_dir` to the absolute path of that directory
+and set `version` to the packaged version.
+
+```bash
+brew tap-new --no-git local/hack-rehearsal
+tap_dir="$(brew --repository local/hack-rehearsal)"
+bun scripts/update-homebrew-tap.ts --tag="v$version" --version="$version" \
+  --archive-dir="$archive_dir" --tap-dir="$tap_dir"
+HOMEBREW_NO_AUTO_UPDATE=1 brew install local/hack-rehearsal/hack
+HOMEBREW_NO_AUTO_UPDATE=1 brew test local/hack-rehearsal/hack
+brew uninstall local/hack-rehearsal/hack
+brew untap local/hack-rehearsal
+```
+
+The generated formula uses local file URLs and hashes the collected archives.
+Its test checks the installed CLI version, the compiler handshake and
+`hack config validate --json`.
+
 ## Release contents (tarball layout)
 
 ```

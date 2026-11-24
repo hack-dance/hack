@@ -1,13 +1,16 @@
 #!/usr/bin/env bun
 
+import { createReadStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 interface Args {
   readonly repo: string;
   readonly tag: string | null;
   readonly version: string | null;
   readonly tapDir: string | null;
+  readonly archiveDir: string | null;
 }
 
 interface ParseOk {
@@ -28,6 +31,7 @@ interface GithubReleaseView {
 export interface ReleaseAssetInfo {
   readonly name: string;
   readonly sha256: string;
+  readonly url?: string;
 }
 
 type ParsedOption =
@@ -43,10 +47,13 @@ type MutableArgs = {
   tag: string | null;
   version: string | null;
   tapDir: string | null;
+  archiveDir: string | null;
 };
 
+const STABLE_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
+
 const HELP_TEXT = [
-  "Render the Homebrew tap formula for a published hack release.",
+  "Render the Homebrew formula for a published or local hack release.",
   "",
   "Usage:",
   "  bun run scripts/update-homebrew-tap.ts --tag=vX.Y.Z --version=X.Y.Z --tap-dir=/path/to/tap",
@@ -54,17 +61,8 @@ const HELP_TEXT = [
   "",
   "Options:",
   "  --repo <owner/name>   GitHub repo to query (default: hack-dance/hack)",
+  "  --archive-dir <path>  Read and hash local archives without querying GitHub",
 ].join("\n");
-
-if (import.meta.main) {
-  const parsed = parseArgs({ argv: Bun.argv.slice(2) });
-  if (parsed.ok) {
-    process.exitCode = await main({ args: parsed.args });
-  } else {
-    process.stderr.write(`${parsed.message}\n`);
-    process.exitCode = 1;
-  }
-}
 
 async function main({ args }: { readonly args: Args }): Promise<number> {
   const tag = args.tag?.trim() ?? "";
@@ -84,40 +82,30 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
     return 1;
   }
 
-  const release = await loadRelease({
-    repo: args.repo,
-    tag,
-  });
-  if (!release.ok) {
-    process.stderr.write(`${release.error}\n`);
-    return 1;
-  }
-
-  if (release.tag !== tag) {
-    process.stderr.write(
-      `Release tag mismatch: expected ${tag}, got ${release.tag}.\n`
-    );
-    return 1;
-  }
-
   let formula: string;
   try {
+    const fileNames = [
+      `hack-${version}-darwin-arm64.tar.gz`,
+      `hack-${version}-darwin-x86_64.tar.gz`,
+      `hack-${version}-linux-x86_64.tar.gz`,
+    ] as const;
+    const archiveDir = args.archiveDir;
+    if (archiveDir && !STABLE_VERSION.test(version)) {
+      throw new Error("Local archives require a stable X.Y.Z version.");
+    }
+    const assets = archiveDir
+      ? await Promise.all(
+          fileNames.map((name) => localAsset({ archiveDir, name }))
+        )
+      : await publishedAssets({ repo: args.repo, tag });
+    const [armName, intelName, linuxName] = fileNames;
     formula = renderFormula({
       repo: args.repo,
       tag,
       version,
-      darwinArm64: requireAsset({
-        assets: release.assets,
-        fileName: `hack-${version}-darwin-arm64.tar.gz`,
-      }),
-      darwinX64: requireAsset({
-        assets: release.assets,
-        fileName: `hack-${version}-darwin-x86_64.tar.gz`,
-      }),
-      linuxX64: requireAsset({
-        assets: release.assets,
-        fileName: `hack-${version}-linux-x86_64.tar.gz`,
-      }),
+      darwinArm64: requireAsset({ assets, fileName: armName }),
+      darwinX64: requireAsset({ assets, fileName: intelName }),
+      linuxX64: requireAsset({ assets, fileName: linuxName }),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -130,6 +118,44 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
   await Bun.write(formulaPath, formula);
   process.stdout.write(`Wrote ${formulaPath}\n`);
   return 0;
+}
+
+async function localAsset({
+  archiveDir,
+  name,
+}: {
+  readonly archiveDir: string;
+  readonly name: string;
+}): Promise<ReleaseAssetInfo> {
+  const path = resolve(archiveDir, name);
+  const file = Bun.file(path);
+  if (!(await file.exists())) {
+    throw new Error(`Missing local archive: expected ${name}.`);
+  }
+  const hash = new Bun.CryptoHasher("sha256");
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+  }
+  return { name, sha256: hash.digest("hex"), url: pathToFileURL(path).href };
+}
+
+async function publishedAssets({
+  repo,
+  tag,
+}: {
+  readonly repo: string;
+  readonly tag: string;
+}): Promise<readonly ReleaseAssetInfo[]> {
+  const release = await loadRelease({ repo, tag });
+  if (!release.ok) {
+    throw new Error(release.error);
+  }
+  if (release.tag !== tag) {
+    throw new Error(
+      `Release tag mismatch: expected ${tag}, got ${release.tag}.`
+    );
+  }
+  return release.assets;
 }
 
 function requireAsset({
@@ -277,6 +303,9 @@ export function renderFormula({
   readonly darwinX64: ReleaseAssetInfo;
   readonly linuxX64: ReleaseAssetInfo;
 }): string {
+  const assetUrl = (asset: ReleaseAssetInfo) =>
+    asset.url ??
+    `https://github.com/${repo}/releases/download/${tag}/${asset.name}`;
   return `${[
     "class Hack < Formula",
     '  desc "Environment orchestration for software projects"',
@@ -286,16 +315,16 @@ export function renderFormula({
     "",
     "  on_macos do",
     "    if Hardware::CPU.arm?",
-    `      url "https://github.com/${repo}/releases/download/${tag}/${darwinArm64.name}"`,
+    `      url "${assetUrl(darwinArm64)}"`,
     `      sha256 "${darwinArm64.sha256}"`,
     "    else",
-    `      url "https://github.com/${repo}/releases/download/${tag}/${darwinX64.name}"`,
+    `      url "${assetUrl(darwinX64)}"`,
     `      sha256 "${darwinX64.sha256}"`,
     "    end",
     "  end",
     "",
     "  on_linux do",
-    `    url "https://github.com/${repo}/releases/download/${tag}/${linuxX64.name}"`,
+    `    url "${assetUrl(linuxX64)}"`,
     `    sha256 "${linuxX64.sha256}"`,
     "  end",
     "",
@@ -310,6 +339,7 @@ export function renderFormula({
     "",
     "  test do",
     '    assert_match "hack", shell_output("#{bin}/hack --help")',
+    '    assert_equal "hack v#{version}", shell_output("#{bin}/hack --version").strip',
     '    assert_predicate libexec/"hack-lifecycle-supervisor", :executable?',
     `    assert_match "transport_version", shell_output("#{libexec}/${FORMULA_CONFIG_COMPILER} --protocol")`,
     '    (testpath/".hack").mkpath',
@@ -338,6 +368,7 @@ function parseArgs({
     version: null,
     tag: null,
     tapDir: null,
+    archiveDir: null,
     repo: "hack-dance/hack",
   };
 
@@ -418,6 +449,16 @@ function parseInlineOption({
       },
     });
   }
+  if (arg.startsWith("--archive-dir=")) {
+    return buildOptionResult({
+      value: arg.slice("--archive-dir=".length).trim(),
+      flag: "--archive-dir",
+      nextIndex: 0,
+      apply: (args, directory) => {
+        args.archiveDir = directory;
+      },
+    });
+  }
   if (arg.startsWith("--repo=")) {
     return buildOptionResult({
       value: arg.slice("--repo=".length).trim(),
@@ -471,6 +512,16 @@ function parseSplitOption({
       },
     });
   }
+  if (arg === "--archive-dir") {
+    return buildOptionResult({
+      value,
+      flag: "--archive-dir",
+      nextIndex: index + 1,
+      apply: (args, directory) => {
+        args.archiveDir = directory;
+      },
+    });
+  }
   if (arg === "--repo") {
     return buildOptionResult({
       value,
@@ -507,4 +558,14 @@ function buildOptionResult({
       apply(args, value);
     },
   };
+}
+
+if (import.meta.main) {
+  const parsed = parseArgs({ argv: Bun.argv.slice(2) });
+  if (parsed.ok) {
+    process.exitCode = await main({ args: parsed.args });
+  } else {
+    process.stderr.write(`${parsed.message}\n`);
+    process.exitCode = 1;
+  }
 }

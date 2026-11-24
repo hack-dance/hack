@@ -181,13 +181,44 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "project-remote-selection",
+    module: "ProjectRemoteSelection",
+    states: 11,
+    invariant: "TeardownUsesStartedTarget",
+    action: "Teardown",
+    fields: ['hook = "pending"', 'started = "none"', 'record = "none"'],
+    additionalControls: [
+      {
+        name: "stale-negative",
+        negative: true,
+        invariant: "ActiveLabelWins",
+        action: "Teardown",
+        fields: ["stale = TRUE", 'label = "qa"', 'hook = "none"'],
+      },
+    ],
+  },
+  {
     name: "guest-execution",
     module: "GuestAgent",
-    states: 3900,
+    states: 6860,
     invariant: "ResultBeforeRelease",
-    action: "Release",
+    action: "Next",
     fields: ['job = "released"', 'saved = "none"'],
     additionalControls: [
+      {
+        name: "unclean-restart",
+        negative: true,
+        invariant: "NoOrphan",
+        action: "AgentRestart",
+        fields: ['agent = "online"', "survivor = TRUE", "epoch = 1"],
+      },
+      {
+        name: "wait-eof",
+        negative: true,
+        invariant: "TerminalReleasable",
+        action: "Next",
+        fields: ['job = "exit37"', 'saved = "exit37"', "writerOpen = TRUE"],
+      },
       {
         name: "duplicate",
         negative: true,
@@ -199,7 +230,7 @@ const contracts: readonly ModelContract[] = [
         name: "record-running",
         negative: true,
         invariant: "SavedOutcome",
-        action: "Record",
+        action: "Next",
         fields: ['belief = "running"', 'saved = "running"'],
       },
     ],
@@ -2452,7 +2483,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "per-service-publication",
     module: "PerServicePublication",
-    states: 622,
+    states: 811,
     invariant: "Safe",
     action: "Record",
     fields: [
@@ -2486,6 +2517,13 @@ const contracts: readonly ModelContract[] = [
             ],
           },
         ],
+      },
+      {
+        name: "dead-authorization",
+        negative: true,
+        invariant: "NoDeadAuthorizedBind",
+        action: "Bind",
+        fields: ["lateBind = TRUE", 'phase = "dead"'],
       },
     ],
   },
@@ -2532,6 +2570,18 @@ const contracts: readonly ModelContract[] = [
         ],
       },
     ],
+  },
+  {
+    // HACK-2576: one run's recovery history across repeated pool stops. Positive:
+    // the oldest proven finished record makes room, and files that cannot be
+    // proven finished are not counted. `negative` is the refusal at the bound
+    // (counting every file with the prefix), which strands the stopped run.
+    name: "recovery-archive-bound",
+    module: "ArchiveBound",
+    states: 75,
+    invariant: "AlwaysRecoverable",
+    action: "PoolStop",
+    fields: ['phase = "stopped"', 'intent = "complete"'],
   },
   {
     name: "publication",
@@ -2874,6 +2924,62 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-build-base-scheduling",
+    module: "BaseScheduling",
+    states: 12,
+    invariant: "NoForegroundImport",
+    action: "Cold",
+    fields: ['phase = "solving"', "foregroundDownload = TRUE"],
+    additionalControls: [
+      {
+        name: "unsafe-overlap",
+        negative: true,
+        invariant: "OnlyIdleRetention",
+        action: "Stop",
+        fields: ['phase = "stopping"', "retention = TRUE"],
+      },
+    ],
+  },
+  {
+    name: "native-build-alias",
+    module: "BuildAlias",
+    states: 23,
+    invariant: "BaseSurvives",
+    action: "Cleanup",
+    fields: ["base = FALSE", "alias = FALSE"],
+    additionalControls: [
+      {
+        name: "old-order",
+        negative: true,
+        invariant: "CanRecover",
+        action: "Refuse",
+        fields: ['phase = "blocked"', "keeper = FALSE", "alias = TRUE"],
+      },
+      {
+        name: "unsafe-remote",
+        negative: true,
+        invariant: "NoRegistryFallback",
+        action: "ResolveMissing",
+        fields: ["wire = TRUE", 'phase = "solving"'],
+      },
+      {
+        name: "unsafe-sweep",
+        negative: true,
+        invariant: "NoLiveSweep",
+        action: "Cleanup",
+        fields: ["sweptLive = TRUE", "alias = FALSE"],
+      },
+    ],
+  },
+  {
+    name: "native-keeper-reclaim",
+    module: "KeeperReclaim",
+    states: 5,
+    invariant: "PinPreservesImage",
+    action: "Reclaim",
+    fields: ['fence = "pinning"', "keeper = FALSE"],
+  },
+  {
     name: "native-build-batch",
     module: "BuildBatch",
     states: 296,
@@ -3107,6 +3213,13 @@ const contracts: readonly ModelContract[] = [
           },
           {
             action: "PoolRecover",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+          // The same stranded finalization, reported one step later: a `Listen`
+          // fault earlier in the trace leaves `ListenerExits` as the last enabled
+          // step, which `NoDeadEnd` counts as progress (seen on the B1 factory).
+          {
+            action: "ListenerExits",
             fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
           },
         ],

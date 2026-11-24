@@ -78,7 +78,7 @@ Usage:
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
   hack-local runtime guest-disk-usage [--json]
-  hack-local runtime disk-usage [--scope all|runtime|build|evidence|artifacts] [--max-entries <1..1000000>] [--json]
+  hack-local runtime disk-usage [--scope all|runtime|build|evidence|artifacts|image-archives] [--max-entries <1..1000000>] [--json]
   hack-local runtime stop-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime serve-hostnames --socket <private-unix-path> (owner pipe on stdin)
   hack-local runtime lookup-hostname --hostname <name> [--json]
@@ -121,6 +121,7 @@ Usage:
   hack-local runtime admit-image --reference <[registry/]repository[:tag][@sha256:digest]|sha256:image-id> --json [IMAGE-POLICY]
   hack-local runtime build-image --request <private-0600-request.json> --json
   hack-local runtime reclaim-build-images [--best-effort] --json
+  hack-local runtime retain-build-bases --json [IMAGE-POLICY]
   hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest|sha256:image-id> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
   hack-local runtime cache-image --reference REF [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
   hack-local runtime image-tag-status --json [REFERENCE...]
@@ -1315,7 +1316,7 @@ fn run() -> Result<(), CandidateError> {
                 &discover_candidate(&requested)?,
                 &jobs,
                 &image_policy(flags)?,
-            ))?;
+            )?)?;
         }
         [
             "runtime",
@@ -1357,11 +1358,29 @@ fn run() -> Result<(), CandidateError> {
                 references,
             )?)?;
         }
+        [
+            "runtime",
+            "build-image",
+            "--request",
+            request,
+            "--bases",
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::image_build::build_bases(
+                Path::new(request),
+            )?)?;
+        }
         ["runtime", "build-image", "--request", request, "--json"] => {
             // Build output streams to stderr; only the result is printed on stdout.
             print_json(&hack_runtime_core::provider::image_build::build_image(
                 &discover_candidate(&requested)?,
                 Path::new(request),
+            )?)?;
+        }
+        ["runtime", "retain-build-bases", "--json", policy @ ..] => {
+            print_json(&hack_runtime_core::provider::image_build::retain::run(
+                &discover_candidate(&requested)?,
+                image_policy(policy)?,
             )?)?;
         }
         ["runtime", "reclaim-build-images", "--best-effort", "--json"] => {

@@ -95,6 +95,7 @@ async function fixture(compose = COMPOSE) {
   await writeFile(
     binary,
     `#!/bin/sh
+case "$1" in --internal-timings=*) shift;; esac
 ${nativeSetupShellReply()}
 if [ "$3-$4" = runtime-build-image ] && [ -f '${stub}/runtime-build-image.hold' ]; then
   request="${"$"}{6##*/}"
@@ -970,7 +971,8 @@ test.each(["fetch", "graph", "hook", "build"] as const)(
         )
       );
       process.kill(-child.pid, "SIGINT");
-      expect(await child.exited).toBe(130);
+      const exitCode = await child.exited;
+      expect(exitCode, await stderr).toBe(130);
       for (const request of barriers) {
         expect(
           await Bun.file(join(f.project, `${request}.settled`)).text()

@@ -99,7 +99,7 @@ impl Selection {
     }
 }
 
-/// A ready receipt and its exact foreground process bind the otherwise absent
+/// A recoverable receipt and its exact foreground process bind the otherwise absent
 /// endpoint to this run. Legacy unscoped roots cannot establish that binding.
 pub(super) fn require_scoped_root(
     candidate: &Candidate,
@@ -127,10 +127,11 @@ pub(super) fn verify_receipt(root: &Path, original: &Receipt) -> Result<(), Cand
     let current: Receipt = serde_json::from_slice(&bytes).map_err(|_| refused())?;
     if bytes != serde_json::to_vec_pretty(&current).map_err(|_| refused())?
         || immutable(&current)? != immutable(original)?
-        || !matches!(
-            current.phase.as_str(),
-            "ready-observed" | "started-observed" | "cleanup-intent" | "stopped-data-retained"
-        )
+        || (current.phase != original.phase
+            && !matches!(
+                current.phase.as_str(),
+                "cleanup-intent" | "stopped-data-retained"
+            ))
     {
         return Err(refused());
     }

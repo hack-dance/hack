@@ -146,6 +146,24 @@ impl<'a> Session<'a> {
     pub fn negotiate(stream: &'a UnixStream, timeout: Duration) -> Result<Self, Error> {
         Self::offer(stream, timeout, (1, VERSION), 0)
     }
+    /// Open a command session only after Facts confirms the negotiated guest identity.
+    /// Negotiation and Facts share one timeout. Subsequent commands each get the full timeout.
+    pub fn ready(stream: &'a UnixStream, timeout: Duration) -> Result<Self, Error> {
+        let started = Instant::now();
+        let mut session = Self::negotiate(stream, timeout)?;
+        session.timeout = timeout
+            .checked_sub(started.elapsed())
+            .ok_or(Error::Deadline)?;
+        match session.execute(&Request::Facts {})? {
+            Response::Facts {
+                boot, incarnation, ..
+            } if boot == session.boot && incarnation == session.incarnation => {}
+            _ => return Err(Error::Invalid),
+        }
+        session.timeout = timeout;
+        Ok(session)
+    }
+
     /// Restrict the offered version range and capabilities to implemented schemas.
     pub fn offer(
         stream: &'a UnixStream,
@@ -218,7 +236,7 @@ impl GuestClient for Session<'_> {
             Request::Facts {} | Request::List {} => None,
         };
         if handle.is_some_and(|h| h.boot != self.boot || h.incarnation != self.incarnation) {
-            return Ok(Response::Unknown {});
+            return Err(Error::StaleHandle);
         }
         let channel = self.next.take().ok_or(Error::Closed)?;
         let mut io = Exchange {

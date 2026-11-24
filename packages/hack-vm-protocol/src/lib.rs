@@ -36,6 +36,8 @@ pub enum Error {
     Io,
     /// An aggregate or field bound was exceeded.
     Size,
+    /// The request belongs to another boot or agent incarnation and was never sent.
+    StaleHandle,
     /// The message violates its schema or session identity.
     Invalid,
 }

@@ -90,6 +90,8 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
       "index.ts",
       "--compile",
       ...CLI_COMPILE_DEFINE_ARGS,
+      "--define",
+      `__HACK_BUILD_VERSION__=${JSON.stringify(version)}`,
       // A compiled hack must not load a .env (which could set BUN_OPTIONS)
       // or a bunfig.toml (preloads) from the directory it runs in: that
       // directory may be an untrusted project. Same flags as the prerelease
@@ -112,7 +114,9 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
     return buildExit;
   }
 
-  await copyFile({ from: binaryPath, to: resolve(releaseDir, "hack") });
+  const releaseBinary = resolve(releaseDir, "hack");
+  await copyFile({ from: binaryPath, to: releaseBinary });
+  await chmodExecutable({ path: releaseBinary });
   const compilerPath = resolve(releaseDir, "hack-config-compiler");
   await copyFile({
     from: resolve(distRoot, "hack-config-compiler"),

@@ -505,7 +505,10 @@ export async function enforceProjectPrerequisites(
     }
   };
   for (const selection of config.selected) {
-    if (names && !selection.envNames.some((name) => names.has(name))) {
+    if (
+      names &&
+      !Object.keys(selection.bindings).some((name) => names.has(name))
+    ) {
       continue;
     }
     for (const name of selection.requires) {

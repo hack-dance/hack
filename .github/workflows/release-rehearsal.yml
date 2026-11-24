@@ -1,0 +1,74 @@
+name: Stable Release Rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version to package
+        type: string
+        default: "5.0.0"
+        required: true
+  pull_request:
+    branches: [next]
+    paths:
+      - ".github/workflows/release-rehearsal.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Stable package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+          - os: macos-15
+            target: darwin-arm64
+          - os: macos-15-intel
+            target: darwin-x86_64
+    env:
+      RELEASE_VERSION: ${{ inputs.version || '5.0.0' }}
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: bun install --frozen-lockfile
+      - name: Build and qualify installed stable package
+        shell: bash
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          bun run build:release "--version=$RELEASE_VERSION" --skip-tests
+          test "$(dist/release/hack-"$RELEASE_VERSION"-release/hack --version)" = "hack v$RELEASE_VERSION"
+          bun scripts/check-release-config-compiler.ts dist/release
+          bun scripts/check-release-lifecycle-supervisor.ts dist/release
+      - name: Record package inventory
+        shell: bash
+        run: |
+          cd dist/release
+          archive="hack-${RELEASE_VERSION}-${RELEASE_TARGET}.tar.gz"
+          tar -tzf "$archive" > package-files.txt
+          shasum -a 256 "$archive" hack-*install.sh > package-sha256.txt
+          git rev-parse HEAD > source-revision.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-package-${{ matrix.target }}
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            dist/release/hack-*.tar.gz
+            dist/release/hack-*install.sh
+            dist/release/package-files.txt
+            dist/release/package-sha256.txt
+            dist/release/source-revision.txt

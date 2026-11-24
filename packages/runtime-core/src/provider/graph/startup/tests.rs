@@ -617,3 +617,50 @@ fn next13_writer_receipt_keeps_legacy_control_identity_and_pending_enrollment() 
     );
     assert_eq!(receipt.resources["volume:data"].phase, "created");
 }
+
+/// Wiring guard: the inspections and publications need an owned VM (and settlement
+/// macOS), so their effects are proven natively. This fails if a check between whole
+/// per-service steps is dropped or moved inside one service's step.
+#[test]
+fn final_verification_serves_requests_between_whole_service_steps() {
+    fn body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let from = source.find(start).expect("function start");
+        let to = from + source[from..].find(end).expect("function end");
+        &source[from..to]
+    }
+    let source = include_str!("runtime.rs");
+    let completed = body(source, "fn verify_with(", "fn verify_listeners(");
+    let completed = body(
+        completed,
+        "for (name, service) in &startup.services {",
+        "\n        }\n",
+    );
+    let served = completed
+        .find("startup_cancelled(")
+        .expect("served per service");
+    assert!(served < completed.find("inspect_resource(").unwrap());
+    let listeners = body(
+        source,
+        "fn verify_listeners(",
+        "pub(in crate::provider::graph) fn check_readonly(",
+    );
+    let exited = body(
+        listeners,
+        "if child.poll_exit()?.is_some() {",
+        "settle_exited_transport(",
+    );
+    let served = exited
+        .find("startup_cancelled(cancelled, requests)?;")
+        .expect("served per listener");
+    assert!(served < exited.find("inspect_resource(").unwrap());
+    let settle = body(
+        include_str!("../foreground/publishers.rs"),
+        "fn settle(",
+        "\nfn command(",
+    );
+    let each = settle.find("for (service, id) in").unwrap();
+    let served = settle.find("stop()?;").unwrap();
+    let published = settle.find("self.publish(").unwrap();
+    assert!(each < served && served < published);
+    assert_eq!(settle.matches("stop()?;").count(), 1);
+}

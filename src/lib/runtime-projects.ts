@@ -184,6 +184,7 @@ export async function readRuntimeProjects(opts: {
           "docker",
           "ps",
           "-a",
+          "--no-trunc",
           "--filter",
           "label=com.docker.compose.project",
           "--format",
@@ -716,6 +717,7 @@ export function serializeRuntimeProject(
         name: container.name,
         ports: container.ports,
         working_dir: container.workingDir ?? null,
+        started_at: container.observation?.startedAt ?? null,
         image: container.image,
         labels: container.labels,
         mounts: container.mounts.map((mount) => ({

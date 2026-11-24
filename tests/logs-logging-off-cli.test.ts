@@ -24,7 +24,7 @@ const COMPOSE_LINE = "web-1  | listening (from compose)";
 
 const STUB = [
   "#!/bin/sh",
-  'printf "%s\\n" "$*" >> "$STUB_CAPTURE/docker-args.log"',
+  'printf "%s\\n" "$*" >> "${0%/*}/../capture/docker-args.log"',
   'if [ "$1" = "compose" ]; then',
   '  case " $* " in',
   `    *" logs "*) printf "%s\\n" "${COMPOSE_LINE}"; exit 0 ;;`,
@@ -95,7 +95,6 @@ async function runHack(args: readonly string[]) {
       root,
       env: {
         PATH: `${join(root, "bin")}:/usr/bin:/bin`,
-        STUB_CAPTURE: capture,
         HACK_NO_INTERACTIVE: "1",
         HACK_TEST_LOCAL_LOKI_URL: closedLokiUrl,
       },

@@ -24,6 +24,8 @@ export interface ExecOptions {
   readonly unsetEnvKeys?: readonly string[];
   readonly stdin?: "inherit" | "pipe" | "ignore" | Blob;
   readonly timeoutMs?: number;
+  /** Called after the command has been dispatched to an owned subprocess. */
+  readonly onSpawn?: () => void;
   /**
    * Capture stdout as raw bytes under this budget. `stdout` is then
    * latin1-decoded (one char per byte, so `Buffer.from(stdout, "latin1")`
@@ -88,6 +90,7 @@ export async function exec(
     stderr: "pipe",
     detached: timeoutMs !== undefined,
   });
+  opts.onSpawn?.();
 
   const timeout = installSubprocessTimeout({
     pid: proc.pid,
@@ -154,6 +157,7 @@ async function execBoundedOwned(
     stderr: "pipe",
     detached: true,
   });
+  opts.onSpawn?.();
   let exited = false;
   let failedCapture = false;
   let drainTimer: ReturnType<typeof setTimeout> | undefined;

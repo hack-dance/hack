@@ -28,6 +28,7 @@ pub struct ProjectsPayload {
     /// `false` when the container runtime could not be read.
     pub runtime_ok: Option<bool>,
     pub runtime_error: Option<String>,
+    pub runtime_checked_at: Option<String>,
     #[serde(deserialize_with = "null_default")]
     pub projects: Vec<ProjectRow>,
     /// Machine-wide always-on state (docs/always-on-projects.md, "JSON
@@ -63,6 +64,7 @@ pub struct ProjectRow {
     #[serde(deserialize_with = "null_default")]
     pub name: String,
     pub dev_host: Option<String>,
+    pub open_url: Option<String>,
     pub repo_root: Option<String>,
     /// `running | stopped | missing | unregistered | unavailable | unknown`.
     #[serde(deserialize_with = "null_default")]
@@ -79,6 +81,13 @@ pub struct ProjectRow {
     pub remotes: Vec<RemoteStatus>,
     pub input_diagnostic: Option<InputDiagnostic>,
     pub runtime: Option<ProjectRuntime>,
+    pub compose_project: Option<String>,
+    pub compose_project_unresolved: bool,
+    #[serde(skip)]
+    pub checkout_verified: Option<bool>,
+    /// Canonical ownership resolved with the branch observations.
+    #[serde(skip)]
+    pub runtime_owner: Option<Option<String>>,
     // Summary-only counters.
     pub defined_service_count: Option<u32>,
     pub container_count: Option<u32>,
@@ -101,6 +110,9 @@ pub struct ProjectRow {
     /// Native branch instances are not reported here (design request R19).
     #[serde(deserialize_with = "null_default")]
     pub branch_runtime: Vec<BranchRuntime>,
+    /// Configured branch and worktree routes, even without containers.
+    #[serde(deserialize_with = "null_default")]
+    pub branch_copies: Vec<BranchCopy>,
     /// Linked worktrees registered for this project (paths only are used).
     #[serde(deserialize_with = "null_default")]
     pub worktrees: Vec<Worktree>,
@@ -164,11 +176,34 @@ impl RemoteAddress {
 }
 
 /// One registered linked worktree in a `/v1/projects` row.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Worktree {
     pub path: Option<String>,
     pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct BranchCheckout {
+    pub root: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct BranchCopy {
+    /// A detached worktree has a checkout but no automatic instance.
+    pub branch: Option<String>,
+    pub branch_name: String,
+    pub checkout: BranchCheckout,
+    pub url: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub defined_services: Vec<String>,
+    pub recorded: bool,
+    pub compose_project: Option<String>,
+    pub compose_project_unresolved: bool,
+    pub runtime: Option<ProjectRuntime>,
 }
 
 /// A path without a trailing slash ("/" stays "/").
@@ -226,6 +261,12 @@ impl ProjectRow {
             .repo_root
             .iter()
             .chain(self.worktrees.iter().filter_map(|w| w.path.as_ref()))
+            .chain(
+                self.branch_copies
+                    .iter()
+                    .filter(|copy| copy.checkout.kind == "worktree")
+                    .map(|copy| &copy.checkout.root),
+            )
             .map(|r| trim_path(r))
             .filter(|r| plain_path(r));
         for root in roots {
@@ -251,6 +292,7 @@ impl ProjectRow {
             std::fs::canonicalize(p)
                 .map_or_else(|_| trim_path(p), |c| trim_path(&c.to_string_lossy()))
         };
+        self.runtime_owner = self.runtime.as_ref().map(|rt| self.owner_by(rt, &canon));
         let owners: Vec<Option<String>> = self
             .branch_runtime
             .iter()
@@ -272,6 +314,15 @@ pub struct BranchRuntime {
     pub branch: String,
     #[serde(deserialize_with = "null_default")]
     pub runtime: ProjectRuntime,
+    pub compose_project: Option<String>,
+    pub compose_project_unresolved: bool,
+    pub checkout_verified: Option<bool>,
+    pub branch_name: Option<String>,
+    pub url: Option<String>,
+    pub checkout: Option<BranchCheckout>,
+    /// `Some` even when the new producer has no service routes.
+    #[serde(rename = "hosts")]
+    pub service_hosts: Option<std::collections::BTreeMap<String, Vec<String>>>,
     /// The owning checkout resolved by [`ProjectRow::resolve_branch_owners`]
     /// (`Some(None)`: none). `None` until resolved; then the derived row
     /// falls back to comparing the paths as written.
@@ -308,53 +359,177 @@ impl ProjectRow {
     /// always-on do not apply.
     #[must_use]
     pub fn instance(&self, branch: &str) -> Option<ProjectRow> {
-        let br = self.branch_runtime.iter().find(|b| b.branch == branch)?;
-        let mut service_hosts: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for svc in &br.runtime.services {
-            for c in &svc.containers {
-                let Some(label) = c.labels.get("caddy") else {
-                    continue;
-                };
-                for host in label.split(',').map(str::trim).filter(|h| !h.is_empty()) {
-                    let hosts = service_hosts.entry(svc.service.clone()).or_default();
-                    if !hosts.iter().any(|h| h == host) {
-                        hosts.push(host.to_owned());
-                    }
-                }
-            }
-        }
+        let root = self
+            .branch_runtime
+            .iter()
+            .find(|b| b.branch == branch)
+            .map(|b| self.branch_owner(b))
+            .unwrap_or_else(|| {
+                self.branch_copies
+                    .iter()
+                    .find(|c| c.branch.as_deref() == Some(branch))
+                    .map(|c| c.checkout.root.clone())
+            });
+        self.instance_at(branch, root.as_deref())
+    }
+
+    /// The verified runtime owner, or no checkout when labels are ambiguous.
+    #[must_use]
+    pub fn branch_owner(&self, runtime: &BranchRuntime) -> Option<String> {
+        runtime
+            .owner
+            .clone()
+            .unwrap_or_else(|| self.owning_checkout(&runtime.runtime))
+    }
+
+    /// Does the observed Compose runtime belong to this row's checkout?
+    #[must_use]
+    pub fn owns_runtime(&self) -> bool {
+        let Some(runtime) = &self.runtime else {
+            return false;
+        };
+        let owner = self
+            .runtime_owner
+            .clone()
+            .unwrap_or_else(|| self.owning_checkout(runtime));
+        owner.is_some() && owner == self.repo_root
+    }
+
+    /// Match observations and configuration by slug and checkout together.
+    #[must_use]
+    pub fn instance_at(&self, branch: &str, checkout: Option<&str>) -> Option<ProjectRow> {
+        let copy = self.branch_copy_at(Some(branch), checkout);
+        let Some(br) = self
+            .branch_runtime
+            .iter()
+            .filter(|b| b.branch == branch && self.branch_owner(b).as_deref() == checkout)
+            .min_by_key(|b| {
+                let expected = copy
+                    .and_then(|copy| copy.compose_project.as_ref())
+                    .or(b.compose_project.as_ref());
+                expected.is_some() && expected != b.runtime.project.as_ref()
+            })
+        else {
+            return Some(self.configured_instance(copy?));
+        };
         // The instance's own host, by the rule `hack open --branch <b>` uses
         // with no target: the branch label on the project's dev host. Never a
         // service route from the labels (those belong in the services table).
         // The OAuth alias preference is not in this read (DESIGN.md R20).
-        let dev_host = self.dev_host.as_ref().map(|d| format!("{branch}.{d}"));
+        let dev_host = self
+            .dev_host
+            .as_ref()
+            .filter(|_| br.service_hosts.is_none())
+            .map(|d| format!("{branch}.{d}"));
         let running = br
             .runtime
             .services
             .iter()
             .any(|s| s.containers.iter().any(Container::is_running));
         let status = if running { "running" } else { "stopped" };
+        // An observed branch can share the primary checkout or use a different
+        // Compose file in a worktree. Only include declarations for its owner.
+        let repo_root = checkout.map(str::to_owned);
+        let defined_services = if checkout.is_some() && checkout == self.repo_root.as_deref() {
+            self.defined_services.clone()
+        } else {
+            copy.map_or_else(Vec::new, |copy| copy.defined_services.clone())
+        };
         Some(ProjectRow {
             project_id: self.project_id.clone(),
             name: self.name.clone(),
             dev_host,
+            open_url: if checkout.is_some() && br.checkout.is_none() {
+                copy.and_then(|copy| copy.url.clone())
+                    .or_else(|| br.url.clone())
+            } else {
+                br.url
+                    .clone()
+                    .or_else(|| copy.and_then(|copy| copy.url.clone()))
+            },
             // The checkout that started this instance, which may be a
             // linked worktree, never a guess: `None` disables its actions.
-            repo_root: br
-                .owner
-                .clone()
-                .unwrap_or_else(|| self.owning_checkout(&br.runtime)),
+            runtime_owner: Some(repo_root.clone()),
+            repo_root,
             status: status.into(),
             runtime_status: Some(status.into()),
             kind: self.kind.clone(),
-            defined_services: self.defined_services.clone(),
-            service_hosts,
+            defined_services,
+            service_hosts: br
+                .service_hosts
+                .clone()
+                .unwrap_or_else(|| br.runtime.service_hosts()),
             runtime: Some(br.runtime.clone()),
+            checkout_verified: br.checkout_verified,
+            compose_project: copy
+                .and_then(|copy| copy.compose_project.clone())
+                .or_else(|| br.compose_project.clone()),
+            compose_project_unresolved: br.compose_project_unresolved
+                || copy.is_some_and(|copy| copy.compose_project_unresolved),
             backend: self.backend.clone(),
             branch: Some(branch.to_owned()),
             ..ProjectRow::default()
         })
+    }
+
+    #[must_use]
+    pub fn branch_copy_at(
+        &self,
+        branch: Option<&str>,
+        checkout: Option<&str>,
+    ) -> Option<&BranchCopy> {
+        self.branch_copies.iter().find(|copy| {
+            copy.branch.as_deref() == branch && Some(copy.checkout.root.as_str()) == checkout
+        })
+    }
+
+    /// Configured copy, including a linked checkout explicitly running base.
+    #[must_use]
+    pub fn configured_instance(&self, copy: &BranchCopy) -> ProjectRow {
+        let status = if copy.runtime.as_ref().is_some_and(|rt| {
+            rt.services
+                .iter()
+                .any(|svc| svc.containers.iter().any(Container::is_running))
+        }) {
+            "running"
+        } else if self.is_native()
+            || self
+                .runtime_status
+                .as_deref()
+                .is_none_or(|s| matches!(s, "unknown" | "unavailable"))
+        {
+            "unknown"
+        } else {
+            "stopped"
+        };
+        let service_hosts = copy
+            .runtime
+            .as_ref()
+            .map_or_else(Default::default, ProjectRuntime::service_hosts);
+        ProjectRow {
+            project_id: self.project_id.clone(),
+            name: self.name.clone(),
+            open_url: copy.url.clone(),
+            repo_root: plain_path(&copy.checkout.root).then(|| copy.checkout.root.clone()),
+            status: status.into(),
+            runtime_status: Some(status.into()),
+            backend: self.backend.clone(),
+            defined_services: copy.defined_services.clone(),
+            input_diagnostic: self.input_diagnostic.clone(),
+            branch: copy.branch.clone(),
+            compose_project: copy.compose_project.clone(),
+            compose_project_unresolved: copy.compose_project_unresolved,
+            runtime: copy.runtime.clone(),
+            service_hosts,
+            ..ProjectRow::default()
+        }
+    }
+
+    #[must_use]
+    pub fn route(&self) -> Option<String> {
+        self.open_url
+            .clone()
+            .or_else(|| self.dev_host.as_ref().map(|host| format!("https://{host}")))
     }
 }
 
@@ -402,6 +577,27 @@ pub struct ProjectRuntime {
     pub services: Vec<RuntimeService>,
 }
 
+impl ProjectRuntime {
+    fn service_hosts(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut service_hosts: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for svc in &self.services {
+            for c in &svc.containers {
+                let Some(label) = c.labels.get("caddy") else {
+                    continue;
+                };
+                for host in label.split(',').map(str::trim).filter(|h| !h.is_empty()) {
+                    let hosts = service_hosts.entry(svc.service.clone()).or_default();
+                    if !hosts.iter().any(|h| h == host) {
+                        hosts.push(host.to_owned());
+                    }
+                }
+            }
+        }
+        service_hosts
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RuntimeService {
@@ -432,6 +628,7 @@ pub struct Container {
     pub labels: std::collections::BTreeMap<String, String>,
     /// The container's compose working directory.
     pub working_dir: Option<String>,
+    pub started_at: Option<String>,
 }
 
 // Older branch payloads used an array here. An unrecognized port shape
@@ -454,6 +651,19 @@ pub struct ContainerMount {
 }
 
 impl Container {
+    /// Host lifecycle processes and one-off Compose runs have no service action.
+    #[must_use]
+    pub fn is_compose_service_container(&self) -> bool {
+        ["hack.lifecycle.process", "com.docker.compose.oneoff"]
+            .iter()
+            .all(|label| {
+                !self
+                    .labels
+                    .get(*label)
+                    .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+            })
+    }
+
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.state.eq_ignore_ascii_case("running")
@@ -655,6 +865,20 @@ pub struct LifecycleResult {
     pub services: LifecycleServices,
     #[serde(rename = "durationMs")]
     pub duration_ms: Option<u64>,
+    #[serde(rename = "stoppedContainerIds")]
+    pub stopped_container_ids: Vec<String>,
+    #[serde(rename = "stoppedContainers")]
+    pub stopped_containers: Vec<StoppedContainerExecution>,
+    #[serde(rename = "stoppedAt")]
+    pub stopped_at: Option<String>,
+}
+
+/// One successful Docker stop and the execution observed before shutdown.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoppedContainerExecution {
+    pub id: String,
+    pub started_at: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -937,9 +1161,9 @@ mod tests {
             };
             let dir = format!("{reported}/.hack");
             p.branch_runtime = vec![BranchRuntime {
-                owner: None,
                 branch: "b".into(),
                 runtime: runtime_in(&[Some(dir.as_str()), Some(dir.as_str())]),
+                ..BranchRuntime::default()
             }];
             assert_eq!(
                 p.instance("b").unwrap().repo_root,
@@ -961,14 +1185,14 @@ mod tests {
         let mut p = registered();
         p.branch_runtime = vec![
             BranchRuntime {
-                owner: None,
                 branch: "feature".into(),
                 runtime: runtime_in(&[Some("/work/wt/feature/.hack")]),
+                ..BranchRuntime::default()
             },
             BranchRuntime {
-                owner: None,
                 branch: "orphan".into(),
                 runtime: runtime_in(&[Some("/elsewhere/.hack")]),
+                ..BranchRuntime::default()
             },
         ];
         assert_eq!(

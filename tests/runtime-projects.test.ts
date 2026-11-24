@@ -92,6 +92,7 @@ const {
   createRuntimeInspectCache,
   getRuntimeInspectCacheDiagnostics,
   readRuntimeProjects,
+  serializeRuntimeProject,
 } = await import("../src/lib/runtime-projects.ts");
 
 beforeAll(() => {
@@ -191,6 +192,13 @@ test("runtime inspection keeps valid stdout when another container disappears", 
   const app = result.runtime[0]?.services.get("service-aaaaaaaaaaaa");
   expect(app?.containers[0]?.image).toBe("image:aaaaaaaaaaaa");
   expect(app?.containers[0]?.networks[0]?.name).toBe("hack-dev");
+  const [runtime] = result.runtime;
+  expect(runtime && serializeRuntimeProject(runtime)).toMatchObject({
+    services: [
+      { containers: [{ started_at: "2026-01-01T00:00:00.000000111Z" }] },
+      { containers: [{ started_at: null }] },
+    ],
+  });
 });
 
 test("runtime auto-registration skips native/mixed roots and still registers legacy peers", async () => {
@@ -284,7 +292,7 @@ function makeInspectRow(opts: {
     State: {
       Status: memberStates.get(opts.id) ?? "running",
       ExitCode: memberExitCodes.get(opts.id) ?? 0,
-      StartedAt: "2026-01-01T00:00:00Z",
+      StartedAt: "2026-01-01T00:00:00.000000111Z",
       Health: { Status: "healthy" },
     },
     Config: {

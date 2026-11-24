@@ -298,7 +298,7 @@ fn owner_death_keeps_native_status_and_recovery_stop() {
     ));
 }
 
-/// Add waits up to the stop-lock bound (16 s) on the server side. The
+/// Add waits up to the stop-lock bound on the server side. The
 /// forwarder must keep waiting for that reply instead of reporting failure
 /// after the ordinary 10-second frame deadline while the server still launches.
 #[test]

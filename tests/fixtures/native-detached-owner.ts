@@ -20,6 +20,7 @@ import {
 import type { NativeDetachedStartPhase } from "../../src/lib/native-detached-start-deadline.ts";
 import {
   nativeDetachedUpBranchDropped,
+  nativeDetachedUpBuildProgress,
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
   nativeDetachedUpHookFailed,
@@ -524,7 +525,13 @@ if (role === "channel-holder") {
         ? await withCommandTimings(join(root, "timings.jsonl"), launch)
         : await launch();
   } catch (error) {
+    if (mode === "build-progress" && process.env.FIXTURE_TEXT_OUTPUT) {
+      process.stderr.write(`${String(error)}\n`);
+    }
     process.exitCode = [
+      ...(mode === "build-progress" && !process.env.FIXTURE_TEXT_OUTPUT
+        ? ["build-progress"]
+        : []),
       "authored-attempt-limit",
       "wrapped-failure",
       "wrapped-static-failure",
@@ -798,6 +805,34 @@ if (role === "channel-holder") {
         // Force cancellation just before the existing owner accepts the IPC
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
+      }
+      if (mode === "build-progress") {
+        process.send?.({
+          kind: "build-settled",
+          outcome: "failed",
+          durationMs: 500,
+          services: ["private-build-line"],
+          extra: "this field is forbidden",
+        });
+        nativeDetachedUpBuildProgress({
+          services: ["worker"],
+          outcome: "failed",
+          durationMs: 1500,
+        });
+        nativeDetachedUpBuildProgress({
+          services: ["web"],
+          outcome: "cancelled",
+          durationMs: 2000,
+        });
+        await nativeDetachedUpFailure(
+          new NativeRuntimeRequestError({
+            message: "fixture failure",
+            nativeCode: "native_build_failed",
+          })
+        );
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
       }
       await reportFixturePhases(mode, root, () => stopped);
       publishFixtureProfileNotice(mode);

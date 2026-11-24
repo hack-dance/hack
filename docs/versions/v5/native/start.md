@@ -139,6 +139,8 @@ During startup, `hack ps` shows verified loopback publications, and
 Other services can still be starting. If the start fails or is cancelled,
 the owner retires the ports it has already published. HTTPS addresses still
 depend on the HTTPS frontend being ready.
+Text output reports each build as it finishes, including its service names,
+outcome and elapsed time. Build output stays with foreground `hack up`.
 See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
 separate detached and graph readiness limits. If detached startup times out,
 run `down` next. It waits up to two minutes for a pending owner and stops what

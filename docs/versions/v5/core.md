@@ -4,12 +4,18 @@ Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
 repository, so teammates and agents use the same definition.
 
-In the desktop preview, **Resources** lists observed containers and their
-attached image, named volumes and networks by project and branch. Open a
-project for its normal lifecycle actions, open its Compose logs, or go to
-**Doctor** for cleanup guidance and the native-pool state. The Resources pane
-is read-only. Detached resources and disk usage require a broader Hack
-inventory report.
+Use `hack resources list --json` or the desktop **Resources** pane to
+inspect observed containers and attachments. The report includes Docker's
+disk-size estimates, the native home's allocated bytes, and retained native
+volume observations where available. A detached row has a missing checkout.
+
+Use `hack resources remove volume:<name> --dry-run --json` to review removal,
+then pass its token with `--confirm`. Interactive removal prompts before
+deleting. The desktop presents the same preview and requires explicit
+confirmation. Cleanup requires a matching launch receipt and fresh engine
+evidence, so growing the inventory alone never grants cleanup permission.
+A named Compose volume needs a deleted checkout and zero container references.
+Native persistent data remains protected for graph restore.
 
 ## Project, instance and branch instance
 

@@ -1,15 +1,22 @@
 import { stat } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
+import { nativeAuthoredProjectPs } from "../backends/native-authored-project-observe.ts";
 import { readNativeDiskUsage } from "../backends/native-disk-usage.ts";
+import { nativeProjectPs } from "../backends/native-project-observe.ts";
 import {
   invokeNativeRuntime,
   resolveNativeSetupSelection,
 } from "../backends/native-runtime-client.ts";
 import {
+  listNativeCopyInstances,
+  listRegistrationCheckouts,
+} from "./branch-instance-identity.ts";
+import {
   projectDockerTransportEnvironment,
   readDockerDaemonIdentity,
 } from "./docker-helper-environment.ts";
 import { getString, isRecord } from "./guards.ts";
+import { readProjectRuntimeStateEntry } from "./project-runtime-state.ts";
 import { readProjectsRegistry } from "./projects-registry.ts";
 import {
   type RemovableKind,
@@ -196,6 +203,10 @@ export function resourceDocker(cwd: string) {
   };
 }
 
+function knownCheckout(dir: string, checkouts: ReadonlyMap<string, string>) {
+  return checkouts.has(dir) ? dir : dirname(dir);
+}
+
 async function composeInventory(cwd: string) {
   const { read, daemon } = resourceDocker(cwd);
   const [runtime, registry, engine, volumeTable, imageTable, volumes] =
@@ -229,18 +240,25 @@ async function composeInventory(cwd: string) {
     );
     for (const container of containers) {
       const dir = container.workingDir;
-      const root = dir && isAbsolute(dir) ? dirname(dir) : null;
-      const projectName =
-        root && (checkouts.get(root) ?? checkouts.get(dir ?? ""));
+      const root =
+        dir && isAbsolute(dir) ? knownCheckout(dir, checkouts) : null;
+      const projectName = root && checkouts.get(root);
       const detached = Boolean(root && (await checkoutGone(root)));
       const hackConfig = dir?.endsWith("/.hack") || dir?.endsWith("/.dev");
       if (!(project.isGlobal || projectName || (hackConfig && detached))) {
         continue;
       }
+      const record =
+        projectName && dir
+          ? await readProjectRuntimeStateEntry({
+              projectDir: dir,
+              composeProject: project.project,
+            })
+          : null;
       const owner = {
         project: projectName || project.project,
         checkout: root,
-        branch: null,
+        branch: record?.launchBranch ?? null,
         detached,
       };
       rows.push(...(await fromContainer(container, owner, engine)));
@@ -317,8 +335,131 @@ async function composeInventory(cwd: string) {
   };
 }
 
+async function nativeProjectRows(cwd: string) {
+  const runtime = await Promise.resolve()
+    .then(() => resolveNativeSetupSelection())
+    .catch(() => null);
+  if (!runtime) {
+    return {
+      rows: [] as ResourceRow[],
+      owners: new Map<string, ResourceOwner>(),
+      complete: false,
+    };
+  }
+  const { projects } = await readProjectsRegistry();
+  const work = (
+    await Promise.all(
+      projects.flatMap((project) =>
+        listRegistrationCheckouts(project).flatMap((checkout) =>
+          (["runtime", "authored"] as const).map(async (store) =>
+            (
+              await listNativeCopyInstances({ checkout, store })
+            ).map((branch) => ({
+              store,
+              scope: {
+                projectRoot: checkout.root,
+                projectDir: checkout.projectDir,
+                nativeHome: runtime.home,
+                branch,
+              },
+              owner: {
+                project: project.name,
+                checkout: checkout.root,
+                branch,
+                detached: false,
+              },
+            }))
+          )
+        )
+      )
+    )
+  ).flat();
+  const signal = AbortSignal.timeout(12_000);
+  const rows: ResourceRow[] = [];
+  const owners = new Map<string, ResourceOwner>();
+  let complete = work.length <= 64;
+  for (
+    let index = 0;
+    index < Math.min(64, work.length) && !signal.aborted;
+    index += 4
+  ) {
+    await Promise.all(
+      work.slice(index, index + 4).map(async ({ store, scope, owner }) => {
+        const observe =
+          store === "runtime" ? nativeProjectPs : nativeAuthoredProjectPs;
+        const result = await observe({ runtime, scope, signal }).catch(
+          () => null
+        );
+        if (!result || result.status !== "observed") {
+          complete = false;
+        }
+        if (result?.run) {
+          owners.set(result.run, owner);
+        }
+        for (const item of result?.items ?? []) {
+          if (item.container) {
+            rows.push({
+              id: item.container,
+              name: item.service,
+              kind: "container",
+              backend: "native",
+              owners: [owner],
+              bytes: null,
+              state: item.state,
+              refusal:
+                "Native containers are managed by their graph. Use the project lifecycle or Doctor.",
+            });
+          }
+        }
+        // Legacy graph snapshots report receipt-bound network and image identities.
+        if (
+          store === "runtime" &&
+          result?.run &&
+          result.status === "observed"
+        ) {
+          const graph = await invokeNativeRuntime({
+            runtime,
+            cwd,
+            args: ["graph", "status", "--run-id", result.run, "--json"],
+            signal,
+            timeoutMs: 5000,
+          }).catch(() => null);
+          const receipt = isRecord(graph) ? graph.receipt : null;
+          if (!(isRecord(receipt) && isRecord(receipt.resources))) {
+            complete = false;
+            return;
+          }
+          for (const resource of Object.values(receipt.resources).filter(
+            isRecord
+          )) {
+            const kind = resource.kind === "network" ? "network" : "image";
+            const name = getString(
+              resource,
+              kind === "network" ? "name" : "image"
+            );
+            if (!name) {
+              continue;
+            }
+            rows.push({
+              id: name,
+              name,
+              kind,
+              backend: "native",
+              owners: [owner],
+              bytes: null,
+              state: getString(resource, "phase") ?? null,
+              refusal: "Referenced by a native graph.",
+            });
+          }
+        }
+      })
+    );
+  }
+  return { rows, owners, complete: complete && !signal.aborted };
+}
+
 async function nativeInventory(cwd: string) {
-  const [disk, storage] = await Promise.all([
+  const [disk, storage, projects] = await Promise.all([
     readNativeDiskUsage(cwd).catch(() => null),
     Promise.resolve()
       .then(() =>
@@ -330,8 +471,9 @@ async function nativeInventory(cwd: string) {
         })
       )
       .catch(() => null),
+    nativeProjectRows(cwd),
   ]);
-  const rows: ResourceRow[] = [];
+  const rows = projects.rows;
   if (disk) {
     rows.push({
       id: "native-home",
@@ -358,7 +500,14 @@ async function nativeInventory(cwd: string) {
         kind: "volume",
         backend: "native",
         owners: run
-          ? [{ project: run, checkout: null, branch: null, detached: false }]
+          ? [
+              projects.owners.get(run) ?? {
+                project: run,
+                checkout: null,
+                branch: null,
+                detached: false,
+              },
+            ]
           : [],
         bytes:
           typeof volume.bytes === "number" && volume.bytes >= 0
@@ -370,7 +519,10 @@ async function nativeInventory(cwd: string) {
       });
     }
   }
-  return { rows, complete: Boolean(disk?.complete && storage) };
+  return {
+    rows: groupedResources(rows),
+    complete: Boolean(disk?.complete && storage && projects.complete),
+  };
 }
 
 export async function listResources(cwd: string) {

@@ -134,6 +134,7 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) resource_inventory: crate::resource_inventory_view::InventoryPane,
     pub(crate) sidebar_menu: Option<String>,
     pub(crate) changes: crate::changes_view::ChangesPane,
     pub(crate) catalog: crate::service_catalog::ServiceCatalog,
@@ -227,6 +228,7 @@ impl HackApp {
             source,
             logs,
             tab: 0,
+            resource_inventory: Default::default(),
             sidebar_menu: None,
             changes: Default::default(),
             catalog: crate::service_catalog::ServiceCatalog {
@@ -1391,6 +1393,7 @@ impl HackApp {
     pub(crate) fn show_resources(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Resources;
         self.user_navigated();
+        self.refresh_resource_inventory(cx);
         cx.notify();
     }
 
@@ -2108,6 +2111,11 @@ impl Render for HackApp {
             }
             // Setup applies whatever the project list shows, a missing CLI
             // included.
+            _ if self.pane == Pane::Resources
+                && (self.live || self.resource_inventory.report.is_some()) =>
+            {
+                crate::resource_inventory_view::render(self, &ui, cx).into_any_element()
+            }
             _ if self.pane == Pane::Resources => crate::resources_view::render(self, &ui, cx),
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),

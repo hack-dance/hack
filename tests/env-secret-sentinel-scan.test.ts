@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
 
+import { quoteShellWord } from "../src/lib/logs.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 import {
   createSecretWorktreeFixture,
@@ -102,6 +103,10 @@ function home(): string {
 
 function spawnLogPath(): string {
   return join(root, "logs", "spawn.jsonl");
+}
+
+function dockerArgvLogDir(): string {
+  return join(root, "logs", "docker-argv");
 }
 
 function sha256(text: string): string {
@@ -248,14 +253,16 @@ function commitEverything(cwd: string, message: string): void {
 beforeAll(async () => {
   // Canonical path, so paths reported by git compare equal to walked paths.
   root = await realpath(await mkdtemp(join(tmpdir(), "hack-sentinel-scan-")));
-  await mkdir(join(root, "logs"), { recursive: true });
+  await mkdir(dockerArgvLogDir(), { recursive: true });
   await mkdir(join(root, "shim"), { recursive: true });
   const shim = join(root, "shim", "docker");
   await writeFile(
     shim,
     [
       "#!/bin/sh",
-      `for arg in "$@"; do printf '%s\\n' "$arg" >> '${join(root, "logs", "docker-argv.log")}'; done`,
+      // Parallel probes each own their argv record.
+      `record=$(mktemp ${quoteShellWord(join(dockerArgvLogDir(), "call.XXXXXX"))}) || exit 1`,
+      'printf "%s\\n" "$@" > "$record" || exit 1',
       'if [ "$*" = "info --format {{.ID}}" ]; then',
       "  printf '%s\\n' sentinel-scan-daemon",
       "  exit 0",
@@ -516,13 +523,17 @@ test("no sentinel or key appears in CLI output or captured child argv", async ()
     )
   );
   expect(argvHits).toEqual([]);
-  const dockerArgv = await readFile(
-    join(root, "logs", "docker-argv.log"),
-    "utf8"
+  const dockerArgvDir = dockerArgvLogDir();
+  const dockerCalls = await Promise.all(
+    (await readdir(dockerArgvDir)).map((entry) =>
+      readFile(join(dockerArgvDir, entry), "utf8")
+    )
   );
-  expect(dockerArgv).toContain("compose");
-  expect(dockerArgv).toContain("network\nls\n");
-  expect(findHits(dockerArgv, needles)).toEqual([]);
+  expect(dockerCalls.some((argv) => argv.startsWith("compose\n"))).toBe(true);
+  expect(dockerCalls.some((argv) => argv.startsWith("network\nls\n"))).toBe(
+    true
+  );
+  expect(dockerCalls.flatMap((argv) => findHits(argv, needles))).toEqual([]);
 });
 
 test("no sentinel or key is tracked or stored in any Git object after a careless commit", async () => {

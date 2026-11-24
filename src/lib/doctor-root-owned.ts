@@ -4,7 +4,6 @@ import { dirname, join, relative } from "node:path";
 import { YAML } from "bun";
 import { isRecord } from "./guards.ts";
 import { serviceMounts } from "./local-directories.ts";
-import { quoteShellWord } from "./logs.ts";
 
 export const ROOT_OWNED_CHECK = "root-owned checkout files";
 const ENTRY_LIMIT = 4096;
@@ -158,33 +157,18 @@ export async function checkRootOwnedCheckout(
     }
     return `${JSON.stringify(relative(opts.projectRoot, path)).replace(UNSAFE_TERMINAL_TEXT, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}${owners.length ? ` (possible services: ${owners.join(", ")})` : ""}`;
   });
-  const safePaths = observed.paths.filter(
-    ({ path }) => path.search(UNSAFE_TERMINAL_TEXT) === -1
-  );
   return {
     name: ROOT_OWNED_CHECK,
     status: "warn",
     message: [
       `Root-owned checkout paths: ${paths.join(", ")}.`,
       observed.incomplete
-        ? "This list may be partial. The command only changes the paths it names. Rerun Doctor to find more."
+        ? "This list may be partial. Rerun Doctor after repair to find more."
         : "",
       servicesToFix.size
         ? `Set user: "${process.getuid?.()}:${process.getgid?.()}" on ${[...servicesToFix].join(", ")} in the Compose file.`
         : "",
-      safePaths.length < paths.length
-        ? "The repair command omits paths with terminal control characters. Review those paths separately."
-        : "",
-      ...[true, false].flatMap((directory) => {
-        const targets = safePaths.filter(
-          (entry) => entry.directory === directory
-        );
-        return targets.length
-          ? [
-              `sudo chown ${directory ? "-hR" : "-h"} -- "$(id -u):$(id -g)" ${targets.map(({ path }) => quoteShellWord(path)).join(" ")}`,
-            ]
-          : [];
-      }),
+      "Before repairing ownership manually, stop all containers and other processes that can write to the checkout. Verify that each target is inside the checkout and that neither the target nor any component of its full path is a symlink. If you cannot keep those paths stable during repair, leave ownership unchanged.",
     ]
       .filter(Boolean)
       .join("\n"),

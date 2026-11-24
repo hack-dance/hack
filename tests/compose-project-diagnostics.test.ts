@@ -87,7 +87,7 @@ test.skipIf(process.platform !== "linux")(
 );
 
 test.skipIf(process.platform !== "linux")(
-  "ownership warning attributes writable binds and prints a safe partial repair",
+  "ownership warning attributes writable binds and gives manual repair guidance",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "checkout-owner-text-"));
     try {
@@ -115,8 +115,14 @@ test.skipIf(process.platform !== "linux")(
       expect(result.message).toContain("on writer in the Compose file.");
       expect(result.message).not.toContain("(possible services: reader");
       expect(result.message).not.toContain("services: override");
-      expect(result.message).toContain("only changes the paths it names");
-      expect(result.message).toContain('sudo chown -h -- "$(id -u):$(id -g)"');
+      expect(result.message).toContain("This list may be partial");
+      expect(result.message).toContain(
+        "stop all containers and other processes"
+      );
+      expect(result.message).toContain(
+        "any component of its full path is a symlink"
+      );
+      expect(result.message).not.toContain("chown");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -124,7 +130,7 @@ test.skipIf(process.platform !== "linux")(
 );
 
 test.skipIf(process.platform !== "linux")(
-  "control characters are displayed safely and omitted from the quoted repair",
+  "control characters are escaped in the ownership report",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "checkout-owner-quote-"));
     try {
@@ -142,12 +148,8 @@ test.skipIf(process.platform !== "linux")(
       );
       expect(message).not.toContain("Set user:");
       expect(message).toContain("bad\\u001bfile");
-      expect(message).toContain("omits paths with terminal control characters");
-      const repair = message
-        .split("\n")
-        .find((line) => line.includes("sudo chown"));
-      expect(repair).toContain("a'\\''file");
-      expect(repair).not.toContain("bad");
+      expect(message).toContain("a'file");
+      expect(message).not.toContain("chown");
       expect(message).not.toContain("\u001b");
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -199,7 +201,7 @@ test.skipIf(process.platform !== "linux")(
       );
       expect(repair.message).toContain('"dist"');
       expect(repair.message).not.toContain("entry-");
-      expect(repair.message).toContain('sudo chown -hR -- "$(id -u):$(id -g)"');
+      expect(repair.message).not.toContain("chown");
       expect(repair.message).not.toContain("Set user:");
       const composeFile = join(root, "compose.yml");
       await writeFile(

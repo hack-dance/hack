@@ -223,9 +223,11 @@ It scans breadth first, includes ignored directories, and skips `.git` and
 symlinks. A scan that finds nothing stays OK and reports any bound it hit. Where a writable Compose bind mount and an
 unset `user:` match a path, Doctor lists possible services and shows the
 `user:` line to set for those services. Doctor lists topmost root-owned
-directories and suggests recursive ownership repair for those directories,
-with separate nonrecursive repair for files. Review the printed commands
-before running them yourself. Doctor never runs them.
+directories. Before changing ownership manually, stop all containers and other
+processes that can write to the checkout. Verify each target is inside the
+checkout and that no component of its full path is a symlink. Only repair
+ownership while those paths can be kept stable. Doctor prints no privileged
+repair command because paths can change after the scan.
 
 When the global router is unavailable on Compose, the routing warning shows a
 published port when it can identify one, or a running container address on

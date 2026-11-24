@@ -76,6 +76,9 @@ A connection failure leaves the execution outcome uncertain. Reconnect, list
 and inspect the original handle. A previous Start can arrive after a new client
 observes Absent. Preserve terminal status across reconnects until the host
 records it and releases it. An incarnation change fences old handles.
+The host client returns `Error::StaleHandle` before sending a handle from a
+different boot or incarnation. This consumes no channel. An `Unknown` reply
+on a negotiated session is an observation received from the peer.
 
 V1 supplies buffered commands with bounded offset reads. Interactive input,
 PTY allocation and resize, output wakeups, file-change subscriptions, time sync,
@@ -97,7 +100,8 @@ Retry the same immutable command and handle within its incarnation; on Conflict
 inspect the original. One host owns a durable, increasing u128 execution counter for each agent incarnation. Wire IDs are fixed-width lowercase hex, so lexical and numeric order agree. Persist the allocation before sending Start. Submit new IDs in admission order; finish reconciling a timed-out Start before submitting a later ID. After a confirmed Release never resend Start. The guest checks its live table first, then rejects IDs at or below its greatest admitted ID. A missing ID below this mark is permanently retired, including skipped numbers; Released does not establish that a skipped command ever ran. A full live table refuses new work before advancing the mark. Release drops the record and both pipes; the mark never decreases or wraps. Restoring a host without its durable counter requires recovery of that counter or a coordinated new incarnation, never guessing from List.
 List includes every
 unreleased job (maximum advertised in Welcome, at most 16). A terminal Signal
-returns the cached status without signalling a PID. Release discards all bytes
+returns the cached status. A guest that pins the unreaped leader may signal its
+owned process group until Release. It must never signal a recycled PID. Release discards all bytes
 while the incarnation watermark fences the ID. Each pipe keeps its newest advertised retention
 bytes and continues draining. A lagging reader resumes at start_offset plus the
 returned byte count. A 1 GiB writer retains only that finite tail.

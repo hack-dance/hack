@@ -60,9 +60,7 @@ that fails later still carries it. It is absent when no such sample was accepted
 a pool that was already running, a Research pool, or a start refused before or at
 that sample.
 
-This slice implements the Rust contract and transport only. The TypeScript reader,
-public `--timings`/`--json` integration, long-lived child transport wiring and measured
-command coverage follow separately. No CLI join or performance acceptance is claimed.
+TypeScript libraries share this contract; public CLI integration and performance qualification follow.
 
 For image acquisition, `image.engine.preflight` measures the initial guest
 check and `image.tag.resolve` measures mutable tag resolution.

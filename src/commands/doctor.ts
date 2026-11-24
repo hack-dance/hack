@@ -176,6 +176,10 @@ import {
 } from "../lib/doctor-native-source.ts";
 import { POLLING_FIX_ID } from "../lib/doctor-polling-fix.ts";
 import {
+  checkRootOwnedCheckout,
+  ROOT_OWNED_CHECK,
+} from "../lib/doctor-root-owned.ts";
+import {
   DOCTOR_SAFE_FIX_ID,
   runDoctorSafeFix,
 } from "../lib/doctor-safe-fix.ts";
@@ -4157,6 +4161,15 @@ async function runProjectChecks(opts: {
       )
     );
     return results;
+  }
+  if (isLinux() && process.getuid?.() !== 0) {
+    const project = await findProjectContext(startDir);
+    if (project) {
+      const observe = () => checkRootOwnedCheckout(project);
+      results.push(
+        await runCheck(s, ROOT_OWNED_CHECK, observe, { timeoutMs: 700 })
+      );
+    }
   }
   if (dockerOk) {
     results.push(

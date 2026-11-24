@@ -1,6 +1,7 @@
 //! Native runtime ownership journal. Compose v1 paths and codecs remain separate.
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 const LIMIT: usize = 64 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -600,10 +601,12 @@ pub(super) fn unreserved() -> CandidateError {
 /// True only when this run's journal directory is exactly absent beneath private
 /// existing ancestors. A present, partial or unreadable path returns false so the
 /// ordinary receipt validation still owns it. Read-only; nothing is created.
-#[cfg(target_os = "macos")]
 pub(super) fn absent(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
-    let root = directory(candidate, run)?;
-    match fs::symlink_metadata(&root) {
+    directory_absent(candidate, &directory(candidate, run)?)
+}
+
+pub(super) fn directory_absent(candidate: &Candidate, root: &Path) -> Result<bool, CandidateError> {
+    match fs::symlink_metadata(root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         _ => return Ok(false),
     }
@@ -618,10 +621,7 @@ pub(super) fn absent(candidate: &Candidate, run: &str) -> Result<bool, Candidate
             Err(_) => return Err(refused()),
         }
     }
-    Ok(
-        fs::symlink_metadata(&root)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-    )
+    Ok(fs::symlink_metadata(root).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
 }
 pub(super) fn directory(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
     if !hex(run, 32) {
@@ -631,7 +631,11 @@ pub(super) fn directory(candidate: &Candidate, run: &str) -> Result<PathBuf, Can
 }
 pub(super) fn reserve(candidate: &Candidate, receipt: &Receipt) -> Result<PathBuf, CandidateError> {
     receipt.validate(receipt.review.scope().run, &receipt.owner)?;
-    let root = directory(candidate, receipt.review.scope().run)?;
+    let run = receipt.review.scope().run;
+    let root = directory(candidate, run)?;
+    if !directory_absent(candidate, &super::archive::directory(candidate, run)?)? {
+        return Err(refused());
+    }
     state::private_directory(root.parent().ok_or_else(refused)?)?;
     fs::DirBuilder::new()
         .mode(0o700)
@@ -733,7 +737,15 @@ fn load_validated(
     run: &str,
     owner: Option<&str>,
 ) -> Result<(Receipt, PathBuf), CandidateError> {
-    let root = directory(candidate, run)?;
+    load_at(candidate, run, owner, directory(candidate, run)?)
+}
+
+pub(super) fn load_at(
+    candidate: &Candidate,
+    run: &str,
+    owner: Option<&str>,
+    root: PathBuf,
+) -> Result<(Receipt, PathBuf), CandidateError> {
     for path in root
         .ancestors()
         .take_while(|path| path.starts_with(&candidate.state_root))

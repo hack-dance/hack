@@ -155,3 +155,9 @@ alive. Between `services.ready` and that reply, `graph.ready.commit` covers
 final verification and durable receipt publication. The `graph.publish.*`
 spans distinguish probe-generation seeding, endpoint reservation, relay
 startup, and publisher readiness verification.
+
+Before provider spawn, `vm.startup.lease` covers acquiring the startup lease,
+`vm.admission.wait` covers the remaining Development host-sampling window
+when it actually sleeps, and `vm.release.verify` covers verifying the retained
+pool's provider release. The existing `vm.ensure` reuse attribute distinguishes
+a recorded sample that replaced the wait. The sampling interval is unchanged.

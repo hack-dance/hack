@@ -22,6 +22,8 @@ steps! {
     ProcessStartup => "process.startup",
     ProjectStatus => "project.status", PlanCompile => "plan.compile",
     RuntimeRequest => "runtime.request", RuntimeDispatch => "runtime.dispatch",
+    VmAdmissionWait => "vm.admission.wait", VmStartupLease => "vm.startup.lease",
+    VmReleaseVerify => "vm.release.verify",
     VmEnsure => "vm.ensure", VmReattach => "vm.reattach", VmBoot => "vm.boot", VmStop => "vm.stop",
     StartObserve => "start.observe", StartDecide => "start.decide", StartWaveRecord => "start.wave.record",
     ContainerCreate => "container.create", ContainerRemove => "container.remove",

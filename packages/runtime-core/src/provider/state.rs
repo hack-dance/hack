@@ -154,6 +154,7 @@ impl Lock {
     }
 
     /// Retry acquisition without creating the lock file.
+    #[cfg(target_os = "macos")]
     pub fn acquire_existing_waiting(root: &Path, wait: Duration) -> Result<Self, CandidateError> {
         wait_for_acquisition(
             Instant::now() + wait,
@@ -224,6 +225,38 @@ pub(super) fn wait_for_acquisition<T>(
             result => return result,
         }
     }
+}
+
+/// Report a contended image lock after two seconds, then clear its progress line.
+pub(super) fn wait_for_image_lock<T>(
+    wait: Duration,
+    subject: &str,
+    acquire: impl FnMut() -> Result<T, CandidateError>,
+) -> Result<T, CandidateError> {
+    let started = Instant::now();
+    let mut reported = false;
+    let result = wait_for_acquisition(
+        started + wait,
+        || {
+            if !reported
+                && started.elapsed() >= Duration::from_secs(2)
+                && matches!(
+                    std::env::var("HACK_INTERNAL_REPORT_IMAGE_WAIT").as_deref(),
+                    Ok("1" | "batch")
+                )
+            {
+                eprintln!("hack.image-wait:begin {subject}");
+                reported = true;
+            }
+            Ok(())
+        },
+        acquire,
+        acquisition_expired,
+    );
+    if reported {
+        eprintln!("hack.image-wait:end {subject}");
+    }
+    result
 }
 
 /// Apply a flock operation to a borrowed descriptor. Closing it releases the lock.

@@ -41,6 +41,7 @@ import {
 } from "./cli-result.ts";
 import {
   acceptUpTimingOwnerRelay,
+  beginUpTiming,
   closeUpTimingOwnerRelay,
   completeUpTimings,
   upTimingOwnerRelay,
@@ -618,6 +619,15 @@ function writeHotReload(value: unknown): boolean {
 
 export function reportNativeImageDownloadWait(reference: string | null): void {
   publishImageDownloadWait?.(reference);
+  if (reference) {
+    const lock = reference === "image-cache" || reference === "image-reclaim";
+    const line = lock
+      ? `Waiting for the native ${reference === "image-cache" ? "image cache lock" : "image reclamation lock"}.`
+      : `Waiting for another start to resolve or download ${reference}.`;
+    if (!reportNativeImageNotice(line)) {
+      process.stderr.write(`${line}\n`);
+    }
+  }
 }
 
 export function reportNativeImageNotice(notice: string): boolean {
@@ -983,12 +993,13 @@ function watchStartDeadline(opts: {
   readonly child: ReturnType<typeof spawn>;
   readonly limits: NativeDetachedStartLimits;
   readonly heartbeatStaleMs: number | undefined;
+  readonly now: (phase?: NativeDetachedStartPhase) => number;
   readonly expire: (error: HackCliError | NativeImageBlocker) => void;
 }): ReturnType<typeof setInterval> {
   // One monotonic clock: a wall clock change must not move either limit.
   const deadline = new NativeDetachedStartDeadline({
     limits: opts.limits,
-    now: performance.now(),
+    now: opts.now(),
     heartbeatStaleMs: opts.heartbeatStaleMs,
   });
   let waiting: NativeImageBlockerDetail | undefined;
@@ -1008,12 +1019,12 @@ function watchStartDeadline(opts: {
       value.kind === "progress" &&
       isNativeDetachedStartPhase(value.phase)
     ) {
-      deadline.observe(value.phase, performance.now());
+      deadline.observe(value.phase, opts.now(value.phase));
     }
   });
   return setInterval(
     () => {
-      const now = performance.now();
+      const now = opts.now();
       const expiry = deadline.check(now);
       if (expiry) {
         opts.expire(
@@ -1071,6 +1082,8 @@ export async function startNativeDetachedUp(opts: {
   readonly limits?: NativeDetachedStartLimits;
   /** How long image work may go without a heartbeat (tests shorten it). */
   readonly heartbeatStaleMs?: number;
+  /** Synthetic process fixtures can drive the clock from owner phase reports. */
+  readonly deadlineNow?: (phase?: NativeDetachedStartPhase) => number;
   /** How long a timed-out launch waits for its owner to exit (tests shorten it). */
   readonly unwindMs?: number;
 }): Promise<number> {
@@ -1104,6 +1117,7 @@ export async function startNativeDetachedUp(opts: {
     env: hackReexecEnvironment(process.env),
   });
   let ready: Ready | undefined;
+  let acceptedTiming: (() => void) | undefined;
   let committed = false;
   const result = Promise.withResolvers<Ready>();
   let failed = false;
@@ -1203,6 +1217,7 @@ export async function startNativeDetachedUp(opts: {
       isReady(value.data)
     ) {
       ready = value.data;
+      acceptedTiming = beginUpTiming("cli.owner.accept");
       child.send("accept", (error) => {
         if (error) {
           fail();
@@ -1210,6 +1225,7 @@ export async function startNativeDetachedUp(opts: {
       });
     } else if (value === "accepted" && ready) {
       committed = true;
+      acceptedTiming?.();
       result.resolve(ready);
     }
   });
@@ -1219,6 +1235,7 @@ export async function startNativeDetachedUp(opts: {
     child,
     limits,
     heartbeatStaleMs: opts.heartbeatStaleMs,
+    now: opts.deadlineNow ?? (() => performance.now()),
     expire: (error) => {
       if (!(committed || failed)) {
         failed = true;
@@ -1229,8 +1246,17 @@ export async function startNativeDetachedUp(opts: {
   });
   try {
     const data = await result.promise;
-    const timings = completeUpTimings();
+    const resultTiming = beginUpTiming("cli.result.prepare");
+    const durationMs = Date.now() - startedAt;
     if (opts.json) {
+      const services = {
+        started: [...data.started].sort(),
+        completed: [...(data.completed ?? [])].sort(),
+        warming: [...(data.warming ?? [])].sort(),
+        stopped: [],
+        failed: [],
+      };
+      resultTiming?.();
       emitCliResult({
         result: okResult({
           data: {
@@ -1238,24 +1264,21 @@ export async function startNativeDetachedUp(opts: {
             project: data.project,
             branch: data.branch,
             composeProject: data.composeProject,
-            services: {
-              started: [...data.started].sort(),
-              completed: [...(data.completed ?? [])].sort(),
-              warming: [...(data.warming ?? [])].sort(),
-              stopped: [],
-              failed: [],
-            },
+            services,
             readiness: data.readiness ?? "ready",
-            durationMs: Date.now() - startedAt,
-            timings,
+            durationMs,
+            timings: completeUpTimings(),
           },
         }),
       });
     } else if (action === "up") {
+      const url = nativeReadyAddress(data.address);
+      resultTiming?.();
+      completeUpTimings();
       writeLifecycleStarted({
-        url: nativeReadyAddress(data.address),
+        url,
         backend: "native",
-        durationMs: Date.now() - startedAt,
+        durationMs,
         warming: data.warming?.length ?? 0,
       });
     } else {

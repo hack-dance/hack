@@ -12,10 +12,13 @@ hack data export               # default location under Hack's home
 hack data export --out ~/backups --json
 ```
 
-`--path`, `--project` and `--branch` select the project and instance like
-other project commands. The command needs the Compose backend: with
-`HACK_RUNTIME_BACKEND=native` it refuses with `E_NATIVE_PROJECT_UNSUPPORTED`
-and changes nothing.
+`--path`, `--project`, `--branch` and `--env` select the project, instance
+and env overlay like other project commands. Every Docker call (Compose, the
+volume and container reads and the helper runs) gets the same managed Compose
+env `hack up` gives the project, so a project that selects its engine with a
+managed `DOCKER_HOST` or `DOCKER_CONTEXT` is read on that engine. The command
+needs the Compose backend: with `HACK_RUNTIME_BACKEND=native` it refuses with
+`E_NATIVE_PROJECT_UNSUPPORTED` and changes nothing.
 
 ## What it backs up
 
@@ -39,9 +42,18 @@ Bind mounts, tmpfs mounts and anonymous volumes are not backed up.
 The export refuses with `E_PROJECT_RUNNING` (exit 1) when a container of the
 instance is running, or when any other container that mounts one of the
 copied volumes is running. `error.detail.running` names them; stop the project
-with `hack down` and retry. Hack never stops anything for an export. It checks
-again after copying, and a container that started meanwhile also refuses, so
-the copy is never published.
+with `hack down` and retry. Hack never stops anything for an export.
+
+After copying, it checks twice more before publishing. It reads Docker's
+event log for the whole copy window (`docker events --since <start> --until
+<now>`, volume `mount` and container `start` events): a mount of a copied
+volume by any container other than this run's own helpers refuses with
+`E_PROJECT_RUNNING` and `error.detail.mounts` (volume, container ID and name).
+This catches a short-lived writer that started and exited during the copy,
+which a `docker ps` snapshot cannot see. Each helper runs under a unique name
+(`hack-data-export-<random>`) so exactly those mounts are excluded. Then it
+lists running containers again. Either refusal leaves the copy unpublished in
+`<backup>.partial/`.
 
 ## How it copies
 
@@ -57,11 +69,17 @@ pulls that digest once if it is not cached. Two helper runs read each volume:
 2. A Bun script computes the tree digest `hack.tree-digest.v1`. Every entry
    (the root as `.`, then each path relative to the root, as raw bytes) is
    sorted bytewise. For each entry, seven fields are hashed, each followed by
-   one NUL byte: path, type (`f` `d` `l` `c` `b` `p` `s`), permission bits in
+   one NUL byte: path, type (`f` `d` `l` `c` `b` `p`), permission bits in
    octal, uid, gid, size (regular files, otherwise 0) and content (a regular
    file's sha256, a symlink's target, a device's rdev, otherwise empty). The
    digest is the sha256 of that stream. A restore runs the same script on the
    restored volume and compares.
+
+Unix sockets are not copied. GNU tar skips them (`socket ignored`), so the
+digest leaves them out too and the manifest counts them per volume as
+`excludedSockets`; the text summary says how many were not copied. Sockets
+are runtime artifacts, such as `mysql.sock` in a MySQL data directory, that
+the service recreates when it starts.
 
 ## Format
 
@@ -82,7 +100,7 @@ Directories and files are created private to your user (0700 and 0600).
 | `project`, `branch`, `composeProject` | Hack project name, branch slug or null, Compose project name |
 | `createdAt` | UTC start time, ISO 8601 |
 | `hackVersion`, `helperImage`, `digestAlgorithm` | Version that wrote it, pinned helper reference, `hack.tree-digest.v1` |
-| `volumes[]` | `key`, `name`, `driver`, the two ownership `labels`, `file`, `tarBytes`, `tarSha256`, `entries` (the root included), `contentDigest` |
+| `volumes[]` | `key`, `name`, `driver`, the two ownership `labels`, `file`, `tarBytes`, `tarSha256`, `entries` (the root included, sockets not), `excludedSockets`, `contentDigest` |
 | `skipped[]` | `key`, `name` and `reason`: `external`, `foreign` or `absent` |
 
 `--json` prints the standard envelope with `data.schema` `hack.data-export.v1`,

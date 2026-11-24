@@ -10,8 +10,10 @@ import {
 } from "./data-backup-format.ts";
 import { isRecord } from "./guards.ts";
 
-const PROJECT_LABEL = "com.docker.compose.project";
-const VOLUME_LABEL = "com.docker.compose.volume";
+export const COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
+export const COMPOSE_VOLUME_LABEL = "com.docker.compose.volume";
+const PROJECT_LABEL = COMPOSE_PROJECT_LABEL;
+const VOLUME_LABEL = COMPOSE_VOLUME_LABEL;
 const VOLUME_FORMAT =
   '{"name":{{json .Name}},"driver":{{json .Driver}},"labels":{{json .Labels}}}';
 const NO_SUCH_VOLUME = /no such volume/i;
@@ -99,7 +101,7 @@ export function dockerReadError(opts: {
     }) ??
     new HackCliError({
       code: "E_UNEXPECTED",
-      message: `${opts.command} failed (exit ${opts.result.exitCode}); nothing was backed up from that step on.`,
+      message: `${opts.command} failed (exit ${opts.result.exitCode}).`,
     })
   );
 }
@@ -110,6 +112,64 @@ function parseInspect(stdout: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/** What `docker volume inspect` proves about one volume. */
+export type InspectedVolume = {
+  readonly name: string;
+  readonly driver: string;
+  readonly labels: Readonly<Record<string, unknown>>;
+};
+
+/** Inspect one volume by exact name; null when Docker has no such volume. */
+export async function inspectVolume(opts: {
+  readonly docker: DataBackupDocker;
+  readonly name: string;
+}): Promise<InspectedVolume | null> {
+  const result = await opts.docker.capture([
+    "docker",
+    "volume",
+    "inspect",
+    "--format",
+    VOLUME_FORMAT,
+    opts.name,
+  ]);
+  if (result.exitCode !== 0) {
+    if (result.exitCode === 1 && NO_SUCH_VOLUME.test(result.stderr)) {
+      return null;
+    }
+    throw dockerReadError({ result, command: "docker volume inspect" });
+  }
+  const value = parseInspect(result.stdout);
+  if (
+    !(
+      isRecord(value) &&
+      value.name === opts.name &&
+      typeof value.driver === "string"
+    )
+  ) {
+    throw new HackCliError({
+      code: "E_UNEXPECTED",
+      message: `docker volume inspect returned unreadable output for ${opts.name}; nothing was changed.`,
+    });
+  }
+  return {
+    name: opts.name,
+    driver: value.driver,
+    labels: isRecord(value.labels) ? value.labels : {},
+  };
+}
+
+/** Whether Compose's own labels name this project and key. */
+export function composeOwnsVolume(opts: {
+  readonly volume: InspectedVolume;
+  readonly composeProject: string;
+  readonly key: string;
+}): boolean {
+  return (
+    opts.volume.labels[PROJECT_LABEL] === opts.composeProject &&
+    opts.volume.labels[VOLUME_LABEL] === opts.key
+  );
 }
 
 /**
@@ -127,45 +187,27 @@ export async function classifyDeclaredVolumes(opts: {
   const owned: OwnedVolume[] = [];
   const skipped: DataBackupSkipped[] = [...opts.plan.external];
   for (const volume of opts.plan.declared) {
-    const result = await opts.docker.capture([
-      "docker",
-      "volume",
-      "inspect",
-      "--format",
-      VOLUME_FORMAT,
-      volume.name,
-    ]);
-    if (result.exitCode !== 0) {
-      if (result.exitCode === 1 && NO_SUCH_VOLUME.test(result.stderr)) {
-        skipped.push({ ...volume, reason: "absent" });
-        continue;
-      }
-      throw dockerReadError({ result, command: "docker volume inspect" });
+    const inspected = await inspectVolume({
+      docker: opts.docker,
+      name: volume.name,
+    });
+    if (inspected === null) {
+      skipped.push({ ...volume, reason: "absent" });
+      continue;
     }
-    const value = parseInspect(result.stdout);
     if (
-      !(
-        isRecord(value) &&
-        value.name === volume.name &&
-        typeof value.driver === "string"
-      )
-    ) {
-      throw new HackCliError({
-        code: "E_UNEXPECTED",
-        message: `docker volume inspect returned unreadable output for ${volume.name}; nothing was backed up.`,
-      });
-    }
-    const labels = isRecord(value.labels) ? value.labels : {};
-    if (
-      labels[PROJECT_LABEL] !== opts.plan.composeProject ||
-      labels[VOLUME_LABEL] !== volume.key
+      !composeOwnsVolume({
+        volume: inspected,
+        composeProject: opts.plan.composeProject,
+        key: volume.key,
+      })
     ) {
       skipped.push({ ...volume, reason: "foreign" });
       continue;
     }
     owned.push({
       ...volume,
-      driver: value.driver,
+      driver: inspected.driver,
       labels: {
         [PROJECT_LABEL]: opts.plan.composeProject,
         [VOLUME_LABEL]: volume.key,
@@ -190,17 +232,17 @@ function names(stdout: string): string[] {
 }
 
 /**
- * Running containers that make a copy inconsistent: any of the Compose
- * project's, and any other container that mounts one of the owned volumes.
+ * Running containers that make a copy or restore inconsistent: any of the
+ * Compose project's, and any other container that mounts one of the volumes.
  */
 export async function runningContainers(opts: {
   readonly docker: DataBackupDocker;
   readonly composeProject: string;
-  readonly volumes: readonly OwnedVolume[];
+  readonly volumeNames: readonly string[];
 }): Promise<readonly string[]> {
   const filters = [
     `label=${PROJECT_LABEL}=${opts.composeProject}`,
-    ...opts.volumes.map((volume) => `volume=${volume.name}`),
+    ...opts.volumeNames.map((name) => `volume=${name}`),
   ];
   const found = new Set<string>();
   for (const filter of filters) {

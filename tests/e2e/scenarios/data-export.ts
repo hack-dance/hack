@@ -34,6 +34,7 @@ type ExportPayload = {
         readonly tarBytes: number;
         readonly tarSha256: string;
         readonly entries: number;
+        readonly excludedSockets: number;
         readonly contentDigest: string;
       }[];
       readonly skipped?: readonly {
@@ -109,6 +110,21 @@ export const dataExportScenario: Scenario = {
           "-c",
           "echo one >/v/a.txt && ln -s a.txt /v/link && mkdir /v/d && echo two >/v/d/secret && chown 1234:5678 /v/d/secret && chmod 0640 /v/d/secret",
         ],
+        // A stale Unix socket, like mysql.sock in a datadir: tar skips it,
+        // so the digest must leave it out too for a restore to verify.
+        [
+          "run",
+          "--rm",
+          "--network",
+          "none",
+          "--volume",
+          `${data}:/v`,
+          "--entrypoint",
+          "bun",
+          HELPER,
+          "-e",
+          'require("node:net").createServer().listen("/v/d/app.sock", () => process.exit(0))',
+        ],
       ]) {
         expectExit({
           result: await docker(ctx, argv),
@@ -143,6 +159,7 @@ export const dataExportScenario: Scenario = {
           volume?.key === "data" &&
           volume.name === data &&
           volume.entries === 5 &&
+          volume.excludedSockets === 1 &&
           JSON.stringify(manifest.skipped) ===
             JSON.stringify([
               { key: "other", name: foreign, reason: "foreign" },
@@ -219,8 +236,10 @@ export const dataExportScenario: Scenario = {
       expect({
         that:
           restored.exitCode === 0 &&
-          JSON.parse(digest.stdout).digest === volume?.contentDigest,
-        message: "a restored tree should have the recorded content digest",
+          JSON.parse(digest.stdout).digest === volume?.contentDigest &&
+          JSON.parse(digest.stdout).excludedSockets === 0,
+        message:
+          "a restored tree (without the socket) should have the recorded content digest",
         result: digest,
       });
 

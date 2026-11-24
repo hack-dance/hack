@@ -2153,6 +2153,34 @@ export async function resolveModernComposeEnvOverrides(opts: {
   };
 }
 
+/**
+ * The managed Compose process env `hack up` gives this project (engine
+ * selection such as DOCKER_HOST/DOCKER_CONTEXT, interpolation values), read
+ * without writing or clearing the generated env override. For commands that
+ * talk to the project's engine outside a lifecycle action (`pull`, `data`).
+ */
+export async function resolveComposeProcessEnv(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly envName?: string | null;
+}): Promise<Readonly<Record<string, string>>> {
+  const composeProject = await resolveComposeProjectName({
+    project: opts.project,
+    cfg: await readProjectConfig(opts.project),
+  });
+  const allServiceNames = await readComposeServiceNames(
+    opts.project.composeFile
+  );
+  const overrides = await resolveComposeEnvOverrides({
+    project: opts.project,
+    projectName: sanitizeProjectSlug(composeProject),
+    targetServices: allServiceNames,
+    allServiceNames,
+    envName: opts.envName,
+    persist: false,
+  });
+  return overrides.env;
+}
+
 export async function resolveLifecycleEnvForProject(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
@@ -7463,15 +7491,7 @@ async function handlePull({
   }
   const cfg = await readProjectConfig(project);
   const composeProject = await resolveComposeProjectName({ project, cfg });
-  const allServiceNames = await readComposeServiceNames(project.composeFile);
-  const envOverrides = await resolveComposeEnvOverrides({
-    project,
-    projectName: sanitizeProjectSlug(composeProject),
-    targetServices: allServiceNames,
-    allServiceNames,
-    envName,
-    persist: false,
-  });
+  const composeEnv = await resolveComposeProcessEnv({ project, envName });
   const exitCode = await runShell(
     [
       ...buildComposeArgs({
@@ -7484,7 +7504,7 @@ async function handlePull({
     ],
     {
       cwd: dirname(project.composeFile),
-      env: envOverrides.env,
+      env: composeEnv,
       forwardSignals: true,
       stdout: json ? "stderr" : "inherit",
     }

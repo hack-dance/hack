@@ -8,11 +8,12 @@
 /// Authored Compose declarations in these namespaces are ignored metadata and
 /// never reach Engine resources. The native runtime generates its own labels
 /// and verifies those independently; an authored declaration grants nothing.
-pub(super) const HACK_OWNERSHIP_LABEL_NAMESPACES: [&str; 4] = [
+pub(super) const HACK_OWNERSHIP_LABEL_NAMESPACES: [&str; 5] = [
     "io.hack-local.",
     "io.hack.native-config.",
     "io.hack.native-file.",
     "io.hack.storage-witness.",
+    "io.hack.data-backup.",
 ];
 
 /// Whether `key` is inside a Hack ownership namespace or is a namespace root
@@ -38,6 +39,8 @@ mod tests {
             "io.hack.native-file",
             "io.hack.storage-witness.carrier",
             "io.hack.storage-witness",
+            "io.hack.data-backup.source",
+            "io.hack.data-backup",
         ] {
             assert!(is_hack_ownership_label(key), "{key}");
         }

@@ -41,6 +41,7 @@ import {
 } from "./cli-result.ts";
 import {
   acceptUpTimingOwnerRelay,
+  beginUpTiming,
   closeUpTimingOwnerRelay,
   completeUpTimings,
   upTimingOwnerRelay,
@@ -1099,6 +1100,7 @@ export async function startNativeDetachedUp(opts: {
     env: hackReexecEnvironment(process.env),
   });
   let ready: Ready | undefined;
+  let acceptedTiming: (() => void) | undefined;
   let committed = false;
   const result = Promise.withResolvers<Ready>();
   let failed = false;
@@ -1198,6 +1200,7 @@ export async function startNativeDetachedUp(opts: {
       isReady(value.data)
     ) {
       ready = value.data;
+      acceptedTiming = beginUpTiming("cli.owner.accept");
       child.send("accept", (error) => {
         if (error) {
           fail();
@@ -1205,6 +1208,7 @@ export async function startNativeDetachedUp(opts: {
       });
     } else if (value === "accepted" && ready) {
       committed = true;
+      acceptedTiming?.();
       result.resolve(ready);
     }
   });
@@ -1224,8 +1228,16 @@ export async function startNativeDetachedUp(opts: {
   });
   try {
     const data = await result.promise;
-    const timings = completeUpTimings();
+    const resultTiming = beginUpTiming("cli.result.prepare");
+    const durationMs = Date.now() - startedAt;
     if (opts.json) {
+      const services = {
+        started: [...data.started].sort(),
+        completed: [...(data.completed ?? [])].sort(),
+        stopped: [],
+        failed: [],
+      };
+      resultTiming?.();
       emitCliResult({
         result: okResult({
           data: {
@@ -1233,22 +1245,20 @@ export async function startNativeDetachedUp(opts: {
             project: data.project,
             branch: data.branch,
             composeProject: data.composeProject,
-            services: {
-              started: [...data.started].sort(),
-              completed: [...(data.completed ?? [])].sort(),
-              stopped: [],
-              failed: [],
-            },
-            durationMs: Date.now() - startedAt,
-            timings,
+            services,
+            durationMs,
+            timings: completeUpTimings(),
           },
         }),
       });
     } else if (action === "up") {
+      const url = nativeReadyAddress(data.address);
+      resultTiming?.();
+      completeUpTimings();
       writeLifecycleStarted({
-        url: nativeReadyAddress(data.address),
+        url,
         backend: "native",
-        durationMs: Date.now() - startedAt,
+        durationMs,
       });
     } else {
       process.stdout.write(

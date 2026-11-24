@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { noteActivityFailedServices } from "../lib/activity-log.ts";
 import type { BranchDroppedSites } from "../lib/branch-hosts.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
+import { beginUpTiming } from "../lib/command-timings.ts";
 import {
   type ComposeEnvFingerprintRecord,
   withComposeServiceEnvFingerprints,
@@ -2768,6 +2769,7 @@ async function startNativeProjectAttempt(
     });
   }
   const deps = { ...DEFAULTS, ...opts.dependencies };
+  const overlayTiming = beginUpTiming("cli.env.overlay");
   await refusePendingFreshStart(opts.restore, opts.scope, deps.loadRestart);
   const select = () =>
     selectNativeStartup({
@@ -2896,6 +2898,8 @@ async function startNativeProjectAttempt(
         emitNativeBranchDroppedNotice(notice, details, deps.warn),
     })
   ).input;
+  overlayTiming?.();
+  const preflightTiming = beginUpTiming("cli.graph.preflight");
   // Pure build admission before hooks, VM or provider start; refuses when disabled.
   const builds = admitStartBuilds(input, opts);
   const buildServices = new Set(builds.keys());
@@ -2977,6 +2981,7 @@ async function startNativeProjectAttempt(
   const artifactHash = createHash("sha256")
     .update(new Uint8Array(await artifactFile.arrayBuffer()))
     .digest("hex");
+  preflightTiming?.();
   const stopSignals = nativeForegroundStopSignals(opts);
   opts.onStopSignals?.();
   const controller = stopSignals.controller;
@@ -3000,6 +3005,7 @@ async function startNativeProjectAttempt(
   try {
     stopSignals.admitPending();
     requireActiveStartup(controller.signal);
+    const inputTiming = beginUpTiming("cli.start.inputs");
     hooks = await opts.before(input, controller.signal);
     requireActiveStartup(controller.signal);
     const credentials = await adaptNativeCredentials({
@@ -3106,6 +3112,7 @@ async function startNativeProjectAttempt(
       deps,
       signal: controller.signal,
     });
+    inputTiming?.();
     progress({ phase: "runtime" });
     const pool = await deps.invoke({
       runtime: opts.runtime,
@@ -3135,6 +3142,7 @@ async function startNativeProjectAttempt(
     });
     emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
+    const resolveTiming = beginUpTiming("cli.graph.resolve");
     const resumed = await verifyNativeResumedRetainedGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
@@ -3184,6 +3192,7 @@ async function startNativeProjectAttempt(
       invoke: deps.invoke,
       observed: resumed,
     });
+    resolveTiming?.();
     progress({ phase: "images" });
     // A restore asks the runtime too: its image is reused only under an unchanged
     // build key, so a Dockerfile edited after `down` is built (HACK-2533).
@@ -3254,6 +3263,7 @@ async function startNativeProjectAttempt(
     requireActiveStartup(controller.signal);
     // Image work is done: what follows counts against a detached start's
     // budget again (HACK-2351).
+    const reviewTiming = beginUpTiming("cli.graph.prepare");
     progress({ phase: "plan" });
     const compose = JSON.parse(input.normalizedComposeJson);
     compose.services = specs;
@@ -3466,6 +3476,7 @@ async function startNativeProjectAttempt(
               planId: restore?.planId ?? review.planId,
             });
             servicesRequested = true;
+            reviewTiming?.();
             code = await deps.serve({
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
@@ -3511,6 +3522,7 @@ async function startNativeProjectAttempt(
                 });
               },
               onReady: async () => {
+                const finalizeTiming = beginUpTiming("cli.readiness.finalize");
                 // Ready: the startup view is no longer needed.
                 void startupStatus.stop();
                 const readyMapping = authoritative(
@@ -3630,6 +3642,7 @@ async function startNativeProjectAttempt(
                 await stop?.owe(() => controller.signal.aborted);
                 requireActiveStartup(controller.signal);
                 const httpsPort = servedHttpsPort(https, opts.https);
+                finalizeTiming?.();
                 await opts.onReady?.(
                   readyServiceSummary(readinessArgs),
                   httpsPort === null

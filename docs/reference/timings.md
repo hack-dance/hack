@@ -137,3 +137,12 @@ for the full attribute vocabulary there. Linux datagram payload capacity is
 queried from `SO_SNDBUF` minus its 32-byte kernel reservation. No global socket
 settings are changed. Diagnostic writes never wait for the reader; saturation
 can drop records and is reported by the truncation marker when it can be sent.
+
+For native startup, `cli.project.selection` and `cli.compose.resolve` cover
+selection in the launcher and configuration resolution in the owner.
+`cli.env.overlay` covers startup input and environment preparation.
+`cli.graph.preflight`, `cli.graph.resolve` and `cli.graph.prepare` cover
+admission, plan inputs and graph launch preparation. `cli.readiness.finalize`
+covers the readiness inspection, publication and hooks. The detached launcher
+also records owner launch, acceptance and result preparation. These phases
+can overlap runtime request spans.

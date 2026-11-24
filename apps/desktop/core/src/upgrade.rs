@@ -13,8 +13,7 @@
 //!   listing, never with `--overwrite`: a file changed since the snapshot is
 //!   left as it is, and whatever a restore replaces is kept by the CLI.
 //!
-//! The app never runs `hack upgrade apply` or a plan step's command: those
-//! are shown for copying.
+//! The app uses structured argv for user-initiated runs in the shared drawer.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -61,6 +60,8 @@ pub struct Finding {
     pub kind: Option<String>,
     /// The command that fixes it, for copying.
     pub command: Option<String>,
+    /// CLI argv for the same command, when supplied by this report.
+    pub args: Option<Vec<String>>,
     /// What to do by hand, when the remedy is not (only) a command.
     pub action: Option<String>,
 }
@@ -80,6 +81,149 @@ pub struct ScopedFinding {
 pub struct CheckCli {
     pub version: String,
     pub channel: String,
+}
+
+/// Evidence from the read-only release check for the selected CLI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UpdateObservation {
+    Available(ReleaseUpdate),
+    NetworkUnavailable,
+    #[default]
+    NoNotice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseUpdate {
+    pub latest: String,
+    pub upgrade_command: Option<Vec<String>>,
+}
+
+impl ReleaseUpdate {
+    /// Bind only the release observer's supported install commands.
+    #[must_use]
+    pub fn command(&self, checked: &crate::setup::Report) -> Option<crate::terminal::CommandSpec> {
+        use crate::terminal::CommandSpec;
+        if !checked.cli_ready() {
+            return None;
+        }
+        let (program, args) = self.upgrade_command.as_deref()?.split_first()?;
+        let context = checked.context.as_ref()?.with_controlled_path().ok()?;
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let trusted = |path: &Path| crate::source::trusted_tool_path(path, uid, false);
+        let program = match args
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            ["update"]
+                if checked.cli_program.as_ref().is_some_and(|selected| {
+                    selected == program
+                        || std::fs::canonicalize(selected).is_ok_and(|path| {
+                            std::fs::canonicalize(program).is_ok_and(|reported| reported == path)
+                        })
+                }) =>
+            {
+                return checked.command(args.to_vec()).ok();
+            }
+            ["upgrade", "hack-dance/tap/hack"] if program == "brew" => {
+                std::env::split_paths(context.value("PATH")?)
+                    .chain(["/opt/homebrew/bin".into(), "/usr/local/bin".into()])
+                    .find_map(|dir| trusted(&dir.join(program)))?
+            }
+            ["--manager", "upgrade", "--version", version]
+                if *version == self.latest
+                    && Path::new(program).is_absolute()
+                    && Path::new(program)
+                        .file_name()
+                        .is_some_and(|name| name == "hack-next") =>
+            {
+                trusted(Path::new(program))?
+            }
+            _ => return None,
+        };
+        context
+            .bind(&CommandSpec {
+                program: program.to_str()?.into(),
+                args: args.to_vec(),
+            })
+            .ok()
+    }
+
+    /// Quote each argument for display and copying to the user's terminal.
+    #[must_use]
+    pub fn terminal_command(&self) -> Option<String> {
+        let argv = self.upgrade_command.as_deref()?;
+        argv.first()?;
+        argv.iter()
+            .map(|arg| crate::terminal::quote(arg))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+            .map(|args| args.join(" "))
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateReport {
+    latest: Option<String>,
+    available: Option<bool>,
+    reason: Option<String>,
+    upgrade_command: Option<Vec<String>>,
+}
+
+/// The checked CLI owns release selection and comparison. The desktop only
+/// displays the observation and never executes an upgrade command from it.
+#[must_use]
+pub fn observe_update(checked: &crate::setup::Report) -> UpdateObservation {
+    let read = || {
+        let program = checked.cli_program.as_ref()?;
+        let context = checked.context.as_ref()?.with_controlled_path().ok()?;
+        context
+            .runner(program)
+            .ok()?
+            .run_schema_json::<UpdateReport>(
+                &["update", "--check", "--json", "--observe"],
+                None,
+                std::time::Duration::from_secs(20),
+                "hack.update-check.v1",
+            )
+            .ok()
+    };
+    if !checked.cli_ready() {
+        return UpdateObservation::NoNotice;
+    }
+    read().map_or(UpdateObservation::NoNotice, UpdateReport::observation)
+}
+
+impl UpdateReport {
+    fn observation(self) -> UpdateObservation {
+        match self {
+            UpdateReport {
+                available: Some(true),
+                latest: Some(version),
+                reason: None,
+                upgrade_command,
+            } if version.len() <= 64
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+                && crate::source::compare_versions(&version, &version).is_some() =>
+            {
+                UpdateObservation::Available(ReleaseUpdate {
+                    latest: version,
+                    upgrade_command,
+                })
+            }
+            UpdateReport {
+                available: None,
+                latest: None,
+                reason: Some(reason),
+                ..
+            } if reason == "network-unavailable" => UpdateObservation::NetworkUnavailable,
+            _ => UpdateObservation::NoNotice,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -116,6 +260,8 @@ pub struct PlanStep {
     pub count: u32,
     pub targets: Vec<PlanTarget>,
     pub command: Option<String>,
+    /// CLI argv, separate from the copy text.
+    pub args: Option<Vec<String>>,
     /// What to do by hand, when the remedy is not (only) a command (for
     /// example restoring a store's key as an alternative to retiring it).
     pub action: Option<String>,
@@ -384,6 +530,69 @@ impl Rollback {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn release_observations_require_consistent_and_versioned_evidence() {
+        for (input, expected) in [
+            (
+                r#"{"available":true,"latest":"5.1.0-next.2","reason":null,"upgrade_command":["/opt/Hack Next/bin/hack-next","--manager","upgrade","--version","5.1.0-next.2"]}"#,
+                UpdateObservation::Available(ReleaseUpdate {
+                    latest: "5.1.0-next.2".into(),
+                    upgrade_command: Some(
+                        [
+                            "/opt/Hack Next/bin/hack-next",
+                            "--manager",
+                            "upgrade",
+                            "--version",
+                            "5.1.0-next.2",
+                        ]
+                        .map(String::from)
+                        .to_vec(),
+                    ),
+                }),
+            ),
+            (
+                r#"{"available":true,"latest":"5.1.0","reason":null,"upgrade_command":null}"#,
+                UpdateObservation::Available(ReleaseUpdate {
+                    latest: "5.1.0".into(),
+                    upgrade_command: None,
+                }),
+            ),
+            (
+                r#"{"available":null,"latest":null,"reason":"network-unavailable"}"#,
+                super::UpdateObservation::NetworkUnavailable,
+            ),
+            (
+                r#"{"available":true,"latest":"not-a-version","reason":null}"#,
+                super::UpdateObservation::NoNotice,
+            ),
+            (
+                r#"{"available":true,"latest":"5.1.0","reason":"network-unavailable"}"#,
+                super::UpdateObservation::NoNotice,
+            ),
+        ] {
+            let report: super::UpdateReport = serde_json::from_str(input).unwrap();
+            assert_eq!(report.observation(), expected);
+        }
+    }
+
+    #[test]
+    fn release_install_commands_quote_argv_for_copy_and_refuse_control_characters() {
+        let mut release = ReleaseUpdate {
+            latest: "5.1.0".into(),
+            upgrade_command: Some(vec!["/opt/Hack's CLI/hack".into(), "update".into()]),
+        };
+        assert_eq!(
+            release.terminal_command().as_deref(),
+            Some(r"'/opt/Hack'\''s CLI/hack' 'update'")
+        );
+        release.upgrade_command = Some(vec!["hack\n".into(), "update".into()]);
+        assert_eq!(release.terminal_command(), None);
+        release.upgrade_command = Some(vec![]);
+        assert_eq!(release.terminal_command(), None);
+        release.upgrade_command = None;
+        assert_eq!(release.terminal_command(), None);
+    }
+
     use super::*;
 
     const CHECK: &str = include_str!("../tests/fixtures/upgrade/check-v2.json");
@@ -400,6 +609,10 @@ mod tests {
         let ignore = r.plan.iter().find(|p| p.id == "ignore-rules").unwrap();
         assert_eq!((ignore.count, ignore.targets.len()), (3, 3));
         assert_eq!(ignore.how(), "hack upgrade apply runs it");
+        assert_eq!(
+            ignore.args.as_deref().unwrap(),
+            ["upgrade", "apply", "--only", "ignore-rules"],
+        );
         assert_eq!(r.plan[0].how(), "Save snapshot below");
         assert_eq!(r.projects.len(), 3);
         let mut v: serde_json::Value = serde_json::from_str(CHECK).unwrap();

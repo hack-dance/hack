@@ -199,7 +199,7 @@ struct Batch {
 
 #[test]
 fn early_port_waits_for_its_healthcheck_and_refuses_a_stale_ready_id() {
-    early_port_waits_for_its_healthcheck("preparing", None);
+    early_port_waits_for_its_healthcheck("preparing", None, false);
 }
 
 /// `hack up` now returns at started (with and without `--wait`, the owner reports
@@ -208,11 +208,16 @@ fn early_port_waits_for_its_healthcheck_and_refuses_a_stale_ready_id() {
 #[test]
 fn after_started_a_slow_port_is_deferred_then_published_not_refused() {
     for from in ["preparing", "restoring"] {
-        early_port_waits_for_its_healthcheck(super::super::STARTED_OBSERVED, Some(from));
+        early_port_waits_for_its_healthcheck(super::super::STARTED_OBSERVED, Some(from), false);
     }
 }
 
-fn early_port_waits_for_its_healthcheck(phase: &str, started_from: Option<&str>) {
+#[test]
+fn targeted_append_publishes_its_port_without_selecting_existing_routes() {
+    early_port_waits_for_its_healthcheck("ready-observed", None, true);
+}
+
+fn early_port_waits_for_its_healthcheck(phase: &str, started_from: Option<&str>, extending: bool) {
     let fixture = super::super::tests::Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();
     let root = directory(&candidate, RUN).unwrap();
@@ -221,6 +226,9 @@ fn early_port_waits_for_its_healthcheck(phase: &str, started_from: Option<&str>)
     let mut receipt = receipt();
     receipt.phase = phase.into();
     receipt.started_from = started_from.map(Into::into);
+    if extending {
+        receipt.extending.insert("api".to_owned());
+    }
     state::write(&root.join("state.json"), &receipt).unwrap();
     let guest = Guest::new(Candidate::discover(&fixture.0).unwrap());
     let services = BTreeSet::from(["api"]);
@@ -234,6 +242,19 @@ fn early_port_waits_for_its_healthcheck(phase: &str, started_from: Option<&str>)
     guest.api_health_starting.set(false);
     assert!(!inspect(API).pending_ports);
     assert_eq!(inspect(API).port_endpoints.len(), 1);
+    if extending {
+        let web = BTreeSet::from(["web"]);
+        let unselected =
+            inspect_targets_scoped(&candidate, &guest, RUN, &web, Some(("web", WEB))).unwrap();
+        assert!(unselected.endpoints.is_empty());
+        assert_eq!(
+            inspect_targets(&candidate, &guest, RUN, &web)
+                .unwrap()
+                .endpoints
+                .len(),
+            1
+        );
+    }
 }
 
 /// One registry with the whole batch reserved from one observation.

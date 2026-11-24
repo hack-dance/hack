@@ -260,7 +260,8 @@ fn inspect_targets_scoped(
         Some((service, id)) => {
             // A start that returned at started (`started-observed`) still
             // publishes each service as it becomes ready.
-            matches!(super::start_phase(receipt), "preparing" | "restoring")
+            (matches!(super::start_phase(receipt), "preparing" | "restoring")
+                || (receipt.phase == "ready-observed" && receipt.extending.contains(service)))
                 && services.len() == 1
                 && services.contains(service)
                 && receipt

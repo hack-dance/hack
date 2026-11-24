@@ -71,6 +71,13 @@ guard is stronger: it also asks for the current spec and this boot's attachments
 which the start loop guarantees by construction today (it creates every container
 fresh), not by a check at `Return`.
 
+`DepsReady` is decided on a fresh observation. Within one evaluation pass the
+evaluator keeps each observation: an edge whose dependency was already seen this
+pass not meeting its condition waits for the next pass without asking the engine
+again, while an edge that would allow a start observes the dependency afresh right
+before it (`execution::run_with_clock`). The model has no passes; a reused
+"not yet" only defers a start by one pass, which it does not distinguish.
+
 ## Not covered
 
 Engine event loss and stale events; more than one owner or two concurrent `up`

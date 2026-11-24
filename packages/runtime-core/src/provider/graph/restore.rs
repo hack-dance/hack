@@ -706,7 +706,10 @@ fn restore_inputs(
             );
         }
         session.create_resources(true)?;
-        execution::run(&prepared.graph, &mut session, options.timeout)
+        let changes = session.engine_changes();
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
     })();
     if let Err(failure) = result {
         super::startup_failure::record_after_started(&session.root, &session.receipt, &failure);

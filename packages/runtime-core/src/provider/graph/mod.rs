@@ -987,6 +987,15 @@ impl Session<'_, '_> {
         }
         Ok(())
     }
+    /// The start loop's wait between passes: woken by an engine event for one of
+    /// this run's containers, else the whole pass interval (see `engine::changes`).
+    fn engine_changes(&self) -> crate::provider::engine::changes::EngineChanges {
+        use crate::provider::engine::changes::EngineChanges;
+        self.engine.guest().engine_socket().map_or_else(
+            |_| EngineChanges::sleeping(),
+            |socket| EngineChanges::follow(&socket, &self.receipt.run),
+        )
+    }
     fn save(&self) -> Result<(), CandidateError> {
         state::write(&self.root.join("state.json"), &self.receipt)
     }
@@ -1882,10 +1891,12 @@ fn run_inputs(
             )?;
         }
         session.create_resources(false)?;
-        execution::run(
+        let changes = session.engine_changes();
+        execution::run_with_wait(
             &prepared.graph,
             &mut session,
             admission_deadline.saturating_duration_since(std::time::Instant::now()),
+            |interval| changes.wait(interval),
         )
     })();
     if let Err(failure) = result {
@@ -2800,10 +2811,13 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         launcher: None,
     };
     session.save()?;
+    let changes = session.engine_changes();
     // The restarting receipt is committed: the previous start's record is superseded.
-    if let Err(failure) = startup_failure::clear_after_started(&session.root)
-        .and_then(|_| execution::run(&prepared.graph, &mut session, options.timeout))
-    {
+    if let Err(failure) = startup_failure::clear_after_started(&session.root).and_then(|_| {
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
+    }) {
         startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;

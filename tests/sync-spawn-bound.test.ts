@@ -63,7 +63,6 @@ const KNOWN_UNBOUNDED: Readonly<Record<string, number>> = {
   "tests/project-target-inspect.test.ts": 1,
   "tests/projects-registry-worktrees.test.ts": 1,
   "tests/projects-registry.test.ts": 1,
-  "tests/qualify-provider-pin.test.ts": 1,
   "tests/registry-touch-worktrees.test.ts": 1,
   "tests/run-exec-branch-default.test.ts": 1,
   "tests/session-list-stop-tmux.test.ts": 2,

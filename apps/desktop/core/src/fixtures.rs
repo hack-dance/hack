@@ -49,6 +49,8 @@ pub enum Fixture {
     ImageRefused,
     BuildBaseRefused,
     BuildCopyRefused,
+    StartupReady,
+    StartupPartial,
     NeedsAttention,
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
@@ -110,7 +112,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 74] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -140,6 +142,8 @@ impl Fixture {
         Self::ImageRefused,
         Self::BuildBaseRefused,
         Self::BuildCopyRefused,
+        Self::StartupReady,
+        Self::StartupPartial,
         Self::NeedsAttention,
         Self::Branches,
         Self::ConfigProject,
@@ -217,6 +221,8 @@ impl Fixture {
             Self::ImageRefused => "image-refused",
             Self::BuildBaseRefused => "build-base-refused",
             Self::BuildCopyRefused => "build-copy-refused",
+            Self::StartupReady => "startup-ready",
+            Self::StartupPartial => "startup-partial",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
             Self::ConfigProject => "config-project",
@@ -521,6 +527,9 @@ fn others() -> Vec<ProjectRow> {
 pub fn project(f: Fixture) -> ProjectsPayload {
     let main = match f {
         Fixture::Stopped | Fixture::Starting => storefront(vec![], "stopped"),
+        Fixture::StartupReady | Fixture::StartupPartial => {
+            simple("storefront", "running", "native", false)
+        }
         Fixture::ImageRefused | Fixture::BuildBaseRefused | Fixture::BuildCopyRefused => {
             simple("storefront", "stopped", "native", false)
         }

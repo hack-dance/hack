@@ -618,6 +618,81 @@ pub struct LifecycleResult {
     pub services: LifecycleServices,
     #[serde(rename = "durationMs")]
     pub duration_ms: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub timings: Vec<StartupTiming>,
+}
+
+/// Only the fields needed for the finished native startup milestones.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StartupTiming {
+    schema: String,
+    trace: String,
+    proc: String,
+    clock: String,
+    step: String,
+    outcome: String,
+    origin_mono_us: u64,
+    start_us: u64,
+    dur_us: u64,
+    attrs: StartupTimingAttrs,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+struct StartupTimingAttrs {
+    anchor_fresh: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupTimeline {
+    pub total_us: u64,
+    pub containers_started_us: Option<u64>,
+    pub services_ready_us: Option<u64>,
+}
+
+impl LifecycleResult {
+    /// Elapsed times relative to the CLI root span. Guest or fresh host clocks
+    /// cannot be compared with the root's monotonic origin.
+    #[must_use]
+    pub fn startup_timeline(&self) -> Option<StartupTimeline> {
+        let joinable = |record: &StartupTiming| {
+            record.schema == "hack.timings/1"
+                && record.clock == "host"
+                && !record.attrs.anchor_fresh
+                && record.outcome == "ok"
+        };
+        let root = self.timings.iter().find(|record| {
+            joinable(record)
+                && record.proc == "cli"
+                && record.step == "command.total"
+                && !record.trace.is_empty()
+        })?;
+        let milestone = |step| {
+            self.timings
+                .iter()
+                .filter(|record| {
+                    joinable(record) && record.trace == root.trace && record.step == step
+                })
+                .find_map(|record| {
+                    record
+                        .origin_mono_us
+                        .checked_add(record.start_us)?
+                        .checked_add(record.dur_us)?
+                        .checked_sub(root.origin_mono_us)
+                        .filter(|elapsed| *elapsed <= root.dur_us)
+                })
+        };
+        Some(StartupTimeline {
+            total_us: root.dur_us,
+            containers_started_us: milestone("containers.started"),
+            services_ready_us: milestone("services.ready"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -693,6 +768,47 @@ impl CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_startup_milestones_join_only_successful_host_clocks_in_the_same_trace() {
+        let root = StartupTiming {
+            schema: "hack.timings/1".into(),
+            trace: "fixture".into(),
+            clock: "host".into(),
+            outcome: "ok".into(),
+            proc: "cli".into(),
+            step: "command.total".into(),
+            origin_mono_us: 100,
+            dur_us: 50,
+            ..Default::default()
+        };
+        let fork = StartupTiming {
+            step: "services.ready".into(),
+            origin_mono_us: 110,
+            start_us: 5,
+            dur_us: 10,
+            attrs: StartupTimingAttrs { anchor_fresh: true },
+            ..root.clone()
+        };
+        let containers = StartupTiming {
+            step: "containers.started".into(),
+            attrs: StartupTimingAttrs::default(),
+            ..fork.clone()
+        };
+        let run = LifecycleResult {
+            timings: vec![fork, containers, root],
+            ..Default::default()
+        };
+        assert_eq!(
+            run.startup_timeline(),
+            Some(StartupTimeline {
+                total_us: 50,
+                containers_started_us: Some(25),
+                services_ready_us: None,
+            })
+        );
+        assert_eq!(LifecycleResult::default().startup_timeline(), None);
+    }
 
     #[test]
     fn container_status_parsing() {

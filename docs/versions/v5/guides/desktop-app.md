@@ -36,6 +36,7 @@ refuses, the app cannot do.
 | --- | --- | --- |
 | Project list | Every registered project and its branch instances, grouped by state. Search with Cmd-K (Ctrl-K on Linux). | `hackd` (`/v1/projects`); `hack ps --json` for native projects |
 | Project header | Start, Stop, Restart and Open, with live phases for local Compose lifecycle actions. Native projects can start when the project is stopped or the native runtime is off. Failed actions show the CLI code, diagnostic and any recovery guidance. | `hack up`, `down`, `restart`, `open`; Compose progress uses `--json --progress` |
+| Native startup timing | After Start, shows elapsed startup time and the observed container-start and service-readiness milestones. | Native `hack up --json`, `data.timings` |
 | Resources | Registered project containers and observed attachments, plus allocated and logical host file totals for the selected native home. Partial scans are labeled. | `hackd`; `hack ps --json`; `hack native disk-usage --json` |
 | Services tab | Each service, its state and its routes. For a running Compose project, also CPU and memory per service, and an **emulated** mark on a service whose image runs under CPU emulation. | `hackd`; `hack ps --json`; `hack usage --json --by-service` |
 | Logs tab | Live logs with pause, search and a filter for one service. | `hack logs --json` |

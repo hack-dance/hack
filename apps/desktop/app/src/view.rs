@@ -197,6 +197,8 @@ pub struct HackApp {
     /// warning. Display only: the app never terminates a lifecycle command.
     action_started: std::collections::HashMap<InstanceKey, Instant>,
     action_progress: std::collections::HashMap<InstanceKey, String>,
+    startup_timelines:
+        std::collections::HashMap<InstanceKey, hack_desktop_core::models::StartupTimeline>,
 }
 
 impl HackApp {
@@ -278,6 +280,7 @@ impl HackApp {
             hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             action_progress: std::collections::HashMap::new(),
+            startup_timelines: std::collections::HashMap::new(),
             setup: Default::default(),
             #[cfg(hack_terminal)]
             setup_command_check: None,
@@ -591,6 +594,20 @@ impl HackApp {
         }
     }
 
+    /// Fixtures: show a completed or partially observed native startup.
+    pub(crate) fn show_startup_fixture(&mut self, ready: bool) {
+        if let Some(key) = self.model.selected_key() {
+            self.startup_timelines.insert(
+                key,
+                hack_desktop_core::models::StartupTimeline {
+                    total_us: 2_450_000,
+                    containers_started_us: Some(1_220_000),
+                    services_ready_us: ready.then_some(2_370_000),
+                },
+            );
+        }
+    }
+
     /// Fixtures: apply a value-free CLI failure through the regular action reducer.
     pub fn simulate_refusal(&mut self, error: hack_desktop_core::source::SourceError) {
         if let Some(key) = self.model.selected_key() {
@@ -699,6 +716,9 @@ impl HackApp {
                 action,
             });
         }
+        if native && action == Action::Start {
+            self.startup_timelines.remove(&key);
+        }
         self.action_started.insert(key.clone(), Instant::now());
         cx.notify();
         if !self.live {
@@ -774,6 +794,14 @@ impl HackApp {
                 }
                 if let Ok(ActionOutcome::Opened(o)) = &result {
                     cx.open_url(&o.url);
+                }
+                if native
+                    && action == Action::Start
+                    && !scoped
+                    && let Ok(ActionOutcome::Lifecycle(result)) = &result
+                    && let Some(timeline) = result.startup_timeline()
+                {
+                    this.startup_timelines.insert(key.clone(), timeline);
                 }
                 this.action_started.remove(&key);
                 let refresh = if scoped {
@@ -1144,6 +1172,7 @@ impl HackApp {
             self.model.source_changed();
             self.action_started.clear();
             self.action_progress.clear();
+            self.startup_timelines.clear();
             self.configuration.invalidate();
             self.changes = Default::default();
             self.resource_disk_pending = false;
@@ -1714,6 +1743,24 @@ impl HackApp {
                             .type_step(text::BODY)
                             .text_color(p.text_secondary)
                             .child(message.clone())
+                    }),
+            )
+            .children(
+                self.startup_timelines
+                    .get(&d.key)
+                    .filter(|_| !compact)
+                    .map(|timeline| {
+                        let seconds =
+                            |us| format!("{:.2} s", Duration::from_micros(us).as_secs_f64());
+                        let milestone = |observed: Option<u64>| {
+                            observed.map_or_else(|| "not observed".to_owned(), seconds)
+                        };
+                        div().type_step(text::BODY).text_color(p.text_secondary).child(format!(
+                    "Last native startup · {} total · Containers started: {} · Services ready: {}",
+                    seconds(timeline.total_us),
+                    milestone(timeline.containers_started_us),
+                    milestone(timeline.services_ready_us),
+                ))
                     }),
             )
             .children(d.note.clone().filter(|_| !compact).map(|n| {

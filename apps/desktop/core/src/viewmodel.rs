@@ -1393,10 +1393,10 @@ mod tests {
         assert_eq!(detail.remotes[0].address_label(), "$DB_HOST:5432");
         assert_eq!(detail.remotes[0].probe, "not checked");
         assert!(!format!("{detail:?}").contains("fixture-value"));
-        model.apply(Event::SelectInstance(InstanceKey {
-            project: "storefront".into(),
-            branch: Some("fix-login".into()),
-        }));
+        model.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "fix-login",
+        )));
         assert!(model.detail().unwrap().remotes.is_empty());
     }
 

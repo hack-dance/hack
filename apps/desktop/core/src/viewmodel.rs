@@ -14,7 +14,9 @@
 
 use std::collections::HashMap;
 
-use crate::models::{LifecycleResult, ProjectRow, StoppedContainerExecution, Worktree};
+use crate::models::{
+    LifecycleResult, ProjectRow, ProjectRuntime, StoppedContainerExecution, Worktree,
+};
 pub use crate::source::UpdateSide;
 use crate::source::{ActionOutcome, DaemonRecovery, ServiceActionError, Snapshot, SourceError};
 use crate::state::{self, Action, LocalContext, ProjectState, ServiceStopEvidence, ServiceView};
@@ -378,6 +380,28 @@ fn branch_keys(p: &ProjectRow) -> Vec<InstanceKey> {
     keys.sort_by(|a, b| a.branch.cmp(&b.branch).then(a.checkout.cmp(&b.checkout)));
     keys.dedup();
     keys
+}
+
+/// Borrow the runtime behind each navigable instance. An observed branch takes
+/// precedence over a configured copy with the same key, just as in the sidebar.
+pub(crate) fn instance_runtimes(
+    project: &ProjectRow,
+) -> impl Iterator<Item = (InstanceKey, &ProjectRuntime)> {
+    project
+        .runtime
+        .iter()
+        .map(move |runtime| (InstanceKey::project(&project.name), runtime))
+        .chain(branch_keys(project).into_iter().filter_map(move |key| {
+            let checkout = key.checkout.as_deref();
+            let branch = key.branch.as_deref();
+            let copy = project.branch_copy_at(branch, checkout);
+            let observed =
+                branch.and_then(|branch| project.branch_observation_at(branch, checkout, copy));
+            let runtime = observed
+                .map(|branch| &branch.runtime)
+                .or_else(|| copy.and_then(|copy| copy.runtime.as_ref()))?;
+            Some((key, runtime))
+        }))
 }
 
 /// Every instance a snapshot reports: each project and its copies.

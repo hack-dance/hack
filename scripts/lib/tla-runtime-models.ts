@@ -1351,6 +1351,80 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-route-lookup",
+    module: "RouteLookup",
+    states: 498,
+    invariant: "LiveRouteAllowed",
+    fields: [
+      'lookup = "deny"',
+      'pending = "claimed"',
+      'committed = [a |-> "original", b |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      [
+        'lookup = "deny"',
+        'pending = "staged"',
+        'committed = [a |-> "original", b |-> "claimed"]',
+      ],
+      [
+        'lookup = "deny"',
+        'pending = "absent"',
+        'committed = [a |-> "original", b |-> "staged"]',
+      ],
+    ],
+    additionalControls: [
+      {
+        name: "detached-inode",
+        negative: true,
+        invariant: "LiveRouteAllowed",
+        fields: [
+          'lookup = "deny"',
+          "linked = FALSE",
+          'committed = [a |-> "original", b |-> "claimed"]',
+        ],
+        alternativeWitnesses: ["absent", "staged"].map((phase) => [
+          'lookup = "deny"',
+          "linked = FALSE",
+          `committed = [a |-> "original", b |-> "${phase}"]`,
+        ]),
+      },
+      {
+        name: "stale-claim",
+        negative: true,
+        invariant: "AllowMatchesOpenedClaim",
+        fields: [
+          'lookup = "allow"',
+          'selected = "original"',
+          'opened = [a |-> "absent", b |-> "absent"]',
+        ],
+        alternativeWitnesses: [
+          ["absent", "claimed"],
+          ["absent", "staged"],
+          ["replacement", "absent"],
+          ["replacement", "claimed"],
+          ["replacement", "staged"],
+        ].map(([claim, phase]) => [
+          'lookup = "allow"',
+          'selected = "original"',
+          `opened = [a |-> "${claim}", b |-> "${phase}"]`,
+        ]),
+      },
+      {
+        name: "retirement-reachable",
+        negative: true,
+        invariant: "NeverDetachDuringRetirement",
+        fields: [
+          'lookup = "secondOpen"',
+          "linked = FALSE",
+          'pending = "none"',
+          'selected = "original"',
+          'opened = [a |-> "original", b |-> "staged"]',
+          'committed = [a |-> "original", b |-> "absent"]',
+        ],
+      },
+    ],
+  },
+  {
     name: "native-route-stop",
     module: "Stop",
     states: 202,

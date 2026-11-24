@@ -84,6 +84,9 @@ and the elapsed time. Native stops report when they retain data.
 If `hack up` stops before the project is ready, look for the `!` line. It
 names the blocker and shows the command to run next.
 
+When checking for leftover Compose networks, Hack passes Docker connection
+settings and keeps application values out of the network probe's environment.
+
 `hack ps` lists services with their primary address and current state. An
 address followed by `+1` has one more configured address. Use `hack ps --wide`
 for all addresses, container names, exit codes and port details.

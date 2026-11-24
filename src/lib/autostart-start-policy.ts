@@ -29,6 +29,8 @@ import {
   isMaterializedBaseDotenv,
 } from "./project-env-config.ts";
 
+import { isHostControlEnvKey } from "./vetted-env.ts";
+
 export type AutostartStartPolicyReason =
   | "host_commands_require_manual_start"
   | "image_build_requires_manual_start"
@@ -47,8 +49,6 @@ export type AutostartStartPolicyOptions = {
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 4 * MAX_INPUT_BYTES;
 const MAX_ENV_FILES = 64;
-const HOST_CONTROL_ENV_KEY =
-  /^(?:COMPOSE_|GIT_|DOCKER_|HACK_|XDG_|LD_|DYLD_|BUN_|HOME$|USER$|LOGNAME$|TMPDIR$|TMP$|TEMP$|SHELL$|PATH$|NODE_OPTIONS$|NODE_PATH$|BASH_ENV$|ENV$|SHELLOPTS$|IFS$|CDPATH$|GCONV_PATH$|PYTHON(?:PATH|HOME|STARTUP|INSPECT)$|RUBYOPT$|RUBYLIB$|PERL5OPT$|PERL5LIB$)/;
 const DEPENDENCY_INSTALL =
   /(?:^|\s)(?:bun|npm|pnpm|yarn|uv|pip)(?:\s+run)?\s+(?:install|ci|sync)(?:\s|$)/i;
 type Budget = { remaining: number; readonly checked: Set<string> };
@@ -378,7 +378,7 @@ function environmentScopeReason(
     return "compose_inputs_require_manual_start";
   }
   for (const [key, value] of Object.entries(values)) {
-    if (HOST_CONTROL_ENV_KEY.test(key)) {
+    if (isHostControlEnvKey(key)) {
       return "compose_inputs_require_manual_start";
     }
     if (

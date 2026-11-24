@@ -757,16 +757,13 @@ following resumes through Resume, not automatically when scrolling to the bottom
 
 ## Env tab
 
-Overlay tabs across the top (`base`, then each overlay the CLI names), scope
-pills on the right, one line for the secret key, and a Name / Value table.
-Names come from `hack env list --json [--env <overlay>] [--service <scope>]`;
-each value from `hack env get <KEY>` on a pipe, through the CLI and nothing
-else. Plaintext values load with the listing. A secret shows dots until its
-eye is pressed, for that one name; it hides again after 60 s and when the
-overlay, scope, detail tab or project changes, or the window is hidden or
-loses focus. Copy reads that one name, puts it on the clipboard and clears the
-clipboard after 60 s, or when the app quits sooner, if it still holds the
-value. A missing required name is
+Overlay tabs across the top show base and every overlay named in the modern
+`hack env list --json` report. Choose a scope on the right. Each value starts
+masked. Press the eye to read just that name through `hack env get <KEY>`.
+The value hides after 60 seconds or when the overlay, scope, tab or project
+changes, or the window loses focus. Copy a revealed value with the copy
+button. The clipboard clears after 60 seconds or when the app quits, if it
+still holds that value. A missing required name is
 listed first with a `required · missing` chip. With the key missing, the line
 says where the CLI looks and secrets cannot be revealed or copied.
 
@@ -785,11 +782,8 @@ its own scope (a global variable shown in a service listing stays global) and
 its own layer (a row from `hack.env[.<overlay>].local.yaml`, or a legacy
 `.env` / `.env.<overlay>`, with `--local`, so a value kept out of the
 repository never lands in the shared YAML); a
-new one goes to the scope listed, in the shared file. A plaintext value starts filled in (read for
-that one name first when the listing has not shown it; until then Save
-stores only text you type, never an empty field, so an unchanged Save never
-blanks it; a late read never overwrites what you typed); a
-secret starts empty, and its field is masked. A secret cannot be edited while
+new one goes to the scope listed, in the shared file. An already revealed plaintext value can prefill the editor. Otherwise type a
+new value to replace it. A secret starts with an empty masked field. A secret cannot be edited while
 the key is missing, and a legacy variable limited to several services cannot
 be edited in the app (one write cannot cover them): the editor says to use the
 CLI per service or `hack env migrate`. Nor can a value held outside the env
@@ -799,12 +793,12 @@ instead, so the editor names the layer and says to use the CLI. The editor close
 project. After Save the tab says "Saved NAME" and lists again.
 
 What needs the CLI is shown, not hidden: **+ Overlay** (create an overlay,
-R27; every overlay as a tab, R24), and, when the key is missing, **Choose key
+R27), and, when the key is missing, **Choose key
 file** and **Use env var** (choose the key source for a run, R26). Each is
 inactive, and its tooltip names the request.
 
-Values never reach a log, a render, `--drive` output or an error message, and
-fixtures use fake values. A failed write shows the command and its exit code,
+Values stay out of logs, `--drive` output and error messages. Offscreen render
+fixtures use obviously fake values. A failed write shows the command and its exit code,
 never the CLI's output (an echoed value could be trimmed, escaped or cut, so
 no check on it is safe): run the command shown in a terminal to see why. A
 write started before a CLI switch runs through the CLI chosen when Save was
@@ -815,7 +809,7 @@ in `Cargo.lock` through GPUI): `objc2 =0.6.5` (MIT), `objc2-app-kit =0.3.2`
 (Zlib OR Apache-2.0 OR MIT), `objc2-foundation =0.3.2` (MIT).
 
 Fixtures: `env-loading`, `env-error`, `env-normal`, `env-overlays`,
-`env-running`, `env-missing`, `env-locked`, `env-long`, `env-edit`,
+`env-running`, `env-missing`, `env-locked`, `env-long`, `env-edit`, `env-revealed`,
 `env-empty`. Each
 renders offscreen in both themes through `--screenshots`.
 Screenshots: [overlays, running](screenshots/env-running-light.png),

@@ -51,6 +51,7 @@ async function fixture() {
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const args = Bun.argv.slice(2);
+if (args[0]?.startsWith("--internal-timings=")) args.shift();
 const home = args[1];
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args.slice(2)) + "\\n");
 if (args.includes("inspect")) {

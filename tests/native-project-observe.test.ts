@@ -96,6 +96,48 @@ test("missing mapping gives native not-started without any runtime call", async 
     })
   ).rejects.toThrow("not been started");
 });
+
+test.each([
+  "preparing",
+  "started-observed",
+])("startup ps displays only verified ports for the selected live run in %s", async (phase) => {
+  const opts = await fixture(false);
+  const finish = await beginNativeProjectStartupObservation(opts.scope);
+  try {
+    await finish.select(run);
+    const observed = snapshot(true);
+    observed.receipt.phase = phase;
+    const invoke = async () => ({
+      ...observed,
+      receipt: {
+        ...observed.receipt,
+        resources: {
+          "container:web": {
+            ...observed.receipt.resources["container:web"],
+            loopback_ports: [
+              { host_port: 8080, target: 80 },
+              { host_port: 8081, target: 81 },
+            ],
+          },
+        },
+      },
+      startup_observed_ports: [8080],
+    });
+    expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+      run: run.run,
+      phase,
+      items: [{ service: "web", state: "running" }],
+      ports: [{ service: "web", port: 8080, state: "observed" }],
+    });
+    await finish.select({ ...run, planId: "f".repeat(64) });
+    expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+      status: "pending",
+      items: [],
+    });
+  } finally {
+    await finish();
+  }
+});
 test("ps reports provider pin mismatch as its own closed status without service claims", async () => {
   const opts = await fixture();
   const result = await nativeProjectPs({
@@ -207,6 +249,71 @@ test("an owner journal transition returns busy without stale service rows", asyn
     items: [],
   });
 });
+
+test("ps reports a failure after started from the receipt, value-free, and drops a malformed one", async () => {
+  const opts = await fixture();
+  for (const [record, want] of [
+    [
+      { code: "graph_timeout", service: "web", at: 1_795_000_000 },
+      { code: "graph_timeout", service: "web", at: 1_795_000_000 },
+    ],
+    [
+      { code: "graph_timeout", at: 1_795_000_000 },
+      { code: "graph_timeout", at: 1_795_000_000 },
+    ],
+    [{ code: "Not a code", service: "web", at: 1 }, undefined],
+    [{ code: "graph_timeout", service: "web/../x", at: 1 }, undefined],
+  ] as const) {
+    const stopped = snapshot(false);
+    stopped.receipt.phase = "stopped-data-retained";
+    Object.assign(stopped, { failed_after_started: record });
+    const result = await nativeProjectPs({
+      ...opts,
+      invoke: async () => stopped,
+    });
+    expect(result.failure).toEqual(want);
+  }
+});
+
+test("ps never asks the owner of a warming run, and reports it as warming", async () => {
+  // The owner of a run that returned at started is still in its start loop:
+  // an owner-status request here would never be answered, so this test would hang.
+  const opts = await fixture();
+  const calls: string[] = [];
+  const warming = snapshot(true);
+  warming.receipt.phase = "started-observed";
+  Object.assign(warming.receipt, {
+    started_from: "preparing",
+    readiness: { web: "healthy" },
+  });
+  warming.observations["container:web"] = {
+    state: "running",
+    health: "starting",
+  };
+  const invoke = (request: { args: readonly string[] }) => {
+    calls.push(request.args[1]!);
+    return request.args[1] === "status"
+      ? Promise.resolve(warming)
+      : new Promise<never>(() => undefined);
+  };
+  const result = await nativeProjectPs({
+    ...opts,
+    invoke,
+    includeReadiness: true,
+  });
+  expect(result).toMatchObject({
+    status: "observed",
+    phase: "started-observed",
+    readiness: "warming",
+  });
+  expect(result.items[0]).toMatchObject({
+    service: "web",
+    state: "running",
+    health: "starting",
+    readiness: "healthy",
+  });
+  expect(calls).toEqual(["status"]);
+}, 10_000);
 
 test("ps distinguishes a live foreground owner from historical ready containers", async () => {
   const opts = await fixture();
@@ -414,7 +521,9 @@ test("bounded logs verify current container before and after using exact CLI con
     follow: false,
   });
   expect(result.stdout).toBe("application output\n");
-  expect(calls.map((call) => call[1])).toEqual(["inspect", "logs", "inspect"]);
+  // The container checks around the read are lease-free (`graph status`), so a
+  // warming run's owner holding the lease does not block them (PR B review, item 3).
+  expect(calls.map((call) => call[1])).toEqual(["status", "logs", "status"]);
   expect(calls[1]).toEqual([
     "graph",
     "logs",
@@ -493,10 +602,10 @@ test("logs without a service read every service with a container, in name order"
   ]);
   expect(result.skipped).toEqual(["worker"]);
   expect(calls.map((call) => [call[1], call[5]])).toEqual([
-    ["inspect", undefined],
+    ["status", undefined],
     ["logs", "api"],
     ["logs", "web"],
-    ["inspect", undefined],
+    ["status", undefined],
   ]);
   expect(calls[1]?.slice(6)).toEqual(["--tail", "30", "--json"]);
 });

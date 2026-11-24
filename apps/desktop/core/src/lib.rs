@@ -18,6 +18,7 @@ mod doctor_plugins;
 mod doctor_tools;
 pub mod files;
 pub mod fixtures;
+pub mod git_changes;
 pub mod logs;
 pub mod machine;
 pub mod machine_gate;

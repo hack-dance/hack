@@ -63,6 +63,7 @@ import {
   parseNativeHttpsSelection,
   prepareNativeProjectServices,
   reviewedNativeHttpsRoutes,
+  startedServiceSummary,
   startNativeProject,
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
@@ -71,6 +72,7 @@ import {
   NativeRuntimeRequestError,
   nativeRuntimeFailure,
 } from "../src/backends/native-runtime-client.ts";
+import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -88,6 +90,13 @@ afterEach(async () => {
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   );
 });
+/** Commands the runtime answers without the provider lease. */
+const LEASE_FREE = new Set([
+  "graph status",
+  "graph observe",
+  "graph owner-status",
+  "runtime status",
+]);
 async function fixture(withEnvironment = true) {
   const root = await mkdtemp(join(tmpdir(), "native-start-test-"));
   roots.push(root);
@@ -98,7 +107,13 @@ async function fixture(withEnvironment = true) {
   );
   const events: string[] = [];
   // Set once a serve request starts: later inspections describe that run.
-  const state = { serving: false };
+  // `leaseHeld` models the owner holding the provider lease from its started
+  // line until its ready line: every leased command is refused meanwhile.
+  const state = {
+    serving: false,
+    leaseHeld: false,
+    refused: [] as string[],
+  };
   let run = "";
   let ready = false;
   // A retained-data removal request makes later inspections report removal.
@@ -148,6 +163,14 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (state.leaseHeld && !LEASE_FREE.has(opts.args.slice(0, 2).join(" "))) {
+        state.refused.push(opts.args.slice(0, 2).join(" "));
+        throw new NativeRuntimeRequestError({
+          message:
+            "Native runtime request failed (provider_busy); inspect owned state before retrying.",
+          nativeCode: "provider_busy",
+        });
+      }
       if (opts.args[1] === "ensure-images") {
         const jobs = JSON.parse(
           new TextDecoder().decode(opts.privateInput)
@@ -218,7 +241,7 @@ async function fixture(withEnvironment = true) {
         dataRemoved = true;
         return {};
       }
-      if (opts.args[1] === "inspect") {
+      if (opts.args[1] === "inspect" || opts.args[1] === "status") {
         let phase = "stopped-data-retained";
         if (ready) {
           phase = "ready-observed";
@@ -263,9 +286,21 @@ async function fixture(withEnvironment = true) {
       }
       expect(opts.args.join(" ")).not.toContain("synthetic-secret");
       try {
-        await opts.onReady();
+        // As the owner does: started first, holding the provider lease, then
+        // ready once the lease is released (see returnAtStarted).
+        state.leaseHeld = true;
+        if (opts.returnAtStarted) {
+          await opts.onReady();
+          state.leaseHeld = false;
+          opts.onAllReady?.();
+        } else {
+          await opts.onStarted?.();
+          state.leaseHeld = false;
+          await opts.onReady();
+        }
         return 0;
       } finally {
+        state.leaseHeld = false;
         ready = false;
       }
     },
@@ -280,6 +315,9 @@ async function fixture(withEnvironment = true) {
     },
     composeFile: join(root, ".hack/docker-compose.yml"),
     sharedSource: true,
+    // These tests cover the ready-time path (`up --wait`); started returns
+    // are tested on their own below.
+    waitForReady: true,
     before: async () => {
       events.push("before");
       return {
@@ -467,7 +505,7 @@ test("foreground saves after readiness and retains mapping after confirmed stop"
   expect(events).toEqual([
     "before",
     "runtime up",
-    "graph inspect",
+    "graph status",
     "save",
     "ready",
     "graph inspect",
@@ -1080,7 +1118,7 @@ test("foreground partial shutdown is reported without selecting failed-start rec
     throw new Error("synthetic-private-canary");
   };
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] !== "inspect") {
+    if (request.args[1] !== "inspect" && request.args[1] !== "status") {
       return invoke(request);
     }
     requests.push(request.args[1]);
@@ -1107,7 +1145,8 @@ test("foreground partial shutdown is reported without selecting failed-start rec
   );
   expect(String(failure)).toContain("Native retaining shutdown is incomplete");
   expect(Bun.inspect(failure)).not.toContain("synthetic-private-canary");
-  expect(requests).toEqual(["inspect", "inspect"]);
+  // The mapping is read lease-free at started; the final inspection is leased.
+  expect(requests).toEqual(["status", "inspect"]);
   expect(events).toContain("ready");
   expect(events).toContain("save");
   expect(events).not.toContain("remove");
@@ -1315,7 +1354,7 @@ test("a ready receipt for another namespace is an integrity refusal", async () =
   };
   opts.dependencies.invoke = async (request) => {
     const reply = await invoke(request);
-    if (request.args[1] === "inspect" && serving) {
+    if (request.args[1] === "status" && serving) {
       const graph = reply as { receipt: Record<string, unknown> };
       return {
         ...graph,
@@ -1552,6 +1591,48 @@ test("cancellation after readiness retains mapping when data is preserved", asyn
   expect(events.at(-1)).toBe("cleanup");
 });
 
+test("without --wait, up returns at started: mapping, hooks and release first, then all-ready", async () => {
+  const { opts, events } = await fixture();
+  const controller = new AbortController();
+  const original = opts.dependencies.serve;
+  opts.dependencies.serve = async (args) => {
+    await original?.(args);
+    // Let the all-ready step (route checks, then its line) finish.
+    await Bun.sleep(20);
+    controller.abort();
+    throw new Error("cancelled after all-ready");
+  };
+  const progress: string[] = [];
+  let reported: unknown;
+  expect(
+    await startNativeProject({
+      ...opts,
+      waitForReady: false,
+      signal: controller.signal,
+      onReady: (services) => {
+        events.push("release");
+        reported = services;
+      },
+      onProgress: (event) => {
+        events.push(`progress:${event.phase}`);
+        progress.push(event.phase);
+      },
+    })
+  ).toBe(130);
+  expect(progress).toContain("started");
+  expect(progress).not.toContain("ready");
+  expect(progress.indexOf("started")).toBeLessThan(
+    progress.indexOf("all-ready")
+  );
+  // The launcher is released at started, after the mapping and up.after.
+  expect(events.indexOf("save")).toBeLessThan(events.indexOf("ready"));
+  expect(events.indexOf("ready")).toBeLessThan(events.indexOf("release"));
+  expect(events.indexOf("release")).toBeLessThan(
+    events.indexOf("progress:all-ready")
+  );
+  expect(reported).toMatchObject({ started: ["web"], readiness: "warming" });
+});
+
 test("foreground reports progress, one ready line after publication, and the stop sequence", async () => {
   const { opts, events } = await fixture();
   const controller = new AbortController();
@@ -1686,7 +1767,12 @@ test("managed values are delivered only to reviewed profile-active services", as
       },
     })
   ).toBe(0);
-  expect(reported).toEqual({ started: ["web"], completed: [] });
+  expect(reported).toEqual({
+    started: ["web"],
+    completed: [],
+    readiness: "ready",
+    warming: [],
+  });
   expect(delivered).toMatchObject({
     version: 1,
     services: { web: { GREETING: "synthetic-secret" } },
@@ -1927,7 +2013,12 @@ test("reviewed dependency caches bind published source and successful completion
       },
     })
   ).toBe(0);
-  expect(reported).toEqual({ started: [], completed: ["web"] });
+  expect(reported).toEqual({
+    started: [],
+    completed: ["web"],
+    readiness: "ready",
+    warming: [],
+  });
 });
 
 test("approved outbound hosts are forwarded exactly and sorted before runtime admission", async () => {
@@ -2338,6 +2429,32 @@ async function filesUnder(path: string): Promise<string[]> {
     .filter((entry) => entry.isFile())
     .map((entry) => join(entry.parentPath, entry.name));
 }
+
+test("a foreground started return whose owner fails later prints the log tails and fails", async () => {
+  const { opts } = await fixture();
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    await serve(request);
+    // The owner later reports a service failure and exits nonzero.
+    request.onStartupLogs?.([
+      { service: "web", stdout: "", stderr: "crashed", truncated: false },
+    ]);
+    request.onExitDiagnostic?.({
+      exitCode: 1,
+      nativeCode: "graph_service_failed",
+    });
+    return 1;
+  };
+  const failure = await startNativeProject({
+    ...opts,
+    waitForReady: false,
+  }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  const message = (failure as Error).message;
+  expect(message).toContain("(graph_service_failed)");
+  expect(message).toContain("--- web stderr ---");
+  expect(message).toContain("crashed");
+});
 
 test("failed services' output is printed with managed values redacted and never saved", async () => {
   const { opts, events } = await fixture();
@@ -3004,16 +3121,85 @@ test("routed HTTPS verification precedes readiness and closes after graph cleanu
     };
   };
   expect(await startNativeProject({ ...opts, https: httpsSelection })).toBe(0);
-  expect(events.indexOf("graph inspect")).toBeLessThan(
+  expect(events.indexOf("graph status")).toBeLessThan(
     events.indexOf("https-start")
   );
   expect(events.indexOf("https-start")).toBeLessThan(
     events.indexOf("https-verify")
   );
-  expect(events.indexOf("https-verify")).toBeLessThan(events.indexOf("save"));
+  // The run mapping is saved at started, before the HTTPS lease (PR B).
+  expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-start"));
   expect(events).not.toContain("remove");
   expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-close"));
   expect(events.indexOf("https-close")).toBeLessThan(events.indexOf("cleanup"));
+});
+test.each([
+  { waitForReady: true },
+  { waitForReady: false },
+])("the started chain runs while the owner holds the provider lease (--wait $waitForReady)", async ({
+  waitForReady,
+}) => {
+  // The owner holds the provider lease from its started line to its ready
+  // line; the fixture refuses every leased command meanwhile, and so does the
+  // HTTPS owner (its acquire check is a leased inspection of a ready graph).
+  const { opts, events, state } = await httpsFixture();
+  opts.dependencies.https = async (selection) => {
+    if (state.leaseHeld) {
+      state.refused.push("https acquire");
+      throw new Error("provider lease held by the start");
+    }
+    events.push("https-start");
+    return {
+      identity: leaseIdentity(selection),
+      caPath: "/synthetic/root.crt",
+      httpsPort: 8443,
+      exited: new Promise(() => {}),
+      verifyHostname: async () => {
+        events.push("https-verify");
+        return { statusCode: 200 };
+      },
+      releaseAfterCleanup: async () => {
+        events.push("https-close");
+      },
+    };
+  };
+  const controller = new AbortController();
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    await serve(request);
+    // A started return finishes its ready step after the owner's ready line.
+    await Bun.sleep(20);
+    controller.abort();
+    throw new Error("cancelled after ready");
+  };
+  const progress: string[] = [];
+  await startNativeProject({
+    ...opts,
+    https: httpsSelection,
+    waitForReady,
+    signal: controller.signal,
+    onReady: () => {
+      events.push("release");
+    },
+    onProgress: (event) => {
+      progress.push(event.phase);
+    },
+  });
+  expect(state.refused).toEqual([]);
+  expect(events).toContain("save");
+  expect(events).toContain("https-verify");
+  expect(progress).not.toContain("routes-not-answering");
+  if (waitForReady) {
+    expect(events.indexOf("https-start")).toBeLessThan(
+      events.indexOf("release")
+    );
+  } else {
+    // Released at started; HTTPS is taken once the owner is ready.
+    expect(events.indexOf("release")).toBeLessThan(
+      events.indexOf("https-start")
+    );
+    expect(progress).toContain("all-ready");
+  }
 });
 test("shared HTTPS lease is never acquired before graph readiness or without a live pool", async () => {
   const beforeReady = await httpsFixture();
@@ -3046,7 +3232,9 @@ test("shared HTTPS lease is never acquired before graph readiness or without a l
     const invoke = opts.dependencies.invoke!;
     let acquired = false;
     opts.dependencies.invoke = async (request) =>
-      request.args[1] === "status" ? status : invoke(request);
+      request.args[0] === "runtime" && request.args[1] === "status"
+        ? status
+        : invoke(request);
     opts.dependencies.https = async () => {
       acquired = true;
       throw new Error("unexpected lease acquisition");
@@ -3055,7 +3243,8 @@ test("shared HTTPS lease is never acquired before graph readiness or without a l
       startNativeProject({ ...opts, https: httpsSelection })
     ).rejects.toThrow("verified running pool");
     expect(acquired).toBe(false);
-    expect(events).not.toContain("save");
+    // Saved at started, before the lease check refuses (PR B).
+    expect(events.filter((event) => event === "save")).toHaveLength(1);
     expect(events.at(-1)).toBe("cleanup");
   }
 });
@@ -3090,7 +3279,8 @@ test("cancellation after lease acquisition releases only the acquired lease and 
   ).toBe(130);
   expect(released).toBe(1);
   expect(verified).toBe(false);
-  expect(events).not.toContain("save");
+  // Saved at started, before the lease (PR B); a later failure keeps it.
+  expect(events.filter((event) => event === "save")).toHaveLength(1);
   expect(events).not.toContain("ready");
   expect(events.at(-1)).toBe("cleanup");
 });
@@ -3148,7 +3338,8 @@ test("HTTPS readiness failure preserves its cause without removing an unpublishe
   await expect(
     startNativeProject({ ...opts, https: httpsSelection })
   ).rejects.toBe(failure);
-  expect(events).not.toContain("save");
+  // Saved at started, before the lease (PR B); a later failure keeps it.
+  expect(events.filter((event) => event === "save")).toHaveLength(1);
   expect(events).not.toContain("remove");
   expect(events).not.toContain("ready");
   expect(events.slice(-2)).toEqual(["https-close", "cleanup"]);
@@ -3202,7 +3393,8 @@ test("failed cleanup reports sanitized TLS failure and retained state without re
   let inspections = 0;
   opts.dependencies.invoke = async (request) => {
     const value = await invoke(request);
-    if (request.args[1] === "inspect" && ++inspections === 2) {
+    // The first leased inspection is the final one; the mapping read is lease-free.
+    if (request.args[1] === "inspect" && ++inspections === 1) {
       return {
         ...(value as object),
         observations: { "container:web": { state: "running" } },
@@ -3356,9 +3548,15 @@ test("HACK-2351: a ready start stops reading its startup status", async () => {
   opts.dependencies.startupStatusIntervalMs = 5;
   let statusReads = 0;
   let readsAtReady = 0;
+  // The started and ready steps' mapping read is not a startup status read.
+  let inReady = false;
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
-    if (request.args[0] === "graph" && request.args[1] === "status") {
+    if (
+      request.args[0] === "graph" &&
+      request.args[1] === "status" &&
+      !inReady
+    ) {
       statusReads += 1;
       return { receipt: { phase: "preparing" }, observations: {} };
     }
@@ -3368,9 +3566,16 @@ test("HACK-2351: a ready start stops reading its startup status", async () => {
   opts.dependencies.serve = async (request) =>
     await serve({
       ...request,
+      onStarted: async () => {
+        inReady = true;
+        await request.onStarted?.();
+        inReady = false;
+      },
       onReady: async (...args) => {
         await Bun.sleep(40);
+        inReady = true;
         await request.onReady(...args);
+        inReady = false;
         readsAtReady = statusReads;
         // The ready graph keeps running; no startup reads continue.
         await Bun.sleep(60);
@@ -3386,7 +3591,8 @@ test("final inspection failure reports uncertainty without echoing arbitrary fai
   const invoke = opts.dependencies.invoke!;
   let inspections = 0;
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] === "inspect" && ++inspections === 2) {
+    // The first leased inspection is the final one; the mapping read is lease-free.
+    if (request.args[1] === "inspect" && ++inspections === 1) {
       throw new Error("synthetic-private-canary");
     }
     return invoke(request);
@@ -3450,7 +3656,8 @@ test("an unreserved inspection without a settled startup failure stays uncertain
   const invoke = opts.dependencies.invoke!;
   let inspections = 0;
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] === "inspect" && ++inspections === 2) {
+    // The first leased inspection is the final one; the mapping read is lease-free.
+    if (request.args[1] === "inspect" && ++inspections === 1) {
       throw new NativeRuntimeRequestError({
         message: "unreserved",
         nativeCode: "graph_unreserved",
@@ -3585,7 +3792,8 @@ test("HTTPS startup refuses a non-2xx reviewed health response", async () => {
   await expect(
     startNativeProject({ ...opts, https: httpsSelection })
   ).rejects.toThrow("HTTP_STATUS_403");
-  expect(events).not.toContain("save");
+  // Saved at started, before the lease (PR B); a later failure keeps it.
+  expect(events.filter((event) => event === "save")).toHaveLength(1);
   expect(events).toContain("https-close");
 });
 
@@ -4422,7 +4630,9 @@ test("lost shared HTTPS acquire reply retains intent and recovers only after gra
     let intent: ReturnType<typeof leaseIdentity> | undefined;
     opts.dependencies.finalization = async (request) => {
       const lifetime = await beginNativeProjectFinalization(request);
-      events.push("intent");
+      // The lifetime is registered before the mapping (no lease yet); the lease
+      // intent then adds the lease to it (PR B review, item 1).
+      events.push(request.httpsLease ? "intent" : "lifetime");
       return {
         ...lifetime,
         complete: async () => {
@@ -4434,7 +4644,9 @@ test("lost shared HTTPS acquire reply retains intent and recovers only after gra
     opts.dependencies.https = async (selection) => {
       intent = leaseIdentity(selection);
       await selection.onIntent?.(intent);
-      expect(events.slice(-2)).toEqual(["intent", "save"]);
+      // The mapping was saved at started, before the lease intent (PR B).
+      expect(events.at(-1)).toBe("intent");
+      expect(events.indexOf("save")).toBeLessThan(events.indexOf("intent"));
       events.push("acquire-sent");
       throw new Error("acquire reply lost");
     };
@@ -4468,7 +4680,10 @@ test("restart callback follows ready and acknowledgement follows all finalizers"
   opts.dependencies.finalization = async (request) => {
     const lifetime = await beginNativeProjectFinalization(request);
     if (!request.httpsLease) {
-      throw new Error("missing HTTPS lease");
+      // Registered before the mapping; the lease is added to it below.
+      expect(events).not.toContain("save");
+      events.push("lifetime");
+      return lifetime;
     }
     expect(lifetime.token).toMatchObject({
       version: 3,
@@ -7264,6 +7479,52 @@ test("up on a stopped pool whose run's owner died recovers the run with data ret
   expect(notices.join("\n")).toContain("recovered with data retained");
 });
 
+// HACK-2579: the pool's provider was killed; its record still says running, and
+// the run's detached owner has not noticed yet.
+test("up on a pool whose provider exited under a running record recovers it with one line, then recovers the run", async () => {
+  const { start, events, notices } =
+    await stoppedPoolUnderRunFixture("stopped");
+  let runtimeRecovered = false;
+  let refusedOnce = false;
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && !refusedOnce) {
+      refusedOnce = true;
+      events.push("graph retained-preflight owner running");
+      throw new NativeRuntimeRequestError({
+        nativeCode: "graph_foreground_owner_running",
+        message: "Another hack up of this run is still running.",
+      });
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "recover") {
+      events.push("runtime recover");
+      runtimeRecovered = true;
+      return { phase: "recovered-unclean", process_alive: false };
+    }
+    if (
+      request.args[0] === "runtime" &&
+      request.args[1] === "status" &&
+      !runtimeRecovered
+    ) {
+      events.push("runtime status exited");
+      return { phase: "process-exited", process_alive: false };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(start)).toBe(0);
+  expect(events.slice(0, 4)).toEqual([
+    "graph retained-preflight owner running",
+    "runtime status exited",
+    "runtime recover",
+    "graph retained-preflight refused",
+  ]);
+  expect(events.filter((event) => event === "runtime recover")).toHaveLength(1);
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(
+    notices.filter((line) => line === NATIVE_EXITED_RUNTIME_NOTICE)
+  ).toHaveLength(1);
+});
+
 test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {
   const { start, events } = await stoppedPoolUnderRunFixture("running");
   const error = await startNativeProject(start).catch(
@@ -7422,6 +7683,7 @@ test("a live foreground owner on a running pool keeps its refusal at once, with 
   );
   expect(events).toEqual([
     "graph retained-preflight owner running",
+    "runtime status",
     "pool record",
   ]);
   expect(notices).toEqual([]);
@@ -7467,4 +7729,37 @@ test.each([
     ].join("\n")
   );
   expect(events).toEqual([]);
+});
+
+test("the started envelope comes from observations: running jobs and unmet health goals are warming", () => {
+  const args = [
+    "--ready",
+    "web=started",
+    "--ready",
+    "db=healthy",
+    "--ready",
+    "migrate=completed",
+    "--ready",
+    "seed=completed",
+  ];
+  expect(
+    startedServiceSummary(args, {
+      observations: {
+        "container:web": { state: "running", health: "none" },
+        "container:db": { state: "running", health: "starting" },
+        "container:migrate": { state: "running", health: "none" },
+        "container:seed": { state: "exited", code: 0 },
+      },
+    })
+  ).toEqual({
+    started: ["web"],
+    completed: ["seed"],
+    warming: ["db", "migrate"],
+  });
+  // Nothing observed: nothing claimed done.
+  expect(startedServiceSummary(args, {})).toEqual({
+    started: ["web"],
+    completed: [],
+    warming: ["db", "migrate", "seed"],
+  });
 });

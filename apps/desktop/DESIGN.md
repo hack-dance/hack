@@ -16,8 +16,8 @@ second implementation of them.
 | The CLI is the only writer | Every action is one `hack <cmd> --no-interactive` run as the user with `--path <repo_root>`. Commands without `--json` are judged by exit code, then a fresh read. |
 | Reads observe only | A poll never starts Docker, hackd, a VM or anything else. A command that can start something (today: `hack global status`) is not polled until it has an observe-only mode (R13). |
 | No app state beyond window layout | Selected project, window size, sidebar width, theme override. Nothing else is stored. |
+| Env values only by request | Env lists metadata. The eye reads one value through `hack env get KEY`. The value hides after 60 seconds or when focus or selection changes. The app delegates writes to the CLI. Logs separately show unredacted service output as the CLI emits it (see [Logs tab](#logs-tab)). |
 | No credentials, no passwords | Explicit Run actions use an app-owned PTY. The CLI invokes `sudo` when needed and owns the prompt. The app has no password field. |
-| Env values only through the CLI, one at a time | Owner decision (Nov 17): Env shows plaintext values and reveals a secret's value on request. Every read goes through the CLI on a pipe (`hack env get KEY` per name); the app never parses env files, decrypts or holds the key. A revealed value hides after 60 s and on any move; nothing bulk-reveals ([Env tab](#env-tab)). Logs are unredacted service output (which can include values Hack injected), shown as the CLI emits them, with a warning, never written to disk and with no copy-all (owner decision: the Logs tab is in scope). |
 | Unknown is not absent | A failed or timed-out read shows "could not read" with the error, never "stopped" or "0 projects". |
 | Small | Target under 4,000 lines of Rust for v0.1. The old `apps/macos` grew to 13,800 lines through an embedded terminal, command palette, editor and agent integrations, tickets and remote features. None of those come back. |
 
@@ -138,19 +138,18 @@ pipe for each value shown. Owner direction, Nov 17; mockup in the lead's brief.
 
 | Part | Shown |
 |---|---|
-| Overlay tabs | `base` (`--env default`), then each overlay the CLI names in `env_selection` (default, requested, effective), once. A `running` chip on the overlay the instance runs, when known (R22). Every overlay of a project is R24. |
+| Overlay tabs | Base (`--env default`), selected overlay metadata and every modern report entry in `overlays[].name`, once each. A running chip appears when known (R22). |
 | Scope | Small pills on the right, from `scopes`; one listing per scope. |
 | Key line | `key_state` only: "Secret key found", or, when missing, the two places the CLI looks (`.hack.secret.key`, `HACK_ENV_SECRET_KEY`). Which source the CLI used is R26. |
-| Table | Name, Value, actions. A scope chip when not global; `required · missing` only for that exception, first. Plaintext values load with the listing (one `hack env get` each, at most 48; one read for all is R25). Secrets are dots with an eye and copy. With the key missing, secrets offer neither. |
+| Table | Name, value and actions. Values start masked. A scope chip identifies non-global scope and missing required names appear first. |
 | Reveal | The eye reads that one name. It hides again after 60 s, and when the overlay, scope, detail tab or project changes, or the window is hidden or loses focus. |
-| Copy | Reads that one name if it is not shown, puts it on the clipboard, and clears the clipboard after 60 s, or when the app quits sooner, if it still holds the value. On macOS the item is marked concealed (`org.nspasteboard.ConcealedType`, written through AppKit because GPUI's clipboard API cannot); Linux has no such convention, so the clear is the only protection there. |
-| Edit, + Variable | An editor with the name (new only), the value (masked for a secret; a secret starts empty, plaintext starts filled), Secret (new only), and the exact command Save runs: `hack env add KEY [--secret] --value-stdin --env <overlay> --service <scope>`, value on stdin, overlay and scope always named. An existing row is written in its own scope; a new variable in the scope listed. No secret edit without the key. |
+| Copy | Copies a revealed value and clears the clipboard after 60 seconds or when the app quits, if it still holds that value. macOS marks the item concealed. |
+| Edit, + Variable | The editor retains per-row overlay, scope and layer, and shows the command it runs with the value on stdin. An already revealed plaintext value can prefill the editor. Otherwise enter a replacement. Secrets start with an empty masked field. |
 | Needs the CLI | Shown inactive with the request in a tooltip: + Overlay (R27, and R24 for every overlay as a tab); Choose key file and Use env var when the key is missing (R26). |
 
-A value never reaches a log, a render, `--drive` output, a test snapshot or an
+A value never reaches a log, `--drive` output, a test snapshot or an
 error message: `Revealed` prints only its length, failures name the variable
-and exit code, and fixtures use obviously fake values. Adding an overlay and
-choosing the key source wait for the CLI (R24, R26, R27). When R26 exists, the
+and exit code, and fixtures use obviously fake values. The app does not yet offer overlay creation or key source controls (R26, R27). When R26 exists, the
 key source will be stored per project in the app's machine-local settings
 file (the same file as the CLI choice), as a path or a variable name, never
 key bytes.
@@ -368,7 +367,7 @@ because the unhealthy states live there.
 | Services CPU/memory | `hack usage --json --details` (until R3) | 5 s while visible | 10 s |
 | Logs | `hack logs --json --path <root> [<service>] --tail 500` (one long-running child) | stream | killed on tab change |
 | Env | `hack env list --json --path <root>` | on tab open, after env actions | 10 s |
-| Env value | `hack env get <KEY> --path <root>` (pipe) | per plaintext row with the listing; per eye or copy press for a secret | 10 s |
+| Env value | `hack env get <KEY> --path <root>` (pipe) | on explicit reveal | 10 s |
 | Activity | `hack activity --json --project <name> --limit 100` (R5b) | on open, 10 s while open | 10 s |
 | Doctor, onboarding | `hack doctor --json` (per project and once outside), `hack daemon status --json` | on open; every 10 min | 60 s |
 | Daemon | `GET /v1/status` | 10 s | 1 s |
@@ -495,8 +494,8 @@ Each is small enough for one PR.
 27. **R21** End an exec session's processes inside the container. The terminal panel's service-shell tab runs `hack exec [--branch <b>] <service> -- bash`. Closing the tab or quitting ends that process group on the host, but a job the shell started in the background inside the container keeps running (as with `docker exec -it`), and the app can neither see nor signal processes in a container. Request: an exec mode that ties the in-container session to the client, for example `hack exec --session-scoped` running the command under a small in-container supervisor that ends its whole session when the client's terminal hangs up or the client exits. An alternative is `hack exec --print-session` (reporting the in-container session id) plus `hack exec --end-session <id>` for the app to call on close and on quit. The first form also covers a crashed app. Until then the app documents the limit and its `--drive` check reports such processes as known open.
 28. **R22** `hack exec` without `--env` on a Compose instance that is running a non-default overlay: today it resolves to the configured default overlay, and `resolveExecTargetReady` refuses the mismatch. `down` and `restart` already reuse the stored running overlay when `--env` is omitted (`resolveStoredRuntimeEnvName`). Request the same for `exec`, or expose the running overlay per instance in `/v1/projects` so the app can pass it explicitly. Until then a service-shell tab on such an instance shows the CLI's refusal, which names the overlay to use.
 29. **R23** Routing evidence for every registered project domain. On macOS, `hack doctor` emits `resolver:<suffix>` and `dnsmasq.conf:<suffix>` checks only for the default domain (`appendCustomDomainDnsChecks` uses `resolveDefaultDomain()`). A registered Compose project whose `dev_host` uses another suffix has no evidence, so Setup's routing card stays unknown and says so, naming the host. Re-checking or running `hack global install` cannot change that. Request: Doctor checks the resolver and dnsmasq entries for each registered project's domain suffix (or reports them as unchecked by name).
-30. **R24** Every overlay of a project. `hack env list --json` names only the default, requested and effective overlay (`env_selection`). The Env tab's overlay tabs need the whole set, for example `env_overlays: [{name, path}]` in that output or `hack env overlays --json`. The app does not list `.hack/hack.env.*.yaml` itself.
-31. **R25** Plaintext values in one read. Values come only with `--show-values` on a terminal, and that reveals everything. Request a pipe-safe listing that includes values for plaintext entries only (never secrets), for example `hack env list --json --plaintext-values`. Until then the app runs `hack env get` once per plaintext name (at most 48 per listing).
+30. **R24 — exists.** Modern `hack env list --json` includes `overlays[].name`.
+31. **R25 — exists.** The CLI supports opt-in `--plaintext-values`. The desktop lists metadata and reads values individually on request.
 32. **R26** Key source: report which source the CLI used for the project secret key (`file` with its path relative to the checkout, or `env` with the variable name), never the key; and accept an override for one run (a key file path or a variable name, for example `--key-file <path>` / `--key-env <NAME>`) so the app can offer "Choose key file" and "Use env var" without reading the key itself.
 33. **R27** Overlay creation: `hack env overlay add <name>` (creates `.hack/hack.env.<name>.yaml` the CLI's way, refusing an existing name), for the Env tab's `+ Overlay`. Slice 2.
 34. **R28** `emulated`, `image_arch` and `engine_arch` on each `hack usage --json --by-service` row (today only `hack ps --json` items carry `emulated`), so the Services tab needs one read. Section 10.

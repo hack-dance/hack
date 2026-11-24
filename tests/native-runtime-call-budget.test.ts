@@ -218,8 +218,9 @@ test("a fresh native up makes exactly these runtime requests", async () => {
     // Final review after image pinning reuses the static review's original
     // identity; the normalized plan re-reads and checks the original file.
     "project plan",
-    // Ready receipt, then the final inspection after the stop.
-    "graph inspect",
+    // The run mapping at started, read lease-free (the owner holds the provider
+    // lease until ready), then the final leased inspection after the stop.
+    "graph status",
     "graph inspect",
   ]);
 });
@@ -271,6 +272,10 @@ test("native exec makes exactly these runtime requests", async () => {
   });
   expect(result.exitCode).toBe(0);
   expect(runtime.calls).toEqual([
+    // `up` may have returned at started: one look whether the run is warming
+    // (it is ready here, so nothing waits).
+    "graph status",
+    "graph owner-status",
     "graph refresh-dependencies",
     // Before: container status and the foreground owner's liveness.
     "graph status",

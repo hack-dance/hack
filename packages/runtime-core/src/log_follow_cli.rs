@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 fn invalid() -> CandidateError {
     CandidateError::new(
         "native_log_arguments",
-        "Use graph logs-follow --run-id ID --service NAME --expect-owner ID --expect-plan SHA --expect-namespace SHA [--native] [--tail 0..1000] [--since UNIX_SECONDS] [--timestamps] [--from-start] [--expect-container <64-hex>] [--selection-only].",
+        "Use graph logs-follow --run-id ID --service NAME --expect-owner ID --expect-plan SHA --expect-namespace SHA [--native] [--tail 0..1000] [--since UNIX_SECONDS] [--timestamps] [--from-start] [--expect-container <64-hex>] [--selection-only] [--no-follow].",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateError> {
@@ -24,12 +24,17 @@ fn parse<'a>(args: &[&'a str]) -> Result<LogFollowOptions<'a>, CandidateError> {
     let mut timestamps = false;
     let mut from_start = false;
     let mut selection_only = false;
+    let mut no_follow = false;
     let mut index = 0;
     while index < args.len() {
         let key = args[index];
         index += 1;
         if key == "--selection-only" && !selection_only {
             selection_only = true;
+            continue;
+        }
+        if key == "--no-follow" && !no_follow {
+            no_follow = true;
             continue;
         }
         if key == "--from-start" && !from_start {
@@ -67,6 +72,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<LogFollowOptions<'a>, CandidateError> {
     let get = |key| values.get(key).copied().ok_or_else(invalid);
     if selection_only
         && (timestamps
+            || no_follow
             || from_start
             || values.contains_key("--tail")
             || values.contains_key("--since"))
@@ -83,6 +89,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<LogFollowOptions<'a>, CandidateError> {
         timestamps,
         from_start,
         selection_only,
+        no_follow,
         expected_container: values.get("--expect-container").copied(),
         tail: values
             .get("--tail")
@@ -144,12 +151,22 @@ mod tests {
             "--selection-only",
         ];
         assert!(parse(&args).unwrap().selection_only);
+        // `--no-follow` reads existing output; repeated or with a finite selection it is refused.
+        let stream = &args[..args.len() - 1];
+        assert!(
+            parse(&[stream, &["--no-follow"]].concat())
+                .unwrap()
+                .no_follow
+        );
+        assert!(!parse(stream).unwrap().no_follow);
+        assert!(parse(&[stream, &["--no-follow", "--no-follow"]].concat()).is_err());
         for extra in [
             vec!["--tail", "0"],
             vec!["--since", "1"],
             vec!["--timestamps"],
             vec!["--from-start"],
             vec!["--selection-only"],
+            vec!["--no-follow"],
         ] {
             assert_eq!(
                 parse(&[args.as_slice(), extra.as_slice()].concat())

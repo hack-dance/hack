@@ -2275,7 +2275,10 @@ mod machine_status_render_tests {
     use super::*;
     use crate::command_control::screenshots::tests::{assert_rendered_status, open};
     use hack_desktop_core::models::{DoctorCheck, DoctorReport};
-    use hack_desktop_core::{doctor::DoctorRun, setup::Status};
+    use hack_desktop_core::{
+        doctor::{DoctorRun, Finish},
+        setup::Status,
+    };
 
     #[test]
     fn rendered_dns_tracks_a_fresh_setup_check_and_rejects_older_and_stale_reads() {
@@ -2292,6 +2295,7 @@ mod machine_status_render_tests {
                 id: "resolver:hack".into(),
                 status: "warn".into(),
                 detail: "Resolver missing".into(),
+                fix: None,
             }],
             ..Default::default()
         }));

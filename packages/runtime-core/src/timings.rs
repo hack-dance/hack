@@ -33,6 +33,7 @@ steps! {
     GraphPublishSeed => "graph.publish.seed", GraphPublishReserve => "graph.publish.reserve",
     GraphPublishRelays => "graph.publish.relays", GraphPublishAwait => "graph.publish.await",
     ContainersStarted => "containers.started", ServicesReady => "services.ready",
+    EnvStage => "env.stage",
     ContainerStart => "container.start", ContainerStop => "container.stop",
     ContainerExec => "container.exec", ContainerRun => "container.run", ContainerInspect => "container.inspect",
     ImageEnsure => "image.ensure", ImageCache => "image.cache", ImageTagRecord => "image.tag.record",

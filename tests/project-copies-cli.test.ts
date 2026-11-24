@@ -136,7 +136,7 @@ test("copies attributes an instance to its worktree using one Compose inventory"
     expect(result.stdout).toContain("https://feature-1.sample.hack.local");
     expect(result.stdout).not.toContain(f.root);
     expect((await readFile(f.calls, "utf8")).trim().split("\n")).toEqual([
-      "ps -a --filter label=com.docker.compose.project --format json",
+      "ps -a --no-trunc --filter label=com.docker.compose.project --format json",
     ]);
 
     const json = await f.run(["--json"]);

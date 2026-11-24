@@ -1478,6 +1478,22 @@ standalone retention exports: archive and prune do not remove them, so the direc
 holds one file per environment-attached run: about 160 bytes per current-boot
 retired slot plus one summary per sealed boot, capped at 4 MiB and refused, never
 truncated, beyond that.
+
+The three ignored owned-VM tests in `provider::graph::environment_crash_test`
+(`managed_driver_loss_preserves_cleanup_and_requires_fresh_restore`,
+`cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases` and
+`interrupted_environment_archival_exports_and_prunes_without_replay`) kill an owned
+helper child at a fault point and check recovery. They need a caller-owned, freshly
+started Development pool and a loaded pinned Linux ARM64 Bun image that provides
+`/usr/local/bin/bun` (for example `oven/bun:1.4.4-slim`). Set `HACK_LOCAL_TEST_ROOT` to
+the pool's candidate home and `HACK_LOCAL_TEST_IMAGE` to the loaded
+`sha256:<config digest>`. Build the library tests with `--features environment-launcher`
+using the pinned Rust and Zig 0.15.2 (`cargo test --features environment-launcher --lib
+--no-run`), then run each exact test name with `--ignored --exact --nocapture
+--test-threads=1` under a 300-second external watchdog. A failure prints the helper
+child's output. The archival test cleans up without the trailing compaction, the state
+an enrolled relay cleanup or a refused compaction leaves, because archive moves only
+records that are still active.
 No retained evidence is automatically deleted to admit new work. This environment
 budget does not increase the runtime's separate container, CPU or memory limits and
 does not establish 32-branch qualification.

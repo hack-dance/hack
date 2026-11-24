@@ -1593,6 +1593,32 @@ fn native_reservations_count_against_the_common_budget_and_uncertainty_blocks_ad
 }
 
 #[test]
+fn full_native_inventory_reports_the_bound_before_guest_work() {
+    let fixture = Fixture::new(basic());
+    for index in 0..storage_inventory::RUN_LIMIT {
+        let run = format!("{index:032x}");
+        let prepared = fixture.prepared_for(&run, json!({"web":{}}), &BTreeMap::new());
+        fixture.session(prepared);
+    }
+    let error = reservations_using(
+        &fixture.candidate,
+        OWNER,
+        BOOT,
+        true,
+        |_, _| unreachable!("full inventory refuses before inspecting guest resources"),
+        |_| unreachable!("full inventory refuses before resource admission"),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "native_graph_attempt_limit");
+    assert!(error.message.contains("64 attempts"));
+    assert!(
+        error
+            .message
+            .contains("hack doctor --native-cleanup inspect")
+    );
+}
+
+#[test]
 fn full_native_inventory_archives_oldest_removed_and_preserves_confirmation() {
     use super::super::archive;
 

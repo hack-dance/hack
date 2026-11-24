@@ -376,6 +376,7 @@ describe("exportProjectData", () => {
         /^hack-data-export-[a-f0-9]{24}$/
       );
       expect(argv[argv.indexOf("--network") + 1]).toBe("none");
+      expect(argv[argv.indexOf("--log-driver") + 1]).toBe("none");
       expect(argv).toContain("--read-only");
       expect(argv[argv.indexOf("--volume") + 1]).toBe("shop_db:/v:ro");
       expect(argv).toContain(PINNED);
@@ -573,6 +574,10 @@ describe("exportProjectData", () => {
     expect(new Set(names).size).toBe(4);
     expect(names[0]).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
     expect(names[3]).toMatch(/^hack-data-export-[a-f0-9]{24}-end$/);
+    // Markers log nothing either.
+    for (const argv of state.calls.filter((a) => a.includes("true"))) {
+      expect(argv[argv.indexOf("--log-driver") + 1]).toBe("none");
+    }
     expect(state.events.watches).toBe(1);
     expect(state.events.open).toBeFalse();
     expect(state.calls.some((argv) => argv[1] === "events")).toBeFalse();

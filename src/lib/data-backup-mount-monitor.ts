@@ -179,6 +179,8 @@ export async function startMountMonitor(opts: {
       name,
       "--network",
       "none",
+      "--log-driver",
+      "none",
       "--pull",
       "missing",
       "--read-only",

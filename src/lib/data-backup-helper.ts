@@ -62,7 +62,10 @@ export function helperContainerName(purpose: HelperPurpose): string {
 
 /**
  * `docker run` of the pinned helper with one volume at `/v`: removed on exit,
- * no network, read-only root file system, no privilege gain. `readOnly`
+ * no network, no logging (`--log-driver none`: the raw tar crosses the
+ * attached stdout, and a daemon's central logging driver must never receive
+ * volume bytes; attached streams still work), read-only root file system,
+ * no privilege gain. `readOnly`
  * mounts the volume read-only; `stdin` keeps stdin open for a tar stream.
  * `name` comes from {@link helperContainerName}.
  */
@@ -82,6 +85,8 @@ export function dataBackupHelperArgv(opts: {
     "--name",
     opts.name,
     "--network",
+    "none",
+    "--log-driver",
     "none",
     "--pull",
     "missing",

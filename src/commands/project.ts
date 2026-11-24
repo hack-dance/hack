@@ -282,6 +282,7 @@ import {
   removePlaintextComposeEnvOverride,
   withComposeEnvOverride,
   writeComposeEnvOverride,
+  writeForegroundComposeEnvOverride,
 } from "../lib/compose-env-at-rest.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import {
@@ -1359,6 +1360,8 @@ async function checkOneShotInterruption(opts: {
   readonly json: boolean;
   /** A targeted restart interrupts only these services. */
   readonly services?: readonly string[];
+  readonly approvedServices?: readonly string[];
+  readonly deferWarning?: boolean;
   /**
    * The Compose environment the command's other `ps` reads use (delivered
    * values, `COMPOSE_PROFILES`), so a profile-gated one-shot is seen too.
@@ -1412,10 +1415,14 @@ async function checkOneShotInterruption(opts: {
     return { proceed: true };
   }
   const names = services.join(", ");
+  const needsApproval = services.filter(
+    (service) => !opts.approvedServices?.includes(service)
+  );
   const warning = `hack ${opts.action} interrupted the one-shot service ${names} while it was still running; its work (for example migrations) may be incomplete. Check its logs before relying on it.`;
-  if (!opts.json && canPrompt()) {
+  if (needsApproval.length > 0 && !opts.json && canPrompt()) {
+    const newNames = needsApproval.join(", ");
     const ok = await confirm({
-      message: `The one-shot service ${names} is still running (for example migrations). hack ${opts.action} stops it mid-run. Continue?`,
+      message: `The one-shot service ${newNames} is still running (for example migrations). hack ${opts.action} stops it mid-run. Continue?`,
       initialValue: false,
     });
     if (isCancel(ok) || !ok) {
@@ -1425,7 +1432,9 @@ async function checkOneShotInterruption(opts: {
       return { proceed: false };
     }
   }
-  logger.warn({ message: warning });
+  if (!opts.deferWarning) {
+    logger.warn({ message: warning });
+  }
   return { proceed: true, interruption: { services, warning } };
 }
 
@@ -8202,7 +8211,7 @@ async function runUpCommand({
     targetServices: preparedServices,
     allServiceNames,
     envName,
-    persist: !detach,
+    persist: !(detach || serviceScoped),
   });
   const baseProjectName = await resolveUpComposeBase({
     project,
@@ -8520,11 +8529,15 @@ async function runResolvedComposeUp({
     expected: args.options.expectComposeProject,
     base: baseProjectName,
     computed:
-      branchProjectName ?? pinnedBase ?? (detach ? baseProjectName : null),
+      branchProjectName ??
+      pinnedBase ??
+      (detach || serviceScoped ? baseProjectName : null),
   });
   const expectedComposeProject =
     args.options.expectComposeProject ??
-    (detach || pinnedBase ? (composeProjectName ?? undefined) : undefined);
+    (detach || serviceScoped || pinnedBase
+      ? (composeProjectName ?? undefined)
+      : undefined);
   beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
 
   // Preserve the owner of a live upgraded session. Its controller must see
@@ -9016,6 +9029,18 @@ async function runResolvedComposeUp({
       });
     };
     const launchWithEnv = async () => {
+      if (!detach && serviceScoped) {
+        const path = envOverrides.referenceText
+          ? await writeForegroundComposeEnvOverride({
+              projectDir: project.projectDir,
+              text: envOverrides.referenceText,
+              signal: cancellation.signal,
+            })
+          : undefined;
+        return await launch(
+          path ? [...composeFilesWithMetadata, path] : composeFilesWithMetadata
+        );
+      }
       if (!detach) {
         return await launch([
           ...composeFilesWithMetadata,
@@ -10991,13 +11016,14 @@ async function runDownCommand({
       }));
   await assertDownEngine();
 
-  const interruptionCheck = await checkOneShotInterruption({
+  let interruptionCheck = await checkOneShotInterruption({
     project,
     composeProjectName,
     profiles,
     action: "down",
     json,
     env: composeEnv,
+    deferWarning: runsBeforeHook,
   });
   if (!interruptionCheck.proceed) {
     return 1;
@@ -11099,6 +11125,20 @@ async function runDownCommand({
           exitCode: beforeCode,
         })
       : beforeCode;
+  }
+  if (runsBeforeHook) {
+    interruptionCheck = await checkOneShotInterruption({
+      project,
+      composeProjectName,
+      profiles: stopSelection.profiles,
+      action: "down",
+      json,
+      env: composeEnv,
+      approvedServices: interruptionCheck.interruption?.services,
+    });
+    if (!interruptionCheck.proceed) {
+      return 1;
+    }
   }
 
   const signalCleanup = installLifecycleSignalCleanup({

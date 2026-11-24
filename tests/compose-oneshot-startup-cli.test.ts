@@ -258,6 +258,26 @@ test("down --json while a one-shot runs proceeds and reports what it interrupted
   expect(result.stderr).toContain("interrupted the one-shot service migrate");
 }, 60_000);
 
+test("Down reports a one-shot that starts during its before-hook", async () => {
+  await writeFile(
+    join(project, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "shop",
+      internal: { dns: false, tls: false },
+      lifecycle: {
+        down: { before: [{ command: ': > "$STUB_STATE/up-started"' }] },
+      },
+    })
+  );
+  const result = await cli(["down", "--json"]);
+  expect(result.exitCode, result.stderr + result.stdout).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: true,
+    data: { interrupted: ["migrate"] },
+  });
+  expect(result.stderr).toContain("interrupted the one-shot service migrate");
+}, 60_000);
+
 test("restart --json while a one-shot runs reports what it interrupted", async () => {
   await writeFile(join(state, "up-started"), "");
   const result = await cli(["restart", "--json"], { STUB_UP_SECONDS: "1" });

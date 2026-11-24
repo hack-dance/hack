@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { link, lstat, mkdir, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
@@ -166,12 +166,43 @@ export async function withComposeEnvOverride<T>(opts: {
   readonly signal?: AbortSignal;
   readonly run: (path: string) => Promise<T>;
 }): Promise<T> {
+  return await withReferenceFile({
+    ...opts,
+    path: composeEnvOverridePath(opts),
+  });
+}
+
+/**
+ * Attached scoped starts keep their own value-free references without holding
+ * the shared override lock for the terminal lifetime. The content path stays
+ * available for Docker's config_files labels after the command exits.
+ */
+export async function writeForegroundComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly text: string;
+  readonly signal?: AbortSignal;
+}): Promise<string> {
+  const digest = createHash("sha256").update(opts.text).digest("hex");
+  const path = join(
+    dirname(composeEnvOverridePath(opts)),
+    `compose.env.${digest}.override.yml`
+  );
+  return await withReferenceFile({ ...opts, path, run: async () => path });
+}
+
+async function withReferenceFile<T>(opts: {
+  readonly path: string;
+  readonly text: string;
+  readonly now?: () => number;
+  readonly signal?: AbortSignal;
+  readonly run: (path: string) => Promise<T>;
+}): Promise<T> {
   if (classifyComposeEnvOverrideText(opts.text).kind !== "references") {
     throw new Error(
       "Refused to write a Compose env override that holds literal values; values omitted."
     );
   }
-  const path = composeEnvOverridePath(opts);
+  const { path } = opts;
   // Refuse a linked `.hack` or `.internal` before mkdir can create anything
   // through it; the read and replace below check both again.
   if ((await holdOverrideDirectories(path)).kind === "refused") {

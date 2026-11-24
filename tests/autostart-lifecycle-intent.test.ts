@@ -298,7 +298,7 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
   }
   if (!options.startContainers) process.exit(1);
   if (options.holdForeground && !args.includes("-d") && !args.includes("--no-start")) {
-    await Bun.write(fixture + "/foreground-dispatched", "started");
+    await Bun.write(fixture + "/foreground-dispatched", JSON.stringify(args));
     const release = Bun.file(fixture + "/release-foreground");
     const deadline = Date.now() + 45_000;
     while (!(await release.exists())) {
@@ -307,7 +307,7 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
     }
   }
   if (options.recordStartReferences) {
-    const references = args.find((arg) => arg.endsWith("/compose.env.override.yml"));
+    const references = args.find((arg) => arg.includes("/compose.env.") && arg.endsWith(".override.yml"));
     const app = YAML.parse(await Bun.file(references).text()).services.app.environment;
     const keys = Object.entries(app).map(([key, reference]) => [key, process.env[reference.slice(2, -1)] !== undefined]);
     const phase = args.includes("--no-start") ? "create" : "start";
@@ -1441,14 +1441,31 @@ test("foreground service startup records the mutation and releases the copy whil
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "sample",
+      dev_host: "sample.hack",
       lifecycle: { up: { after: [{ command: hook }] } },
     })
   );
+  for (const [envName, key] of [
+    ["qa", "QA_ONLY"],
+    ["staging", "STAGING_ONLY"],
+  ] as const) {
+    await writeOwnedFixture(
+      join(projectDir, `hack.env.${envName}.yaml`),
+      `version: 1\nenvironment: ${envName}\nsecretsprovider: project_key\nvalues:\n  global:\n    ${key}: fixture\n`
+    );
+  }
   await installComposeNameFixture({
     startContainers: true,
     holdForeground: true,
+    trackNamedStacks: true,
+    recordStartReferences: true,
   });
-  const original = run(["up", "-d", "--json"], false, undefined, env);
+  const original = run(
+    ["up", "-d", "--env", "qa", "--json"],
+    false,
+    undefined,
+    env
+  );
   let foreground: ReturnType<typeof run> | undefined;
   try {
     await waitForCondition(
@@ -1456,7 +1473,7 @@ test("foreground service startup records the mutation and releases the copy whil
       "Start did not reach its after-hook",
       20_000
     );
-    foreground = run(["up", "app"], false, undefined, env);
+    foreground = run(["up", "app", "--env", "qa"], false, undefined, env);
     await Promise.race([
       waitForCondition(
         () => Bun.file(join(root, "foreground-dispatched")).exists(),
@@ -1472,6 +1489,25 @@ test("foreground service startup records the mutation and releases the copy whil
       composeProject: "sample",
     });
     expect(launch?.serviceMutationId).toBeDefined();
+    const invocation: string[] = await Bun.file(
+      join(root, "foreground-dispatched")
+    ).json();
+    expect(invocation[invocation.indexOf("-p") + 1]).toBe("sample");
+    expect(
+      invocation.some(
+        (arg) =>
+          arg.includes("compose.env.") &&
+          arg.endsWith(".override.yml") &&
+          !arg.endsWith("/compose.env.override.yml")
+      )
+    ).toBe(true);
+    const sibling = await run(
+      ["up", "-d", "app", "--branch", "sibling", "--env", "staging", "--json"],
+      false,
+      undefined,
+      env
+    );
+    expect(sibling.exitCode, sibling.stderr + sibling.stdout).toBe(0);
     await Bun.write(releaseAfter, "continue");
     const superseded = await Promise.race([
       original,
@@ -1489,6 +1525,16 @@ test("foreground service startup records the mutation and releases the copy whil
       foregroundResult.exitCode,
       foregroundResult.stderr + foregroundResult.stdout
     ).toBe(0);
+    expect(
+      await Bun.file(join(root, "references-sample-start")).json()
+    ).toEqual({
+      QA_ONLY: true,
+    });
+    expect(
+      await Bun.file(join(root, "references-sample--sibling-start")).json()
+    ).toEqual({
+      STAGING_ONLY: true,
+    });
   } finally {
     await Bun.write(releaseAfter, "continue");
     await Bun.write(releaseForeground, "continue");

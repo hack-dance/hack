@@ -15,6 +15,8 @@ For a targeted repair, `hack doctor --fix --only 'hack gitignore' --yes --json -
 `hack doctor --fix --only 'polling watchers' --path <repo>` shows a diff that removes only the `CHOKIDAR_USEPOLLING: "true"` and `WATCHPACK_POLLING: "true"` lines old `hack init` generated, and writes nothing. Add `--yes` to apply it. It refuses an adopted project and any change that would alter more than those lines. With `--json`, `data.fix` adds `applied`, `removed` and `diff`. Plain `--fix` never runs it.
 
 Use `hack doctor --machine --json` for a machine-only audit. It returns the same `checks`, `summary` and `counts` in the envelope, tagged `data.schema: "hack.doctor.machine.v1"` (listed in the machine-readable output reference); plain `hack doctor --json` keeps `schema: 1`. It skips project discovery and project checks even from a broken project checkout, and inspects only global stores for secrets hygiene. It also omits the retained gateway checks, whose resolver reads registered project configurations. Every finding has machine scope; failed or unavailable observations remain warnings/errors. It runs bounded read-only probes, including `runtime status --json` from the native executor for the native backend, never starts Docker, hackd or a native runtime, and accepts no project selection, browser observation or repair flags. The selected backend and home still come from the same environment as ordinary Doctor.
+Use `hack doctor --disk` to report allocated and logical file bytes for the selected native home without starting its pool. Add `--json` for the Doctor report envelope. An incomplete scan is marked as a warning and its totals cover only the files observed. Run this as a standalone audit. Repair flags such as `--fix` cannot be combined with it. See [Local disk footprint](https://github.com/hack-dance/hack/blob/next/docs/reference/disk-footprint.md).
+
 
 Rows marked "since next.N" need that prerelease or a later one. An older
 installed bundle keeps its older behaviour. See the
@@ -61,6 +63,11 @@ installed bundle keeps its older behaviour. See the
 If native shutdown was interrupted during guest relay removal, repeat the same
 shutdown or recovery command. An empty relay allocation can be removed on retry
 when its recorded slot generation is stopped or discarded and its socket is gone.
+
+When recovery archives a previous-boot shared HTTPS owner, it checks the frontend
+invocation for this Hack home. Other users' processes and different executables
+do not need readable arguments. If a possible owner still has unreadable
+arguments, recovery keeps the retained state and reports `stop_uncertain`.
 
 ## A store whose key is lost
 

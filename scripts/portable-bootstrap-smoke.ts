@@ -1,5 +1,5 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, createReadStream } from "node:fs";
 import {
   access,
   lstat,
@@ -104,7 +104,12 @@ type Fixture = {
  */
 export async function runPortableBootstrap(opts: {
   readonly hackBin: string;
-}): Promise<{ version: string; checks: readonly string[]; cleanup: true }> {
+}): Promise<{
+  version: string;
+  selectedExecutableSha256: string;
+  checks: readonly string[];
+  cleanup: true;
+}> {
   const context: BootstrapContext = { step: "setup" };
   try {
     return await runWorkflow(opts, context);
@@ -119,10 +124,23 @@ export async function runPortableBootstrap(opts: {
   }
 }
 
+async function executableSha256(path: string): Promise<string> {
+  const digest = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    digest.update(chunk);
+  }
+  return digest.digest("hex");
+}
+
 async function runWorkflow(
   opts: { readonly hackBin: string },
   context: BootstrapContext
-): Promise<{ version: string; checks: readonly string[]; cleanup: true }> {
+): Promise<{
+  version: string;
+  selectedExecutableSha256: string;
+  checks: readonly string[];
+  cleanup: true;
+}> {
   if (!isAbsolute(opts.hackBin)) {
     throw new BootstrapFailure("invalid_executable");
   }
@@ -134,13 +152,17 @@ async function runWorkflow(
   const fixture = await createFixture();
   const checks: string[] = [];
   let version = "";
+  let selectedExecutableSha256 = "";
   let completed = false;
   let failure: BootstrapFailure | undefined;
   try {
     context.step = "identity";
+    selectedExecutableSha256 = await executableSha256(hackBin);
     const identity = await command({ fixture, hackBin, args: ["--version"] });
     requireThat(
-      identity.code === 0 && identity.stdout.trim().length > 0,
+      identity.code === 0 &&
+        identity.stdout.trim().length > 0 &&
+        (await executableSha256(hackBin)) === selectedExecutableSha256,
       "cli_identity"
     );
     version = identity.stdout.trim();
@@ -256,6 +278,11 @@ async function runWorkflow(
     );
     await assertNoSecretFiles(fixture);
     checks.push("no key/plaintext files or output");
+    context.step = "identity";
+    requireThat(
+      (await executableSha256(hackBin)) === selectedExecutableSha256,
+      "cli_identity"
+    );
     completed = true;
   } catch (error: unknown) {
     failure = new BootstrapFailure(failureReason(error), context.step);
@@ -273,7 +300,7 @@ async function runWorkflow(
     throw failure;
   }
   requireThat(completed, "workflow_completion");
-  return { version, checks, cleanup: true };
+  return { version, selectedExecutableSha256, checks, cleanup: true };
 }
 
 /** Only closed labels may cross the runner's stderr boundary; never retain a raw cause. */

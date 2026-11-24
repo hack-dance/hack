@@ -1045,6 +1045,12 @@ impl Publication {
         super::super::host_pin_recovery::exact_lock_path(&self.pin.root, &self._lock)?;
         self.pin.verify()
     }
+    /// A second handle to this owner's listener, for the requests answered while the
+    /// start loop runs (`StartupServer`); it accepts on the same verified socket.
+    pub(super) fn startup_listener(&self) -> Result<UnixListener, CandidateError> {
+        self.verify()?;
+        self.listener.try_clone().map_err(|_| refused())
+    }
     pub fn accept(&self) -> Result<Option<UnixStream>, CandidateError> {
         self.verify()?;
         match self.listener.accept() {

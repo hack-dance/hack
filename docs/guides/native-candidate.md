@@ -509,11 +509,14 @@ With it:
   an unchanged context is not read again. The cache misses only a change that keeps the
   size, inode, modification time and change time identical, which needs a deliberate
   clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
-- Only those inputs count. A changed network response (a download in a `RUN` step),
-  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
-  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
-  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
-  `hack restart` to build every image again; base-image tags then resolve again too.
+- A changed network response in a `RUN` step or changed cache mount contents do
+  not trigger a rebuild. Native checks base-image tags according to the image tag
+  policy and rebuilds when the selected base digest changes. `hack up --offline`
+  uses locally recorded selections even after they expire. `hack up --refresh-images`
+  checks the registry for current tags. Ordinary expiry is checked after readiness.
+  `HACK_NATIVE_REBUILD=1` forces BuildKit to run with the recorded selection.
+  Cold solves let BuildKit fetch missing bases by digest. Background retention
+  tags a verified local base or downloads and loads it after readiness.
 - When an image is actually built, BuildKit reads a private copy of the included
   context, made and checked against the build key right before it runs, so edits during
   a build never reach the image. The copy keeps hard links as links and gives every
@@ -670,9 +673,51 @@ commands and pipelines. The command keeps the pane's terminal stdin. Failed send
 remove their staged payload; if the pane never executes a successfully sent command,
 the private payload remains until it is consumed or explicitly cleaned up.
 
+### Started and ready
+
+Native `hack up` and `hack restart` return once every container has started,
+by Compose's rule: running, or exited `0` for a job another service waits on, in
+dependency order; `service_healthy` and `service_completed_successfully` edges
+still hold their dependents back. Health checks and route probes keep running
+after that: the run is **warming** until every goal is met and every route
+answers, then **ready**. `--wait` returns at ready, exactly as before, with the
+same lines, exit codes and timeout text.
+
+- **At started:** the run mapping is saved first, then `up.after`, the exit
+  watcher and the down-hook debt; then `up` returns. The HTTPS routes and the
+  removal of superseded build images wait for ready, because the runtime is
+  still busy with the start until then. The closing line
+  counts the routes still warming: `https://web.app.hack  up in 4.6s · native ·
+  2 routes warming`. With `--json`, the result has `readiness: "warming"` (or
+  `"ready"`) and `services.warming`.
+- **`up.after` runs at started,** as with Compose `up -d`. A hook that calls one of
+  the project's URLs needs `hack up --wait`.
+- **While warming:**
+  - `hack ps` shows a service still waiting on its health check as `warming`;
+    `ps --json` has `readiness: "warming"`;
+  - `hack open` opens the route at once, as before; it may not answer until the
+    run is ready;
+  - `hack exec` and one-off `hack run` wait for the whole project to be ready
+    (one line on stderr), then run, so `hack up -d && hack exec api ...` keeps
+    working;
+  - `hack logs SERVICE` without `-f` prints what exists so far, in the same
+    format as for a ready run;
+  - `hack down` stops the run with data retained; the owner accepts the stop
+    between start passes, after any publication in progress has committed or
+    been withdrawn. `hack down --remove-data` waits for ready: stop first, then
+    remove;
+  - `hack restart` stops and starts again; a second `hack up` says the project is
+    already running and names the services still warming.
+- **Scripts:** whether `--json` and `--no-interactive` imply `--wait` is one
+  setting, currently off. Pass `--wait` when a script needs live endpoints.
+- **On the Compose backend,** `hack up -d --wait` passes `--wait` to
+  `docker compose up -d`, which waits for running and healthy services.
+  `--wait` needs `-d` (or `--json`) there, and `hack restart --wait` is native-only.
+
 Native `hack up -d` (also `--detach`, `--json`, or both) starts the existing
-frontend and Rust foreground owners in a background session, returning after
-readiness and up-after hooks. The frontend keeps host lifecycle processes and
+frontend and Rust foreground owners in a background session, returning once
+every container has started and up-after hooks ran (see "Started and ready"
+below); `--wait` returns once every service is ready instead. The frontend keeps host lifecycle processes and
 down hooks alive. From any terminal, use `hack ps`, `hack logs`, `hack exec`,
 `hack restart` or `hack down` through the existing authenticated controls.
 When the project is already up, `hack up -d` starts nothing and succeeds: it
@@ -722,8 +767,10 @@ same incarnation checks and retained-uncertainty limits. No daemon adoption,
 automatic replay, or separate graph supervision tick is introduced.
 
 Foreground image-project `up` prints each startup step (input, runtime, images,
-services) and one ready line, `Project is ready (SERVICES; run RUN)`, after the
-graph is ready and its run mapping is published. Under it, `up` lists each routed
+services) and one started line, `Project started (SERVICES; run RUN)`, once every
+container has started and its run mapping is published, then `All services ready`
+once every goal is met and every route answers. With `--wait` it prints one ready
+line, `Project is ready (SERVICES; run RUN)`, at that point instead. Under it, `up` lists each routed
 service's reviewed hostnames as HTTPS URLs (with the `HACK_NATIVE_HTTPS_PORT`
 port unless it is 443) and the published loopback ports. Without the native
 HTTPS frontend it says that routes are not served on this host. Ctrl-C prints the
@@ -1527,11 +1574,14 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the resolved base references that the receipt and the result report. Never pass a
   secret as a build argument. BuildKit build secrets are the right mechanism for
   secrets; native builds do not support them yet.
-- Every build runs under a BuildKit source policy: only the pinned base images
-  resolve as images, and network sources (`ADD` of an `http`, `https` or git URL, and
-  image blob sources) are denied. The engine would otherwise fetch those from outside
-  the isolated build network. The policy also covers sources that a base image's
-  stored `ONBUILD` triggers add; such bases refuse before the build anyway.
+- A fresh recorded base resolution whose verified image is in the guest makes
+  no registry request. An expired resolution checks the registry and can use the
+  proven loaded base if the registry is unavailable. `hack pull` refreshes build
+  bases as well as service images. The build key includes each base digest.
+- BuildKit receives only attempt-owned local references to the verified bases.
+  The source policy denies other image sources and remote `ADD`, git and image
+  blob sources. A private cache tag keeps the base while attempt aliases are
+  removed, including on recovery after an interrupted build.
 - Argument values reach the client only through a private definition file (mode
   `0600`, removed after the build), never its command line or its environment; the
   client's environment is a fixed list of its own settings. Names must be plain
@@ -2581,6 +2631,14 @@ An owner that is ending can read for a moment as neither running nor exited (its
 process exited but is not yet reaped, or its publication is read mid-change); the
 runtime reports that as `graph_foreground_owner_uncertain`, and the same wait covers it. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
+A provider that dies while the pool record still says `running` (killed, crashed, or
+lost across a sleep) leaves the pool `process-exited` in `runtime status`, and
+`runtime down` refuses it (`process_identity_unavailable`). The run's detached start
+notices that its provider's process is gone and ends as for an ended boot, and
+`hack up` and `hack down` run `runtime recover` first (under the provider lease,
+with the recorded provider proven gone by its identity), say so in one line, and
+continue as after any pool stop (HACK-2579).
+
 Each such recovery moves the run's earlier completed recovery record aside as history
 (`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
 `interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the

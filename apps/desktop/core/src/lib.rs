@@ -25,6 +25,7 @@ pub mod machine;
 pub mod machine_gate;
 pub mod models;
 mod process;
+pub mod resources;
 pub mod runner;
 pub mod setup;
 pub mod setup_fixtures;

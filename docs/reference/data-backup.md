@@ -313,8 +313,18 @@ atomically. On a rerun, a non-empty target is treated as this import's own
 partial copy only when all of these hold: its `io.hack.data-backup.source`
 label is the same backup id, the journal names the same backup and target,
 and the journal is not `complete`. That copy is cleared inside the helper and
-restored again. Any other non-empty volume is refused as above, including one
-that already holds a completed restore of this backup (`already_imported`).
+restored again.
+
+A target whose journal is `complete` for the same backup and target name was
+restored by an earlier run, for example one stopped before its other targets
+finished. It is re-verified in a read-only held helper: when its tree digest
+and entry count equal the manifest's it is reported as `verified-complete`
+(`outcome: verified`) and not written, and the import goes on with the other
+targets; when they differ, it changed since and refuses (`modified`). If every
+target already matches, the import exits 0 with "Nothing to restore: all
+volumes already match this backup". Any other non-empty volume, including one
+with a complete journal of a different backup, is refused as above
+(`not_empty`).
 
 An existing empty volume that the import filled has no source label (Docker
 labels cannot be added later), so if that import is interrupted a rerun
@@ -322,6 +332,7 @@ refuses it; the message says to remove that volume after checking it.
 
 `--json` prints the standard envelope with `data.schema` `hack.data-import.v1`:
 `backup`, `backupId`, `sourceComposeProject`, `composeProject`, `volumes[]`
-(`key`, `target` `created`, `empty` or `replaced-partial`, `entries`,
+(`key`, `target` `created`, `empty`, `replaced-partial` or
+`verified-complete`, `outcome` `restored` or `verified`, `entries`,
 `excludedSockets`, `contentDigest`) and `skipped[]` (`key`, `reason`
 `undeclared` or `external`). Docker volume names appear in neither.

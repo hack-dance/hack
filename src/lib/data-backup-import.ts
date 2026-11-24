@@ -65,12 +65,19 @@ export type DataImportInput = {
 };
 
 /** How a target was prepared before extraction. */
-export type DataImportTargetKind = "created" | "empty" | "replaced-partial";
+export type DataImportTargetKind =
+  | "created"
+  | "empty"
+  | "replaced-partial"
+  /** Completed by an earlier run of this backup; re-verified, not rewritten. */
+  | "verified-complete";
 
 /** A restored volume, by Compose key only: Docker names are never reported. */
 export type DataImportVolume = {
   readonly key: string;
   readonly target: DataImportTargetKind;
+  /** `restored` by this run, or `verified`: it already matched the backup. */
+  readonly outcome: "restored" | "verified";
   readonly entries: number;
   readonly excludedSockets: number;
   readonly contentDigest: string;
@@ -110,6 +117,7 @@ export type DataTargetConflict = {
     | "foreign"
     | "not_empty"
     | "already_imported"
+    | "modified"
     | "unsupported_driver"
     | "changed";
 };
@@ -224,7 +232,11 @@ async function importWithin(
     : null;
   const volumes: DataImportVolume[] = [];
   for (const target of targets) {
-    volumes.push(await restoreTarget(context, target, composeVersion));
+    volumes.push(
+      target.kind === "verified-complete"
+        ? verifiedResult(target)
+        : await restoreTarget(context, target, composeVersion)
+    );
   }
   await refuseRunning({
     docker: input.docker,
@@ -252,7 +264,9 @@ async function importWithin(
     });
   }
   for (const target of targets) {
-    await writeJournal(context, target, "complete");
+    if (target.kind !== "verified-complete") {
+      await writeJournal(context, target, "complete");
+    }
   }
   return volumes;
 }
@@ -381,6 +395,102 @@ async function existingIsEmpty(
   );
 }
 
+/** Whether an existing target's tree, read-only, equals the backup's. */
+async function existingMatches(
+  context: Context,
+  entry: SelectedTarget,
+  identity: InspectedVolume
+): Promise<boolean> {
+  const tree = await withHeldVolume(
+    {
+      docker: context.input.docker,
+      volume: entry.name,
+      label: entry.volume.key,
+      identity,
+      readOnly: true,
+      purpose: "import",
+      deadlines: context.deadlines,
+      helperNames: context.helperNames,
+      changed: changedTarget(entry.volume.key),
+      consequence: "nothing was changed.",
+    },
+    (held) => held.treeDigest("nothing was changed.")
+  );
+  return (
+    tree.digest === entry.volume.contentDigest &&
+    tree.entries === entry.volume.entries
+  );
+}
+
+function verifiedResult(target: Target): DataImportVolume {
+  return {
+    key: target.volume.key,
+    target: "verified-complete",
+    outcome: "verified",
+    entries: target.volume.entries,
+    excludedSockets: target.volume.excludedSockets,
+    contentDigest: target.volume.contentDigest,
+  };
+}
+
+/** Classify one target; a conflict is returned, never thrown. */
+async function classifyTarget(
+  context: Context,
+  entry: SelectedTarget
+): Promise<Target | DataTargetConflict> {
+  const key = entry.volume.key;
+  if (!plainLocalVolume(entry.declared)) {
+    return { key, reason: "unsupported_driver" };
+  }
+  const journalPath = dataImportJournalPath({
+    hackHome: context.input.hackHome,
+    composeProject: context.plan.composeProject,
+    key,
+  });
+  const inspected = await inspectVolume({
+    docker: context.input.docker,
+    name: entry.name,
+  });
+  if (inspected === null) {
+    return { ...entry, journalPath, kind: "created", identity: null };
+  }
+  if (
+    !composeOwnsVolume({
+      volume: inspected,
+      composeProject: context.plan.composeProject,
+      key,
+    })
+  ) {
+    return { key, reason: "foreign" };
+  }
+  if (!plainLocalVolume(inspected)) {
+    return { key, reason: "unsupported_driver" };
+  }
+  const target = { ...entry, journalPath, identity: inspected };
+  if (await existingIsEmpty(context, entry, inspected)) {
+    return { ...target, kind: "empty" };
+  }
+  const journal = await readDataImportJournal(journalPath);
+  const sameRestore =
+    journal !== null &&
+    journal.backupId === context.backup.id &&
+    journal.targetSha256 === dataBackupNameSha256(entry.name);
+  // An earlier run of this backup completed this target: re-verify it and
+  // move on, so a run interrupted after some targets can finish the rest.
+  if (sameRestore && journal.state === "complete") {
+    return (await existingMatches(context, entry, inspected))
+      ? { ...target, kind: "verified-complete" }
+      : { key, reason: "modified" };
+  }
+  if (
+    sameRestore &&
+    inspected.labels[DATA_IMPORT_SOURCE_LABEL] === context.backup.id
+  ) {
+    return { ...target, kind: "replaced-partial" };
+  }
+  return { key, reason: "not_empty" };
+}
+
 /** Classify every target before any write; one refusal names all conflicts. */
 async function prepareTargets(
   context: Context,
@@ -389,63 +499,12 @@ async function prepareTargets(
   const targets: Target[] = [];
   const conflicts: DataTargetConflict[] = [];
   for (const entry of selected) {
-    const key = entry.volume.key;
-    if (!plainLocalVolume(entry.declared)) {
-      conflicts.push({ key, reason: "unsupported_driver" });
-      continue;
+    const outcome = await classifyTarget(context, entry);
+    if ("reason" in outcome) {
+      conflicts.push(outcome);
+    } else {
+      targets.push(outcome);
     }
-    const journalPath = dataImportJournalPath({
-      hackHome: context.input.hackHome,
-      composeProject: context.plan.composeProject,
-      key,
-    });
-    const inspected = await inspectVolume({
-      docker: context.input.docker,
-      name: entry.name,
-    });
-    if (inspected === null) {
-      targets.push({ ...entry, journalPath, kind: "created", identity: null });
-      continue;
-    }
-    if (
-      !composeOwnsVolume({
-        volume: inspected,
-        composeProject: context.plan.composeProject,
-        key,
-      })
-    ) {
-      conflicts.push({ key, reason: "foreign" });
-      continue;
-    }
-    if (!plainLocalVolume(inspected)) {
-      conflicts.push({ key, reason: "unsupported_driver" });
-      continue;
-    }
-    if (await existingIsEmpty(context, entry, inspected)) {
-      targets.push({
-        ...entry,
-        journalPath,
-        kind: "empty",
-        identity: inspected,
-      });
-      continue;
-    }
-    const journal = await readDataImportJournal(journalPath);
-    const ours =
-      inspected.labels[DATA_IMPORT_SOURCE_LABEL] === context.backup.id &&
-      journal !== null &&
-      journal.backupId === context.backup.id &&
-      journal.targetSha256 === dataBackupNameSha256(entry.name);
-    if (ours && journal.state !== "complete") {
-      targets.push({
-        ...entry,
-        journalPath,
-        kind: "replaced-partial",
-        identity: inspected,
-      });
-      continue;
-    }
-    conflicts.push({ key, reason: ours ? "already_imported" : "not_empty" });
   }
   if (conflicts.length > 0) {
     throw conflictError(conflicts);
@@ -460,6 +519,8 @@ function conflictError(conflicts: readonly DataTargetConflict[]): HackCliError {
         return `the volume for ${conflict.key} exists but its labels name another project or key, so Hack does not touch it`;
       case "already_imported":
         return `the volume for ${conflict.key} already holds a completed restore of this backup`;
+      case "modified":
+        return `the volume for ${conflict.key} was restored from this backup earlier but no longer matches it (it changed since)`;
       case "unsupported_driver":
         return `the volume for ${conflict.key} is declared or created with a driver other than plain \`local\` or with driver_opts, and hack data import restores into plain local volumes only for now`;
       case "changed":
@@ -641,6 +702,7 @@ async function restoreTarget(
   return {
     key,
     target: target.kind,
+    outcome: "restored",
     entries: tree.entries,
     excludedSockets: target.volume.excludedSockets,
     contentDigest: tree.digest,

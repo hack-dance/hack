@@ -257,6 +257,7 @@ describe("targets", () => {
         {
           key: "db",
           target: "created",
+          outcome: "restored",
           entries: 3,
           excludedSockets: 0,
           contentDigest: sha("rows-db"),
@@ -401,7 +402,8 @@ describe("interruption and recovery", () => {
     for (const [state, label, reason] of [
       [null, id, "not_empty"],
       ["started", "another-backup", "not_empty"],
-      ["complete", id, "already_imported"],
+      // Completed from this backup earlier, but changed since.
+      ["complete", id, "modified"],
     ] as const) {
       const fake = await partial({ dir, state, label });
       const error = await caught(importProjectData(input(fake, dir)));
@@ -411,6 +413,116 @@ describe("interruption and recovery", () => {
       expect(fake.volumes.get("shop_db")?.content).toBe("rows-half");
       await rm(join(root, "home"), { recursive: true, force: true });
     }
+  });
+
+  test("a rerun after an interruption between targets verifies the done one and restores the rest", async () => {
+    const dir = await writeBackup({ keys: ["db", "cache"] });
+    const id = await backupId(dir);
+    // As left by a run that completed db and stopped before cache started.
+    await writeDataImportJournal({
+      path: dataImportJournalPath({
+        hackHome: join(root, "home"),
+        composeProject: PROJECT,
+        key: "db",
+      }),
+      journal: {
+        backupId: id,
+        backup: dir,
+        key: "db",
+        targetSha256: sha("shop_db"),
+        state: "complete",
+      },
+      now: NOW,
+    });
+    const fake = engine();
+    fake.volume("shop_db", {
+      labels: { ...OWNED("db"), [DATA_IMPORT_SOURCE_LABEL]: id },
+      content: "rows-db",
+    });
+    const result = await importProjectData(input(fake, dir));
+    expect(
+      result.volumes.map((volume) => [
+        volume.key,
+        volume.target,
+        volume.outcome,
+      ])
+    ).toEqual([
+      ["db", "verified-complete", "verified"],
+      ["cache", "created", "restored"],
+    ]);
+    // db was only read; cache was created and restored.
+    expect(
+      writes(fake).map((argv) => argv.at(-1)?.slice(0, 20) ?? "")
+    ).not.toContain("shop_db");
+    expect(fake.volumes.get("shop_db")?.content).toBe("rows-db");
+    expect(fake.volumes.get("shop_cache")?.content).toBe("rows-cache");
+    expect((await journal("cache"))?.state).toBe("complete");
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a rerun when every target already matches writes nothing and succeeds", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    const first = await importProjectData(input(fake, dir));
+    expect(first.volumes[0]?.outcome).toBe("restored");
+    fake.calls = [];
+    const again = await importProjectData(input(fake, dir));
+    expect(again.volumes).toEqual([
+      {
+        key: "db",
+        target: "verified-complete",
+        outcome: "verified",
+        entries: 3,
+        excludedSockets: 0,
+        contentDigest: sha("rows-db"),
+      },
+    ]);
+    expect(writes(fake)).toEqual([]);
+    expect(renderDataImportText(again)).toBe(
+      [
+        `Nothing to restore: all volumes already match this backup (${dir}):`,
+        "  db  already matches this backup  3 entries verified",
+        "",
+      ].join("\n")
+    );
+  });
+
+  test("a completed target changed after the import refuses, untouched", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const fake = engine();
+    await importProjectData(input(fake, dir));
+    const volume = fake.volumes.get("shop_db");
+    if (volume) {
+      volume.content = "rows-db-edited";
+    }
+    fake.calls = [];
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.code).toBe("E_DATA_TARGET_CONFLICT");
+    expect(error.detail).toEqual({
+      conflicts: [{ key: "db", reason: "modified" }],
+    });
+    expect(writes(fake)).toEqual([]);
+    expect(fake.volumes.get("shop_db")?.content).toBe("rows-db-edited");
+  });
+
+  test("a complete journal of a different backup on a non-empty target refuses", async () => {
+    const dir = await writeBackup({ keys: ["db"] });
+    const other = await writeBackup({ keys: ["db"], name: "20261124T080000Z" });
+    const manifest = JSON.parse(
+      await readFile(join(other, "manifest.json"), "utf8")
+    );
+    await writeFile(
+      join(other, "manifest.json"),
+      JSON.stringify({ ...manifest, createdAt: "2026-11-24T08:00:00.000Z" })
+    );
+    const fake = engine();
+    await importProjectData(input(fake, other));
+    fake.calls = [];
+    const error = await caught(importProjectData(input(fake, dir)));
+    expect(error.detail).toEqual({
+      conflicts: [{ key: "db", reason: "not_empty" }],
+    });
+    expect(writes(fake)).toEqual([]);
   });
 
   test("a digest mismatch marks the journal failed, leaves the volume, and a rerun replaces it", async () => {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { DATA_BACKUP_DIGEST_SCRIPT } from "../../../src/lib/data-backup-format.ts";
@@ -75,6 +75,11 @@ export const dataImportScenario: Scenario = {
     });
     const volumeA = `${first.name}_${KEY}`;
     const volumeB = `${second.name}_${KEY}`;
+    const third = await createMonorepoFixture({
+      parentDir: ctx.tempRoot,
+      withHackConfig: true,
+    });
+    const thirdVolumes = ["one", "two"].map((key) => `${third.name}_${key}`);
     const out = join(ctx.tempRoot, "backups");
     try {
       for (const fixture of [first, second]) {
@@ -241,14 +246,119 @@ export const dataImportScenario: Scenario = {
           "a foreign non-empty target should be refused and left identical",
         result: refused,
       });
+
+      await interruptedBetweenTargets(ctx, third, join(ctx.tempRoot, "third"));
     } finally {
       for (const fixture of [first, second]) {
         await compose(ctx, fixture, ["down", "--volumes"], false);
       }
-      await docker(ctx, ["volume", "rm", volumeA, volumeB]);
+      await docker(ctx, ["volume", "rm", volumeA, volumeB, ...thirdVolumes]);
     }
   },
 };
+
+/**
+ * Multi-volume control: a two-volume import whose run ended after the first
+ * target completed (the second volume and its journal are gone). The rerun
+ * re-verifies the first, read-only, and restores the second.
+ */
+async function interruptedBetweenTargets(
+  ctx: ScenarioContext,
+  fixture: MonorepoFixture,
+  out: string
+): Promise<void> {
+  const keys = ["one", "two"] as const;
+  await Bun.write(
+    composeFile(fixture),
+    [
+      `name: ${fixture.name}`,
+      "services:",
+      "  holder:",
+      `    image: ${HELPER}`,
+      "    network_mode: none",
+      "    volumes: [one:/one, two:/two]",
+      "volumes:",
+      "  one: {}",
+      "  two: {}",
+      "",
+    ].join("\n")
+  );
+  for (const key of keys) {
+    const name = `${fixture.name}_${key}`;
+    expectExit({
+      result: await docker(ctx, [
+        "volume",
+        "create",
+        "--label",
+        `com.docker.compose.project=${fixture.name}`,
+        "--label",
+        `com.docker.compose.volume=${key}`,
+        name,
+      ]),
+      codes: [0],
+      message: `create ${key}`,
+    });
+    await docker(ctx, [
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--volume",
+      `${name}:/v`,
+      "--entrypoint",
+      "sh",
+      HELPER,
+      "-c",
+      `echo ${key} >/v/${key}.txt && mkdir /v/d && echo nested >/v/d/n`,
+    ]);
+  }
+  const exported = await ctx.cli({
+    args: ["data", "export", "--json", "--out", out],
+    cwd: fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  expectExit({ result: exported, codes: [0], message: "export two volumes" });
+  const backup = extractJsonObject<Envelope>({ text: exported.stdout })?.data;
+  const path = backup?.backup ?? "";
+  await docker(ctx, [
+    "volume",
+    "rm",
+    ...keys.map((key) => `${fixture.name}_${key}`),
+  ]);
+  const full = await importData(ctx, fixture, path, []);
+  expect({
+    that: full.data?.volumes?.length === 2,
+    message: "the first import should restore both volumes",
+  });
+  // Interrupted after `one` completed, before `two` started.
+  await docker(ctx, ["volume", "rm", `${fixture.name}_two`]);
+  await rm(
+    dataImportJournalPath({
+      hackHome: ctx.hackHome,
+      composeProject: fixture.name,
+      key: "two",
+    }),
+    { force: true }
+  );
+  const rerun = await importData(ctx, fixture, path, []);
+  const outcomes = (rerun.data?.volumes ?? []).map(
+    (volume) => `${volume.key}:${volume.target}`
+  );
+  const digests = await Promise.all(
+    keys.map((key) => treeDigest(ctx, `${fixture.name}_${key}`))
+  );
+  expect({
+    that:
+      JSON.stringify(outcomes) ===
+        JSON.stringify(["one:verified-complete", "two:created"]) &&
+      keys.every(
+        (key, index) =>
+          backup?.manifest?.volumes?.find((volume) => volume.key === key)
+            ?.contentDigest === digests[index]
+      ),
+    message: "a rerun should verify the completed volume and restore the other",
+  });
+}
 
 function composeFile(fixture: MonorepoFixture): string {
   return join(fixture.hackDir, "docker-compose.yml");

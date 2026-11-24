@@ -241,12 +241,18 @@ export function renderDataImportText(result: DataImportResult): string {
     created: "created",
     empty: "existing empty volume",
     "replaced-partial": "replaced an interrupted import",
+    "verified-complete": "already matches this backup",
   } as const;
-  const lines = [
-    result.volumes.length === 0
-      ? `Nothing to restore from ${result.backup}.`
-      : `Restored ${result.volumes.length} volume${result.volumes.length === 1 ? "" : "s"} from ${result.backup}:`,
-  ];
+  const restored = result.volumes.filter(
+    (volume) => volume.outcome === "restored"
+  ).length;
+  let heading = `Restored ${restored} volume${restored === 1 ? "" : "s"} from ${result.backup}:`;
+  if (result.volumes.length === 0) {
+    heading = `Nothing to restore from ${result.backup}.`;
+  } else if (restored === 0) {
+    heading = `Nothing to restore: all volumes already match this backup (${result.backup}):`;
+  }
+  const lines = [heading];
   for (const volume of result.volumes) {
     lines.push(
       `  ${volume.key}  ${how[volume.target]}  ${volume.entries} entr${volume.entries === 1 ? "y" : "ies"} verified${socketNote(volume.excludedSockets)}`

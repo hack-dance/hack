@@ -639,16 +639,6 @@ pub struct ContainerMount {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct ContainerMount {
-    pub name: Option<String>,
-    pub source: String,
-    pub destination: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-}
-
 impl Container {
     /// Host lifecycle processes and one-off Compose runs have no service action.
     #[must_use]

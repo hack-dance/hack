@@ -122,10 +122,17 @@ fn image_tokens(bytes: &[u8], into: &mut BTreeSet<String>) {
 
 /// Collect every image ID retained graph state mentions. Symlinks, special files,
 /// unreadable entries or exceeded bounds refuse: reclamation needs a complete scan.
-pub(super) fn referenced_images(candidate: &Candidate) -> Result<BTreeSet<String>, CandidateError> {
+pub(in crate::provider) fn referenced_images(
+    candidate: &Candidate,
+) -> Result<BTreeSet<String>, CandidateError> {
     let mut found = BTreeSet::new();
     let mut entries = 0;
-    for name in ["run/graphs", "run/native-graphs", "run/graph-archive"] {
+    for name in [
+        "run/graphs",
+        "run/native-graphs",
+        "run/graph-archive",
+        "run/native-graph-archive",
+    ] {
         let root = candidate.state_root.join(name);
         match fs::symlink_metadata(&root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,

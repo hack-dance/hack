@@ -229,6 +229,8 @@ checkout and that no component of its full path is a symlink. Only repair
 ownership while those paths can be kept stable. Doctor prints no privileged
 repair command because paths can change after the scan.
 
-When the global router is unavailable on Compose, the routing warning shows a
-published port when it can identify one, or a running container address on
-Linux. If it has neither, it shows how to publish a local port.
+When the global router is unavailable on Compose, the routing warning from
+`hack up` and `hack restart` shows a published port when it can identify one, or
+a running container address on Linux. If it has neither, it shows how to publish
+a local port. A one-off `hack run` makes no Docker call for this and always shows
+how to publish a local port.

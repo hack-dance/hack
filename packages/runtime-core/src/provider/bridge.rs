@@ -70,6 +70,26 @@ impl Request {
         }
     }
 
+    /// The bridge capacity a new pool boots with (U13). An exact request keeps its count.
+    /// A minimum request takes every socket the pool's 32 leave beside `dependencies`, and
+    /// never fewer than it asked for, because a running pool is never resized: a second
+    /// project's routes and ports can then use the sockets the first project left free. An
+    /// existing pool keeps its recorded capacity; only its owner record is authority.
+    pub(super) fn initial_with_headroom(
+        self,
+        dependencies: Option<super::DependencySocketIntent>,
+    ) -> Option<BridgeIntent> {
+        match self {
+            Self::Exact(intent) => intent,
+            Self::Minimum(intent) => {
+                let spare = 32u8.saturating_sub(dependencies.map_or(0, |d| d.slots));
+                Some(BridgeIntent {
+                    slots: intent.slots.max(spare),
+                })
+            }
+        }
+    }
+
     pub(super) fn check(self, existing: Option<BridgeIntent>) -> Result<(), CandidateError> {
         match self {
             Self::Exact(intent) => check_request(existing, intent),
@@ -543,6 +563,39 @@ mod tests {
         );
         Request::Exact(None).check(Some(four)).unwrap();
         Request::Exact(None).check(None).unwrap();
+    }
+
+    #[test]
+    fn a_new_pool_boots_with_every_socket_its_dependencies_leave() {
+        let three = BridgeIntent::new(3).unwrap();
+        let dependencies = |slots| Some(super::super::DependencySocketIntent::new(slots).unwrap());
+        // A first project with 3 routes and ports leaves 29 sockets for a second project.
+        assert_eq!(
+            Request::Minimum(three).initial_with_headroom(None),
+            Some(BridgeIntent::new(32).unwrap())
+        );
+        assert_eq!(
+            Request::Minimum(three).initial_with_headroom(dependencies(4)),
+            Some(BridgeIntent::new(28).unwrap())
+        );
+        // Never fewer than asked: the combined capacity check still refuses an overcommit.
+        assert_eq!(
+            Request::Minimum(BridgeIntent::new(30).unwrap()).initial_with_headroom(dependencies(4)),
+            Some(BridgeIntent::new(30).unwrap())
+        );
+        // An exact request is the low-level contract and keeps its count.
+        assert_eq!(
+            Request::Exact(Some(three)).initial_with_headroom(None),
+            Some(three)
+        );
+        assert_eq!(Request::Exact(None).initial_with_headroom(None), None);
+        // The headroom always passes the shared 32-socket check.
+        for d in 1..=29 {
+            let deps = dependencies(d);
+            let bridges = Request::Minimum(three).initial_with_headroom(deps);
+            assert_eq!(bridges.map(|b| b.slots), Some(32 - d));
+            super::super::dependency_socket::check_capacity(bridges, deps).unwrap();
+        }
     }
 
     #[test]

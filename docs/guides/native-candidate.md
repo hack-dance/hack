@@ -854,6 +854,11 @@ The command still checks age, owner, identity and target absence.
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
 bridge socket to appear with the required private ownership and mode.
+A pool that native `hack up` creates declares every bridge socket its dependency
+sockets leave of the 32 (all 32 for a project without host dependencies), not only
+the first project's routes and ports. A running pool is never resized, so this
+leaves room for a second project's routes and ports. A pool created before this
+change keeps its recorded count.
 The provider's guest-ready signal can arrive before its bridge threads bind. Native
 rechecks the same provider identity around each observation; it never accepts a socket of
 another type, user or link count, or removes one, to make startup pass. A socket of this user

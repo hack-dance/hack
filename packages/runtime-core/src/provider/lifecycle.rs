@@ -1380,8 +1380,8 @@ fn start_pool_observed(
             "Retained foreground startup requires macOS.",
         ));
     }
-    let requested = bridge_request.initial();
     let dependencies = dependency_request.initial();
+    let requested = bridge_request.initial_with_headroom(dependencies);
     let request = running_start::StartRequest {
         bridges: bridge_request,
         network: network.as_ref(),

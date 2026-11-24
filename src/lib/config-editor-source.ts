@@ -34,6 +34,10 @@ export function isConfigSecret(key: string, value: unknown): boolean {
   );
 }
 
+export function redactConfigPath(path: readonly string[]): string[] {
+  return path.map((part) => (isConfigSecret("", part) ? "[redacted]" : part));
+}
+
 export function privateProjectOverlayNames(
   project: Record<string, unknown>
 ): ReadonlySet<string> {

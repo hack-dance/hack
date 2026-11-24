@@ -13,7 +13,7 @@ import {
   rewriteCaddyLabelForBranch,
   splitCaddySites,
 } from "./branch-hosts.ts";
-import { isConfigSecret } from "./config-editor-source.ts";
+import { isConfigSecret, redactConfigPath } from "./config-editor-source.ts";
 import { isRecord } from "./guards.ts";
 
 const ADDRESS =
@@ -720,7 +720,7 @@ function composeDependencyIssue(
   return composeFieldIssue(
     source,
     path,
-    SERVICE_NAME.test(missing)
+    SERVICE_NAME.test(missing) && !isConfigSecret("", missing)
       ? `depends_on names a service that is not defined: ${missing}`
       : "depends_on names a service that is not defined."
   );
@@ -864,9 +864,7 @@ export function composeModel(opts: {
     services: rows.filter(({ name }) => !isConfigSecret("", name)),
     issues: issues.map((issue) => ({
       ...issue,
-      path: issue.path.map((part) =>
-        isConfigSecret("", part) ? "[redacted]" : part
-      ),
+      path: redactConfigPath(issue.path),
     })),
   };
 }

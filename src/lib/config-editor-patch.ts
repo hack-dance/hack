@@ -37,6 +37,7 @@ import {
   jsonConfigDiagnostic,
   jsonConfigTree,
   privateProjectOverlayNames,
+  redactConfigPath,
   restoreConfigSource,
 } from "./config-editor-source.ts";
 import {
@@ -162,7 +163,13 @@ function configIssue(
   code: HackErrorCode = "E_CONFIG_INVALID",
   line: number | null = null
 ): ConfigIssue {
-  return { layer: change.layer, path, message, code, line };
+  return {
+    layer: change.layer,
+    path: redactConfigPath(path),
+    message,
+    code,
+    line,
+  };
 }
 
 const PROJECT_TOGGLES = new Set([

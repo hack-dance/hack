@@ -730,6 +730,9 @@ function addEnvLayer(opts: {
   readonly privateKeys: Set<string>;
 }): void {
   for (const [key, value] of Object.entries(opts.values)) {
+    if (isConfigSecret("", key)) {
+      continue;
+    }
     const id = `${opts.scope}/${key}`;
     const row = opts.rows.get(id) ?? {
       key,
@@ -774,7 +777,9 @@ function envModel(layers: readonly LayerSnapshot[], issues: ConfigIssue[]) {
       continue;
     }
     for (const [scope, values] of Object.entries(read.config.values)) {
-      addEnvLayer({ rows, layer: layer.id, scope, values, privateKeys });
+      if (!isConfigSecret("", scope)) {
+        addEnvLayer({ rows, layer: layer.id, scope, values, privateKeys });
+      }
     }
   }
   const env = [...rows.values()].map((row) => {

@@ -504,6 +504,54 @@ test.each([
   expect((await readFile(path, "utf8")) === text).toBe(true);
 });
 
+test.each([
+  "list",
+  "map",
+] as const)("Compose %s dependency diagnostics omit token-shaped names", async (syntax) => {
+  const f = await fixture();
+  const privateDependency = `ghp_${"FixtureOnly".repeat(4)}.example.test`;
+  const field =
+    syntax === "list"
+      ? `    depends_on: [api, ${privateDependency}]`
+      : `    depends_on:\n      api: {condition: service_started}\n      ${privateDependency}: {condition: service_started}`;
+  const path = join(f.project, "docker-compose.yml");
+  const text = compose
+    .replace("    depends_on: [api]", field)
+    .replace("  worker:\n", "  worker:\n    depends_on: [public-worker]\n");
+  await writeFile(path, text);
+
+  const report = await show(f.root, f.main);
+  const diagnostic = {
+    layer: "2",
+    path: ["services", "web", "depends_on"],
+    line: syntax === "list" ? 10 : 11,
+    code: "E_CONFIG_INVALID",
+    message: "depends_on names a service that is not defined.",
+  };
+  expect(JSON.stringify(report).includes(privateDependency)).toBe(false);
+  expect(report.issues).toContainEqual(diagnostic);
+  expect(report.issues).toContainEqual(
+    expect.objectContaining({
+      message: "depends_on names a service that is not defined: public-worker",
+    })
+  );
+
+  const patch = {
+    base: bases(report),
+    changes: [{ layer: "1", kind: "project", path: "name", value: "shop" }],
+  };
+  for (const command of ["validate", "apply"]) {
+    const result = await cli({ ...f, cwd: f.main, args: [command], patch });
+    const issues =
+      result.payload.data?.issues ?? result.payload.error?.detail?.issues;
+    expect(JSON.stringify(result.payload).includes(privateDependency)).toBe(
+      false
+    );
+    expect(issues).toContainEqual(diagnostic);
+  }
+  expect((await readFile(path, "utf8")) === text).toBe(true);
+});
+
 test("show redacts a credential-bearing Compose service key and its issue path", async () => {
   const f = await fixture();
   const marker = "fixture-service-sentinel";
@@ -531,22 +579,68 @@ test("show redacts a credential-bearing Compose service key and its issue path",
   expect((await readFile(path, "utf8")) === text).toBe(true);
 });
 
+test("Compose report and patch diagnostics redact a token-shaped service name", async () => {
+  const f = await fixture();
+  const name = `glpat-${"FixtureOnly".repeat(3)}`;
+  const path = join(f.project, "docker-compose.yml");
+  const text = compose.replace(
+    "services:\n",
+    `services:\n  ${name}: {image: alpine}\n`
+  );
+  await writeFile(path, text);
+
+  const report = await show(f.root, f.main);
+  expect(JSON.stringify(report).includes(name)).toBe(false);
+  expect(report.services.map((service) => service.name)).toEqual([
+    "web",
+    "api",
+    "worker",
+  ]);
+  const patch = {
+    base: bases(report),
+    changes: [
+      {
+        layer: "2",
+        kind: "service",
+        service: name,
+        field: "ports",
+        value: [70_000],
+      },
+    ],
+  };
+  for (const command of ["validate", "apply"]) {
+    const result = await cli({ ...f, cwd: f.main, args: [command], patch });
+    const issues =
+      result.payload.data?.issues ?? result.payload.error?.detail?.issues;
+    expect(JSON.stringify(result.payload).includes(name)).toBe(false);
+    expect(issues).toContainEqual(
+      expect.objectContaining({
+        path: ["services", "[redacted]", "ports"],
+        message: "Enter Compose port mappings.",
+      })
+    );
+  }
+  expect((await readFile(path, "utf8")) === text).toBe(true);
+});
+
 test("project reports hide credential-bearing JSON keys and keep ordinary settings editable", async () => {
   const f = await fixture();
   const marker = "fixture-project-key-sentinel";
   const name = `https://fixture:${marker}@registry.example.test`;
+  const tokenKey = `ghp_${"FixtureOnly".repeat(4)}`;
   const path = join(f.project, "hack.config.json");
   const config = {
     name: "storefront",
     dev_host: "storefront.hack",
     internal: { dns: true, [name]: "private entry" },
-    additional: [{ [name]: "private array entry", keep: true }],
+    additional: [{ [tokenKey]: "private array entry", keep: true }],
   };
   const text = JSON.stringify(config);
   await writeFile(path, text);
 
   const report = await show(f.root, f.main);
   expect(JSON.stringify(report).includes(marker)).toBe(false);
+  expect(JSON.stringify(report).includes(tokenKey)).toBe(false);
   expect(report.project).toEqual({
     name: "storefront",
     dev_host: "storefront.hack",
@@ -570,6 +664,7 @@ test("project reports hide credential-bearing JSON keys and keep ordinary settin
   });
   expect(validated.payload.data.valid).toBe(true);
   expect(validated.payload.data.previews["1"]).toBeNull();
+  expect(JSON.stringify(validated.payload).includes(tokenKey)).toBe(false);
   const applied = await cli({
     root: f.root,
     cwd: f.main,
@@ -634,6 +729,36 @@ test("show masks plaintext GitHub tokens in local env cells and Source", async (
       { layer: "5", secret: true },
     ]);
   }
+  expect(
+    report.env.find((row) => row.key === "LOG_LEVEL")?.values
+  ).toContainEqual({ layer: "5", secret: false, value: "debug" });
+  expect((await readFile(path, "utf8")) === text).toBe(true);
+});
+
+test("Config hides credential-shaped env keys and scopes from local reports", async () => {
+  const f = await fixture();
+  const privateKey = `AKIA${"FIXTURE9".repeat(2)}`;
+  const privateScope = `glpat-${"fixtureonly".repeat(3)}`;
+  const path = join(f.project, "hack.env.local.yaml");
+  const text = env(
+    `  global:\n    ${privateKey}: fixture-private-key-value\n    LOG_LEVEL: debug\n  ${privateScope}:\n    ADAPTER: fixture-private-scope-value`
+  );
+  await writeFile(path, text);
+
+  const report = await show(f.root, f.main);
+  const output = JSON.stringify(report);
+  for (const marker of [
+    privateKey,
+    privateScope,
+    "fixture-private-key-value",
+    "fixture-private-scope-value",
+  ]) {
+    expect(output.includes(marker)).toBe(false);
+  }
+  expect(report.layers.find((layer) => layer.id === "5")).toMatchObject({
+    hidden: true,
+    source: null,
+  });
   expect(
     report.env.find((row) => row.key === "LOG_LEVEL")?.values
   ).toContainEqual({ layer: "5", secret: false, value: "debug" });

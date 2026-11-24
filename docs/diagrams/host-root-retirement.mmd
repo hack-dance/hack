@@ -1,0 +1,24 @@
+---
+title: HostRootRetirement · pruned host roots
+---
+stateDiagram-v2
+    direction TB
+    [*] --> Present
+    Present --> Present: Prune [recoverable]
+    Present --> Planned: Plan [no references]
+    Planned --> Quarantined: Move [exact identity]
+    Quarantined --> Removed: Remove [exact identity]
+    Planned --> Planned: Crash / Replace
+    Quarantined --> Quarantined: Crash / Replace
+    note right of Quarantined
+        INV No live or recoverable references
+        Changed identity blocks further effects.
+    end note
+    classDef live stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef ok stroke-width:1.6px
+    classDef idle stroke-width:1.6px
+    class Present idle
+    class Planned wait
+    class Quarantined live
+    class Removed ok

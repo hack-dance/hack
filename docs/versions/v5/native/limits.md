@@ -37,3 +37,9 @@ fills, the oldest receipts expire as new ones are added.
 
 If all 64 attempts need their active directories, startup reports the attempt
 limit. Run `hack doctor --native-cleanup inspect` for cleanup guidance.
+
+After an attempt has been archived, exported and pruned, run
+`hack-local graph retire-pruned-host-roots --run-id <id> --json` from the same
+native candidate to dispose of its proven host owner roots on macOS. The
+command is retryable after an interruption. Older relay roots without a recorded
+ownership identity are preserved, as are roots containing uncertain evidence.

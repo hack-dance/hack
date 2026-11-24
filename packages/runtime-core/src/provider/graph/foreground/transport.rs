@@ -260,6 +260,73 @@ fn selected_retirement_path(
     Ok((path, is_original))
 }
 
+/// After the run is pruned, only fully retired and identity-matched publication
+/// records may be included in a host-root removal plan.
+#[cfg(target_os = "macos")]
+pub(in crate::provider::graph) fn prunable_root(
+    candidate: &Candidate,
+    run: &str,
+    root: &Path,
+) -> Result<(super::super::host_root_retirement::Selection, state::Lock), CandidateError> {
+    let guard = Retired::acquire(candidate, run)?.ok_or_else(retirement_refused)?;
+    if root != guard.root {
+        return Err(retirement_refused());
+    }
+    let mut files = std::collections::BTreeMap::new();
+    for (index, entry) in fs::read_dir(root).map_err(state::io)?.take(130).enumerate() {
+        if index >= 129 {
+            return Err(retirement_refused());
+        }
+        let entry = entry.map_err(state::io)?;
+        let name = entry.file_name();
+        let Some(digest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("retirement-"))
+            .and_then(|name| name.strip_suffix(".json"))
+            .filter(|digest| super::super::hex(digest, 64))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let intent: Retirement = state::read_bounded(&path, 8192)?;
+        if verify_retirement(
+            candidate,
+            run,
+            (digest, &intent.receipt_sha256),
+            root,
+            &guard._lock,
+            &intent,
+            None,
+        )? != (false, false)
+        {
+            return Err(retirement_refused());
+        }
+        files.insert(
+            name.to_string_lossy().into_owned(),
+            id(&fs::symlink_metadata(path).map_err(state::io)?),
+        );
+        for (socket, identity) in [(true, intent.socket), (false, intent.record)] {
+            let path = retired_path(root, digest, socket);
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(retirement_refused)?;
+            if files.insert(name.into(), identity).is_some() {
+                return Err(retirement_refused());
+            }
+        }
+    }
+    Ok((
+        super::super::host_root_retirement::Selection {
+            directory: guard.identity,
+            lock_directory: guard.identity,
+            lock: guard.lock_identity,
+            files,
+        },
+        guard._lock,
+    ))
+}
+
 fn verify_retirement(
     candidate: &Candidate,
     run: &str,

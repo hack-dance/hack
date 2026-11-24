@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import type { DataBackupDeadlines } from "./data-backup-deadlines.ts";
 import type {
@@ -71,8 +72,15 @@ export interface MountMonitor {
    *   own helpers hold a volume with a bind of its Mountpoint, which emits
    *   no volume `mount` event (checked on Docker 29.9), and markers mount
    *   nothing;
+   * - each container that started in the window and is not one this run
+   *   created (by ID), inspected by ID: a volume mount of a watched volume,
+   *   or a bind whose Source is a watched Mountpoint, inside one, or above
+   *   one. A bind emits no volume event, so another container could use the
+   *   same technique as Hack's helpers.
    *
-   * Refuses, closed, when the stream ended before it was stopped.
+   * Refuses, closed, when the stream ended before it was stopped, or when a
+   * foreign container that started in the window cannot be inspected (it is
+   * already gone, or the inspect failed): what it mounted is unknown.
    */
   finish(volumes: readonly WatchedVolume[]): Promise<readonly ForeignMount[]>;
   /** Stop the subscription on any other path. Idempotent. */
@@ -83,6 +91,94 @@ function notPublished(command: HelperPurpose): string {
   return command === "export"
     ? "the backup was not published"
     : "the restore is not marked complete";
+}
+
+/**
+ * A container started during the window and could not be inspected, so
+ * what it mounted is unknown. On a busy engine it can be unrelated (any
+ * short-lived container): retrying is the answer.
+ */
+function uncheckedStartError(
+  command: HelperPurpose,
+  containers: readonly string[]
+): HackCliError {
+  return new HackCliError({
+    code: "E_PROJECT_RUNNING",
+    message: `A container (${containers.join(", ")}) started during the ${command} and could not be checked (it was already gone or could not be inspected), so Hack cannot prove it did not use the project's volumes; ${notPublished(command)}. If nothing else should be using them, retry.`,
+    detail: { unchecked: containers, reason: "unchecked_start" },
+  });
+}
+
+/** A Docker-side path, lexically normalized without a trailing slash. */
+function normalizedDaemonPath(path: string): string {
+  const normal = posix.normalize(path);
+  return normal.length > 1 && normal.endsWith("/")
+    ? normal.slice(0, -1)
+    : normal;
+}
+
+/** Whether `path` is `root` or inside it. */
+function within(path: string, root: string): boolean {
+  return root === "/" || path === root || path.startsWith(`${root}/`);
+}
+
+/**
+ * Watched volumes a container's mounts reach: a volume mount by name, or
+ * any mount whose Source is a watched Mountpoint, inside one or above one.
+ * Paths are the daemon's own (they may live in a VM), so they are compared
+ * lexically after normalization.
+ */
+export function mountsReachingVolumes(opts: {
+  readonly mounts: readonly unknown[];
+  readonly volumes: readonly WatchedVolume[];
+}): string[] {
+  const reached = new Set<string>();
+  for (const mount of opts.mounts) {
+    if (!isRecord(mount)) {
+      continue;
+    }
+    for (const volume of opts.volumes) {
+      if (mount.Type === "volume" && mount.Name === volume.name) {
+        reached.add(volume.name);
+        continue;
+      }
+      if (typeof mount.Source !== "string" || mount.Source === "") {
+        continue;
+      }
+      const source = normalizedDaemonPath(mount.Source);
+      const mountpoint = normalizedDaemonPath(volume.mountpoint);
+      if (within(source, mountpoint) || within(mountpoint, source)) {
+        reached.add(volume.name);
+      }
+    }
+  }
+  return [...reached].sort();
+}
+
+/** The Mounts of a container, by ID; null when it cannot be inspected. */
+async function inspectMounts(opts: {
+  readonly docker: DataBackupDocker;
+  readonly container: string;
+  readonly timeoutMs: number;
+}): Promise<readonly unknown[] | null> {
+  const result = await opts.docker
+    .capture(
+      [
+        "docker",
+        "container",
+        "inspect",
+        "--format",
+        "{{json .Mounts}}",
+        opts.container,
+      ],
+      { timeoutMs: opts.timeoutMs }
+    )
+    .catch(() => null);
+  if (result === null || result.exitCode !== 0) {
+    return null;
+  }
+  const mounts = parseJsonText(result.stdout.trim());
+  return Array.isArray(mounts) ? mounts : null;
 }
 
 function lostCoverage(command: HelperPurpose, why: string): HackCliError {
@@ -302,7 +398,36 @@ export async function startMountMonitor(opts: {
           volume: mount.volume,
           container: mount.container.slice(0, 12),
         }));
-      return found;
+      const unchecked: string[] = [];
+      for (const container of started) {
+        if (opts.helpers.created.has(container)) {
+          continue;
+        }
+        const inspected = await inspectMounts({
+          docker: opts.docker,
+          container,
+          timeoutMs: opts.deadlines.commandMs,
+        });
+        if (inspected === null) {
+          unchecked.push(container.slice(0, 12));
+          continue;
+        }
+        for (const volume of mountsReachingVolumes({
+          mounts: inspected,
+          volumes,
+        })) {
+          found.push({ volume, container: container.slice(0, 12) });
+        }
+      }
+      const unique = [
+        ...new Map(
+          found.map((mount) => [`${mount.volume}\0${mount.container}`, mount])
+        ).values(),
+      ];
+      if (unique.length === 0 && unchecked.length > 0) {
+        throw uncheckedStartError(opts.purpose, unchecked);
+      }
+      return unique;
     },
     stop,
   };

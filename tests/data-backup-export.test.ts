@@ -1040,3 +1040,107 @@ describe("container names never reach output", () => {
     );
   });
 });
+
+describe("foreign container starts are inspected by ID", () => {
+  const MOUNTPOINT = "/var/lib/docker/volumes/shop_db/_data";
+
+  let runs = 0;
+  async function exportWithForeignStart(
+    mounts: readonly unknown[] | null
+  ): Promise<{ fake: FakeEngine; id: string; error: HackCliError | null }> {
+    runs += 1;
+    const fake = engine({ only: "db" });
+    let id = "";
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar") && id === "") {
+        if (mounts === null) {
+          // Started and already removed before Hack could inspect it.
+          id = "7".repeat(64);
+          fake.events.start(id, "short-lived");
+        } else {
+          id = fake.createForeign("binder", mounts) ?? "";
+        }
+      }
+    };
+    const error = await exportProjectData(
+      input(fake, { outDir: join(root, `run-${runs}`) })
+    ).then(
+      () => null,
+      (caughtError: unknown) => caughtError as HackCliError
+    );
+    return { fake, id, error };
+  }
+
+  test("a bind of an owned volume's Mountpoint refuses publication", async () => {
+    const { id, error } = await exportWithForeignStart([
+      { Type: "bind", Source: MOUNTPOINT, Destination: "/x" },
+    ]);
+    expect(error?.code).toBe("E_PROJECT_RUNNING");
+    expect(error?.detail).toEqual({
+      mounts: [{ volume: "db", container: id.slice(0, 12) }],
+    });
+  });
+
+  test("a bind of a path inside, or above, an owned Mountpoint refuses publication", async () => {
+    for (const source of [
+      `${MOUNTPOINT}/sub/dir`,
+      `${MOUNTPOINT}/`,
+      "/var/lib/docker/volumes",
+      "/var/lib/docker/volumes/shop_db/./_data/../_data",
+    ]) {
+      const { id, error } = await exportWithForeignStart([
+        { Type: "bind", Source: source, Destination: "/x" },
+      ]);
+      expect({ source, detail: error?.detail }).toEqual({
+        source,
+        detail: { mounts: [{ volume: "db", container: id.slice(0, 12) }] },
+      });
+    }
+  });
+
+  test("a foreign start with unrelated mounts publishes", async () => {
+    const { error, fake, id } = await exportWithForeignStart([
+      { Type: "bind", Source: "/srv/shop_db/_data", Destination: "/x" },
+      {
+        Type: "bind",
+        Source: "/var/lib/docker/volumes/shop_db_other/_data",
+        Destination: "/y",
+      },
+      { Type: "volume", Name: "other", Source: "/z", Destination: "/z" },
+    ]);
+    expect(error).toBeNull();
+    // It was inspected, by ID.
+    expect(
+      fake.calls.some(
+        (argv) =>
+          argv[2] === "inspect" &&
+          argv.includes("{{json .Mounts}}") &&
+          argv.at(-1) === id
+      )
+    ).toBeTrue();
+  });
+
+  test("a foreign start that is gone before it can be inspected refuses, closed", async () => {
+    const { error } = await exportWithForeignStart(null);
+    expect(error?.code).toBe("E_PROJECT_RUNNING");
+    expect(error?.detail).toEqual({
+      unchecked: ["7".repeat(12)],
+      reason: "unchecked_start",
+    });
+    expect(error?.message).toContain("could not be checked");
+    expect(error?.message).not.toContain("short-lived");
+  });
+
+  test("our own helpers' and markers' starts are never inspected", async () => {
+    const fake = engine({ only: "db" });
+    await exportProjectData(input(fake));
+    const ours = new Set(fake.created.map((entry) => entry.id));
+    expect(ours.size).toBe(3);
+    // Only the hold's own mount proof inspects one of our containers.
+    const inspected = fake.calls.filter(
+      (argv) => argv[2] === "inspect" && argv.includes("{{json .Mounts}}")
+    );
+    expect(inspected).toHaveLength(1);
+    expect(ours.has(inspected[0]?.at(-1) ?? "")).toBeTrue();
+  });
+});

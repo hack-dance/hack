@@ -79,7 +79,10 @@ alone.
 No mount is exempt: Hack's own helpers hold each volume with a bind of its
 `Mountpoint`, which emits no volume `mount` event (checked on Docker 29.9),
 and markers mount nothing, so any `mount` event of a copied volume comes
-from another container. After the last copy it lists running
+from another container. Because a bind emits no volume event, another
+container could use the same technique, so every container that starts in
+the window and is not one Hack created is inspected by ID (bounded by
+`HACK_DATA_COMMAND_TIMEOUT_MS`) once the window closes. After the last copy it lists running
 containers again, runs an end marker and waits for its start event (the
 engine emits events in order, so every earlier event has then arrived), stops
 the subscription and decides:
@@ -88,6 +91,17 @@ the subscription and decides:
   during the copy or reuses one of Hack's helper names, refuses with
   `E_PROJECT_RUNNING` and `error.detail.mounts` (volume key and short
   container ID);
+- so does a container that started in the window with a volume mount of a
+  copied volume or a bind whose `Source` is a copied volume's `Mountpoint`,
+  a path inside it, or a directory above it. Paths are the daemon's own
+  (they may live in a VM), so they are compared after lexical
+  normalization;
+- a container that started in the window but cannot be inspected (it was
+  already removed, or the inspect failed) refuses with `E_PROJECT_RUNNING`
+  (`detail.reason: unchecked_start`, `detail.unchecked`: short IDs), since
+  what it mounted is unknown. On a busy engine an unrelated short-lived
+  container that starts during the export can cause this refusal; if
+  nothing else should be using the project's volumes, retry the export;
 - an event stream that ended before Hack stopped it, an unreadable event, or
   a marker whose start event did not arrive within 30 seconds refuses with
   `E_DOCKER_UNAVAILABLE`: Hack lost coverage and cannot prove nothing else

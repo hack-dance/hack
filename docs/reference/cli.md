@@ -366,6 +366,8 @@ hack up [services...] [options]
 | `--refresh-images` | Native backend: refresh the project's mutable image tags from the registry. |
 | `--offline` | Native backend: use recorded image resolutions and local archives without contacting a registry. |
 | `--wait` | Native: return once every service is ready and every route answers (default: once every container has started). Compose: passed to docker compose up --wait (needs -d) |
+| `--timings` | Native backend: print the startup timeline to stderr |
+| `--timings-file <file>` | Native backend: write startup timing records to a new JSONL file |
 | `--always` | Mark this project for machine-local autostart and start it |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -614,6 +616,90 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | `--timeout-ms <ms>` | With --detach: stop the command after this long (default 1800000, maximum 21600000) |
 | `--stall-after-ms <ms>` | With --detach: report an advisory stall after this long without output (default 120000, 0 turns it off) |
 | `--capture <full|metadata>` | With --detach: store output (full, the default) or only events and the outcome (metadata) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack files`
+
+Browse files in a running Compose service
+
+### Usage
+
+```bash
+hack files <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack files ls <service> <container-path>` | List a running service's files and their mount sources |
+| `hack files cat <service> <container-path>` | Read a file from a running service |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack files ls <service> <container-path>`
+
+List a running service's files and their mount sources
+
+### Usage
+
+```bash
+hack files ls <service> <container-path> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `service` |  |
+| `container-path` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack files cat <service> <container-path>`
+
+Read a file from a running service
+
+### Usage
+
+```bash
+hack files cat <service> <container-path> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `service` |  |
+| `container-path` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1984,6 +2070,7 @@ hack doctor [options]
 
 | Option | Description |
 | --- | --- |
+| `--disk` | Audit host file usage for the selected native home without starting the pool |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
 | `--include-unverified-volumes` | With --fix, include native aliases whose volume may be unmounted |

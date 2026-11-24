@@ -39,6 +39,12 @@ import {
   type HackErrorCode,
   okResult,
 } from "./cli-result.ts";
+import {
+  acceptUpTimingOwnerRelay,
+  closeUpTimingOwnerRelay,
+  completeUpTimings,
+  upTimingOwnerRelay,
+} from "./command-timings.ts";
 import { isRecord } from "./guards.ts";
 import {
   isNativeDetachedStartPhase,
@@ -682,6 +688,10 @@ function isShellVariables(value: unknown): value is string[] {
 
 /** Called only after durable readiness and up.after; contains no private values. */
 export function nativeDetachedUpReady(ready: Ready): void {
+  closeUpTimingOwnerRelay();
+  if (!publishReady) {
+    completeUpTimings();
+  }
   publishReady?.(ready);
 }
 
@@ -870,9 +880,10 @@ export async function runNativeDetachedOwner(opts: {
     });
   };
   try {
-    return await opts.run(opts.args);
+    return await opts.run(await acceptUpTimingOwnerRelay(opts.args));
   } finally {
     stopping = true;
+    closeUpTimingOwnerRelay();
     workingImages = [];
     publishReady = undefined;
     publishShellVariables = undefined;
@@ -1077,12 +1088,18 @@ export async function startNativeDetachedUp(opts: {
   if (!executable) {
     throw new Error("Missing detached owner executable.");
   }
-  const child = spawn(executable, [...invocation.slice(1), ...opts.args], {
+  const relay = upTimingOwnerRelay();
+  const ownerArgs = [
+    ...invocation.slice(1),
+    ...(relay ? [relay.argument] : []),
+    ...opts.args,
+  ];
+  const child = spawn(executable, ownerArgs, {
     cwd: opts.cwd,
     detached: true,
     // Application/hook output may contain secrets. Never persist it or mix it
     // with the launcher's JSON. Service logs remain available through hack logs.
-    stdio: ["ignore", "ignore", "ignore", "ipc"],
+    stdio: ["ignore", "ignore", "ignore", "ipc", ...(relay ? [relay.fd] : [])],
     serialization: "json",
     env: hackReexecEnvironment(process.env),
   });
@@ -1212,6 +1229,7 @@ export async function startNativeDetachedUp(opts: {
   });
   try {
     const data = await result.promise;
+    const timings = completeUpTimings();
     if (opts.json) {
       emitCliResult({
         result: okResult({
@@ -1229,6 +1247,7 @@ export async function startNativeDetachedUp(opts: {
             },
             readiness: data.readiness ?? "ready",
             durationMs: Date.now() - startedAt,
+            timings,
           },
         }),
       });

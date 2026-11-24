@@ -14,6 +14,7 @@ import {
 } from "../backends/native-project-run.ts";
 import type { NativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { emitCliResult, HackCliError, okResult } from "../lib/cli-result.ts";
+import { completeUpTimings } from "../lib/command-timings.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
@@ -188,6 +189,7 @@ export function reportNativeAlreadyRunning(opts: {
           failed: [],
         },
         readiness: opts.readiness ?? "ready",
+        timings: completeUpTimings(),
         durationMs: Date.now() - opts.startedAtMs,
       },
     }),

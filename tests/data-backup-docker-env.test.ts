@@ -55,6 +55,9 @@ if (args[0] === "events") {
   out({ name: project, services: {}, volumes: { db: { name: volumeName } } });
 } else if (args[0] === "volume" && args[1] === "inspect") {
   out({ name: volumeName, createdAt: "2026-11-24T00:00:00Z", driver: "local", mountpoint, options: null, labels: { "com.docker.compose.project": project, "com.docker.compose.volume": "db" } });
+} else if (args[0] === "ps" && args.includes("--all")) {
+  // Containers labeled with a nonce, as the test lists them.
+  out((process.env.DATA_STUB_LABELED || "").split(",").filter(Boolean).map((id) => id + "\\n").join(""));
 } else if (args[0] === "ps") {
   // A running container named by the test: its name, or its short ID.
   const named = process.env.DATA_STUB_RUNNING;
@@ -67,6 +70,8 @@ if (args[0] === "events") {
   appendFileSync(feed, JSON.stringify({ Type: "container", Action: "start", Actor: { ID: name, Attributes: { name } } }) + "\\n");
 } else if (args[0] === "create") {
   out("c".repeat(64));
+} else if (args[0] === "container" && args.some((arg) => arg.includes("index .Config.Labels")) && !args.some((arg) => arg.includes("{{.Id}}"))) {
+  out((process.env.DATA_STUB_NONCE || "") + "\\n");
 } else if (args[0] === "container" && args.includes("{{.Id}} {{json .Mounts}}")) {
   // Batched: every container binds the owned Mountpoint.
   const ids = args.slice(args.indexOf("--format") + 2);
@@ -507,4 +512,52 @@ test("hack data export never prints a container name, which can carry a managed 
       });
     }
   }
+});
+
+test("hack data cleanup removes the nonce's containers through the managed DOCKER_HOST, never a volume", async () => {
+  const { bin, log } = await stubBin();
+  const managedHost = `unix://${root}/managed-engine.sock`;
+  const projectRoot = await shopProject({
+    envFiles: { default: [`DOCKER_HOST: "${managedHost}"`] },
+  });
+  const nonce = "0123456789abcdef0123456789abcdef";
+  const labeled = ["a".repeat(64), "b".repeat(64)];
+  const result = await runDataCli({
+    cwd: projectRoot,
+    args: ["data", "cleanup", "--nonce", nonce, "--json"],
+    bin,
+    env: {
+      DATA_STUB_LOG: log,
+      DATA_STUB_LABELED: labeled.join(","),
+      DATA_STUB_NONCE: nonce,
+    },
+  });
+  expect(result.exitCode).toBe(0);
+  const envelope = JSON.parse(result.stdout) as {
+    data: { schema: string; removed: string[]; label: string };
+  };
+  expect(envelope.data.schema).toBe("hack.data-cleanup.v1");
+  expect(envelope.data.removed).toEqual(labeled);
+  expect(envelope.data.label).toBe(`io.hack.data-backup.nonce=${nonce}`);
+  const calls = (await readFile(log, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { args: string[]; host: string });
+  // Every call went to the managed engine; removals by ID only, no volumes.
+  expect(calls.filter((call) => call.host !== managedHost)).toEqual([]);
+  expect(calls.some((call) => call.args[0] === "volume")).toBeFalse();
+  const removals = calls.filter((call) => call.args[0] === "rm");
+  expect(removals.map((call) => call.args)).toEqual(
+    labeled.map((id) => ["rm", "--force", id])
+  );
+  // A malformed nonce is a usage error before any Docker call.
+  await writeFile(log, "");
+  const bad = await runDataCli({
+    cwd: projectRoot,
+    args: ["data", "cleanup", "--nonce", "not-a-nonce", "--json"],
+    bin,
+    env: { DATA_STUB_LOG: log },
+  });
+  expect(bad.stdout).toContain("E_USAGE");
+  expect(await readFile(log, "utf8")).toBe("");
 });

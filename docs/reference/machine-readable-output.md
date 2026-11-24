@@ -86,6 +86,7 @@ success behavior stays covered by command-specific suites.
 | `hack daemon start --json` | Envelope; versioned `data.schema`: `hack.daemon-start.v1` |
 | `hack daemon status --json` | Legacy bare object (no `data` envelope) |
 | `hack daemon stop --json` | Envelope; versioned `data.schema`: `hack.daemon-stop.v1` |
+| `hack data cleanup --json` | Envelope; versioned `data.schema`: `hack.data-cleanup.v1` |
 | `hack data export --json` | Envelope; versioned `data.schema`: `hack.data-export.v1` |
 | `hack data import --json` | Envelope; versioned `data.schema`: `hack.data-import.v1` |
 | `hack dispatch logs --json` | Legacy bare object (no `data` envelope) |

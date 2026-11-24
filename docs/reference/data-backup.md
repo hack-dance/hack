@@ -291,15 +291,31 @@ disk or any other failure the helper container is removed; if Docker cannot
 confirm the removal, the outcome says so (`detail.cleanup: {container,
 removed: false}`, the container ID, and the `docker rm -f <id>` command to
 run) instead of claiming cleanup, and nothing is published. When a `docker
-create` for a helper, marker or reference returns no container ID (the
-response was lost or timed out) and Hack cannot find the container by its
-name and the create's random `io.hack.data-backup.nonce` label either, a
-container of this run may exist that Hack does not track: the refusal says
-so with an unknown cleanup outcome (`detail.cleanup: {container: null,
-removed: false, outcome: "unknown", label, command}`) and, in text too, one
-command that finds and removes it by that label only,
+create` for a helper, marker or reference returns no container ID and
+Hack cannot find the container by its name and the create's random
+`io.hack.data-backup.nonce` label, a container of this run may exist that
+Hack does not track: the refusal says so with an unknown cleanup outcome
+(`detail.cleanup: {container: null, removed: false, outcome: "unknown",
+label, command, hackCommand}`) and, in text too, how to remove it on the
+same engine the command used: `hack data cleanup --nonce <nonce>` with the
+same `--path`, `--project`, `--branch` and `--env` selection
+(`hackCommand`), and the raw command by label as a fallback (`command`):
 `docker ps -aq --filter label=io.hack.data-backup.nonce=<nonce> | xargs -r docker rm -f`.
-A create the daemon itself refused created nothing and is not reported. Ctrl-C or SIGTERM
+When the managed env selects the engine, the raw command carries that
+selection: `docker --context <name> …` on both sides of the pipe for a
+managed `DOCKER_CONTEXT` (other managed values in the name redacted), or
+`DOCKER_HOST=<value> …` on both sides for a managed `DOCKER_HOST` that
+holds no userinfo, no query and no other managed value; any other
+`DOCKER_HOST` is never printed and the instruction says to run the command
+with your managed `DOCKER_HOST`. A create the daemon itself refused created
+nothing and is not reported. A create that timed out (or was interrupted)
+is not settled by one "No such container": the daemon may still register
+it after the client gave up, so Hack looks it up again, five times 400 ms
+apart, each bounded by `HACK_DATA_COMMAND_TIMEOUT_MS`. Only finding it
+(it is then removed by ID with removal confirmed) or finding its name held
+by someone else's container settles it; otherwise the outcome stays
+unknown. A create that returned without a timeout and is absent is
+settled as absent. Ctrl-C or SIGTERM
 stops the event subscription, force-removes the run's live helper containers
 by ID and reports
 `E_CANCELLED`; removal is confirmed with a few short retries, since Docker
@@ -363,6 +379,27 @@ resolved value is written or printed:
   `hack up` does.
 
 A restore compares these hashes instead of the values.
+
+## Cleaning up an untracked helper (`hack data cleanup`)
+
+```sh
+hack data cleanup --nonce <nonce> [--path <dir>] [--project <name>] [--branch <name>] [--env <name>] [--json]
+```
+
+A refusal with an unknown cleanup outcome (see Deadlines) names the
+create's `io.hack.data-backup.nonce` label and prints this command with the
+same project, instance and `--env` selection. It resolves the managed env
+exactly as `hack data export` does, so it lists and removes containers on
+the same engine, including one a managed `DOCKER_HOST` or `DOCKER_CONTEXT`
+selects. It removes only containers, running or not, whose
+`io.hack.data-backup.nonce` label equals the nonce (read back by ID), each
+by its ID with removal confirmed, and never removes a volume. A nonce that
+is not 32 hex characters refuses with `E_USAGE` before any engine call.
+`--json` prints the standard envelope with `data.schema`
+`hack.data-cleanup.v1`: `nonce`, `label`, `removed` (full container IDs)
+and `unconfirmed`. A removal Docker cannot confirm exits 1 with
+`E_UNEXPECTED` and the same fields in `error.detail`. Nothing matching is a
+clean no-op.
 
 ## Format
 

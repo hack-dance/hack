@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { HackCliError } from "./cli-result.ts";
 import {
+  HELPER_NONCE_LABEL,
+  rawCleanupInstruction,
+} from "./data-backup-cleanup-instruction.ts";
+import {
   DATA_STEP_TIMEOUT_ENV,
   type DataBackupDeadlines,
 } from "./data-backup-deadlines.ts";
@@ -39,7 +43,9 @@ const CONTAINER_ID = /^[0-9a-f]{64}$/;
  * created, if any, without trusting the name: a name can be reused by
  * another container, an ID cannot.
  */
-const HELPER_NONCE_LABEL = "io.hack.data-backup.nonce";
+/** Lookups after a create that timed out: attempts and their spacing. */
+export const TIMED_OUT_CREATE_LOOKUPS = 5;
+export const TIMED_OUT_CREATE_LOOKUP_GAP_MS = 400;
 /**
  * How the local driver refuses a reference to a missing volume (a `type`
  * option without `device`): the volume was removed after validation.
@@ -219,6 +225,22 @@ const REMOVAL_CHECKS = 10;
  * the absence check is retried a few times before removal is reported as
  * unconfirmed.
  */
+/**
+ * Force-remove the container `container` (a full ID) and confirm with
+ * Docker that it is gone; see {@link release}. Never removes a volume.
+ */
+export async function removeContainerConfirmed(opts: {
+  readonly docker: DataBackupDocker;
+  readonly container: string;
+  readonly deadlines: DataBackupDeadlines;
+}): Promise<boolean> {
+  return (
+    await release(opts).catch(
+      (): HeldVolumeRelease => ({ container: opts.container, removed: false })
+    )
+  ).removed;
+}
+
 async function release(opts: {
   readonly docker: DataBackupDocker;
   readonly container: string;
@@ -254,31 +276,38 @@ function withUnconfirmedCleanup(
 }
 
 /**
- * The copy-paste command that finds and removes a container this run may
- * have created under `nonce`, by its label only (random, never a managed
- * value).
- */
-export function unknownCleanupCommand(nonce: string): string {
-  return `docker ps -aq --filter label=${HELPER_NONCE_LABEL}=${nonce} | xargs -r docker rm -f`;
-}
-
-/**
  * Add an unknown cleanup outcome to a refusal: a `docker create` whose
- * outcome Hack could not reconcile (no ID came back and the lookup by name
- * and nonce failed), so a container of this run may exist that Hack does
- * not track and cannot remove; it could hold a volume.
+ * outcome Hack could not reconcile (no ID came back, and no lookup by name
+ * and nonce found it), so a container of this run may exist that Hack does
+ * not track and cannot remove; it could hold a volume. The instruction
+ * targets the engine the command used: `hack data cleanup --nonce <nonce>`
+ * with the same selection when the CLI ran it, and the raw `docker`
+ * command with the same engine selection as a fallback.
  */
-function withUnknownCleanup(failure: unknown, nonce: string): unknown {
-  const label = `${HELPER_NONCE_LABEL}=${nonce}`;
-  const command = unknownCleanupCommand(nonce);
+function withUnknownCleanup(
+  failure: unknown,
+  opts: { readonly nonce: string; readonly docker: DataBackupDocker }
+): unknown {
+  const label = `${HELPER_NONCE_LABEL}=${opts.nonce}`;
+  const raw = rawCleanupInstruction({
+    nonce: opts.nonce,
+    engine: opts.docker.engine,
+    redactValues: opts.docker.redactValues,
+  });
+  const hackCommand = opts.docker.hackCleanupCommand?.(opts.nonce) ?? null;
+  const how =
+    hackCommand === null
+      ? raw.sentence
+      : `\`${hackCommand}\` (or, by hand: ${raw.sentence})`;
   return withCleanupNote(failure, {
-    note: `A helper container may have been created without Hack learning its ID, so it was not removed and may hold a volume. Find and remove it by its label ${label}: \`${command}\`.`,
+    note: `A helper container may have been created without Hack learning its ID, so it was not removed and may hold a volume. Find and remove it by its label ${label}: ${how}.`,
     cleanup: {
       container: null,
       removed: false,
       outcome: "unknown",
       label,
-      command,
+      command: raw.command,
+      ...(hackCommand === null ? {} : { hackCommand }),
     },
   });
 }
@@ -453,7 +482,7 @@ async function findOwnCreated(opts: {
   readonly deadlines: DataBackupDeadlines;
 }): Promise<
   | { readonly kind: "found"; readonly id: string }
-  | { readonly kind: "absent" | "unknown" }
+  | { readonly kind: "absent" | "taken" | "unknown" }
 > {
   const found = await opts.docker
     .capture(
@@ -482,7 +511,7 @@ async function findOwnCreated(opts: {
     return { kind: "found", id };
   }
   // The name is someone else's: our create under it cannot have succeeded.
-  return { kind: "absent" };
+  return { kind: "taken" };
 }
 
 /**
@@ -520,6 +549,7 @@ export async function withTrackedContainer<T>(
       printed,
       checkCreate: opts.checkCreate,
       unknownNonce,
+      docker: opts.docker,
     });
   }
   let failure: unknown;
@@ -588,13 +618,19 @@ async function createTracked(opts: {
   );
   const printed =
     created.exitCode === 0 ? createdContainerId(created.stdout) : null;
+  // A create that timed out (or was interrupted) may still be processed by
+  // the daemon after the client gave up: "No such container" right after
+  // it proves nothing, so the lookup is retried a few times (bounded), and
+  // only finding the container settles it.
+  const timedOut = INTERRUPTED_EXITS.has(created.exitCode);
   const lookup =
     printed === null
-      ? await findOwnCreated({
+      ? await lookupOwnCreated({
           docker: opts.docker,
           name: opts.name,
           nonce,
           deadlines: opts.deadlines,
+          attempts: timedOut ? TIMED_OUT_CREATE_LOOKUPS : 1,
         })
       : null;
   const container = printed ?? (lookup?.kind === "found" ? lookup.id : null);
@@ -603,9 +639,38 @@ async function createTracked(opts: {
   }
   // The daemon refused the create outright: nothing was created.
   const refused = created.exitCode !== 0 && DAEMON_REFUSAL.test(created.stderr);
+  // Settled without a container: the name is someone else's (our create
+  // cannot have succeeded), or Docker answered "no such container" for a
+  // create that returned without a timeout.
+  const settledAbsent =
+    lookup?.kind === "taken" || (lookup?.kind === "absent" && !timedOut);
   const unknownNonce =
-    container === null && !refused && lookup?.kind !== "absent" ? nonce : null;
+    container === null && !refused && !settledAbsent ? nonce : null;
   return { created, printed, container, unknownNonce };
+}
+
+/** Exit codes of a client that was stopped before the daemon answered. */
+const INTERRUPTED_EXITS = new Set([DATA_BACKUP_TIMEOUT_EXIT, 130, 143]);
+
+/**
+ * {@link findOwnCreated}, up to `attempts` times, spaced by
+ * {@link TIMED_OUT_CREATE_LOOKUP_GAP_MS}, until it finds the container or
+ * the name proves someone else's; the last answer otherwise.
+ */
+async function lookupOwnCreated(
+  opts: Parameters<typeof findOwnCreated>[0] & { readonly attempts: number }
+): ReturnType<typeof findOwnCreated> {
+  let last: Awaited<ReturnType<typeof findOwnCreated>> = { kind: "unknown" };
+  for (let attempt = 0; attempt < opts.attempts; attempt += 1) {
+    if (attempt > 0) {
+      await Bun.sleep(TIMED_OUT_CREATE_LOOKUP_GAP_MS);
+    }
+    last = await findOwnCreated(opts);
+    if (last.kind === "found" || last.kind === "taken") {
+      return last;
+    }
+  }
+  return last;
 }
 
 /** A create the daemon itself answered with an error: nothing exists. */
@@ -617,6 +682,7 @@ function failUnreconciled(opts: {
   readonly printed: string | null;
   readonly checkCreate: (result: DataBackupProcessResult) => void;
   readonly unknownNonce: string;
+  readonly docker: DataBackupDocker;
 }): never {
   let failure: unknown;
   try {
@@ -624,7 +690,10 @@ function failUnreconciled(opts: {
   } catch (error: unknown) {
     failure = error;
   }
-  throw withUnknownCleanup(failure, opts.unknownNonce);
+  throw withUnknownCleanup(failure, {
+    nonce: opts.unknownNonce,
+    docker: opts.docker,
+  });
 }
 
 /** Throw the refusal for a failed or untrackable create. */
@@ -730,7 +799,13 @@ export class VolumeReferences {
       });
     };
     if (unknownNonce !== null) {
-      failUnreconciled({ created, printed, checkCreate, unknownNonce });
+      failUnreconciled({
+        created,
+        printed,
+        checkCreate,
+        unknownNonce,
+        docker,
+      });
     }
     requireCreated({ created, printed, checkCreate });
   }

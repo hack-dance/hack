@@ -32,6 +32,17 @@ export type DataBackupStreamResult = {
  * {@link DATA_BACKUP_TIMEOUT_EXIT}; the daemon-side container is the
  * caller's to remove (see data-backup-held-volume.ts).
  */
+/**
+ * The engine a data command's managed env selects, when it selects one:
+ * a managed `DOCKER_HOST` or `DOCKER_CONTEXT` (values Hack added, not the
+ * caller's own environment). Recovery instructions must target the same
+ * engine.
+ */
+export type DataBackupEngineSelection = {
+  readonly host: string | null;
+  readonly context: string | null;
+};
+
 export interface DataBackupDocker {
   /**
    * Values the project's managed env adds to the client's environment (see
@@ -39,6 +50,14 @@ export interface DataBackupDocker {
    * refusal that quotes an engine line redacts them, in text and JSON.
    */
   readonly redactValues: readonly string[];
+  /** The managed engine selection; absent means the caller's own engine. */
+  readonly engine?: DataBackupEngineSelection;
+  /**
+   * The `hack data cleanup` command line that targets this command's
+   * project, instance and env, for the given nonce; absent when the caller
+   * is not the CLI.
+   */
+  readonly hackCleanupCommand?: (nonce: string) => string;
   /** Run `argv` and capture its UTF-8 output. */
   capture(
     argv: readonly string[],
@@ -117,8 +136,16 @@ export function createHostDataBackupDocker(opts: {
   readonly cwd?: string;
   /** Bound for a capture that names none (metadata reads). */
   readonly captureTimeoutMs?: number;
+  /** See {@link DataBackupDocker.hackCleanupCommand}. */
+  readonly hackCleanupCommand?: (nonce: string) => string;
 }): DataBackupDocker {
   const env = { ...opts.env };
+  const managed = (key: string): string | null => {
+    const value = env[key];
+    return value !== undefined && value !== "" && process.env[key] !== value
+      ? value
+      : null;
+  };
   const cwd = opts.cwd;
   const captureTimeoutMs = opts.captureTimeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS;
   const spawn = (
@@ -134,6 +161,11 @@ export function createHostDataBackupDocker(opts: {
     }) as Bun.Subprocess<"ignore" | Blob, "pipe", "pipe">;
   return {
     redactValues: composeEnvValuesToRedact({ env }),
+    engine: {
+      host: managed("DOCKER_HOST"),
+      context: managed("DOCKER_CONTEXT"),
+    },
+    hackCleanupCommand: opts.hackCleanupCommand,
     async capture(argv, captureOpts) {
       const result = await exec(argv, {
         cwd,

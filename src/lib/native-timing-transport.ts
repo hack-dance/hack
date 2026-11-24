@@ -26,6 +26,7 @@ const { symbols: c } = dlopen(
     },
     setsockopt: { args: [T.i32, T.i32, T.i32, T.ptr, T.u32], returns: T.i32 },
     getsockopt: { args: [T.i32, T.i32, T.i32, T.ptr, T.ptr], returns: T.i32 },
+    send: { args: [T.i32, T.ptr, T.u64, T.i32], returns: T.i64 },
     recv: { args: [T.i32, T.ptr, T.u64, T.i32], returns: T.i64 },
     close: { args: [T.i32], returns: T.i32 },
   }
@@ -37,6 +38,12 @@ function fcntl(fd: number, command: number, value = 0) {
     ? c.fcntl(fd, command, 0, 0, 0, 0, 0, 0, value)
     : c.fcntl(fd, command, value);
 }
+/** A disconnected launcher or a full queue must never stall the owner. */
+export function sendTimingLine(fd: number, line: string): void {
+  const bytes = Buffer.from(line);
+  c.send(fd, ptr(bytes), bytes.length, MSG_DONTWAIT);
+}
+
 export function protectTimingFd(fd: number): boolean {
   return (
     fcntl(fd, F_SETFD, FD_CLOEXEC) === 0 && fcntl(fd, F_GETFD) === FD_CLOEXEC

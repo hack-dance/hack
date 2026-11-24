@@ -392,6 +392,10 @@ pub struct Snapshot {
     /// Presentation only; native recovery selection still validates all evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_cleanup: Option<cleanup_diagnostics::PendingCleanup>,
+    /// A start that failed after `started-observed`, read from its own run-directory
+    /// file; see [`startup_failure::AfterStarted`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_after_started: Option<startup_failure::AfterStarted>,
     #[cfg(target_os = "macos")]
     pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
@@ -1866,6 +1870,7 @@ fn run_inputs(
         )
     })();
     if let Err(failure) = result {
+        startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);
@@ -1972,6 +1977,24 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "dead_owner_recovery_complete": predecessor_complete,
         "dead_owner_recovery_error": predecessor_error,
     }))
+}
+
+/// Whether `run` belongs to a foreground relay owner, so its cleanup goes to that
+/// owner. Read with the provider lease when it is free, as before; while the lease is
+/// held (`provider_busy`, for example by a start loop still warming), the receipt is
+/// read without it: the owner, which holds the lease, then performs the cleanup, and
+/// no second lease is taken.
+#[cfg(target_os = "macos")]
+pub fn foreground_owned(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
+    match inspect(candidate, run) {
+        Ok(snapshot) => Ok(snapshot.receipt.relay_startup.is_some()),
+        Err(error) if error.code == "provider_busy" => {
+            let owner = state::Owner::load(candidate)?;
+            let (receipt, _) = load_at(directory(candidate, run)?, run, &owner.token)?;
+            Ok(receipt.relay_startup.is_some())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Read-only recovery inspection; historical ready phase is not a current health assertion.
@@ -2308,10 +2331,12 @@ fn inspect_using(
     }
     let storage_references = storage::references(&receipt, journal_incomplete, &observations);
     let pending_cleanup = cleanup_diagnostics::pending(&receipt, &observations, journal_incomplete);
+    let failed_after_started = startup_failure::after_started(&root);
     Ok(Snapshot {
         receipt,
         journal_incomplete,
         pending_cleanup,
+        failed_after_started,
         #[cfg(target_os = "macos")]
         interrupted_start_cleanup_incomplete,
         observations,
@@ -2331,6 +2356,7 @@ pub fn cleanup(
     let (receipt, root) = load(candidate, &engine, run)?;
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
     let receipt = cleanup_owned(candidate, &engine, receipt, &root, remove_data)?;
+    explicit_cleanup_done(&root);
     // The cleaned receipt is committed and ordinary cleanup binds no relay effect identity to
     // its environment inventory, so history is compacted under the same lease. A refusal keeps
     // the records for the next cleanup, restore or archive; it never reports this cleanup failed.
@@ -2374,10 +2400,32 @@ pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Receipt,
     }
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
     let receipt = cleanup_owned(candidate, &engine, receipt, &root, true)?;
+    explicit_cleanup_done(&root);
     if let Some(containers) = environment::bound_containers(&receipt) {
         environment::compact_history(candidate, &engine, &receipt.run, &containers);
     }
     Ok(receipt)
+}
+
+/// `graph clear-failure-after-started`: remove a stopped run's failure-after-started
+/// record under the same provider lease `graph cleanup` takes, so it never races a
+/// start. See [`startup_failure::clear_stopped`] for what it refuses.
+pub fn clear_failure_after_started(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<Value, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = load(candidate, &engine, run)?;
+    let cleared = startup_failure::clear_stopped(&root, &receipt)?;
+    Ok(json!({"run": run, "cleared": cleared}))
+}
+
+/// After an explicit cleanup (`graph cleanup`, which `hack down` calls) committed:
+/// remove the failure-after-started record. The owner's own cleanup after a failure
+/// does not call this, so it keeps the record. Diagnostic only: a failed removal
+/// never reports the committed cleanup failed.
+pub(super) fn explicit_cleanup_done(root: &std::path::Path) {
+    let _ = startup_failure::clear_after_started(root);
 }
 
 // The caller retains the VM mutation lease through this entire effect and any
@@ -2733,7 +2781,11 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         launcher: None,
     };
     session.save()?;
-    if let Err(failure) = execution::run(&prepared.graph, &mut session, options.timeout) {
+    // The restarting receipt is committed: the previous start's record is superseded.
+    if let Err(failure) = startup_failure::clear_after_started(&session.root)
+        .and_then(|_| execution::run(&prepared.graph, &mut session, options.timeout))
+    {
+        startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         session.receipt.set_phase("failed-retained");
         session.save()?;
         return Err(failure);

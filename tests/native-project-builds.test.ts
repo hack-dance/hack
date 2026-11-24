@@ -4,18 +4,22 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   admitNativeProjectBuild,
   admitNativeProjectBuilds,
   buildNativeProjectImages,
   invokeNativeBuild,
   type NativeBuildRequest,
+  nativeBuildBases,
   nativeBuildIdentity,
   nativeBuildsDisabledRefusal,
   nativeBuildsEnabled,
@@ -242,6 +246,7 @@ test("identical builds run once, pin every service and keep the request private"
       ["other", { ...request(), target: "dev" }],
     ]),
     specs,
+    imageTagMode: "offline",
     rebuild: false,
     signal: new AbortController().signal,
     invoke: async ({ requestFile }) => {
@@ -260,6 +265,7 @@ test("identical builds run once, pin every service and keep the request private"
     branch: "feature",
     context: "app",
     policy: "missing",
+    image_tag_mode: "offline",
     args: { A: VALUE },
   });
   expect(seen[1]?.body.target).toBe("dev");
@@ -795,6 +801,101 @@ test("a native home without the image builder says so and how to add it", async 
   expect(written.join("")).toBe("resolving base images\n");
 });
 
+test("build base scans deduplicate references and remove the private request", async () => {
+  const projectRoot = await root();
+  const files: string[] = [];
+  const alpine = "docker.io/library/alpine:3.20";
+  expect(
+    await nativeBuildBases({
+      projectRoot,
+      runtime,
+      builds: new Map([
+        ["one", request()],
+        ["two", request({})],
+      ]),
+      invoke: async ({ args }) => {
+        const path = args[3];
+        if (!path) {
+          throw new Error("Expected a build request path");
+        }
+        files.push(path);
+        expect(args.slice(4)).toEqual(["--bases", "--json"]);
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+        return files.length === 1
+          ? [alpine]
+          : [alpine, "docker.io/library/busybox:latest"];
+      },
+    })
+  ).toEqual([alpine, "docker.io/library/busybox:latest"]);
+  expect(files).toHaveLength(2);
+  expect(await Bun.file(files[0] ?? "").exists()).toBe(false);
+});
+
+test("later builds receive command base pins and each fallback notice is reported once", async () => {
+  const projectRoot = await root();
+  const reference = "docker.io/library/alpine:3.20";
+  const pin = `docker.io/library/alpine@${IMAGE}`;
+  const notice = "Registry unavailable, using the loaded build base.";
+  const notices: string[] = [];
+  let calls = 0;
+  await buildNativeProjectImages({
+    runtime,
+    projectRoot,
+    branch: null,
+    profiles: [],
+    builds: new Map([
+      ["one", request()],
+      ["two", request({})],
+    ]),
+    specs: { one: { build: "app" }, two: { build: "app" } },
+    rebuild: false,
+    imageTagMode: "refresh",
+    signal: new AbortController().signal,
+    onNotice: (line) => notices.push(line),
+    invoke: async ({ requestFile }) => {
+      const body = JSON.parse(await readFile(requestFile, "utf8"));
+      expect(body.image_tag_mode).toBe("refresh");
+      expect(body.command_base_pins).toEqual(
+        calls === 0 ? undefined : { [reference]: pin }
+      );
+      calls += 1;
+      return {
+        imageId: IMAGE,
+        buildKey: KEY,
+        reused: true,
+        baseSelections: { [reference]: pin },
+        baseFallbacks: [notice],
+      };
+    },
+  });
+  expect(calls).toBe(2);
+  expect(notices).toEqual([notice]);
+});
+
+test("build output decodes lock progress and verified fallback notices", async () => {
+  const reference = "docker.io/library/alpine:3.20";
+  const fake = await fakeRuntime(
+    `printf 'hack.image-wait:begin ${reference}\\nhack.image-wait:end ${reference}\\n' >&2
+     printf '{"image_id":"${IMAGE}","build_key":"${KEY}","reused":true,"reused_legacy_key":true,"base_fallbacks":[{"reference":"${reference}","resolved_at_unix_seconds":0},{"reference":"invalid reference","resolved_at_unix_seconds":0}]}'`
+  );
+  const waiting: (string | null)[] = [];
+  const built = await invokeNativeBuild({
+    runtime: fake as never,
+    cwd: fake.home,
+    requestFile: join(fake.home, "request.json"),
+    onImageWait: (value) => waiting.push(value),
+    write: () => {
+      throw new Error("Expected the image-wait markers to be consumed");
+    },
+  });
+  expect(waiting).toEqual([reference, null, null]);
+  expect(built.baseFallbacks).toHaveLength(2);
+  expect(built.baseFallbacks?.[0]).toContain(reference);
+  expect(built.baseFallbacks?.[1]).toContain(
+    "unchanged context and Dockerfile"
+  );
+});
+
 test.each([
   { cpus: 4, cap: 3, outcome: "success" },
   { cpus: 2, cap: 2, outcome: "success" },
@@ -891,7 +992,7 @@ test.each([
       expect(await result).toEqual(new Set([...builds.keys()]));
       expect(started).toEqual(names);
       expect(specs.duplicate).toEqual({ image: IMAGE });
-      expect(settlements).toHaveLength(cap > 1 ? names.length : 0);
+      expect(settlements).toHaveLength(names.length);
     } else {
       if (outcome === "failure") {
         releases.get("worker")?.resolve(true);
@@ -922,4 +1023,84 @@ test.each([
     }
     await result;
   }
+});
+
+test("concurrent builds share a physical command pin directory and deduplicate notices", async () => {
+  const projectRoot = await root();
+  const arrived = Promise.withResolvers<void>();
+  const directories: string[] = [];
+  const notices: string[] = [];
+  const base = "docker.io/library/alpine:latest";
+  const pin = `docker.io/library/alpine@${IMAGE}`;
+  const notice = "Using a previously verified base.";
+  const physical = join(await realpath(projectRoot), "physical");
+  const alias = join(projectRoot, "alias");
+  const previous = process.env.TMPDIR;
+  await mkdir(join(physical, "tmp"), { recursive: true });
+  await symlink(physical, alias);
+  process.env.TMPDIR = join(alias, "tmp");
+  try {
+    await buildNativeProjectImages({
+      runtime,
+      projectRoot,
+      branch: null,
+      profiles: [],
+      builds: new Map([
+        ["one", request()],
+        ["two", request({})],
+      ]),
+      specs: { one: { build: "app" }, two: { build: "app" } },
+      rebuild: false,
+      guestCpus: 2,
+      imageTagMode: "refresh",
+      signal: new AbortController().signal,
+      onNotice: (line) => notices.push(line),
+      invoke: async ({ requestFile }) => {
+        const body = JSON.parse(await readFile(requestFile, "utf8"));
+        expect(body.share_command_base_pins).toBe(true);
+        expect(body.image_tag_mode).toBe("refresh");
+        directories.push(dirname(requestFile));
+        if (directories.length === 2) {
+          arrived.resolve();
+        }
+        await arrived.promise;
+        return {
+          imageId: IMAGE,
+          buildKey: KEY,
+          reused: false,
+          baseSelections: { [base]: pin },
+          baseFallbacks: [notice],
+        };
+      },
+    });
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "TMPDIR");
+    } else {
+      process.env.TMPDIR = previous;
+    }
+  }
+  expect(directories).toHaveLength(2);
+  expect(new Set(directories.map(dirname))).toEqual(
+    new Set([join(physical, "tmp")])
+  );
+  expect(new Set(directories).size).toBe(1);
+  expect(notices).toEqual([notice]);
+});
+
+test("native runtime requests centralize temporary paths", async () => {
+  const backends = fileURLToPath(new URL("../src/backends/", import.meta.url));
+  const unresolved: string[] = [];
+  for await (const file of new Bun.Glob("*.ts").scan(backends)) {
+    const source = await Bun.file(join(backends, file)).text();
+    // The HTTPS FIFO is consumed by the shell before exec, not by the runtime.
+    const requests = source.replace(
+      'mkdtempSync(join(tmpdir(), "hk-https-pipe-"))',
+      ""
+    );
+    if (requests.replaceAll("realpath(tmpdir())", "").includes("tmpdir()")) {
+      unresolved.push(file);
+    }
+  }
+  expect(unresolved).toEqual([]);
 });

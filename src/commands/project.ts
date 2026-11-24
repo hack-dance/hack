@@ -3764,7 +3764,8 @@ export type ComposeRuntimeModel = {
 
 /**
  * Resolve an instance's Compose invocation the way `hack up` does (same
- * files, project name, project directory and managed env), without starting
+ * files, project name, project directory and managed env; an omitted env
+ * selection is the one the instance was started with), without starting
  * anything: the env override is resolved but not rewritten (`persist:
  * false`) and Hack's internal override is the one the last start stored.
  * For commands that read the instance's model, such as `hack data`.
@@ -3791,12 +3792,22 @@ export async function resolveComposeRuntimeModel(opts: {
   const allServiceNames = await readComposeServiceNames(
     opts.project.composeFile
   );
+  // Omitted --env: the selection the instance was started with, as `hack
+  // down` resolves it, else the configured default.
+  const envName = await resolveStoredRuntimeEnvName({
+    requestedEnvName: opts.envName,
+    projectDir: opts.project.projectDir,
+    composeProject: resolveLifecycleComposeProjectName({
+      projectName,
+      branch: opts.branch,
+    }),
+  });
   const envOverrides = await resolveComposeEnvOverrides({
     project: opts.project,
     projectName,
     targetServices: allServiceNames,
     allServiceNames,
-    envName: opts.envName,
+    envName,
     persist: false,
   });
   // The internal override holds routing and trust settings, not volumes; a

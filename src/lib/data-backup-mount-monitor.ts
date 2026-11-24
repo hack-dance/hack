@@ -1,15 +1,19 @@
 import { HackCliError } from "./cli-result.ts";
+import type { DataBackupDeadlines } from "./data-backup-deadlines.ts";
 import type {
   DataBackupDocker,
   DataBackupWatch,
 } from "./data-backup-docker.ts";
 import { dataBackupHelperImage } from "./data-backup-format.ts";
 import {
+  requireStep,
+  withTrackedContainer,
+} from "./data-backup-held-volume.ts";
+import {
   type HelperPurpose,
   helperContainerName,
   parseJsonText,
 } from "./data-backup-helper.ts";
-import { dockerReadError } from "./data-backup-volumes.ts";
 import { isRecord } from "./guards.ts";
 import { holdSignalCleanup } from "./process-exit.ts";
 
@@ -76,7 +80,9 @@ function lostCoverage(command: HelperPurpose, why: string): HackCliError {
 export async function startMountMonitor(opts: {
   readonly docker: DataBackupDocker;
   readonly purpose: HelperPurpose;
-  readonly helperNames: ReadonlySet<string>;
+  /** Every container this run owns; markers are added and removed here. */
+  readonly helperNames: Set<string>;
+  readonly deadlines: DataBackupDeadlines;
   readonly markerTimeoutMs?: number;
 }): Promise<MountMonitor> {
   const names = new Map<string, string>();
@@ -165,46 +171,76 @@ export async function startMountMonitor(opts: {
     process.on(signal, handler);
   }
 
-  /** Run a no-op marker container and wait for its start event. */
+  /**
+   * Create and start a no-op marker container and wait for its start event.
+   * The marker is tracked like a helper: its create and start are bounded
+   * by the command deadline, and it is removed and its removal confirmed on
+   * every path, a signal included.
+   */
   const marker = async (stage: "start" | "end"): Promise<void> => {
     const name = `${helperContainerName(opts.purpose)}-${stage}`;
     const seen = new Promise<void>((resolve) => {
       waiting.set(name, resolve);
     });
-    const run = await opts.docker.capture([
-      "docker",
-      "run",
-      "--rm",
-      "--name",
-      name,
-      "--network",
-      "none",
-      "--log-driver",
-      "none",
-      "--pull",
-      "missing",
-      "--read-only",
-      "--security-opt",
-      "no-new-privileges",
-      "--label",
-      `io.hack.data-backup=${opts.purpose}`,
-      "--entrypoint",
-      "true",
-      dataBackupHelperImage(),
-    ]);
-    if (run.exitCode !== 0) {
-      throw dockerReadError({ result: run, command: "docker run" });
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      seen,
-      closed,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, opts.markerTimeoutMs ?? MARKER_TIMEOUT_MS);
-      }),
-    ]);
-    clearTimeout(timer);
-    waiting.delete(name);
+    const { commandMs } = opts.deadlines;
+    await withTrackedContainer(
+      {
+        docker: opts.docker,
+        container: name,
+        deadlines: opts.deadlines,
+        helperNames: opts.helperNames,
+      },
+      async () => {
+        for (const argv of [
+          [
+            "docker",
+            "create",
+            "--name",
+            name,
+            "--network",
+            "none",
+            "--log-driver",
+            "none",
+            "--pull",
+            "missing",
+            "--read-only",
+            "--security-opt",
+            "no-new-privileges",
+            "--label",
+            `io.hack.data-backup=${opts.purpose}`,
+            "--entrypoint",
+            "true",
+            dataBackupHelperImage(),
+          ],
+          ["docker", "start", name],
+        ]) {
+          // Creating may pull the pinned image once.
+          const result = await opts.docker.capture(argv, {
+            timeoutMs: argv[1] === "create" ? opts.deadlines.stepMs : commandMs,
+          });
+          requireStep({
+            result,
+            label: `${stage} marker`,
+            action: argv[1] === "create" ? "create" : "start",
+            timeoutMs: commandMs,
+            consequence: "nothing was changed.",
+          });
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          seen,
+          closed,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(
+              resolve,
+              opts.markerTimeoutMs ?? MARKER_TIMEOUT_MS
+            );
+          }),
+        ]);
+        clearTimeout(timer);
+        waiting.delete(name);
+      }
+    );
     if (ended) {
       throw lostCoverage(opts.purpose, "the event stream ended");
     }

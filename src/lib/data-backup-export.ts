@@ -37,6 +37,7 @@ import {
   type DeclaredVolumePlan,
   dockerReadError,
   type OwnedVolume,
+  plainLocalInspected,
   planDeclaredVolumes,
 } from "./data-backup-volumes.ts";
 
@@ -100,14 +101,23 @@ export async function exportProjectData(
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
   const helperNames = new Set<string>();
   // Subscribe and prove coverage before the first running-container check.
+  const deadlines = input.deadlines ?? resolveDataBackupDeadlines();
   const monitor = await startMountMonitor({
     docker: input.docker,
     purpose: "export",
     helperNames,
+    deadlines,
     markerTimeoutMs: input.markerTimeoutMs,
   });
   try {
-    return await exportWithin({ input, now, plan, monitor, helperNames });
+    return await exportWithin({
+      input,
+      now,
+      plan,
+      monitor,
+      helperNames,
+      deadlines,
+    });
   } finally {
     await monitor.stop();
   }
@@ -119,27 +129,45 @@ async function exportWithin(opts: {
   readonly plan: DeclaredVolumePlan;
   readonly monitor: MountMonitor;
   readonly helperNames: Set<string>;
+  readonly deadlines: DataBackupDeadlines;
 }): Promise<DataExportResult> {
-  const { input, now, plan, monitor, helperNames } = opts;
-  const deadlines = input.deadlines ?? resolveDataBackupDeadlines();
+  const { input, now, plan, monitor, helperNames, deadlines } = opts;
   const stopCommand = input.downCommand ?? "hack down";
   const { owned, skipped } = await classifyDeclaredVolumes({
     docker: input.docker,
     plan,
   });
+  // Hack reads a volume by binding its Mountpoint, never by mounting it by
+  // name (which would create it if it vanished): plain local volumes only.
+  const unsupported = owned
+    .filter((volume) => !plainLocalInspected(volume.identity))
+    .map((volume) => volume.key);
+  if (unsupported.length > 0) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: `hack data export reads only plain local volumes for now; the volume for ${unsupported.join(", ")} uses another driver or driver options. Nothing was backed up.`,
+      detail: { keys: unsupported, reason: "unsupported_driver" },
+    });
+  }
   const volumeNames = owned.map((volume) => volume.name);
+  const redact = redactComposeProject(plan.composeProject);
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
     volumeNames,
     stopCommand,
     command: "export",
+    redact,
     lead: "The project is running, so its volumes cannot be copied consistently; nothing was backed up.",
   });
 
   const parent =
     input.outDir ??
-    join(input.hackHome, DATA_BACKUPS_DIR_NAME, plan.composeProject);
+    join(
+      input.hackHome,
+      DATA_BACKUPS_DIR_NAME,
+      input.branch ? `${input.project}--${input.branch}` : input.project
+    );
   const backup = join(parent, dataBackupTimestamp(now));
   const partial = `${backup}${DATA_BACKUP_PARTIAL_SUFFIX}`;
   // Directories this export creates; their entries are flushed at the end.
@@ -172,6 +200,7 @@ async function exportWithin(opts: {
     volumeNames,
     stopCommand,
     command: "export",
+    redact,
     lead: `A container started during the export, so the copy may be inconsistent and was not published; the incomplete copy is in ${partial}, which you can delete.`,
   });
   // Stop and drain the subscription, then decide.
@@ -179,6 +208,7 @@ async function exportWithin(opts: {
   const mounts = (await monitor.finish(volumeNames)).map((mount) => ({
     ...mount,
     volume: keyOf.get(mount.volume) ?? mount.volume,
+    name: mount.name === null ? null : redact(mount.name),
   }));
   if (mounts.length > 0) {
     throw foreignMountError({
@@ -193,7 +223,7 @@ async function exportWithin(opts: {
     schema: DATA_BACKUP_SCHEMA,
     project: input.project,
     branch: input.branch,
-    composeProject: plan.composeProject,
+    composeProjectSha256: dataBackupNameSha256(plan.composeProject),
     createdAt: now.toISOString(),
     hackVersion: input.hackVersion,
     helperImage,
@@ -228,6 +258,16 @@ async function missingDirectories(path: string): Promise<readonly string[]> {
     current = up;
   }
   return missing;
+}
+
+/**
+ * Replace the resolved Compose project name (which can carry interpolated
+ * env values) wherever it appears in a reported container name.
+ */
+export function redactComposeProject(
+  composeProject: string
+): (text: string) => string {
+  return (text) => text.replaceAll(composeProject, "<compose project>");
 }
 
 async function refuseExisting(path: string): Promise<void> {
@@ -271,7 +311,7 @@ async function copyVolume(opts: {
       changed: () =>
         new HackCliError({
           code: "E_PROJECT_RUNNING",
-          message: `The volume for ${volume.key} was removed, replaced or relabeled after it was validated, so it was not read; ${consequence} If Docker recreated it empty while mounting it, that empty volume is left as it is.`,
+          message: `The volume for ${volume.key} was removed, replaced or relabeled after it was validated, so it was not read and nothing was created; ${consequence}`,
           detail: { key: volume.key, reason: "volume_changed" },
         }),
     },
@@ -326,7 +366,14 @@ async function copyVolume(opts: {
         key: volume.key,
         nameSha256: dataBackupNameSha256(volume.name),
         driver: volume.driver,
-        labels: volume.labels,
+        labelsSha256: {
+          "com.docker.compose.project": dataBackupNameSha256(
+            volume.labels["com.docker.compose.project"]
+          ),
+          "com.docker.compose.volume": dataBackupNameSha256(
+            volume.labels["com.docker.compose.volume"]
+          ),
+        },
         file,
         tarBytes: tar.bytes,
         tarSha256: tar.sha256,

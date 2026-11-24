@@ -41,8 +41,12 @@ export type DataBackupVolume = {
    */
   readonly nameSha256: string;
   readonly driver: string;
-  /** The Compose labels that proved ownership. */
-  readonly labels: {
+  /**
+   * sha256 of each Compose label that proved ownership: the project label's
+   * value is the resolved Compose project name, which can carry
+   * interpolated env values, so no value is stored in the clear.
+   */
+  readonly labelsSha256: {
     readonly "com.docker.compose.project": string;
     readonly "com.docker.compose.volume": string;
   };
@@ -78,11 +82,15 @@ export function dataBackupNameSha256(name: string): string {
 
 export type DataBackupManifest = {
   readonly schema: typeof DATA_BACKUP_SCHEMA;
-  /** Hack's project name. */
+  /** Hack's project name (hack.config.json `name`, else the checkout's). */
   readonly project: string;
   /** Branch instance slug, or null for the default instance. */
   readonly branch: string | null;
-  readonly composeProject: string;
+  /**
+   * sha256 of the resolved Compose project name (which can carry
+   * interpolated env values); a restore compares hashes.
+   */
+  readonly composeProjectSha256: string;
   /** UTC ISO-8601 time the export started. */
   readonly createdAt: string;
   readonly hackVersion: string;
@@ -146,11 +154,12 @@ process.stdout.write(JSON.stringify({algorithm:"${DATA_BACKUP_TREE_DIGEST}",entr
  * computed from a tar stream on stdin instead of a live tree, so export can
  * prove the archive it publishes holds exactly the tree it digested. It
  * streams (constant memory), parses GNU (`L`/`K` long names, base-256
- * numbers) and POSIX/pax (`x`/`g` records, ustar prefix) headers, verifies
+ * numbers) and POSIX/pax (`x`/`g` records, the ustar prefix when the magic is `ustar\0` version
+ * `00`) headers, verifies
  * each header checksum, and applies the live script's field rules: regular
- * files hash their content; a hard link counts as a regular file with its
- * target's size and content (its own mode, uid and gid, which are the same
- * inode's); symlinks carry their target, devices their rdev (glibc
+ * files hash their content; a hard link takes its target entry's type,
+ * size and content (of any type tar links: a file, FIFO, symlink or device)
+ * with its own mode, uid and gid, which are the same inode's; symlinks carry their target, devices their rdev (glibc
  * `makedev`), directories and FIFOs nothing. Tar cannot hold sockets, so
  * `excludedSockets` is 0. Any other entry type, a bad checksum or a
  * truncated stream exits non-zero.
@@ -170,7 +179,7 @@ const num=(b,o,l)=>{if(b[o]&0x80){let v=0n;for(let i=o;i<o+l;i++)v=(v<<8n)|BigIn
 const norm=b=>{let s=b;while(s.length>=2&&s[0]===46&&s[1]===47)s=s.subarray(2);while(s.length>1&&s[s.length-1]===47)s=s.subarray(0,s.length-1);return s.length===0||(s.length===1&&s[0]===46)?ROOT:s;};
 const paxRecords=b=>{const out={};let o=0;while(o<b.length){const sp=b.indexOf(32,o);if(sp<0)break;const len=parseInt(b.subarray(o,sp).toString("latin1"),10);if(!(len>0))fail("bad pax record");const rec=b.subarray(sp+1,o+len-1);const eq=rec.indexOf(61);if(eq>0)out[rec.subarray(0,eq).toString("latin1")]=rec.subarray(eq+1);o+=len;}return out;};
 const makedev=(ma,mi)=>{const M=BigInt(ma),m=BigInt(mi);return String(Number(((M&0xfffff000n)<<32n)|((M&0xfffn)<<8n)|((m&0xffffff00n)<<12n)|(m&0xffn)));};
-const entries=[],files=new Map();
+const entries=[],known=new Map();
 let longName=null,longLink=null,pax={},global={};
 for(;;){
  if(!(await need(512))){if(entries.length===0)fail("empty archive");break;}
@@ -185,7 +194,7 @@ for(;;){
  if(type==="x"){pax=paxRecords(await bytesOf(size));continue;}
  if(type==="g"){global={...global,...paxRecords(await bytesOf(size))};continue;}
  const meta={...global,...pax};
- const ustar=h.subarray(257,263).toString("latin1")==="ustar\\u000000";
+ const ustar=h.subarray(257,263).toString("latin1")==="ustar\\u0000"&&h.subarray(263,265).toString("latin1")==="00";
  const prefix=ustar?field(h,345,155):Buffer.alloc(0);
  const raw=longName??meta.path??(prefix.length?Buffer.concat([prefix,Buffer.from("/"),field(h,0,100)]):field(h,0,100));
  const link=longLink??meta.linkpath??field(h,157,100);
@@ -197,13 +206,14 @@ for(;;){
  const rel=norm(raw);
  const key=rel.toString("latin1");
  let t,fsize=0,content=Buffer.alloc(0);
- if(type==="0"||type==="7"){const hash=crypto.createHash("sha256");await data(size,c=>hash.update(c));const hex=hash.digest("hex");t="f";fsize=size;content=Buffer.from(hex);files.set(key,{size,hex});}
- else if(type==="1"){await data(size,()=>{});const target=files.get(norm(link).toString("latin1"));if(!target)fail("hard link to an unknown entry");t="f";fsize=target.size;content=Buffer.from(target.hex);}
+ if(type==="0"||type==="7"){const hash=crypto.createHash("sha256");await data(size,c=>hash.update(c));const hex=hash.digest("hex");t="f";fsize=size;content=Buffer.from(hex);}
+ else if(type==="1"){await data(size,()=>{});const target=known.get(norm(link).toString("latin1"));if(!target)fail("hard link to an unknown entry");t=target.t;fsize=target.fsize;content=target.content;}
  else if(type==="2"){await data(size,()=>{});t="l";content=Buffer.from(link);}
  else if(type==="3"||type==="4"){await data(size,()=>{});t=type==="3"?"c":"b";content=Buffer.from(makedev(num(h,329,8),num(h,337,8)));}
  else if(type==="5"){await data(size,()=>{});t="d";}
  else if(type==="6"){await data(size,()=>{});t="p";}
  else fail("unsupported archive entry type "+type);
+ known.set(key,{t,fsize,content});
  entries.push([rel,Buffer.from(t),Buffer.from(mode.toString(8)),Buffer.from(String(uid)),Buffer.from(String(gid)),Buffer.from(String(fsize)),content]);
 }
 entries.sort((a,b)=>Buffer.compare(a[0],b[0]));

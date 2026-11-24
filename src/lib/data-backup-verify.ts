@@ -54,7 +54,11 @@ function verifiedVolume(path: string, value: unknown): DataBackupVolume {
       count(value.excludedSockets, 0) &&
       typeof value.contentDigest === "string" &&
       SHA256_HEX.test(value.contentDigest) &&
-      isRecord(value.labels)
+      isRecord(value.labelsSha256) &&
+      typeof value.labelsSha256["com.docker.compose.project"] === "string" &&
+      SHA256_HEX.test(value.labelsSha256["com.docker.compose.project"]) &&
+      typeof value.labelsSha256["com.docker.compose.volume"] === "string" &&
+      SHA256_HEX.test(value.labelsSha256["com.docker.compose.volume"])
     )
   ) {
     return invalid(path, "a volume record in manifest.json is malformed");
@@ -63,13 +67,11 @@ function verifiedVolume(path: string, value: unknown): DataBackupVolume {
     key: value.key,
     nameSha256: value.nameSha256,
     driver: value.driver,
-    labels: {
-      "com.docker.compose.project": String(
-        value.labels["com.docker.compose.project"]
-      ),
-      "com.docker.compose.volume": String(
-        value.labels["com.docker.compose.volume"]
-      ),
+    labelsSha256: {
+      "com.docker.compose.project":
+        value.labelsSha256["com.docker.compose.project"],
+      "com.docker.compose.volume":
+        value.labelsSha256["com.docker.compose.volume"],
     },
     file: value.file,
     tarBytes: value.tarBytes,
@@ -91,8 +93,8 @@ export function parseDataBackupManifest(
       value.schema === DATA_BACKUP_SCHEMA &&
       typeof value.project === "string" &&
       (value.branch === null || typeof value.branch === "string") &&
-      typeof value.composeProject === "string" &&
-      DATA_BACKUP_VOLUME_NAME.test(value.composeProject) &&
+      typeof value.composeProjectSha256 === "string" &&
+      SHA256_HEX.test(value.composeProjectSha256) &&
       typeof value.createdAt === "string" &&
       typeof value.hackVersion === "string" &&
       typeof value.helperImage === "string" &&
@@ -114,7 +116,7 @@ export function parseDataBackupManifest(
     schema: DATA_BACKUP_SCHEMA,
     project: value.project,
     branch: value.branch,
-    composeProject: value.composeProject,
+    composeProjectSha256: value.composeProjectSha256,
     createdAt: value.createdAt,
     hackVersion: value.hackVersion,
     helperImage: value.helperImage,

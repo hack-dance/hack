@@ -70,7 +70,10 @@ async function writeBackup(opts: {
       key,
       nameSha256: sha(`${composeProject}_${key}`),
       driver: "local",
-      labels: OWNED(key, composeProject),
+      labelsSha256: {
+        "com.docker.compose.project": sha(composeProject),
+        "com.docker.compose.volume": sha(key),
+      },
       file: `${key}.tar`,
       tarBytes: bytes.length,
       tarSha256: sha(bytes),
@@ -86,7 +89,7 @@ async function writeBackup(opts: {
         schema: "hack.data-backup.v1",
         project: composeProject,
         branch: null,
-        composeProject,
+        composeProjectSha256: sha(composeProject),
         createdAt: "2026-11-24T09:00:00.000Z",
         hackVersion: "9.9.9",
         helperImage: "oven/bun@sha256:x",
@@ -114,6 +117,8 @@ function input(
     docker: fake.docker(),
     composeArgs: COMPOSE,
     backupPath,
+    project: PROJECT,
+    branch: null,
     hackHome: join(root, "home"),
     now: () => NOW,
     deadlines: DEADLINES,
@@ -217,8 +222,8 @@ describe("backup verification runs before any effect", () => {
     const result = await importProjectData(
       input(fake, dir, { fromProject: "shop-old" })
     );
-    expect(result.sourceComposeProject).toBe("shop-old");
-    expect(result.composeProject).toBe(PROJECT);
+    expect(result.sourceProject).toBe("shop-old");
+    expect(result.project).toBe(PROJECT);
     expect(result.volumes.map((volume) => volume.key)).toEqual(["db"]);
     expect(fake.volumes.get("shop_db")?.content).toBe("rows-db");
   });
@@ -251,8 +256,10 @@ describe("targets", () => {
     expect(result).toEqual({
       backup: dir,
       backupId: id,
-      sourceComposeProject: PROJECT,
-      composeProject: PROJECT,
+      sourceProject: PROJECT,
+      sourceBranch: null,
+      project: PROJECT,
+      branch: null,
       volumes: [
         {
           key: "db",
@@ -278,8 +285,13 @@ describe("targets", () => {
     expect(fake.calls.some((argv) => argv.includes("team-shared"))).toBeFalse();
     expect((await journal("db"))?.state).toBe("complete");
     // The extract runs in one held, logless, network-less helper, read-write.
-    const create = fake.calls.find((argv) => argv[1] === "create") ?? [];
-    expect(create[create.indexOf("--volume") + 1]).toBe("shop_db:/v");
+    const create =
+      fake.calls.find(
+        (argv) => argv[1] === "create" && argv.includes("--mount")
+      ) ?? [];
+    expect(create[create.indexOf("--mount") + 1]).toBe(
+      "type=bind,src=/var/lib/docker/volumes/shop_db/_data,dst=/v"
+    );
     expect(create[create.indexOf("--log-driver") + 1]).toBe("none");
     expect(create[create.indexOf("--network") + 1]).toBe("none");
     const tar = fake.calls.find((argv) => argv.includes("-xpf")) ?? [];

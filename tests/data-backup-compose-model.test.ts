@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dataComposeArgs } from "../src/commands/data.ts";
+import { resolveComposeRuntimeModel } from "../src/commands/project.ts";
 import { createHostDataBackupDocker } from "../src/lib/data-backup-docker.ts";
 import { parseJsonText } from "../src/lib/data-backup-helper.ts";
 import { planDeclaredVolumes } from "../src/lib/data-backup-volumes.ts";
+import { findProjectContextAtRoot } from "../src/lib/project.ts";
+import { upsertProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
 import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 /**
@@ -26,10 +29,18 @@ const composeAvailable = (() => {
 })();
 
 let root: string;
+let hackHome: string | undefined;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "hack-data-model-"));
+  hackHome = process.env.HACK_HOME;
+  process.env.HACK_HOME = join(root, "hack-home");
 });
 afterEach(async () => {
+  if (hackHome === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_HOME");
+  } else {
+    process.env.HACK_HOME = hackHome;
+  }
   await rm(root, { recursive: true, force: true });
 });
 
@@ -120,5 +131,83 @@ test.skipIf(!composeAvailable)(
       ["data", "shop_data-managed"],
       ["jobs", "shop_jobs"],
     ]);
+  }
+);
+
+async function envProject(): Promise<string> {
+  const projectRoot = join(root, "repo");
+  const projectDir = join(projectRoot, ".hack");
+  await mkdir(join(projectDir, ".internal"), { recursive: true });
+  await writeFile(
+    join(projectDir, "docker-compose.yml"),
+    [
+      "name: shop",
+      "services:",
+      "  db:",
+      "    image: busybox",
+      "    volumes: [data:/data]",
+      "volumes:",
+      "  data:",
+      "    name: shop_data-${VOL_SUFFIX}",
+      "",
+    ].join("\n")
+  );
+  for (const [env, suffix] of [
+    ["default", "base"],
+    ["staging", "staging"],
+  ] as const) {
+    await writeFile(
+      join(projectDir, `hack.env.${env}.yaml`),
+      [
+        "version: 1",
+        `environment: ${env}`,
+        "secretsprovider: project_key",
+        "values:",
+        "  global:",
+        `    VOL_SUFFIX: "${suffix}"`,
+        "",
+      ].join("\n")
+    );
+  }
+  return projectRoot;
+}
+
+test.skipIf(!composeAvailable)(
+  "without --env, the model uses the selection the instance was started with",
+  async () => {
+    const projectRoot = await envProject();
+    const project = await findProjectContextAtRoot({
+      projectRoot,
+      projectDirName: ".hack",
+    });
+    if (!project) {
+      throw new Error("expected the fixture project");
+    }
+    await upsertProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      entry: {
+        composeProject: "shop",
+        envName: "staging",
+        updatedAt: "2026-11-24T00:00:00.000Z",
+      },
+    });
+    const volumeName = async (envName: string | undefined) => {
+      const model = await resolveComposeRuntimeModel({
+        project,
+        branch: null,
+        envName,
+      });
+      const config = await createHostDataBackupDocker({
+        env: model.env,
+        cwd: model.cwd,
+      }).capture([...dataComposeArgs(model), "config", "--format", "json"]);
+      expect(config.exitCode).toBe(0);
+      return planDeclaredVolumes(parseJsonText(config.stdout)).declared[0]
+        ?.name;
+    };
+    // Recorded `staging`, as `hack down` would use it.
+    expect(await volumeName(undefined)).toBe("shop_data-staging");
+    // An explicit selection still wins.
+    expect(await volumeName("default")).toBe("shop_data-base");
   }
 );

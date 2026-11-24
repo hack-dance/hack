@@ -43,7 +43,7 @@ if (args[0] === "events") {
 } else if (args[0] === "create") {
   out("c".repeat(64));
 } else if (args[0] === "container" && args.includes("{{json .Mounts}}")) {
-  out([{ Type: "volume", Name: "shop_db", Source: "/var/lib/docker/volumes/shop_db/_data", Destination: "/v", RW: false }]);
+  out([{ Type: "bind", Source: "/var/lib/docker/volumes/shop_db/_data", Destination: "/v", RW: false }]);
 } else if (args[0] === "container") {
   process.stderr.write("Error: No such container: " + args.at(-1) + "\\n");
   process.exit(1);
@@ -108,7 +108,6 @@ test("a managed DOCKER_HOST reaches every docker argv of an export", async () =>
       "volume inspect",
       "ps",
       "events",
-      "run",
       "create",
       "start",
       "container inspect",

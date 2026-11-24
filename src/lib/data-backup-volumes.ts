@@ -238,6 +238,19 @@ export function sameVolumeIdentity(
   );
 }
 
+/**
+ * Whether an inspected volume is a plain `local` volume (no driver options),
+ * whose data is its Mountpoint directory. A local volume with options (an
+ * NFS or bind mount, say) is only mounted there while a container uses it
+ * by name, so binding its Mountpoint would read an empty directory.
+ */
+export function plainLocalInspected(volume: InspectedVolume): boolean {
+  return (
+    volume.driver === "local" &&
+    (volume.options === "null" || volume.options === "{}")
+  );
+}
+
 /** Whether Compose's own labels name this project and key. */
 export function composeOwnsVolume(opts: {
   readonly volume: InspectedVolume;

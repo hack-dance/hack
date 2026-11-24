@@ -30,18 +30,24 @@ import {
 import { isRecord } from "./guards.ts";
 
 const NO_SUCH_CONTAINER = /no such (container|object)/i;
+/** Docker's refusal of a bind whose source path does not exist. */
+const MISSING_BIND =
+  /bind source path does not exist|no such file or directory/i;
 
 /**
  * One volume bound to one retained reference. A single helper container is
- * created with the volume mounted at `/v` and kept running (`sleep
- * infinity`); every read or write of that volume runs in it through
- * `docker exec`, so all of them use the same mount. Mounting by name in
- * separate containers could silently use a replacement volume, or have
- * Docker create an empty one, between steps.
+ * created with the volume's inspected `Mountpoint` bind-mounted at `/v`
+ * and kept running (`sleep infinity`); every read or write of that volume
+ * runs in it through `docker exec`, so all of them use the same mount. The
+ * volume is never mounted by name: Docker creates a missing named volume
+ * when a container mounts it, while a bind of a missing path fails, so a
+ * volume removed after validation refuses and nothing is created. Only
+ * plain `local` volumes (no driver options) qualify: their data is the
+ * Mountpoint directory itself.
  *
  * Once the container holds the mount, the volume is inspected again and must
  * match the validated identity (CreatedAt, driver, mountpoint, options and
- * Compose labels), and the container's own mount must name it. The helper
+ * Compose labels), and the container's mount must be that directory. The helper
  * runs with no network, no logging, a read-only root, no privilege gain and
  * the pinned image.
  */
@@ -79,8 +85,8 @@ export type HoldVolumeOptions = {
   readonly volume: string;
   /** The Compose key, used in messages. */
   readonly label: string;
-  /** The inspection validated before; null when the caller verifies itself. */
-  readonly identity: InspectedVolume | null;
+  /** The validated inspection: its Mountpoint is bound, its identity rechecked. */
+  readonly identity: InspectedVolume;
   readonly readOnly: boolean;
   readonly purpose: HelperPurpose;
   readonly deadlines: DataBackupDeadlines;
@@ -143,7 +149,6 @@ export function requireStep<T extends { readonly exitCode: number }>(opts: {
 
 function heldMountMatches(opts: {
   readonly stdout: string;
-  readonly volume: string;
   readonly mountpoint: string;
   readonly readOnly: boolean;
 }): boolean {
@@ -154,8 +159,7 @@ function heldMountMatches(opts: {
   const mount: unknown = mounts[0];
   return (
     isRecord(mount) &&
-    mount.Type === "volume" &&
-    mount.Name === opts.volume &&
+    mount.Type === "bind" &&
     mount.Destination === "/v" &&
     mount.Source === opts.mountpoint &&
     mount.RW === !opts.readOnly
@@ -219,7 +223,17 @@ function withUnconfirmedCleanup(
       },
     });
   }
-  return failure;
+  // An unclassified failure (an EIO on the tar write, say) keeps the
+  // container name and cleanup status too.
+  const reason =
+    failure instanceof Error && failure.message
+      ? failure.message
+      : String(failure);
+  return new HackCliError({
+    code: "E_UNEXPECTED",
+    message: `The data command failed (${reason}); nothing was published. ${note}`,
+    detail: { cleanup },
+  });
 }
 
 async function holdVolume(
@@ -247,8 +261,8 @@ async function holdVolume(
       "/tmp",
       "--env",
       "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
-      "--volume",
-      `${opts.volume}:/v${opts.readOnly ? ":ro" : ""}`,
+      "--mount",
+      `type=bind,src=${opts.identity.mountpoint},dst=/v${opts.readOnly ? ",readonly" : ""}`,
       "--entrypoint",
       "sleep",
       dataBackupHelperImage(),
@@ -257,14 +271,20 @@ async function holdVolume(
     // Creating may pull the pinned image once.
     { timeoutMs: deadlines.stepMs }
   );
+  // A bind of a path that is gone fails instead of creating anything: the
+  // volume was removed after validation.
   if (created.exitCode !== 0) {
-    throw dockerReadError({ result: created, command: "docker create" });
+    throw MISSING_BIND.test(created.stderr)
+      ? opts.changed()
+      : dockerReadError({ result: created, command: "docker create" });
   }
   const started = await docker.capture(["docker", "start", container], {
     timeoutMs: deadlines.commandMs,
   });
   if (started.exitCode !== 0) {
-    throw dockerReadError({ result: started, command: "docker start" });
+    throw MISSING_BIND.test(started.stderr)
+      ? opts.changed()
+      : dockerReadError({ result: started, command: "docker start" });
   }
   // The container holds the mount now: the volume it holds must be the one
   // validated, unchanged.
@@ -282,11 +302,10 @@ async function holdVolume(
   );
   if (
     now === null ||
-    (opts.identity !== null && !sameVolumeIdentity(opts.identity, now)) ||
+    !sameVolumeIdentity(opts.identity, now) ||
     mounts.exitCode !== 0 ||
     !heldMountMatches({
       stdout: mounts.stdout,
-      volume: opts.volume,
       mountpoint: now.mountpoint,
       readOnly: opts.readOnly,
     })
@@ -340,24 +359,29 @@ async function holdVolume(
 }
 
 /**
- * Hold `opts.volume` in one helper container, run `work` against it, and
- * remove the container on every path. Removal is confirmed with Docker; an
- * unconfirmed removal is added to the outcome (`detail.cleanup`) and turns a
- * success into a refusal, never a silent claim of cleanup.
+ * Run `work` with a container this run owns, named `container`, and remove
+ * it on every path: the name is registered first (so the signal cleanup and
+ * the mount monitor know it, even if `work` fails halfway through creating
+ * it), and removal is confirmed with Docker. An unconfirmed removal is added
+ * to the outcome (`detail.cleanup`) and turns a success into a refusal,
+ * never a silent claim of cleanup.
  */
-export async function withHeldVolume<T>(
-  opts: HoldVolumeOptions,
-  work: (held: HeldVolume) => Promise<T>
+export async function withTrackedContainer<T>(
+  opts: {
+    readonly docker: DataBackupDocker;
+    readonly container: string;
+    readonly deadlines: DataBackupDeadlines;
+    readonly helperNames: Set<string>;
+  },
+  work: () => Promise<T>
 ): Promise<T> {
-  // Named and registered before `docker create`, so a create or start that
-  // failed halfway is removed too, and the mount monitor knows the name.
-  const container = helperContainerName(opts.purpose);
+  const { container } = opts;
   opts.helperNames.add(container);
   let failure: unknown;
   let value: T | undefined;
   let ok = false;
   try {
-    value = await work(await holdVolume({ ...opts, container }));
+    value = await work();
     ok = true;
   } catch (error: unknown) {
     failure = error;
@@ -374,4 +398,18 @@ export async function withHeldVolume<T>(
     throw failure;
   }
   return value as T;
+}
+
+/**
+ * Hold `opts.volume` in one helper container, run `work` against it, and
+ * remove the container on every path (see {@link withTrackedContainer}).
+ */
+export async function withHeldVolume<T>(
+  opts: HoldVolumeOptions,
+  work: (held: HeldVolume) => Promise<T>
+): Promise<T> {
+  const container = helperContainerName(opts.purpose);
+  return await withTrackedContainer({ ...opts, container }, async () =>
+    work(await holdVolume({ ...opts, container }))
+  );
 }

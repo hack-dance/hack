@@ -14,7 +14,10 @@ hack data import <backup> --from-project shop   # into a branch or renamed proje
 ```
 
 `--path`, `--project`, `--branch` and `--env` select the project, instance
-and env overlay like other project commands. Every Docker call (Compose, the
+and env overlay like other project commands. Without `--env`, the env
+selection the instance was last started with is used, as `hack down` does
+(else the configured default), so a volume name or engine that depends on
+that overlay resolves as it did at startup. Every Docker call (Compose, the
 volume and container reads and the helper runs) gets the same managed Compose
 env `hack up` gives the project, so a project that selects its engine with a
 managed `DOCKER_HOST` or `DOCKER_CONTEXT` is read on that engine. The command
@@ -53,9 +56,11 @@ with `hack down` and retry. Hack never stops anything for an export.
 Before its first check, the export subscribes to Docker's live event
 stream (`docker events`, volume `mount` and container `start` events, with no
 `--since`, so nothing depends on the engine's short event history). It proves
-the subscription live by running a no-op marker container
-(`hack-data-export-<random>-start`) and waiting for that container's start
-event; only then does it check for running containers and copy. Every helper
+the subscription live by creating and starting a no-op marker container
+(`hack-data-export-<random>-start`, no network, no logging) and waiting for
+that container's start event. Markers are tracked like the volume helpers:
+their create and start are bounded by `HACK_DATA_COMMAND_TIMEOUT_MS`, and
+each is removed and its removal confirmed on every path, a signal included; only then does it check for running containers and copy. Every helper
 runs under a unique name (`hack-data-export-<random>`), so its own mounts are
 told apart from anything else's. After the last copy it lists running
 containers again, runs an end marker and waits for its start event (the
@@ -82,18 +87,32 @@ creates it from the image the storage witness already pins
 (`oven/bun@sha256:1846adf2…`) with a unique name
 (`hack-data-export-<random>`), `--network none`, `--log-driver none` (the raw
 tar crosses the container's attached output, and a daemon's central logging
-driver must never receive volume bytes), a read-only root filesystem,
-`no-new-privileges` and the volume mounted read-only at `/v`, running `sleep
-infinity`. Docker pulls the image digest once if it is not cached.
+driver must never receive volume bytes), a read-only root filesystem and
+`no-new-privileges`, running `sleep infinity`. Docker pulls the image digest
+once if it is not cached.
 
-Once the container holds the mount, Hack inspects the volume again and
+The helper never mounts the volume by name. Docker creates a missing named
+volume whenever a container mounts it, so mounting by name could leave an
+empty volume behind if the validated one was removed meanwhile. Instead the
+helper bind-mounts the volume's inspected `Mountpoint` read-only at `/v`
+(`--mount type=bind,src=<Mountpoint>,dst=/v,readonly`); a bind of a path
+that is gone fails, so a volume removed after validation refuses with
+`E_PROJECT_RUNNING` (`detail.reason: volume_changed`, "nothing was created")
+and nothing is created. This reads only plain `local` volumes, whose data
+is that directory: a volume with another driver, or a local volume with
+driver options (an NFS or bind mount, which is only mounted while a
+container uses it by name), refuses the export before any hold with
+`E_CONFIG_INVALID` (`detail.reason: unsupported_driver`).
+
+Once the container holds the bind, Hack inspects the volume again and
 requires the identity it validated before: the same `CreatedAt`, driver,
-mountpoint, options and Compose labels, and the container's own mount must
-name that volume. A volume that was removed, replaced or relabeled in
-between refuses with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`)
-and is not read. Docker creates a volume that is missing when a container
-mounts it, so a volume removed in that gap may be left recreated, empty and
-unlabelled.
+mountpoint, options and Compose labels, and the container's mount must be
+that directory. A volume replaced or relabeled in between refuses the same
+way and is not read.
+
+On Docker Desktop and OrbStack the daemon runs in a VM, and the
+`Mountpoint` is a path inside that VM; the daemon resolves the bind there.
+That has not been checked on macOS yet.
 
 Every read then runs in that container through `docker exec`, so all of them
 use the same mount:
@@ -178,10 +197,24 @@ the service recreates when it starts.
 
 ## Redaction
 
-A resolved Docker volume name can carry interpolated env values (for example
-`name: app-${TOKEN}`). The manifest, the `--json` output, the text summary and
-error messages name volumes by Compose key only; the manifest keeps a sha256
-of the resolved name so a restore can tell whether it changed.
+Compose resolves names with interpolated env values: a volume's `name:`
+(`app-${TOKEN}`) and the top-level project `name:` (`${STORAGE_TOKEN}`), which
+Docker then copies into every container name and ownership label. No such
+resolved value is written or printed:
+
+- volumes are named by Compose key in the manifest, the `--json` output, the
+  text summary and error messages; the manifest keeps `nameSha256`, the
+  sha256 of the resolved Docker name;
+- the manifest keeps `composeProjectSha256` instead of the Compose project
+  name, and `labelsSha256` (the sha256 of each ownership label value)
+  instead of the labels;
+- the default backup path is named after Hack's project name
+  (`hack.config.json` `name`, else the checkout directory) and the branch
+  slug, never the Compose project;
+- container names in refusals (`detail.running`, `detail.mounts[].name`)
+  have the resolved Compose project name replaced by `<compose project>`.
+
+A restore compares these hashes instead of the values.
 
 ## Format
 
@@ -191,18 +224,19 @@ of the resolved name so a restore can tell whether it changed.
   <key>.tar                        one per copied volume
 ```
 
-The default parent is `$HACK_HOME/data-backups/<compose project>` (Hack's home
-is `~/.hack` unless `HACK_HOME` is set). `--out <dir>` replaces the parent.
+The default parent is `$HACK_HOME/data-backups/<hack project>` for the default
+instance and `$HACK_HOME/data-backups/<hack project>--<branch>` for a branch
+instance (Hack's home is `~/.hack` unless `HACK_HOME` is set). `--out <dir>` replaces the parent.
 Directories and files are created private to your user (0700 and 0600).
 
 `manifest.json` (schema `hack.data-backup.v1`):
 
 | Field | Meaning |
 | --- | --- |
-| `project`, `branch`, `composeProject` | Hack project name, branch slug or null, Compose project name |
+| `project`, `branch`, `composeProjectSha256` | Hack project name, branch slug or null, sha256 of the resolved Compose project name |
 | `createdAt` | UTC start time, ISO 8601 |
 | `hackVersion`, `helperImage`, `digestAlgorithm` | Version that wrote it, pinned helper reference, `hack.tree-digest.v1` |
-| `volumes[]` | `key`, `nameSha256` (sha256 of the Docker volume name, never the name itself), `driver`, the two ownership `labels`, `file`, `tarBytes`, `tarSha256`, `entries` (the root included, sockets not), `excludedSockets`, `contentDigest` |
+| `volumes[]` | `key`, `nameSha256` (sha256 of the Docker volume name, never the name itself), `driver`, `labelsSha256` (sha256 of the two ownership label values), `file`, `tarBytes`, `tarSha256`, `entries` (the root included, sockets not), `excludedSockets`, `contentDigest` |
 | `skipped[]` | `key` and `reason`: `external`, `foreign` or `absent` |
 
 `--json` prints the standard envelope with `data.schema` `hack.data-export.v1`,

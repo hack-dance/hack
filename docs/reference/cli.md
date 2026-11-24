@@ -1185,7 +1185,7 @@ Copies each declared, non-external named volume that Docker labels as this proje
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
-| `--out <dir>` | Parent directory for the backup (default: $HACK_HOME/data-backups/<compose project>) |
+| `--out <dir>` | Parent directory for the backup (default: $HACK_HOME/data-backups/<hack project>[--<branch>]) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -1217,7 +1217,7 @@ Verifies the backup (manifest, tar sizes and sha256), then restores each backed-
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
-| `--from-project <compose project>` | Restore a backup taken from another Compose project (a branch instance or a renamed project); must equal the backup's compose project |
+| `--from-project <hack project>` | Restore a backup taken from another instance or project (a branch instance or a renamed project): the backup's Hack project name |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

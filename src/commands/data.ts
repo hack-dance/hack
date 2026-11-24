@@ -12,7 +12,6 @@ import {
   optProject,
 } from "../cli/options.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
-import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { resolveDataBackupDeadlines } from "../lib/data-backup-deadlines.ts";
 import { createHostDataBackupDocker } from "../lib/data-backup-docker.ts";
@@ -27,7 +26,7 @@ import {
 import { HACK_VERSION } from "../lib/hack-version.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { scopedHackCommand } from "../lib/printed-shell-command.ts";
-import { readProjectConfig } from "../lib/project.ts";
+import { resolveEffectiveProjectName } from "../lib/project.ts";
 import {
   type ComposeRuntimeModel,
   resolveComposeRuntimeModel,
@@ -41,7 +40,7 @@ const optOut = defineOption({
   long: "--out",
   valueHint: "<dir>",
   description:
-    "Parent directory for the backup (default: $HACK_HOME/data-backups/<compose project>)",
+    "Parent directory for the backup (default: $HACK_HOME/data-backups/<hack project>[--<branch>])",
 } as const);
 
 const exportSpec = defineCommand({
@@ -59,9 +58,9 @@ const optFromProject = defineOption({
   name: "fromProject",
   type: "string",
   long: "--from-project",
-  valueHint: "<compose project>",
+  valueHint: "<hack project>",
   description:
-    "Restore a backup taken from another Compose project (a branch instance or a renamed project); must equal the backup's compose project",
+    "Restore a backup taken from another instance or project (a branch instance or a renamed project): the backup's Hack project name",
 } as const);
 
 const importSpec = defineCommand({
@@ -133,10 +132,9 @@ async function resolveDataContext(opts: {
     branchOption: opts.options.branch,
     noticeToStderr: opts.options.json === true,
   });
-  const base = await resolveComposeProjectName({
-    project,
-    cfg: await readProjectConfig(project),
-  });
+  // Hack's project name (hack.config.json `name`, else the checkout): never
+  // the resolved Compose project name, which can carry interpolated values.
+  const projectName = await resolveEffectiveProjectName(project);
   // Refuse a malformed deadline override before anything runs.
   const deadlines = resolveDataBackupDeadlines();
   // Exactly the Compose invocation `hack up` builds for this instance (files,
@@ -149,7 +147,7 @@ async function resolveDataContext(opts: {
     envName: resolveRequestedEnvName({ envOption: opts.options.env }),
   });
   return {
-    base,
+    projectName,
     branch,
     deadlines,
     docker: createHostDataBackupDocker({
@@ -181,7 +179,7 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
     docker: context.docker,
     deadlines: context.deadlines,
     composeArgs: context.composeArgs,
-    project: context.base,
+    project: context.projectName,
     branch: context.branch,
     hackHome: context.hackHome,
     outDir:
@@ -217,6 +215,8 @@ const handleImport: CommandHandlerFor<typeof importSpec> = async ({
     docker: context.docker,
     deadlines: context.deadlines,
     composeArgs: context.composeArgs,
+    project: context.projectName,
+    branch: context.branch,
     backupPath: resolve(ctx.cwd, args.positionals.backupDir),
     fromProject: args.options.fromProject,
     hackHome: context.hackHome,

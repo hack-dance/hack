@@ -5,6 +5,7 @@ import {
   resolveDataBackupDeadlines,
 } from "./data-backup-deadlines.ts";
 import type { DataBackupDocker } from "./data-backup-docker.ts";
+import { redactComposeProject } from "./data-backup-export.ts";
 import {
   type DataBackupVolume,
   dataBackupNameSha256,
@@ -51,7 +52,13 @@ export type DataImportInput = {
   /** The instance's Compose argv, as `hack up` builds it (see dataComposeArgs). */
   readonly composeArgs: readonly string[];
   readonly backupPath: string;
-  /** Required when the backup's Compose project or a volume's name differs. */
+  /** This instance's Hack project name and branch slug (never Compose names). */
+  readonly project: string;
+  readonly branch: string | null;
+  /**
+   * The Hack project name the backup was taken from; required when the
+   * backup is from another instance or project, or a volume's name differs.
+   */
   readonly fromProject?: string;
   readonly hackHome: string;
   readonly now?: () => Date;
@@ -91,8 +98,12 @@ export type DataImportSkipped = {
 export type DataImportResult = {
   readonly backup: string;
   readonly backupId: string;
-  readonly sourceComposeProject: string;
-  readonly composeProject: string;
+  /** The Hack project and branch the backup was taken from. */
+  readonly sourceProject: string;
+  readonly sourceBranch: string | null;
+  /** This instance's Hack project and branch. */
+  readonly project: string;
+  readonly branch: string | null;
   readonly volumes: readonly DataImportVolume[];
   readonly skipped: readonly DataImportSkipped[];
 };
@@ -166,12 +177,12 @@ export async function importProjectData(
     throw dockerReadError({ result: config, command: "docker compose config" });
   }
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
-  requireSourceProject({ backup, plan, fromProject: input.fromProject });
+  requireSourceProject({ backup, plan, input });
   const { selected, skipped } = selectTargets({ backup, plan });
-  requireSameNames({ selected, fromProject: input.fromProject, plan });
+  requireSameNames({ selected, input });
   return await withDataImportLock({
     hackHome: input.hackHome,
-    composeProject: plan.composeProject,
+    composeProject: instanceDir(input),
     timeoutMs: input.lockTimeoutMs,
     run: async () => {
       const helperNames = new Set<string>();
@@ -180,6 +191,7 @@ export async function importProjectData(
         docker: input.docker,
         purpose: "import",
         helperNames,
+        deadlines,
         markerTimeoutMs: input.markerTimeoutMs,
       });
       try {
@@ -198,8 +210,10 @@ export async function importProjectData(
         return {
           backup: backup.path,
           backupId: backup.id,
-          sourceComposeProject: backup.manifest.composeProject,
-          composeProject: plan.composeProject,
+          sourceProject: backup.manifest.project,
+          sourceBranch: backup.manifest.branch,
+          project: input.project,
+          branch: input.branch,
           volumes,
           skipped,
         };
@@ -218,12 +232,14 @@ async function importWithin(
   const { input, plan } = context;
   const stopCommand = input.downCommand ?? "hack down";
   const volumeNames = selected.map((entry) => entry.name);
+  const redact = redactComposeProject(plan.composeProject);
   await refuseRunning({
     docker: input.docker,
     composeProject: plan.composeProject,
     volumeNames,
     stopCommand,
     command: "import",
+    redact,
     lead: "The project is running, so its volumes cannot be restored safely; nothing was changed.",
   });
   const targets = await prepareTargets(context, selected);
@@ -244,6 +260,7 @@ async function importWithin(
     volumeNames,
     stopCommand,
     command: "import",
+    redact,
     lead: "A container started during the import, so the restore is not marked complete; rerunning hack data import after stopping it replaces its own copy.",
   });
   // Stop and drain the subscription, then decide.
@@ -253,6 +270,7 @@ async function importWithin(
   const mounts = (await monitor.finish(volumeNames)).map((mount) => ({
     ...mount,
     volume: keyOf.get(mount.volume) ?? mount.volume,
+    name: mount.name === null ? null : redact(mount.name),
   }));
   if (mounts.length > 0) {
     throw foreignMountError({
@@ -271,25 +289,44 @@ async function importWithin(
   return volumes;
 }
 
+/** `<hack project>[--<branch>]`: names this instance in Hack's own state. */
+function instanceDir(opts: {
+  readonly project: string;
+  readonly branch: string | null;
+}): string {
+  return opts.branch ? `${opts.project}--${opts.branch}` : opts.project;
+}
+
+/**
+ * The backup must be from this instance: its Compose project hash equals
+ * this instance's. Restoring into a branch instance or another project needs
+ * `--from-project` naming the backup's Hack project name. Messages name Hack
+ * projects and branches only, never the resolved Compose project.
+ */
 function requireSourceProject(opts: {
   readonly backup: VerifiedBackup;
   readonly plan: DeclaredVolumePlan;
-  readonly fromProject: string | undefined;
+  readonly input: DataImportInput;
 }): void {
-  const source = opts.backup.manifest.composeProject;
-  if (opts.fromProject !== undefined) {
-    if (opts.fromProject !== source) {
+  const { manifest } = opts.backup;
+  const source = instanceDir(manifest);
+  const fromProject = opts.input.fromProject;
+  if (fromProject !== undefined) {
+    if (fromProject !== manifest.project) {
       throw new HackCliError({
         code: "E_USAGE",
-        message: `--from-project ${opts.fromProject} does not match the backup, which is from Compose project ${source}. Nothing was changed.`,
+        message: `--from-project ${fromProject} does not match the backup, which is from Hack project ${manifest.project}. Nothing was changed.`,
       });
     }
     return;
   }
-  if (source !== opts.plan.composeProject) {
+  if (
+    manifest.composeProjectSha256 !==
+    dataBackupNameSha256(opts.plan.composeProject)
+  ) {
     throw new HackCliError({
       code: "E_USAGE",
-      message: `The backup is from Compose project ${source}, and this project is ${opts.plan.composeProject}. To restore it here (into a branch instance or a renamed project), rerun with --from-project ${source}. Nothing was changed.`,
+      message: `The backup is from ${source}, and this instance is ${instanceDir(opts.input)}. To restore it here (into a branch instance or a renamed project), rerun with --from-project ${manifest.project}. Nothing was changed.`,
     });
   }
 }
@@ -329,10 +366,9 @@ function selectTargets(opts: {
  */
 function requireSameNames(opts: {
   readonly selected: readonly SelectedTarget[];
-  readonly fromProject: string | undefined;
-  readonly plan: DeclaredVolumePlan;
+  readonly input: DataImportInput;
 }): void {
-  if (opts.fromProject !== undefined) {
+  if (opts.input.fromProject !== undefined) {
     return;
   }
   const changed = opts.selected
@@ -343,7 +379,7 @@ function requireSameNames(opts: {
   if (changed.length > 0) {
     throw new HackCliError({
       code: "E_USAGE",
-      message: `The Docker volume name for ${changed.join(", ")} differs from the one the backup was taken from. To restore under the current name, rerun with --from-project ${opts.plan.composeProject}. Nothing was changed.`,
+      message: `The Docker volume name for ${changed.join(", ")} differs from the one the backup was taken from. To restore under the current name, rerun with --from-project ${opts.input.project}. Nothing was changed.`,
       detail: { keys: changed },
     });
   }
@@ -444,7 +480,7 @@ async function classifyTarget(
   }
   const journalPath = dataImportJournalPath({
     hackHome: context.input.hackHome,
-    composeProject: context.plan.composeProject,
+    composeProject: instanceDir(context.input),
     key,
   });
   const inspected = await inspectVolume({
@@ -631,6 +667,9 @@ async function restoreTarget(
     target.kind === "created"
       ? await createTarget(context, target, composeVersion)
       : target.identity;
+  if (identity === null) {
+    throw changedTarget(key)();
+  }
   const recoverable = target.kind !== "empty";
   const partialNote = recoverable
     ? `the volume for ${key} may hold a partial copy; rerunning hack data import replaces it.`

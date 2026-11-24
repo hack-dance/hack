@@ -228,8 +228,8 @@ describe("exportProjectData", () => {
     expect(
       references(fake).map((argv) => argv[argv.indexOf("--mount") + 1])
     ).toEqual([
-      "type=volume,src=custom-cache,dst=/v,volume-nocopy",
-      "type=volume,src=shop_db,dst=/v,volume-nocopy",
+      "type=volume,src=custom-cache,dst=/v,volume-nocopy,volume-driver=local,volume-opt=type=none",
+      "type=volume,src=shop_db,dst=/v,volume-nocopy,volume-driver=local,volume-opt=type=none",
     ]);
     // Only owned volumes are held; external is never even inspected.
     expect(
@@ -609,9 +609,9 @@ describe("binding to the validated volume", () => {
     expect(fake.leftovers()).toEqual([]);
   });
 
-  test("a volume removed after validation is refused when the reference recreates it", async () => {
-    // Removed before Hack's reference exists: Docker creates a missing named
-    // volume for the reference container, so the identity no longer matches.
+  test("a volume removed after validation is refused at its reference and never recreated", async () => {
+    // Removed before Hack's reference exists: the reference's driver options
+    // make Docker refuse a missing name instead of creating it.
     const fake = engine({ only: "db" });
     let removed = false;
     fake.onPs = () => {
@@ -623,11 +623,32 @@ describe("binding to the validated volume", () => {
     const error = await caught(exportProjectData(input(fake)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
-    expect(error.message).toContain("before Hack could take a reference");
-    // Nothing was read: no bind hold ran.
+    expect(error.message).toContain("nothing was created");
+    // Nothing was read and no volume exists under the name: read-only.
     expect(creates(fake)).toEqual([]);
-    // Docker's auto-created volume is left in place: Hack never removes one.
-    expect(fake.volumes.get("shop_db")?.content).toBe("");
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+    expect(
+      fake.calls.some((argv) => argv[1] === "volume" && argv[2] !== "inspect")
+    ).toBeFalse();
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a volume replaced under its name before its reference is referenced, refused and kept", async () => {
+    // Not ours: a different volume now carries the name. Hack refuses and
+    // never removes it.
+    const fake = engine({ only: "db" });
+    let replaced = false;
+    fake.onPs = () => {
+      if (!replaced) {
+        replaced = true;
+        fake.removeVolume("shop_db");
+        fake.volume("shop_db", owned("db", "someone-elses"));
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(creates(fake)).toEqual([]);
+    expect(fake.volumes.get("shop_db")?.content).toBe("someone-elses");
     expect(fake.leftovers()).toEqual([]);
   });
 
@@ -1771,5 +1792,94 @@ describe("default backup names within one second", () => {
     );
     expect(conflict.code).toBe("E_PATH_CONFLICT");
     expect(await readdir(out)).toEqual(["20261123T140501Z"]);
+  });
+});
+
+describe("a create whose outcome cannot be reconciled is reported, not hidden", () => {
+  /**
+   * Docker accepts the matching create, but its response is lost (the
+   * client times out) and the lookup by name and nonce fails too.
+   */
+  function lostCreate(
+    fake: FakeEngine,
+    matches: (argv: readonly string[]) => boolean,
+    lookupFails: boolean
+  ): DataBackupDocker {
+    const real = fake.docker();
+    let lost = false;
+    return {
+      ...real,
+      capture: async (argv, opts) => {
+        if (!lost && argv[1] === "create" && matches(argv)) {
+          lost = true;
+          await real.capture(argv, opts);
+          return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
+        }
+        if (
+          lookupFails &&
+          argv[2] === "inspect" &&
+          argv.some((arg) => arg.includes(".Config.Labels"))
+        ) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "error during connect: the engine stopped answering",
+          };
+        }
+        return await real.capture(argv, opts);
+      },
+    };
+  }
+
+  const kinds = {
+    hold: (argv: readonly string[]) =>
+      argv.some((arg) => arg.startsWith("type=bind,")),
+    reference: (argv: readonly string[]) =>
+      argv.some((arg) => arg.startsWith("type=volume,")),
+    marker: (argv: readonly string[]) => !argv.includes("--mount"),
+  } as const;
+
+  for (const [kind, matches] of Object.entries(kinds)) {
+    test(`an unreconciled ${kind} create gives the unknown cleanup outcome and its command`, async () => {
+      const fake = engine({ only: "db" });
+      const error = await caught(
+        exportProjectData({
+          ...input(fake, { outDir: join(root, kind) }),
+          docker: lostCreate(fake, matches, true),
+        })
+      );
+      // The container Docker made is still there, untracked.
+      const [left] = fake.leftovers();
+      const nonce =
+        fake.containers.get(left ?? "")?.labels["io.hack.data-backup.nonce"] ??
+        "";
+      expect(nonce).toMatch(/^[a-f0-9]{32}$/);
+      const label = `io.hack.data-backup.nonce=${nonce}`;
+      const command = `docker ps -aq --filter label=${label} | xargs -r docker rm -f`;
+      expect(error.detail).toMatchObject({
+        cleanup: {
+          container: null,
+          removed: false,
+          outcome: "unknown",
+          label,
+          command,
+        },
+      });
+      expect(error.message).toContain(command);
+      expect(error.message).toContain(label);
+    });
+  }
+
+  test("a lost reference create that the lookup recovers is cleaned up normally", async () => {
+    const fake = engine({ only: "db" });
+    const error = await caught(
+      exportProjectData({
+        ...input(fake),
+        docker: lostCreate(fake, kinds.reference, false),
+      })
+    );
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
+    expect(fake.leftovers()).toEqual([]);
   });
 });

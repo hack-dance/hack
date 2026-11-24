@@ -40,6 +40,12 @@ const CONTAINER_ID = /^[0-9a-f]{64}$/;
  * another container, an ID cannot.
  */
 const HELPER_NONCE_LABEL = "io.hack.data-backup.nonce";
+/**
+ * How the local driver refuses a reference to a missing volume (a `type`
+ * option without `device`): the volume was removed after validation.
+ */
+const MISSING_REFERENCED_VOLUME =
+  /missing required option: "?device"?|no such volume/i;
 /** Docker's refusal of a bind whose source path does not exist. */
 const MISSING_BIND =
   /bind source path does not exist|no such file or directory/i;
@@ -241,8 +247,47 @@ function withUnconfirmedCleanup(
   failure: unknown,
   released: HeldVolumeRelease
 ): unknown {
-  const note = `The helper container ${released.container} could not be confirmed removed and may still hold the volume; remove it with \`docker rm -f ${released.container}\`.`;
-  const cleanup = { container: released.container, removed: false };
+  return withCleanupNote(failure, {
+    note: `The helper container ${released.container} could not be confirmed removed and may still hold the volume; remove it with \`docker rm -f ${released.container}\`.`,
+    cleanup: { container: released.container, removed: false },
+  });
+}
+
+/**
+ * The copy-paste command that finds and removes a container this run may
+ * have created under `nonce`, by its label only (random, never a managed
+ * value).
+ */
+export function unknownCleanupCommand(nonce: string): string {
+  return `docker ps -aq --filter label=${HELPER_NONCE_LABEL}=${nonce} | xargs -r docker rm -f`;
+}
+
+/**
+ * Add an unknown cleanup outcome to a refusal: a `docker create` whose
+ * outcome Hack could not reconcile (no ID came back and the lookup by name
+ * and nonce failed), so a container of this run may exist that Hack does
+ * not track and cannot remove; it could hold a volume.
+ */
+function withUnknownCleanup(failure: unknown, nonce: string): unknown {
+  const label = `${HELPER_NONCE_LABEL}=${nonce}`;
+  const command = unknownCleanupCommand(nonce);
+  return withCleanupNote(failure, {
+    note: `A helper container may have been created without Hack learning its ID, so it was not removed and may hold a volume. Find and remove it by its label ${label}: \`${command}\`.`,
+    cleanup: {
+      container: null,
+      removed: false,
+      outcome: "unknown",
+      label,
+      command,
+    },
+  });
+}
+
+function withCleanupNote(
+  failure: unknown,
+  opts: { readonly note: string; readonly cleanup: Record<string, unknown> }
+): unknown {
+  const { note, cleanup } = opts;
   if (failure === undefined) {
     return new HackCliError({
       code: "E_UNEXPECTED",
@@ -406,25 +451,38 @@ async function findOwnCreated(opts: {
   readonly name: string;
   readonly nonce: string;
   readonly deadlines: DataBackupDeadlines;
-}): Promise<string | null> {
-  const found = await opts.docker.capture(
-    [
-      "docker",
-      "container",
-      "inspect",
-      "--format",
-      `{{.Id}} {{index .Config.Labels "${HELPER_NONCE_LABEL}"}}`,
-      opts.name,
-    ],
-    { timeoutMs: opts.deadlines.commandMs }
-  );
+}): Promise<
+  | { readonly kind: "found"; readonly id: string }
+  | { readonly kind: "absent" | "unknown" }
+> {
+  const found = await opts.docker
+    .capture(
+      [
+        "docker",
+        "container",
+        "inspect",
+        "--format",
+        `{{.Id}} {{index .Config.Labels "${HELPER_NONCE_LABEL}"}}`,
+        opts.name,
+      ],
+      { timeoutMs: opts.deadlines.commandMs }
+    )
+    .catch(() => null);
+  if (found === null) {
+    return { kind: "unknown" };
+  }
   if (found.exitCode !== 0) {
-    return null;
+    // Docker answered that no container has the name: none of ours exists.
+    return NO_SUCH_CONTAINER.test(found.stderr)
+      ? { kind: "absent" }
+      : { kind: "unknown" };
   }
   const [id, nonce] = found.stdout.trim().split(" ");
-  return id !== undefined && CONTAINER_ID.test(id) && nonce === opts.nonce
-    ? id
-    : null;
+  if (id !== undefined && CONTAINER_ID.test(id) && nonce === opts.nonce) {
+    return { kind: "found", id };
+  }
+  // The name is someone else's: our create under it cannot have succeeded.
+  return { kind: "absent" };
 }
 
 /**
@@ -454,7 +512,16 @@ export async function withTrackedContainer<T>(
   },
   work: (container: string) => Promise<T>
 ): Promise<T> {
-  const { created, printed, container } = await createTracked(opts);
+  const { created, printed, container, unknownNonce } =
+    await createTracked(opts);
+  if (unknownNonce !== null) {
+    failUnreconciled({
+      created,
+      printed,
+      checkCreate: opts.checkCreate,
+      unknownNonce,
+    });
+  }
   let failure: unknown;
   let value: T | undefined;
   let ok = false;
@@ -499,6 +566,12 @@ async function createTracked(opts: {
   readonly created: DataBackupProcessResult;
   readonly printed: string | null;
   readonly container: string | null;
+  /**
+   * The create's nonce when its outcome could not be reconciled: no ID came
+   * back, Docker did not refuse it outright, and the lookup by name and
+   * nonce failed. A container of this run may exist untracked.
+   */
+  readonly unknownNonce: string | null;
 }> {
   const nonce = randomBytes(16).toString("hex");
   const created = await opts.docker.capture(
@@ -515,18 +588,43 @@ async function createTracked(opts: {
   );
   const printed =
     created.exitCode === 0 ? createdContainerId(created.stdout) : null;
-  const container =
-    printed ??
-    (await findOwnCreated({
-      docker: opts.docker,
-      name: opts.name,
-      nonce,
-      deadlines: opts.deadlines,
-    }).catch(() => null));
+  const lookup =
+    printed === null
+      ? await findOwnCreated({
+          docker: opts.docker,
+          name: opts.name,
+          nonce,
+          deadlines: opts.deadlines,
+        })
+      : null;
+  const container = printed ?? (lookup?.kind === "found" ? lookup.id : null);
   if (container !== null) {
     opts.helpers.add(container);
   }
-  return { created, printed, container };
+  // The daemon refused the create outright: nothing was created.
+  const refused = created.exitCode !== 0 && DAEMON_REFUSAL.test(created.stderr);
+  const unknownNonce =
+    container === null && !refused && lookup?.kind !== "absent" ? nonce : null;
+  return { created, printed, container, unknownNonce };
+}
+
+/** A create the daemon itself answered with an error: nothing exists. */
+const DAEMON_REFUSAL = /^Error response from daemon:/m;
+
+/** Throw `failure` (or the create's own refusal) with the unknown outcome. */
+function failUnreconciled(opts: {
+  readonly created: DataBackupProcessResult;
+  readonly printed: string | null;
+  readonly checkCreate: (result: DataBackupProcessResult) => void;
+  readonly unknownNonce: string;
+}): never {
+  let failure: unknown;
+  try {
+    requireCreated(opts);
+  } catch (error: unknown) {
+    failure = error;
+  }
+  throw withUnknownCleanup(failure, opts.unknownNonce);
 }
 
 /** Throw the refusal for a failed or untrackable create. */
@@ -554,12 +652,15 @@ function requireCreated(opts: {
  * network, no logging, the run's nonce label), tracked by the ID its create
  * returned. While it exists Docker refuses to remove the volume, `--force`
  * included ("volume is in use"; checked on Docker 29.9.2); it starts
- * nothing and emits no mount event. Docker creates a missing named volume
- * when such a container is created, so a caller must take a reference only
- * after validating the volume, and treat a create event for the name in its
- * window, or a changed identity after the reference exists, as a refusal.
- * Hack never removes a volume: only the reference containers, by ID, with
- * removal confirmed.
+ * nothing and emits no mount event. Docker would create a missing named
+ * volume for a plain volume mount; the reference therefore names the local
+ * driver with a `type` option and no `device`, options the driver uses only
+ * to create a volume and refuses ("missing required option"), so a missing
+ * name refuses instead of being created while an existing volume is
+ * referenced unchanged (checked on Docker 29.9.2). A caller still rechecks
+ * identity once the reference exists: a volume replaced under its name in
+ * between is referenced as it now is. Hack never removes or creates a
+ * volume here: only the reference containers, by ID, with removal confirmed.
  */
 export type VolumeReferencesOptions = {
   readonly docker: DataBackupDocker;
@@ -577,9 +678,13 @@ export class VolumeReferences {
   }
 
   /** Take a reference to the volume `name` (a Docker name, never printed). */
-  async add(name: string): Promise<void> {
+  async add(
+    name: string,
+    /** The refusal when the volume no longer exists (it was removed). */
+    missing: () => HackCliError
+  ): Promise<void> {
     const { docker, deadlines, helpers, purpose } = this.opts;
-    const { created, printed, container } = await createTracked({
+    const { created, printed, container, unknownNonce } = await createTracked({
       docker,
       name: `${helperContainerName(purpose)}-ref`,
       createArgs: [
@@ -595,7 +700,11 @@ export class VolumeReferences {
         "--label",
         `io.hack.data-backup=${purpose}`,
         "--mount",
-        `type=volume,src=${name},dst=/v,volume-nocopy`,
+        // The driver options are used only to create a volume, which a
+        // `type` without `device` makes the local driver refuse: a missing
+        // name is refused instead of created, while an existing volume is
+        // referenced unchanged (checked on Docker 29.9.2).
+        `type=volume,src=${name},dst=/v,volume-nocopy,volume-driver=local,volume-opt=type=none`,
         "--entrypoint",
         "true",
         dataBackupHelperImage(),
@@ -607,19 +716,23 @@ export class VolumeReferences {
     if (container !== null) {
       this.held.push(container);
     }
-    requireCreated({
-      created,
-      printed,
-      checkCreate: (result) => {
-        if (result.exitCode !== 0) {
-          throw dockerReadError({
-            result,
-            command: "docker create",
-            redactValues: docker.redactValues,
-          });
-        }
-      },
-    });
+    const checkCreate = (result: DataBackupProcessResult): void => {
+      if (result.exitCode === 0) {
+        return;
+      }
+      if (MISSING_REFERENCED_VOLUME.test(result.stderr)) {
+        throw missing();
+      }
+      throw dockerReadError({
+        result,
+        command: "docker create",
+        redactValues: docker.redactValues,
+      });
+    };
+    if (unknownNonce !== null) {
+      failUnreconciled({ created, printed, checkCreate, unknownNonce });
+    }
+    requireCreated({ created, printed, checkCreate });
   }
 
   /** Remove every reference by ID; the first unconfirmed removal, or null. */

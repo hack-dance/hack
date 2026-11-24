@@ -203,23 +203,32 @@ tree that every later digest agrees on. Hack therefore also holds a Docker
 reference to each copied volume for the whole copy and the window's checks:
 right after the first running check, it creates (and never starts) one
 reference container per volume (`--mount
-type=volume,src=<name>,dst=/v,volume-nocopy`, no network, no logging, a
-read-only root, the run's nonce label), tracked by the ID its create
+type=volume,src=<name>,dst=/v,volume-nocopy,volume-driver=local,volume-opt=type=none`,
+no network, no logging, a read-only root, the run's nonce label), tracked by the ID its create
 returned. While it exists Docker refuses the removal, `--force` included
 ("volume is in use"); it runs nothing and emits no mount event. Each
 reference is removed by its ID once the window's checks are done, before
 the publish, and its removal is confirmed; an unconfirmed removal is
 reported like a helper's (`detail.cleanup`). Hack never removes a volume.
 
-Docker creates a missing named volume when a container that references it
-is created, so a volume removed between validation and the reference comes
-back empty under the same name. Hack rechecks every volume's identity (by
-inspect) as soon as its references exist, and the window's volume `create`
-events (below) see the recreation too: either refuses with `volume_changed`,
-and the empty volume Docker created is left in place. Identity is also
-rechecked right after each hold, after each copy and its second digest, and
-for every copied volume immediately before the rename that publishes the
-backup, in case a reference was removed by someone else. A volume that is
+A plain volume mount would make Docker create a missing named volume. The
+reference names local driver options instead (`type=none` without a
+`device`), which the driver uses only to create a volume and refuses to
+create with. So a volume removed between validation and the reference is
+refused at the reference ("missing required option") and not recreated,
+while an existing volume is referenced unchanged (checked on Docker 29.9.2,
+engine API 1.56: its `CreatedAt`, options, labels and Mountpoint stay the
+same, and no volume event is emitted). Export therefore creates no volume
+and leaves none behind. Every other way of taking a reference that was
+tried, a plain volume mount, `DriverConfig` with the local driver and no
+options, `Subpath`, volume labels, a read-only mount or a legacy `Binds`
+entry, recreates a missing volume; a bogus driver refuses existing and
+missing volumes alike. Hack rechecks every volume's identity (by inspect)
+as soon as its references exist, for a volume replaced under the same name
+in between; that volume is not Hack's and is never removed. Identity is
+also rechecked right after each hold, after each copy and its second
+digest, and for every copied volume immediately before the rename that
+publishes the backup, in case a reference was removed by someone else. A volume that is
 gone, or replaced under the same name, refuses with `E_PROJECT_RUNNING`
 (`detail.reason: volume_changed`) and leaves the copy in
 `<backup>.partial/`.
@@ -281,7 +290,16 @@ runs. A step past its bound is stopped and refuses with
 disk or any other failure the helper container is removed; if Docker cannot
 confirm the removal, the outcome says so (`detail.cleanup: {container,
 removed: false}`, the container ID, and the `docker rm -f <id>` command to
-run) instead of claiming cleanup, and nothing is published. Ctrl-C or SIGTERM
+run) instead of claiming cleanup, and nothing is published. When a `docker
+create` for a helper, marker or reference returns no container ID (the
+response was lost or timed out) and Hack cannot find the container by its
+name and the create's random `io.hack.data-backup.nonce` label either, a
+container of this run may exist that Hack does not track: the refusal says
+so with an unknown cleanup outcome (`detail.cleanup: {container: null,
+removed: false, outcome: "unknown", label, command}`) and, in text too, one
+command that finds and removes it by that label only,
+`docker ps -aq --filter label=io.hack.data-backup.nonce=<nonce> | xargs -r docker rm -f`.
+A create the daemon itself refused created nothing and is not reported. Ctrl-C or SIGTERM
 stops the event subscription, force-removes the run's live helper containers
 by ID and reports
 `E_CANCELLED`; removal is confirmed with a few short retries, since Docker

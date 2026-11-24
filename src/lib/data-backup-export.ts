@@ -211,10 +211,19 @@ async function exportWithin(opts: {
     { docker: input.docker, purpose: "export", deadlines, helpers },
     async (references) => {
       for (const volume of owned) {
-        await references.add(volume.name);
+        // A reference never creates a volume: a missing one refuses here.
+        await references.add(
+          volume.name,
+          () =>
+            new HackCliError({
+              code: "E_PROJECT_RUNNING",
+              message: `The volume for ${volume.key} was removed after it was validated, so it was not read and nothing was created; ${notPublishedNote} Make sure nothing removes the project's volumes, then retry.`,
+              detail: { key: volume.key, reason: "volume_changed" },
+            })
+        );
       }
-      // Docker creates a missing named volume for a reference: the volume
-      // must still be the one validated now that the reference exists.
+      // A volume replaced under its name before its reference existed is
+      // referenced as it now is: it must still be the one validated.
       for (const volume of owned) {
         await requireUnchangedVolume({
           docker: input.docker,

@@ -548,9 +548,10 @@ async function removalRefusedDuringCopy(opts: {
 
 /**
  * The volume is removed after validation, right before Hack creates its
- * reference. Docker creates a missing named volume for
- * the reference container, so the identity no longer matches: export
- * refuses, publishes nothing and never removes the volume Docker created.
+ * reference. The reference names local driver options Docker uses only to
+ * create a volume and refuses to create with, so the missing name is
+ * refused rather than recreated: export refuses, publishes nothing, and no
+ * volume of that name exists afterwards (read-only).
  */
 async function removedBeforeReference(opts: {
   readonly ctx: ScenarioContext;
@@ -598,8 +599,8 @@ async function removedBeforeReference(opts: {
       refusal instanceof HackCliError &&
       isRecord(refusal.detail) &&
       refusal.detail.reason === "volume_changed" &&
-      // Docker's own volume for the reference, left in place.
-      after !== "" &&
+      // Nothing recreated it: no volume of that name exists.
+      after === "" &&
       leftInOut.every((entry) => entry.endsWith(".partial")),
     message: `a volume removed before the reference should refuse and publish nothing (refusal: ${String(refusal)}, CreatedAt before/after: ${before}/${after}, out: ${leftInOut.join(",")})`,
   });

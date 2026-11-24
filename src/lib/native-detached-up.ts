@@ -53,6 +53,10 @@ import {
   NATIVE_BUILDER_NOT_PREPARED,
   nativeBuilderMissingDetachedRefusal,
 } from "./native-image-builder.ts";
+import {
+  NATIVE_AUTHORED_ATTEMPT_LIMIT,
+  NativeAuthoredAttemptLimitError,
+} from "./native-up-refusals.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
   "--internal-native-detached-owner";
@@ -370,6 +374,10 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
     await publishImageBlocker?.(error.observation);
     return;
   }
+  if (error instanceof NativeAuthoredAttemptLimitError) {
+    await publishFailure({ code: NATIVE_AUTHORED_ATTEMPT_LIMIT });
+    return;
+  }
   const { nativeRuntimeFailure } = await import(
     "../backends/native-runtime-client.ts"
   );
@@ -451,6 +459,9 @@ function startupFailureError(failure: StartupFailure): HackCliError {
     ...(failure.failedServices ?? []),
     failure.service,
   ]);
+  if (failure.code === NATIVE_AUTHORED_ATTEMPT_LIMIT) {
+    return new NativeAuthoredAttemptLimitError();
+  }
   if (failure.code === "provider_pin_changed") {
     return new HackCliError({
       code: "E_STARTUP_INCOMPLETE",

@@ -224,7 +224,7 @@ function optionalBoolean(value: unknown): boolean {
 
 /**
  * After selected predecessor recovery is handled, dispatch a live/absent owner
- * to ordinary authenticated cleanup, or a dead ready owner to same-boot
+ * to ordinary authenticated cleanup, or a provably recoverable dead owner to same-boot
  * recovery. The runtime revalidates process death and exact inventories itself;
  * this observation grants no recovery authority.
  */
@@ -421,10 +421,10 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
   if (
     selection.foreground === "exited" &&
     !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
-    !(selection.phase === "failed-retained" && selection.failedStartRecoverable)
+    !selection.failedStartRecoverable
   ) {
     throw new ClosedCliError(
-      "Native down --recover found a foreground owner that exited before its start was confirmed. Nothing was changed. Run hack ps --json to inspect this run's retained state."
+      `Native down --recover found a foreground owner that exited before its start was confirmed. The runtime could not prove which resources to retire. ${nativeRecoveryGuidance("graph_live_owner_recovery")}`
     );
   }
 }

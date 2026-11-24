@@ -344,10 +344,15 @@ pub fn inspect_args(c: &Candidate, args: &[&str]) -> Result<Report, CandidateErr
         "build" => ("build", "target", ".hack-local/target"),
         "evidence" => ("evidence", "review", ".hack-local/review"),
         "artifacts" => ("artifacts", "artifacts", ".hack-local/artifacts"),
+        "image-archives" => (
+            "image-archives",
+            "artifacts/images",
+            ".hack-local/artifacts/images",
+        ),
         _ => {
             return Err(CandidateError::new(
                 "storage_usage",
-                "Scope must be all, runtime, build, evidence or artifacts.",
+                "Scope must be all, runtime, build, evidence, artifacts or image-archives.",
             ));
         }
     };
@@ -449,6 +454,24 @@ mod tests {
         assert_eq!(report.omissions["depth_limit"], 1);
         assert_eq!(report.total_logical_file_bytes, 0);
     }
+    #[test]
+    fn image_archive_scope_counts_only_the_archive_store() {
+        let f = Fixture::new();
+        let candidate = Candidate::discover(&f.0).unwrap();
+        let artifacts = candidate.state_root.join("artifacts");
+        let archives = artifacts.join("images");
+        fs::create_dir_all(&archives).unwrap();
+        fs::write(archives.join("owned-archive"), b"archive").unwrap();
+        fs::write(artifacts.join("other"), b"other").unwrap();
+
+        let report = inspect_args(&candidate, &["--scope", "image-archives"]).unwrap();
+        assert!(report.complete);
+        assert_eq!(report.selected_scope, "image-archives");
+        assert_eq!(report.total_logical_file_bytes, 7);
+        assert_eq!(report.categories["root_files"].unique_regular_files, 1);
+        assert!(!report.deletion_candidates);
+    }
+
     #[test]
     fn explicit_scan_budget_is_bounded_and_duplicate_options_refuse() {
         assert_eq!(options(&[]).unwrap(), ("all", 100_000));

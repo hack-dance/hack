@@ -87,7 +87,8 @@ pub(super) fn launch_child(
     options: &Launch<'_>,
     check: impl FnOnce() -> Result<(), CandidateError>,
 ) -> Result<std::process::Child, CandidateError> {
-    let mut command = Command::new(std::env::current_exe().map_err(state::io)?);
+    let executable = std::env::current_exe().map_err(state::io)?;
+    let mut command = super::process::publisher_command(&executable);
     command.arg("--internal-publication-child");
     launch_child_with(candidate, options, check, command)
 }
@@ -108,9 +109,13 @@ fn launch_child_with(
     let mut committed = false;
     let result = (|| {
         let mut gate = child.stdin.take().ok_or_else(error)?;
+        #[cfg(debug_assertions)]
+        super::graph::publisher_recovery_fault(candidate, options.run, "publisher-gated")?;
         let process = identity::observe(child.id() as i32)?;
         let entry = stage_launch(candidate, options, process)?;
         committed = true;
+        #[cfg(debug_assertions)]
+        super::graph::publisher_recovery_fault(candidate, options.run, "publisher-committed")?;
         let request = ChildLaunch {
             entry,
             upstream: options.upstream.into(),
@@ -122,7 +127,11 @@ fn launch_child_with(
         check()?;
         // Encode authorization after the complete payload. EOF alone is a refusal.
         gate.write_all(&bytes).map_err(state::io)?;
-        gate.write_all(b"\n").map_err(state::io)
+        gate.write_all(b"\n").map_err(state::io)?;
+        #[cfg(debug_assertions)]
+        let _ =
+            super::graph::publisher_recovery_fault(candidate, options.run, "publisher-authorized");
+        Ok(())
     })();
     if let Err(error) = result {
         child.wait().map_err(state::io)?;
@@ -700,10 +709,13 @@ fn check_socket(
         .map_err(state::io)
 }
 fn cleanup(e: &Entry) -> Result<(), CandidateError> {
+    let control = directory(e).join("control");
+    #[cfg(target_os = "macos")]
+    wait_for_authorized_child(e, &control)?;
     let options = publisher::StopOptions {
         process: &e.process,
         binary: &e.process.executable,
-        control: &directory(e).join("control"),
+        control: &control,
         token: &e.token,
     };
     #[cfg(target_os = "macos")]
@@ -791,6 +803,28 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
         .map_err(state::io)?
         .sync_all()
         .map_err(state::io)
+}
+
+/// A committed child may still be between authorization and the control bind.
+/// Wait only for that exact incarnation to exit or reach the normal stop path.
+#[cfg(target_os = "macos")]
+fn wait_for_authorized_child(e: &Entry, control: &Path) -> Result<(), CandidateError> {
+    use std::time::{Duration, Instant};
+    if !e.binary.as_ref().is_some_and(|binary| binary.ready) {
+        return Ok(());
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match fs::symlink_metadata(control) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(state::io(error)),
+        }
+        if entry_gone(e)? || Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// The caller holds the provider lease; require every selected recorded process to be absent before
@@ -1054,6 +1088,30 @@ fn verify_claim_snapshot(
         ));
     }
     Ok(())
+}
+
+/// Lease-free presentation of the verified TCP listeners of one receipt.
+#[cfg(target_os = "macos")]
+pub(super) fn observed_run_ports(
+    candidate: &Candidate,
+    owner: &str,
+    run: &str,
+) -> Result<Vec<u16>, CandidateError> {
+    let entries = load(candidate, owner)?;
+    let observed = entries
+        .values()
+        .filter(|entry| entry.run == run && !entry.unix)
+        .filter(|entry| observe_publication(entry).is_ok())
+        .collect::<Vec<_>>();
+    let after_owner = state::Owner::load(candidate)?;
+    let after = load(candidate, &after_owner.token)?;
+    observed
+        .into_iter()
+        .map(|entry| {
+            verify_claim_snapshot(entry, &after, &after_owner.token)?;
+            Ok(entry.port)
+        })
+        .collect()
 }
 /// A point-in-time observation, not a persistent capability or guest health claim.
 pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, CandidateError> {

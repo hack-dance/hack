@@ -76,8 +76,19 @@ fn multiple_channels_fenced_handles_and_buffered_close() {
         id: "0".repeat(32),
     };
     assert_eq!(
-        s.execute(&Request::Inspect { handle: stale }),
-        Ok(Response::Unknown {})
+        s.execute(&Request::Inspect {
+            handle: stale.clone()
+        }),
+        Err(Error::StaleHandle)
+    );
+    let prior_boot = Handle {
+        boot: stale.incarnation,
+        incarnation: UUID.into(),
+        id: stale.id,
+    };
+    assert_eq!(
+        s.execute(&Request::Release { handle: prior_boot }),
+        Err(Error::StaleHandle)
     );
     for _ in 0..2 {
         assert_eq!(

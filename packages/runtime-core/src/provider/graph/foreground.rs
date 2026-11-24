@@ -13,7 +13,7 @@ mod dependency_refresh;
 pub mod jobs;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod native_test;
-mod publishers;
+pub(in crate::provider::graph) mod publishers;
 pub(in crate::provider::graph) mod redelivery;
 pub use dependency_refresh::request as refresh_dependencies_request;
 #[cfg(all(test, feature = "native-stream-relay"))]
@@ -245,6 +245,15 @@ fn serve_input<'a>(
         }
     };
     runtime.set_startup_cancellation(Some(signals::startup_pending));
+    // Explicit slots reserve as one batch so earlier automatic allocations
+    // cannot consume slots requested by services that are still starting.
+    let early = route_slots
+        .values()
+        .all(|slot| *slot == super::RouteSlot::Auto);
+    if early {
+        runtime.early_publications =
+            Some(publishers::EarlyPublications::new(route_slots, deadline));
+    }
     let attempt = if let Some((compose, Some(generation))) = normalized {
         super::restore::restore_normalized_foreground(
             candidate,
@@ -281,6 +290,11 @@ fn serve_input<'a>(
         )
     };
     runtime.set_startup_cancellation(None);
+    let mut publishers = runtime
+        .early_publications
+        .take()
+        .map(|early| early.publishers)
+        .unwrap_or_default();
     let receipt = match attempt {
         Ok(receipt) => receipt,
         Err(error) => {
@@ -306,14 +320,16 @@ fn serve_input<'a>(
                 candidate,
                 &run_id,
                 runtime.admission_started(),
-            )? && runtime.cleanup(candidate, false).is_ok()
+            )? && publishers.cleanup(candidate, &mut runtime, false).is_ok()
+                && publishers
+                    .reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))
+                    .is_ok()
             {
                 publication.finish()?;
             }
             return Err(error);
         }
     };
-    let mut publishers = publishers::Publishers::default();
     let mut lifecycle = OwnerLoop::default();
     let mut restore_recovery_error = None;
     let result = (|| {
@@ -321,7 +337,11 @@ fn serve_input<'a>(
             lifecycle.cleanup_attempted = true;
             return publishers.cleanup(candidate, &mut runtime, false);
         }
-        publishers.start(candidate, &receipt, &signals, deadline, route_slots)?;
+        if early {
+            publishers.finish_early_start(candidate, &receipt, &signals, deadline, route_slots)?;
+        } else {
+            publishers.start(candidate, &receipt, &signals, deadline, route_slots)?;
+        }
         signals.watch_read(runtime.dependency_notification_fd())?;
         let ready =
             json!({"kind":"graph_foreground_ready","run":receipt.run,"phase":receipt.phase});

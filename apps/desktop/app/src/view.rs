@@ -135,6 +135,9 @@ pub struct HackApp {
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
     pub(crate) changes: crate::changes_view::ChangesPane,
+    resource_disk_pending: bool,
+    pub(crate) resource_disk:
+        Option<Result<hack_desktop_core::resources::NativeDiskUsage, &'static str>>,
     pub(crate) configuration: crate::config_view::Configuration,
     pub(crate) catalog: crate::service_catalog::ServiceCatalog,
     pub(crate) service_pane: crate::service_view::ServicePane,
@@ -237,6 +240,8 @@ impl HackApp {
             logs,
             tab: 0,
             changes: Default::default(),
+            resource_disk_pending: false,
+            resource_disk: None,
             configuration: crate::config_view::Configuration::new(config_input),
             catalog: crate::service_catalog::ServiceCatalog {
                 input: catalog_input,
@@ -1141,6 +1146,11 @@ impl HackApp {
             self.action_progress.clear();
             self.configuration.invalidate();
             self.changes = Default::default();
+            self.resource_disk_pending = false;
+            self.resource_disk = None;
+            if self.pane == Pane::Resources {
+                self.load_resource_disk(cx);
+            }
             self.action_started.clear();
             self.copies = Default::default();
             // A Start or Restart hackd still running belongs to the
@@ -1405,9 +1415,43 @@ impl HackApp {
     }
 
     pub(crate) fn show_resources(&mut self, cx: &mut Context<Self>) {
+        let opening = self.pane != Pane::Resources;
         self.pane = Pane::Resources;
         self.user_navigated();
+        if opening {
+            self.load_resource_disk(cx);
+        }
         cx.notify();
+    }
+
+    pub(crate) fn load_resource_disk(&mut self, cx: &mut Context<Self>) {
+        if !self.live || self.resource_disk_pending {
+            return;
+        }
+        self.resource_disk_pending = true;
+        self.resource_disk = None;
+        let epoch = self.model.source_epoch();
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.native_disk_usage() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.model.source_epoch() == epoch {
+                    this.resource_disk_pending = false;
+                    this.resource_disk = Some(result);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn show_resources_fixture(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.show_resources(cx);
+        self.resource_disk = hack_desktop_core::fixtures::native_disk_usage(name);
     }
 
     /// Routing and DNS: from the last completed Doctor run when there is

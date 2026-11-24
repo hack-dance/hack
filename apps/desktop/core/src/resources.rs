@@ -3,6 +3,42 @@
 use crate::{models::ProjectsPayload, viewmodel::InstanceKey};
 use std::collections::BTreeSet;
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeDiskUsage {
+    scope: String,
+    pub complete: bool,
+    pub allocated_bytes: u64,
+    pub logical_bytes: u64,
+    pub categories: Vec<DiskCategory>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskCategory {
+    pub label: String,
+    pub allocated_bytes: u64,
+    pub logical_bytes: u64,
+}
+
+impl NativeDiskUsage {
+    pub(crate) fn read(runner: &crate::runner::CliRunner) -> Result<Self, &'static str> {
+        let result: Self = runner
+            .run_json(
+                &["native", "disk-usage", "--json"],
+                None,
+                std::time::Duration::from_secs(18),
+            )
+            .map_err(
+                |_| "Could not read disk usage. Check `hack native disk-usage` in a terminal.",
+            )?;
+        if result.scope != "native-home-host-files" {
+            return Err("The CLI returned an unsupported disk usage report.");
+        }
+        Ok(result)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ResourceGroup {
     pub key: InstanceKey,
@@ -97,6 +133,26 @@ pub fn inventory(projects: &ProjectsPayload) -> Vec<ResourceGroup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_disk_usage_calls_the_read_only_command_and_preserves_partial_totals() {
+        let root = std::env::temp_dir().join(format!("desktop-disk-usage-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let cli = root.join("hack");
+        crate::test_support::script(
+            &cli,
+            r#"#!/bin/sh
+[ "$#" -eq 3 ] && [ "$1:$2:$3" = native:disk-usage:--json ] || exit 2
+printf '%s\n' '{"ok":true,"data":{"scope":"native-home-host-files","complete":false,"allocatedBytes":512,"logicalBytes":32768,"categories":[{"label":"Runtime state and VM disks","allocatedBytes":512,"logicalBytes":32768}]}}'
+"#,
+        );
+        let report = NativeDiskUsage::read(&crate::runner::CliRunner::new(cli));
+        std::fs::remove_dir_all(&root).unwrap();
+        let report = report.unwrap();
+        assert!(!report.complete);
+        assert_eq!((report.allocated_bytes, report.logical_bytes), (512, 32768));
+        assert_eq!(report.categories[0].label, "Runtime state and VM disks");
+    }
 
     #[test]
     fn attachments_keep_project_and_branch_ownership_without_bind_paths() {

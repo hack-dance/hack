@@ -395,6 +395,10 @@ impl From<RunError> for CopiesError {
 }
 
 pub trait Source: Send + Sync {
+    fn native_disk_usage(&self) -> Result<crate::resources::NativeDiskUsage, &'static str> {
+        Err("Native disk usage is unavailable.")
+    }
+
     fn config_read(
         &self,
         _root: Option<&Path>,
@@ -1917,6 +1921,10 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn native_disk_usage(&self) -> Result<crate::resources::NativeDiskUsage, &'static str> {
+        crate::resources::NativeDiskUsage::read(&self.runner.fixed())
+    }
+
     fn config_read(
         &self,
         root: Option<&Path>,

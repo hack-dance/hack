@@ -349,7 +349,7 @@ A restore compares these hashes instead of the values.
 ## Format
 
 ```text
-<parent>/<UTC timestamp>/          for example 20261123T140501Z
+<parent>/<UTC timestamp>[-<n>]/    for example 20261123T140501Z or 20261123T140501Z-2
   manifest.json
   <key>.tar                        one per copied volume
 ```
@@ -393,9 +393,14 @@ durable as a whole. The outcomes are:
   true, durable: false}`. Use it once the file system is healthy, or export
   again.
 
-Each run uses a new timestamp; if the target or its `.partial` already
-exists (two runs in the same second), the export refuses with
-`E_PATH_CONFLICT` instead of writing into it.
+Each run uses a new UTC timestamp. Under the default parent, when that name
+or its `.partial` already exists (two runs in the same second, or a quick
+retry after a refused run, whose `.partial` is left on purpose), the export
+takes the next free name: `<UTC>-2`, `<UTC>-3`, and so on, up to 99 more
+names in one second. The claim is the creation of `<name>.partial` itself,
+so two exports at once never share a name, and an existing backup or
+`.partial` is never reused or replaced. With an explicit `--out <dir>`, a
+collision still refuses with `E_PATH_CONFLICT` instead of writing into it.
 
 ## Restore (`hack data import`)
 

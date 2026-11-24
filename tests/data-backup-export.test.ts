@@ -1724,3 +1724,52 @@ describe("bind sources and alias devices are proven on the daemon", () => {
     }
   });
 });
+
+describe("default backup names within one second", () => {
+  const backups = (): string => join(root, "home", "data-backups", PROJECT);
+
+  test("two default-path exports in the same second publish two distinct backups", async () => {
+    const first = await exportProjectData(input(engine({ only: "db" })));
+    const second = await exportProjectData(input(engine({ only: "db" })));
+    expect(first.backup).toBe(join(backups(), "20261123T140501Z"));
+    expect(second.backup).toBe(join(backups(), "20261123T140501Z-2"));
+    expect((await readdir(backups())).sort()).toEqual([
+      "20261123T140501Z",
+      "20261123T140501Z-2",
+    ]);
+  });
+
+  test("a refused export's .partial is never reused: a quick retry takes the next name", async () => {
+    const failing = engine({ only: "db" });
+    failing.tarExit.shop_db = 2;
+    const refused = await caught(exportProjectData(input(failing)));
+    expect(refused.code).toBe("E_UNEXPECTED");
+    const retried = await exportProjectData(input(engine({ only: "db" })));
+    expect(retried.backup).toBe(join(backups(), "20261123T140501Z-2"));
+    // The refused copy stays where it was, untouched.
+    expect((await readdir(backups())).sort()).toEqual([
+      "20261123T140501Z-2",
+      "20261123T140501Z.partial",
+    ]);
+    expect(await readdir(join(backups(), "20261123T140501Z.partial"))).toEqual([
+      "db.tar",
+    ]);
+  });
+
+  test("concurrent default-path exports in one second never share a name", async () => {
+    const results = await Promise.all(
+      [0, 1, 2].map(() => exportProjectData(input(engine({ only: "db" }))))
+    );
+    expect(new Set(results.map((result) => result.backup)).size).toBe(3);
+  });
+
+  test("an explicit --out collision still refuses", async () => {
+    const out = join(root, "explicit");
+    await exportProjectData(input(engine({ only: "db" }), { outDir: out }));
+    const conflict = await caught(
+      exportProjectData(input(engine({ only: "db" }), { outDir: out }))
+    );
+    expect(conflict.code).toBe("E_PATH_CONFLICT");
+    expect(await readdir(out)).toEqual(["20261123T140501Z"]);
+  });
+});

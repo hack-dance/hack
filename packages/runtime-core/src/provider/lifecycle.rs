@@ -335,7 +335,9 @@ fn startup_admission_lease(
     earlier: &impl admission::Earlier,
     observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
 ) -> Result<(state::Lock, admission::Leased), CandidateError> {
-    let lock = startup_lease(root, wait)?;
+    let lock = crate::timings::measure(crate::timings::Step::VmStartupLease, None, |_| {
+        startup_lease(root, wait)
+    })?;
     let leased = admission::recheck_after_lease(profile, opened, clock, earlier, observe)?;
     Ok((lock, leased))
 }

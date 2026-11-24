@@ -70,6 +70,7 @@ pub(in crate::provider::graph) fn follow_logs(
             tail: options.tail,
             since: crate::provider::graph::log_follow::since(options, &generation)?,
             timestamps: options.timestamps,
+            follow: !options.no_follow,
         },
         || {
             observer.guest().verify()?;

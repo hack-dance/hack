@@ -105,6 +105,7 @@ test("one-off preserves default command or literal argv and fresh private delive
       },
     });
     expect(calls).toEqual([
+      "status",
       "refresh-dependencies",
       "run-selection",
       "run-service",
@@ -128,6 +129,10 @@ test("stale selection and missing project never request a job", async () => {
       invoke: async (request) => {
         if (request.args[1] === "refresh-dependencies") {
           return refreshed();
+        }
+        // The read-only warming check (PR B) is not a mutation.
+        if (request.args[1] === "status") {
+          return {};
         }
         if (request.args[1] !== "run-selection") {
           mutations++;
@@ -200,6 +205,7 @@ test("one-off explicitly delivers an empty environment and wipes it after comple
     },
   });
   expect(calls).toEqual([
+    "status",
     "refresh-dependencies",
     "run-selection",
     "run-service",
@@ -222,6 +228,10 @@ test("unconfirmed cleanup or transport failure never replays and wipes delivery"
           }
           if (request.args[1] === "run-selection") {
             return selection;
+          }
+          // The read-only warming check (PR B) is not a mutation.
+          if (request.args[1] === "status") {
+            return {};
           }
           mutations++;
           payload = request.privateInput;
@@ -274,7 +284,7 @@ test("environment preparation cannot authorize a job after the project mapping c
     }),
     "unconfirmed"
   );
-  expect(calls).toEqual(["refresh-dependencies", "run-selection"]);
+  expect(calls).toEqual(["status", "refresh-dependencies", "run-selection"]);
 });
 
 test("failed dependency refresh refuses before one-off selection or private preparation without replay", async () => {
@@ -300,7 +310,7 @@ test("failed dependency refresh refuses before one-off selection or private prep
         },
       })
     ).rejects.toThrow("dependency refresh identity or outcome is unconfirmed");
-    expect(calls).toEqual(["refresh-dependencies"]);
+    expect(calls).toEqual(["status", "refresh-dependencies"]);
     expect(prepared).toBe(0);
   }
 });
@@ -336,6 +346,7 @@ test("a run selection equal to the running one proceeds to the job", async () =>
       },
     });
     expect(calls).toEqual([
+      "status",
       "refresh-dependencies",
       "run-selection",
       "run-service",

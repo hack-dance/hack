@@ -21,6 +21,13 @@
  * wait (HACK-2535 real-VM run: about 9 s of `up` after a pool stop). A pool that is only slow (starting, stopping, unreadable, or any
  * transitional phase) never proves an ended boot, so it never ends the start.
  *
+ * The provider can also die while the record still says `running` (a crash, a
+ * kill, or a provider that does not survive a sleep; HACK-2579): only a later
+ * `runtime recover` writes a stopped phase. So the watch also records the
+ * provider's pid with the boot, and a pid that no longer exists (`kill 0` answers
+ * ESRCH) ends the boot the same way. A reused pid only reads as alive, never the
+ * reverse, so it cannot end a start early.
+ *
  * Ending is the same as a crash of the start process, which the run's records
  * already tolerate: the receipt, finalization and recovery evidence stay as
  * they are, and the next `hack up` or `hack down --recover` recovers the run.
@@ -42,9 +49,13 @@ export function watchNativeStartPool(opts: {
   readonly graceMs?: number | (() => number);
   /** Test seam: the pool record read; production reads `owner.json`. */
   readonly read?: (home: string) => Promise<unknown>;
+  /** Test seam: whether a pid is gone; production asks `kill 0` for ESRCH. */
+  readonly gone?: (pid: number) => boolean;
 }): () => void {
   const read = opts.read ?? readNativePoolRecord;
+  const gone = opts.gone ?? processGone;
   let pool: { readonly owner: string; readonly bootId: string } | undefined;
+  let provider: number | undefined;
   let stopped = false;
   let grace: ReturnType<typeof setTimeout> | undefined;
   const check = async () => {
@@ -61,10 +72,17 @@ export function watchNativeStartPool(opts: {
         record.guest_boot_id !== ""
       ) {
         pool = { owner: record.token, bootId: record.guest_boot_id };
+        provider = providerPid(record);
       }
       return;
     }
-    if (nativeHttpsPoolBootEnded(record, pool)) {
+    const providerExited =
+      provider !== undefined &&
+      isRecord(record) &&
+      record.phase === "running" &&
+      providerPid(record) === provider &&
+      gone(provider);
+    if (providerExited || nativeHttpsPoolBootEnded(record, pool)) {
       const graceMs =
         typeof opts.graceMs === "function"
           ? opts.graceMs()
@@ -88,4 +106,25 @@ export function watchNativeStartPool(opts: {
     clearInterval(timer);
     clearTimeout(grace);
   };
+}
+
+/** The provider pid a running pool record names, when it is a plausible pid. */
+function providerPid(record: Record<string, unknown>): number | undefined {
+  const process = record.process;
+  return isRecord(process) &&
+    typeof process.pid === "number" &&
+    Number.isSafeInteger(process.pid) &&
+    process.pid > 1
+    ? process.pid
+    : undefined;
+}
+
+/** Only ESRCH proves a pid gone; EPERM or success reads as alive. */
+function processGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return isRecord(error) && error.code === "ESRCH";
+  }
 }

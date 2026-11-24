@@ -46,6 +46,7 @@ flowchart LR
 | **An old `hackd` keeps running after you upgrade the CLI in place.** `hack daemon status` reports it as incompatible. | Run `hack daemon restart`. For a prerelease trial beside v4, stop and uninstall the v4 daemon first instead: see [Upgrade from v4](upgrade.md). |
 | **`hack session` needs tmux.** Zellij is removed. | Install tmux. Stop any project that has saved zellij state with the v4 CLI first. |
 | **Hack options go before your command.** In `hack exec`, `hack run`, `hack host exec` and `hack env exec`, everything from the command's first word on belongs to that command, including `--json` and `--help`. v4 read Hack flags anywhere, so a tool's own flag after the command could be refused. v5 passes everything after the command to it. | Move Hack options in front of the command in your scripts. |
+| **Native `hack up` and `hack restart` return once every container has started, not once every service is ready.** Health checks and routes keep warming after it returns, and `up.after` hooks run at that point, as with Compose `up -d`. `hack exec` and `hack run` wait for ready on their own. | A script or hook that calls a project URL right after `up` should run `hack up --wait` (the old behaviour). `--json` results say `readiness: "warming"` or `"ready"`. |
 | **Secrets are refused as command arguments.** | Type the value at the hidden prompt, or pipe it with `--value-stdin`. |
 | **Env migration keeps your old files.** v4's `hack doctor --migrate-env-config` deleted them. | Run `hack env migrate --json` to preview, then `hack env migrate --apply`. Start the project and check it. Then run `hack env migrate --cleanup --apply`. Undo with `hack env migrate --rollback-manifest <path>`. |
 | **Managed values that contain `$` are delivered as stored.** v4 let Compose expand `$VAR` inside a managed value. | Check values that relied on that, or that escaped `$` as `$$`. The next `hack up` recreates those services. |
@@ -55,6 +56,13 @@ flowchart LR
 
 Follow [Upgrade from v4](upgrade.md). It is a backup-first procedure, and it
 says how to go back.
+
+### Native build receipts and downgrades
+
+New native build receipts record verified base image IDs for reclamation. After
+a downgrade to a runtime that rejects the new receipt field, build-image
+reclamation skips cleanup when it encounters those receipts. Upgrade to the
+newer runtime to reclaim the images.
 
 ### Native build contexts
 

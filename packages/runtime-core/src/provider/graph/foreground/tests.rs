@@ -607,3 +607,66 @@ fn inspect_names_only_an_absent_unpublished_attempt_as_unreserved() {
     }
     assert_eq!(code(&candidate), "graph_unreserved");
 }
+
+/// The start loop's transport: status answered from the on-disk receipt, other
+/// requests refused as `graph_starting`, a data-retaining stop held until cleanup
+/// answers it.
+#[test]
+fn the_start_loop_answers_status_and_holds_a_stop() {
+    use startup::StartupRequests as _;
+    let (_fixture, candidate, run) = fixture();
+    let _root = owned_root(&candidate, &run);
+    let mut published = Publication::bind(&candidate, &run).unwrap();
+    let pin = Pin::load(&candidate, &run).unwrap();
+    let receipts = super::super::tests::Fixture::new();
+    let owner = "b".repeat(32);
+    // A receipt the start loop could have written: `load_at` refuses one with no
+    // resources (`graph_receipt`), and a real start always records its resources
+    // before the owner serves requests.
+    let receipt: Receipt = serde_json::from_value(json!({"version":1,"run":run,"owner":owner,
+        "namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"preparing",
+        "readiness":{"web":"started"},
+        "resources":{"container:web":{"key":"web","kind":"container",
+            "name":format!("hkg-{run}-container-0"),"id":"e".repeat(64),"phase":"started",
+            "image":format!("sha256:{}", "f".repeat(64))}}}))
+    .unwrap();
+    super::super::state::write(&receipts.0.join("state.json"), &receipt).unwrap();
+    let stop = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut server = StartupServer {
+        listener: published.startup_listener().unwrap(),
+        root: receipts.0.clone(),
+        run: run.clone(),
+        owner,
+        stop: std::rc::Rc::clone(&stop),
+    };
+    let request = |remove_data: Value| {
+        let mut stream = pin.connect().unwrap();
+        let value = json!({"version":1,"run":run,"remove_data":remove_data});
+        transport::write(&mut stream, &value, Duration::from_secs(1)).unwrap();
+        stream
+    };
+    let read = |stream: &mut UnixStream| -> Value {
+        transport::read(stream, Duration::from_secs(2), 64 * 1024).unwrap()
+    };
+    // Nothing pending: the check returns at once without a stop.
+    assert!(!server.serve());
+    let mut status = request(Value::Null);
+    assert!(!server.serve());
+    let status = read(&mut status);
+    assert_eq!(status["ok"], true);
+    assert_eq!(status["phase"], "preparing");
+    assert_eq!(status["runtime_verified"], false);
+    assert_eq!(status["runtime_error"], "graph_starting");
+    let mut removal = request(json!(true));
+    assert!(!server.serve());
+    assert_eq!(read(&mut removal)["code"], "graph_starting");
+    let mut down = request(json!(false));
+    assert!(server.serve());
+    // Later checks keep reporting the held stop.
+    assert!(server.serve());
+    reply_stop(stop.borrow_mut().take(), Ok(&receipt), &run);
+    let reply = read(&mut down);
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["phase"], "preparing");
+    published.finish().unwrap();
+}

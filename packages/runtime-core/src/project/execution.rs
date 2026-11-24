@@ -502,7 +502,9 @@ fn run_with_clock(
                 if let Some(span) = all_ready {
                     span.finish(Outcome::Ok, false, None, Default::default());
                 }
-                driver.record(Event::Ready)?;
+                timings::measure(Step::GraphReadyCommit, None, |_| {
+                    driver.record(Event::Ready)
+                })?;
                 return Ok(());
             }
         }
@@ -622,6 +624,7 @@ mod tests {
         assert_eq!(records[1].step, "services.ready");
         assert_eq!(records[0].outcome, Outcome::Ok);
         assert_eq!(records[1].outcome, Outcome::Ok);
+        assert_eq!(records[2].step, "graph.ready.commit");
     }
 
     #[test]
@@ -1475,5 +1478,72 @@ mod started_deadline_tests {
                 .iter()
                 .any(|e| e.contains("all_started") || e.contains(r#""ready""#))
         );
+    }
+}
+
+#[cfg(test)]
+mod stop_during_publication_tests {
+    use super::*;
+    use std::cell::Cell;
+    /// A stop that arrives while `web`'s publication runs inside its `ServiceReady`
+    /// record. Cancellation is only checked between engine operations, so the
+    /// publication finishes first and the stop is seen at the next check.
+    #[derive(Default)]
+    struct StopDuringPublication {
+        stop: Cell<bool>,
+        published: bool,
+        stopped_after_publication: Cell<bool>,
+        starts: Vec<String>,
+    }
+    impl Driver for StopDuringPublication {
+        fn check_cancelled(&self) -> Result<(), CandidateError> {
+            if self.stop.get() {
+                self.stopped_after_publication.set(self.published);
+                return Err(CandidateError::new("graph_cancelled", "stopped"));
+            }
+            Ok(())
+        }
+        fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+            if matches!(event, Event::ServiceReady { service: "web" }) {
+                // The stop arrives mid-publication; the publication still commits.
+                self.stop.set(true);
+                self.published = true;
+            }
+            Ok(())
+        }
+        fn start(&mut self, service: &str) -> Result<(), CandidateError> {
+            self.starts.push(service.into());
+            Ok(())
+        }
+        fn observe(&mut self, _: &str) -> Result<Observation, CandidateError> {
+            Ok(Observation::Running {
+                health: Health::None,
+            })
+        }
+    }
+    #[test]
+    fn a_stop_during_a_publication_takes_effect_after_it() {
+        let started = Service {
+            dependencies: BTreeMap::new(),
+            ready: Condition::Started,
+        };
+        let graph = Graph {
+            services: BTreeMap::from([
+                ("web".into(), started.clone()),
+                (
+                    "worker".into(),
+                    Service {
+                        dependencies: BTreeMap::from([("web".into(), Condition::Started)]),
+                        ready: Condition::Started,
+                    },
+                ),
+            ]),
+        };
+        let mut driver = StopDuringPublication::default();
+        let outcome = run(&graph, &mut driver, Duration::from_secs(1));
+        assert_eq!(outcome.unwrap_err().code, "graph_cancelled");
+        assert!(driver.published);
+        assert!(driver.stopped_after_publication.get());
+        assert_eq!(driver.starts, ["web"]);
     }
 }

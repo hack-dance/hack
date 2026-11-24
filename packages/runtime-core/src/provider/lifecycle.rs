@@ -315,6 +315,12 @@ pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, 
     operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 
+/// Serialize a host cache retention decision with every graph state mutation,
+/// including when archive acquisition runs with the guest stopped.
+pub(super) fn graph_inventory_lease(candidate: &Candidate) -> Result<state::Lock, CandidateError> {
+    startup_lease(&root(candidate), STARTUP_LEASE_WAIT)
+}
+
 /// Returning the mutation lease requires a fresh Development admission sample under it,
 /// taken no sooner than the admission window after the start's first sample, or after an
 /// earlier recorded sample of this home that `earlier` finds usable (`admission::opening`).

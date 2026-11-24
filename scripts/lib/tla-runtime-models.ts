@@ -71,6 +71,14 @@ const laterIncompleteMissingLockStages = [
   "socket",
   "owner",
 ] as const;
+const stoppedHttpsWitnessFields = [
+  'pool = "stopped"',
+  'run = "retained"',
+  "fin = TRUE",
+  'https = "records"',
+  'port = "free"',
+  "pub = FALSE",
+] as const;
 // TLC's two-worker search does not always report the shortest trace: a deeper
 // first violation can be checked first. Each multi-root-share control therefore
 // accepts exactly the first violations its model can reach, as complete states
@@ -3132,20 +3140,23 @@ const contracts: readonly ModelContract[] = [
       {
         name: "https-stopped",
         negative: true,
-        action: "OwnerRetire",
-        fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+        // These are the first NoDeadEnd violations in the bounded control's
+        // state graph. OwnerRetire preserves a listener or leaves TIME_WAIT,
+        // so it always leaves another step before the dead end.
+        action: "TimeWaitEnds",
+        fields: stoppedHttpsWitnessFields,
         alternativeWitnesses: [
           {
-            action: "RuntimeDown",
-            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+            action: "ListenerExits",
+            fields: stoppedHttpsWitnessFields,
           },
           {
-            action: "TimeWaitEnds",
-            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+            action: "RuntimeDown",
+            fields: stoppedHttpsWitnessFields,
           },
           {
             action: "PoolRecover",
-            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+            fields: stoppedHttpsWitnessFields,
           },
         ],
       },

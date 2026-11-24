@@ -4,6 +4,7 @@ import {
   verifyBalloonReuseModelResult,
   verifyRestoreHistoryModelResult,
 } from "../scripts/lib/tla-result.ts";
+import { runtimeModels } from "../scripts/lib/tla-runtime-models.ts";
 
 describe("TLC admission evidence", () => {
   test("requires completed state exploration for the positive model", () => {
@@ -154,6 +155,49 @@ describe("TLC restore history evidence", () => {
           output: invalid,
         })
       ).toBe(false);
+    }
+  });
+});
+
+describe("TLC stopped HTTPS finalization evidence", () => {
+  test("accepts the last listener leaving a run stranded in a stopped pool", () => {
+    const control = runtimeModels
+      .find(({ name }) => name === "native-pool-stop")
+      ?.additionalControls.find(({ name }) => name === "https-stopped");
+    const output = String.raw`Error: Invariant NoDeadEnd is violated.
+Error: The behavior up to this point is:
+State 7: <OwnerRetire line 138 of module PoolStop>
+/\ pool = "stopped"
+/\ run = "retained"
+/\ fin = TRUE
+/\ https = "records"
+/\ port = "listener"
+/\ pub = FALSE
+State 8: <ListenerExits line 151 of module PoolStop>
+/\ pool = "stopped"
+/\ run = "retained"
+/\ fin = TRUE
+/\ https = "records"
+/\ port = "free"
+/\ pub = FALSE
+`;
+    const result = { negative: true, exitCode: 12, output };
+    expect(control?.verify(result)).toBe(true);
+
+    for (const invalid of [
+      { ...result, exitCode: 0 },
+      { ...result, output: output.replace("NoDeadEnd", "TypeOK") },
+      { ...result, output: output.replace("<ListenerExits", "<OwnerRetire") },
+      {
+        ...result,
+        output: output.replace('port = "free"', 'port = "listener"'),
+      },
+      {
+        ...result,
+        output: output.replace(/(State 8:[\s\S]*)fin = TRUE/, "$1fin = FALSE"),
+      },
+    ]) {
+      expect(control?.verify(invalid)).toBe(false);
     }
   });
 });

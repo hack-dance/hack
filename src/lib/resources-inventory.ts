@@ -17,7 +17,10 @@ import {
 import { getString, isRecord } from "./guards.ts";
 import { readProjectRuntimeStateEntry } from "./project-runtime-state.ts";
 import { readProjectsRegistry } from "./projects-registry.ts";
-import { verifyResourceDetachment } from "./resource-detachment.ts";
+import {
+  readResourceReferences,
+  verifyResourceDetachment,
+} from "./resource-detachment.ts";
 import {
   type RemovableKind,
   readResourceReceipt,
@@ -68,14 +71,15 @@ export type ResourceRow = {
 };
 
 async function receiptOwner(
-  receipt: import("./resource-receipts.ts").ResourceReceipt
+  receipt: import("./resource-receipts.ts").ResourceReceipt,
+  references: Awaited<ReturnType<typeof readResourceReferences>>
 ): Promise<ResourceOwner> {
   const { project, checkout, branch } = receipt;
   return {
     project,
     checkout,
     branch,
-    detached: (await verifyResourceDetachment(receipt)).detached,
+    detached: (await verifyResourceDetachment(receipt, references)).detached,
   };
 }
 
@@ -133,7 +137,8 @@ async function fromContainer(
   container: RuntimeContainer,
   owner: ResourceOwner,
   daemon: string | null,
-  projectDown: boolean
+  projectDown: boolean,
+  references: Awaited<ReturnType<typeof readResourceReferences>>
 ) {
   const receipt =
     daemon && CONTAINER_ID.test(container.id)
@@ -162,7 +167,7 @@ async function fromContainer(
     backend: "compose",
     name: container.name || container.service,
     state: container.state,
-    owners: verified ? [await receiptOwner(receipt)] : [owner],
+    owners: verified ? [await receiptOwner(receipt, references)] : [owner],
     bytes: null,
     ports: container.ports,
     labels: composeLabels(container),
@@ -206,9 +211,8 @@ function knownCheckout(dir: string, checkouts: ReadonlyMap<string, string>) {
 
 async function composeInventory(cwd: string) {
   const { read, daemon } = resourceDocker(cwd);
-  const [runtime, registry, engine, diskTable, volumes] = await Promise.all([
-    readRuntimeProjects({ includeGlobal: true }),
-    readProjectsRegistry(),
+  const [runtime, engine, diskTable, volumes, references] = await Promise.all([
+    readRuntimeProjects({ includeGlobal: true, readOnlyLifecycle: true }),
     daemon(),
     read([
       "system",
@@ -225,9 +229,10 @@ async function composeInventory(cwd: string) {
       "--format",
       "{{.Name}}",
     ]),
+    readResourceReferences(),
   ]);
   const checkouts = new Map(
-    registry.projects.flatMap((project) => [
+    (references.registry?.projects ?? []).flatMap((project) => [
       [project.repoRoot, project.name] as const,
       ...(project.worktrees ?? []).map(
         (checkout) => [checkout.path, project.name] as const
@@ -280,7 +285,8 @@ async function composeInventory(cwd: string) {
           container,
           owner,
           engine,
-          containers.every((item) => ["exited", "dead"].includes(item.state))
+          containers.every((item) => ["exited", "dead"].includes(item.state)),
+          references
         ))
       );
     }
@@ -315,7 +321,7 @@ async function composeInventory(cwd: string) {
       receipt && resourceFingerprint("volume", volume) === receipt.fingerprint;
     const linked = volumeRows.find((row) => row.Name === id);
     const detachment = verified
-      ? await verifyResourceDetachment(receipt)
+      ? await verifyResourceDetachment(receipt, references)
       : null;
     if (!verified) {
       missingProof = true;

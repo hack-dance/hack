@@ -183,6 +183,26 @@ success behavior stays covered by command-specific suites.
 | `hack doctor --json --machine` | Envelope; `data.schema: hack.doctor.machine.v1` |
 <!-- json-inventory:end -->
 
+### Resource removal refusals
+
+`hack resources remove --json` reports a machine-readable `error.detail.reason`
+for safety refusals. `confirmation_required` accompanies `E_INTERACTIVE_REQUIRED`.
+The remaining reasons below accompany `E_PLAN_REFUSED`. Invalid selectors and
+combining `--dry-run` with `--confirm` return `E_USAGE`.
+
+| Reason | Meaning |
+| --- | --- |
+| `engine_context_unknown`, `engine_unknown`, `engine_changed` | Docker context or engine identity could not be pinned, verified, or stayed inconsistent. |
+| `receipt_mismatch` | The resource is absent or does not match a Hack launch receipt on this engine. |
+| `container_active`, `project_not_down` | The container or its Compose project has an active or unverified container state. |
+| `volume_references_unknown`, `volume_referenced` | Container references could not be checked, or a container references the volume. |
+| `checkout_present`, `checkout_unknown` | A launch checkout exists or its absence cannot be verified. |
+| `registry_reference`, `run_reference` | A registered checkout or a runtime or lifecycle entry still refers to the Compose project. |
+| `registry_unknown`, `state_unknown`, `history_unknown` | The registry, checkout state, or launch history could not be verified. |
+| `confirmation_stale`, `resource_changed` | The preview token or final identity check no longer matches. |
+| `engine_refused` | Docker declined the non-forced removal. |
+
+
 ## Additive fields
 
 Additive fields keep a command's row and shape above; consumers ignore keys they do not know.

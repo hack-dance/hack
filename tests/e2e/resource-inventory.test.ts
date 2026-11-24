@@ -1,11 +1,19 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   projectDockerTransportEnvironment,
   readDockerDaemonIdentity,
 } from "../../src/lib/docker-helper-environment.ts";
+import { resolveLifecycleStatePath } from "../../src/lib/lifecycle-runtime.ts";
 import {
   removeProjectRuntimeStateEntry,
   upsertProjectRuntimeStateEntry,
@@ -96,7 +104,14 @@ test.skipIf(process.platform !== "linux" || !Bun.which("docker"))(
         `volume:${volume("detached")}`,
         "--json",
       ];
-      reason(await cli([...selection, "--dry-run"]), "registry_unknown");
+      const missingCheckout = await cli([...selection, "--dry-run"]);
+      reason(missingCheckout, "registry_unknown");
+      expect(JSON.parse(missingCheckout.stdout).error.message).toContain(
+        checkout("detached")
+      );
+      expect(JSON.parse(missingCheckout.stdout).error.message).toContain(
+        "hack projects prune"
+      );
       // Register the moved copy through a successful launch, then prove that
       // the original path being absent does not permit deleting its data.
       expect(
@@ -195,6 +210,47 @@ test.skipIf(process.platform !== "linux" || !Bun.which("docker"))(
         receiptPath(engine.id)
       );
 
+      const betaName = `${project("beta")}-redis-1`;
+      const oldBeta = docker([
+        "container",
+        "inspect",
+        betaName,
+        "--format",
+        "{{.Id}}",
+      ]);
+      const oldBetaKey = new Bun.CryptoHasher("sha256")
+        .update(JSON.stringify([engine.id, "container", oldBeta]))
+        .digest("hex");
+      const oldBetaReceipt = join(
+        hackHome,
+        "resource-receipts",
+        `${oldBetaKey}.json`
+      );
+      expect(await Bun.file(oldBetaReceipt).exists()).toBe(true);
+      const betaCompose = join(checkout("beta"), ".hack", "docker-compose.yml");
+      await writeFile(
+        betaCompose,
+        (await readFile(betaCompose, "utf8")).replace(
+          "    image: redis:7-alpine",
+          "    image: redis:7-alpine\n    command: [redis-server]"
+        )
+      );
+      const recreated = await cli([
+        "up",
+        "--detach",
+        "--json",
+        "--path",
+        checkout("beta"),
+      ]);
+      expect(
+        recreated.exitCode,
+        JSON.parse(recreated.stdout).error?.message
+      ).toBe(0);
+      expect(
+        docker(["container", "inspect", betaName, "--format", "{{.Id}}"])
+      ).not.toBe(oldBeta);
+      expect(await Bun.file(oldBetaReceipt).exists()).toBe(false);
+
       const active = docker([
         "container",
         "inspect",
@@ -249,6 +305,30 @@ test.skipIf(process.platform !== "linux" || !Bun.which("docker"))(
           }),
         ])
       );
+      docker(["container", "stop", active]);
+      await removeProjectRuntimeStateEntry({
+        projectDir: join(checkout("alpha"), ".hack"),
+        composeProject: project("alpha"),
+      });
+      const stoppedSelection = [
+        "resources",
+        "remove",
+        `container:${stopped}`,
+        "--json",
+      ];
+      const stoppedPreview = await cli([...stoppedSelection, "--dry-run"]);
+      expect(
+        stoppedPreview.exitCode,
+        JSON.parse(stoppedPreview.stdout).error?.message
+      ).toBe(0);
+      const stoppedToken = JSON.parse(stoppedPreview.stdout).data.token;
+      const stoppedRemoval = await cli([
+        ...stoppedSelection,
+        "--confirm",
+        stoppedToken,
+      ]);
+      expect(JSON.parse(stoppedRemoval.stdout).data.removed).toBe(true);
+
       const live = await cli([
         "resources",
         "remove",
@@ -259,6 +339,19 @@ test.skipIf(process.platform !== "linux" || !Bun.which("docker"))(
       expect(JSON.parse(live.stdout).error.message).toContain(
         "references this volume"
       );
+      const journal = resolveLifecycleStatePath({
+        projectDir: join(checkout("beta"), ".hack"),
+      });
+      await mkdir(dirname(journal), { recursive: true });
+      const invalidJournal = "{invalid synthetic fixture";
+      await writeFile(journal, invalidJournal, { flag: "wx", mode: 0o600 });
+      try {
+        expect((await cli(["resources", "list", "--json"])).exitCode).toBe(0);
+        expect(await readFile(journal, "utf8")).toBe(invalidJournal);
+        reason(await cli([...selection, "--dry-run"]), "state_unknown");
+      } finally {
+        await rm(journal);
+      }
       const preview = await cli([...selection, "--dry-run"]);
       expect(preview.exitCode).toBe(0);
       const { token, message } = JSON.parse(preview.stdout).data;
@@ -273,12 +366,41 @@ test.skipIf(process.platform !== "linux" || !Bun.which("docker"))(
         );
       }
       expect(message).toContain("cannot be undone");
+      expect(message).toContain(
+        "Hack has not seen this project at any other path."
+      );
       const unconfirmed = await cli(selection);
       expect(JSON.parse(unconfirmed.stdout).error.code).toBe(
         "E_INTERACTIVE_REQUIRED"
       );
       const wrong = await cli([...selection, "--confirm", "wrong"]);
       expect(JSON.parse(wrong.stdout).error.code).toBe("E_PLAN_REFUSED");
+      const failedRecording = Bun.spawnSync(
+        [
+          process.execPath,
+          "-e",
+          "const { recordResourceCheckout } = await import(process.argv[1]); await recordResourceCheckout(process.argv[2], process.argv[3]).catch(() => process.exit(9));",
+          import.meta.resolve("../../src/lib/resource-receipts.ts"),
+          compose("detached"),
+          checkout("never-mounted"),
+        ],
+        { env: { ...process.env, HACK_HOME: hackHome } }
+      );
+      expect(failedRecording.exitCode).toBe(9);
+      reason(await cli([...selection, "--dry-run"]), "history_unknown");
+      // Remove only the injected failure from our disposable fixture so the
+      // remaining test can exercise a valid, complete history.
+      const failureKey = new Bun.CryptoHasher("sha256")
+        .update(
+          JSON.stringify([
+            "compose-project-history-failure",
+            "volume",
+            compose("detached"),
+          ])
+        )
+        .digest("hex");
+      await rm(join(hackHome, "resource-receipts", `${failureKey}.json`));
+
       const removed = await cli([...selection, "--confirm", token]);
       expect(JSON.parse(removed.stdout).data.removed).toBe(true);
       docker([

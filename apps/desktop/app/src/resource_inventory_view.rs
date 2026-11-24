@@ -135,7 +135,7 @@ impl HackApp {
         if confirmation {
             self.resource_inventory.confirmation = Some((self.model.source_epoch(), RemovalPlan {
                 id: "volume:old-copy_data".into(),
-                message: "Delete volume old-copy_data permanently? This cannot be undone.\nSize: 2097152 bytes.\nCheckouts: \"/work/old-copy\".\nNo registered checkout or run references this Compose project.".into(),
+                message: "Delete volume old-copy_data permanently? This cannot be undone.\nSize: 2097152 bytes.\nCheckouts: \"/work/old-copy\".\nNo registered checkout or run references this Compose project. Hack has not seen this project at any other path.".into(),
                 token: "fixture".into(),
                 removed: false,
             }));

@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   checkoutContext,
@@ -10,7 +10,10 @@ import { readLifecycleState } from "./lifecycle-runtime.ts";
 import { readReplaceablePrivateFile } from "./private-file.ts";
 import { readProjectConfigFiles } from "./project.ts";
 import { resolveProjectRuntimeStatePath } from "./project-runtime-state.ts";
-import { readProjectsRegistryStrict } from "./projects-registry.ts";
+import {
+  readProjectsRegistryStrict,
+  resolveProjectsRegistryPath,
+} from "./projects-registry.ts";
 import {
   type CheckoutWitness,
   type ResourceReceipt,
@@ -65,7 +68,7 @@ export async function witnessedCheckoutStatus(witness: CheckoutWitness) {
   }
 }
 
-async function runtimeReferences(projectDir: string, name: string) {
+async function runtimeNames(projectDir: string) {
   const path = resolveProjectRuntimeStatePath({ projectDir });
   const file = (await exists(path))
     ? await readReplaceablePrivateFile({
@@ -75,6 +78,7 @@ async function runtimeReferences(projectDir: string, name: string) {
         refusal: () => new Error("Runtime state is unsafe."),
       })
     : null;
+  const names: string[] = [];
   const text = file?.text ?? null;
   if (text !== null) {
     const parsed: unknown = JSON.parse(text);
@@ -90,59 +94,118 @@ async function runtimeReferences(projectDir: string, name: string) {
     ) {
       throw new Error("Runtime state is invalid.");
     }
-    if (parsed.entries.some((row) => row.composeProject === name)) {
-      return true;
-    }
+    names.push(...parsed.entries.map((row) => row.composeProject));
   }
-  return (await readLifecycleState({ projectDir, readOnly: true })).some(
-    (row) => row.composeProject === name
-  );
+  const lifecycle = await readLifecycleState({ projectDir, readOnly: true });
+  return [...names, ...lifecycle.map((row) => row.composeProject)];
 }
 
-const sameInstance = (base: string, name: string) =>
-  name === base || name.startsWith(`${base}--`);
+type Reference = { code: Detachment["code"]; reason?: string };
+const pruneHelp =
+  "Run hack projects prune for a deleted checkout, or remount its drive.";
 
-async function registrationReference(
-  name: string
-): Promise<Detachment["code"] | null> {
+async function checkoutReferences(
+  ctx: ReturnType<typeof checkoutContext>,
+  bases: Set<string>,
+  runs: Set<string>
+): Promise<Reference | null> {
+  const path = JSON.stringify(ctx.projectRoot);
+  try {
+    const checkout = await stat(ctx.projectRoot).catch((error: unknown) => {
+      if (missing(error)) {
+        return null;
+      }
+      throw error;
+    });
+    if (!checkout?.isDirectory()) {
+      return {
+        code: "registry_unknown",
+        reason: `The registered checkout ${path} is unavailable. ${pruneHelp}`,
+      };
+    }
+    if (!(await stat(ctx.projectDir)).isDirectory()) {
+      throw new Error("Project directory is unavailable.");
+    }
+    for (const name of await runtimeNames(ctx.projectDir)) {
+      runs.add(name);
+    }
+    if (!(await exists(ctx.composeFile))) {
+      return null;
+    }
+    const cfg = await readProjectConfigFiles(ctx.projectDir);
+    const names = await Promise.all(
+      [false, true].map((forBranch) =>
+        resolveDesktopComposeProjectName({ project: ctx, cfg, forBranch })
+      )
+    );
+    for (const name of names) {
+      if (!name) {
+        throw new Error("Compose project name is unavailable.");
+      }
+      bases.add(name);
+    }
+    return null;
+  } catch {
+    return {
+      code: "state_unknown",
+      reason: `Could not verify configuration or run state at ${path}. ${pruneHelp}`,
+    };
+  }
+}
+
+export async function readResourceReferences() {
+  const bases = new Set<string>();
+  const runs = new Set<string>();
   const read = await readProjectsRegistryStrict({
     requireAutostartTrust: true,
   }).catch(() => null);
+  let unknown: Reference | null = null;
   if (read?.kind !== "valid" || read.rejected > 0) {
-    return "registry_unknown";
-  }
-  let registered = false;
-  for (const project of read.registry.projects) {
-    registered ||= sameInstance(project.name, name);
-    for (const checkout of listRegistrationCheckouts(project)) {
-      const ctx = checkoutContext({ registration: project, checkout });
-      try {
-        if (!(await exists(checkout.root))) {
-          return "registry_unknown";
+    unknown = {
+      code: "registry_unknown",
+      reason: `The projects registry at ${JSON.stringify(resolveProjectsRegistryPath())} could not be verified. ${pruneHelp}`,
+    };
+  } else {
+    for (const registration of read.registry.projects) {
+      bases.add(registration.name);
+      for (const checkout of listRegistrationCheckouts(registration)) {
+        const ctx = checkoutContext({ registration, checkout });
+        unknown = await checkoutReferences(ctx, bases, runs);
+        if (unknown) {
+          break;
         }
-        if (await runtimeReferences(ctx.projectDir, name)) {
-          return "run_reference";
-        }
-        if (await exists(ctx.composeFile)) {
-          const cfg = await readProjectConfigFiles(ctx.projectDir);
-          const names = await Promise.all(
-            [false, true].map((forBranch) =>
-              resolveDesktopComposeProjectName({ project: ctx, cfg, forBranch })
-            )
-          );
-          if (names.some((base) => base && sameInstance(base, name))) {
-            registered = true;
-          }
-          if (names.some((base) => base === null)) {
-            return "state_unknown";
-          }
-        }
-      } catch {
-        return "state_unknown";
+      }
+      if (unknown) {
+        break;
       }
     }
   }
-  return registered ? "registry_reference" : null;
+  return {
+    registry: read?.kind === "valid" ? read.registry : null,
+    lookup(name: string): Reference | null {
+      if (unknown) {
+        return unknown;
+      }
+      if (runs.has(name)) {
+        return { code: "run_reference" };
+      }
+      return registeredInstance(bases, name)
+        ? { code: "registry_reference" }
+        : null;
+    },
+  };
+}
+
+function registeredInstance(bases: ReadonlySet<string>, name: string) {
+  if (bases.has(name)) {
+    return true;
+  }
+  for (let at = name.indexOf("--"); at >= 0; at = name.indexOf("--", at + 1)) {
+    if (bases.has(name.slice(0, at))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const reasons: Record<Detachment["code"], string> = {
@@ -164,7 +227,8 @@ const reasons: Record<Detachment["code"], string> = {
 };
 
 export async function verifyResourceDetachment(
-  receipt: ResourceReceipt
+  receipt: ResourceReceipt,
+  references?: Awaited<ReturnType<typeof readResourceReferences>>
 ): Promise<Detachment> {
   const history = await readResourceCheckoutHistory(receipt.composeProject);
   const paths = [
@@ -172,10 +236,13 @@ export async function verifyResourceDetachment(
       [...receipt.checkouts, ...(history ?? [])].map((row) => row.path)
     ),
   ];
-  const result = (code: Detachment["code"]): Detachment => ({
+  const result = (
+    code: Detachment["code"],
+    reason = reasons[code]
+  ): Detachment => ({
     code,
     detached: code === "detached",
-    reason: reasons[code],
+    reason,
     paths,
   });
   if (
@@ -188,9 +255,11 @@ export async function verifyResourceDetachment(
   ) {
     return result("history_unknown");
   }
-  const registry = await registrationReference(receipt.composeProject);
+  const registry = (references ?? (await readResourceReferences())).lookup(
+    receipt.composeProject
+  );
   if (registry) {
-    return result(registry);
+    return result(registry.code, registry.reason);
   }
   for (const witness of history) {
     const status = await witnessedCheckoutStatus(witness);

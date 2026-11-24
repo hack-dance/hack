@@ -174,7 +174,7 @@ export async function planResourceRemoval(opts: {
         })
       : null;
   const reason = detachment.detached
-    ? detachment.reason
+    ? `${detachment.reason} Hack has not seen this project at any other path.`
     : "Every observed container in this Compose project is stopped.";
   const message = `Delete ${kind} ${id} permanently? This cannot be undone.\nSize: ${size === null ? "unknown" : `${size} bytes`}.\nCheckouts: ${detachment.paths.map((path) => JSON.stringify(path)).join(", ") || "unknown"}.\n${reason}`;
   return {
@@ -207,7 +207,10 @@ export async function removeResource(opts: {
   ) {
     refused("resource_changed", "Resource identity changed before removal.");
   }
-  // Docker's non-forced removal also rechecks running containers and volume references.
+  // Hack holds the Compose-name lock. Docker has no compare-and-delete by
+  // volume identity. An out-of-band recreation in this last window can lose
+  // the replacement volume only if unreferenced. Non-forced removal refuses volumes referenced
+  // by any container and refuses active containers.
   if ((await plan.read([plan.kind, "rm", plan.id])) === null) {
     refused(
       "engine_refused",

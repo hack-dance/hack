@@ -174,11 +174,22 @@ function historyFile(dir: string, project: string) {
   return receiptFile(dir, "compose-project-history", "volume", project);
 }
 
+function historyFailureFile(dir: string, project: string) {
+  return receiptFile(dir, "compose-project-history-failure", "volume", project);
+}
+
 export async function readResourceCheckoutHistory(
   project: string
 ): Promise<readonly CheckoutWitness[] | null> {
   try {
     const dir = await privateReceiptDirectory(false);
+    const failure = await readReplaceablePrivateFile({
+      ...historyFailureFile(dir, project),
+      maxBytes: 32,
+    });
+    if (failure) {
+      return null;
+    }
     const file = await readReplaceablePrivateFile({
       ...historyFile(dir, project),
       maxBytes: 131_072,
@@ -198,6 +209,23 @@ export async function recordResourceCheckout(
   root: string
 ): Promise<readonly CheckoutWitness[]> {
   const dir = await privateReceiptDirectory(true);
+  try {
+    return await appendResourceCheckout(dir, project, root);
+  } catch (error) {
+    // A later successful launch cannot reconstruct the missing checkout.
+    await replacePrivateFileAtomic({
+      ...historyFailureFile(dir, project),
+      text: "incomplete",
+    });
+    throw error;
+  }
+}
+
+async function appendResourceCheckout(
+  dir: string,
+  project: string,
+  root: string
+) {
   const path = await realpath(root);
   const [parent, checkout] = await Promise.all([
     lstat(dirname(path)),
@@ -285,6 +313,24 @@ async function ownedVolumeKeys(file: string): Promise<Set<string>> {
   );
 }
 
+export async function readComposeContainerIds(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly env: Readonly<Record<string, string>>;
+}) {
+  const read = dockerResourceReader({ cwd: opts.projectDir, env: opts.env });
+  return dockerNames(
+    await read([
+      "ps",
+      "-aq",
+      "--no-trunc",
+      "--filter",
+      `label=${COMPOSE_PROJECT}=${opts.composeProject}`,
+    ]),
+    CONTAINER_ID
+  );
+}
+
 /** An exact resource receipt is published only from a successful, admitted Compose launch. */
 export async function recordComposeResourceReceipts(opts: {
   readonly projectDir: string;
@@ -296,20 +342,12 @@ export async function recordComposeResourceReceipts(opts: {
   readonly launch: string;
   readonly daemon: string;
   readonly checkouts: readonly CheckoutWitness[];
+  readonly priorContainers?: { daemon: string; ids: readonly string[] };
   readonly env: Readonly<Record<string, string>>;
 }) {
   const { projectDir, daemon, composeProject, env } = opts;
   const read = dockerResourceReader({ cwd: projectDir, env });
-  const ids = dockerNames(
-    await read([
-      "ps",
-      "-aq",
-      "--no-trunc",
-      "--filter",
-      `label=${COMPOSE_PROJECT}=${composeProject}`,
-    ]),
-    CONTAINER_ID
-  );
+  const ids = await readComposeContainerIds(opts);
   if (!ids?.length || ids.length > 32) {
     return;
   }
@@ -352,6 +390,15 @@ export async function recordComposeResourceReceipts(opts: {
     return;
   }
   const dir = await privateReceiptDirectory(true);
+  if (opts.priorContainers?.daemon === daemon) {
+    await Promise.all(
+      opts.priorContainers.ids
+        .filter((id) => !ids.includes(id))
+        .map((id) =>
+          pruneResourceReceipt(daemon, "container", id).catch(() => undefined)
+        )
+    );
+  }
   const publish = async (
     kind: RemovableKind,
     row: Record<string, unknown> | null

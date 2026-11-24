@@ -49,6 +49,7 @@ import {
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import {
   type CheckoutWitness,
+  readComposeContainerIds,
   recordComposeResourceReceipts,
   recordResourceCheckout,
 } from "../lib/resource-receipts.ts";
@@ -9034,14 +9035,35 @@ async function runResolvedComposeUp({
   // Set right before Compose may start containers. A signal from then on
   // keeps the shared helpers: a start still in flight can start services
   // after any snapshot, so no probe could prove them absent.
+  let priorResourceContainers:
+    | { daemon: string; ids: readonly string[] }
+    | undefined;
   let cleanupCheckouts: readonly CheckoutWitness[] | undefined;
   let foregroundReceipts: Promise<void> | undefined;
   const foregroundReceiptStop = new AbortController();
   const recordLaunchCheckout = async () => {
-    cleanupCheckouts ??= await recordResourceCheckout(
-      lifecycleComposeProject,
-      project.projectRoot
-    ).catch(() => undefined);
+    if (cleanupCheckouts) {
+      return;
+    }
+    try {
+      cleanupCheckouts = await recordResourceCheckout(
+        lifecycleComposeProject,
+        project.projectRoot
+      );
+      const captured = await engine.capture();
+      if (captured.daemon.kind === "verified") {
+        const ids = await readComposeContainerIds({
+          projectDir: project.projectDir,
+          composeProject: lifecycleComposeProject,
+          env: envOverrides.env,
+        });
+        if (ids) {
+          priorResourceContainers = { daemon: captured.daemon.id, ids };
+        }
+      }
+    } catch {
+      // Receipt capture is optional and must not block Compose startup.
+    }
   };
   const recordResourceReceipts = async () => {
     try {
@@ -9057,6 +9079,7 @@ async function runResolvedComposeUp({
           launch: captured.launchId,
           daemon: captured.daemon.id,
           checkouts: cleanupCheckouts,
+          priorContainers: priorResourceContainers,
           env: envOverrides.env,
         });
       }

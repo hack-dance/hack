@@ -7,7 +7,7 @@ repository, so teammates and agents use the same definition.
 Use `hack resources list --json` or the desktop **Resources** pane to
 inspect observed containers and attachments. The report includes Docker's
 disk-size estimates, the native home's allocated bytes, and retained native
-volume observations where available. A detached row has a missing checkout.
+volume observations where available. A detached row has no known checkout or runtime mapping for its Compose project.
 
 Use `hack resources remove volume:<name> --dry-run --json` to review removal,
 then pass its token with `--confirm`. Interactive removal prompts before
@@ -18,6 +18,16 @@ A named Compose volume needs zero container references, no registry or run
 mapping for its Compose project name, and verified absence of every checkout
 that launched that instance. Missing or changed checkout parents block
 removal. A stopped container of an active project also stays protected.
+A checkout moved to a new path where Hack has never launched it can count as
+detached after its old registry entry is pruned. Hack only knows paths it has
+recorded.
+
+Hack serializes its own operations by Compose project name. Docker has no
+compare-and-delete by volume identity. An out-of-band recreation in the final
+instant between identity validation and removal can delete the replacement
+volume. Docker's non-forced removal still refuses a volume mounted by any
+container, including a stopped one.
+
 Native persistent data remains protected for graph restore.
 
 ## Project, instance and branch instance

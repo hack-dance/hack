@@ -220,7 +220,7 @@ impl Palette {
             border: c(rgb(0x2B3036)),
             border_strong: c(rgb(0x2B3036)),
             text_primary,
-            text_secondary,
+            text_secondary: c(rgb(0xBFC5CB)),
             text_muted,
             accent: text_primary,
             states: States {

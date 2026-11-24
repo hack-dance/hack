@@ -69,3 +69,15 @@ test("a CLI that leaks the wrong injected key is refused without forwarding it o
   );
   expect(await readdir(join(f.root, "tmp"))).toEqual([]);
 });
+
+test("a selected file that changes during version discovery produces no receipt", async () => {
+  const f = await fixture(
+    'printf "\\n# changed\\n" >> "$0"\n echo fake-version'
+  );
+  const result = await run(f);
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe(
+    "Portable bootstrap failed: step=identity reason=cli_identity\n"
+  );
+});

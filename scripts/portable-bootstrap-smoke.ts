@@ -124,6 +124,14 @@ export async function runPortableBootstrap(opts: {
   }
 }
 
+async function executableSha256(path: string): Promise<string> {
+  const digest = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    digest.update(chunk);
+  }
+  return digest.digest("hex");
+}
+
 async function runWorkflow(
   opts: { readonly hackBin: string },
   context: BootstrapContext
@@ -149,14 +157,12 @@ async function runWorkflow(
   let failure: BootstrapFailure | undefined;
   try {
     context.step = "identity";
-    const digest = createHash("sha256");
-    for await (const chunk of createReadStream(hackBin)) {
-      digest.update(chunk);
-    }
-    selectedExecutableSha256 = digest.digest("hex");
+    selectedExecutableSha256 = await executableSha256(hackBin);
     const identity = await command({ fixture, hackBin, args: ["--version"] });
     requireThat(
-      identity.code === 0 && identity.stdout.trim().length > 0,
+      identity.code === 0 &&
+        identity.stdout.trim().length > 0 &&
+        (await executableSha256(hackBin)) === selectedExecutableSha256,
       "cli_identity"
     );
     version = identity.stdout.trim();
@@ -272,6 +278,11 @@ async function runWorkflow(
     );
     await assertNoSecretFiles(fixture);
     checks.push("no key/plaintext files or output");
+    context.step = "identity";
+    requireThat(
+      (await executableSha256(hackBin)) === selectedExecutableSha256,
+      "cli_identity"
+    );
     completed = true;
   } catch (error: unknown) {
     failure = new BootstrapFailure(failureReason(error), context.step);

@@ -21,6 +21,23 @@ HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=lifecycle-session-recovery
 Exit codes: `0` all pass/skip, `1` any scenario failed, `2` isolation canary
 failed (nothing ran) or the launchd canary saw the real hackd plist change.
 
+## Compose branch retention at 1, 8 and 32 instances
+
+Run this opt-in scenario against the selected packaged CLI on a Docker host
+with the usual E2E prerequisites and capacity for 32 containers:
+
+```bash
+HACK_E2E_CLI_BIN=/absolute/path/to/hack-cli HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 \
+  bun tests/e2e/run.ts --only=compose-branch-scale
+```
+
+Each cohort starts all branches side by side, writes a distinct marker into each
+named volume, then reads the markers before and after retaining stop/start.
+Containers use no network so the test does not consume a Docker subnet per
+branch. The harness owns teardown. Record the package and source identity alongside the
+result. Use the application benchmark protocol for storage plateau, CPU and
+memory, and qualify native separately on its own engine.
+
 ## CI tiering
 
 Only the `test` job is a required status check on `next` and `main`. It is the

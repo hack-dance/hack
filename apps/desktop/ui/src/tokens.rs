@@ -103,10 +103,14 @@ pub struct Palette {
     pub surface: Hsla,
     /// Sidebar, title bar and status bar.
     pub chrome: Hsla,
-    /// Hover, selected row, selected tab, log block, neutral pills.
+    /// Hover, log block, neutral pills.
     pub surface_1: Hsla,
-    /// Pressed or selected-and-hovered.
+    /// Pressed.
     pub surface_2: Hsla,
+    /// Selected navigation and file rows.
+    pub selection: Hsla,
+    /// Read-only file preview body.
+    pub preview_surface: Hsla,
     pub border: Hsla,
     pub border_strong: Hsla,
     pub text_primary: Hsla,
@@ -155,6 +159,8 @@ impl Palette {
             chrome: c(rgb(0xF7F7F5)),
             surface_1: c(rgb(0xEFEFEC)),
             surface_2: c(rgb(0xE6E6E2)),
+            selection: c(rgb(0xEFEFEC)),
+            preview_surface: c(rgb(0xEFEFEC)),
             border: c(rgba(0x0000_0017)),
             border_strong: c(rgba(0x0000_002E)),
             text_primary: c(rgb(0x1C1C1A)),
@@ -198,49 +204,56 @@ impl Palette {
 
     #[must_use]
     pub fn dark() -> Self {
-        // Merino Dark from the onboarding design tokens.
+        // Merino Dark, from the HACK-2595 desktop frames.
+        let surface_1 = c(rgb(0x1A1E24));
+        let selection = c(rgb(0x24272B));
+        let text_primary = c(rgb(0xE6EDF3));
+        let text_secondary = c(rgb(0xBFC5CB));
+        let text_muted = c(rgb(0x8B9197));
         Self {
             mode: Mode::Dark,
             surface: c(rgb(0x0D1117)),
             chrome: c(rgb(0x090C10)),
-            surface_1: c(rgb(0x1A1E24)),
-            surface_2: c(rgb(0x23272D)),
-            border: c(rgb(0x2B3036)),
-            border_strong: c(rgb(0x464B51)),
-            text_primary: c(rgb(0xE6EDF3)),
-            text_secondary: c(rgb(0xBFC5CB)),
-            text_muted: c(rgb(0x8B9197)),
-            accent: c(rgb(0xE6EDF3)),
+            surface_1,
+            surface_2: selection,
+            selection,
+            preview_surface: c(rgb(0x1E2329)),
+            border: c(rgb(0x1E2329)),
+            border_strong: c(rgb(0x2B3036)),
+            text_primary,
+            text_secondary,
+            text_muted,
+            accent: text_primary,
             states: States {
                 running: StateColors {
                     dot: c(rgb(0x3FB950)),
-                    bg: c(rgb(0x12221D)),
-                    fg: c(rgb(0x3FB950)),
+                    bg: c(rgb(0x152C20)),
+                    fg: c(rgb(0x56D364)),
                 },
                 busy: StateColors {
-                    dot: c(rgb(0xBFC5CB)),
-                    bg: c(rgb(0x1F2329)),
-                    fg: c(rgb(0xBFC5CB)),
+                    dot: c(rgb(0x58A6FF)),
+                    bg: c(rgba(0x58A6_FF30)),
+                    fg: c(rgb(0x79C0FF)),
                 },
                 degraded: StateColors {
                     dot: c(rgb(0xD29922)),
-                    bg: c(rgb(0x211F18)),
-                    fg: c(rgb(0xD29922)),
+                    bg: c(rgba(0xD299_222E)),
+                    fg: c(rgb(0xE3B341)),
                 },
                 failed: StateColors {
                     dot: c(rgb(0xFF7B72)),
-                    bg: c(rgb(0x251C20)),
-                    fg: c(rgb(0xFF7B72)),
+                    bg: c(rgb(0x2F2024)),
+                    fg: c(rgb(0xFFA198)),
                 },
                 stopped: StateColors {
                     dot: c(rgb(0x686D73)),
-                    bg: c(rgb(0x1A1E24)),
-                    fg: c(rgb(0x8B9197)),
+                    bg: surface_1,
+                    fg: text_secondary,
                 },
                 unknown: StateColors {
-                    dot: c(rgb(0x8B9197)),
-                    bg: c(rgb(0x1A1E24)),
-                    fg: c(rgb(0x8B9197)),
+                    dot: text_muted,
+                    bg: surface_1,
+                    fg: text_secondary,
                 },
             },
         }

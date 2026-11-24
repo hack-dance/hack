@@ -96,6 +96,48 @@ test("missing mapping gives native not-started without any runtime call", async 
     })
   ).rejects.toThrow("not been started");
 });
+
+test.each([
+  "preparing",
+  "started-observed",
+])("startup ps displays only verified ports for the selected live run in %s", async (phase) => {
+  const opts = await fixture(false);
+  const finish = await beginNativeProjectStartupObservation(opts.scope);
+  try {
+    await finish.select(run);
+    const observed = snapshot(true);
+    observed.receipt.phase = phase;
+    const invoke = async () => ({
+      ...observed,
+      receipt: {
+        ...observed.receipt,
+        resources: {
+          "container:web": {
+            ...observed.receipt.resources["container:web"],
+            loopback_ports: [
+              { host_port: 8080, target: 80 },
+              { host_port: 8081, target: 81 },
+            ],
+          },
+        },
+      },
+      startup_observed_ports: [8080],
+    });
+    expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+      run: run.run,
+      phase,
+      items: [{ service: "web", state: "running" }],
+      ports: [{ service: "web", port: 8080, state: "observed" }],
+    });
+    await finish.select({ ...run, planId: "f".repeat(64) });
+    expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+      status: "pending",
+      items: [],
+    });
+  } finally {
+    await finish();
+  }
+});
 test("ps reports provider pin mismatch as its own closed status without service claims", async () => {
   const opts = await fixture();
   const result = await nativeProjectPs({

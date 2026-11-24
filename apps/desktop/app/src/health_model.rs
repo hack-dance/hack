@@ -508,7 +508,6 @@ mod tests {
             id: "project".into(),
             status: "ok".into(),
             detail: format!("Found .hack/ (or legacy .dev/) at {root}/.hack"),
-            ..DoctorCheck::default()
         };
         let run = |checks| {
             DoctorRun::project(

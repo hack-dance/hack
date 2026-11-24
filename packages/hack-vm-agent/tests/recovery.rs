@@ -38,6 +38,7 @@ impl Agent {
             .process_group(0)
             .env_clear()
             .env("HOME", &dir)
+            .env("GUEST_LAUNCHER_FIXTURE", "launcher-only")
             .arg(dir.join("agent.sock"))
             .spawn()
             .unwrap();
@@ -454,4 +455,37 @@ fn kill_running_shell_reaches_its_worker() {
         Err(e) => (e.kind() == std::io::ErrorKind::NotFound).then_some(()),
     });
     assert_eq!(agent.request(release(&handle)), Response::Released {});
+}
+
+#[test]
+fn only_the_target_job_receives_its_explicit_environment() {
+    let agent = Agent::boot("target-env");
+    // Compare inside the target. The host needs only the exit code.
+    let checks = [
+        (
+            1,
+            vec![("JOB_FIXTURE".into(), "first-job".into())],
+            b"first-job\n".as_slice(),
+            r#"read -r expected && test "$JOB_FIXTURE" = "$expected" && test -z "${GUEST_LAUNCHER_FIXTURE+x}""#,
+        ),
+        (
+            2,
+            vec![],
+            b"".as_slice(),
+            r#"test -z "${JOB_FIXTURE+x}" && test -z "${GUEST_LAUNCHER_FIXTURE+x}""#,
+        ),
+    ];
+    for (id, env, stdin, script) in checks {
+        let handle = agent.handle(id);
+        let command = Request::Start {
+            handle: handle.clone(),
+            argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            env,
+            stdin: stdin.to_vec(),
+            cwd: "/".into(),
+        };
+        assert_eq!(agent.request(command), Response::Running {});
+        agent.await_reply(inspect(&handle), Response::Exited { code: 0 });
+        assert_eq!(agent.request(release(&handle)), Response::Released {});
+    }
 }

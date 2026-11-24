@@ -1,4 +1,6 @@
 //! Foreground host publications. Intent precedes staging/exec; cleanup never adopts unknown files.
+#[cfg(test)]
+mod lookup_tests;
 pub mod recovery;
 #[cfg(test)]
 mod retirement_tests;
@@ -272,20 +274,49 @@ fn directory(e: &Entry) -> PathBuf {
 fn root(c: &Candidate) -> PathBuf {
     c.state_root.join("run/publications")
 }
+
+enum RegistryRead {
+    Settled,
+    Committed,
+}
+
 fn load(c: &Candidate, owner: &str) -> Result<BTreeMap<String, Entry>, CandidateError> {
+    load_registry(c, owner, RegistryRead::Settled)
+}
+
+fn load_registry(
+    c: &Candidate,
+    owner: &str,
+    purpose: RegistryRead,
+) -> Result<BTreeMap<String, Entry>, CandidateError> {
     let root = root(c);
-    if !root.exists() && !root.is_symlink() {
-        return Ok(BTreeMap::new());
-    }
-    state::check_private_directory(&root)?;
-    if root.join("state.pending").exists() || root.join("state.pending").is_symlink() {
-        return Err(error());
+    match fs::symlink_metadata(&root) {
+        Ok(_) => state::check_private_directory(&root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) => return Err(state::io(error)),
     }
     let path = root.join("state.json");
-    let entries: BTreeMap<String, Entry> = if path.exists() || path.is_symlink() {
-        state::read_bounded(&path, 65536)?
-    } else {
-        BTreeMap::new()
+    let entries = match purpose {
+        RegistryRead::Committed => {
+            // The pending journal changes one reservation and is invisible
+            // until rename. A sibling must be able to serve from state.json
+            // even if the writer stops with a pending journal left behind.
+            state::read_committed(&path, 65536)?.unwrap_or_default()
+        }
+        RegistryRead::Settled => {
+            match fs::symlink_metadata(root.join("state.pending")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(error()),
+                Err(error) => return Err(state::io(error)),
+            }
+            if path.exists() || path.is_symlink() {
+                state::read_bounded(&path, 65536)?
+            } else {
+                BTreeMap::new()
+            }
+        }
     };
     validate(&entries, owner)?;
     Ok(entries)
@@ -1058,10 +1089,7 @@ fn verify_staged_binary(e: &Entry) -> Result<(), CandidateError> {
 }
 
 fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
-    let observed = identity::observe(e.process.pid)?;
-    identity::verify(&e.process, &observed, &e.process.executable, unsafe {
-        libc::geteuid()
-    })?;
+    verify_publication_process(e)?;
     verify_staged_binary(e)?;
     // A TCP frontend has no filesystem identity. The publisher binds its
     // control socket only after the frontend listener is bound and listening,
@@ -1071,8 +1099,12 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     }
     check_socket(e, "control", "HKPC1", &e.token, false)?;
     // A second observation refuses death or identity change during filesystem checks.
-    let after = identity::observe(e.process.pid)?;
-    identity::verify(&e.process, &after, &e.process.executable, unsafe {
+    verify_publication_process(e)
+}
+
+fn verify_publication_process(e: &Entry) -> Result<(), CandidateError> {
+    let observed = identity::observe(e.process.pid)?;
+    identity::verify(&e.process, &observed, &e.process.executable, unsafe {
         libc::geteuid()
     })
 }
@@ -1116,30 +1148,39 @@ pub(super) fn observed_run_ports(
 /// A point-in-time observation, not a persistent capability or guest health claim.
 pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, CandidateError> {
     let name = normalize_hostname(value)?;
-    let owner = state::Owner::load(c)?;
-    let entries = load(c, &owner.token)?;
-    let entry = entries
-        .values()
-        .find(|e| e.hostnames.contains(&name))
-        .ok_or_else(error)?;
-    observe_publication(entry)?;
-    // Writers retain the provider lock. Readers validate the selected immutable
-    // ownership record twice instead of blocking unrelated running applications.
-    let after_owner = state::Owner::load(c)?;
-    let after = load(c, &after_owner.token)?;
-    verify_claim_snapshot(entry, &after, &after_owner.token)?;
-    let process = identity::observe(entry.process.pid)?;
-    identity::verify(
-        &entry.process,
-        &process,
-        &entry.process.executable,
-        unsafe { libc::geteuid() },
+    let entry = observe_hostname_claim(
+        c,
+        &name,
+        || Ok(state::Owner::load_for_hostname_lookup(c)?.token),
+        observe_publication,
     )?;
+    verify_publication_process(&entry)?;
     Ok(
         serde_json::json!({"hostname":name,"run":entry.run,"reservation":entry.reservation,
-        "endpoint":directory(entry).join("frontend"),"state":"publication-observed",
+        "endpoint":directory(&entry).join("frontend"),"state":"publication-observed",
         "scope":"point-in-time-host-publication"}),
     )
+}
+
+fn observe_hostname_claim(
+    c: &Candidate,
+    name: &str,
+    load_owner: impl Fn() -> Result<String, CandidateError>,
+    observe: impl FnOnce(&Entry) -> Result<(), CandidateError>,
+) -> Result<Entry, CandidateError> {
+    let owner = load_owner()?;
+    let entries = load_registry(c, &owner, RegistryRead::Committed)?;
+    let entry = entries
+        .into_values()
+        .find(|e| e.hostnames.iter().any(|hostname| hostname == name))
+        .ok_or_else(error)?;
+    observe(&entry)?;
+    // Compare the selected claim across snapshots. A change to another run
+    // must not invalidate this one, even if it committed during observation.
+    let after_owner = load_owner()?;
+    let after = load_registry(c, &after_owner, RegistryRead::Committed)?;
+    verify_claim_snapshot(&entry, &after, &after_owner)?;
+    Ok(entry)
 }
 
 /// Point-in-time observation of one owned loopback TCP publication, selected by

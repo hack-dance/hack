@@ -155,6 +155,7 @@ async function installComposeNameFixture(opts?: {
   readonly failFirstProbe?: boolean;
   readonly holdStart?: boolean;
   readonly holdRestart?: boolean;
+  readonly holdForeground?: boolean;
   readonly holdBeforePin?: boolean;
   readonly holdBeforePinStack?: string;
   readonly foreignCheckout?: string;
@@ -171,6 +172,7 @@ async function installComposeNameFixture(opts?: {
   readonly daemonProbeFailures?: number;
   readonly daemonAfterStart?: string;
   readonly daemonDuringOwnershipCheck?: string;
+  readonly refuseStagedServiceMutation?: boolean;
   readonly rememberCheckout?: boolean;
   readonly recordStartReferences?: boolean;
 }) {
@@ -194,6 +196,14 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
   await Bun.write(countFile, String(count));
   if (count <= (options.daemonProbeFailures ?? 0)) process.exit(124);
   const identity = Bun.file(fixture + "/daemon-id");
+  if (options.refuseStagedServiceMutation) {
+    const state = Bun.file(fixture + "/project/.hack/.internal/runtime-state.json");
+    if (await state.exists() && (await state.json()).entries.some((entry) => entry.serviceMutationId)) {
+      await Bun.write(fixture + "/refused-staged-mutation", "verified");
+      console.log("replacement-daemon");
+      process.exit(0);
+    }
+  }
   if (await identity.exists()) process.stdout.write((await identity.text()) + "\\n");
 } else if (mode === "config" && args[args.indexOf("-f") + 1] === "-") {
   const model = JSON.parse(await Bun.stdin.text());
@@ -287,6 +297,15 @@ if (args[0] === "info" && args.includes("{{.ID}}")) {
     }
   }
   if (!options.startContainers) process.exit(1);
+  if (options.holdForeground && !args.includes("-d") && !args.includes("--no-start")) {
+    await Bun.write(fixture + "/foreground-dispatched", "started");
+    const release = Bun.file(fixture + "/release-foreground");
+    const deadline = Date.now() + 45_000;
+    while (!(await release.exists())) {
+      if (Date.now() > deadline) process.exit(99);
+      await Bun.sleep(10);
+    }
+  }
   if (options.recordStartReferences) {
     const references = args.find((arg) => arg.endsWith("/compose.env.override.yml"));
     const app = YAML.parse(await Bun.file(references).text()).services.app.environment;
@@ -1296,6 +1315,187 @@ function nestedLifecycleCommand(args: readonly string[]): string {
     .map(quoteShellWord)
     .join(" ");
 }
+
+test.each([
+  { phase: "before", command: ["down", "--service", "app"], running: false },
+  { phase: "after", command: ["up", "-d", "app"], running: true },
+] as const)("Down permits a same-copy command from down.$phase", async (testCase) => {
+  const projectDir = join(root, "project", ".hack");
+  await installComposeNameFixture({ startContainers: true });
+  const start = await run(["up", "-d", "--json"]);
+  expect(start.exitCode, start.stderr + start.stdout).toBe(0);
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        down: {
+          [testCase.phase]: [
+            {
+              command: nestedLifecycleCommand([...testCase.command, "--json"]),
+            },
+          ],
+        },
+      },
+    })
+  );
+  const stop = await run(["down", "--json"], false, undefined, {
+    PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+  });
+  expect(stop.exitCode, stop.stderr + stop.stdout).toBe(0);
+  expect(JSON.parse(stop.stdout).ok).toBe(true);
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(true);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(
+    testCase.running
+  );
+  if (testCase.phase === "before") {
+    expect(await Bun.file(join(root, "stop-context")).exists()).toBe(true);
+  }
+}, 60_000);
+
+test("a replacement launch from down.before cancels the older Down", async () => {
+  const projectDir = join(root, "project", ".hack");
+  const launch = { projectDir, composeProject: "sample" };
+  await installComposeNameFixture({ startContainers: true });
+  const start = await run(["up", "-d", "--json"]);
+  expect(start.exitCode, start.stderr + start.stdout).toBe(0);
+  const previous = await readProjectRuntimeStateEntry(launch);
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        down: {
+          before: [{ command: nestedLifecycleCommand(["up", "-d", "--json"]) }],
+        },
+      },
+    })
+  );
+  const stop = await run(["down", "--json"], false, undefined, {
+    PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+  });
+  expect(stop.exitCode, stop.stderr + stop.stdout).toBe(1);
+  expect(JSON.parse(stop.stdout).error.code).toBe("E_CANCELLED");
+  expect(await Bun.file(join(root, "compose-down")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+  const current = await readProjectRuntimeStateEntry(launch);
+  expect(current?.launchId).toBeDefined();
+  expect(current?.launchId).not.toBe(previous?.launchId);
+}, 60_000);
+
+test.each([
+  { action: "Stop", args: ["down", "--service", "app"] },
+  { action: "Restart", args: ["restart", "app"] },
+] as const)("a refused scoped $action restores the staged mutation", async ({
+  args,
+}) => {
+  const projectDir = join(root, "project", ".hack");
+  const resultFile = join(root, "scoped-json");
+  const command = nestedLifecycleCommand([...args, "--json"]);
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        up: {
+          after: [
+            {
+              command: `if ${command} > ${quoteShellWord(resultFile)}; then exit 9; fi`,
+            },
+          ],
+        },
+      },
+    })
+  );
+  await installComposeNameFixture({
+    startContainers: true,
+    refuseStagedServiceMutation: true,
+  });
+  await Bun.write(join(root, "daemon-id"), "original-daemon");
+  const result = await run(["up", "-d", "--json"], false, undefined, {
+    PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+  });
+  expect(result.exitCode, result.stderr + result.stdout).toBe(0);
+  expect(await Bun.file(resultFile).json()).toMatchObject({ ok: false });
+  expect(await Bun.file(join(root, "refused-staged-mutation")).exists()).toBe(
+    true
+  );
+  expect(await Bun.file(join(root, "restart-stack")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "stop-context")).exists()).toBe(false);
+  const launch = await readProjectRuntimeStateEntry({
+    projectDir,
+    composeProject: "sample",
+  });
+  expect(launch?.launchId).toBeDefined();
+  expect(launch?.serviceMutationId).toBeUndefined();
+}, 60_000);
+
+test("foreground service startup records the mutation and releases the copy while attached", async () => {
+  const projectDir = join(root, "project", ".hack");
+  const afterEntered = join(root, "after-entered");
+  const releaseAfter = join(root, "release-after");
+  const releaseForeground = join(root, "release-foreground");
+  const env = { PATH: `${join(root, "bin")}:/usr/bin:/bin` };
+  const hook = `: > ${quoteShellWord(afterEntered)}; while [ ! -f ${quoteShellWord(releaseAfter)} ]; do /bin/sleep 0.05; done`;
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: { up: { after: [{ command: hook }] } },
+    })
+  );
+  await installComposeNameFixture({
+    startContainers: true,
+    holdForeground: true,
+  });
+  const original = run(["up", "-d", "--json"], false, undefined, env);
+  let foreground: ReturnType<typeof run> | undefined;
+  try {
+    await waitForCondition(
+      () => Bun.file(afterEntered).exists(),
+      "Start did not reach its after-hook",
+      20_000
+    );
+    foreground = run(["up", "app"], false, undefined, env);
+    await Promise.race([
+      waitForCondition(
+        () => Bun.file(join(root, "foreground-dispatched")).exists(),
+        "Foreground service did not dispatch",
+        20_000
+      ),
+      foreground.then(({ stdout, stderr }) => {
+        throw new Error(`Foreground command exited early: ${stdout || stderr}`);
+      }),
+    ]);
+    const launch = await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "sample",
+    });
+    expect(launch?.serviceMutationId).toBeDefined();
+    await Bun.write(releaseAfter, "continue");
+    const superseded = await Promise.race([
+      original,
+      foreground.then(() => {
+        throw new Error(
+          "The foreground child exited before Start could reacquire its locks"
+        );
+      }),
+    ]);
+    expect(superseded.exitCode, superseded.stderr + superseded.stdout).toBe(1);
+    expect(JSON.parse(superseded.stdout).error.code).toBe("E_CANCELLED");
+    await Bun.write(releaseForeground, "continue");
+    const foregroundResult = await foreground;
+    expect(
+      foregroundResult.exitCode,
+      foregroundResult.stderr + foregroundResult.stdout
+    ).toBe(0);
+  } finally {
+    await Bun.write(releaseAfter, "continue");
+    await Bun.write(releaseForeground, "continue");
+    await foreground;
+    await original;
+  }
+}, 80_000);
 
 test.each([
   "before",
@@ -3349,9 +3549,10 @@ test("native selection with an existing marker reaches the same dispatch as an u
 
 async function waitForCondition(
   check: () => Promise<boolean>,
-  message: string
+  message: string,
+  timeoutMs = 8000
 ) {
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await check()) {
       return;

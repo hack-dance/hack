@@ -127,6 +127,12 @@ including operations whose outcome will remain unknown. The private CLI fixtures
 cover a successor launch, a same-copy service stop, and an exception while
 reacquiring a lock after a persistent hook. Scoped mutations and manual Restart
 hook interleavings are outside the finite model.
+Whole-copy Down releases the locks for its before-hooks and validates the saved
+launch, engine, and checkout again before teardown. It releases admission for
+after-hooks once teardown has settled. A foreground scoped Compose start holds
+admission only through dispatch. If a scoped command is refused before it can
+spawn Docker, rollback restores the preceding revision only if the same staged
+revision is still current. The CLI fixtures cover these hook and dispatch cases.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

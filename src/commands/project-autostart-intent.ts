@@ -108,7 +108,11 @@ export async function withComposeCheckoutLock<T>(
   opts: AutostartCommandSelection & {
     readonly selectedCopy?: ComposeCheckoutCopy;
     readonly beforeLock?: (target: ComposeCheckoutCopy) => Promise<void>;
-    readonly run: (copy?: ComposeCheckoutCopy) => Promise<T>;
+    readonly signal?: AbortSignal;
+    readonly run: (
+      copy?: ComposeCheckoutCopy,
+      projectDir?: string
+    ) => Promise<T>;
   }
 ): Promise<T> {
   const registry = await readProjectsRegistry();
@@ -134,7 +138,8 @@ export async function withComposeCheckoutLock<T>(
   return await withComposeCopyLock({
     projectDir: project.projectDir,
     branch: copy.branch,
-    run: () => opts.run(copy),
+    signal: opts.signal,
+    run: () => opts.run(copy, project.projectDir),
   });
 }
 
@@ -464,6 +469,7 @@ export async function withAutostartCommandLock<T>(opts: {
   readonly project?: string;
   readonly branch?: string;
   readonly expectComposeProject?: string;
+  readonly signal?: AbortSignal;
   readonly resolveLoginComposeBase?: (opts: {
     readonly project: ProjectContext;
     readonly cfg: ProjectConfig;
@@ -478,7 +484,7 @@ export async function withAutostartCommandLock<T>(opts: {
       // Execution revalidates it under this lock before mutating Compose.
       const name = opts.expectComposeProject;
       const run = () =>
-        withComposeNameLock(name, () => opts.run(undefined, name));
+        withComposeNameLock(name, () => opts.run(undefined, name), opts.signal);
       if (opts.action === "up") {
         return await withComposeCheckoutLock({ ...opts, run });
       }
@@ -540,6 +546,7 @@ export async function withAutostartCommandLock<T>(opts: {
   };
   return await withAutostartProjectLock({
     scope,
+    signal: opts.signal,
     run: async () => {
       if (login) {
         await assertAutostartProjectCurrent({

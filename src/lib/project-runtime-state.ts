@@ -193,22 +193,54 @@ export async function removeProjectRuntimeStateEntry(opts: {
   });
 }
 
-/** Fence a full launch's post-hook readiness and cleanup before scoped dispatch. */
-export async function recordProjectRuntimeServiceMutation(opts: {
+/** Fence post-hook readiness and return a rollback for a refused dispatch. */
+async function stageProjectRuntimeServiceMutation(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
-}): Promise<void> {
+}): Promise<() => Promise<void>> {
+  const serviceMutationId = crypto.randomUUID();
+  let previous: string | undefined;
   await mutateProjectRuntimeState(opts.projectDir, (entries) => {
     const entry = entries.find(
       (current) => current.composeProject === opts.composeProject
     );
+    previous = entry?.serviceMutationId;
     return entry
-      ? replaceRuntimeEntry(entries, {
-          ...entry,
-          serviceMutationId: crypto.randomUUID(),
-        })
+      ? replaceRuntimeEntry(entries, { ...entry, serviceMutationId })
       : null;
   });
+  return () =>
+    mutateProjectRuntimeState(opts.projectDir, (entries) => {
+      const entry = entries.find(
+        (current) => current.composeProject === opts.composeProject
+      );
+      if (entry?.serviceMutationId !== serviceMutationId) {
+        return null;
+      }
+      const { serviceMutationId: _discarded, ...rest } = entry;
+      return replaceRuntimeEntry(entries, {
+        ...rest,
+        ...(previous === undefined ? {} : { serviceMutationId: previous }),
+      });
+    });
+}
+
+/** Keep the mutation revision once the subprocess has been dispatched. */
+export function createServiceMutationPublication(
+  opts: Parameters<typeof stageProjectRuntimeServiceMutation>[0]
+) {
+  let rollback: (() => Promise<void>) | undefined;
+  return {
+    async stage() {
+      rollback = await stageProjectRuntimeServiceMutation(opts);
+    },
+    dispatched() {
+      rollback = undefined;
+    },
+    async settle() {
+      await rollback?.();
+    },
+  };
 }
 
 /** Roll back an unpublished-to-Docker launch without replacing another writer's records. */

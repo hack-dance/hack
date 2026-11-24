@@ -615,6 +615,15 @@ function writeHotReload(value: unknown): boolean {
 
 export function reportNativeImageDownloadWait(reference: string | null): void {
   publishImageDownloadWait?.(reference);
+  if (reference) {
+    const lock = reference === "image-cache" || reference === "image-reclaim";
+    const line = lock
+      ? `Waiting for the native ${reference === "image-cache" ? "image cache lock" : "image reclamation lock"}.`
+      : `Waiting for another start to resolve or download ${reference}.`;
+    if (!reportNativeImageNotice(line)) {
+      process.stderr.write(`${line}\n`);
+    }
+  }
 }
 
 export function reportNativeImageNotice(notice: string): boolean {

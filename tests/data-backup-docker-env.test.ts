@@ -1,9 +1,19 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { HackCliError } from "../src/lib/cli-result.ts";
 import { createHostDataBackupDocker } from "../src/lib/data-backup-docker.ts";
 import { exportProjectData } from "../src/lib/data-backup-export.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
  * The project's managed Compose env (here a managed DOCKER_HOST) reaches
@@ -19,6 +29,12 @@ const STUB = `
 const { appendFileSync, readFileSync, existsSync } = require("node:fs");
 const args = process.argv.slice(2);
 appendFileSync(process.env.DATA_STUB_LOG, JSON.stringify({ args, host: process.env.DOCKER_HOST ?? null }) + "\\n");
+// An unreachable engine at one step: the client names DOCKER_HOST verbatim.
+const failAt = process.env.DATA_STUB_FAIL;
+if (failAt && args.join(" ").includes(failAt)) {
+  process.stderr.write("Cannot connect to the Docker daemon at " + process.env.DOCKER_HOST + ". Is the docker daemon running?\\n");
+  process.exit(1);
+}
 const feed = process.env.DATA_STUB_LOG + ".events";
 const out = (value) => process.stdout.write(typeof value === "string" ? value : JSON.stringify(value) + "\\n");
 if (args[0] === "events") {
@@ -59,7 +75,7 @@ if (args[0] === "events") {
 
 let root: string;
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hack-data-docker-env-"));
+  root = await realpath(await mkdtemp(join(tmpdir(), "hack-data-docker-env-")));
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -118,4 +134,144 @@ test("a managed DOCKER_HOST reaches every docker argv of an export", async () =>
   );
   expect(calls.filter((call) => call.host !== MANAGED_HOST)).toEqual([]);
   expect(process.env.DOCKER_HOST).toBe(inherited);
+});
+
+/**
+ * Not a credential: a recognizable private socket path standing in for a
+ * managed engine endpoint, so a leak is easy to spot.
+ */
+const PRIVATE_ENDPOINT_MARKER = "managed-private-endpoint";
+
+async function stubBin(): Promise<{ bin: string; log: string }> {
+  const bin = join(root, "bin");
+  const log = join(root, "calls.ndjson");
+  await Bun.write(join(bin, "docker"), `#!${process.execPath}\n${STUB}`);
+  await chmod(join(bin, "docker"), 0o755);
+  await writeFile(log, "");
+  return { bin, log };
+}
+
+test("an unreachable managed DOCKER_HOST is redacted from every engine refusal", async () => {
+  const { bin, log } = await stubBin();
+  const managedHost = `unix://${root}/${PRIVATE_ENDPOINT_MARKER}.sock`;
+  // Each step that can quote an engine line: Compose, the volume and
+  // container reads, the marker and hold containers and a helper exec.
+  for (const failAt of [
+    "compose",
+    "volume inspect",
+    "ps --filter",
+    "create",
+    "type=bind",
+    "exec",
+  ]) {
+    const error = await exportProjectData({
+      docker: createHostDataBackupDocker({
+        env: {
+          DOCKER_HOST: managedHost,
+          DATA_STUB_LOG: log,
+          DATA_STUB_FAIL: failAt,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+        },
+      }),
+      composeArgs: ["docker", "compose", "-f", join(root, "compose.yml")],
+      project: "shop",
+      branch: null,
+      hackHome: join(root, `home-${failAt.replace(/\W/g, "-")}`),
+      hackVersion: "9.9.9",
+    }).then(
+      () => null,
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(HackCliError);
+    const refusal = error as HackCliError;
+    expect({ failAt, code: refusal.code }).toEqual({
+      failAt,
+      code: "E_DOCKER_UNAVAILABLE",
+    });
+    expect(refusal.message).toContain("Engine said: Cannot connect");
+    expect(refusal.message).toContain("[REDACTED]");
+    const rendered = JSON.stringify({
+      message: refusal.message,
+      detail: refusal.detail,
+      startBlocker: refusal.startBlocker,
+    });
+    expect({
+      failAt,
+      leaked: rendered.includes(PRIVATE_ENDPOINT_MARKER),
+    }).toEqual({
+      failAt,
+      leaked: false,
+    });
+  }
+});
+
+test("hack data export prints no managed DOCKER_HOST in text or JSON when the engine is unreachable", async () => {
+  const { bin, log } = await stubBin();
+  const projectRoot = join(root, "repo");
+  const hackDir = join(projectRoot, ".hack");
+  await mkdir(hackDir, { recursive: true });
+  await writeFile(
+    join(hackDir, "docker-compose.yml"),
+    "name: shop\nservices: {}\nvolumes:\n  db: {}\n"
+  );
+  // The project's own env selects the engine: a managed value, not the
+  // caller's environment.
+  const managedHost = `unix://${root}/${PRIVATE_ENDPOINT_MARKER}.sock`;
+  await writeFile(
+    join(hackDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      `    DOCKER_HOST: "${managedHost}"`,
+      "",
+    ].join("\n")
+  );
+  for (const json of [false, true]) {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "..", "index.ts"),
+        "data",
+        "export",
+        ...(json ? ["--json"] : []),
+      ],
+      {
+        cwd: projectRoot,
+        env: privateCliEnv({
+          root,
+          env: {
+            PATH: `${bin}:/usr/bin:/bin`,
+            HACK_NO_INTERACTIVE: "1",
+            DATA_STUB_LOG: log,
+            DATA_STUB_FAIL: "volume inspect",
+          },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    const output = `${stdout}\n${stderr}`;
+    expect({ json, exitCode: exitCode === 0 }).toEqual({
+      json,
+      exitCode: false,
+    });
+    expect(output).toContain(
+      "Cannot connect to the Docker daemon at [REDACTED]"
+    );
+    expect({ json, leaked: output.includes(PRIVATE_ENDPOINT_MARKER) }).toEqual({
+      json,
+      leaked: false,
+    });
+  }
+  // The stub saw the managed endpoint, so the refusal really quoted it.
+  expect(await readFile(log, "utf8")).toContain(PRIVATE_ENDPOINT_MARKER);
 });

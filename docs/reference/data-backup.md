@@ -15,9 +15,13 @@ hack data import <backup> --from-project shop   # into a branch or renamed proje
 
 `--path`, `--project`, `--branch` and `--env` select the project, instance
 and env overlay like other project commands. Without `--env`, the env
-selection the instance was last started with is used, as `hack down` does
-(else the configured default), so a volume name or engine that depends on
-that overlay resolves as it did at startup. Every Docker call (Compose, the
+selection the instance was last started with is used, as `hack down` does,
+so a volume name or engine that depends on that overlay resolves as it did at
+startup. A successful `hack down` removes that record, so after
+`hack up --env staging` then `hack down` the selection is no longer known:
+when the project has env overlays the command refuses with `E_USAGE`, naming
+them, before any Docker call; pass `--env <name>` (or `--env base` for base
+layers only). A project without overlays uses its base layers. Every Docker call (Compose, the
 volume and container reads and the helper runs) gets the same managed Compose
 env `hack up` gives the project, so a project that selects its engine with a
 managed `DOCKER_HOST` or `DOCKER_CONTEXT` is read on that engine. The command
@@ -60,15 +64,18 @@ the subscription live by creating and starting a no-op marker container
 (`hack-data-export-<random>-start`, no network, no logging) and waiting for
 that container's start event. Markers are tracked like the volume helpers:
 their create and start are bounded by `HACK_DATA_COMMAND_TIMEOUT_MS`, and
-each is removed and its removal confirmed on every path, a signal included; only then does it check for running containers and copy. Every helper
-runs under a unique name (`hack-data-export-<random>`), so its own mounts are
-told apart from anything else's. After the last copy it lists running
+each is removed and its removal confirmed on every path, a signal included; only then does it check for running containers and copy. No mount is
+exempt, and container names are never trusted (a removed marker's name can
+be reused): Hack's own helpers hold each volume with a bind of its
+`Mountpoint`, which emits no volume `mount` event (checked on Docker 29.9),
+and markers mount nothing, so any `mount` event of a copied volume comes
+from another container. After the last copy it lists running
 containers again, runs an end marker and waits for its start event (the
 engine emits events in order, so every earlier event has then arrived), stops
 the subscription and decides:
 
-- a mount of a copied volume by any other container, even one that started
-  and exited during the copy, refuses with `E_PROJECT_RUNNING` and
+- any mount of a copied volume, even by a container that started and exited
+  during the copy or reuses one of Hack's helper names, refuses with `E_PROJECT_RUNNING` and
   `error.detail.mounts` (volume, container ID and name);
 - an event stream that ended before Hack stopped it, an unreadable event, or
   a marker whose start event did not arrive within 30 seconds refuses with
@@ -212,7 +219,11 @@ resolved value is written or printed:
   (`hack.config.json` `name`, else the checkout directory) and the branch
   slug, never the Compose project;
 - container names in refusals (`detail.running`, `detail.mounts[].name`)
-  have the resolved Compose project name replaced by `<compose project>`.
+  have the resolved Compose project name replaced by `<compose project>`;
+- an engine line quoted in a refusal (`Engine said: …`, in text and JSON)
+  has every value the project's managed env adds, such as a managed
+  `DOCKER_HOST` or `DOCKER_CONTEXT`, replaced by `[REDACTED]`, as
+  `hack up` does.
 
 A restore compares these hashes instead of the values.
 
@@ -272,7 +283,9 @@ exists (two runs in the same second), the export refuses with
 `hack data import <backup-dir> [--from-project <name>] [--json]` takes the
 same `--path`, `--project`, `--branch` and `--env` selection, the same Compose
 model as `hack up`, the same managed env and the same deadlines as export,
-and refuses the native backend the same way. It never overwrites, deletes or
+the same refusal without `--env` when the selection is no longer recorded and
+the project has overlays, the same redaction of quoted engine lines, and
+refuses the native backend the same way. It never overwrites, deletes or
 relabels data it does not own.
 
 Before any write it checks, in order:
@@ -299,8 +312,9 @@ Before any write it checks, in order:
 4. **Running containers and writers.** As for export: the live event
    subscription is proven before the first running-container check, and
    `E_PROJECT_RUNNING` refuses when a container of the instance, or any
-   container mounting a target, runs, or when anything but this run's
-   helpers mounts a target during the import.
+   container mounting a target, runs, or when any container mounts a target
+   during the import (this run's helpers hold targets by bind, which emits
+   no volume `mount` event; no container name is exempt).
 5. **Targets.** A backed-up key that is no longer declared here, or is
    `external` here, is skipped and reported. For each other key the target is
    its Docker volume (`name:` or `<compose project>_<key>`):

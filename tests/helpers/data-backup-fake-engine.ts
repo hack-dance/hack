@@ -135,6 +135,7 @@ export class FakeEngine {
 
   docker(): DataBackupDocker {
     return {
+      redactValues: [],
       capture: (argv) => Promise.resolve(this.capture(argv)),
       streamToFile: async ({ argv, path }) => {
         this.calls.push([...argv]);

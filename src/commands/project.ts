@@ -487,6 +487,7 @@ import {
   finishImplicitLegacyEnvMigration,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hasUnmigratedLegacyDotenv,
+  listProjectEnvOverlays,
   ProjectEnvKeyMissingError,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
@@ -3765,7 +3766,8 @@ export type ComposeRuntimeModel = {
 /**
  * Resolve an instance's Compose invocation the way `hack up` does (same
  * files, project name, project directory and managed env; an omitted env
- * selection is the one the instance was started with), without starting
+ * selection is the one the instance was started with; without that record a
+ * project with env overlays refuses), without starting
  * anything: the env override is resolved but not rewritten (`persist:
  * false`) and Hack's internal override is the one the last start stored.
  * For commands that read the instance's model, such as `hack data`.
@@ -3793,7 +3795,9 @@ export async function resolveComposeRuntimeModel(opts: {
     opts.project.composeFile
   );
   // Omitted --env: the selection the instance was started with, as `hack
-  // down` resolves it, else the configured default.
+  // down` resolves it. A successful `hack down` removes that record, so
+  // without it the configured default is only unambiguous when the project
+  // has no overlays; otherwise refuse before any Docker effect.
   const envName = await resolveStoredRuntimeEnvName({
     requestedEnvName: opts.envName,
     projectDir: opts.project.projectDir,
@@ -3802,6 +3806,9 @@ export async function resolveComposeRuntimeModel(opts: {
       branch: opts.branch,
     }),
   });
+  if (envName === undefined) {
+    await refuseUnrecordedEnvWithOverlays(opts.project);
+  }
   const envOverrides = await resolveComposeEnvOverrides({
     project: opts.project,
     projectName,
@@ -3842,6 +3849,37 @@ export async function resolveComposeRuntimeModel(opts: {
     cwd: dirname(opts.project.composeFile),
     env: envOverrides.env,
   };
+}
+
+/**
+ * A data command without `--env` and without a recorded selection: the
+ * configured default is only the env `hack up` used when the project has no
+ * overlays. With overlays, refuse with E_USAGE, naming them (names only),
+ * before any Docker effect.
+ */
+async function refuseUnrecordedEnvWithOverlays(
+  project: Awaited<ReturnType<typeof requireProjectContext>>
+): Promise<void> {
+  const overlays = await listProjectEnvOverlays({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+  });
+  if (overlays.length === 0) {
+    return;
+  }
+  throw new HackCliError({
+    code: "E_USAGE",
+    message: unrecordedEnvRefusalMessage(
+      overlays.map((overlay) => overlay.name)
+    ),
+  });
+}
+
+/** The refusal line for {@link refuseUnrecordedEnvWithOverlays}. */
+export function unrecordedEnvRefusalMessage(
+  overlayNames: readonly string[]
+): string {
+  return `This project has environment overlays (${overlayNames.join(", ")}); the environment \`hack up\` used is no longer recorded. Pass --env <name> (or --env base for base layers only).`;
 }
 
 async function resolveBranchComposeFiles(opts: {

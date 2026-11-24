@@ -96,7 +96,11 @@ export async function exportProjectData(
     "json",
   ]);
   if (config.exitCode !== 0) {
-    throw dockerReadError({ result: config, command: "docker compose config" });
+    throw dockerReadError({
+      result: config,
+      command: "docker compose config",
+      redactValues: input.docker.redactValues,
+    });
   }
   const plan = planDeclaredVolumes(parseJsonText(config.stdout));
   const helperNames = new Set<string>();
@@ -328,6 +332,7 @@ async function copyVolume(opts: {
         action: "copy",
         timeoutMs: deadlines.stepMs,
         consequence,
+        redactValues: opts.docker.redactValues,
       });
       const after = await held.treeDigest(consequence);
       if (before.digest !== after.digest || before.entries !== after.entries) {
@@ -348,6 +353,7 @@ async function copyVolume(opts: {
           action: "verify the archive of",
           timeoutMs: deadlines.stepMs,
           consequence,
+          redactValues: opts.docker.redactValues,
         }).stdout,
         label: volume.key,
         consequence,

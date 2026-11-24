@@ -69,10 +69,13 @@ export function helperFailure(opts: {
   readonly action: string;
   readonly result: { readonly exitCode: number; readonly stderr: string };
   readonly consequence: string;
+  /** The managed values to redact from a quoted engine line. */
+  readonly redactValues: readonly string[];
 }): HackCliError {
   const engine = dockerReadError({
     result: { ...opts.result, stdout: "" },
     command: "docker run",
+    redactValues: opts.redactValues,
   });
   if (engine.code !== "E_UNEXPECTED") {
     return engine;

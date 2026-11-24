@@ -1376,13 +1376,13 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-route-lookup",
     module: "RouteLookup",
-    states: 102,
+    states: 498,
     invariant: "LiveRouteAllowed",
     action: "RejectPending",
     fields: [
       'lookup = "deny"',
       'pending = "claimed"',
-      'committed = [a |-> "live", b |-> "absent"]',
+      'committed = [a |-> "original", b |-> "absent"]',
     ],
     alternativeWitnesses: [
       {
@@ -1390,7 +1390,7 @@ const contracts: readonly ModelContract[] = [
         fields: [
           'lookup = "deny"',
           'pending = "staged"',
-          'committed = [a |-> "live", b |-> "claimed"]',
+          'committed = [a |-> "original", b |-> "claimed"]',
         ],
       },
       {
@@ -1398,7 +1398,7 @@ const contracts: readonly ModelContract[] = [
         fields: [
           'lookup = "deny"',
           'pending = "absent"',
-          'committed = [a |-> "live", b |-> "staged"]',
+          'committed = [a |-> "original", b |-> "staged"]',
         ],
       },
     ],
@@ -1411,16 +1411,37 @@ const contracts: readonly ModelContract[] = [
         fields: [
           'lookup = "deny"',
           "linked = FALSE",
-          'opened = [a |-> "live", b |-> "absent"]',
+          'committed = [a |-> "original", b |-> "claimed"]',
         ],
-        alternativeWitnesses: ["claimed", "staged"].map((phase) => ({
+        alternativeWitnesses: ["absent", "staged"].map((phase) => ({
           action: "RejectUnlinked",
           fields: [
             'lookup = "deny"',
             "linked = FALSE",
-            `opened = [a |-> "live", b |-> "${phase}"]`,
+            `committed = [a |-> "original", b |-> "${phase}"]`,
           ],
         })),
+      },
+      {
+        name: "stale-claim",
+        negative: true,
+        invariant: "AllowMatchesOpenedClaim",
+        action: "ReadSecond",
+        fields: [
+          'lookup = "allow"',
+          'selected = "original"',
+          'opened = [a |-> "absent", b |-> "absent"]',
+        ],
+        alternativeWitnesses: ["absent", "replacement"].flatMap((claim) =>
+          ["absent", "claimed", "staged"].map((phase) => ({
+            action: "ReadSecond",
+            fields: [
+              'lookup = "allow"',
+              'selected = "original"',
+              `opened = [a |-> "${claim}", b |-> "${phase}"]`,
+            ],
+          }))
+        ),
       },
       {
         name: "retirement-reachable",
@@ -1431,8 +1452,9 @@ const contracts: readonly ModelContract[] = [
           'lookup = "secondOpen"',
           "linked = FALSE",
           'pending = "none"',
-          'opened = [a |-> "live", b |-> "staged"]',
-          'committed = [a |-> "live", b |-> "absent"]',
+          'selected = "original"',
+          'opened = [a |-> "original", b |-> "staged"]',
+          'committed = [a |-> "original", b |-> "absent"]',
         ],
       },
     ],

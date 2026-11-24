@@ -53,6 +53,13 @@ export function privateProjectOverlayNames(
   );
 }
 
+export function isPrivateConfigOverlay(
+  name: string,
+  derivedNames: ReadonlySet<string>
+): boolean {
+  return isConfigSecret("", name) || derivedNames.has(name);
+}
+
 export function isPrivateOverlayValue(
   value: unknown,
   names: ReadonlySet<string>

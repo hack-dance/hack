@@ -70,7 +70,7 @@ and **Env** to select an overlay. Save edits to the layer shown. Route changes
 offer a restart, and env-only changes apply the next time a service starts.
 Use `hack config show --json` for the same Compose model from the CLI.
 Config omits recognized credentials from service and dependency diagnostics
-and hides env keys or scopes that contain recognized credentials.
+and hides env overlay names, keys and scopes that contain recognized credentials.
 
 ## Start and open
 

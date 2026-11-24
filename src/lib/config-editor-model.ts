@@ -8,6 +8,7 @@ import { type ConfigIssue, composeModel } from "./config-editor-compose.ts";
 import {
   configLine,
   isConfigSecret,
+  isPrivateConfigOverlay,
   isPrivateOverlayValue,
   jsonConfigTree,
   privateProjectOverlayNames,
@@ -350,7 +351,8 @@ async function configLayers(opts: {
     ]),
   ].filter(
     (name) =>
-      !opts.privateOverlays.has(name) && parseEnvConfigSelection(name) === name
+      !isPrivateConfigOverlay(name, opts.privateOverlays) &&
+      parseEnvConfigSelection(name) === name
   );
   const layers: Layer[] = [
     {
@@ -511,13 +513,15 @@ function configOverlaySelection(
   const privateOverlays = privateProjectOverlayNames(raw);
   const redactDefault =
     isConfigSecret("", authoredDefault) ||
-    (configured !== null && privateOverlays.has(configured));
+    (configured !== null &&
+      isPrivateConfigOverlay(configured, privateOverlays));
   return {
     privateOverlays,
     defaultOverlay: redactDefault ? null : configured,
     displayDefault: redactDefault ? "[redacted]" : (configured ?? "default"),
     requested:
-      typeof requested === "string" && privateOverlays.has(requested)
+      typeof requested === "string" &&
+      isPrivateConfigOverlay(requested, privateOverlays)
         ? null
         : requested,
   };

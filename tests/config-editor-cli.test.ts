@@ -1784,6 +1784,90 @@ test("show withholds a credential-bearing default overlay and its derived layer 
   expect(JSON.stringify(collision).includes(marker)).toBe(false);
 });
 
+test("Config omits discovered and requested credential-shaped overlay names", async () => {
+  const f = await fixture();
+  const shared = `glpat-${"fixtureshared".repeat(2)}`;
+  const local = `glpat-${"fixturelocal".repeat(2)}`;
+  const inherited = `glpat-${"fixtureinherited".repeat(2)}`;
+  const linkedProject = join(f.linked, ".hack");
+  const overlays = [
+    { project: f.project, name: shared, suffix: ".yaml" },
+    { project: linkedProject, name: local, suffix: ".local.yaml" },
+    { project: f.project, name: inherited, suffix: ".local.yaml" },
+  ];
+  const privateSource = "  global:\n    MODE: fixture-private-overlay-value";
+  for (const { project, name, suffix } of overlays) {
+    await writeFile(
+      join(project, `hack.env.${name}${suffix}`),
+      env(privateSource, name)
+    );
+  }
+
+  for (const [cwd, requested] of [
+    [f.main, undefined],
+    [f.main, shared],
+    [f.linked, undefined],
+    [f.linked, local],
+    [f.linked, inherited],
+    [f.linked, "qa"],
+  ] as const) {
+    const args = requested === undefined ? [] : ["--env", requested];
+    const report = await show(f.root, cwd, ...args);
+    expect(report.overlay).toBe(requested === "qa" ? "qa" : null);
+    expect(report.overlays).toEqual(["qa"]);
+    expect(report.layers.some((layer) => layer.id === "3:qa")).toBe(true);
+    const output = JSON.stringify(report);
+    for (const marker of [
+      shared,
+      local,
+      inherited,
+      "fixture-private-overlay-value",
+    ]) {
+      expect(output.includes(marker)).toBe(false);
+    }
+  }
+  for (const { project, name, suffix } of overlays) {
+    const path = join(project, `hack.env.${name}${suffix}`);
+    expect((await readFile(path, "utf8")) === env(privateSource, name)).toBe(
+      true
+    );
+  }
+});
+
+test("Config patch diagnostics hide credential-shaped overlay layer IDs", async () => {
+  const f = await fixture();
+  const name = `glpat-${"fixturelocal".repeat(2)}`;
+  const report = await show(f.root, f.main);
+  const base = bases(report);
+  const layer = `5:${name}`;
+  const change = {
+    layer,
+    kind: "env",
+    scope: "global",
+    key: "MODE",
+    value: "test",
+  };
+  for (const patch of [
+    { base, changes: [change] },
+    { base: { ...base, [layer]: "0".repeat(64) }, changes: [] },
+  ]) {
+    for (const command of ["validate", "apply"]) {
+      const result = await cli({
+        ...f,
+        cwd: f.main,
+        args: [command, "--env", name],
+        patch,
+      });
+      const issues =
+        result.payload.data?.issues ?? result.payload.error?.detail?.issues;
+      expect(JSON.stringify(result.payload).includes(name)).toBe(false);
+      expect(issues).toContainEqual(
+        expect.objectContaining({ layer: "[redacted]" })
+      );
+    }
+  }
+});
+
 test("replacing a private canonical default cannot expose a derived layer filename", async () => {
   const f = await fixture();
   const marker = "canonical-private-overlay-fixture";
@@ -1951,6 +2035,22 @@ test("implicit migration receipts withhold private overlay names", async () => {
     result.payload.data.changed.some((id: string) => id.endsWith(":[redacted]"))
   ).toBe(true);
   expect(JSON.stringify(result.payload).includes(marker)).toBe(false);
+});
+
+test("implicit migration receipts hide independently discovered credential-shaped overlay names", async () => {
+  const name = `glpat-${"fixturelegacy".repeat(2)}`;
+  const f = await legacyOverlayFixture({ name: "legacy" });
+  await writeFile(join(f.project, `.env.${name}`), "MODE=private-layer\n");
+  const patch = {
+    base: bases(await show(f.root, f.cwd)),
+    changes: [addEnvChoice],
+  };
+  const result = await cli({ ...f, args: ["apply"], patch });
+  expect(result.payload.ok).toBe(true);
+  expect(result.payload.data.changed).toContain("3:[redacted]");
+  expect(JSON.stringify(result.payload).includes(name)).toBe(false);
+  const report = await show(f.root, f.cwd);
+  expect(JSON.stringify(report).includes(name)).toBe(false);
 });
 
 test("a project-only save preserves redaction for a later legacy env migration", async () => {

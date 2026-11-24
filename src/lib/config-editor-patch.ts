@@ -34,6 +34,7 @@ import {
   configLine,
   hasPrivateOverlayValue,
   isConfigSecret,
+  isPrivateConfigOverlay,
   jsonConfigDiagnostic,
   jsonConfigTree,
   privateProjectOverlayNames,
@@ -164,12 +165,16 @@ function configIssue(
   line: number | null = null
 ): ConfigIssue {
   return {
-    layer: change.layer,
+    layer: publicPatchLayerId(change.layer),
     path: redactConfigPath(path),
     message,
     code,
     line,
   };
+}
+
+function publicPatchLayerId(id: string): string {
+  return isConfigSecret("", id) ? "[redacted]" : id;
 }
 
 const PROJECT_TOGGLES = new Set([
@@ -474,7 +479,7 @@ function preparePatch(snapshot: ConfigSnapshot, patch: Patch) {
     const layer = snapshot.layers.find((entry) => entry.id === id);
     if (layer?.revision !== base) {
       issues.push({
-        layer: id,
+        layer: publicPatchLayerId(id),
         path: [],
         line: null,
         code: "E_CONFLICT",
@@ -1282,11 +1287,15 @@ function migrationLayerIds(
     const overlay =
       local && stem.endsWith(".local") ? stem.slice(0, -".local".length) : stem;
     const id = local ? "5" : "3";
+    const publicOverlay = isPrivateConfigOverlay(
+      overlay,
+      snapshot.privateOverlays
+    )
+      ? "[redacted]"
+      : overlay;
     layers.set(
       file.path,
-      ["local", "default"].includes(overlay)
-        ? id
-        : `${id}:${snapshot.privateOverlays.has(overlay) ? "[redacted]" : overlay}`
+      ["local", "default"].includes(overlay) ? id : `${id}:${publicOverlay}`
     );
   }
   return layers;

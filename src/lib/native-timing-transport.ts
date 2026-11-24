@@ -37,6 +37,12 @@ function fcntl(fd: number, command: number, value = 0) {
     ? c.fcntl(fd, command, 0, 0, 0, 0, 0, 0, value)
     : c.fcntl(fd, command, value);
 }
+export function protectTimingFd(fd: number): boolean {
+  return (
+    fcntl(fd, F_SETFD, FD_CLOEXEC) === 0 && fcntl(fd, F_GETFD) === FD_CLOEXEC
+  );
+}
+
 export function hostMonotonicUs(): number | undefined {
   // All supported CLI targets have a 64-bit timespec (two 64-bit longs).
   const time = new BigInt64Array(2);
@@ -72,11 +78,9 @@ export function timingChannel() {
     const flags = fcntl(receiver, F_GETFL);
     if (
       flags < 0 ||
-      fcntl(receiver, F_SETFD, FD_CLOEXEC) < 0 ||
-      fcntl(sender, F_SETFD, FD_CLOEXEC) < 0 ||
+      !protectTimingFd(receiver) ||
+      !protectTimingFd(sender) ||
       fcntl(receiver, F_SETFL, flags | O_NONBLOCK) < 0 ||
-      fcntl(receiver, F_GETFD) !== FD_CLOEXEC ||
-      fcntl(sender, F_GETFD) !== FD_CLOEXEC ||
       fcntl(receiver, F_GETFL) !== (flags | O_NONBLOCK)
     ) {
       throw new Error("Timing socket setup failed.");

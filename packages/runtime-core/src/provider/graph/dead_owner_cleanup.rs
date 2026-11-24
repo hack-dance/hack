@@ -62,6 +62,7 @@ pub(super) fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
         let value = value.as_object_mut().ok_or_else(refused)?;
         value.remove("phase");
         value.remove("started_from");
+        value.remove("extending");
     }
     for group in ["resources", "probes"] {
         if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {

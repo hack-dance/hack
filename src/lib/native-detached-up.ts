@@ -77,6 +77,7 @@ type Ready = {
   readonly composeProject: string;
   readonly address?: string;
   readonly started: readonly string[];
+  readonly warnings?: readonly string[];
   readonly completed?: readonly string[];
   /** Absent from an older owner: `ready`. */
   readonly readiness?: "warming" | "ready";
@@ -98,6 +99,7 @@ let publishShellVariables:
   | undefined;
 type StartupFailure = {
   readonly code: string;
+  readonly causeCode?: string;
   readonly message?: string;
   readonly service?: string;
   /** Names only: services whose process failed during startup. Never their output. */
@@ -461,12 +463,20 @@ function isStartupFailure(value: unknown): value is StartupFailure {
   return (
     isRecord(value) &&
     Object.keys(value).every((key) =>
-      ["code", "message", "service", "failedServices", "startupPhase"].includes(
-        key
-      )
+      [
+        "code",
+        "causeCode",
+        "message",
+        "service",
+        "failedServices",
+        "startupPhase",
+      ].includes(key)
     ) &&
     typeof value.code === "string" &&
     FAILURE_CODE.test(value.code) &&
+    (value.causeCode === undefined ||
+      (typeof value.causeCode === "string" &&
+        FAILURE_CODE.test(value.causeCode))) &&
     (value.message === undefined ||
       (typeof value.message === "string" &&
         FAILURE_MESSAGE.test(value.message))) &&
@@ -552,9 +562,22 @@ function startupFailureError(failure: StartupFailure): HackCliError {
   const failed = failure.failedServices?.length
     ? ` Failed during startup: ${failure.failedServices.join(", ")}. A detached start does not keep service output; run hack up without -d in a terminal to see each failed service's last lines (managed values redacted, not saved).`
     : "";
+  const code = failure.causeCode ?? failure.code;
   return new HackCliError({
-    code: "E_STARTUP_INCOMPLETE",
-    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed} ${NATIVE_IDLE_POOL_NOTE}`,
+    ...(failure.causeCode
+      ? {
+          detail: {
+            nativeCode: failure.code,
+            causeCode: failure.causeCode,
+            ...(failure.message ? { message: failure.message } : {}),
+          },
+        }
+      : {}),
+    code:
+      code === "graph_starting"
+        ? "E_NATIVE_STILL_STARTING"
+        : "E_STARTUP_INCOMPLETE",
+    message: `Native detached startup failed (${code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed} ${NATIVE_IDLE_POOL_NOTE}`,
   });
 }
 
@@ -996,6 +1019,13 @@ function isReady(value: unknown): value is Ready {
       (Array.isArray(value.completed) &&
         value.completed.length <= 256 &&
         value.completed.every((name: unknown) => typeof name === "string"))) &&
+    (value.warnings === undefined ||
+      (Array.isArray(value.warnings) &&
+        value.warnings.length <= 256 &&
+        value.warnings.every(
+          (line: unknown) =>
+            typeof line === "string" && FAILURE_MESSAGE.test(line)
+        ))) &&
     (value.readiness === undefined ||
       value.readiness === "warming" ||
       value.readiness === "ready") &&
@@ -1338,6 +1368,7 @@ export async function startNativeDetachedUp(opts: {
             branch: data.branch,
             composeProject: data.composeProject,
             services,
+            ...(data.warnings?.length ? { warnings: data.warnings } : {}),
             ...(opts.targeted ? {} : { readiness: data.readiness ?? "ready" }),
             durationMs,
             ...(opts.targeted ? {} : { timings }),
@@ -1345,6 +1376,10 @@ export async function startNativeDetachedUp(opts: {
         }),
       });
     } else if (action === "up") {
+      for (const warning of data.warnings ?? []) {
+        process.stderr.write(`${warning}
+`);
+      }
       const url = nativeReadyAddress(data.address);
       resultTiming?.();
       completeUpTimings();

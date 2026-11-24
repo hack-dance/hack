@@ -414,6 +414,55 @@ fn load_store(
     )?;
     Ok(store)
 }
+
+#[cfg(target_os = "macos")]
+pub(super) fn check_extension_capacity(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    resuming: &BTreeSet<String>,
+    requested: usize,
+) -> Result<(), CandidateError> {
+    let resumed_demand = resuming
+        .iter()
+        .map(|service| {
+            let resource = &receipt.resources[&format!("container:{service}")];
+            resource.loopback_ports.len() + usize::from(resource.routing.is_some())
+        })
+        .sum::<usize>();
+    let requested = requested + resumed_demand;
+    if requested == 0 {
+        return Ok(());
+    }
+    let store = load_store(candidate, engine, false)?;
+    let capacity = engine.guest().bridge_intent().map_or(0, |b| b.slots);
+    let occupied = store
+        .slots
+        .values()
+        .filter(|assignment| {
+            assignment.run != receipt.run || !resuming.contains(&assignment.service)
+        })
+        .count();
+    check_free_capacity(capacity, occupied, requested)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn check_free_capacity(
+    capacity: u8,
+    reserved: usize,
+    requested: usize,
+) -> Result<(), CandidateError> {
+    let free = usize::from(capacity).saturating_sub(reserved);
+    if requested > free {
+        return Err(error(
+            "bridge_capacity_exhausted",
+            format!(
+                "Selected services need {requested} application bridge sockets, but the running pool has {free} free. No services were started."
+            ),
+        ));
+    }
+    Ok(())
+}
 fn save(candidate: &Candidate, store: &Store) -> Result<(), CandidateError> {
     let root = root(candidate);
     state::private_directory(&root)?;
@@ -1442,6 +1491,31 @@ pub(super) fn release_run(
     )
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn release_extension(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    services: &BTreeSet<String>,
+) -> Result<(), CandidateError> {
+    let mut store = load_store(candidate, engine, false)?;
+    let selected = store
+        .slots
+        .iter()
+        .filter_map(|(slot, assignment)| {
+            (assignment.run == receipt.run && services.contains(&assignment.service))
+                .then_some(*slot)
+        })
+        .collect();
+    release_slots(
+        candidate,
+        &LeasedRelease { candidate, engine },
+        &mut store,
+        &receipt.run,
+        selected,
+    )
+}
+
 /// Effects of releasing one run's bridges; the caller holds the provider lease.
 trait ReleaseGuest {
     fn boot_id(&self) -> &str;
@@ -1511,6 +1585,16 @@ fn release_selected(
     run: &str,
 ) -> Result<(), CandidateError> {
     let selected = owned_slots(store, run);
+    release_slots(candidate, guest, store, run, selected)
+}
+
+fn release_slots(
+    candidate: &Candidate,
+    guest: &impl ReleaseGuest,
+    store: &mut Store,
+    run: &str,
+    selected: Vec<u8>,
+) -> Result<(), CandidateError> {
     if selected.is_empty() {
         return Ok(());
     }
@@ -1592,6 +1676,14 @@ pub fn reconcile_bridges(candidate: &Candidate, run: &str) -> Result<Value, Cand
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extension_counts_free_pool_sockets_before_any_effect() {
+        assert!(check_free_capacity(8, 5, 3).is_ok());
+        let refused = check_free_capacity(8, 6, 3).unwrap_err();
+        assert_eq!(refused.code, "bridge_capacity_exhausted");
+        assert!(refused.message.contains("has 2 free"));
+    }
+
     #[test]
     fn fresh_registry_is_exclusive_and_lost_registry_stays_unknown() {
         let fixture = super::super::tests::Fixture::new();

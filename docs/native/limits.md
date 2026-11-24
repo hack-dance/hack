@@ -24,7 +24,7 @@ service, have their own codes.
 
 | Command | Supported on native | Refusal for unsupported forms | What a Compose project can use that native lacks |
 | --- | --- | --- | --- |
-| `hack up` | Whole project in the foreground, with `--detach`, or with `--json` (detached) | `E_USAGE` for a service subset or `--target` | Start selected services or use a remote target. See the configuration gaps below. |
+| `hack up` | Whole project or selected services from a Compose file, in the foreground, with `--detach`, or with `--json` (detached) | `E_USAGE` for `--target`; authored native projects still refuse service selection | Use a remote target. See the configuration gaps below. |
 | `hack restart` | Whole project in the foreground. Since next.22, Compose-backed projects also support detached restart through `--json`. | `E_USAGE` for service selection or `--target` on Compose-backed projects. Authored projects return `E_NATIVE_PROJECT_UNSUPPORTED` for those forms and for `--json`. The parser rejects `--detach` on either backend. | Restart selected services or target another host. |
 | `hack down`, `hack down --recover` | Whole-project stop and explicit recovery for an interrupted native run | `E_NATIVE_PROJECT_UNSUPPORTED` for authored `down --json` or env/profile overrides | Use JSON for ordinary stops with an authored project. Native recovery applies to native owners. |
 | `hack ps` | Status and `--json` | `E_NATIVE_PROJECT_UNSUPPORTED` for an authored `ps --profile` | Select Compose profiles when listing services. |

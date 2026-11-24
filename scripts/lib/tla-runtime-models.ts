@@ -3544,23 +3544,23 @@ const contracts: readonly ModelContract[] = [
   {
     name: "targeted-start",
     module: "TargetedStart",
-    states: 52,
+    states: 291,
     invariant: "OwnedEffects",
     action: "Create",
     fields: [
       'phase = "Extending"',
       'receipt = {"web", "redis"}',
-      "containers = [web |-> 1, cache |-> 2, redis |-> 0, unused |-> 0]",
+      "containers = [web |-> 1, cache |-> 2, redis |-> 0, api |-> 0, unused |-> 0]",
     ],
     additionalControls: [
       {
         name: "replace-existing",
         negative: true,
         invariant: "PreserveExisting",
-        action: "Reserve",
+        action: "Create",
         fields: [
           'phase = "Extending"',
-          "containers = [web |-> 2, cache |-> 0, redis |-> 0, unused |-> 0]",
+          "containers = [web |-> 2, cache |-> 0, redis |-> 0, api |-> 0, unused |-> 0]",
         ],
       },
     ],

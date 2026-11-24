@@ -60,7 +60,12 @@ fn probe_tick<L>(
         if !supervised_service(excluded, &name) {
             continue;
         }
-        if generations.get(&name).ok_or_else(refused)? == &expected {
+        // Only a confirmed publication may enroll a new supervisor target.
+        // An uncommitted extension can already have a running container.
+        if generations
+            .get(&name)
+            .is_none_or(|previous| previous == &expected)
+        {
             continue;
         }
         let lease = match acquire(ConnectionMode::Allocation) {
@@ -152,7 +157,10 @@ pub(in crate::provider::graph) fn changed_publications(
             let store = load_store(candidate, &engine, false)?;
             let mut changed = Vec::new();
             for (&slot, assignment) in &store.slots {
-                if assignment.run != run || assignment.phase != "running" {
+                if assignment.run != run
+                    || assignment.phase != "running"
+                    || snapshot.receipt.extending.contains(&assignment.service)
+                {
                     continue;
                 }
                 let resource = snapshot
@@ -254,8 +262,13 @@ fn route_endpoint(
         .resources
         .get(&format!("container:{name}"))
         .ok_or_else(refused)?;
+    if resource.phase != "started" || receipt.extending.contains(name) {
+        return Ok(None);
+    }
     let route = resource.routing.as_ref().ok_or_else(refused)?;
-    let inspected = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
+    let Some(inspected) = inspect_resource(engine, receipt, resource)? else {
+        return Ok(None);
+    };
     restart_policy::verify_admitted(resource, &inspected)?;
     if !matches!(observation(&inspected)?, Observation::Running { .. }) {
         return Ok(None);
@@ -349,6 +362,33 @@ pub(in crate::provider::graph) fn supervise_probes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unseen_route_does_not_stop_or_rearm_until_publication_seeds_it() {
+        let mut generations = BTreeMap::from([("web".into(), "before".into())]);
+        let mut rearmed = Vec::new();
+        for seed in [false, true] {
+            if seed {
+                generations.insert("redis".into(), "published".into());
+            }
+            probe_tick(
+                false,
+                &mut generations,
+                &BTreeSet::new(),
+                |_| Ok(()),
+                |_| Ok(BTreeMap::from([("redis".into(), "restarted".into())])),
+                |_, service, _| {
+                    rearmed.push(service.to_owned());
+                    Ok(true)
+                },
+            )
+            .unwrap();
+            assert_eq!(rearmed.len(), usize::from(seed));
+        }
+        assert_eq!(rearmed, ["redis"]);
+        assert_eq!(generations["web"], "before");
+        assert_eq!(generations["redis"], "restarted");
+    }
 
     #[test]
     fn exited_publishers_never_rearm_but_healthy_siblings_follow_new_generations() {

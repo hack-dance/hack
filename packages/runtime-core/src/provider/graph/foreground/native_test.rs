@@ -565,3 +565,5 @@ mod retired_recovery_cleanup;
 mod same_boot_absent_relay;
 mod same_boot_recovery;
 mod source_device_rebind;
+
+mod targeted_start;

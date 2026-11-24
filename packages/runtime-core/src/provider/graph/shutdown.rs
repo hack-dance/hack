@@ -64,10 +64,25 @@ pub(super) fn stop_owned(
         }
     };
     validate_current(&evidence, receipt)?;
+    for (key, terminal) in stop_selected(engine, receipt, true)? {
+        record(&mut evidence, key, terminal);
+    }
+    state::write(&path, &evidence)
+}
+
+/// Stop only the immutable container identities in this selection. A caller
+/// deleting these resources must keep their durable intent until removal is verified.
+pub(super) fn stop_selected(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    disarm: bool,
+) -> Result<BTreeMap<String, Terminal>, CandidateError> {
     // Stop wins against engine restarts: disarm every admitted policy and
     // confirm it with a fresh observation before the first stop request. A
     // restart already pending in the engine is cancelled by the stop itself.
-    disarm_owned(engine, receipt)?;
+    if disarm {
+        disarm_owned(engine, receipt)?;
+    }
     let mut selected = Vec::new();
     for resource in receipt
         .resources
@@ -95,19 +110,16 @@ pub(super) fn stop_owned(
         })?;
     // No container deletion is authorized until every selected instance has a
     // fresh matching terminal observation and that evidence is durable.
+    let mut terminals = BTreeMap::new();
     for (resource, prepared) in selected {
         let value = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
         let terminal = terminal(resource, &value, prepared.running)?;
         if terminal.id != prepared.id {
             return Err(refused());
         }
-        record(
-            &mut evidence,
-            format!("container:{}", resource.key),
-            terminal,
-        );
+        terminals.insert(format!("container:{}", resource.key), terminal);
     }
-    state::write(&path, &evidence)
+    Ok(terminals)
 }
 
 fn validate(evidence: &Evidence, receipt: &Receipt) -> Result<(), CandidateError> {

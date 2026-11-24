@@ -162,7 +162,7 @@ fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     if (!starting
         && !matches!(
             receipt.phase.as_str(),
-            "ready-observed" | STARTED_OBSERVED | "failed-retained"
+            "ready-observed" | STARTED_OBSERVED | "failed-retained" | "reconciled-cleanup-only"
         ))
         || !startup.valid(receipt)
         || startup.services.values().any(|s| {
@@ -183,6 +183,7 @@ fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
         let value = value.as_object_mut().ok_or_else(refused)?;
         value.remove("phase");
         value.remove("started_from");
+        value.remove("extending");
     }
     for group in ["resources", "probes"] {
         if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
@@ -375,7 +376,24 @@ pub fn recover_live_owner(
         return Err(refused());
     }
     let engine = Engine::connect_cleanup_wait(candidate)?;
-    let (receipt, root) = load(candidate, &engine, run)?;
+    let (mut receipt, root) = load(candidate, &engine, run)?;
+    let mut dead = None;
+    let reconciled;
+    let expected = if !receipt.extending.is_empty() && exists(&root.join("state.pending"))? {
+        if digest(&receipt)? != expected {
+            return Err(refused());
+        }
+        let foreground = foreground::DeadOwner::acquire(candidate, run)?;
+        foreground.verify_retirement_ready()?;
+        // Pending bytes are retained as evidence only. Every dispatched append
+        // effect is already enrolled in the committed receipt.
+        receipt = reconcile_receipt(&engine, receipt, &root)?;
+        reconciled = digest(&receipt)?;
+        dead = Some(foreground);
+        reconciled.as_str()
+    } else {
+        expected
+    };
     no_pending(&root, &receipt)?;
     if exists(&root.join(FILE))? {
         let intent: Intent = state::read(&root.join(FILE))?;
@@ -387,7 +405,7 @@ pub fn recover_live_owner(
             );
         }
     }
-    let foreground = foreground::DeadOwner::acquire(candidate, run)?;
+    let foreground = dead.map_or_else(|| foreground::DeadOwner::acquire(candidate, run), Ok)?;
     foreground.verify_retirement_ready()?;
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     let context = host_relay::context(&receipt.owner, engine.guest().boot_id())?;

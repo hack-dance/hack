@@ -309,6 +309,8 @@ test(
     await f.reply("graph extend", {
       ok: true,
       phase: "ready-observed",
+      started: ["cache", "redis"],
+      changed: [],
       receipt: {
         ...receipt,
         readiness: { ...receipt.readiness, cache: "started", redis: "started" },
@@ -345,6 +347,32 @@ test(
     expect(calls).not.toContain("graph serve");
     expect(calls).not.toContain("graph cleanup");
     expect(await loadNativeProjectRun(f.scope)).toEqual(run);
+
+    await rm(join(f.root, "stub", "graph-extend.out"));
+    const message = "The running pool has insufficient free bridge sockets.";
+    await f.fail("graph extend", {
+      code: "graph_owner_recovery",
+      cause_code: "bridge_capacity_exhausted",
+      message,
+      message_fixed: true,
+    });
+    const refused = await cli({
+      fixture: f,
+      args: ["up", "redis", "--json"],
+      env: SHARED,
+    });
+    expect(refused.code).toBe(1);
+    expect(JSON.parse(refused.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_STARTUP_INCOMPLETE",
+        detail: {
+          nativeCode: "graph_owner_recovery",
+          causeCode: "bridge_capacity_exhausted",
+          message,
+        },
+      },
+    });
   },
   SPAWN_TIMEOUT_MS
 );

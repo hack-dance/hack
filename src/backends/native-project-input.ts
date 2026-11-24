@@ -21,6 +21,7 @@ import {
   MAX_NATIVE_PRIVATE_INPUT_BYTES,
   nativePrivateEnvironmentPayload,
 } from "./native-private-environment-payload.ts";
+import { nativeServiceActive } from "./native-project-builds.ts";
 import type { NativeEmulationPolicy } from "./native-project-platform.ts";
 import {
   NativeUnknownServiceError,
@@ -521,11 +522,23 @@ export async function prepareNativeProjectInput(opts: {
     if (!(isRecord(compose) && isRecord(compose.services))) {
       throw refused("the Compose file has no services mapping");
     }
-    const declaredNames = Object.keys(compose.services);
-    const scoped = opts.targets?.length
+    const declared = compose.services;
+    const declaredNames = Object.keys(declared);
+    const targets =
+      opts.targets ??
+      (opts.existingImages
+        ? declaredNames.filter((name) => {
+            const service = declared[name];
+            return (
+              isRecord(service) &&
+              nativeServiceActive(service, opts.profiles ?? [])
+            );
+          })
+        : undefined);
+    const scoped = targets
       ? selectNativeServices({
           services: compose.services,
-          targets: opts.targets,
+          targets,
           profiles: opts.profiles ?? [],
           existingImages: opts.existingImages,
         })
@@ -610,7 +623,7 @@ export async function prepareNativeProjectInput(opts: {
       effectiveEnvName: selection.effectiveEnv,
       environmentFiles: resolved?.files ?? [],
       serviceNames,
-      ...(opts.targets?.length
+      ...(targets
         ? {
             omittedServiceSpecs: new Set(
               declaredNames.filter(

@@ -7581,8 +7581,9 @@ test("up on a pool whose provider exited under a running record recovers it with
     return await invoke(request);
   };
   expect(await startNativeProject(start)).toBe(0);
-  expect(events.slice(0, 4)).toEqual([
+  expect(events.slice(0, 5)).toEqual([
     "graph retained-preflight owner running",
+    "graph inspect",
     "runtime status exited",
     "runtime recover",
     "graph retained-preflight refused",
@@ -7752,6 +7753,7 @@ test("a live foreground owner on a running pool keeps its refusal at once, with 
   );
   expect(events).toEqual([
     "graph retained-preflight owner running",
+    "graph inspect",
     "runtime status",
     "pool record",
   ]);
@@ -7831,4 +7833,109 @@ test("the started envelope comes from observations: running jobs and unmet healt
     completed: [],
     warming: ["db", "migrate", "seed"],
   });
+});
+
+test.each([
+  [["redis"]],
+  [[]],
+])("up reports only owner-started services from the reviewed active closure (%j)", async (targets) => {
+  const { opts, events, saved } = await retainedFinalizationFixture();
+  const invoke = opts.dependencies.invoke!;
+  const image = `sha256:${"e".repeat(64)}`;
+  const shape = {
+    ...stoppedGraph(saved),
+    receipt: {
+      ...stoppedGraph(saved).receipt,
+      phase: "ready-observed",
+      readiness: { web: "started", redis: "started" },
+    },
+  };
+  opts.dependencies.prepare = async () => ({
+    originalSha256: "a".repeat(64),
+    normalizedComposeJson: JSON.stringify({
+      services: { web: { image }, redis: { image, depends_on: ["web"] } },
+    }),
+    managedEnvironment: {},
+    lifecycleHostEnvironment: {},
+    environmentFiles: [],
+    effectiveEnvName: null,
+    serviceNames: ["web", "redis"],
+  });
+  opts.dependencies.review = async ({ run }) =>
+    run({
+      planId: saved.planId,
+      namespace: saved.namespace,
+      projectArgs: ["--project", opts.scope.projectRoot],
+      report: {
+        plan: {
+          enrollment_compatible: true,
+          services: {
+            web: { active: true, image, dependencies: {} },
+            redis: {
+              active: true,
+              image,
+              dependencies: { web: { condition: "service_started" } },
+            },
+            unrelated: { active: false, image },
+          },
+        },
+      },
+    });
+  opts.dependencies.invoke = async (request) => {
+    switch (request.args[1]) {
+      case "retained-preflight":
+        throw new NativeRuntimeRequestError({
+          nativeCode: "graph_foreground_owner_running",
+          message: "The run has a live foreground owner.",
+        });
+      case "inspect":
+      case "status":
+        if (request.args[0] === "graph") {
+          return shape;
+        }
+        break;
+      case "owner-status":
+        return {
+          ok: true,
+          run: saved.run,
+          phase: "ready-observed",
+          plan: saved.planId,
+          runtime_verified: true,
+          generation: "f".repeat(64),
+          service_images: { web: image },
+        };
+      case "extend":
+        events.push("graph extend");
+        expect(request.args).toContain(saved.run);
+        return {
+          ok: true,
+          phase: "ready-observed",
+          receipt: shape.receipt,
+          started: ["redis"],
+          changed: ["web"],
+        };
+      default:
+        break;
+    }
+    return await invoke(request);
+  };
+  const outcomes: unknown[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      targets: targets.length ? targets : undefined,
+      onReady: (services) => void outcomes.push(services),
+    })
+  ).toBe(0);
+  expect(events).toContain("graph extend");
+  expect(events).not.toContain("before");
+  expect(outcomes).toEqual([
+    {
+      started: ["redis"],
+      completed: [],
+      readiness: "ready",
+      warming: [],
+      warnings: [expect.stringContaining("hack restart web")],
+    },
+  ]);
 });

@@ -41,6 +41,8 @@ struct StartupServer {
     run: String,
     owner: String,
     stop: std::rc::Rc<std::cell::RefCell<Option<std::os::unix::net::UnixStream>>>,
+    client: Option<transport::ClientWatch>,
+    ports: Vec<Value>,
 }
 impl startup::StartupRequests for StartupServer {
     fn serve(&mut self) -> bool {
@@ -81,6 +83,10 @@ impl startup::StartupRequests for StartupServer {
             let _ = transport::write(&mut stream, &reply, Duration::from_secs(1));
         }
         self.stop.borrow().is_some()
+            || self
+                .client
+                .as_ref()
+                .is_some_and(transport::ClientWatch::disconnected)
     }
 }
 impl StartupServer {
@@ -91,7 +97,8 @@ impl StartupServer {
         match receipt {
             Ok((generation, receipt)) => json!({"ok":true,"run":receipt.run,"phase":receipt.phase,
                 "plan":receipt.plan_id,"generation":generation,"foreground_alive":true,
-                "runtime_verified":false,"runtime_error":"graph_starting","publisher_ports":[]}),
+                "runtime_verified":false,"runtime_error":"graph_starting","publisher_ports":self.ports,
+                "extending":receipt.extending}),
             Err(error) => json!({"ok":false,"run":self.run,"code":error.code}),
         }
     }
@@ -304,6 +311,10 @@ fn serve_input<'a>(
         if !files.is_empty() {
             super::pending_environments(&compiled, files, deadline)?;
         }
+        runtime.extension_input = Some(super::extend::Input::read(
+            compose,
+            &compiled.executable.review.plan,
+        )?);
     } else if !managed.is_empty() || !files.is_empty() {
         // Refuse invalid scoped ownership or payload before publishing an owner.
         // Runtime admission compiles again to detect intervening project changes.
@@ -342,6 +353,8 @@ fn serve_input<'a>(
             run: run_id.clone(),
             owner: owner.token,
             stop: std::rc::Rc::clone(&stop_request),
+            client: None,
+            ports: Vec::new(),
         })));
     }
     // Explicit slots reserve as one batch so earlier automatic allocations
@@ -521,7 +534,16 @@ fn serve_input<'a>(
             }
             if queued.is_none() && supervise_restarts && Instant::now() >= restart_tick {
                 publication.verify()?;
-                publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
+                let (current, _) = super::load_at(
+                    super::directory(candidate, &receipt.run)?,
+                    &receipt.run,
+                    &receipt.owner,
+                )?;
+                // An unconfirmed append may own a partially retired bridge.
+                // Keep the owner serving status and down until that set is cleaned.
+                if current.extending.is_empty() {
+                    publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
+                }
                 restart_tick = Instant::now() + Duration::from_secs(1);
             }
             if queued.is_none() && runtime.drain_dependency_notifications()? {
@@ -568,15 +590,29 @@ fn serve_input<'a>(
             publication.verify()?;
             if let Some(extend) = request.extend {
                 let has_routes = extend.has_routes();
-                let response = match service_start::handle(
-                    candidate,
-                    &mut runtime,
-                    &mut publishers,
-                    &signals,
-                    &receipt.run,
-                    extend,
-                    &stream,
-                ) {
+                let stop = std::rc::Rc::new(std::cell::RefCell::new(None));
+                let serve = (|| {
+                    Ok::<_, CandidateError>(StartupServer {
+                        listener: publication.startup_listener()?,
+                        root: super::directory(candidate, &receipt.run)?,
+                        run: receipt.run.clone(),
+                        owner: receipt.owner.clone(),
+                        stop: std::rc::Rc::clone(&stop),
+                        client: Some(transport::ClientWatch::new(&stream)?),
+                        ports: publishers.port_status(),
+                    })
+                })();
+                let response = match serve.and_then(|server| {
+                    service_start::handle(
+                        candidate,
+                        &mut runtime,
+                        &mut publishers,
+                        &signals,
+                        &receipt.run,
+                        extend,
+                        server,
+                    )
+                }) {
                     Ok(value) => {
                         // An added route or port may introduce the first restart-supervised service.
                         supervise_restarts = true;
@@ -594,9 +630,23 @@ fn serve_input<'a>(
                         }
                         value
                     }
-                    Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),
+                    Err(error) => service_start::owner_failure(&receipt.run, &error),
                 };
                 let _ = transport::write(&mut stream, &response, Duration::from_secs(5));
+                if let Some(stream) = stop.borrow_mut().take() {
+                    queued = Some((
+                        stream,
+                        WireRequest {
+                            version: 1,
+                            run: receipt.run.clone(),
+                            remove_data: Some(false),
+                            restore: None,
+                            job: None,
+                            refresh_dependencies: None,
+                            extend: None,
+                        },
+                    ));
+                }
                 continue;
             }
             if let Some(refresh) = request.refresh_dependencies {

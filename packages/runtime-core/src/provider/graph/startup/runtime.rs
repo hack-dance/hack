@@ -107,6 +107,8 @@ pub struct HostRelayRuntime {
     #[cfg(target_os = "macos")]
     pub(in crate::provider::graph) early_publications:
         Option<crate::provider::graph::foreground::publishers::EarlyPublications>,
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider::graph) extension_input: Option<super::super::extend::Input>,
     /// Sticky: a dependency rebind wrote its journal and did not complete. Its
     /// effects are unconfirmed, so automatic refresh must never try again.
     rebind_unconfirmed: bool,
@@ -672,6 +674,8 @@ impl HostRelayRuntime {
             report_started: false,
             #[cfg(target_os = "macos")]
             early_publications: None,
+            #[cfg(target_os = "macos")]
+            extension_input: None,
             rebind_unconfirmed: false,
             dependency_reservation,
         })
@@ -1023,6 +1027,13 @@ fn announce_started(
 
 impl Driver for HostRelayRuntime {
     #[cfg(target_os = "macos")]
+    fn resume_publications(&mut self, receipt: &Receipt, services: &BTreeSet<String>) {
+        if let Some(publications) = &mut self.early_publications {
+            publications.resume(receipt, services);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn service_ready_leased(
         &mut self,
         engine: &Engine<'_>,
@@ -1031,7 +1042,10 @@ impl Driver for HostRelayRuntime {
         container_id: &str,
     ) -> Result<(), CandidateError> {
         if let Some(publications) = &mut self.early_publications {
-            publications.publish(engine, receipt, service, container_id)?;
+            let (check, requests) = (self.startup_cancelled, self.startup_requests.as_ref());
+            publications.publish(engine, receipt, service, container_id, || {
+                startup_cancelled(check, requests)
+            })?;
         }
         Ok(())
     }

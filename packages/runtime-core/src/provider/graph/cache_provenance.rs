@@ -406,6 +406,7 @@ mod tests {
             started_from: None,
             extending: BTreeSet::new(),
             normalized_input: None,
+            input_plan_id: None,
             relay_startup: None,
             relay_cleanup: None,
             probes: BTreeMap::new(),

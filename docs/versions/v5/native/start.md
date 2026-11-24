@@ -119,17 +119,26 @@ keep their container IDs and publications, and `hack ps` shows the combined run.
 `hack up redis --json` uses the same lifecycle fields as a targeted Compose
 start. An unknown service returns `E_SERVICE_NOT_FOUND`.
 
-Adding routes or loopback ports uses spare bridge capacity in the current
-pool. A previously admitted service that has stopped, or a new service that
-needs new host relay bindings, requires a fresh graph start with `hack down`
-followed by `hack up`. Named data is retained by ordinary `down`.
+A later plain `hack up` starts the other active services. An already-owned
+stopped service starts again. Running services keep the settings they started
+with. Hack reports a warning if a selected running service's Compose declaration
+changed. On native, use `hack restart` to apply those changes. If the owner is
+still warming or starting another selection, the command can return
+`E_NATIVE_STILL_STARTING`. Use `hack ps` to check its progress and retry.
 
-If a targeted start is interrupted after admission, `ps` can report the run as
-degraded and show the service states it can confirm. `hack down` stops the whole
-run, including any services created midway, and keeps named data. If the owner
-exited before confirming cleanup, use `hack down --recover`. The runtime keeps
-the creation and publication records needed to identify those resources, even if
-the start's reply was lost.
+Adding routes or loopback ports requires enough free bridge sockets in the
+running pool. Hack checks capacity before recording or creating the selected
+services. Adding host relay bindings still requires a fresh graph start.
+
+On failure, the owner tries to remove the new resources and returns previously
+stopped services to their prior state. If it cannot confirm rollback, `hack ps`
+reports a degraded run and shows the service states it can verify. Ctrl-C
+cancels the targeted start. `hack down` cancels the start and stops the whole
+run, including any service created midway. If the owner exited, use
+`hack down --recover`. The committed receipt records the resource names
+needed for cleanup, including when a create reply was lost. After ordinary
+`down`, `ps` shows `stopped-data-retained`. A later `up` reattaches the named
+data that the reviewed configuration still uses.
 
 **Build base registry refusal (`registry_image`).** Foreground and detached
 starts can report `Image unavailable: could not resolve build base` when the

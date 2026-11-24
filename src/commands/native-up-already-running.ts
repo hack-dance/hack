@@ -1,4 +1,5 @@
 import { declaredComposeProfiles } from "../backends/native-profile-selection.ts";
+import { nativeServiceActive } from "../backends/native-project-builds.ts";
 import {
   type NativeProjectPsResult,
   nativeProjectPs,
@@ -341,6 +342,26 @@ export async function answerNativeAlreadyRunning(opts: {
       return null;
     }
     const compose = await readNativeComposeDocument(project.composeFile);
+    const names = new Set(result.items.map((item) => item.service));
+    if (
+      result.phase === "ready-observed" &&
+      isRecord(compose) &&
+      isRecord(compose.services) &&
+      Object.entries(compose.services).some(
+        ([name, service]) =>
+          !names.has(name) &&
+          isRecord(service) &&
+          nativeServiceActive(service, saved.profiles ?? [])
+      )
+    ) {
+      return null;
+    }
+    if (
+      state.kind === "partial" &&
+      result.items.some((item) => item.state === "exited")
+    ) {
+      return null;
+    }
     observed = {
       state,
       branch,

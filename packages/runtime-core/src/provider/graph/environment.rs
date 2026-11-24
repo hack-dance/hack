@@ -63,6 +63,15 @@ pub(super) fn cleanup_slots(
     engine: &Engine<'_>,
     receipt: &Receipt,
 ) -> Result<Vec<String>, CandidateError> {
+    cleanup_slots_selected(candidate, engine, receipt, |_| true)
+}
+
+pub(super) fn cleanup_slots_selected(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    selected: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, CandidateError> {
     // The marker is durable before any bound intent; ordinary graphs need no intent scan.
     if !receipt.environment_attached {
         return Ok(Vec::new());
@@ -81,7 +90,9 @@ pub(super) fn cleanup_slots(
                 "Recorded environment does not match this graph container.",
             ));
         }
-        slots.push(slot);
+        if selected(&service) {
+            slots.push(slot);
+        }
     }
     Ok(slots)
 }

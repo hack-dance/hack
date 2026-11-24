@@ -3,7 +3,77 @@
 use super::startup::Driver as _;
 use super::*;
 #[cfg(target_os = "macos")]
-use std::time::Instant;
+use std::{path::Path, time::Instant};
+
+/// In-memory public normalization and authored service digests. Managed
+/// values never enter this structure.
+#[cfg(target_os = "macos")]
+pub(super) struct Input {
+    document: Value,
+    authored: BTreeMap<String, String>,
+}
+
+#[cfg(target_os = "macos")]
+impl Input {
+    pub(super) fn read(
+        compose: project::NormalizedComposeOptions<'_>,
+        plan: &project::PlanData,
+    ) -> Result<Self, CandidateError> {
+        let bytes = project::source::read_compose(&plan.source.join(&plan.compose_file))?;
+        if digest(&bytes) != compose.expected_compose_sha256 {
+            return Err(refused(
+                "Compose input changed before the owner could record it.",
+            ));
+        }
+        let original = project::yaml::parse(&bytes)?;
+        let authored = original["services"]
+            .as_object()
+            .ok_or_else(|| refused("The authored Compose services are missing."))?
+            .iter()
+            .map(|(service, spec)| (service.clone(), digest(spec.to_string().as_bytes())))
+            .collect();
+        Ok(Self {
+            document: project::yaml::parse(compose.compose_bytes)?,
+            authored,
+        })
+    }
+
+    fn combine(&self, next: Self, added: &BTreeMap<String, Value>) -> Result<Self, CandidateError> {
+        let mut document = self.document.clone();
+        let mut authored = self.authored.clone();
+        let services = document["services"]
+            .as_object_mut()
+            .ok_or_else(|| refused("The owner's normalized services are missing."))?;
+        for name in added.keys() {
+            services.insert(name.clone(), next.document["services"][name].clone());
+            if let Some(spec) = next.authored.get(name) {
+                authored.insert(name.clone(), spec.clone());
+            }
+        }
+        for section in ["networks", "volumes"] {
+            if let Some(incoming) = next.document[section].as_object() {
+                if document[section].is_null() {
+                    document[section] = json!({});
+                }
+                let target = document[section].as_object_mut().ok_or_else(|| {
+                    refused("The owner's normalized resource declarations are invalid.")
+                })?;
+                for (name, resource) in incoming {
+                    target
+                        .entry(name.clone())
+                        .or_insert_with(|| resource.clone());
+                }
+            }
+        }
+        Ok(Self { document, authored })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
+}
 
 #[cfg(target_os = "macos")]
 fn refused(message: &'static str) -> CandidateError {
@@ -12,13 +82,7 @@ fn refused(message: &'static str) -> CandidateError {
 
 /// The newly compiled graph uses existing resources by logical key. Existing
 /// containers are dependency witnesses only, even when their authored spec changed.
-fn select_resources(current: &Receipt, prepared: &mut config::Prepared) -> BTreeSet<String> {
-    let existing = prepared
-        .configs
-        .keys()
-        .filter(|name| current.resources.contains_key(&format!("container:{name}")))
-        .cloned()
-        .collect::<BTreeSet<_>>();
+fn select_resources(prepared: &mut config::Prepared, existing: &BTreeSet<String>) {
     prepared.configs.retain(|name, _| !existing.contains(name));
     prepared.probes.retain(|name, _| !existing.contains(name));
     prepared
@@ -43,7 +107,6 @@ fn select_resources(current: &Receipt, prepared: &mut config::Prepared) -> BTree
                     })
             }),
         });
-    existing
 }
 
 #[cfg(target_os = "macos")]
@@ -58,11 +121,18 @@ pub(super) struct Selection<'a> {
 /// refresh. The Engine lease covers ownership checks, intent and guest effects.
 /// Every effect then has the same cleanup authority as a cold graph start.
 #[cfg(target_os = "macos")]
+pub(super) struct Started {
+    pub receipt: Receipt,
+    pub services: BTreeSet<String>,
+    pub changed: BTreeSet<String>,
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn run(
     candidate: &Candidate,
     selected: Selection<'_>,
     startup: &mut HostRelayRuntime,
-) -> Result<Receipt, CandidateError> {
+) -> Result<Started, CandidateError> {
     let Selection {
         options,
         generation,
@@ -73,6 +143,7 @@ pub(super) fn run(
     let compiled = compile_normalized_inputs(candidate, &options, managed.values)?;
     let mut environments = pending_environments(&compiled, managed.files, deadline)?;
     let inputs = compiled.executable;
+    let next_input = Input::read(options.compose, &inputs.review.plan)?;
     if inputs
         .services
         .values()
@@ -90,7 +161,7 @@ pub(super) fn run(
     let deadline = deadline.min(Instant::now() + options.run.timeout);
     let engine = Engine::connect_for_start(
         candidate,
-        super::super::engine::ConnectionMode::Cleanup,
+        super::super::engine::ConnectionMode::Allocation,
         deadline,
         &|| startup.check_cancelled(),
     )?;
@@ -112,6 +183,7 @@ pub(super) fn run(
     }
     startup.check_cancelled()?;
     startup.verify(&engine, &mut receipt, &root)?;
+    let before = receipt.clone();
     let source = source::prepare_mode(
         candidate,
         &engine,
@@ -144,25 +216,70 @@ pub(super) fn run(
         },
         Some(&receipt),
     )?;
-    let existing = select_resources(&receipt, &mut prepared);
-    for name in &existing {
-        let resource = &receipt.resources[&format!("container:{name}")];
+    let mut owned = BTreeSet::new();
+    let mut existing = BTreeSet::new();
+    let mut resuming = BTreeSet::new();
+    for name in prepared.configs.keys() {
+        let Some(resource) = receipt.resources.get(&format!("container:{name}")) else {
+            continue;
+        };
+        owned.insert(name.clone());
         let value = inspect_resource(&engine, &receipt, resource)?.ok_or_else(|| {
             refused("An already owned service is missing. Use hack down to reconcile the run.")
         })?;
-        if !(value["State"]["Running"] == true
+        let state = observation(&value)?;
+        if value["State"]["Running"] == true
             || receipt.readiness[name] == Condition::Completed
-                && observation(&value)? == (Observation::Exited { code: 0 }))
+                && state == (Observation::Exited { code: 0 })
         {
+            existing.insert(name.clone());
+        } else if matches!(state, Observation::Exited { .. }) {
+            restart_policy::verify_admitted(resource, &value)?;
+            resuming.insert(name.clone());
+        } else {
             return Err(refused(
-                "An already owned service is stopped. Use hack down before starting it again.",
+                "An owned service is changing state. Retry after hack ps reports it running or stopped.",
             ));
         }
     }
-    if prepared.configs.is_empty() {
-        return Ok(receipt);
+    let previous_input = startup
+        .extension_input
+        .as_ref()
+        .ok_or_else(|| refused("The live owner has no normalized Compose input to extend."))?;
+    let changed = existing
+        .iter()
+        .filter(|name| previous_input.authored.get(*name) != next_input.authored.get(*name))
+        .cloned()
+        .collect();
+    select_resources(&mut prepared, &owned);
+    if prepared.configs.is_empty() && resuming.is_empty() {
+        return Ok(Started {
+            receipt,
+            services: BTreeSet::new(),
+            changed,
+        });
     }
-    environments.retain(|service, _| !existing.contains(service));
+    let combined = previous_input.combine(next_input, &prepared.configs)?;
+    let bytes = combined.document.to_string();
+    let combined_plan = project::plan_normalized(
+        candidate,
+        project::NormalizedComposeOptions {
+            compose_bytes: bytes.as_bytes(),
+            ..options.compose
+        },
+    )?;
+    let combined_identity = NormalizedInputIdentity {
+        namespace: receipt.namespace.clone(),
+        original_compose_sha256: options.compose.expected_compose_sha256.to_owned(),
+        normalized_compose_sha256: combined_plan.plan.compose_sha256,
+    };
+    let bridge_count = prepared
+        .resources
+        .values()
+        .map(|resource| resource.loopback_ports.len() + usize::from(resource.routing.is_some()))
+        .sum();
+    bridges::check_extension_capacity(candidate, &engine, &receipt, &resuming, bridge_count)?;
+    environments.retain(|service, _| !owned.contains(service));
     let mut new_storage = Vec::new();
     for (key, resource) in prepared.resources {
         if let Some(owned) = receipt.resources.get(&key) {
@@ -245,7 +362,13 @@ pub(super) fn run(
     if receipt.source.is_none() {
         receipt.source = source.map(|source| source.binding);
     }
-    receipt.extending = prepared.configs.keys().cloned().collect();
+    receipt.extending = prepared
+        .configs
+        .keys()
+        .cloned()
+        .chain(resuming.iter().cloned())
+        .collect();
+    let services = receipt.extending.clone();
     let mut session = Session {
         startup: Some(startup),
         engine,
@@ -263,31 +386,166 @@ pub(super) fn run(
         probe_findings: BTreeMap::new(),
     };
     // A single journal commit enrolls every new name before the first create.
-    // Keep the active phase and all old entries even on error or interruption.
+    // Keep the active phase and all old entries until the extension commits.
     session.save()?;
-    let mut created = BTreeSet::new();
-    for key in new_storage {
-        session.create_storage_resource(&key, false, &mut created)?;
+    let result = (|| {
+        if !resuming.is_empty() {
+            session.check_cancelled()?;
+            bridges::release_extension(candidate, &session.engine, &session.receipt, &resuming)?;
+            session
+                .startup
+                .as_mut()
+                .ok_or_else(|| refused("Missing extension driver."))?
+                .resume_publications(&session.receipt, &resuming);
+        }
+        let mut created = BTreeSet::new();
+        for key in new_storage {
+            session.check_cancelled()?;
+            session.create_storage_resource(&key, false, &mut created)?;
+        }
+        session.apply_created_volume_cadence(&created);
+        // Jobs use the admitted template before private attachments.
+        let templates = session.configs.clone();
+        execution::run_seeded(
+            &prepared.graph,
+            &mut session,
+            deadline.saturating_duration_since(Instant::now()),
+            &existing,
+        )?;
+        Ok::<_, CandidateError>(templates)
+    })();
+    let Session {
+        engine,
+        root,
+        mut receipt,
+        ..
+    } = session;
+    let committed = result.and_then(|templates| {
+        startup.check_cancelled()?;
+        let publications = startup
+            .early_publications
+            .as_mut()
+            .ok_or_else(|| refused("Targeted start requires the owner's publication set."))?;
+        publications.verify_extension(candidate, &receipt)?;
+        receipt.normalized_input = Some(combined_identity);
+        receipt.input_plan_id = Some(combined_plan.plan_id);
+        receipt.extending.clear();
+        state::write(&root.join("state.json"), &receipt)?;
+        Ok(templates)
+    });
+    match committed {
+        Ok(templates) => {
+            startup.remember_extensions(templates);
+            startup.extension_input = Some(combined);
+            Ok(Started {
+                receipt,
+                services,
+                changed,
+            })
+        }
+        Err(error) => {
+            // On uncertain rollback leave the full journal and all authority
+            // with the owner. A later down can clean both resource sets.
+            if rollback(candidate, &engine, &root, &before).is_ok() {
+                if let Some(publications) = &mut startup.early_publications {
+                    publications.mark_rolled_back();
+                }
+                Err(error)
+            } else {
+                Err(super::error(
+                    "graph_extend_incomplete",
+                    "Targeted start failed and could not confirm rollback. Run hack down to clean up the owned resources.",
+                ))
+            }
+        }
     }
-    session.apply_created_volume_cadence(&created);
-    // Jobs derive their public process template from the same admission as up.
-    // Save this before Session adds any private launcher attachments.
-    let templates = session.configs.clone();
-    execution::run_seeded(
-        &prepared.graph,
-        &mut session,
-        deadline.saturating_duration_since(Instant::now()),
-        &existing,
-    )?;
-    let receipt = session.receipt;
-    startup.remember_extensions(templates);
-    Ok(receipt)
+}
+
+#[cfg(target_os = "macos")]
+fn rollback(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    root: &Path,
+    before: &Receipt,
+) -> Result<(), CandidateError> {
+    if root.join("state.pending").symlink_metadata().is_ok() {
+        return Err(refused("The targeted start journal needs reconciliation."));
+    }
+    let (current, _) = load_at(root.to_path_buf(), &before.run, &before.owner)?;
+    if current.extending.is_empty() {
+        return Err(refused("The targeted start journal is no longer pending."));
+    }
+    let selected = &current.extending;
+    let has_new_environment =
+        !environment::cleanup_slots_selected(candidate, engine, &current, |name| {
+            selected.contains(name) && !before.readiness.contains_key(name)
+        })?
+        .is_empty();
+    bridges::release_extension(candidate, engine, &current, selected)?;
+    let mut added = current.clone();
+    added
+        .resources
+        .retain(|key, _| !before.resources.contains_key(key));
+    added.probes.retain(|service, _| {
+        added
+            .resources
+            .contains_key(&format!("container:{service}"))
+    });
+    shutdown::stop_selected(engine, &added, true)?;
+    let mut resumed = current.clone();
+    resumed.resources.retain(|key, resource| {
+        resource.kind == Kind::Container
+            && selected.contains(&resource.key)
+            && before.resources.contains_key(key)
+    });
+    // A previously stopped service can have accepted the start before its
+    // reply was lost. Stop it without deleting its pre-existing resources.
+    shutdown::stop_selected(engine, &resumed, false)?;
+    for kind in [Kind::Container, Kind::Network, Kind::Volume] {
+        for resource in added
+            .resources
+            .values()
+            .filter(|resource| resource.kind == kind)
+        {
+            if resource.cache.is_none() && resource.phase != "reserved" {
+                remove_owned_resource(engine, &added, resource, || Ok(()))?;
+            }
+        }
+    }
+    probes::cleanup(engine, &mut added)?;
+    if has_new_environment {
+        let attempt = probes::token()?;
+        for resource in added
+            .resources
+            .values()
+            .filter(|resource| resource.kind == Kind::Container)
+        {
+            super::super::environment_recovery::archive_job(
+                candidate,
+                engine.guest(),
+                &current.run,
+                &resource.key,
+                &resource.name,
+                &root
+                    .join("extension-environment-history")
+                    .join(&attempt)
+                    .join(&resource.key),
+            )?;
+        }
+    }
+    let mut restored = before.clone();
+    for (service, probe) in current.probes {
+        if restored.probes.contains_key(&service) && selected.contains(&service) {
+            restored.probes.insert(service, probe);
+        }
+    }
+    state::write(&root.join("state.json"), &restored)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::{os::unix::fs::PermissionsExt, path::Path};
 
     #[test]
     fn targeted_ownership_preserves_running_ids_and_recovers_lost_create_reply() {
@@ -351,10 +609,7 @@ mod tests {
             Some(&receipt),
         )
         .unwrap();
-        assert_eq!(
-            select_resources(&receipt, &mut prepared),
-            BTreeSet::from(["web".into()])
-        );
+        select_resources(&mut prepared, &BTreeSet::from(["web".into()]));
         assert!(!prepared.configs.contains_key("web"));
         let redis = &prepared.resources["container:redis"];
         assert_ne!(redis.name, web_name);
@@ -371,7 +626,7 @@ mod tests {
         fs::create_dir_all(root.parent().unwrap()).unwrap();
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         state::write(&root.join("state.json"), &receipt).unwrap();
-        let (read, _) = load_at(root, &run, &owner).unwrap();
+        let (read, root) = load_at(root, &run, &owner).unwrap();
         assert_eq!(
             read.resources["container:web"].id.as_deref(),
             Some(web_id.as_str())
@@ -384,5 +639,21 @@ mod tests {
         verify_resource_identity(&read, redis, &inspected).unwrap();
         inspected["Config"]["Labels"]["io.hack-local.plan"] = json!("f".repeat(64));
         assert!(verify_resource_identity(&read, redis, &inspected).is_err());
+
+        let pending = root.join("state.pending");
+        fs::write(&pending, b"{interrupted").unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        let evidence = journal::retain(&root).unwrap().unwrap();
+        let mut reconciled = read;
+        reconciled.set_phase("reconciled-cleanup-only");
+        state::write(&root.join("state.json"), &reconciled).unwrap();
+        let (loaded, _) = load_at(root, &run, &owner).unwrap();
+        assert_eq!(loaded.phase, "reconciled-cleanup-only");
+        assert!(loaded.extending.is_empty());
+        assert!(loaded.resources.contains_key("container:redis"));
+        assert_eq!(
+            fs::read(evidence.join("interrupted.pending")).unwrap(),
+            b"{interrupted"
+        );
     }
 }

@@ -3,7 +3,7 @@ use super::*;
 use crate::project::{NormalizedComposeOptions, PlanOptions, execution::Condition};
 use crate::provider::managed_environment::{self, Managed};
 use serde::{Deserialize, Serialize};
-use std::{os::unix::net::UnixStream, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,7 +94,31 @@ pub fn request(
         options.run.timeout + Duration::from_secs(10),
         256 * 1024,
     )?;
-    validate_owner_response(reply, run)
+    validate_owner_response(reply.clone(), run).map_err(|mut error| {
+        // The pinned same-user owner only emits compile-time fixed messages.
+        if error.cause_code.is_some()
+            && reply["run"] == run
+            && let Some(message) = reply["message"].as_str()
+            && (1..=300).contains(&message.len())
+            && message.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+        {
+            error.message = message.to_owned();
+            error.message_fixed = true;
+        }
+        error
+    })
+}
+
+pub(super) fn owner_failure(run: &str, error: &CandidateError) -> Value {
+    let mut reply = json!({"ok":false,"run":run,"code":error.code});
+    if error.message_fixed {
+        reply["message"] = json!(error.message);
+    } else if error.code == "bridge_capacity_exhausted" {
+        reply["message"] = json!(
+            "The running native pool has insufficient free application bridge sockets for the selected services. No services were started."
+        );
+    }
+    reply
 }
 
 pub(super) fn handle(
@@ -104,7 +128,7 @@ pub(super) fn handle(
     signals: &signals::Events,
     run: &str,
     request: ExtendRequest,
-    stream: &UnixStream,
+    server: StartupServer,
 ) -> Result<Value, CandidateError> {
     let timeout = Duration::from_secs(request.timeout_seconds);
     if timeout.is_zero() || timeout > Duration::from_secs(600) {
@@ -157,7 +181,7 @@ pub(super) fn handle(
             profiles: &request.profiles,
         },
     };
-    transport::peer(stream)?;
+    runtime.set_startup_requests(Some(Box::new(server)));
     runtime.set_startup_cancellation(Some(signals::startup_pending));
     runtime.early_publications = Some(publishers::EarlyPublications::new(&slots, deadline));
     let result = super::super::extend::run(
@@ -174,11 +198,22 @@ pub(super) fn handle(
         runtime,
     );
     runtime.set_startup_cancellation(None);
-    if let Some(early) = runtime.early_publications.take() {
-        // Even a refused append may own live children. Keep those with the
-        // original owner so down and publisher exit handling see the same set.
-        publishers.absorb(early.publishers, signals)?;
+    runtime.set_startup_requests(None);
+    if let Some(mut early) = runtime.early_publications.take() {
+        let reap = publishers.reap_resumed(&early.resumed, signals);
+        if !early.rolled_back
+            || early
+                .publishers
+                .reap_after_cleanup(signals, Instant::now() + Duration::from_secs(5))
+                .is_err()
+        {
+            // A refused append can still own children if rollback was uncertain.
+            publishers.absorb(early.publishers, signals)?;
+        }
+        reap?;
     }
-    let receipt = result?;
-    Ok(json!({"ok":true,"run":run,"phase":receipt.phase,"receipt":receipt}))
+    let started = result?;
+    Ok(
+        json!({"ok":true,"run":run,"phase":started.receipt.phase,"receipt":started.receipt,"started":started.services,"changed":started.changed}),
+    )
 }

@@ -15,10 +15,10 @@ pub mod native;
 pub(crate) mod private_files;
 pub mod registry;
 pub mod snapshot;
-mod source;
+pub(crate) mod source;
 pub mod source_budget;
 pub mod watcher;
-mod yaml;
+pub(crate) mod yaml;
 
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};

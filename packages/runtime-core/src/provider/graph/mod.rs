@@ -310,7 +310,7 @@ impl Receipt {
     pub(super) fn set_phase(&mut self, phase: &str) {
         self.phase = phase.into();
         self.started_from = None;
-        if matches!(phase, "removed" | "stopped-data-retained") {
+        if phase != "ready-observed" {
             self.extending.clear();
         }
     }
@@ -373,6 +373,10 @@ pub struct Receipt {
     pub startup_failure: Option<startup_failure::Failure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalized_input: Option<NormalizedInputIdentity>,
+    /// Logical review of the combined input. Resource labels retain the plan
+    /// under which the run enrolled, so cleanup and mapping can use one fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_plan_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_startup: Option<startup::Startup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -704,6 +708,9 @@ fn load_at(
         || receipt.owner != incarnation
         || !hex(&receipt.namespace, 64)
         || !hex(&receipt.plan_id, 64)
+        || receipt.input_plan_id.as_ref().is_some_and(|plan| {
+            !hex(plan, 64) || receipt.normalized_input.is_none()
+        })
         || receipt
             .normalized_input
             .as_ref()
@@ -729,7 +736,7 @@ fn load_at(
             .any(|r| r.outbound && r.kind != Kind::Network)
         || receipt.resources.is_empty()
         || (!receipt.extending.is_empty()
-            && (!matches!(receipt.phase.as_str(), "ready-observed" | "cleanup-intent")
+            && (!matches!(receipt.phase.as_str(), "ready-observed" | "cleanup-intent" | "reconciled-cleanup-only")
                 || !receipt.extending.iter().all(|service| receipt.readiness.contains_key(service))))
         || !resource_counts_fit(&receipt.resources)
         || !network_bindings_valid(&receipt.resources)
@@ -1011,6 +1018,13 @@ impl Session<'_, '_> {
         self.save()?;
         one_off::record_effect(&self.root, key, &self.receipt.resources[key])
     }
+
+    fn resumes_container(&self, service: &str) -> bool {
+        self.receipt.extending.contains(service)
+            && self.receipt.resources[&format!("container:{service}")]
+                .id
+                .is_some()
+    }
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
         let mut created_volumes = BTreeSet::new();
         let keys: Vec<_> = self
@@ -1168,10 +1182,13 @@ impl Driver for Session<'_, '_> {
         match event {
             Event::StartIntent { service } => {
                 let key = format!("container:{service}");
+                let resumed = self.resumes_container(service);
                 if self.receipt.resources.get(&key).is_none_or(|r| {
                     r.phase
                         != if self.restarting {
                             "restart-reserved"
+                        } else if resumed {
+                            "started"
                         } else {
                             "reserved"
                         }
@@ -1182,7 +1199,7 @@ impl Driver for Session<'_, '_> {
                     ));
                 }
                 // The durable intent write between a met gate and the create.
-                let phase = if self.restarting {
+                let phase = if self.restarting || resumed {
                     "start-intent"
                 } else {
                     "create-intent"
@@ -1231,8 +1248,11 @@ impl Driver for Session<'_, '_> {
                 if let Some(startup) = self.startup.as_mut() {
                     startup.verify(&self.engine, &mut self.receipt, &self.root)?;
                 }
+                if !self.receipt.extending.is_empty() {
+                    // The extension still has to verify its publication set.
+                    return Ok(());
+                }
                 self.receipt.set_phase("ready-observed");
-                self.receipt.extending.clear();
                 self.save()
             }
         }
@@ -1241,6 +1261,32 @@ impl Driver for Session<'_, '_> {
         self.check_cancelled()?;
         let key = format!("container:{service}");
         let resource = self.receipt.resources[&key].clone();
+        if self.resumes_container(service) {
+            let inspected =
+                inspect_resource(&self.engine, &self.receipt, &resource)?.ok_or_else(|| {
+                    error("graph_resource_missing", "Selected container disappeared.")
+                })?;
+            if resource.phase != "start-intent"
+                || !matches!(observation(&inspected)?, Observation::Exited { .. })
+            {
+                return Err(error(
+                    "graph_extend",
+                    "Selected container is no longer stopped.",
+                ));
+            }
+            restart_policy::verify_admitted(&resource, &inspected)?;
+            self.reset_probe(service, "reset")?;
+            self.check_cancelled()?;
+            let id = resource.id.as_deref().ok_or_else(|| {
+                error(
+                    "graph_resource_identity",
+                    "Selected container has no confirmed ID.",
+                )
+            })?;
+            self.engine
+                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+            return self.start_probe(service, id);
+        }
         if self.restarting {
             if resource.phase != "start-intent" {
                 return Err(error("graph_replay_refused", "Restart intent is missing."));
@@ -1837,6 +1883,7 @@ fn run_inputs(
         extending: BTreeSet::new(),
         startup_failure: None,
         normalized_input,
+        input_plan_id: None,
         relay_startup: None,
         relay_cleanup: None,
         probes: probe_states,
@@ -2148,7 +2195,8 @@ fn unchanged_normalized_review(
     plan_id: &str,
     normalized: &NormalizedInputIdentity,
 ) -> bool {
-    receipt.plan_id == plan_id && receipt.normalized_input.as_ref() == Some(normalized)
+    receipt.input_plan_id.as_deref().unwrap_or(&receipt.plan_id) == plan_id
+        && receipt.normalized_input.as_ref() == Some(normalized)
 }
 
 /// Read-only proof for an exact normalized review or a compatible shared-source
@@ -2464,6 +2512,46 @@ fn cleanup_owned(
     })
 }
 
+/// Remove one journaled resource after stop, then independently observe absence.
+fn remove_owned_resource(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    resource: &Resource,
+    fence: impl Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    fence()?;
+    let kind = resource.kind;
+    if let Some(value) = inspect_resource(engine, receipt, resource)? {
+        let target = if kind == Kind::Volume {
+            resource.name.as_str()
+        } else {
+            value["Id"].as_str().expect("verified id")
+        };
+        fence()?;
+        engine.request(
+            Method::DELETE,
+            &format!(
+                "/v1.53/{}/{target}{}",
+                kind.collection(),
+                if kind == Kind::Container {
+                    "?v=true"
+                } else {
+                    ""
+                }
+            ),
+            None,
+        )?;
+        if inspect_resource(engine, receipt, resource)?.is_some() {
+            return Err(error(
+                "graph_cleanup_uncertain",
+                "Removed graph resource remains visible.",
+            ));
+        }
+    }
+    volume_subpaths::forget_removed(engine, receipt, resource)?;
+    Ok(())
+}
+
 /// An explicit recovery can recheck its independent host proof immediately
 /// before each destructive graph effect. Ordinary callers use the same engine
 /// lease and state machine without an additional recovery witness.
@@ -2534,35 +2622,7 @@ fn cleanup_owned_fenced(
                 state::write(&root.join("state.json"), &receipt)?;
                 continue;
             }
-            fence()?;
-            if let Some(value) = inspect_resource(engine, &receipt, &resource)? {
-                let target = if kind == Kind::Volume {
-                    resource.name.as_str()
-                } else {
-                    value["Id"].as_str().expect("verified id")
-                };
-                fence()?;
-                engine.request(
-                    Method::DELETE,
-                    &format!(
-                        "/v1.53/{}/{target}{}",
-                        kind.collection(),
-                        if kind == Kind::Container {
-                            "?v=true"
-                        } else {
-                            ""
-                        }
-                    ),
-                    None,
-                )?;
-                if inspect_resource(engine, &receipt, &resource)?.is_some() {
-                    return Err(error(
-                        "graph_cleanup_uncertain",
-                        "Removed graph resource remains visible.",
-                    ));
-                }
-            }
-            volume_subpaths::forget_removed(engine, &receipt, &resource)?;
+            remove_owned_resource(engine, &receipt, &resource, &fence)?;
             receipt.resources.get_mut(&key).expect("resource").phase = "absent".into();
             // The durable cleanup intent owns every retry. Reinspection recovers partial removal;
             // only the final receipt needs another commit, including environment-slot retirement.
@@ -2823,11 +2883,19 @@ mod tests;
 /// interrupted file is retained, existing resources are verified, and no engine mutation occurs.
 pub fn reconcile(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
-    let (mut receipt, root) = archive::load_reconciliation(candidate, &engine, run)?;
+    let (receipt, root) = archive::load_reconciliation(candidate, &engine, run)?;
+    reconcile_receipt(&engine, receipt, &root)
+}
+
+fn reconcile_receipt(
+    engine: &Engine<'_>,
+    mut receipt: Receipt,
+    root: &std::path::Path,
+) -> Result<Receipt, CandidateError> {
     for resource in receipt.resources.values() {
-        inspect_resource(&engine, &receipt, resource)?;
+        inspect_resource(engine, &receipt, resource)?;
     }
-    if let Some(retained) = journal::retain(&root)? {
+    if let Some(retained) = journal::retain(root)? {
         state::write(&retained.join("committed.json"), &receipt)?;
         // Enrollment already fences ordinary mutations. Preserve committed
         // terminal evidence so explicit confirmation can independently recover.

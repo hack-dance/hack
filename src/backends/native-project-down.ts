@@ -75,12 +75,27 @@ async function captureFinalization(opts: {
     throw finalizationRefused();
   }
 }
-function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
+function verify(
+  value: unknown,
+  run: NativeProjectRun,
+  stopped: boolean,
+  recovering = false
+): void {
   if (
-    !isRecord(value) ||
-    value.journal_incomplete !== false ||
-    !isRecord(value.receipt) ||
-    !isRecord(value.observations)
+    !(
+      isRecord(value) &&
+      isRecord(value.receipt) &&
+      isRecord(value.observations)
+    ) ||
+    (value.journal_incomplete !== false &&
+      !(
+        recovering &&
+        !stopped &&
+        value.journal_incomplete === true &&
+        value.receipt.phase === "ready-observed" &&
+        Array.isArray(value.receipt.extending) &&
+        value.receipt.extending.length > 0
+      ))
   ) {
     throw refused();
   }
@@ -126,6 +141,7 @@ const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
 const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
   "ready-observed",
   "started-observed",
+  "reconciled-cleanup-only",
 ]);
 
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
@@ -865,7 +881,7 @@ async function nativeProjectDownOnce(opts: {
     poolBootEnded: opts.poolBootEnded,
     endedBootOwnerWaitMs: opts.endedBootOwnerWaitMs,
   });
-  verify(initial, run, false);
+  verify(initial, run, false, opts.recover === true);
   // A failure after started is kept beside the receipt until `down` clears it
   // (the restart coordinator's down leaves it to the next start).
   const failureRecorded =

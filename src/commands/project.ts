@@ -6949,24 +6949,22 @@ async function handleNativeUp({
     env: process.env,
     projectDir: project.projectDir,
   });
-  if (!targets) {
-    await refuseNativeComposeBackendFeatures({
-      composeFile: project.composeFile,
-      adaptationCandidates: nativeAdaptationCandidates({
-        selection: adaptation,
-        requestedEnvName,
-      }),
-      restart,
-      buildsEnabled: nativeBuildsEnabled(),
-      // The printed Compose fallback selects the same project and branch.
-      projectRoot: project.projectRoot,
-      branch:
-        typeof args.options.branch === "string"
-          ? args.options.branch
-          : undefined,
-      env: typeof args.options.env === "string" ? args.options.env : undefined,
-    });
-  }
+  await refuseNativeComposeBackendFeatures({
+    composeFile: project.composeFile,
+    adaptationCandidates: nativeAdaptationCandidates({
+      selection: adaptation,
+      requestedEnvName,
+    }),
+    restart,
+    targets,
+    profiles: parseCsvList(args.options.profile),
+    buildsEnabled: nativeBuildsEnabled(),
+    // The printed Compose fallback selects the same project and branch.
+    projectRoot: project.projectRoot,
+    branch:
+      typeof args.options.branch === "string" ? args.options.branch : undefined,
+    env: typeof args.options.env === "string" ? args.options.env : undefined,
+  });
   const branchIdentity = await resolveEffectiveBranchIdentityForCommand({
     project,
     branchOption: args.options.branch,
@@ -7089,6 +7087,11 @@ async function handleNativeUp({
         ...services,
       };
       resultTiming?.();
+      if (!isNativeDetachedOwnerProcess()) {
+        for (const warning of services.warnings ?? []) {
+          logger.warn({ message: warning });
+        }
+      }
       nativeDetachedUpReady(data);
     },
     startTimeoutSeconds: resolveNativeStartTimeoutSeconds({

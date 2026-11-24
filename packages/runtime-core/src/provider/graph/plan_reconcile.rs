@@ -117,9 +117,7 @@ pub(super) fn applies(
 ) -> bool {
     !source_rebind
         && eligible(receipt)
-        && !(receipt.plan_id == plan_id
-            && receipt.normalized_input.as_ref() == Some(next)
-            && ordinary_layout(receipt, plan))
+        && !(unchanged_normalized_review(receipt, plan_id, next) && ordinary_layout(receipt, plan))
 }
 
 /// Read-only proof of a reconciliation selection. Admission repeats it under the
@@ -586,6 +584,7 @@ mod tests {
             extending: BTreeSet::new(),
             startup_failure: None,
             normalized_input: Some(identity.clone()),
+            input_plan_id: None,
             relay_startup: None,
             relay_cleanup: None,
             probes: BTreeMap::new(),

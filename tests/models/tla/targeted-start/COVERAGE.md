@@ -1,28 +1,27 @@
 # Targeted native start coverage
 
-The model fixes one ready run with a running and published `web`, a request for
-`redis`, its dependency `cache`, and an unused service. It explores every
-ordering of create, start, publish, crash and cleanup in this finite instance.
-The effects are separate from their journal records. `Reserve` is the one
-atomic receipt replacement that enrolls all new resource names. `Create` can
-complete before the caller learns the container ID. `Down` uses the same receipt
-after an owner failure and can remove every enrolled effect.
+The model starts with `web` running on one run, with a route and a seeded
+supervisor. Two requests can add `cache` and its dependent `redis`, then
+`api`. The pool starts with zero to two spare sockets. `unused` remains
+unselected. The model keeps durable ownership separate from observed compute.
 
 | Property | Source and regression |
 | --- | --- |
-| `SameRun`, `PreserveExisting`, `OnlySelected` | `foreground/service_start.rs` pins the live owner and `extend.rs` verifies the receipt generation under the provider lease. `config::prepare_with_ownership` preserves allocation and labels. The `targeted_ownership_preserves_running_ids_and_recovers_lost_create_reply` fake reads back the old ID and checks the new engine identity against the same plan. |
-| `DependencyBeforeCreate`, `PublishAfterStart` | `project/execution.rs` starts the selected closure and observes existing dependencies without starting them. `EarlyPublications::publish` uses one service and its confirmed ID. The seeded scheduler fake verifies dependency order and existing service exclusion. |
-| `OwnedEffects`, `CleanStop` | The extension saves all names, then `Session::reserve` saves each effect intent. `cleanup_owned_fenced` stops and removes owned resources from the combined receipt. The lost-create fake authenticates the new container by its recorded name and labels when the returned ID is missing. |
+| `SameRun`, `PreserveExisting`, `OnlySelected` | `foreground/service_start.rs` pins the live owner. `extend::run` verifies the current receipt under the provider lease. `config::prepare_with_ownership` reuses allocated names and `execution::run_seeded` observes running dependencies. The ownership fake checks the old ID and the macOS fixture sends two requests through the owner socket. |
+| `DependencyBeforeCreate`, `PublishAfterStart` | The seeded scheduler dispatches after the dependency condition and publishes the confirmed container ID. The scheduler regression checks the wait and exact selection. |
+| `Capacity`, `SupervisorSeeded` | `bridges::check_extension_capacity` checks the leased pool registry before the receipt write. `EarlyPublications` verifies the added publishers and carries each admitted route generation to the supervisor. The free-count and unseen-probe tests cover refusal and supervisor enrollment. |
+| `OwnedEffects`, `CleanStop`, `Loadable` | `Session::reserve` records names before allocation. Failure keeps the owner and pending marker until scoped rollback succeeds. Explicit recovery retains pending bytes as evidence, reconciles the committed receipt and clears the marker on phase change. The macOS fixture kills the owner during an append, recovers, and reads back the settled receipt. |
 
-TLC 1.7.4 with Java 17, two workers and a 512 MiB heap explores 52 distinct
-states. `negative.cfg` omits the dependency's reservation and fails `OwnedEffects`
-at `Create`. `replace-existing.cfg` changes `web`'s ID and fails `PreserveExisting`
-at `Reserve`.
+TLC 1.7.4 with Java 17 explores 291 distinct states. `negative.cfg` drops the
+dependency's intent and fails `OwnedEffects` at `Create`. `replace-existing.cfg`
+admits the running service into the effect selection and fails
+`PreserveExisting` when `Create` acts on it.
 
-The model assumes serialization in the foreground owner, a provider lease for
-mutation, atomic journal replacement, and an engine that honors confirmed
-identities. It abstracts per-resource acknowledgment fields, provider boot and
-route transport, and assumes authorized cleanup can eventually complete. It does
-not check filesystem durability, fairness, signal timing, or real VM routing.
-The [Pele source](../../../../docs/reference/state-charts/targeted-start.mmd)
-uses the same transition names.
+The model assumes serialized owner requests, an exclusive provider lease,
+atomic committed receipt replacement and an engine that honors confirmed
+identities. A crash keeps the committed names even when the latest effect
+reply was lost. `Degraded` is the owner's state until rollback is verified
+or cleanup is requested. The model abstracts Docker retries, private
+environment and volume cleanup, probe sampling, signal delivery, filesystem
+durability and live VM routing. The [Pele state chart](../../../../docs/reference/state-charts/targeted-start.svg)
+shows the same transitions.

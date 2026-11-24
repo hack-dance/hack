@@ -4,22 +4,32 @@ title: TargetedStart · Same graph owner
 stateDiagram-v2
     direction TB
     [*] --> Ready
-    Ready --> Extending : Reserve
-    Extending --> Ready : Commit
+    Ready --> Ready : CapacityRefuse
+    Ready --> Extending : Reserve [space]
+    Extending --> Ready : Commit [probes seeded]
+    Extending --> Degraded : Fail or time out
+    Degraded --> Ready : Rollback [verified]
     Extending --> Interrupted : Crash
+    Degraded --> Interrupted : Crash
+    Interrupted --> Reconciled : Reconcile
     Ready --> Cleaning : Down
-    Interrupted --> Cleaning : Down
+    Extending --> Cleaning : Down cancels start
+    Degraded --> Cleaning : Down
+    Reconciled --> Cleaning : Down
     Cleaning --> Stopped : FinishDown
     note right of Extending
       Create, Start, Publish
-      INV: Keep existing IDs
+      INV Existing IDs stay
     end note
-    note right of Cleaning
-      Remove owned resources
+    note right of Degraded
+      RefuseConcurrent
+      Keep cleanup intent
     end note
     classDef live stroke-width:1.6px
+    classDef wait stroke-width:1.6px
     classDef fail stroke-width:1.6px
     classDef ok stroke-width:1.6px
-    class Extending live
-    class Interrupted fail
+    class Extending,Cleaning live
+    class Interrupted,Degraded fail
+    class Reconciled wait
     class Stopped ok

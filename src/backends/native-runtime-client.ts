@@ -518,6 +518,7 @@ export function nativeFailureDetail(value: Record<string, unknown>): {
 
 type SafeNativeFailure = Readonly<{
   code: string;
+  causeCode?: string;
   message?: string;
   service?: string;
   /** Set only by the frontend's effect-free static review, never runtime output. */
@@ -605,6 +606,9 @@ export class NativeRuntimeRequestError extends ClosedCliError {
         this,
         Object.freeze({
           code: opts.nativeCode,
+          ...(opts.nativeCauseCode && ERROR_CODE.test(opts.nativeCauseCode)
+            ? { causeCode: opts.nativeCauseCode }
+            : {}),
           ...(opts.nativeStartupPhase === "static-preflight"
             ? { startupPhase: "static-preflight" as const }
             : {}),

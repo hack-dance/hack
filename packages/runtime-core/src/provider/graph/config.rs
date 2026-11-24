@@ -789,7 +789,7 @@ pub(super) fn prepare_with_ownership(
             return Ok(owned.name.clone());
         }
         let prefix = format!("hkg-{run}-{}-", kind.word());
-        (index..100)
+        (index..64)
             .chain(0..index)
             .map(|slot| format!("{prefix}{slot}"))
             .find(|candidate| used_names.insert(candidate.clone()))
@@ -1090,7 +1090,7 @@ pub(super) fn prepare_with_ownership(
         probes,
         resources,
         namespace: plan.namespace.clone(),
-        plan_id: inputs.review.plan_id.clone(),
+        plan_id: plan_id.to_owned(),
     })
 }
 

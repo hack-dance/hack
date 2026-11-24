@@ -183,11 +183,16 @@ export function adaptNativeProject(opts: {
   if (!(isRecord(compose) && isRecord(compose.services))) {
     throw refused();
   }
-  const perService = (value: unknown) => {
+  const services = compose.services;
+  const perService = (value: unknown, includeWitnesses = false) => {
     const omitted = opts.input.omittedServiceSpecs;
     return omitted && isRecord(value)
       ? Object.fromEntries(
-          Object.entries(value).filter(([name]) => !omitted.has(name))
+          Object.entries(value).filter(
+            ([name]) =>
+              !omitted.has(name) ||
+              (includeWitnesses && Object.hasOwn(services, name))
+          )
         )
       : value;
   };
@@ -200,7 +205,9 @@ export function adaptNativeProject(opts: {
     applyNativeWorkspaceCache({ compose, selection: cache });
   }
   for (const [name, value] of Object.entries(
-    selectedMap(perService(selection.httpProbes))
+    // Existing dependency witnesses need their health condition for review.
+    // The owner inspects their current probe and creates effects only for new services.
+    selectedMap(perService(selection.httpProbes, true))
   )) {
     const spec = service(compose.services, name);
     if (spec.healthcheck !== undefined) {

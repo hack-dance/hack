@@ -21,6 +21,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The selected native home needs runtime setup before project startup.",
     readFirst: "`hack doctor --native-preflight --json`",
   },
+  E_NATIVE_STILL_STARTING: {
+    meaning:
+      "The native owner is still starting the project or selected services.",
+    readFirst: "`hack ps --json`",
+  },
   E_UNSUPPORTED_PLATFORM: {
     meaning:
       "The command needs a platform this host is not, such as the native runtime outside Apple Silicon macOS.",

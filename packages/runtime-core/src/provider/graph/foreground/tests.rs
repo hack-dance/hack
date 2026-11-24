@@ -639,6 +639,8 @@ fn the_start_loop_answers_status_and_holds_a_stop() {
         run: run.clone(),
         owner,
         stop: std::rc::Rc::clone(&stop),
+        client: None,
+        ports: Vec::new(),
     };
     let request = |remove_data: Value| {
         let mut stream = pin.connect().unwrap();

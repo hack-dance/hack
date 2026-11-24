@@ -8,6 +8,7 @@ fn receipt() -> Receipt {
         started_from: None,
         extending: Default::default(),
         normalized_input: None,
+        input_plan_id: None,
         relay_startup: None,
         relay_cleanup: None,
         version: 1,

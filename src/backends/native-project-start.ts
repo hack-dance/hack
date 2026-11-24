@@ -2084,18 +2084,31 @@ async function selectNativeStartup(opts: {
           aws: opts.aws,
           gcloud: opts.gcloud,
         };
-  const extension =
-    retained && opts.targets?.length
-      ? await selectNativeGraphExtension({ ...opts, run: retained })
+  const extend = async (run: NativeProjectRun) => {
+    const extension = await selectNativeGraphExtension({ ...opts, run });
+    return extension
+      ? {
+          retained: run,
+          restore: undefined,
+          selection,
+          retainedFlags: [],
+          extension,
+        }
       : undefined;
-  if (extension) {
-    return {
-      retained,
-      restore: undefined,
-      selection,
-      retainedFlags: [],
-      extension,
-    };
+  };
+  if (retained && !opts.restore && opts.targets?.length) {
+    const selected = await extend(retained).catch((error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "runtime_not_running"
+      ) {
+        return undefined;
+      }
+      throw error;
+    });
+    if (selected) {
+      return selected;
+    }
   }
   let retainedFlags: string[] = [];
   if (retained) {
@@ -2113,7 +2126,27 @@ async function selectNativeStartup(opts: {
       run: retained,
       invoke: opts.invoke,
       signal: opts.signal,
+    }).catch(async (error: unknown) => {
+      if (
+        !(opts.restore || opts.targets?.length) &&
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "graph_foreground_owner_running"
+      ) {
+        const selected = await extend(retained).catch((refusal: unknown) => {
+          if (refusal instanceof HackCliError) {
+            throw refusal;
+          }
+          return undefined;
+        });
+        if (selected) {
+          return selected;
+        }
+      }
+      throw error;
     });
+    if ("extension" in preflight) {
+      return preflight;
+    }
     retainedFlags = preflight.flags;
     const observed =
       preflight.runtimePhase === "running"
@@ -2136,6 +2169,14 @@ async function selectNativeStartup(opts: {
   }
   const restore = opts.restore ?? retained ?? undefined;
   return { retained, restore, selection, retainedFlags, extension: undefined };
+}
+
+function nativeGraphStillStarting() {
+  return new HackCliError({
+    code: "E_NATIVE_STILL_STARTING",
+    message:
+      "The native project is still starting. Retry after hack ps reports it ready.",
+  });
 }
 
 async function selectNativeGraphExtension(opts: {
@@ -2161,6 +2202,17 @@ async function selectNativeGraphExtension(opts: {
   ) {
     throw unconfirmed("the targeted start owner");
   }
+  if (snapshot.receipt.phase === "stopped-data-retained") {
+    return undefined;
+  }
+  if (
+    snapshot.receipt.phase === "preparing" ||
+    snapshot.receipt.phase === "restoring" ||
+    snapshot.receipt.phase === "restarting" ||
+    snapshot.receipt.phase === "started-observed"
+  ) {
+    throw nativeGraphStillStarting();
+  }
   if (snapshot.receipt.phase !== "ready-observed") {
     return undefined;
   }
@@ -2171,6 +2223,13 @@ async function selectNativeGraphExtension(opts: {
     timeoutMs: 15_000,
     signal: opts.signal,
   });
+  if (
+    isRecord(owner) &&
+    owner.run === run &&
+    owner.runtime_error === "graph_starting"
+  ) {
+    throw nativeGraphStillStarting();
+  }
   if (
     isRecord(owner) &&
     owner.run === run &&
@@ -2650,6 +2709,7 @@ type NativeProjectStartOptions = {
   readonly onReady?: (
     services: {
       readonly started: readonly string[];
+      readonly warnings?: readonly string[];
       readonly completed: readonly string[];
       /**
        * `warming` after a started return (the owner has not reported every goal
@@ -2929,6 +2989,22 @@ function emitNativeBranchDroppedNotice(
 }
 
 /** Request the extension from the pinned owner and confirm its combined receipt. */
+function nativeExtensionServiceSet(
+  value: unknown,
+  selected: readonly string[]
+): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.some(
+      (name: unknown) => typeof name !== "string" || !selected.includes(name)
+    ) ||
+    new Set(value).size !== value.length
+  ) {
+    throw unconfirmed("the targeted start service set");
+  }
+  return value;
+}
+
 async function extendNativeProjectGraph({
   opts,
   deps,
@@ -2944,7 +3020,7 @@ async function extendNativeProjectGraph({
   admitted,
 }: {
   readonly opts: NativeProjectStartOptions;
-  readonly deps: Pick<Dependencies, "invoke">;
+  readonly deps: Pick<Dependencies, "invoke" | "warn">;
   readonly extension: NonNullable<
     Awaited<ReturnType<typeof selectNativeGraphExtension>>
   >;
@@ -3020,17 +3096,20 @@ async function extendNativeProjectGraph({
       throw unconfirmed("the targeted start result");
     }
     const readiness = response.receipt.readiness;
-    if (services.some((service) => !Object.hasOwn(readiness, service))) {
-      throw unconfirmed("the targeted start service set");
+    const started = nativeExtensionServiceSet(response.started, services);
+    const changed = nativeExtensionServiceSet(response.changed, services);
+    const warnings = changed.map(
+      (name) =>
+        `Service ${name} is running with its previous configuration. Use hack restart to apply the change on native; Compose supports hack restart ${name}.`
+    );
+    if (!opts.onReady) {
+      warnings.forEach(deps.warn);
     }
     await opts.onReady?.(
       {
-        started: services.filter(
-          (service) => readiness[service] !== "completed"
-        ),
-        completed: services.filter(
-          (service) => readiness[service] === "completed"
-        ),
+        started: started.filter((name) => readiness[name] !== "completed"),
+        completed: started.filter((name) => readiness[name] === "completed"),
+        ...(warnings.length ? { warnings } : {}),
         readiness: "ready",
         warming: [],
       },

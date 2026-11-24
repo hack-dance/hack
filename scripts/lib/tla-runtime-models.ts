@@ -408,7 +408,6 @@ const contracts: readonly ModelContract[] = [
     module: "ShutdownReceipt",
     states: 16,
     invariant: "CleanupAdmitsRestore",
-    action: "Refuse",
     fields: [
       'phase = "Refused"',
       'receiptId = "none"',
@@ -420,7 +419,6 @@ const contracts: readonly ModelContract[] = [
         name: "reachability",
         negative: true,
         invariant: "NeverRestored",
-        action: "Restore",
         fields: [
           'phase = "Restored"',
           'receiptId = "original"',

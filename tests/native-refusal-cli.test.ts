@@ -95,6 +95,7 @@ async function fixture(compose = COMPOSE) {
   await writeFile(
     binary,
     `#!/bin/sh
+case "$1" in --internal-timings=*) shift;; esac
 ${nativeSetupShellReply()}
 if [ "$3-$4" = runtime-build-image ] && [ -f '${stub}/runtime-build-image.hold' ]; then
   request="${"$"}{6##*/}"

@@ -16,8 +16,8 @@ second implementation of them.
 | The CLI is the only writer | Every action is one `hack <cmd> --no-interactive` run as the user with `--path <repo_root>`. Commands without `--json` are judged by exit code, then a fresh read. |
 | Reads observe only | A poll never starts Docker, hackd, a VM or anything else. A command that can start something (today: `hack global status`) is not polled until it has an observe-only mode (R13). |
 | No app state beyond window layout | Selected project, window size, sidebar width, theme override. Nothing else is stored. |
-| No credentials, no passwords | No password field, no `sudo` from the app. Admin steps go to the user's terminal ([Onboarding](#2-first-run-onboarding)). |
 | Env values only by request | Env lists metadata. The eye reads one value through `hack env get KEY`. The value hides after 60 seconds or when focus or selection changes. The app delegates writes to the CLI. Logs separately show unredacted service output as the CLI emits it (see [Logs tab](#logs-tab)). |
+| No credentials, no passwords | Explicit Run actions use an app-owned PTY. The CLI invokes `sudo` when needed and owns the prompt. The app has no password field. |
 | Unknown is not absent | A failed or timed-out read shows "could not read" with the error, never "stopped" or "0 projects". |
 | Small | Target under 4,000 lines of Rust for v0.1. The old `apps/macos` grew to 13,800 lines through an embedded terminal, command palette, editor and agent integrations, tickets and remote features. None of those come back. |
 
@@ -193,10 +193,11 @@ check, in order. Every check is read-only; every card offers **Check again**.
 | Certificate trust (native) | doctor `native root trust` | none from the app: `hack global trust` refuses native; doc link | — | "unknown" |
 | Login service | `daemon status` `service.installed` | `hack daemon install` | no | Always-on switch disabled |
 
-Skips are not stored: the next check finds the step still open and Doctor lists
-it. Non-admin **Run** executes the command and shows its output, then re-checks.
-Admin steps offer **Copy command** and **Open Terminal**; neither is assumed to
-have succeeded until **Check again** (also run when the window regains focus).
+Skips last for the session. Setup's daemon start, local domains and certificate
+trust commands use the shared **Run** and **Copy** control where Ghostty is
+available. Run opens the bottom terminal and checks the step again on exit.
+The drawer closes after 1.5 seconds when the command and the check both pass.
+The Terminal app hand-off also remains available from the drawer menu.
 
 ![Admin hand-off](diagrams/admin-handoff.svg) ([source](diagrams/admin-handoff.mmd))
 
@@ -217,22 +218,48 @@ the hand-off instead of fixing a different engine.
 
 ## 3. Doctor
 
+### Shared command control
+
+Setup, Doctor and machine views share `core::terminal::CommandControl` and the
+desktop command drawer. Use a stable ID per action and target, a short command
+label for display, and authored argv from the check that offered the command
+(for example, `setup::Report::command`). Run, Copy and terminal hand-off use
+this same spec. Pass blocked or version-mismatch copy in `CommandAvailability`
+when the check cannot offer a command. These states do not start a terminal.
+
+In the app crate, `command_control::render` accepts the props, a caller-busy
+flag and an exit callback. The callback receives a run ID, a typed
+`CommandExit` and an optional diagnosis. Start a fresh check on exit, then
+call `HackApp::command_checked` with that run ID and its result. A zero exit
+with a passing check closes the drawer after 1.5 seconds. A failed command
+or check leaves its output available. Use `HackApp::run_drawer_command` for
+an explicit run initiated outside a button pair, such as Doctor's Fix all.
+Use `HackApp::show_command_output` with the control ID to reopen the latest
+run from a banner. Use `command_control::render_history` when a passing check
+removes its Run and Copy buttons. Closing the drawer retains the latest output until
+the next command starts or the CLI changes.
+
 Source: `hack doctor --json --path <root>` per registered project, plus
 `hack doctor --machine --json` for machine findings, on open and every 10
 minutes while visible. The project audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; the machine variant uses the same envelope with `data.schema: "hack.doctor.machine.v1"` (R7c). Checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a). Until the app switches to the machine variant, it still runs one plain `hack doctor --json` outside any project and de-duplicates machine checks.
 
-| Card part | Content |
-|---|---|
-| Group | Area: Engine, Routing and DNS, Certificates, Daemon, Env and secrets, Project files, Native |
-| Severity | `error` red, `warn` amber; `ok` collapsed into "12 checks passed" |
-| Affected | "Machine" or the projects it applies to |
-| One action | Run safe fix (R7b) · Open Terminal (admin) · Copy command · Open doc |
+Doctor shows checked time and groups rows as Machine, Projects and a collapsed
+list of passed checks. The machine rows come from the Setup report. Each row
+offers its observed repair, guide or recheck. The scoped Git ignore repair is
+runnable only when Doctor reports the known safe recipe for an exact checkout.
+Other project commands remain manual. Upgrade opens its review.
 
-Machine findings are de-duplicated by check `id` and shown once; project
-findings link from that project's header. Schema 1 supplies `area`, `scope` and
-`fix`; older CLI versions still need `core`'s known-ID mapping. Unknown checks
-appear under "Other" with only Copy and Open doc. No Run button appears without
-a `fix.kind: safe`.
+Fix all queues runnable repairs in display order. The shared drawer owns the
+active command. After an exit, Doctor reads fresh evidence and advances only
+after exit zero and a confirmed repair. A stop, failed command, or unconfirmed
+repair leaves the terminal output available. The app skips a queued check that
+already passes, and checks that a remaining action still matches before running
+it.
+
+The project pane shows one dismissible follow-up. A dismissal belongs to the
+current condition and clears when that condition changes or resolves. Release
+availability and offline update checks use the read-only R14 output. The
+banner and error sheets use fixtures.
 
 Browser observations and native hostname DNS/HTTPS route checks are project-scoped:
 each describes the selected exact target and must not be de-duplicated across projects.
@@ -243,7 +270,7 @@ each describes the selected exact target and must not be de-duplicated across pr
 
 | State | Source | Shown | Action |
 |---|---|---|---|
-| Update available | R14 (read-only, any install kind). `hack update --check` rejects Homebrew installs and candidate launchers, so it is not used | Chip "Hack vX available" | Review |
+| Update available | R14 via `hack update --check --json --observe` (read-only, any install kind) | Follow-up "Hack X is available" | Review in the Upgrade pane, with the target release and a copyable install command when R14 supplies one |
 | Checking | `hack upgrade check --json` (#790) | Spinner, then plan | none |
 | Blocked | `ready: false`. `blockers[]` / `incomplete[]` are `{scope,id,summary}`; the command or action comes from the matching finding (`machine[]` or `projects[].findings[]` by scope + id) | One card per blocker | Copy / Open Terminal; Run only with R17's `kind: safe`; Re-check |
 | Ready | `ready: true`, `plan[]` (`command` / `args` / `action`, `blocker`) | Ordered plan | Upgrade |

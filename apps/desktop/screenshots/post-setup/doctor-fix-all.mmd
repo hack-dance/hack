@@ -1,0 +1,22 @@
+---
+title: Doctor Fix all
+---
+stateDiagram-v2
+    direction TB
+    [*] --> Ready
+    Ready --> Running : Fix all
+    Running --> Rechecking : Command exits
+    Running --> Stopping : Stop
+    Stopping --> Rechecking : Command exits
+    Rechecking --> Outcome
+    state Outcome <<choice>>
+    Outcome --> Running : Confirmed, more repairs
+    Outcome --> Complete : Confirmed, queue finished
+    Outcome --> Changed : Confirmed, queue changed
+    Changed --> [*]
+    Outcome --> Retained : Failed, unverified or stopped
+    Complete --> [*]
+    Retained --> [*]
+    class Running live
+    class Complete ok
+    class Retained fail

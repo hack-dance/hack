@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
+import { startupTimingSpawn } from "../lib/command-timings.ts";
 import { isRecord } from "../lib/guards.ts";
 import { normalizeHomeDir, readAbsolutePathOverride } from "../lib/home-dir.ts";
 import {
@@ -800,7 +801,7 @@ export async function invokeNativeRuntime(opts: {
   if (opts.onImageWait) {
     env.HACK_INTERNAL_REPORT_IMAGE_WAIT = imageBatch ? "batch" : "1";
   }
-  const child = Bun.spawn(
+  const child = startupTimingSpawn(
     [
       opts.runtime.binary,
       "--candidate-root",

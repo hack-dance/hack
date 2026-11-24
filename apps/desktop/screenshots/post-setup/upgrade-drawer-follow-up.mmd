@@ -1,0 +1,19 @@
+---
+title: Upgrade command drawer
+---
+stateDiagram-v2
+    direction TB
+    [*] --> Ready
+    Ready --> Running : Run
+    Running --> Refreshing : Process exits
+    Refreshing --> Output : Plan refreshed
+    Output --> Running : Run again
+    Output --> Ready : Close drawer
+    classDef live stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    class Running live
+    class Refreshing wait
+    note right of Refreshing
+        Exit and output stay visible.
+        The read uses the selected CLI.
+    end note

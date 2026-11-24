@@ -67,6 +67,8 @@ impl std::fmt::Display for RunError {
     }
 }
 
+type VerifyProgram = fn(&Path) -> Result<(), RunError>;
+
 #[derive(Debug, Clone)]
 pub struct CliRunner {
     program: PathBuf,
@@ -82,7 +84,7 @@ pub struct CliRunner {
     clear_env: bool,
     /// Refuse to run `program` unless no other user can change it or the
     /// directories above it ([`Self::verified`]).
-    verify: bool,
+    verify: Option<VerifyProgram>,
     /// The name [`Self::on_path`] searched for; [`Self::rediscover`] searches
     /// for it again.
     path_name: Option<String>,
@@ -146,6 +148,20 @@ fn trusted_cli(program: &Path) -> Result<(), RunError> {
         .ok_or_else(|| {
             RunError::Spawn(
                 "the selected hack is in a location other users can change; it was not run".into(),
+            )
+        })
+}
+
+fn trusted_docker(program: &Path) -> Result<(), RunError> {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    crate::source::trusted_docker_path(program, uid)
+        .filter(|real| crate::source::trusted_interpreter(real, uid, 4, false))
+        .map(|_| ())
+        .ok_or_else(|| {
+            RunError::Spawn(
+                "Docker CLI or its installation path is unavailable or writable by other users"
+                    .into(),
             )
         })
 }
@@ -225,7 +241,7 @@ impl CliRunner {
             term_grace: TERM_GRACE,
             strip_startup: false,
             clear_env: false,
-            verify: false,
+            verify: None,
             path_name: None,
             pinned: None,
         }
@@ -305,7 +321,15 @@ impl CliRunner {
     #[must_use]
     pub fn verified(program: impl Into<PathBuf>) -> Self {
         let mut runner = Self::new(program);
-        runner.verify = true;
+        runner.verify = Some(trusted_cli);
+        runner
+    }
+
+    /// The Docker executable for an explicit desktop service action.
+    pub(crate) fn verified_docker(program: impl Into<PathBuf>) -> Self {
+        let mut runner = Self::new(program);
+        runner.verify = Some(trusted_docker);
+        runner.strip_startup = true;
         runner
     }
 
@@ -324,8 +348,8 @@ impl CliRunner {
     /// `NotFound`, or `Spawn` for a verified CLI others can change.
     pub fn resolve_program(&self) -> Result<PathBuf, RunError> {
         let program = self.program_path().ok_or(RunError::NotFound)?;
-        if self.verify {
-            trusted_cli(&program)?;
+        if let Some(verify) = self.verify {
+            verify(&program)?;
         }
         Ok(program)
     }
@@ -535,8 +559,8 @@ impl CliRunner {
 
     fn spawn_io(&self, args: &[&str], path: Option<&Path>, input: bool) -> Result<Child, RunError> {
         let program = self.current_program().ok_or(RunError::NotFound)?;
-        if self.verify {
-            trusted_cli(&program)?;
+        if let Some(verify) = self.verify {
+            verify(&program)?;
         }
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry
@@ -1485,6 +1509,23 @@ mod tests {
     }
 
     const T: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn docker_service_runner_refuses_writable_installations_with_a_docker_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = FakeHack::new("exit 0");
+        let dir = &fake.dir;
+        let docker = dir.join("docker");
+        crate::test_support::script(&docker, "#!/bin/sh\nexit 0\n");
+        let runner = CliRunner::verified_docker(&docker);
+        assert_eq!(runner.resolve_program().unwrap(), docker);
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let error = runner
+            .run_raw(&["stop"], None, Duration::from_secs(2))
+            .unwrap_err();
+        assert!(error.to_string().contains("Docker CLI"));
+        assert!(!error.to_string().contains("selected hack"));
+    }
 
     /// A slow start (here an ETXTBSY retry while another descriptor still
     /// has the program open for writing) counts against the timeout, and

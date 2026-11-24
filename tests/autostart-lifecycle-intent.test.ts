@@ -199,8 +199,18 @@ if (options.checkLogEnvironment) {
   if (!allowedInterpolation) blocked.push("APP_ONLY", "COMPOSE_PROFILES");
   if (blocked.some((key) => key in process.env) || process.env.PATH !== fixture + "/bin") process.exit(41);
   if (mode === "logs" && (!args.includes("observability") || args.includes("-f"))) process.exit(42);
+  const config = process.env.DOCKER_CONFIG;
+  if (allowedInterpolation && config !== fixture + "/docker-client") process.exit(43);
+  if (!allowedInterpolation) {
+    const staged = await Bun.file(config + "/config.json").json();
+    if (staged.currentContext !== "saved-files-context" ||
+        JSON.stringify(staged.cliPluginsExtraDirs) !== JSON.stringify([fixture + "/launcher-plugins", fixture + "/docker-client/cli-plugins"]) ||
+        await Bun.file(config + "/cli-plugins/docker-compose").exists() ||
+        !(await Bun.file(config + "/contexts/fixture-context").exists()) ||
+        process.env.DOCKER_CERT_PATH !== process.cwd() + "/project-docker") process.exit(44);
+  }
   const phase = args[0] === "info" ? "info" : mode;
-  if (phase) await Bun.write(fixture + "/safe-log-" + phase, "checked");
+  if (phase) await Bun.write(fixture + "/safe-log-" + phase, config);
 }
 if (args[0] === "info" && args.includes("{{.ID}}")) {
   const countFile = Bun.file(fixture + "/daemon-probe-count");
@@ -1988,12 +1998,29 @@ test("bound service Shell, Logs, Restart and Stop use the legacy stack's saved D
   );
 }, 40_000);
 
-test("bound Logs use the saved Docker context without passing project host controls or application values", async () => {
+test("bound Logs keep the saved Docker transport and use only launcher-selected plugins", async () => {
   const projectRoot = join(root, "project");
   const projectDir = join(projectRoot, ".hack");
   const overlay = join(projectDir, "hack.env.qa.yaml");
   const selection =
-    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n";
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_CONTEXT: saved-files-context\n    DOCKER_CONFIG: project-docker\n";
+  const client = join(projectDir, "project-docker");
+  await mkdir(join(client, "contexts"), { recursive: true });
+  await mkdir(join(client, "cli-plugins"));
+  await Bun.write(join(client, "contexts", "fixture-context"), "observed");
+  await Bun.write(join(client, "cli-plugins", "docker-compose"), "");
+  await Bun.write(
+    join(client, "config.json"),
+    JSON.stringify({
+      currentContext: "saved-files-context",
+      cliPluginsExtraDirs: [join(client, "project-extra")],
+    })
+  );
+  await mkdir(join(root, "docker-client"));
+  await Bun.write(
+    join(root, "docker-client", "config.json"),
+    JSON.stringify({ cliPluginsExtraDirs: [join(root, "launcher-plugins")] })
+  );
   await Bun.write(join(root, "daemon-id"), "fixture-log-engine");
   await writeInterpolatedStack(projectRoot, "STACK_A");
   await installComposeNameFixture({ startContainers: true });
@@ -2023,7 +2050,11 @@ test("bound Logs use the saved Docker context without passing project host contr
   expect(logs.exitCode, logs.stderr || logs.stdout).toBe(0);
   expect(logs.stdout).toContain("saved-overlay-log");
   for (const phase of ["config", "info", "ps", "logs"]) {
-    expect(await Bun.file(join(root, `safe-log-${phase}`)).exists()).toBe(true);
+    const config = await Bun.file(join(root, `safe-log-${phase}`)).text();
+    expect(config).not.toBe(client);
+    if (phase !== "config") {
+      expect(await Bun.file(join(config, "config.json")).exists()).toBe(false);
+    }
   }
 }, 20_000);
 

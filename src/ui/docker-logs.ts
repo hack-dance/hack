@@ -60,7 +60,7 @@ export interface DockerComposeLogsParams {
 export async function dockerComposeLogsPlain(
   opts: DockerComposeLogsParams
 ): Promise<number> {
-  const composeProc = spawnComposeLogs({
+  const composeProc = await spawnComposeLogs({
     composeFile: opts.composeFile,
     cwd: opts.cwd,
     follow: opts.follow,
@@ -150,7 +150,7 @@ export async function dockerComposeLogsPlain(
 export async function dockerComposeLogsPretty(
   opts: DockerComposeLogsParams
 ): Promise<number> {
-  const composeProc = spawnComposeLogs({
+  const composeProc = await spawnComposeLogs({
     composeFile: opts.composeFile,
     cwd: opts.cwd,
     follow: opts.follow,
@@ -273,7 +273,7 @@ export async function dockerComposeLogsPretty(
 export async function dockerComposeLogsJson(
   opts: DockerComposeLogsParams
 ): Promise<number> {
-  const composeProc = spawnComposeLogs({
+  const composeProc = await spawnComposeLogs({
     composeFile: opts.composeFile,
     cwd: opts.cwd,
     follow: opts.follow,
@@ -421,7 +421,7 @@ function createJsonLogWriter(opts: {
   };
 }
 
-function spawnComposeLogs(opts: {
+async function spawnComposeLogs(opts: {
   readonly composeFile: string;
   readonly cwd: string;
   readonly follow: boolean;
@@ -434,13 +434,16 @@ function spawnComposeLogs(opts: {
   readonly since?: string;
   readonly until?: string;
   readonly composeDisabled: boolean;
-}): ReturnType<typeof Bun.spawn> | null {
+}): Promise<Pick<
+  ReturnType<typeof Bun.spawn>,
+  "stdout" | "stderr" | "exited"
+> | null> {
   if (opts.composeDisabled) {
     return null;
   }
-  const command = projectDockerTransportCommand(
+  const command = await projectDockerTransportCommand(
     buildComposeLogsArgs(opts),
-    opts.env
+    { cwd: opts.cwd, overrides: opts.env }
   );
   if (!command) {
     throw new HackCliError({
@@ -448,13 +451,23 @@ function spawnComposeLogs(opts: {
       message: "Docker was not found on the launcher's absolute PATH.",
     });
   }
-  return Bun.spawn(command.argv, {
-    env: command.env,
-    cwd: opts.cwd,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  try {
+    const proc = Bun.spawn(command.argv, {
+      env: command.env,
+      cwd: opts.cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      stdout: proc.stdout,
+      stderr: proc.stderr,
+      exited: proc.exited.finally(command.release),
+    };
+  } catch (error) {
+    await command.release?.();
+    throw error;
+  }
 }
 
 function buildComposeLogsArgs(opts: {

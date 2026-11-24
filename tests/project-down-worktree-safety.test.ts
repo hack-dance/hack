@@ -444,7 +444,10 @@ test("service Stop reports confirmed replicas on failure and uses the Compose wo
   const projectDir = join(fixture.worktreeRoot, ".hack");
   const dockerConfig = join(projectDir, "relative-docker-config");
   await mkdir(dockerConfig);
-  await writeFile(join(dockerConfig, "fixture-context"), "qa\n");
+  await writeFile(
+    join(dockerConfig, "config.json"),
+    '{"currentContext":"fixture-scoped-stop"}\n'
+  );
   await writeFile(
     join(projectDir, "hack.env.default.yaml"),
     [
@@ -833,8 +836,8 @@ async function createWorktreeFixture(): Promise<{
     [
       "#!/bin/sh",
       `echo "$@" >> "${dockerLogPath}"`,
-      'if [ "${DOCKER_CONFIG:-}" = "relative-docker-config" ]; then',
-      '  [ -f "$DOCKER_CONFIG/fixture-context" ] || exit 29',
+      'if [ "${DOCKER_CONFIG#*/hack-docker-transport-}" != "$DOCKER_CONFIG" ]; then',
+      '  grep -q \'"currentContext":"fixture-scoped-stop"\' "$DOCKER_CONFIG/config.json" || exit 29',
       '  [ -z "${LD_PRELOAD:-}${NODE_OPTIONS:-}" ] || exit 30',
       '  [ "$PATH" != /fixture/project-provided-path ] || exit 31',
       '  if [ "$1" = "inspect" ]; then',

@@ -1,9 +1,11 @@
 import { createHash, createHmac } from "node:crypto";
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { mkdtemp, open, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { childEnvironment } from "./child-environment.ts";
 import { getString, isRecord } from "./guards.ts";
+import { installLifecycleSignalCleanup } from "./project-lifecycle-controller.ts";
 import { exec } from "./shell.ts";
 
 /** Only platform and Docker transport settings are inputs to inspect/logs/events. */
@@ -199,14 +201,108 @@ function resolveLauncherDocker(path: string): string | null {
   return binary && isAbsolute(binary) ? binary : null;
 }
 
+function dockerConfigDirectory(
+  cwd: string,
+  env: Readonly<Record<string, string>>
+): string {
+  return resolve(
+    cwd,
+    env.DOCKER_CONFIG || join(env.HOME || homedir(), ".docker")
+  );
+}
+
+type ProjectDockerTransport = {
+  readonly env: Record<string, string>;
+  readonly release?: () => Promise<void>;
+};
+
+/**
+ * Docker uses its client config for both context lookup and executable plugin
+ * discovery. When an overlay selects a separate config, build a private config
+ * that links only its context store and uses the launcher's plugin directories.
+ */
+async function prepareProjectDockerTransport(opts: {
+  readonly cwd: string;
+  readonly overrides?: Readonly<Record<string, string>>;
+}): Promise<ProjectDockerTransport> {
+  const env = projectDockerTransportEnvironment(opts.overrides);
+  const launcherConfig = dockerConfigDirectory(
+    opts.cwd,
+    dockerHelperEnvironment()
+  );
+  const selectedConfig = dockerConfigDirectory(opts.cwd, env);
+  if (selectedConfig === launcherConfig) {
+    return { env };
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), "hack-docker-transport-"));
+  let cleanup: Promise<void> | undefined;
+  const remove = () =>
+    (cleanup ??= rm(directory, { recursive: true, force: true }));
+  const signalCleanup = installLifecycleSignalCleanup({ cleanup: remove });
+  const release = async () => {
+    signalCleanup.dispose();
+    await remove();
+  };
+  try {
+    const [launcher, selected] = await Promise.all([
+      readDockerSelectionJson(join(launcherConfig, "config.json")),
+      readDockerSelectionJson(join(selectedConfig, "config.json")),
+    ]);
+    const extra = Array.isArray(launcher.cliPluginsExtraDirs)
+      ? launcher.cliPluginsExtraDirs.filter(
+          (path): path is string => typeof path === "string" && isAbsolute(path)
+        )
+      : [];
+    await writeFile(
+      join(directory, "config.json"),
+      JSON.stringify({
+        currentContext: getString(selected, "currentContext"),
+        cliPluginsExtraDirs: [...extra, join(launcherConfig, "cli-plugins")],
+      }),
+      { mode: 0o600 }
+    );
+    const contexts = join(selectedConfig, "contexts");
+    const hasContexts = await stat(contexts).then(
+      (info) => info.isDirectory(),
+      (error: unknown) => {
+        if (isRecord(error) && error.code === "ENOENT") {
+          return false;
+        }
+        throw error;
+      }
+    );
+    if (hasContexts) {
+      await symlink(contexts, join(directory, "contexts"), "dir");
+    }
+    return {
+      env: {
+        ...env,
+        DOCKER_CONFIG: directory,
+        // Docker normally takes default TLS certificate paths from its config
+        // directory. Keep that path without reading or copying any keys.
+        DOCKER_CERT_PATH: env.DOCKER_CERT_PATH || selectedConfig,
+      },
+      release,
+    };
+  } catch (error) {
+    await release();
+    throw error;
+  }
+}
+
 /** Prepare an absolute Docker invocation for a pipe or streaming subprocess. */
-export function projectDockerTransportCommand(
+export async function projectDockerTransportCommand(
   args: readonly string[],
-  overrides?: Readonly<Record<string, string>>
-): { readonly argv: string[]; readonly env: Record<string, string> } | null {
-  const env = projectDockerTransportEnvironment(overrides);
-  const binary = resolveLauncherDocker(env.PATH ?? "");
-  return binary ? { argv: [binary, ...args], env } : null;
+  opts: Parameters<typeof prepareProjectDockerTransport>[0]
+): Promise<(ProjectDockerTransport & { readonly argv: string[] }) | null> {
+  const binary = resolveLauncherDocker(launcherDockerPath());
+  return binary
+    ? {
+        argv: [binary, ...args],
+        ...(await prepareProjectDockerTransport(opts)),
+      }
+    : null;
 }
 
 /**
@@ -222,15 +318,22 @@ export function createProjectDockerExec(): typeof exec {
     if (!binary || argv[0] !== "docker") {
       return { exitCode: 127, stdout: "", stderr: "" };
     }
-    const env =
+    const transport =
       argv[1] === "compose"
-        ? composeNameProbeEnvironment(host, opts?.env)
-        : projectDockerTransportEnvironment(opts?.env);
-    return await exec([binary, ...argv.slice(1)], {
-      ...opts,
-      env: { ...env, PATH: path },
-      unsetEnvKeys: Object.keys(process.env),
-    });
+        ? { env: composeNameProbeEnvironment(host, opts?.env) }
+        : await prepareProjectDockerTransport({
+            cwd: opts?.cwd ?? process.cwd(),
+            overrides: opts?.env,
+          });
+    try {
+      return await exec([binary, ...argv.slice(1)], {
+        ...opts,
+        env: { ...transport.env, PATH: path },
+        unsetEnvKeys: Object.keys(process.env),
+      });
+    } finally {
+      await transport.release?.();
+    }
   };
 }
 

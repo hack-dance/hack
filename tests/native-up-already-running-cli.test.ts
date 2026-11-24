@@ -307,6 +307,30 @@ test(
 );
 
 test(
+  "plain up attempts to start an active service absent from a partial ready run",
+  async () => {
+    const f = await fixture({
+      phase: "ready-observed",
+      services: { web: { state: "running" } },
+      owner: LIVE_OWNER,
+    });
+    await writeFile(
+      join(f.projectDir, "docker-compose.yml"),
+      JSON.stringify({
+        services: { web: { image: IMAGE }, db: { image: IMAGE } },
+      })
+    );
+    // This fixture stops at retained preflight. Reaching it shows the
+    // launcher handed the missing service to startup instead of returning.
+    const result = await up(f, ["-d", "--json"]);
+    expect(result.code).toBe(1);
+    expect(await f.calls()).toContain("graph retained-preflight");
+    expect(JSON.parse(result.stdout).ok).toBe(false);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "a running project with a service that is down says which, and what to run, instead of 'not confirmed'",
   async () => {
     const f = await fixture({

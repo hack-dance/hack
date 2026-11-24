@@ -356,12 +356,6 @@ export async function answerNativeAlreadyRunning(opts: {
     ) {
       return null;
     }
-    if (
-      state.kind === "partial" &&
-      result.items.some((item) => item.state === "exited")
-    ) {
-      return null;
-    }
     observed = {
       state,
       branch,

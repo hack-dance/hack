@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
-import { closeSync, openSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, openSync, writeSync } from "node:fs";
 import { holdProcessUntil } from "./process-exit.ts";
 import {
   readTimingLine,
@@ -31,15 +31,25 @@ class CommandTimings {
   private readonly records: TimingRecord[] = [];
   private readonly children = new Set<Promise<void>>();
   private dropped = 0;
+  private startup?: { sender: number; stop: () => void };
+  private snapshot?: readonly TimingRecord[];
+  private relayTried = false;
 
-  private readonly fd: number;
+  private readonly fd: number | undefined;
   private readonly transport: Transport;
   private readonly originMono: number;
 
-  constructor(fd: number, transport: Transport, originMono: number) {
+  private readonly publish?: (records: readonly TimingRecord[]) => void;
+  constructor(
+    fd: number | undefined,
+    transport: Transport,
+    originMono: number,
+    publish?: (records: readonly TimingRecord[]) => void
+  ) {
     this.fd = fd;
     this.transport = transport;
     this.originMono = originMono;
+    this.publish = publish;
   }
 
   private now() {
@@ -51,7 +61,7 @@ class CommandTimings {
 
   private record(
     span: string,
-    step: TimingStep,
+    step: TimingStep | UpTimingStep,
     start_us: number,
     outcome: Outcome
   ): TimingRecord {
@@ -103,22 +113,7 @@ class CommandTimings {
       return Bun.spawn(command, options);
     }
     this.cliSpans.add(span);
-    const drain = () => {
-      channel.drain((line) => {
-        if (!line.endsWith("\n")) {
-          return;
-        }
-        const record = readTimingLine(line);
-        if (
-          record?.trace === this.trace &&
-          record.parent !== null &&
-          record.proc !== "cli" &&
-          !this.cliSpans.has(record.span)
-        ) {
-          this.add(record);
-        }
-      });
-    };
+    const drain = () => channel.drain((line) => this.receive(line));
 
     try {
       const stdio: NonNullable<RuntimeOptions["stdio"]> = options.stdio
@@ -165,62 +160,126 @@ class CommandTimings {
     }
   }
 
-  async finish(outcome: Outcome) {
-    await Promise.allSettled(this.children);
-    try {
-      for (const record of this.records) {
-        if (record.proc !== "cli" && this.cliSpans.has(record.span)) {
-          continue;
-        }
-        writeSync(this.fd, `${JSON.stringify(record)}\n`);
-      }
-      writeSync(
-        this.fd,
-        `${JSON.stringify(this.record(this.root, "command.total", 0, outcome))}\n`
-      );
-      if (this.dropped) {
-        const marker = this.record(id(), "timings.truncated", this.now(), "ok");
-        marker.attrs.dropped = this.dropped;
-        writeSync(this.fd, `${JSON.stringify(marker)}\n`);
-      }
-    } catch {
-      // Timing I/O must preserve the command result.
-    } finally {
+  private receive(line: string) {
+    const record = line.endsWith("\n") ? readTimingLine(line) : undefined;
+    if (
+      record?.trace === this.trace &&
+      record.parent !== null &&
+      record.proc !== "cli" &&
+      !this.cliSpans.has(record.span)
+    ) {
+      this.add(record);
+    }
+  }
+
+  beginPhase(step: UpTimingStep) {
+    if (this.snapshot) {
+      return;
+    }
+    const start = this.now();
+    const span = id();
+    this.cliSpans.add(span);
+    return () => {
+      this.add(this.record(span, step, start, "ok"));
+    };
+  }
+
+  startupRelay() {
+    if (!(this.relayTried || this.snapshot)) {
+      this.relayTried = true;
       try {
-        closeSync(this.fd);
+        const channel = this.transport.timingChannel();
+        const drain = () => channel.drain((line) => this.receive(line));
+        const timer = setInterval(drain, 2);
+        timer.unref();
+        this.startup = {
+          sender: channel.sender,
+          stop: () => {
+            clearInterval(timer);
+            drain();
+            channel.close();
+          },
+        };
       } catch {
-        // The file is diagnostic only.
+        // Startup observation is optional.
       }
     }
+    if (this.startup && !this.snapshot) {
+      return {
+        fd: this.startup.sender,
+        identity: `${this.trace}:${this.root}`,
+        clock: this.transport.hostMonotonicUs,
+      };
+    }
+  }
+
+  complete(outcome: Outcome): readonly TimingRecord[] {
+    if (this.snapshot) {
+      return this.snapshot;
+    }
+    this.startup?.stop();
+    const records = this.records.filter(
+      (record) => record.proc === "cli" || !this.cliSpans.has(record.span)
+    );
+    records.push(this.record(this.root, "command.total", 0, outcome));
+    if (this.dropped) {
+      const marker = this.record(id(), "timings.truncated", this.now(), "ok");
+      marker.attrs.dropped = this.dropped;
+      records.push(marker);
+    }
+    this.snapshot = records;
+    if (this.fd !== undefined) {
+      try {
+        for (const record of records) {
+          writeSync(this.fd, `${JSON.stringify(record)}\n`);
+        }
+      } catch {
+        // The file is diagnostic only.
+      } finally {
+        try {
+          closeSync(this.fd);
+        } catch {
+          // Timing I/O must preserve the command result.
+        }
+      }
+    }
+    this.publish?.(records);
+    return records;
+  }
+
+  async finish(outcome: Outcome) {
+    await Promise.allSettled(this.children);
+    return this.complete(outcome);
   }
 }
 
 /** A collector exists only for an explicitly selected command with a host clock. */
 export async function withCommandTimings<T>(
-  file: string,
-  action: () => Promise<T>
+  file: string | undefined,
+  action: () => Promise<T>,
+  publish?: (records: readonly TimingRecord[]) => void
 ): Promise<T> {
-  let trace: CommandTimings | undefined;
-  try {
-    const transport = await import("./native-timing-transport.ts");
-    const origin = transport.hostMonotonicUs();
-    if (origin !== undefined) {
-      trace = new CommandTimings(
-        openSync(file, "wx", 0o600),
-        transport,
-        origin
-      );
-    }
-  } catch {
-    // Unsupported libc, clock, or output file.
-  }
-  if (!trace) {
+  const transport = await import("./native-timing-transport.ts").catch(
+    () => undefined
+  );
+  const origin = transport?.hostMonotonicUs();
+  if (!transport || origin === undefined) {
     return action();
   }
+  let fd: number | undefined;
+  if (file !== undefined) {
+    try {
+      fd = openSync(file, "wx", 0o600);
+    } catch {
+      process.stderr.write("Could not create the timings file.\n");
+      return action();
+    }
+  }
+  const trace = new CommandTimings(fd, transport, origin, publish);
   let outcome: Outcome = "error";
   try {
     const result = await context.run(trace, action);
-    outcome = "ok";
+    outcome = result === 0 || typeof result !== "number" ? "ok" : "error";
     return result;
   } finally {
     await trace.finish(outcome);
@@ -232,4 +291,169 @@ export function timedNativeSpawn(command: string[], options: RuntimeOptions) {
   return (
     context.getStore()?.spawn(command, options) ?? Bun.spawn(command, options)
   );
+}
+
+const OWNER_ARGUMENT = "--internal-up-timing=";
+const OWNER_ID = /^([0-9a-f]{32}:[0-9a-f]{16}):([0-9]{1,16})$/;
+type UpTimingStep =
+  | "cli.autostart"
+  | "cli.project.selection"
+  | "cli.owner.prepare"
+  | "cli.owner.launch"
+  | "cli.compose.resolve"
+  | "cli.env.overlay"
+  | "cli.graph.preflight"
+  | "cli.start.inputs"
+  | "cli.graph.resolve"
+  | "cli.graph.prepare"
+  | "cli.readiness.finalize"
+  | "cli.owner.accept"
+  | "cli.result.prepare";
+
+type Relay = NonNullable<ReturnType<CommandTimings["startupRelay"]>>;
+let inheritedRelay:
+  | (Relay & {
+      send: typeof import("./native-timing-transport.ts").sendTimingLine;
+      origin: number;
+      unix: number;
+    })
+  | undefined;
+
+/** Startup phases describe frontend work, including any nested runtime spans. */
+export function beginUpTiming(step: UpTimingStep): (() => void) | undefined {
+  const owner = inheritedRelay;
+  if (!owner) {
+    return context.getStore()?.beginPhase(step);
+  }
+  const start = owner.clock();
+  if (start !== undefined) {
+    return () => {
+      if (inheritedRelay === owner) {
+        emitOwnerTiming(owner, step, start);
+      }
+    };
+  }
+}
+
+function emitOwnerTiming(
+  owner: NonNullable<typeof inheritedRelay>,
+  step: UpTimingStep,
+  start: number
+) {
+  const end = owner.clock();
+  if (end === undefined || end < start) {
+    return;
+  }
+  const [trace, parent] = owner.identity.split(":");
+  owner.send(
+    owner.fd,
+    `${JSON.stringify({
+      schema: TIMING_SCHEMA,
+      trace,
+      parent,
+      span: id(),
+      step,
+      proc: "owner",
+      clock: "host",
+      origin_unix_us: owner.unix,
+      origin_mono_us: owner.origin,
+      start_us: start - owner.origin,
+      dur_us: end - start,
+      outcome: "ok",
+      attrs: {},
+    })}\n`
+  );
+}
+
+/** The launcher transfers the socket, trace identity and monotonic launch time. */
+export function upTimingOwnerRelay() {
+  const relay = context.getStore()?.startupRelay();
+  const start = relay?.clock();
+  if (relay && start !== undefined) {
+    return {
+      fd: relay.fd,
+      argument: `${OWNER_ARGUMENT}${relay.identity}:${start}`,
+    };
+  }
+}
+
+export async function acceptUpTimingOwnerRelay(args: string[]) {
+  const argument = args[0];
+  if (!argument?.startsWith(OWNER_ARGUMENT)) {
+    return args;
+  }
+  const fd = 4; // fd 3 belongs to the owner's existing IPC protocol.
+  const match = OWNER_ID.exec(argument.slice(OWNER_ARGUMENT.length));
+  const identity = match?.[1];
+  const origin = Number(match?.[2]);
+  try {
+    const transport = await import("./native-timing-transport.ts");
+    if (
+      identity &&
+      Number.isSafeInteger(origin) &&
+      fstatSync(fd).isSocket() &&
+      transport.protectTimingFd(fd)
+    ) {
+      const clock = transport.hostMonotonicUs;
+      const now = clock();
+      if (now !== undefined && origin <= now) {
+        inheritedRelay = {
+          fd,
+          identity,
+          clock,
+          origin,
+          unix: Date.now() * 1000 - (now - origin),
+          send: transport.sendTimingLine,
+        };
+        emitOwnerTiming(inheritedRelay, "cli.owner.launch", origin);
+      }
+    }
+  } catch {
+    // An unavailable relay must not prevent the owner from starting.
+  }
+  if (!inheritedRelay) {
+    try {
+      closeSync(fd);
+    } catch {
+      // The descriptor may already be closed.
+    }
+  }
+  return args.slice(1);
+}
+
+export function closeUpTimingOwnerRelay() {
+  if (inheritedRelay) {
+    const { fd } = inheritedRelay;
+    inheritedRelay = undefined;
+    try {
+      closeSync(fd);
+    } catch {
+      // Timing must not interfere with readiness or owner shutdown.
+    }
+  }
+}
+
+/** Startup-only observation. Never await the process or register an exit hold. */
+export function startupTimingSpawn(command: string[], options: RuntimeOptions) {
+  const relay = inheritedRelay ?? context.getStore()?.startupRelay();
+  const spawn = relay?.clock();
+  const executable = command[0];
+  if (!relay || spawn === undefined || !executable || options.stdio) {
+    return Bun.spawn(command, options);
+  }
+  return Bun.spawn(
+    [
+      executable,
+      `--internal-timings=3:${relay.identity}:${spawn}:runtime`,
+      ...command.slice(1),
+    ],
+    {
+      ...options,
+      stdio: [options.stdin ?? "ignore", "pipe", "pipe", relay.fd],
+    }
+  );
+}
+
+export function completeUpTimings() {
+  return context.getStore()?.complete("ok");
 }

@@ -960,11 +960,64 @@ fn term_ignoring_command_is_killed_after_grace() {
         start.elapsed() >= Duration::from_secs(5),
         "TERM grace was shortened"
     );
-    assert!(
-        start.elapsed() < Duration::from_secs(7),
-        "stop exceeded its confirmation budget"
-    );
     assert!(wait(&mut caller, TIMEOUT).success());
+    let state = f.state("worker");
+    assert_eq!(state["phase"], "killed", "{state}");
+    assert_eq!(state["signal"], libc::SIGKILL, "{state}");
+}
+
+#[test]
+fn stop_confirms_kill_after_guard_is_delayed_past_old_budget() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "wrapper-term-child")]);
+    f.await_log("fixture-ready");
+    eventually(|| f.root.join("wrapper-child-ready").exists().then_some(()));
+    let state = f.state("worker");
+    let guard = identity(pid(&state, "guardPid")).expect("guard identity");
+    let command_pid = pid(&state, "commandPid");
+    let command_birth = process_birth(command_pid).expect("wrapper birth");
+    let descendant = f
+        .log()
+        .lines()
+        .find_map(|line| {
+            line.split("wrapper-child ")
+                .nth(1)
+                .and_then(|pid| pid.parse::<i32>().ok())
+                .and_then(identity)
+        })
+        .expect("TERM-ignoring descendant identity");
+    f.owned.borrow_mut().push(descendant.clone());
+
+    let mut stop = command(&f.root, "stop").spawn().unwrap();
+    send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    // The wrapper's exit proves the guard started its grace and sent TERM.
+    eventually(|| {
+        (process_birth(command_pid) != Some(command_birth) || process_is_zombie(command_pid))
+            .then_some(())
+    });
+    // SAFETY: the fixture owns this guard, which is still supervising its
+    // TERM-ignoring descendant. Fixture teardown also handles a frozen guard.
+    assert!(identity(guard.pid).as_ref() == Some(&guard));
+    assert_eq!(unsafe { libc::kill(guard.pid, libc::SIGSTOP) }, 0);
+    eventually(|| process_is_stopped(guard.pid).then_some(()));
+    assert_eq!(f.state("worker")["phase"], "stopping");
+    // Keep the guard unscheduled past the old request budget, then give it
+    // time to escalate and publish confirmed absence within the new budget.
+    thread::sleep(Duration::from_millis(7_250));
+    assert!(identity(guard.pid).as_ref() == Some(&guard));
+    assert_eq!(unsafe { libc::kill(guard.pid, libc::SIGCONT) }, 0);
+
+    let receipt = receive(stop.stdout.as_mut().unwrap());
+    assert!(wait(&mut stop, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "stopped", "{receipt}");
+    assert_eq!(receipt["liveProcessNames"], json!([]), "{receipt}");
+    assert_eq!(receipt["unknownProcessNames"], json!([]), "{receipt}");
+    assert!(wait(&mut caller, TIMEOUT).success());
+    assert_eq!(f.state("worker")["phase"], "killed");
+    assert!(
+        identity(descendant.pid).as_ref() != Some(&descendant) || process_is_zombie(descendant.pid),
+        "TERM-ignoring descendant survived"
+    );
 }
 
 #[test]
@@ -1891,14 +1944,14 @@ fn stop_waiting_past_lock_bound_reports_unknown_without_acting() {
     let start = Instant::now();
     let mut stop = command(&f.root, "stop").spawn().unwrap();
     send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
-    // The frame arrives only after the sixteen-second wait; the reader's own
+    // The frame arrives only after the nineteen-second wait. The reader's own
     // timeout is shorter, so start reading part of the way through.
     thread::sleep(Duration::from_secs(10));
     let receipt = receive(stop.stdout.as_mut().unwrap());
     assert!(!wait(&mut stop, TIMEOUT).success(), "{receipt}");
     assert_eq!(receipt["outcome"], "unknown");
     assert_eq!(receipt["reason"], "stop-lock-wait-expired");
-    assert!(start.elapsed() >= Duration::from_secs(16));
+    assert!(start.elapsed() >= Duration::from_secs(19));
     assert!(
         identity(worker.pid).as_ref() == Some(&worker),
         "stop acted while waiting"

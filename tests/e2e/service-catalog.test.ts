@@ -79,9 +79,11 @@ test("service add previews and updates a Compose file on the native backend", as
       hackHome,
     });
     expect(start.exitCode).not.toBe(0);
+    // The selected service proceeds to native setup. This fixture supplies an
+    // unavailable runtime so it can exercise admission without starting a VM.
     expect(JSON.parse(start.stdout).error).toMatchObject({
-      code: "E_USAGE",
-      message: expect.stringContaining("service selection is not supported"),
+      code: "E_STARTUP_INCOMPLETE",
+      detail: { native_code: "native_setup_unavailable" },
     });
 
     const duplicate = await cli([]);

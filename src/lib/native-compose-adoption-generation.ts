@@ -1306,6 +1306,7 @@ async function readInputs(
       signal: ctx.signal,
       timeoutMs: ctx.timeoutMs,
       composeFiles: projection?.composeFiles,
+      releasedReferenceDigest: projection?.releasedReferenceDigest,
       ...(selectedBranch
         ? {
             composeFiles: selectedBranch.composeFiles,

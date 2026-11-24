@@ -305,7 +305,10 @@ import {
   internalOverrideStorePath,
   legacyInternalOverridePath,
 } from "../lib/compose-internal-override-store.ts";
-import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
+import {
+  EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE,
+  renderComposeEnvReferenceOverride,
+} from "../lib/compose-managed-env.ts";
 import {
   effectiveComposeProfiles,
   readComposeInterpolationEnv,
@@ -2027,7 +2030,7 @@ async function clearComposeEnvOverride(opts: {
   try {
     await writeComposeEnvOverride({
       projectDir: opts.projectDir,
-      text: EMPTY_COMPOSE_ENV_OVERRIDE,
+      text: EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE,
     });
   } catch {
     logger.warn({
@@ -2036,8 +2039,6 @@ async function clearComposeEnvOverride(opts: {
     });
   }
 }
-
-const EMPTY_COMPOSE_ENV_OVERRIDE = "services: {}\n";
 
 async function maybePromptLegacyProjectEnvMigration(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;

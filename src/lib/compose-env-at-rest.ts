@@ -5,6 +5,7 @@ import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import {
   type ComposeEnvOverrideContent,
   classifyComposeEnvOverrideText,
+  EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE,
 } from "./compose-managed-env.ts";
 import { COMPOSE_ENV_OVERRIDE_WAIT_MS } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
@@ -55,7 +56,7 @@ export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 const REFUSAL =
   "Refused the generated Compose env override: it, .hack or .hack/.internal is a symlink or not a regular file or directory. Replace it with a regular file or directory and retry; values omitted.";
 const MAX_REFERENCE_PROOF_BYTES = 1024 * 1024;
-const EMPTY_REFERENCE_OVERRIDE = "services: {}\n";
+const REFERENCE_DIGEST = /^[0-9a-f]{64}$/;
 
 /** Absolute path of the generated env override for a project directory. */
 export function composeEnvOverridePath(opts: {
@@ -187,7 +188,7 @@ export async function prepareForegroundComposeEnvOverride(opts: {
   const text =
     opts.text ??
     (current.kind === "references" || current.kind === "plaintext"
-      ? EMPTY_REFERENCE_OVERRIDE
+      ? EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE
       : undefined);
   if (text === undefined) {
     return undefined;
@@ -197,7 +198,10 @@ export async function prepareForegroundComposeEnvOverride(opts: {
   if (!(await composeEnvOverrideAdoptionBound(opts))) {
     await writeComposeEnvOverride({ ...opts, text });
   }
-  const path = foregroundComposeEnvPath({ ...opts, text });
+  const path = foregroundComposeEnvPath({
+    ...opts,
+    digest: createHash("sha256").update(text).digest("hex"),
+  });
   return await withTerminationAbort((signal) =>
     withReferenceFile({ ...opts, text, path, signal, run: async () => path })
   );
@@ -205,12 +209,11 @@ export async function prepareForegroundComposeEnvOverride(opts: {
 
 function foregroundComposeEnvPath(opts: {
   readonly projectDir: string;
-  readonly text: string;
+  readonly digest: string;
 }): string {
-  const digest = createHash("sha256").update(opts.text).digest("hex");
   return join(
     dirname(composeEnvOverridePath(opts)),
-    `foreground-env.${digest}.override.yml`
+    `foreground-env.${opts.digest}.override.yml`
   );
 }
 
@@ -222,7 +225,18 @@ function foregroundComposeEnvPath(opts: {
 export async function isEquivalentForegroundComposeEnvOverride(opts: {
   readonly projectDir: string;
   readonly observedPath: string;
+  readonly releasedReferenceDigest?: string;
 }): Promise<boolean> {
+  const { releasedReferenceDigest } = opts;
+  // Rollback restores original sources using saved container and hash proofs.
+  // It deliberately releases the env files themselves.
+  if (releasedReferenceDigest !== undefined) {
+    return (
+      REFERENCE_DIGEST.test(releasedReferenceDigest) &&
+      opts.observedPath ===
+        foregroundComposeEnvPath({ ...opts, digest: releasedReferenceDigest })
+    );
+  }
   try {
     const canonical = await readReplaceablePrivateFile({
       ...fileOptions(composeEnvOverridePath(opts)),
@@ -232,7 +246,10 @@ export async function isEquivalentForegroundComposeEnvOverride(opts: {
       !canonical ||
       classifyComposeEnvOverrideText(canonical.text).kind !== "references" ||
       opts.observedPath !==
-        foregroundComposeEnvPath({ ...opts, text: canonical.text })
+        foregroundComposeEnvPath({
+          ...opts,
+          digest: createHash("sha256").update(canonical.text).digest("hex"),
+        })
     ) {
       return false;
     }

@@ -756,6 +756,7 @@ async function equivalentForegroundConfigFiles(opts: {
   readonly root: string;
   readonly composeFiles: readonly string[];
   readonly facts: readonly Record<string, unknown>[];
+  readonly releasedReferenceDigest?: string;
 }): Promise<string | undefined> {
   const { composeFiles, facts } = opts;
   const projectDir = resolve(opts.root, ".hack");
@@ -773,6 +774,7 @@ async function equivalentForegroundConfigFiles(opts: {
   const equivalent = await isEquivalentForegroundComposeEnvOverride({
     projectDir,
     observedPath: observed.slice(prefix.length),
+    releasedReferenceDigest: opts.releasedReferenceDigest,
   });
   return equivalent ? observed : undefined;
 }
@@ -942,6 +944,7 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly composeFiles?: readonly string[];
+  readonly releasedReferenceDigest?: string;
   readonly selectedBranch?: string;
 }): Promise<LegacyComposeVerifiedBinding> {
   return await inspectResources(opts);
@@ -987,6 +990,7 @@ async function inspectResources(
     readonly signal?: AbortSignal;
     readonly timeoutMs?: number;
     readonly composeFiles?: readonly string[];
+    readonly releasedReferenceDigest?: string;
     readonly selectedBranch?: string;
     readonly fileCandidate?: unknown;
   },
@@ -1104,6 +1108,7 @@ async function inspectResources(
         root: opts.root,
         composeFiles,
         facts,
+        releasedReferenceDigest: opts.releasedReferenceDigest,
       }),
       volumes,
       network: single?.network,

@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { DEFAULT_PROJECT_TLD } from "../constants.ts";
 import {
   classifyComposeEnvOverrideText,
+  EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE,
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
 } from "./compose-managed-env.ts";
@@ -67,6 +68,7 @@ const FILES = [
 ] as const;
 const ENV_OVERRIDE_FILE = "compose.env.override.yml";
 const ENV_OVERRIDE_INDEX = FILES.indexOf(ENV_OVERRIDE_FILE);
+const SHA256_DIGEST = /^[a-f0-9]{64}$/;
 const CONSTRUCTION_TOKEN = Symbol("legacy-adoption-projection");
 const ownedProjections = new WeakSet<object>();
 type Source = Extract<NativeConfigImportInputs, { readonly ok: true }>;
@@ -158,7 +160,8 @@ function generatedProof(generated: Generated) {
  * A saved generated proof with its env override entry released, for rollback
  * only (HACK-1437). The directory identity and every other entry stay exact;
  * `bound` records whether preparation bound an env override at all, which
- * keeps its path in the containers' saved `config_files` list.
+ * keeps its path in the containers' saved `config_files` list. The digest
+ * also identifies the equivalent foreground alias when the file is gone.
  */
 function releasedEnvOverrideProof(generated: unknown) {
   if (
@@ -174,6 +177,10 @@ function releasedEnvOverrideProof(generated: unknown) {
   if (!(bound === null || isRecord(bound))) {
     refuse();
   }
+  const digest = bound?.hash;
+  if (bound && (typeof digest !== "string" || !SHA256_DIGEST.test(digest))) {
+    refuse();
+  }
   return {
     proof: {
       ...generated,
@@ -182,6 +189,7 @@ function releasedEnvOverrideProof(generated: unknown) {
       ),
     },
     bound: bound !== null,
+    digest: typeof digest === "string" ? digest : undefined,
     files: generated.files as readonly unknown[],
   };
 }
@@ -496,6 +504,7 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
         ? { routingResolution: proof.routingResolution }
         : {}),
       metadata,
+      releasedReferenceDigest: releasedEnv?.digest,
       // A released override keeps the saved path list that the containers'
       // `config_files` label records, without reading the file.
       composeFiles: [
@@ -937,8 +946,12 @@ export class LegacyComposeAdoptionProjection {
       const reference = [shared, perService].find(
         (candidate) => (candidate?.text ?? null) === envText
       );
+      const emptyReference =
+        shared === null && envText === EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE;
       if (
-        (reference === undefined && envText !== literalText) ||
+        (reference === undefined &&
+          envText !== literalText &&
+          !emptyReference) ||
         (runtime && runtime.text !== context.runtimeText)
       ) {
         refuse();

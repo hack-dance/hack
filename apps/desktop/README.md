@@ -881,4 +881,6 @@ Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
 
 With the screenshots feature enabled, run `hack-desktop --service-screenshots
 <dir>` to render the pane’s light and dark fixtures and exercise its tab
-shortcuts through the app keymap.
+shortcuts through the app keymap. The dark window chrome and service pane
+use the HTP design system's Merino Dark palette. The terminal captures include
+the ended shell and the fresh session opened from it.

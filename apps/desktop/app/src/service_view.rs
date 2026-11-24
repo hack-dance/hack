@@ -291,6 +291,7 @@ impl HackApp {
                                 .bg(p.text_primary),
                         )
                     })
+                    .test_support()
             }))
     }
 
@@ -301,33 +302,27 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut service_ui = ui.clone();
-        let p = &mut service_ui.p;
-        let (surface, chrome, raised, hover, line, ink, secondary, muted, green, amber, red) =
-            match p.mode {
-                Mode::Light => (
-                    0xfdfdfd, 0xf2f2f2, 0xfdfdfd, 0xeeeeee, 0xdcdcdc, 0x080808, 0x303030, 0x5f5f5f,
-                    0x008400, 0x737300, 0xc40000,
-                ),
-                Mode::Dark => (
-                    0x0e1319, 0x0b0f14, 0x1b2027, 0x24292f, 0x2b3138, 0xe6edf3, 0xbcc3ca, 0x9098a0,
-                    0x3bb650, 0xe0a41c, 0xff7771,
-                ),
-            };
-        let color = |value| gpui_kit::Hsla::from(gpui_kit::rgb(value));
-        p.surface = color(surface);
-        p.chrome = color(chrome);
-        p.surface_1 = color(hover);
-        p.surface_2 = color(raised);
-        p.border = color(line);
-        p.border_strong = p.border;
-        p.text_primary = color(ink);
-        p.text_secondary = color(secondary);
-        p.text_muted = color(muted);
-        p.states.running.dot = color(green);
-        p.states.degraded.fg = color(amber);
-        p.states.failed.fg = color(red);
-        let ui = &service_ui;
+        let mut light_ui;
+        let ui = if ui.p.mode == Mode::Light {
+            light_ui = ui.clone();
+            let p = &mut light_ui.p;
+            let color = |value| gpui_kit::Hsla::from(gpui_kit::rgb(value));
+            p.surface = color(0xfdfdfd);
+            p.chrome = color(0xf2f2f2);
+            p.surface_1 = color(0xeeeeee);
+            p.surface_2 = p.surface;
+            p.border = color(0xdcdcdc);
+            p.border_strong = p.border;
+            p.text_primary = color(0x080808);
+            p.text_secondary = color(0x303030);
+            p.text_muted = color(0x5f5f5f);
+            p.states.running.dot = color(0x008400);
+            p.states.degraded.fg = color(0x737300);
+            p.states.failed.fg = color(0xc40000);
+            &light_ui
+        } else {
+            ui
+        };
         let name = self.selected_service().unwrap_or_default().to_owned();
         let row = self.model.selected_row();
         let service = detail.services.iter().find(|service| service.name == name);
@@ -888,6 +883,12 @@ fn render_info(facts: &ServiceFacts, live: bool, ui: &Ui) -> AnyElement {
             rows.into_iter()
                 .enumerate()
                 .map(|(i, (label, value, note))| {
+                    let health = match (label, value.as_deref()) {
+                        ("Health", Some("healthy")) => Some(Status::Running),
+                        ("Health", Some("unhealthy")) => Some(Status::Degraded),
+                        ("Health", Some("starting")) => Some(Status::Busy),
+                        _ => None,
+                    };
                     div()
                         .flex()
                         .items_center()
@@ -910,6 +911,9 @@ fn render_info(facts: &ServiceFacts, live: bool, ui: &Ui) -> AnyElement {
                                 .flex()
                                 .items_center()
                                 .gap(space::S3)
+                                .when_some(health, |d, status| {
+                                    d.child(dot(status, ui).id("service-health-dot").test_support())
+                                })
                                 .child(
                                     div()
                                         .min_w_0()

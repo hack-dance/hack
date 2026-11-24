@@ -458,6 +458,9 @@ pub fn service_pane(dir: &Path) {
                     assert!(app.read(cx).logs.model.service.is_none());
                     assert!(app.read(cx).service_pane.menu.is_none());
                 }
+                if shot == "m06-service-info" {
+                    assert!(window.try_find("service-health-dot").is_some());
+                }
                 #[cfg(hack_terminal)]
                 if shot == "m04-service-terminal" {
                     assert_eq!(app.read(cx).drive_tab_count(cx), Some(3));
@@ -482,7 +485,63 @@ pub fn service_pane(dir: &Path) {
             })
             .expect("exercise service pane controls");
         }
+        #[cfg(hack_terminal)]
+        capture_service_shell_reopen(&mut cx, handle, &app, dir, suffix);
         cx.update_window(handle, |_, window, _| window.remove_window())
             .ok();
     }
+}
+
+#[cfg(hack_terminal)]
+fn capture_service_shell_reopen(
+    cx: &mut HeadlessAppContext,
+    handle: gpui_kit::AnyWindowHandle,
+    app: &gpui_kit::Entity<HackApp>,
+    dir: &Path,
+    suffix: &str,
+) {
+    use crate::service_view::ServiceTab;
+    use crate::terminal::ServiceShellFixture;
+    use hack_desktop_term::view::Status;
+
+    let fixture = ServiceShellFixture::new();
+    cx.update_window(handle, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.close_all_terminals(window, cx);
+            fixture.install(app, Fixture::Branches, cx);
+        });
+    })
+    .expect("install shell screenshot fixture");
+    for (shot, active) in [("service-shell-ended", 1), ("service-shell-reopened", 2)] {
+        cx.update_window(handle, |_, window, cx| {
+            window.click(("service-tab", 3_usize), cx);
+            let app = app.read(cx);
+            assert_eq!(app.service_pane.tab, ServiceTab::Terminal);
+            let key = app.model.selected_key().expect("selected branch");
+            let sessions = app.panels.by_key[&key].sessions.clone();
+            let shell = sessions.read(cx).tab(active).expect("active shell").clone();
+            if active == 1 {
+                ServiceShellFixture::exit(&shell, cx);
+            } else {
+                ServiceShellFixture::wait_for(&shell, "/app #", false, cx);
+            }
+            window.render_frame(cx);
+            let sessions = sessions.read(cx);
+            assert_eq!(sessions.tab_count(), active + 1);
+            assert_eq!(sessions.active_index(), Some(active));
+            let ended = sessions.tab(1).expect("original shell").read(cx);
+            assert!(matches!(ended.status(), Status::Ended(_)));
+        })
+        .expect("exercise service shell reopen");
+        let path = dir.join(format!("{shot}-{suffix}.png"));
+        cx.capture_screenshot(handle)
+            .expect("read shell screenshot")
+            .save(&path)
+            .expect("write shell png");
+        println!("{}", path.display());
+    }
+    cx.update_window(handle, |_, window, cx| {
+        app.update(cx, |app, cx| app.close_all_terminals(window, cx));
+    })
+    .expect("close shell screenshot PTYs");
 }

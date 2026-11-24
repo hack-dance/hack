@@ -1243,6 +1243,64 @@ mod tests {
         assert!(relay::verify_receipt(&fixture.0, &original).is_err());
     }
     #[test]
+    fn live_owner_recovery_admits_first_observed_id_and_pins_known_ids() {
+        let fixture = super::super::tests::Fixture::new();
+        let mut original = generation(1, "preparing");
+        let resource = original.resources.get_mut("container:web").unwrap();
+        resource.id = None;
+        resource.phase = "create-intent".into();
+        let intent = completed(original.clone());
+        let chosen = &intent.original_sha256;
+        let mut observed = original.clone();
+        observed.set_phase("cleanup-intent");
+        let resource = observed.resources.get_mut("container:web").unwrap();
+        resource.id = Some("a".repeat(64));
+        resource.cleanup_observed_create = true;
+        validate(&intent, &observed, chosen, "boot").unwrap();
+
+        let path = fixture.0.join("state.json");
+        state::write(&path, &observed).unwrap();
+        relay::verify_receipt(&fixture.0, &original).unwrap();
+        relay::verify_receipt(&fixture.0, &observed).unwrap();
+
+        // A selection that already carries the observed ID requires that exact ID.
+        let mut different = observed.clone();
+        different.resources.get_mut("container:web").unwrap().id = Some("b".repeat(64));
+        state::write(&path, &different).unwrap();
+        assert_eq!(
+            relay::verify_receipt(&fixture.0, &observed)
+                .unwrap_err()
+                .code,
+            refused().code
+        );
+
+        let mut pinned = original.clone();
+        let resource = pinned.resources.get_mut("container:web").unwrap();
+        resource.id = observed.resources["container:web"].id.clone();
+        resource.phase = "created".into();
+        let pinned_intent = completed(pinned.clone());
+        pinned.set_phase("cleanup-intent");
+        validate(
+            &pinned_intent,
+            &pinned,
+            &pinned_intent.original_sha256,
+            "boot",
+        )
+        .unwrap();
+        pinned.resources.get_mut("container:web").unwrap().id = Some("b".repeat(64));
+        assert_eq!(
+            validate(
+                &pinned_intent,
+                &pinned,
+                &pinned_intent.original_sha256,
+                "boot"
+            )
+            .unwrap_err()
+            .code,
+            refused().code
+        );
+    }
+    #[test]
     fn historical_recovery_survives_eviction_without_lending_current_authority() {
         let fixture = super::super::tests::Fixture::new();
         let prior = completed(generation(1, "ready-observed"));

@@ -442,12 +442,13 @@ const contracts: readonly ModelContract[] = [
     name: "shutdown-receipt",
     module: "ShutdownReceipt",
     states: 16,
-    invariant: "IdentifiableByRestore",
-    action: "WriteShutdown",
+    invariant: "CleanupAdmitsRestore",
+    action: "Refuse",
     fields: [
-      'phase = "ShutdownWritten"',
+      'phase = "Refused"',
       'receiptId = "none"',
       'shutdownId = "original"',
+      'compute = "absent"',
     ],
     additionalControls: [
       {

@@ -65,5 +65,6 @@ TypeOK == /\ phase \in {"CreateLost", "CleanupIntent", "TerminalObserved",
           /\ compute \in {"owned", "absent", "replacement"}
 IdentifiableByRestore == shutdownId # "none" => receiptId = shutdownId
 RestoreRequiresAbsence == phase = "Restored" => compute = "absent"
+CleanupAdmitsRestore == phase = "Refused" => compute # "absent"
 NeverRestored == phase # "Restored"
 ========================================================================

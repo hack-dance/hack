@@ -14,6 +14,10 @@ stateDiagram-v2
     ShutdownWritten --> ComputeAbsent : RemoveCompute
     ComputeAbsent --> Stopped : FinishCleanup
     CleanupIntent --> ComputeAbsent : RetryAbsent [ID absent]
+    TerminalObserved --> CleanupIntent : Crash
+    ReceiptWritten --> CleanupIntent : Crash
+    ShutdownWritten --> CleanupIntent : Crash
+    ComputeAbsent --> CleanupIntent : Crash
     Stopped --> Stopped : ReplaceAtName
     Stopped --> Restored : Restore [absent, IDs match]
     Stopped --> Refused : Refuse [presence or mismatch]
@@ -21,11 +25,6 @@ stateDiagram-v2
     note right of ShutdownWritten
         INV IdentifiableByRestore
         Receipt ID equals stop ID.
-    end note
-
-    note right of CleanupIntent
-        Crash before FinishCleanup
-        resumes from committed state.
     end note
 
     class Restored ok

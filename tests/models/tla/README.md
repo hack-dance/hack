@@ -1694,7 +1694,8 @@ coverage and native proof limits are in `docs/reference/v5-model-coverage.md`.
 cleanup to restore after an unacknowledged create. The 16-state positive
 configuration separates the receipt and shutdown commits from deletion and
 allows cleanup to retry after each commit. The missing-receipt control fails
-`IdentifiableByRestore` at `WriteShutdown`. The reachability control reaches
+`CleanupAdmitsRestore` at `Refuse` after cleanup finished and compute is absent.
+The reachability control reaches
 `Restore` after both IDs match and compute is absent. See the
 [source mapping and state chart](../../../docs/reference/v5-model-coverage.md#cleanup-identity-after-an-unacknowledged-create-hack-2628).
 

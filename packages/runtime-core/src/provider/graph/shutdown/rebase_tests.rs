@@ -133,13 +133,6 @@ fn observed_create_cleanup_retries_each_commit_boundary() {
             assert_eq!(root.join(RECEIPT_PENDING).exists(), receipt_pending);
             assert_eq!(root.join("shutdown.pending").exists(), shutdown_pending);
             assert_eq!(root.join("shutdown.json").exists(), committed_stop);
-            assert_eq!(
-                rebase_stopped_with(root, &retry, |_, _| Ok(true))
-                    .unwrap_err()
-                    .code,
-                "graph_shutdown_uncertain"
-            );
-
             let committed = begin_stop(root, &retry).unwrap();
             assert!(!root.join(RECEIPT_PENDING).exists());
             assert!(!root.join("shutdown.pending").exists());
@@ -196,6 +189,20 @@ fn observed_create_restore_accepts_exact_id_and_refuses_replaced_id() {
         publish_stop(root, &mut receipt, committed, observed, &|| Ok(())).unwrap();
         finish_cleanup(root, &mut receipt);
 
+        // The old failure had both a stopped receipt and shutdown evidence.
+        // Even a confirmed absence cannot supply the missing receipt ID.
+        let mut missing = receipt.clone();
+        let resource = missing.resources.get_mut("container:service").unwrap();
+        resource.id = None;
+        resource.cleanup_observed_create = false;
+        restore_history::retain(root, &missing).unwrap();
+        assert_eq!(
+            rebase_stopped_with(root, &missing, |_, _| Ok(true))
+                .unwrap_err()
+                .code,
+            "graph_shutdown_uncertain"
+        );
+
         let mut replaced = receipt.clone();
         replaced.resources.get_mut("container:service").unwrap().id = Some("f".repeat(64));
         restore_history::retain(root, &replaced).unwrap();
@@ -212,6 +219,69 @@ fn observed_create_restore_accepts_exact_id_and_refuses_replaced_id() {
             panic!("exact ID needs no historical fallback")
         })
         .unwrap();
+    }
+}
+
+#[test]
+fn observed_create_stop_publication_refuses_invalid_identity_and_phase() {
+    for (graph_phase, resource_phase, recorded_id) in [
+        ("cleanup-intent", "create-intent", Some("f".repeat(64))),
+        ("preparing", "create-intent", None),
+        ("cleanup-intent", "reserved", None),
+    ] {
+        let fixture = Fixture::new();
+        let root = &fixture.0;
+        let path = root.join("state.json");
+        let mut receipt = unacknowledged_create(resource_phase);
+        receipt.set_phase(graph_phase);
+        let observed = observe_created(&receipt);
+        receipt.resources.get_mut("container:service").unwrap().id = recorded_id;
+        state::write(&path, &receipt).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let committed = begin_stop(root, &receipt).unwrap();
+        assert_eq!(
+            publish_stop(root, &mut receipt, committed, observed, &|| {
+                panic!("refusal should precede any publication")
+            })
+            .unwrap_err()
+            .code,
+            "graph_shutdown_uncertain"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        for name in [RECEIPT_PENDING, "shutdown.pending", "shutdown.json"] {
+            assert!(!root.join(name).exists());
+        }
+    }
+}
+
+#[test]
+fn load_at_accepts_observed_create_only_with_id_in_cleanup() {
+    for (phase, id) in [
+        ("ready-observed", Some("a".repeat(64))),
+        ("restoring", Some("a".repeat(64))),
+        ("cleanup-intent", None),
+    ] {
+        let fixture = Fixture::new();
+        let root = &fixture.0;
+        let path = root.join("state.json");
+        let mut receipt = unacknowledged_create("create-intent");
+        receipt.set_phase(phase);
+        receipt.resources.get_mut("container:service").unwrap().id = id;
+        state::write(&path, &receipt).unwrap();
+        super::super::load_at(root.clone(), &receipt.run, &receipt.owner).unwrap();
+        receipt
+            .resources
+            .get_mut("container:service")
+            .unwrap()
+            .cleanup_observed_create = true;
+        state::write(&path, &receipt).unwrap();
+        let failure =
+            super::super::load_at(root.clone(), &receipt.run, &receipt.owner).unwrap_err();
+        assert_eq!(failure.code, "graph_receipt", "{phase}");
+        assert_eq!(
+            failure.message, "Malformed graph resource identity.",
+            "{phase}"
+        );
     }
 }
 

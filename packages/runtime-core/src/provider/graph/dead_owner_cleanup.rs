@@ -1641,6 +1641,67 @@ mod tests {
         }
     }
     #[test]
+    fn dead_owner_selection_accepts_observed_id_and_refuses_changed_known_id() {
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let root = fixture.graph();
+        let mut owner = Owner::load(&fixture.candidate).unwrap();
+        let mut original = fixture.receipt();
+        original.set_phase("cleanup-intent");
+        let resource = original.resources.get_mut("container:web").unwrap();
+        resource.id = None;
+        resource.phase = "uncertain".into();
+        let mut selection = intent(&original);
+        let old_boot = owner
+            .guest_boot_id
+            .replace("22222222-2222-2222-2222-222222222222".into());
+        owner.previous_guest_boot_id = old_boot.clone();
+        owner.phase = "running".into();
+        selection.old_boot = old_boot.unwrap();
+        selection.new_boot = owner.guest_boot_id.clone();
+        state::write(&root.join(FILE), &selection).unwrap();
+
+        let mut current = original.clone();
+        let resource = current.resources.get_mut("container:web").unwrap();
+        resource.id = Some("a".repeat(64));
+        resource.cleanup_observed_create = true;
+        validate(
+            &selection,
+            &current,
+            &selection.original_sha256,
+            &selection.owner_sha256,
+        )
+        .unwrap();
+        let resume = |receipt: &Receipt| {
+            recovery_selection(&fixture.candidate, &root, receipt, &owner, true)
+        };
+        assert_eq!(
+            resume(&current).unwrap().as_deref(),
+            Some(selection.original_sha256.as_str())
+        );
+
+        let mut pinned = intent(&current);
+        pinned.old_boot = selection.old_boot;
+        pinned.new_boot = selection.new_boot;
+        state::write(&root.join(FILE), &pinned).unwrap();
+        assert_eq!(
+            resume(&current).unwrap().as_deref(),
+            Some(pinned.original_sha256.as_str())
+        );
+        current.resources.get_mut("container:web").unwrap().id = Some("b".repeat(64));
+        assert_eq!(
+            validate(
+                &pinned,
+                &current,
+                &pinned.original_sha256,
+                &pinned.owner_sha256
+            )
+            .unwrap_err()
+            .code,
+            refused().code
+        );
+        assert_eq!(resume(&current).unwrap_err().code, refused().code);
+    }
+    #[test]
     fn interrupted_bridge_selection_does_not_require_a_restored_generation() {
         let fixture = super::super::tests::Fixture::new();
         let mut receipt = partial();

@@ -239,15 +239,19 @@ identity evidence.
 
 `ShutdownReceipt` checks that a committed stop ID matches the receipt and
 that restore requires compute absence. TLC 1.7.4 on Java 17 explores 16 states
-with one graph, one original container ID, one possible replacement at the
-reserved name and repeatable crashes between actions. The missing-write
-control fails `IdentifiableByRestore` at `WriteShutdown`. A reachability
-control reaches `Restore` with matching IDs and absent compute.
+with one graph, one original container ID and repeatable crashes between
+actions. It also checks refusal when a different container occupies the
+reserved name after cleanup. The missing-write control fails
+`CleanupAdmitsRestore` at `Refuse`, after the original compute is absent and
+cleanup has finished. A reachability control reaches `Restore` with matching
+IDs and absent compute.
 
 Linux tests exercise publication before each rename, the gap between the
 commits, and retry after deletion. They verify that the retained volume
 record survives and that `rebase_stopped_with` accepts the observed ID and
-refuses a mismatched ID. The model assumes serialized managed writers,
+refuses missing or mismatched receipt IDs when no historical generation
+matches the shutdown record. The model treats replacement at the reserved
+name as live compute rather than a changed receipt ID. It assumes serialized managed writers,
 atomic durable file commits and authoritative engine observations. It
 leaves real filesystem durability, provider loss, operation enrollment
 and data continuity on a live VM to implementation and native tests.

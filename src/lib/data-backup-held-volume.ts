@@ -30,18 +30,24 @@ import {
 import { isRecord } from "./guards.ts";
 
 const NO_SUCH_CONTAINER = /no such (container|object)/i;
+/** Docker's refusal of a bind whose source path does not exist. */
+const MISSING_BIND =
+  /bind source path does not exist|no such file or directory/i;
 
 /**
  * One volume bound to one retained reference. A single helper container is
- * created with the volume mounted at `/v` and kept running (`sleep
- * infinity`); every read or write of that volume runs in it through
- * `docker exec`, so all of them use the same mount. Mounting by name in
- * separate containers could silently use a replacement volume, or have
- * Docker create an empty one, between steps.
+ * created with the volume's inspected `Mountpoint` bind-mounted at `/v`
+ * and kept running (`sleep infinity`); every read or write of that volume
+ * runs in it through `docker exec`, so all of them use the same mount. The
+ * volume is never mounted by name: Docker creates a missing named volume
+ * when a container mounts it, while a bind of a missing path fails, so a
+ * volume removed after validation refuses and nothing is created. Only
+ * plain `local` volumes (no driver options) qualify: their data is the
+ * Mountpoint directory itself.
  *
  * Once the container holds the mount, the volume is inspected again and must
  * match the validated identity (CreatedAt, driver, mountpoint, options and
- * Compose labels), and the container's own mount must name it. The helper
+ * Compose labels), and the container's mount must be that directory. The helper
  * runs with no network, no logging, a read-only root, no privilege gain and
  * the pinned image.
  */
@@ -79,8 +85,8 @@ export type HoldVolumeOptions = {
   readonly volume: string;
   /** The Compose key, used in messages. */
   readonly label: string;
-  /** The inspection validated before; null when the caller verifies itself. */
-  readonly identity: InspectedVolume | null;
+  /** The validated inspection: its Mountpoint is bound, its identity rechecked. */
+  readonly identity: InspectedVolume;
   readonly readOnly: boolean;
   readonly purpose: HelperPurpose;
   readonly deadlines: DataBackupDeadlines;
@@ -143,7 +149,6 @@ export function requireStep<T extends { readonly exitCode: number }>(opts: {
 
 function heldMountMatches(opts: {
   readonly stdout: string;
-  readonly volume: string;
   readonly mountpoint: string;
   readonly readOnly: boolean;
 }): boolean {
@@ -154,8 +159,7 @@ function heldMountMatches(opts: {
   const mount: unknown = mounts[0];
   return (
     isRecord(mount) &&
-    mount.Type === "volume" &&
-    mount.Name === opts.volume &&
+    mount.Type === "bind" &&
     mount.Destination === "/v" &&
     mount.Source === opts.mountpoint &&
     mount.RW === !opts.readOnly
@@ -257,8 +261,8 @@ async function holdVolume(
       "/tmp",
       "--env",
       "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
-      "--volume",
-      `${opts.volume}:/v${opts.readOnly ? ":ro" : ""}`,
+      "--mount",
+      `type=bind,src=${opts.identity.mountpoint},dst=/v${opts.readOnly ? ",readonly" : ""}`,
       "--entrypoint",
       "sleep",
       dataBackupHelperImage(),
@@ -267,14 +271,20 @@ async function holdVolume(
     // Creating may pull the pinned image once.
     { timeoutMs: deadlines.stepMs }
   );
+  // A bind of a path that is gone fails instead of creating anything: the
+  // volume was removed after validation.
   if (created.exitCode !== 0) {
-    throw dockerReadError({ result: created, command: "docker create" });
+    throw MISSING_BIND.test(created.stderr)
+      ? opts.changed()
+      : dockerReadError({ result: created, command: "docker create" });
   }
   const started = await docker.capture(["docker", "start", container], {
     timeoutMs: deadlines.commandMs,
   });
   if (started.exitCode !== 0) {
-    throw dockerReadError({ result: started, command: "docker start" });
+    throw MISSING_BIND.test(started.stderr)
+      ? opts.changed()
+      : dockerReadError({ result: started, command: "docker start" });
   }
   // The container holds the mount now: the volume it holds must be the one
   // validated, unchanged.
@@ -292,11 +302,10 @@ async function holdVolume(
   );
   if (
     now === null ||
-    (opts.identity !== null && !sameVolumeIdentity(opts.identity, now)) ||
+    !sameVolumeIdentity(opts.identity, now) ||
     mounts.exitCode !== 0 ||
     !heldMountMatches({
       stdout: mounts.stdout,
-      volume: opts.volume,
       mountpoint: now.mountpoint,
       readOnly: opts.readOnly,
     })

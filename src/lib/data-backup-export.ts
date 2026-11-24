@@ -37,6 +37,7 @@ import {
   type DeclaredVolumePlan,
   dockerReadError,
   type OwnedVolume,
+  plainLocalInspected,
   planDeclaredVolumes,
 } from "./data-backup-volumes.ts";
 
@@ -136,6 +137,18 @@ async function exportWithin(opts: {
     docker: input.docker,
     plan,
   });
+  // Hack reads a volume by binding its Mountpoint, never by mounting it by
+  // name (which would create it if it vanished): plain local volumes only.
+  const unsupported = owned
+    .filter((volume) => !plainLocalInspected(volume.identity))
+    .map((volume) => volume.key);
+  if (unsupported.length > 0) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: `hack data export reads only plain local volumes for now; the volume for ${unsupported.join(", ")} uses another driver or driver options. Nothing was backed up.`,
+      detail: { keys: unsupported, reason: "unsupported_driver" },
+    });
+  }
   const volumeNames = owned.map((volume) => volume.name);
   await refuseRunning({
     docker: input.docker,
@@ -280,7 +293,7 @@ async function copyVolume(opts: {
       changed: () =>
         new HackCliError({
           code: "E_PROJECT_RUNNING",
-          message: `The volume for ${volume.key} was removed, replaced or relabeled after it was validated, so it was not read; ${consequence} If Docker recreated it empty while mounting it, that empty volume is left as it is.`,
+          message: `The volume for ${volume.key} was removed, replaced or relabeled after it was validated, so it was not read and nothing was created; ${consequence}`,
           detail: { key: volume.key, reason: "volume_changed" },
         }),
     },

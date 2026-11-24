@@ -83,18 +83,32 @@ creates it from the image the storage witness already pins
 (`oven/bun@sha256:1846adf2…`) with a unique name
 (`hack-data-export-<random>`), `--network none`, `--log-driver none` (the raw
 tar crosses the container's attached output, and a daemon's central logging
-driver must never receive volume bytes), a read-only root filesystem,
-`no-new-privileges` and the volume mounted read-only at `/v`, running `sleep
-infinity`. Docker pulls the image digest once if it is not cached.
+driver must never receive volume bytes), a read-only root filesystem and
+`no-new-privileges`, running `sleep infinity`. Docker pulls the image digest
+once if it is not cached.
 
-Once the container holds the mount, Hack inspects the volume again and
+The helper never mounts the volume by name. Docker creates a missing named
+volume whenever a container mounts it, so mounting by name could leave an
+empty volume behind if the validated one was removed meanwhile. Instead the
+helper bind-mounts the volume's inspected `Mountpoint` read-only at `/v`
+(`--mount type=bind,src=<Mountpoint>,dst=/v,readonly`); a bind of a path
+that is gone fails, so a volume removed after validation refuses with
+`E_PROJECT_RUNNING` (`detail.reason: volume_changed`, "nothing was created")
+and nothing is created. This reads only plain `local` volumes, whose data
+is that directory: a volume with another driver, or a local volume with
+driver options (an NFS or bind mount, which is only mounted while a
+container uses it by name), refuses the export before any hold with
+`E_CONFIG_INVALID` (`detail.reason: unsupported_driver`).
+
+Once the container holds the bind, Hack inspects the volume again and
 requires the identity it validated before: the same `CreatedAt`, driver,
-mountpoint, options and Compose labels, and the container's own mount must
-name that volume. A volume that was removed, replaced or relabeled in
-between refuses with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`)
-and is not read. Docker creates a volume that is missing when a container
-mounts it, so a volume removed in that gap may be left recreated, empty and
-unlabelled.
+mountpoint, options and Compose labels, and the container's mount must be
+that directory. A volume replaced or relabeled in between refuses the same
+way and is not read.
+
+On Docker Desktop and OrbStack the daemon runs in a VM, and the
+`Mountpoint` is a path inside that VM; the daemon resolves the bind there.
+That has not been checked on macOS yet.
 
 Every read then runs in that container through `docker exec`, so all of them
 use the same mount:

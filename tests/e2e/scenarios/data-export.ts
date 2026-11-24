@@ -1,11 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-
+import { dataComposeArgs } from "../../../src/commands/data.ts";
+import { HackCliError } from "../../../src/lib/cli-result.ts";
+import {
+  createHostDataBackupDocker,
+  type DataBackupDocker,
+} from "../../../src/lib/data-backup-docker.ts";
+import { exportProjectData } from "../../../src/lib/data-backup-export.ts";
 import {
   DATA_BACKUP_ARCHIVE_DIGEST_SCRIPT,
   DATA_BACKUP_DIGEST_SCRIPT,
 } from "../../../src/lib/data-backup-format.ts";
-import { createMonorepoFixture } from "../fixture.ts";
+import { isRecord } from "../../../src/lib/guards.ts";
+import { createMonorepoFixture, type MonorepoFixture } from "../fixture.ts";
 import {
   expect,
   expectExit,
@@ -112,7 +119,7 @@ export const dataExportScenario: Scenario = {
           "sh",
           HELPER,
           "-c",
-          "echo one >/v/a.txt && ln -s a.txt /v/link && mkdir /v/d && echo two >/v/d/secret && chown 1234:5678 /v/d/secret && chmod 0640 /v/d/secret && mknod /v/d/null c 1 3 && mkfifo /v/d/fifo",
+          "echo one >/v/a.txt && ln -s a.txt /v/link && mkdir /v/d && echo two >/v/d/secret && chown 1234:5678 /v/d/secret && chmod 0640 /v/d/secret && mknod /v/d/null c 1 3 && mkfifo /v/d/fifo && ln /v/d/fifo /v/d/fifo2 && ln -P /v/link /v/link2",
         ],
         // A stale Unix socket, like mysql.sock in a datadir: tar skips it,
         // so the digest must leave it out too for a restore to verify.
@@ -163,7 +170,7 @@ export const dataExportScenario: Scenario = {
           volume?.key === "data" &&
           volume.nameSha256 ===
             new Bun.CryptoHasher("sha256").update(data).digest("hex") &&
-          volume.entries === 7 &&
+          volume.entries === 9 &&
           volume.excludedSockets === 1 &&
           JSON.stringify(manifest.skipped) ===
             JSON.stringify([
@@ -384,12 +391,85 @@ export const dataExportScenario: Scenario = {
           "a writer that started and exited during the copy should refuse publication",
         result: raced,
       });
+
+      await removedBeforeHold({ ctx, fixture, project, volume: data });
     } finally {
       await docker(ctx, ["rm", "--force", runner, writer]);
       await docker(ctx, ["volume", "rm", data, foreign, external, scratch]);
     }
   },
 };
+
+/**
+ * The volume is removed between validation and the hold: export refuses and
+ * Docker creates nothing, since the hold binds the Mountpoint and never
+ * mounts the volume by name. A wrapper around the real engine removes the
+ * volume right before the helper's create.
+ */
+async function removedBeforeHold(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly project: string;
+  readonly volume: string;
+}): Promise<void> {
+  const { ctx, fixture, project } = opts;
+  const data = opts.volume;
+  const real = createHostDataBackupDocker({
+    env: {},
+    cwd: fixture.hackDir,
+  });
+  let removed = false;
+  const racingDocker: DataBackupDocker = {
+    ...real,
+    capture: async (argv, opts) => {
+      if (!removed && argv[1] === "create" && argv.includes("--mount")) {
+        removed = true;
+        expectExit({
+          result: await docker(ctx, ["volume", "rm", data]),
+          codes: [0],
+          message: "remove the validated volume before the hold",
+        });
+      }
+      return await real.capture(argv, opts);
+    },
+  };
+  let raceRefusal: unknown = null;
+  try {
+    await exportProjectData({
+      docker: racingDocker,
+      composeArgs: dataComposeArgs({
+        composeFiles: [join(fixture.hackDir, "docker-compose.yml")],
+        composeProject: null,
+        cwd: fixture.hackDir,
+        env: {},
+      }),
+      project,
+      branch: null,
+      hackHome: ctx.hackHome,
+      outDir: join(ctx.tempRoot, "race-out"),
+      hackVersion: "e2e",
+    });
+  } catch (error: unknown) {
+    raceRefusal = error;
+  }
+  const listed = await docker(ctx, [
+    "volume",
+    "ls",
+    "--quiet",
+    "--filter",
+    `name=^${data}$`,
+  ]);
+  expect({
+    that:
+      removed &&
+      raceRefusal instanceof HackCliError &&
+      isRecord(raceRefusal.detail) &&
+      raceRefusal.detail.reason === "volume_changed" &&
+      listed.exitCode === 0 &&
+      listed.stdout.trim() === "",
+    message: `a volume removed before the hold should refuse and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()})`,
+  });
+}
 
 function labels(project: string, key: string): string[] {
   return [

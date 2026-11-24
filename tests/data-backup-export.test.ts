@@ -109,14 +109,12 @@ const partialDir = (): string =>
 
 /** Every helper `docker create` a run issued (markers mount nothing). */
 const creates = (fake: FakeEngine): string[][] =>
-  fake.calls.filter(
-    (argv) => argv[1] === "create" && argv.includes("--volume")
-  );
+  fake.calls.filter((argv) => argv[1] === "create" && argv.includes("--mount"));
 
 /** Every event-stream marker `docker create`. */
 const markers = (fake: FakeEngine): string[][] =>
   fake.calls.filter(
-    (argv) => argv[1] === "create" && !argv.includes("--volume")
+    (argv) => argv[1] === "create" && !argv.includes("--mount")
   );
 
 describe("planDeclaredVolumes", () => {
@@ -208,8 +206,13 @@ describe("exportProjectData", () => {
     ]);
     // Only owned volumes are held; external is never even inspected.
     expect(
-      creates(fake).map((argv) => argv[argv.indexOf("--volume") + 1])
-    ).toEqual(["custom-cache:/v:ro", "shop_db:/v:ro"]);
+      creates(fake).map((argv) => argv[argv.indexOf("--mount") + 1])
+    ).toEqual([
+      "type=bind,src=/var/lib/docker/volumes/custom-cache/_data,dst=/v,readonly",
+      "type=bind,src=/var/lib/docker/volumes/shop_db/_data,dst=/v,readonly",
+    ]);
+    // No volume is ever mounted by name.
+    expect(fake.calls.some((argv) => argv.includes("--volume"))).toBeFalse();
     expect(fake.calls.some((argv) => argv.includes("team-shared"))).toBeFalse();
     expect(fake.leftovers()).toEqual([]);
     expect(renderDataExportText(result)).toBe(
@@ -238,7 +241,9 @@ describe("exportProjectData", () => {
     expect(create?.[create.indexOf("--log-driver") + 1]).toBe("none");
     expect(create).toContain("--read-only");
     expect(create).toContain("no-new-privileges");
-    expect(create?.[create.indexOf("--volume") + 1]).toBe("shop_db:/v:ro");
+    expect(create?.[create.indexOf("--mount") + 1]).toBe(
+      "type=bind,src=/var/lib/docker/volumes/shop_db/_data,dst=/v,readonly"
+    );
     expect(create?.slice(-2)).toEqual([PINNED, "infinity"]);
     expect(dataBackupHelperImage()).toBe(PINNED);
     const execs = fake.calls.filter((argv) => argv[1] === "exec");
@@ -356,8 +361,25 @@ describe("binding to the validated volume", () => {
     };
     const error = await caught(exportProjectData(input(fake)));
     expect(error.detail).toMatchObject({ reason: "volume_changed" });
-    expect(error.message).toContain("recreated it empty");
+    expect(error.message).toContain("nothing was created");
+    // The bind of the vanished Mountpoint failed: no volume was created.
+    expect(fake.volumes.has("shop_db")).toBeFalse();
     expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a volume with another driver or driver options is refused before any hold", async () => {
+    const fake = engine({ only: "db" });
+    const volume = fake.volumes.get("shop_db");
+    if (volume) {
+      volume.options = { type: "nfs", device: ":/export" };
+    }
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_CONFIG_INVALID");
+    expect(error.detail).toEqual({
+      keys: ["db"],
+      reason: "unsupported_driver",
+    });
+    expect(creates(fake)).toEqual([]);
   });
 
   test("a tree that changes between the digests before and after the copy is not published", async () => {
@@ -583,7 +605,7 @@ describe("running containers and the live event fence", () => {
     });
     // The subscription was live before that check: the start marker ran first.
     const marker = fake.calls.findIndex(
-      (argv) => argv[1] === "create" && !argv.includes("--volume")
+      (argv) => argv[1] === "create" && !argv.includes("--mount")
     );
     const ps = fake.calls.findIndex((argv) => argv[1] === "ps");
     expect(marker).toBeLessThan(ps);

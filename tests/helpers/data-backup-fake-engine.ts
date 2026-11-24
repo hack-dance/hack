@@ -233,17 +233,26 @@ export class FakeEngine {
     }
     if (args[0] === "create") {
       const name = args[args.indexOf("--name") + 1] ?? "";
-      const mount = args.includes("--volume")
-        ? (args[args.indexOf("--volume") + 1] ?? "")
+      const mount = args.includes("--mount")
+        ? (args[args.indexOf("--mount") + 1] ?? "")
         : null;
-      const volume = mount === null ? null : mount.slice(0, mount.indexOf(":"));
-      if (volume !== null && !this.volumes.has(volume)) {
-        // Like Docker: mounting a missing name creates an empty volume.
-        this.volume(volume, { labels: {}, content: "" });
+      let volume: string | null = null;
+      if (mount !== null) {
+        // A bind of a Mountpoint: a missing path fails, nothing is created.
+        const src = /src=([^,]+)/.exec(mount)?.[1] ?? "";
+        volume =
+          [...this.volumes.keys()].find(
+            (candidate) => `/var/lib/docker/volumes/${candidate}/_data` === src
+          ) ?? null;
+        if (volume === null) {
+          return fail(
+            `Error response from daemon: invalid mount config for type "bind": bind source path does not exist: ${src}`
+          );
+        }
       }
       this.containers.set(name, {
         volume,
-        readOnly: mount?.endsWith(":ro") ?? true,
+        readOnly: mount?.includes(",readonly") ?? true,
         running: false,
       });
       return ok(`${"c".repeat(64)}\n`);
@@ -259,13 +268,8 @@ export class FakeEngine {
         return fail("start did not finish", exit);
       }
       held.running = true;
-      this.events.run([
-        "docker",
-        "run",
-        "--name",
-        name,
-        ...(held.volume ? ["--volume", `${held.volume}:/v`] : []),
-      ]);
+      // A bind mount emits no volume mount event, only the start.
+      this.events.run(["docker", "run", "--name", name]);
       return ok(`${name}\n`);
     }
     if (args[0] === "container" && args[1] === "inspect") {
@@ -278,8 +282,7 @@ export class FakeEngine {
         return ok(
           `${JSON.stringify([
             {
-              Type: "volume",
-              Name: held.volume,
+              Type: "bind",
               Source: `/var/lib/docker/volumes/${held.volume}/_data`,
               Destination: "/v",
               RW: !held.readOnly,

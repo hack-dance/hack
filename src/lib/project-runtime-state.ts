@@ -20,6 +20,8 @@ export type ProjectRuntimeStateEntry = {
   readonly updatedAt: string;
   /** Unique publication identity for a launch's failure cleanup. */
   readonly launchId?: string;
+  /** Changes when a service-scoped command may have changed the running copy. */
+  readonly serviceMutationId?: string;
   /** Digest of the Docker engine selection used for the launch. */
   readonly dockerEngineSelection?: string;
   /** Digest of the responding Docker daemon's ID when it was available. */
@@ -183,9 +185,29 @@ export async function removeProjectRuntimeStateEntry(opts: {
     const next = entries.filter(
       (entry) =>
         entry.composeProject !== opts.composeProject ||
-        (opts.launchId !== undefined && entry.launchId !== opts.launchId)
+        (opts.launchId !== undefined &&
+          (entry.launchId !== opts.launchId ||
+            entry.serviceMutationId !== undefined))
     );
     return next.length === entries.length ? null : next;
+  });
+}
+
+/** Fence a full launch's post-hook readiness and cleanup before scoped dispatch. */
+export async function recordProjectRuntimeServiceMutation(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<void> {
+  await mutateProjectRuntimeState(opts.projectDir, (entries) => {
+    const entry = entries.find(
+      (current) => current.composeProject === opts.composeProject
+    );
+    return entry
+      ? replaceRuntimeEntry(entries, {
+          ...entry,
+          serviceMutationId: crypto.randomUUID(),
+        })
+      : null;
   });
 }
 
@@ -310,6 +332,7 @@ function parseProjectRuntimeStateEntry(
   const pinnedComposeBase = getString(value, "pinnedComposeBase");
   const launchComposeBase = getString(value, "launchComposeBase");
   const launchId = getString(value, "launchId");
+  const serviceMutationId = getString(value, "serviceMutationId");
   const dockerEngineSelection = getString(value, "dockerEngineSelection");
   const dockerDaemonIdentity = getString(value, "dockerDaemonIdentity");
   const dockerDaemonIdentityState = getString(
@@ -330,6 +353,7 @@ function parseProjectRuntimeStateEntry(
     envName,
     updatedAt,
     ...(launchId ? { launchId } : {}),
+    ...(serviceMutationId ? { serviceMutationId } : {}),
     ...(dockerEngineSelection ? { dockerEngineSelection } : {}),
     ...(dockerDaemonIdentity ? { dockerDaemonIdentity } : {}),
     ...(dockerDaemonIdentityState === "unsupported" ||

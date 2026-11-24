@@ -118,10 +118,15 @@ more processes or publishing. After-hook cleanup takes the copy locks and
 checks the current launch and session cleanup epoch. Adoption changes the
 epoch before Compose dispatch. These host-process transitions are outside
 the finite start/stop model and covered by controller and private tmux tests.
-Whole-copy Restart uses the same releasable locks for its attached startup
-hooks. A successful after-hook returns to the same launch ID before its
-readiness result can be accepted. The private tmux tests cover a successor
-launch and an exception while reacquiring a lock after a persistent hook.
+Whole-copy Restart uses the same releasable locks for its attached startup and
+shutdown hooks. After a shutdown hook it revalidates the saved launch, Docker
+engine, and checkout ownership before resuming. After an attached startup
+after-hook, readiness and cleanup require the same launch ID with no intervening
+service mutation. Scoped mutations mark the saved launch before dispatch,
+including operations whose outcome will remain unknown. The private CLI fixtures
+cover a successor launch, a same-copy service stop, and an exception while
+reacquiring a lock after a persistent hook. Scoped mutations and manual Restart
+hook interleavings are outside the finite model.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

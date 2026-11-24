@@ -1284,6 +1284,181 @@ test.each([
   20_000
 );
 
+function nestedLifecycleCommand(args: readonly string[]): string {
+  return [
+    process.execPath,
+    "--preload",
+    DOCKER_TRUST_PRELOAD,
+    cli,
+    "--no-interactive",
+    ...args,
+  ]
+    .map(quoteShellWord)
+    .join(" ");
+}
+
+test.each([
+  "before",
+  "after",
+] as const)("Restart permits a same-copy scoped Stop in down.%s", async (phase) => {
+  const projectDir = join(root, "project", ".hack");
+  await installComposeNameFixture({ startContainers: true });
+  const start = await run(["up", "-d", "--json"]);
+  expect(start.exitCode, start.stderr + start.stdout).toBe(0);
+  await writeOwnedFixture(
+    join(projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "sample",
+      lifecycle: {
+        down: {
+          [phase]: [
+            {
+              command: nestedLifecycleCommand([
+                "down",
+                "--service",
+                "app",
+                "--json",
+              ]),
+            },
+          ],
+        },
+      },
+    })
+  );
+  const restart = await run(["restart", "--json"], false, undefined, {
+    PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+  });
+  expect(restart.exitCode, restart.stderr + restart.stdout).toBe(0);
+  expect(await Bun.file(join(root, "stop-context")).exists()).toBe(true);
+  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+}, 60_000);
+
+test.skipIf(!Bun.which("tmux")).each(["up", "restart"] as const)(
+  "a scoped Stop in %s's after-hook preserves the full copy's host process",
+  async (operation) => {
+    const projectDir = join(root, "project", ".hack");
+    const env = {
+      PATH: `${join(root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    };
+    const config = {
+      name: "sample",
+      sessions: { mux: "tmux" },
+      lifecycle: {
+        processes: [{ name: "fixture-client", command: "/bin/sleep 60" }],
+        up: {
+          after: [
+            {
+              command: nestedLifecycleCommand([
+                "down",
+                "--service",
+                "app",
+                "--json",
+              ]),
+            },
+          ],
+        },
+      },
+    };
+    await installComposeNameFixture({ startContainers: true });
+    if (operation === "restart") {
+      const start = await run(["up", "-d", "--json"], false, undefined, env);
+      expect(start.exitCode, start.stderr + start.stdout).toBe(0);
+    }
+    try {
+      await writeOwnedFixture(
+        join(projectDir, "hack.config.json"),
+        JSON.stringify(config)
+      );
+      const result = await run(
+        [operation, ...(operation === "up" ? ["-d"] : []), "--json"],
+        false,
+        undefined,
+        env
+      );
+      expect(result.exitCode, result.stderr + result.stdout).toBe(1);
+      expect(JSON.parse(result.stdout).error.code, result.stderr).toBe(
+        "E_CANCELLED"
+      );
+      expect(await Bun.file(join(root, "stop-context")).exists()).toBe(true);
+      const [owner] = await readLifecycleState({ projectDir });
+      expect(owner?.backend).toBe("tmux");
+      expect(owner?.composeProject).toBe("sample");
+      expect(
+        await readProjectRuntimeStateEntry({
+          projectDir,
+          composeProject: "sample",
+        })
+      ).toMatchObject({ serviceMutationId: expect.any(String) });
+    } finally {
+      await run(["down", "--json"], false, undefined, env);
+    }
+  },
+  60_000
+);
+
+test
+  .skipIf(!Bun.which("tmux"))
+  .each(["none", "managed", "persistent"] as const)(
+  "Restart keeps typed supersession with %s host processes",
+  async (mode) => {
+    const projectDir = join(root, "project", ".hack");
+    const env = {
+      PATH: `${join(root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    };
+    await installComposeNameFixture({ startContainers: true });
+    const start = await run(["up", "-d", "--json"], false, undefined, env);
+    expect(start.exitCode, start.stderr + start.stdout).toBe(0);
+    const launch = { projectDir, composeProject: "sample" };
+    const previous = await readProjectRuntimeStateEntry(launch);
+    const nested = nestedLifecycleCommand(["up", "-d", "--json"]);
+    const before = [
+      {
+        command: `if [ "${"${HACK_FIXTURE_RESTART:-}"}" = 1 ]; then HACK_FIXTURE_RESTART=0 ${nested}; fi`,
+      },
+    ];
+    const lifecycleProcess = {
+      name: "fixture-client",
+      command: "/bin/sleep 60",
+    };
+    try {
+      await writeOwnedFixture(
+        join(projectDir, "hack.config.json"),
+        JSON.stringify({
+          name: "sample",
+          sessions: { mux: "tmux" },
+          lifecycle: {
+            up: {
+              before:
+                mode === "persistent"
+                  ? [...before, { ...lifecycleProcess, persistent: true }]
+                  : before,
+            },
+            processes: mode === "managed" ? [lifecycleProcess] : [],
+          },
+        })
+      );
+      const restart = await run(["restart", "--json"], false, undefined, {
+        ...env,
+        HACK_FIXTURE_RESTART: "1",
+      });
+      expect(restart.exitCode, restart.stderr + restart.stdout).toBe(1);
+      expect(JSON.parse(restart.stdout).error.code, restart.stderr).toBe(
+        "E_CANCELLED"
+      );
+      const successor = await readProjectRuntimeStateEntry(launch);
+      expect(successor?.launchId).toBeDefined();
+      expect(successor?.launchId).not.toBe(previous?.launchId);
+      expect(await Bun.file(join(root, "restart-stack")).exists()).toBe(false);
+      expect(await readLifecycleState({ projectDir })).toHaveLength(
+        mode === "none" ? 0 : 1
+      );
+    } finally {
+      await run(["down", "--json"], false, undefined, env);
+    }
+  },
+  60_000
+);
+
 for (const hookExit of [0, 7]) {
   test.skipIf(!Bun.which("tmux"))(
     `Start with after-hook exit ${hookExit} preserves the successor launch and mux session`,

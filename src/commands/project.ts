@@ -504,6 +504,7 @@ import {
   readProjectRuntimeCopyLaunch,
   readProjectRuntimeState,
   readProjectRuntimeStateEntry,
+  recordProjectRuntimeServiceMutation,
   removeProjectRuntimeStateEntry,
   resolveComposeExecStaleEnvWarning,
   restoreUndispatchedRuntimeLaunch,
@@ -2675,6 +2676,9 @@ export async function runLifecycleCommands(opts: {
       } catch (error: unknown) {
         if (opts.startupSignal?.aborted) {
           return 130;
+        }
+        if (error instanceof HackCliError && error.code === "E_CANCELLED") {
+          throw error;
         }
         const message =
           error instanceof Error
@@ -8331,13 +8335,13 @@ function createComposeAdmission<Target>(opts: {
 async function runAttachedComposeHook(opts: {
   readonly admission: ReturnType<typeof createComposeAdmission>;
   readonly run: () => Promise<number>;
-  readonly onReadmission: () => void;
+  readonly onReadmission: () => void | Promise<void>;
 }): Promise<number> {
   await opts.admission.leave();
   const code = await opts.run();
   if (code === 0) {
     await opts.admission.enter();
-    opts.onReadmission();
+    await opts.onReadmission();
   }
   return code;
 }
@@ -8614,7 +8618,8 @@ async function runResolvedComposeUp({
     });
     return (
       publishedLaunch !== undefined &&
-      record?.launchId === publishedLaunch.launchId
+      record?.launchId === publishedLaunch.launchId &&
+      record.serviceMutationId === undefined
     );
   };
   const discardPublishedRuntimeSelection = () =>
@@ -8909,6 +8914,12 @@ async function runResolvedComposeUp({
                 : undefined,
             beforeCreate: async () => {
               await verifyOwnership();
+              if (serviceScoped) {
+                await recordProjectRuntimeServiceMutation({
+                  projectDir: project.projectDir,
+                  composeProject: lifecycleComposeProject,
+                });
+              }
               await publishRuntimeSelection();
               await engine.verify();
             },
@@ -9714,6 +9725,7 @@ async function handleServiceDown({
           timeoutSeconds,
           json: json === true,
           assertEngine,
+          lifecycleComposeProject: lifecycle.lifecycleComposeProject,
         })
     );
   } catch (error) {
@@ -9735,6 +9747,7 @@ async function runServiceStop(
     readonly timeoutSeconds: number | undefined;
     readonly json: boolean;
     readonly assertEngine: () => Promise<unknown>;
+    readonly lifecycleComposeProject: string;
   }
 ): Promise<number> {
   const startedAt = Date.now();
@@ -9775,6 +9788,10 @@ async function runServiceStop(
     stoppedAt: new Date().toISOString(),
   });
   if (active.length) {
+    await recordProjectRuntimeServiceMutation({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.lifecycleComposeProject,
+    });
     await opts.assertEngine();
     const result = await exec(
       [
@@ -11155,6 +11172,7 @@ async function runRestartDownPhase(opts: {
   readonly routeStdoutToStderr?: boolean;
   readonly envForCompose: Readonly<Record<string, string>>;
   readonly assertEngine: () => Promise<void>;
+  readonly runAttachedHook: (run: () => Promise<number>) => Promise<number>;
   readonly preserveComposeRuntime?: boolean;
 }): Promise<{
   readonly code: number;
@@ -11176,6 +11194,21 @@ async function runRestartDownPhase(opts: {
       composeProject: opts.lifecycleComposeProject,
       containers,
     });
+  const downBefore = await runLifecycleCommands({
+    title: "Lifecycle (restart down before)",
+    commands: opts.cfg.lifecycle?.down?.before,
+    projectRoot: opts.project.projectRoot,
+    env: opts.envForCompose,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
+    routeStdoutToStderr: opts.routeStdoutToStderr,
+    runAttachedHook: opts.runAttachedHook,
+  });
+  if (downBefore !== 0) {
+    return { code: downBefore };
+  }
+
+  await opts.assertEngine();
   const signalCleanup = installLifecycleSignalCleanup({
     cleanup: async () => {
       await lifecycleDownCleanup("unconfirmed");
@@ -11184,19 +11217,6 @@ async function runRestartDownPhase(opts: {
   let downCode: number;
   let helperReleaseFailures: readonly string[] = [];
   try {
-    const downBefore = await runLifecycleCommands({
-      title: "Lifecycle (restart down before)",
-      commands: opts.cfg.lifecycle?.down?.before,
-      projectRoot: opts.project.projectRoot,
-      env: opts.envForCompose,
-      projectDir: opts.project.projectDir,
-      composeProject: opts.lifecycleComposeProject,
-    });
-    if (downBefore !== 0) {
-      return { code: downBefore };
-    }
-
-    await opts.assertEngine();
     await markLifecycleSharedHelpersStopping({
       cfg: opts.cfg,
       composeProject: opts.lifecycleComposeProject,
@@ -11251,6 +11271,8 @@ async function runRestartDownPhase(opts: {
     env: opts.envForCompose,
     projectDir: opts.project.projectDir,
     composeProject: opts.lifecycleComposeProject,
+    routeStdoutToStderr: opts.routeStdoutToStderr,
+    runAttachedHook: opts.runAttachedHook,
   });
   return { code: downAfter };
 }
@@ -11612,6 +11634,15 @@ async function runRestartUpPhase(opts: {
     assertHelpersCurrent = lifecycleUp.assertSharedHelpersCurrent;
     keepSharedHelpers = lifecycleUp.keepSharedHelpers;
   } catch (error: unknown) {
+    if (error instanceof HackCliError && error.code === "E_CANCELLED") {
+      throw error;
+    }
+    if (
+      error instanceof LifecycleSessionRetainedError &&
+      error.original instanceof ComposeLaunchSupersededError
+    ) {
+      throw error.original;
+    }
     const message =
       error instanceof Error
         ? error.message
@@ -12060,6 +12091,11 @@ async function runTargetedServiceRestart(opts: {
   const code = await composeRuntimeBackend.up({
     beforeCreate: async () => {
       await verifyOwnership(opts.services);
+      await recordProjectRuntimeServiceMutation({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.lifecycleComposeProject,
+      });
+      await engine.verify();
     },
     beforeStart: async () => {
       await verifyOwnership(opts.services);
@@ -12573,14 +12609,50 @@ async function runLocalRestart({
     return 1;
   }
   reportLifecycleProgress({ service: null, phase: "stopping" });
-  await assertDesktopComposeOwnership({
-    expected: compose.expected,
-    project,
-    composeProjectName,
-    profiles,
-    env: preflightEnv.env,
-    action: "restart",
-  });
+  const nextLifecycleKey = resolveRestartTarget({
+    baseProjectName,
+    branch,
+  }).lifecycleComposeProject;
+  const readLaunch = (composeProject: string) =>
+    readProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject,
+    });
+  const readCopyLaunches = async () =>
+    (await readProjectRuntimeState({ projectDir: project.projectDir })).filter(
+      (record) =>
+        record.launchBranch === branch ||
+        record.composeProject === lifecycleComposeProject ||
+        record.composeProject === nextLifecycleKey
+    );
+  const previousLaunches = new Map(
+    (await readCopyLaunches()).map((record) => [record.composeProject, record])
+  );
+  const assertUnchangedLaunch = async () => {
+    for (const current of await readCopyLaunches()) {
+      const previous = previousLaunches.get(current.composeProject);
+      // A shutdown hook can remove the copy, but a replacement belongs to
+      // the command that launched it.
+      if (
+        current.launchId !== previous?.launchId ||
+        current.updatedAt !== previous?.updatedAt
+      ) {
+        throw new ComposeLaunchSupersededError();
+      }
+    }
+  };
+  const assertRestartOwnership = () =>
+    readOnCapturedDockerEngine(assertEngine, () =>
+      assertDesktopComposeOwnership({
+        expected: composeProjectName,
+        project,
+        composeProjectName,
+        profiles,
+        env: preflightEnv.env,
+        action: "restart",
+      })
+    );
+  await assertRestartOwnership();
   const downPhase = await runRestartDownPhase({
     project,
     cfg,
@@ -12592,6 +12664,15 @@ async function runLocalRestart({
     branch,
     envForCompose: preflightEnv.lifecycleEnv,
     assertEngine,
+    runAttachedHook: (run) =>
+      runAttachedComposeHook({
+        admission,
+        run,
+        onReadmission: async () => {
+          await assertUnchangedLaunch();
+          await assertRestartOwnership();
+        },
+      }),
     routeStdoutToStderr: json,
     preserveComposeRuntime: true,
   });
@@ -12629,37 +12710,6 @@ async function runLocalRestart({
   }
 
   reportLifecycleProgress({ service: null, phase: "stopped" });
-  const nextLifecycleKey = resolveRestartTarget({
-    baseProjectName,
-    branch,
-  }).lifecycleComposeProject;
-  const readLaunch = (composeProject: string) =>
-    readProjectRuntimeStateEntry({
-      projectDir: project.projectDir,
-      composeProject,
-    });
-  const previousLaunches = await Promise.all(
-    [...new Set([lifecycleComposeProject, nextLifecycleKey])].map(
-      async (key) => ({
-        key,
-        record: await readLaunch(key),
-      })
-    )
-  );
-  const assertUnchangedLaunch = async () => {
-    for (const { key, record: previous } of previousLaunches) {
-      const current = await readLaunch(key);
-      // A hook may run Down itself. An empty record permits restarting the
-      // copy, while a replacement launch belongs to its own command.
-      if (
-        current &&
-        (current.launchId !== previous?.launchId ||
-          current.updatedAt !== previous?.updatedAt)
-      ) {
-        throw new ComposeLaunchSupersededError();
-      }
-    }
-  };
   const effectiveProfiles = resolveEffectiveComposeProfiles({
     cliProfiles: profiles,
     composeEnv: preflightEnv.env,
@@ -12705,7 +12755,8 @@ async function runLocalRestart({
     const record = await readLaunch(nextLifecycleKey);
     return (
       publishedLaunch !== undefined &&
-      record?.launchId === publishedLaunch.launchId
+      record?.launchId === publishedLaunch.launchId &&
+      record.serviceMutationId === undefined
     );
   };
 

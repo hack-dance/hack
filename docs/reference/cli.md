@@ -1289,7 +1289,7 @@ Remove a helper container a data command could not track
 hack data cleanup [options]
 ```
 
-Removes the containers labeled io.hack.data-backup.nonce=<nonce>, which a data command's refusal names when a helper create's outcome could not be reconciled, on the engine the project's managed env selects (as export resolves it), by ID with removal confirmed. Never removes a volume.
+Removes the containers labeled io.hack.data-backup.nonce=<nonce>, which a data command's refusal names when a helper create's outcome could not be reconciled. Reads the run's cleanup record under $HACK_HOME/data-cleanup/ for its env selection and engine, and refuses (E_DATA_CLEANUP_RECORD, no engine call) unless the project's managed env still resolves to the same engine. Removes by ID with removal confirmed; never removes a volume.
 
 ### Options
 
@@ -1298,7 +1298,6 @@ Removes the containers labeled io.hack.data-backup.nonce=<nonce>, which a data c
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
-| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--nonce <nonce>` | The io.hack.data-backup.nonce label value a data command's refusal named |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

@@ -49,6 +49,7 @@ import {
   volumeReplacedError,
   type WatchedVolume,
 } from "./data-backup-volumes.ts";
+import { withDataCleanupRecord } from "./data-cleanup-record.ts";
 import { isRecord } from "./guards.ts";
 
 export type DataExportInput = {
@@ -71,6 +72,12 @@ export type DataExportInput = {
   readonly deadlines?: DataBackupDeadlines;
   /** fsync of a directory; a test seam for the post-rename durability path. */
   readonly syncDirectory?: (path: string) => Promise<void>;
+  /**
+   * The env selection the managed env was resolved with (see
+   * ComposeRuntimeModel.envSelection), kept in the run's cleanup record;
+   * `undefined` is the configured default.
+   */
+  readonly envSelection?: string | null;
 };
 
 export type DataExportResult = {
@@ -116,25 +123,42 @@ export async function exportProjectData(
   const helpers = new DataHelperContainers();
   // Subscribe and prove coverage before the first running-container check.
   const deadlines = input.deadlines ?? resolveDataBackupDeadlines();
-  const monitor = await startMountMonitor({
-    docker: input.docker,
-    purpose: "export",
-    helpers,
-    deadlines,
-    markerTimeoutMs: input.markerTimeoutMs,
-  });
-  try {
-    return await exportWithin({
-      input,
-      now,
-      plan,
-      monitor,
+  // The run's cleanup record, durable before its first container create
+  // (the start marker), so `hack data cleanup --nonce` can reach the same
+  // engine if a create's outcome cannot be reconciled.
+  return await withDataCleanupRecord(
+    {
+      hackHome: input.hackHome,
+      command: "export",
+      project: input.project,
+      branch: input.branch,
+      envSelection: input.envSelection,
+      docker: input.docker,
       helpers,
-      deadlines,
-    });
-  } finally {
-    await monitor.stop();
-  }
+      now,
+    },
+    async () => {
+      const monitor = await startMountMonitor({
+        docker: input.docker,
+        purpose: "export",
+        helpers,
+        deadlines,
+        markerTimeoutMs: input.markerTimeoutMs,
+      });
+      try {
+        return await exportWithin({
+          input,
+          now,
+          plan,
+          monitor,
+          helpers,
+          deadlines,
+        });
+      } finally {
+        await monitor.stop();
+      }
+    }
+  );
 }
 
 async function exportWithin(opts: {

@@ -13,7 +13,13 @@ import { join, resolve } from "node:path";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { createHostDataBackupDocker } from "../src/lib/data-backup-docker.ts";
 import { exportProjectData } from "../src/lib/data-backup-export.ts";
-import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import {
+  dataCleanupRecordPath,
+  endpointDigest,
+  engineSource,
+  writeDataCleanupRecord,
+} from "../src/lib/data-cleanup-record.ts";
+import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
 /**
  * The project's managed Compose env (here a managed DOCKER_HOST) reaches
@@ -28,7 +34,7 @@ const MANAGED_HOST = "unix:///managed/engine.sock";
 const STUB = `
 const { appendFileSync, readFileSync, existsSync } = require("node:fs");
 const args = process.argv.slice(2);
-appendFileSync(process.env.DATA_STUB_LOG, JSON.stringify({ args, host: process.env.DOCKER_HOST ?? null }) + "\\n");
+appendFileSync(process.env.DATA_STUB_LOG, JSON.stringify({ args, host: process.env.DOCKER_HOST ?? null, context: process.env.DOCKER_CONTEXT ?? null }) + "\\n");
 // An unreachable engine at one step: the client names DOCKER_HOST verbatim.
 const failAt = process.env.DATA_STUB_FAIL;
 if (failAt && args.join(" ").includes(failAt)) {
@@ -41,7 +47,12 @@ const project = process.env.DATA_STUB_PROJECT || "shop";
 const volumeName = project + "_db";
 const mountpoint = "/var/lib/docker/volumes/" + volumeName + "/_data";
 const out = (value) => process.stdout.write(typeof value === "string" ? value : JSON.stringify(value) + "\\n");
-if (args[0] === "events") {
+if (args[0] === "context" && args[1] === "show") {
+  out("default\\n");
+} else if (args[0] === "context" && args[1] === "inspect") {
+  // A context's endpoints, as the test configures them (local CLI read).
+  out((process.env.DATA_STUB_CONTEXT_ENDPOINT || "{}") + "\\n");
+} else if (args[0] === "events") {
   // A live subscription: replay what runs append, until SIGTERM.
   let offset = 0;
   process.on("SIGTERM", () => process.exit(0));
@@ -71,6 +82,7 @@ if (args[0] === "events") {
 } else if (args[0] === "create") {
   out("c".repeat(64));
 } else if (args[0] === "container" && args.some((arg) => arg.includes("index .Config.Labels")) && !args.some((arg) => arg.includes("{{.Id}}"))) {
+  if (process.env.DATA_STUB_INSPECT_FAIL) { process.stderr.write("error during connect\\n"); process.exit(1); }
   out((process.env.DATA_STUB_NONCE || "") + "\\n");
 } else if (args[0] === "container" && args.includes("{{.Id}} {{json .Mounts}}")) {
   // Batched: every container binds the owned Mountpoint.
@@ -406,6 +418,61 @@ test("hack data export never prints a container name, which can carry a managed 
   }
 });
 
+/**
+ * Write the run's cleanup record the way export does: the engine source and
+ * endpoint digest a client with the project's managed env resolves.
+ */
+async function recordRun(opts: {
+  readonly nonce: string;
+  readonly managed: Readonly<Record<string, string>>;
+  readonly bin: string;
+  readonly log: string;
+  readonly extraEnv?: Readonly<Record<string, string>>;
+  readonly envName?: string | null;
+  readonly endpointSha256?: string;
+}): Promise<string> {
+  const docker = createHostDataBackupDocker({
+    env: {
+      ...opts.managed,
+      PATH: `${opts.bin}:/usr/bin:/bin`,
+      DATA_STUB_LOG: opts.log,
+      ...opts.extraEnv,
+    },
+  });
+  const hackHome = join(privateCliHome(root), ".hack");
+  await writeDataCleanupRecord({
+    hackHome,
+    record: {
+      version: 1,
+      nonce: opts.nonce,
+      command: "export",
+      project: "repo",
+      branch: null,
+      envName: opts.envName ?? null,
+      envDefault: opts.envName === undefined,
+      engine: engineSource({ docker, envName: opts.envName ?? null }),
+      endpointSha256: opts.endpointSha256 ?? (await endpointDigest(docker)),
+      createdAt: "2026-11-24T00:00:00.000Z",
+    },
+  });
+  await writeFile(opts.log, "");
+  return dataCleanupRecordPath({ hackHome, nonce: opts.nonce });
+}
+
+const stubCalls = async (log: string) =>
+  (await readFile(log, "utf8"))
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          args: string[];
+          host: string | null;
+          context: string | null;
+        }
+    );
+
 test("hack data cleanup removes the nonce's containers through the managed DOCKER_HOST, never a volume", async () => {
   const { bin, log } = await stubBin();
   const managedHost = `unix://${root}/managed-engine.sock`;
@@ -414,6 +481,19 @@ test("hack data cleanup removes the nonce's containers through the managed DOCKE
   });
   const nonce = "0123456789abcdef0123456789abcdef";
   const labeled = ["a".repeat(64), "b".repeat(64)];
+  const record = await recordRun({
+    nonce,
+    managed: { DOCKER_HOST: managedHost },
+    bin,
+    log,
+  });
+  // The record names how the engine was selected, never the endpoint.
+  const recordText = await readFile(record, "utf8");
+  expect(recordText).not.toContain(managedHost);
+  expect(JSON.parse(recordText).engine).toEqual({
+    kind: "managed-host",
+    overlay: null,
+  });
   const result = await runDataCli({
     cwd: projectRoot,
     args: ["data", "cleanup", "--nonce", nonce, "--json"],
@@ -442,6 +522,8 @@ test("hack data cleanup removes the nonce's containers through the managed DOCKE
   expect(removals.map((call) => call.args)).toEqual(
     labeled.map((id) => ["rm", "--force", id])
   );
+  // Every removal confirmed: the record is gone.
+  expect(await readFile(record, "utf8").catch(() => null)).toBeNull();
   // A malformed nonce is a usage error before any Docker call.
   await writeFile(log, "");
   const bad = await runDataCli({
@@ -452,4 +534,174 @@ test("hack data cleanup removes the nonce's containers through the managed DOCKE
   });
   expect(bad.stdout).toContain("E_USAGE");
   expect(await readFile(log, "utf8")).toBe("");
+});
+
+test("hack data cleanup uses a recorded managed context and reaches it", async () => {
+  const { bin, log } = await stubBin();
+  const projectRoot = await shopProject({
+    envFiles: { default: ['DOCKER_CONTEXT: "build-box"'] },
+  });
+  const nonce = "1123456789abcdef0123456789abcdef";
+  const endpoint = '{"docker":{"Host":"tcp://10.0.0.5:2376"}}';
+  const record = await recordRun({
+    nonce,
+    managed: { DOCKER_CONTEXT: "build-box" },
+    bin,
+    log,
+    extraEnv: { DATA_STUB_CONTEXT_ENDPOINT: endpoint },
+  });
+  const recordText = await readFile(record, "utf8");
+  expect(JSON.parse(recordText).engine).toEqual({
+    kind: "managed-context",
+    context: "build-box",
+  });
+  // The context's endpoint is hashed, never stored.
+  expect(recordText).not.toContain("10.0.0.5");
+  const result = await runDataCli({
+    cwd: projectRoot,
+    args: ["data", "cleanup", "--nonce", nonce, "--json"],
+    bin,
+    env: {
+      DATA_STUB_LOG: log,
+      DATA_STUB_LABELED: "c".repeat(64),
+      DATA_STUB_NONCE: nonce,
+      DATA_STUB_CONTEXT_ENDPOINT: endpoint,
+    },
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.output).not.toContain("10.0.0.5");
+  const calls = await stubCalls(log);
+  expect(calls.filter((call) => call.context !== "build-box")).toEqual([]);
+  expect(calls.some((call) => call.args[0] === "rm")).toBeTrue();
+});
+
+test("hack data cleanup without a record, or whose engine now differs, refuses with no engine call", async () => {
+  const { bin, log } = await stubBin();
+  const projectRoot = await shopProject({
+    envFiles: { default: [`DOCKER_HOST: "unix://${root}/now-elsewhere.sock"`] },
+  });
+  const cases = [
+    {
+      nonce: "2123456789abcdef0123456789abcdef",
+      // Missing: no record at all.
+      record: false,
+      why: "there is no record",
+    },
+    {
+      nonce: "3123456789abcdef0123456789abcdef",
+      // Recorded through the same managed DOCKER_HOST setting, but on an
+      // engine the overlay no longer points at.
+      record: true,
+      why: "endpoint digest differs",
+    },
+  ] as const;
+  for (const entry of cases) {
+    if (entry.record) {
+      await recordRun({
+        nonce: entry.nonce,
+        managed: { DOCKER_HOST: `unix://${root}/the-recorded-one.sock` },
+        bin,
+        log,
+      });
+    }
+    await writeFile(log, "");
+    for (const json of [true, false]) {
+      const refused = await runDataCli({
+        cwd: projectRoot,
+        args: [
+          "data",
+          "cleanup",
+          "--nonce",
+          entry.nonce,
+          ...(json ? ["--json"] : []),
+        ],
+        bin,
+        env: {
+          DATA_STUB_LOG: log,
+          DATA_STUB_LABELED: "d".repeat(64),
+          DATA_STUB_NONCE: entry.nonce,
+        },
+      });
+      expect({ nonce: entry.nonce, json, ok: refused.exitCode === 0 }).toEqual({
+        nonce: entry.nonce,
+        json,
+        ok: false,
+      });
+      expect(refused.output).toContain("E_DATA_CLEANUP_RECORD");
+      expect(refused.output).toContain(entry.why);
+      // No endpoint in the refusal, and not one Docker call.
+      expect(refused.output).not.toContain(".sock");
+      expect(await readFile(log, "utf8")).toBe("");
+    }
+  }
+});
+
+test("hack data cleanup no longer takes --env: the record holds the selection", async () => {
+  const { bin, log } = await stubBin();
+  const projectRoot = await shopProject({ envFiles: { default: [] } });
+  const refused = await runDataCli({
+    cwd: projectRoot,
+    args: [
+      "data",
+      "cleanup",
+      "--env",
+      "staging",
+      "--nonce",
+      "4123456789abcdef0123456789abcdef",
+      "--json",
+    ],
+    bin,
+    env: { DATA_STUB_LOG: log },
+  });
+  expect(refused.exitCode).not.toBe(0);
+  expect(refused.output).toContain("E_USAGE");
+  expect(await readFile(log, "utf8")).toBe("");
+});
+
+test("hack data cleanup: a listed container it cannot verify exits nonzero; an empty list is a no-op", async () => {
+  const { bin, log } = await stubBin();
+  const managedHost = `unix://${root}/managed-engine.sock`;
+  const projectRoot = await shopProject({
+    envFiles: { default: [`DOCKER_HOST: "${managedHost}"`] },
+  });
+  const nonce = "5123456789abcdef0123456789abcdef";
+  const record = await recordRun({
+    nonce,
+    managed: { DOCKER_HOST: managedHost },
+    bin,
+    log,
+  });
+  for (const json of [true, false]) {
+    const unverified = await runDataCli({
+      cwd: projectRoot,
+      args: ["data", "cleanup", "--nonce", nonce, ...(json ? ["--json"] : [])],
+      bin,
+      env: {
+        DATA_STUB_LOG: log,
+        DATA_STUB_LABELED: "e".repeat(64),
+        DATA_STUB_NONCE: nonce,
+        DATA_STUB_INSPECT_FAIL: "1",
+      },
+    });
+    expect({ json, ok: unverified.exitCode === 0 }).toEqual({
+      json,
+      ok: false,
+    });
+    expect(unverified.output).toContain(`io.hack.data-backup.nonce=${nonce}`);
+    expect(unverified.output).toContain("e".repeat(12));
+    expect(unverified.output).not.toContain("No container is labeled");
+  }
+  // Unconfirmed: the record stays for a retry.
+  expect(await readFile(record, "utf8")).toContain(nonce);
+  const empty = await runDataCli({
+    cwd: projectRoot,
+    args: ["data", "cleanup", "--nonce", nonce],
+    bin,
+    env: { DATA_STUB_LOG: log, DATA_STUB_NONCE: nonce },
+  });
+  expect(empty.exitCode).toBe(0);
+  expect(empty.output).toContain(
+    `No container is labeled io.hack.data-backup.nonce=${nonce}; nothing to remove.`
+  );
+  expect(await readFile(record, "utf8").catch(() => null)).toBeNull();
 });

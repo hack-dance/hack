@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { HackCliError } from "./cli-result.ts";
 import {
+  cleanupInstruction,
   HELPER_NONCE_LABEL,
-  rawCleanupInstruction,
 } from "./data-backup-cleanup-instruction.ts";
 import {
   DATA_STEP_TIMEOUT_ENV,
@@ -106,6 +106,29 @@ export type HeldVolume = {
 export class DataHelperContainers {
   readonly live = new Set<string>();
   readonly created = new Set<string>();
+  /**
+   * The run's nonce, the `io.hack.data-backup.nonce` label of every
+   * container it creates, and the key of its cleanup record.
+   */
+  readonly nonce: string;
+  private unknownOutcome = false;
+
+  constructor(nonce: string = randomBytes(16).toString("hex")) {
+    this.nonce = nonce;
+  }
+
+  /** A create of this run could not be reconciled. */
+  markUnknown(): void {
+    this.unknownOutcome = true;
+  }
+
+  /**
+   * Every container this run created is confirmed removed and no create is
+   * unknown: nothing of this run can be left behind.
+   */
+  get settled(): boolean {
+    return this.live.size === 0 && !this.unknownOutcome;
+  }
 
   add(id: string): void {
     this.live.add(id);
@@ -279,35 +302,27 @@ function withUnconfirmedCleanup(
  * Add an unknown cleanup outcome to a refusal: a `docker create` whose
  * outcome Hack could not reconcile (no ID came back, and no lookup by name
  * and nonce found it), so a container of this run may exist that Hack does
- * not track and cannot remove; it could hold a volume. The instruction
- * targets the engine the command used: `hack data cleanup --nonce <nonce>`
- * with the same selection when the CLI ran it, and the raw `docker`
- * command with the same engine selection as a fallback.
+ * not track and cannot remove; it could hold a volume. The only recovery
+ * instruction is `hack data cleanup --nonce <nonce>` (see
+ * {@link cleanupInstruction}): no raw docker command and no endpoint value.
  */
 function withUnknownCleanup(
   failure: unknown,
   opts: { readonly nonce: string; readonly docker: DataBackupDocker }
 ): unknown {
   const label = `${HELPER_NONCE_LABEL}=${opts.nonce}`;
-  const raw = rawCleanupInstruction({
+  const hackCommand = cleanupInstruction({
     nonce: opts.nonce,
-    engine: opts.docker.engine,
-    redactValues: opts.docker.redactValues,
+    hackCommand: opts.docker.hackCleanupCommand?.(opts.nonce),
   });
-  const hackCommand = opts.docker.hackCleanupCommand?.(opts.nonce) ?? null;
-  const how =
-    hackCommand === null
-      ? raw.sentence
-      : `\`${hackCommand}\` (or, by hand: ${raw.sentence})`;
   return withCleanupNote(failure, {
-    note: `A helper container may have been created without Hack learning its ID, so it was not removed and may hold a volume. Find and remove it by its label ${label}: ${how}.`,
+    note: `A helper container may have been created without Hack learning its ID, so it was not removed and may hold a volume. Remove it with \`${hackCommand}\` (it finds containers by their label ${label}, on the engine this command used).`,
     cleanup: {
       container: null,
       removed: false,
       outcome: "unknown",
       label,
-      command: raw.command,
-      ...(hackCommand === null ? {} : { hackCommand }),
+      hackCommand,
     },
   });
 }
@@ -550,6 +565,7 @@ export async function withTrackedContainer<T>(
       checkCreate: opts.checkCreate,
       unknownNonce,
       docker: opts.docker,
+      helpers: opts.helpers,
     });
   }
   let failure: unknown;
@@ -603,7 +619,7 @@ async function createTracked(opts: {
    */
   readonly unknownNonce: string | null;
 }> {
-  const nonce = randomBytes(16).toString("hex");
+  const nonce = opts.helpers.nonce;
   const created = await opts.docker.capture(
     [
       "docker",
@@ -683,7 +699,9 @@ function failUnreconciled(opts: {
   readonly checkCreate: (result: DataBackupProcessResult) => void;
   readonly unknownNonce: string;
   readonly docker: DataBackupDocker;
+  readonly helpers: DataHelperContainers;
 }): never {
+  opts.helpers.markUnknown();
   let failure: unknown;
   try {
     requireCreated(opts);
@@ -805,6 +823,7 @@ export class VolumeReferences {
         checkCreate,
         unknownNonce,
         docker,
+        helpers,
       });
     }
     requireCreated({ created, printed, checkCreate });

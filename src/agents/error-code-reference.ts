@@ -216,6 +216,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "A file Hack must write could not be written because the disk is full or the disk quota is exceeded.",
     readFirst: "`df -h <path from the message>`",
   },
+  E_DATA_CLEANUP_RECORD: {
+    meaning:
+      "`hack data cleanup --nonce` found no usable cleanup record for that nonce under `$HACK_HOME/data-cleanup/`, or the record's project, instance, env selection or engine endpoint no longer matches what this project's managed env selects; nothing was listed or removed and no engine was contacted.",
+    readFirst: "`ls $HACK_HOME/data-cleanup/`",
+  },
   E_PATH_CONFLICT: {
     meaning:
       "A path Hack must read or write is the wrong kind of entry: a file where a directory is needed, or a directory or special file where a regular file is needed.",

@@ -823,7 +823,10 @@ describe("running containers and the live event fence", () => {
     expect(error.detail).toEqual({ running: [fakePsId("shop-web-1")] });
     expect(creates(fake)).toEqual([]);
     expect(fake.events.open).toBeFalse();
-    expect(await readdir(root)).toEqual([]);
+    // No backup, and the run's cleanup record is gone: nothing is left.
+    expect(await readdir(root)).toEqual(["home"]);
+    expect(await readdir(join(root, "home"))).toEqual(["data-cleanup"]);
+    expect(await readdir(join(root, "home", "data-cleanup"))).toEqual([]);
   });
 
   test("refuses while another container mounts an owned volume", async () => {
@@ -1846,18 +1849,18 @@ describe("a create whose outcome cannot be reconciled is reported, not hidden", 
         "";
       expect(nonce).toMatch(/^[a-f0-9]{32}$/);
       const label = `io.hack.data-backup.nonce=${nonce}`;
-      const command = `docker ps -aq --filter label=${label} | xargs -r docker rm -f`;
-      expect(error.detail).toMatchObject({
-        cleanup: {
-          container: null,
-          removed: false,
-          outcome: "unknown",
-          label,
-          command,
-        },
+      const hackCommand = `hack data cleanup --nonce=${nonce}`;
+      expect((error.detail as { readonly cleanup?: unknown }).cleanup).toEqual({
+        container: null,
+        removed: false,
+        outcome: "unknown",
+        label,
+        hackCommand,
       });
-      expect(error.message).toContain(command);
+      expect(error.message).toContain(hackCommand);
       expect(error.message).toContain(label);
+      // The only instruction: no raw docker command.
+      expect(error.message).not.toContain("docker ps");
     });
   }
 
@@ -1984,47 +1987,134 @@ describe("the unknown cleanup instruction targets the export's engine", () => {
     };
   }
 
-  test("the refusal names hack data cleanup with the selection and the raw command on the same engine", async () => {
+  test("the refusal names only hack data cleanup with the run's selection, and no endpoint", async () => {
+    // Recognizable stand-ins: a credential-free endpoint and one with
+    // userinfo. Neither may appear in any output, quoted or not.
+    for (const host of [
+      "tcp://10.0.0.5:2376",
+      "ssh://deploy:canary-pass-31@build.example",
+    ]) {
+      const fake = engine({ only: "db" });
+      const error = await caught(
+        exportProjectData({
+          ...input(fake, { outDir: join(root, host.slice(0, 3)) }),
+          docker: {
+            ...unreconciled(fake, {
+              engine: { host, context: null },
+              hackCleanupCommand: (nonce) =>
+                `hack data cleanup --branch=feature-x --nonce=${nonce}`,
+            }),
+            redactValues: [host],
+          },
+        })
+      );
+      const cleanup = (error.detail as { cleanup: Record<string, unknown> })
+        .cleanup;
+      const nonce = String(cleanup.label).split("=")[1] ?? "";
+      expect(cleanup).toEqual({
+        container: null,
+        removed: false,
+        outcome: "unknown",
+        label: `io.hack.data-backup.nonce=${nonce}`,
+        hackCommand: `hack data cleanup --branch=feature-x --nonce=${nonce}`,
+      });
+      const rendered = `${error.message}${JSON.stringify(error.detail)}`;
+      expect({ host, leaked: rendered.includes(host) }).toEqual({
+        host,
+        leaked: false,
+      });
+      for (const fragment of [
+        "10.0.0.5",
+        "canary-pass-31",
+        "DOCKER_HOST",
+        "docker ps",
+      ]) {
+        expect({ fragment, found: rendered.includes(fragment) }).toEqual({
+          fragment,
+          found: false,
+        });
+      }
+    }
+  });
+});
+
+describe("the run's cleanup record", () => {
+  const recordsDir = (): string => join(root, "home", "data-cleanup");
+
+  test("is written before the first create, holds no endpoint, and is removed once the run is settled", async () => {
     const fake = engine({ only: "db" });
+    // Recognizable stand-in endpoint for a managed DOCKER_HOST.
     const host = "tcp://10.0.0.5:2376";
-    const error = await caught(
-      exportProjectData({
-        ...input(fake),
-        docker: unreconciled(fake, {
-          engine: { host, context: null },
-          hackCleanupCommand: (nonce) =>
-            `hack data cleanup --env=staging --nonce=${nonce}`,
-        }),
-      })
-    );
-    const cleanup = (error.detail as { cleanup: Record<string, string> })
-      .cleanup;
-    const nonce = cleanup.label?.split("=")[1] ?? "";
-    expect(nonce).toMatch(/^[a-f0-9]{32}$/);
-    expect(cleanup.hackCommand).toBe(
-      `hack data cleanup --env=staging --nonce=${nonce}`
-    );
-    expect(cleanup.command).toStartWith(`DOCKER_HOST=${host} docker ps -aq`);
-    expect(error.message).toContain(cleanup.hackCommand ?? "");
-    expect(error.message).toContain(cleanup.command ?? "");
+    const real = fake.docker();
+    let atFirstCreate: string[] | null = null;
+    let recordText = "";
+    const docker: DataBackupDocker = {
+      ...real,
+      engine: { host, context: null },
+      capture: async (argv, opts) => {
+        if (atFirstCreate === null && argv[1] === "create") {
+          atFirstCreate = await readdir(recordsDir()).catch(() => []);
+          const [file] = atFirstCreate;
+          recordText = await readFile(join(recordsDir(), file ?? ""), "utf8");
+        }
+        return await real.capture(argv, opts);
+      },
+    };
+    await exportProjectData({
+      ...input(fake),
+      docker,
+      envSelection: "staging",
+    });
+    expect(atFirstCreate).toHaveLength(1);
+    const record = JSON.parse(recordText);
+    expect(record).toMatchObject({
+      version: 1,
+      command: "export",
+      project: PROJECT,
+      branch: null,
+      envName: "staging",
+      envDefault: false,
+      engine: { kind: "managed-host", overlay: "staging" },
+    });
+    expect(record.nonce).toMatch(/^[0-9a-f]{32}$/);
+    expect(record.endpointSha256).toBe(sha(`host\n${host}`));
+    expect(recordText).not.toContain("10.0.0.5");
+    // Every container of the run went with it: the record is removed.
+    expect(await readdir(recordsDir())).toEqual([]);
+    // Every container the run made carries the run's nonce.
+    for (const entry of fake.created) {
+      expect(fake.calls).toContainEqual(
+        expect.arrayContaining([`io.hack.data-backup.nonce=${record.nonce}`])
+      );
+      expect(entry.id).toMatch(/^[a-f0-9]{64}$/);
+    }
   });
 
-  test("a DOCKER_HOST with userinfo reaches neither the text nor the JSON", async () => {
+  test("stays when a create could not be reconciled", async () => {
     const fake = engine({ only: "db" });
-    // Not a credential: a recognizable stand-in.
-    const host = "ssh://deploy:canary-pass-31@build.example";
-    const error = await caught(
-      exportProjectData({
-        ...input(fake),
-        docker: {
-          ...unreconciled(fake, { engine: { host, context: null } }),
-          redactValues: [host],
-        },
-      })
-    );
-    const rendered = `${error.message}${JSON.stringify(error.detail)}`;
-    expect(rendered).toContain("outcome");
-    expect(rendered).not.toContain("canary-pass-31");
-    expect(error.message).toContain("with your managed DOCKER_HOST");
+    const real = fake.docker();
+    let lost = false;
+    const docker: DataBackupDocker = {
+      ...real,
+      capture: async (argv, opts) => {
+        if (!lost && argv[1] === "create" && !argv.includes("--mount")) {
+          lost = true;
+          await real.capture(argv, opts);
+          return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
+        }
+        if (
+          argv[2] === "inspect" &&
+          argv.some((arg) => arg.includes(".Config.Labels"))
+        ) {
+          return { exitCode: 1, stdout: "", stderr: "error during connect" };
+        }
+        return await real.capture(argv, opts);
+      },
+    };
+    const error = await caught(exportProjectData({ ...input(fake), docker }));
+    const nonce = String(
+      (error.detail as { cleanup: { label: string } }).cleanup.label
+    ).split("=")[1];
+    expect(await readdir(recordsDir())).toEqual([`${nonce}.json`]);
   });
 });

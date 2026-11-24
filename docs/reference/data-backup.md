@@ -291,22 +291,15 @@ confirm the removal, the outcome says so (`detail.cleanup: {container,
 removed: false}`, the container ID, and the `docker rm -f <id>` command to
 run) instead of claiming cleanup, and nothing is published. When a `docker
 create` for a helper, marker or reference returns no container ID and
-Hack cannot find the container by its name and the create's random
+Hack cannot find the container by its name and the run's random
 `io.hack.data-backup.nonce` label, a container of this run may exist that
 Hack does not track: the refusal says so with an unknown cleanup outcome
 (`detail.cleanup: {container: null, removed: false, outcome: "unknown",
-label, command, hackCommand}`) and, in text too, how to remove it on the
-same engine the command used: `hack data cleanup --nonce <nonce>` with the
-same `--path`, `--project`, `--branch` and `--env` selection
-(`hackCommand`), and the raw command by label as a fallback (`command`):
-`docker ps -aq --filter label=io.hack.data-backup.nonce=<nonce> | xargs -r docker rm -f`.
-When the managed env selects the engine, the raw command carries that
-selection: `docker --context <name> …` on both sides of the pipe for a
-managed `DOCKER_CONTEXT` (other managed values in the name redacted), or
-`DOCKER_HOST=<value> …` on both sides for a managed `DOCKER_HOST` that
-holds no userinfo, no query and no other managed value; any other
-`DOCKER_HOST` is never printed and the instruction says to run the command
-with your managed `DOCKER_HOST`. A create the daemon itself refused created
+label, hackCommand}`) and, in text too, the only recovery instruction:
+`hack data cleanup --nonce <nonce>` with the run's `--path`, `--project`
+and `--branch` (`hackCommand`). No raw `docker` command is printed, and no
+engine endpoint (a `DOCKER_HOST` value or a context's endpoint) appears in
+any output. A create the daemon itself refused created
 nothing and is not reported. A create that timed out (or was interrupted)
 is not settled by one "No such container": the daemon may still register
 it after the client gave up, so Hack looks it up again, five times 400 ms
@@ -382,23 +375,44 @@ A restore compares these hashes instead of the values.
 ## Cleaning up an untracked helper (`hack data cleanup`)
 
 ```sh
-hack data cleanup --nonce <nonce> [--path <dir>] [--project <name>] [--branch <name>] [--env <name>] [--json]
+hack data cleanup --nonce <nonce> [--path <dir>] [--project <name>] [--branch <name>] [--json]
 ```
 
-A refusal with an unknown cleanup outcome (see Deadlines) names the
-create's `io.hack.data-backup.nonce` label and prints this command with the
-same project, instance and `--env` selection. It resolves the managed env
-exactly as `hack data export` does, so it lists and removes containers on
-the same engine, including one a managed `DOCKER_HOST` or `DOCKER_CONTEXT`
-selects. It removes only containers, running or not, whose
-`io.hack.data-backup.nonce` label equals the nonce (read back by ID), each
-by its ID with removal confirmed, and never removes a volume. A nonce that
-is not 32 hex characters refuses with `E_USAGE` before any engine call.
-`--json` prints the standard envelope with `data.schema`
-`hack.data-cleanup.v1`: `nonce`, `label`, `removed` (full container IDs)
-and `unconfirmed`. A removal Docker cannot confirm exits 1 with
-`E_UNEXPECTED` and the same fields in `error.detail`. Nothing matching is a
-clean no-op.
+Every export (and import) run has one random nonce: the
+`io.hack.data-backup.nonce` label of every container it creates. Before its
+first container create the run writes a cleanup record,
+`$HACK_HOME/data-cleanup/<nonce>.json` (0600, in a 0700 directory, written
+to a new file, fsynced, renamed into place, the directory fsynced). It
+holds the nonce, the command, Hack's project and branch, the env selection
+(an overlay name, base, or the configured default), which setting selected
+the engine (a managed `DOCKER_CONTEXT` by name, the fact that a managed
+`DOCKER_HOST` came from the env and from which env selection, or the
+caller's own Docker settings) and the sha256 of the resolved endpoint
+identity (the effective `DOCKER_HOST` value, or the context with its
+endpoints as `docker context inspect` reports them). It never holds an
+endpoint value or any other managed value. The run removes the record once
+every container it created is confirmed removed and no create is unknown;
+otherwise it stays.
+
+A refusal with an unknown cleanup outcome (see Deadlines) prints this
+command with the run's project and instance. It takes no `--env`: it reads
+the record for the run's selection instead, refuses unless the record is
+for the same Hack project and branch, re-resolves the managed env through
+the recorded selection, and refuses unless the engine is selected the same
+way and its endpoint identity hashes the same. A record that is missing,
+unreadable or does not match refuses with `E_DATA_CLEANUP_RECORD`, says
+why, and makes no engine call (reading a context's endpoints is a local CLI
+read). Then it lists the containers, running or not, labeled with the
+nonce, reads each one's label back by ID, and removes each by ID with
+removal confirmed; it never removes a volume. A listed container whose
+read-back fails or times out, or whose removal Docker cannot confirm, is
+`unconfirmed`: the command exits 1 with `E_UNEXPECTED`, naming the label,
+and keeps the record for a retry. Only an empty listing is a no-op ("No
+container is labeled …"), which exits 0. Once nothing is unconfirmed the
+record is removed. A nonce that is not 32 hex characters refuses with
+`E_USAGE` before anything else. `--json` prints the standard envelope with
+`data.schema` `hack.data-cleanup.v1`: `nonce`, `label`, `listed`, `removed`
+(full container IDs) and `unconfirmed`.
 
 ## Format
 

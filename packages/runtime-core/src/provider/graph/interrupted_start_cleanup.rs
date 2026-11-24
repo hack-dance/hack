@@ -651,6 +651,18 @@ fn select_ignoring<'a>(
 const RETIRED_PREFIX: &str = "interrupted-start-cleanup-retired-";
 const RETIRED_LIMIT: usize = 8;
 
+/// A retired journal that is proven finished: every step done, nothing pending, and
+/// its file named for its own selection digest (HACK-2576).
+fn finished_journal(name: &str, bytes: &[u8]) -> bool {
+    serde_json::from_slice::<recovery::Journal>(bytes).is_ok_and(|journal| {
+        journal.graph_complete
+            && journal.publisher_retired
+            && journal.reservation_released
+            && !journal.pending
+            && name == format!("{RETIRED_PREFIX}{}.json", journal.selection_sha256)
+    })
+}
+
 /// Whether a fully finished recovery journal describes an earlier container generation
 /// of a run that was restored and failed again, now with its own pending cleanup.
 ///
@@ -702,19 +714,8 @@ fn retire_superseded(candidate: &Candidate, root: &Path, run: &str) -> Result<()
     let Some((record, identity)) = retirable(root, run)? else {
         return Ok(());
     };
-    let mut retired = 0;
-    for entry in fs::read_dir(root).map_err(state::io)? {
-        let name = entry.map_err(state::io)?.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with(RETIRED_PREFIX))
-        {
-            retired += 1;
-            if retired >= RETIRED_LIMIT {
-                return Err(refused());
-            }
-        }
-    }
+    // HACK-2576: the oldest proven finished journals make room instead of refusing.
+    super::retired_history::make_room(root, RETIRED_PREFIX, RETIRED_LIMIT, finished_journal)?;
     let target = root.join(format!("{RETIRED_PREFIX}{}.json", record.selection_sha256));
     rename_unchanged(root, &target, &identity)
 }

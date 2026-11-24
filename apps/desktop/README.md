@@ -167,6 +167,10 @@ renders the window after each step of a short click-through on fixtures
 method its click handler calls; it is not a synthetic mouse event.
 [Click-through](screenshots/window/click-through.png).
 
+To capture the grouped sidebar and row menu in both themes, run
+`hack-desktop --screenshots <dir> --fixtures grouped-sidebar` with the
+screenshots build. This fixture drives the sidebar and menu through GPUI clicks.
+
 ## Window
 
 The window follows [DESIGN-V1.md](DESIGN-V1.md).
@@ -182,17 +186,16 @@ The window follows [DESIGN-V1.md](DESIGN-V1.md).
 - **Live data only.** Without `--fixtures` everything comes from hackd and the
   CLI. What the CLI does not report is not invented: CPU and memory are a dash
   with a tooltip; the always-on switch is disabled with its reason (HACK-2213).
-- **Branch instances** (`hack up --branch <name>`) are listed under their
-  project from `/v1/projects` `branch_runtime`, with their own state,
-  services and routes (from each container's `caddy` label). Its URL is
-  `<branch>.<dev host>`, the host `hack open --branch` opens, never a service
-  route. Selecting one runs Start, Stop, Restart, Open and Logs with
-  `--branch <name>` in the checkout that started it (a registered linked
-  worktree or the main checkout, from Compose's `working_dir`, compared as
-  canonical paths so a checkout reached through a link still matches); when
-  that checkout is not one the project registered, the app offers no actions. A project
-  whose only running instances are branches is in the Running group. Native
-  branch instances are not in that read yet (DESIGN.md R19).
+- **Projects and copies.** The project tree shows `main`, registered
+  worktrees and Hack branches. Only the selected copy expands to show its
+  services. The Services tab lists Other copies and their routes, including
+  copies with no running containers. hackd and the CLI report configuration
+  in `branch_copies` and runtime observations in `branch_runtime`.
+- **Service actions.** Hover a service to open its route or stop it. Its
+  menu also opens filtered logs, opens the existing Ghostty drawer for a
+  shell, restarts the service, and copies its route. Selection and Files
+  navigation use the service pane's instance-scoped navigation target.
+  Use the copy header's menu to inspect the full copies report.
 - **Daemon match.** Equal version strings match. Otherwise the core asks the
   CLI (`hack daemon status --json`, `api_compatible`) once per version pair.
   When they do not match, the banner says which side to update: an older
@@ -762,16 +765,13 @@ following resumes through Resume, not automatically when scrolling to the bottom
 
 ## Env tab
 
-Overlay tabs across the top (`base`, then each overlay the CLI names), scope
-pills on the right, one line for the secret key, and a Name / Value table.
-Names come from `hack env list --json [--env <overlay>] [--service <scope>]`;
-each value from `hack env get <KEY>` on a pipe, through the CLI and nothing
-else. Plaintext values load with the listing. A secret shows dots until its
-eye is pressed, for that one name; it hides again after 60 s and when the
-overlay, scope, detail tab or project changes, or the window is hidden or
-loses focus. Copy reads that one name, puts it on the clipboard and clears the
-clipboard after 60 s, or when the app quits sooner, if it still holds the
-value. A missing required name is
+Overlay tabs across the top show base and every overlay named in the modern
+`hack env list --json` report. Choose a scope on the right. Each value starts
+masked. Press the eye to read just that name through `hack env get <KEY>`.
+The value hides after 60 seconds or when the overlay, scope, tab or project
+changes, or the window loses focus. Copy a revealed value with the copy
+button. The clipboard clears after 60 seconds or when the app quits, if it
+still holds that value. A missing required name is
 listed first with a `required · missing` chip. With the key missing, the line
 says where the CLI looks and secrets cannot be revealed or copied.
 
@@ -790,11 +790,8 @@ its own scope (a global variable shown in a service listing stays global) and
 its own layer (a row from `hack.env[.<overlay>].local.yaml`, or a legacy
 `.env` / `.env.<overlay>`, with `--local`, so a value kept out of the
 repository never lands in the shared YAML); a
-new one goes to the scope listed, in the shared file. A plaintext value starts filled in (read for
-that one name first when the listing has not shown it; until then Save
-stores only text you type, never an empty field, so an unchanged Save never
-blanks it; a late read never overwrites what you typed); a
-secret starts empty, and its field is masked. A secret cannot be edited while
+new one goes to the scope listed, in the shared file. An already revealed plaintext value can prefill the editor. Otherwise type a
+new value to replace it. A secret starts with an empty masked field. A secret cannot be edited while
 the key is missing, and a legacy variable limited to several services cannot
 be edited in the app (one write cannot cover them): the editor says to use the
 CLI per service or `hack env migrate`. Nor can a value held outside the env
@@ -804,12 +801,12 @@ instead, so the editor names the layer and says to use the CLI. The editor close
 project. After Save the tab says "Saved NAME" and lists again.
 
 What needs the CLI is shown, not hidden: **+ Overlay** (create an overlay,
-R27; every overlay as a tab, R24), and, when the key is missing, **Choose key
+R27), and, when the key is missing, **Choose key
 file** and **Use env var** (choose the key source for a run, R26). Each is
 inactive, and its tooltip names the request.
 
-Values never reach a log, a render, `--drive` output or an error message, and
-fixtures use fake values. A failed write shows the command and its exit code,
+Values stay out of logs, `--drive` output and error messages. Offscreen render
+fixtures use obviously fake values. A failed write shows the command and its exit code,
 never the CLI's output (an echoed value could be trimmed, escaped or cut, so
 no check on it is safe): run the command shown in a terminal to see why. A
 write started before a CLI switch runs through the CLI chosen when Save was
@@ -820,7 +817,7 @@ in `Cargo.lock` through GPUI): `objc2 =0.6.5` (MIT), `objc2-app-kit =0.3.2`
 (Zlib OR Apache-2.0 OR MIT), `objc2-foundation =0.3.2` (MIT).
 
 Fixtures: `env-loading`, `env-error`, `env-normal`, `env-overlays`,
-`env-running`, `env-missing`, `env-locked`, `env-long`, `env-edit`,
+`env-running`, `env-missing`, `env-locked`, `env-long`, `env-edit`, `env-revealed`,
 `env-empty`. Each
 renders offscreen in both themes through `--screenshots`.
 Screenshots: [overlays, running](screenshots/env-running-light.png),
@@ -860,9 +857,9 @@ Drop's reader join completes. These test allowances do not change CLI timeouts.
 
 ## Service details
 
-Select a service from the Services table to open its detail pane. The pane opens
-on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
-Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
+Select a service from the sidebar or Services table to open its detail pane.
+The pane opens on **Logs**. Use ⌘1–⌘5 on macOS or Ctrl+1–Ctrl+5 elsewhere to switch between
+Info, Stats, Logs, Terminal and Files. Stats shows recent Compose resource use.
 
 - **Info** shows copyable route, health, image, mount, container name and
   startup information reported for the selected service. A Compose ownership
@@ -877,14 +874,13 @@ Info, Stats, Logs, Terminal and Files. Stats and Files show placeholders.
   the last shell exits. The ended tab retains its scrollback. Terminal tabs
   stay open when you switch detail tabs, and the drawer keeps Ghostty’s
   configured appearance.
-- **Restart** calls Hack for the selected service. **Stop** targets its
-  observed running Compose containers and confirms their identity with Docker
-  before stopping by full ID. On macOS, the explicit service action accepts
-  Docker CLI installs under the standard system Applications directory when
-  that directory is writable only by root and the local administrators group.
-  The project’s **Stop** still runs instance-wide
-  `hack down`.
+- **Files** opens the existing file browser on the selected service.
+- **Restart** and **Stop** call Hack with the selected checkout, Compose
+  project and service. Hack checks checkout ownership and stops containers by
+  full ID. The project’s **Stop** still runs instance-wide `hack down`.
 
 With the screenshots feature enabled, run `hack-desktop --service-screenshots
 <dir>` to render the pane’s light and dark fixtures and exercise its tab
-shortcuts through the app keymap.
+shortcuts through the app keymap. The dark window chrome and service pane
+use the HTP design system's Merino Dark palette. The terminal captures include
+the ended shell and the fresh session opened from it.

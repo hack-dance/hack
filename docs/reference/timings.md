@@ -139,3 +139,27 @@ for the full attribute vocabulary there. Linux datagram payload capacity is
 queried from `SO_SNDBUF` minus its 32-byte kernel reservation. No global socket
 settings are changed. Diagnostic writes never wait for the reader; saturation
 can drop records and is reported by the truncation marker when it can be sent.
+
+For native startup, `cli.project.selection` and `cli.compose.resolve` cover
+selection in the launcher and configuration resolution in the owner.
+`cli.env.overlay` covers startup input and environment preparation.
+`cli.graph.preflight`, `cli.graph.resolve` and `cli.graph.prepare` cover
+admission, plan inputs and graph launch preparation. `cli.readiness.finalize`
+covers the readiness inspection, publication and hooks. The detached launcher
+also records owner launch, acceptance and result preparation. These phases
+can overlap runtime request spans.
+
+The foreground graph owner emits `graph.owner.input` and, for normalized
+inputs, `graph.owner.configure` before entering the graph. It completes
+`graph.owner.startup` on the timing descriptor before flushing the ready
+reply. This lets the launcher collect startup work while the owner remains
+alive. Between `services.ready` and that reply, `graph.ready.commit` covers
+final verification and durable receipt publication. The `graph.publish.*`
+spans distinguish probe-generation seeding, endpoint reservation, relay
+startup, and publisher readiness verification.
+
+Before provider spawn, `vm.startup.lease` covers acquiring the startup lease,
+`vm.admission.wait` covers the remaining Development host-sampling window
+when it actually sleeps, and `vm.release.verify` covers verifying the retained
+pool's provider release. The existing `vm.ensure` reuse attribute distinguishes
+a recorded sample that replaced the wait. The sampling interval is unchanged.

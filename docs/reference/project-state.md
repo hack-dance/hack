@@ -136,10 +136,30 @@ name `<project>--<slug>`) and `runtime`, and adds:
 | `branch_name` | The name the instance was started with: the `hack up --branch` / `hack restart --branch` argument, or a linked worktree's git branch. `null` when it was not recorded (for example an instance started by an older Hack). |
 | `branch_name_source` | `recorded` (written by `up`/`restart` to the owning checkout's `.hack/.internal/branch-usage.json`), `worktree_registration` (the registered linked worktree's git branch, when it maps to the same slug), or `null`. |
 | `checkout` | `{root, project_dir, kind}` of the checkout that owns the instance, by the same rule `hack projects prune` uses: the container working directory is the registered checkout (`kind: primary`) or one of its registered linked worktrees (`kind: worktree`). `null` when it is neither. |
+| `checkout_verified` | Whether the registered primary or a current linked Git checkout owns this runtime. A historical worktree path can still identify an observation when Git can no longer verify the checkout. |
 | `hosts` | Hosts per service, from the running containers' Caddy site labels (`caddy`, `caddy_<n>`), parsed as the CLI parses them; wildcard, template and port entries are left out. |
 | `hosts_source` | `runtime_labels`; `config` when no container carries a site label (the owning checkout's Compose labels, qualified for the branch); `unavailable` for authored native instances. |
-| `url` | The URL `hack open --branch <branch>` opens with no target in the owning checkout (or the registered checkout when `checkout` is `null`): its `open.prefer` (default `auto`, which prefers the OAuth alias when `oauth.enabled` gives one), then the branch qualification of that host. `null` when the project prefers an alias it cannot serve, where `hack open` refuses, when the owning (or, with no owner, the registered) checkout's `.hack` directory is missing, and for authored native instances. |
+| `url` | The URL `hack open --branch <branch>` opens with no target in the owning checkout. Its `open.prefer` selects the host, then Hack qualifies the host with the branch. The URL is `null` for unverified Compose owners, missing checkout configuration, unavailable preferred aliases, and authored native instances. |
 | `url_host` | `dev` or `alias`: which project host `url` uses. |
+
+Full rows also include `branch_copies[]`, the configured Hack branches,
+linked Git worktrees and locally recorded branch instances for a
+Compose project. Each entry has `branch`, `branch_name`, `checkout`, `url`,
+`defined_services` and `recorded`. The URL uses the checkout's configuration
+and the same open preference as `hack open`. When Compose can target a
+copy, `compose_project` names that stack. Base copies honor
+`COMPOSE_PROJECT_NAME` from the shell or checkout dotenv. Branch copies
+interpolate their checkout's Compose `name` for the branch prefix independently
+of that base override. Full rows and
+branch entries set `compose_project_unresolved: true` when the effective
+name lookup fails.
+A worktree configured with
+`worktree.auto_branch=false` has a null branch, a base URL, and a `runtime`
+when it owns the base stack. An unaddressable worktree has a null branch and
+URL. Match branch observations by branch and owning checkout, then use
+`runtime_ok` to distinguish a missing runtime from an unavailable observation.
+Container IDs are full Docker IDs. When available, the container's `started_at`
+identifies the observed execution and retains Docker's timestamp precision.
 
 The row also has `open_url` and `open_url_host`, the same for the base
 instance (`hack open` with no branch).

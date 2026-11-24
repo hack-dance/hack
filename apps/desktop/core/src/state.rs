@@ -150,6 +150,14 @@ pub struct LocalContext {
     pub in_flight: Option<Action>,
     /// Failed services from the last `up`/`restart` this app ran.
     pub last_failed: Vec<String>,
+    /// Container executions confirmed stopped by a service action in this session.
+    pub(crate) service_stops: std::collections::BTreeMap<String, ServiceStopEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceStopEvidence {
+    pub started_at: String,
+    pub stopped_at: String,
 }
 
 /// One service row for the Services table.
@@ -166,6 +174,10 @@ pub struct ServiceView {
     /// with none may simply be in an inactive Compose profile.
     pub created: bool,
     pub route: Option<String>,
+    #[serde(skip)]
+    pub compose_container: bool,
+    #[serde(skip)]
+    pub intentionally_stopped: bool,
 }
 
 impl ServiceView {
@@ -175,12 +187,16 @@ impl ServiceView {
     /// services are expected is only known once the CLI reports it (R2).
     #[must_use]
     pub fn is_down(&self) -> bool {
-        self.created && !self.running && !self.completed
+        self.created && !self.running && !self.completed && !self.intentionally_stopped
     }
 }
 
 #[must_use]
 pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
+    services_with_stops(row, &Default::default())
+}
+
+pub(crate) fn services_with_stops(row: &ProjectRow, local: &LocalContext) -> Vec<ServiceView> {
     if let Some(ps) = row.native.as_ref().filter(|_| row.is_native()) {
         let mut out: Vec<ServiceView> = ps
             .items
@@ -193,6 +209,8 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
                 };
                 ServiceView {
                     created: true,
+                    compose_container: false,
+                    intentionally_stopped: false,
                     name: i.service.clone(),
                     running,
                     status,
@@ -226,19 +244,53 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
                 .map(|s| s.containers.as_slice())
                 .unwrap_or_default();
             let running = containers.iter().any(|c| c.is_running());
-            let first = containers.first();
-            let exit_code = first.and_then(|c| c.exit_code());
+            let failed = containers.iter().find(|c| {
+                !explicitly_stopped(c, local)
+                    && !stop_evidence_pending(c, local)
+                    && (c.exit_code().is_some_and(|code| code != 0)
+                        || matches!(c.state.as_str(), "dead" | "restarting"))
+            });
+            let representative = containers
+                .iter()
+                .find(|c| c.is_running())
+                .or(failed)
+                .or_else(|| containers.iter().find(|c| !explicitly_stopped(c, local)))
+                .or_else(|| containers.first());
+            let awaiting_stop_evidence = !running
+                && failed.is_none()
+                && containers.iter().any(|c| stop_evidence_pending(c, local));
+            let exit_code = representative
+                .filter(|_| !awaiting_stop_evidence)
+                .and_then(|c| c.exit_code());
+            let intentionally_stopped = containers.iter().any(|c| explicitly_stopped(c, local))
+                && containers.iter().all(|c| {
+                    explicitly_stopped(c, local)
+                        || (c.state.eq_ignore_ascii_case("exited") && c.exit_code() == Some(0))
+                });
             ServiceView {
-                created: first.is_some(),
+                created: representative.is_some(),
+                compose_container: !row.is_native()
+                    && representative.is_some()
+                    && containers.iter().all(|c| c.is_compose_service_container()),
+                intentionally_stopped,
                 completed: !running
-                    && first.is_some_and(|c| c.state.eq_ignore_ascii_case("exited"))
-                    && exit_code == Some(0),
+                    && !intentionally_stopped
+                    && representative.is_some()
+                    && containers.iter().all(|c| {
+                        c.state.eq_ignore_ascii_case("exited") && c.exit_code() == Some(0)
+                    }),
                 route: row
                     .service_hosts
                     .get(&name)
                     .and_then(|h| h.first().cloned()),
                 running,
-                status: first.map_or_else(|| "not created".into(), |c| c.status.clone()),
+                status: if intentionally_stopped {
+                    "Stopped".into()
+                } else if awaiting_stop_evidence {
+                    "Status unknown".into()
+                } else {
+                    representative.map_or_else(|| "not created".into(), |c| c.status.clone())
+                },
                 exit_code,
                 name,
             }
@@ -247,6 +299,25 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
     // Down services first, then by name.
     out.sort_by(|a, b| b.is_down().cmp(&a.is_down()).then(a.name.cmp(&b.name)));
     out
+}
+
+fn explicitly_stopped(container: &crate::models::Container, local: &LocalContext) -> bool {
+    container.state.eq_ignore_ascii_case("exited")
+        && container
+            .id
+            .as_ref()
+            .and_then(|id| local.service_stops.get(id))
+            .zip(container.started_at.as_ref())
+            .is_some_and(|(receipt, started_at)| started_at == &receipt.started_at)
+}
+
+fn stop_evidence_pending(container: &crate::models::Container, local: &LocalContext) -> bool {
+    container.state.eq_ignore_ascii_case("exited")
+        && container.started_at.is_none()
+        && container
+            .id
+            .as_ref()
+            .is_some_and(|id| local.service_stops.contains_key(id))
 }
 
 #[must_use]
@@ -305,11 +376,11 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         }
     }
 
-    let svcs = services(row);
+    let svcs = services_with_stops(row, local);
     let running: Vec<&ServiceView> = svcs.iter().filter(|s| s.running).collect();
     let mut failed_exit: Vec<String> = svcs
         .iter()
-        .filter(|s| !s.running && s.exit_code.is_some_and(|c| c != 0))
+        .filter(|s| !s.running && !s.intentionally_stopped && s.exit_code.is_some_and(|c| c != 0))
         .map(|s| s.name.clone())
         .collect();
     // Docker's summary counts only `running`. A crash loop or a dead
@@ -317,9 +388,16 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
     let mut uncertain = Vec::new();
     for service in row.runtime.iter().flat_map(|r| &r.services) {
         for c in &service.containers {
+            if stop_evidence_pending(c, local) {
+                uncertain.push(service.service.clone());
+                continue;
+            }
             match c.state.to_ascii_lowercase().as_str() {
                 "restarting" | "dead" => failed_exit.push(service.service.clone()),
-                "exited" if c.exit_code().is_some_and(|code| code != 0) => {
+                "exited"
+                    if !explicitly_stopped(c, local)
+                        && c.exit_code().is_some_and(|code| code != 0) =>
+                {
                     failed_exit.push(service.service.clone())
                 }
                 "running" | "exited" => {}
@@ -332,10 +410,11 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
 
     // The CLI named these as failed: trust that, created or not.
     if !local.last_failed.is_empty()
-        && local
-            .last_failed
-            .iter()
-            .any(|f| !svcs.iter().any(|s| &s.name == f && s.running))
+        && local.last_failed.iter().any(|f| {
+            !svcs
+                .iter()
+                .any(|s| &s.name == f && (s.running || s.intentionally_stopped))
+        })
     {
         return ProjectState::FailedStart {
             services: local.last_failed.clone(),

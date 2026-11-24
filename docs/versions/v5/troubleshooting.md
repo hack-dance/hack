@@ -57,12 +57,19 @@ installed bundle keeps its older behaviour. See the
 | `native setup`: “WARN: Setup found that the image builder in this native home does not match the pinned release …” (`builder: "changed"` in JSON), Doctor's `native image builder` warning with the same words, or native `up`: “BuildKit client prepared tree changed; refusing execution.” (`artifact_digest_mismatch`) | The image builder's files in the native home were changed after setup installed them. Setup still succeeds and never deletes or overwrites them; image builds are refused. | Remove the two paths the warning names, relative to the native home (`.hack-local/providers/buildx-<version>-darwin-arm64` and `.hack-local/providers/buildx.json`), then run `native setup --accept-downloads` with the same launcher. [The image builder](native/setup.md#the-image-builder) |
 | Preflight has blockers or reports `runtime review: skipped` / `unavailable` | The Compose project uses an unsupported field, the wrong backend is selected, or the CLI/runtime pair cannot complete review. | Use the native launcher, fix the reported fields and rerun `doctor --native-preflight`. Check `ready` and the runtime review, not just the exit code. Stay on Compose when the feature is required. [Preflight details](native/preflight.md). |
 | `E_LIFECYCLE_FAILED` | A project hook failed before startup could finish; its own credentials or command may need repair. | Read the hook's message, fix that project dependency, then retry. Do not bypass the hook just to get a green start. |
+| Native-authored project using Compose reports `E_RECOVERY_REQUIRED` with `compose-readiness (probe-timeout)` (HACK-2618) | Compose may have started containers, and Hack could not finish a fresh ownership and readiness check within its budget. The generation is still pending. | Inspect the saved generation with `hack ps --json`. Run `hack down --recover` for the same project and instance to stop its owned resources, then retry startup after the stop is confirmed. |
+| Native-authored Compose startup reports `E_STARTUP_INCOMPLETE` after an initializer exits nonzero (HACK-2618) | Hack verified an owned job with restart disabled that exited unsuccessfully. The generation is still pending. | Inspect the job with `hack ps --json` and `hack logs <job> --compose`. Run `hack down --recover` for the same project and instance before retrying with the job fixed. |
 | Native `up`: `E_RECOVERY_REQUIRED` “This project's last native run has no confirmed shutdown …” (HACK-2456) | A recovery stopped the run with data kept but did not finish its shutdown, usually the shared HTTPS lease after the pool was stopped under a running project; or another start of this instance replaced it. | Run `hack down --recover`. It starts a stopped native runtime when it needs to, finishes the shutdown with data kept, and leaves the runtime running (run `runtime down` to stop it). Then run `hack up`. |
 | next.16 `E_STARTUP_INCOMPLETE` after a fast one-shot service finished | next.16 can misread a service that exits successfully in under a second. | Inspect `ps` and logs. If this is that known case and the services are up, rerun `up --detach`. Fixed in next.17. [Trial record](guides/upgrade-from-v4.md#known-problems-and-the-dogfood-record). |
 
 If native shutdown was interrupted during guest relay removal, repeat the same
 shutdown or recovery command. An empty relay allocation can be removed on retry
 when its recorded slot generation is stopped or discarded and its socket is gone.
+
+When recovery archives a previous-boot shared HTTPS owner, it checks the frontend
+invocation for this Hack home. Other users' processes and different executables
+do not need readable arguments. If a possible owner still has unreadable
+arguments, recovery keeps the retained state and reports `stop_uncertain`.
 
 ## A store whose key is lost
 

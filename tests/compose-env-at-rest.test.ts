@@ -27,6 +27,7 @@ import {
   inspectComposeEnvOverrideAtRest,
   PENDING_ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
   removePlaintextComposeEnvOverride,
+  withComposeEnvOverride,
   writeComposeEnvOverride,
 } from "../src/lib/compose-env-at-rest.ts";
 import {
@@ -147,6 +148,88 @@ test("classifier counts literal values without returning them", () => {
     kind: "unverifiable",
   });
   expect(classifyComposeEnvOverrideText("")).toEqual({ kind: "references" });
+});
+
+test("a Compose operation holds its reference file against another writer", async () => {
+  const first = "services:\n  web:\n    environment:\n      FIRST: ${FIRST}\n";
+  const second =
+    "services:\n  web:\n    environment:\n      SECOND: ${SECOND}\n";
+  const entered = Promise.withResolvers<string>();
+  const release = Promise.withResolvers<void>();
+  const operation = withComposeEnvOverride({
+    projectDir,
+    text: first,
+    run: async (path) => {
+      entered.resolve(path);
+      await release.promise;
+    },
+  });
+  const path = await entered.promise;
+  const writer = writeComposeEnvOverride({ projectDir, text: second });
+  try {
+    expect(
+      await Promise.race([writer, Bun.sleep(10_250).then(() => null)])
+    ).toBeNull();
+    expect(await readFile(path, "utf8")).toBe(first);
+  } finally {
+    release.resolve();
+    await Promise.all([operation, writer]);
+  }
+  expect(await readFile(path, "utf8")).toBe(second);
+}, 30_000);
+
+test("a cancelled Compose waiter cannot enter while its lifecycle cleanup is pending", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const cleanup = Promise.withResolvers<void>();
+  const cleanupStarted = Promise.withResolvers<void>();
+  const owner = withComposeEnvOverride({
+    projectDir,
+    text: "",
+    run: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  await entered.promise;
+  const cancel = new AbortController();
+  let enteredAfterCancel = false;
+  const waiter = withComposeEnvOverride({
+    projectDir,
+    text: "",
+    signal: cancel.signal,
+    run: async () => {
+      enteredAfterCancel = true;
+    },
+  }).catch(async (error: unknown) => {
+    cleanupStarted.resolve();
+    await cleanup.promise;
+    return error;
+  });
+  try {
+    const directory = join(projectDir, ".internal");
+    const deadline = Date.now() + 2000;
+    while (
+      !(await readdir(directory)).some((name) => name.endsWith(".owner"))
+    ) {
+      if (Date.now() >= deadline) {
+        throw new Error("Restart did not queue for the reference lock");
+      }
+      await Bun.sleep(10);
+    }
+    cancel.abort();
+    release.resolve();
+    await owner;
+    await cleanupStarted.promise;
+    expect(enteredAfterCancel).toBe(false);
+  } finally {
+    cancel.abort();
+    release.resolve();
+    cleanup.resolve();
+    await Promise.allSettled([owner, waiter]);
+  }
+  expect(await waiter).toMatchObject({ name: "AbortError" });
+  expect(enteredAfterCancel).toBe(false);
 });
 
 test("writer leaves a value-free 0600 file and tightens an existing loose mode", async () => {

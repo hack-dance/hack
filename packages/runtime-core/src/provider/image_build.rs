@@ -27,9 +27,9 @@
 //!   image, so no context case remains in which the image holds bytes other than the
 //!   keyed ones; a reused image's key misses only what the stat cache can miss (see
 //!   [`context`]). Base images are pinned by digest.
-//! - Every image the Dockerfile can pull (see [`super::build_scan`]) resolves to a digest
-//!   before BuildKit runs and is handed to it as a named build context, so BuildKit pulls
-//!   only those exact manifests. Base images with stored `ONBUILD` triggers refuse.
+//! - Resolve each base to a verified digest and a loaded config ID before output reuse.
+//!   The build key includes those pins. BuildKit sees only attempt-owned local contexts.
+//!   Base images with stored `ONBUILD` triggers refuse.
 //! - The provider lease is held only for short admission and adoption steps, never while
 //!   BuildKit runs. A shared build fence (`run/image-builds/active.lock`), taken under the
 //!   lease and held for the whole operation, makes `runtime down` refuse instead of
@@ -49,8 +49,8 @@
 //!   bounds.
 //! - The client builds from a private copy of the Dockerfile and ignore bytes that were
 //!   scanned and hashed, never from the project paths again.
-//! - Every build runs under [`build_policy::document`] for its pins, a BuildKit source
-//!   policy the client sends with the solve: only the pinned base references resolve as
+//! - Every build runs under [`build_policy::build_document`] for its aliases, a BuildKit source
+//!   policy the client sends with the solve: only the attempt's local base aliases resolve as
 //!   images, and network sources (`ADD` URLs, git, image blobs) are denied, including
 //!   ones a base image's stored `ONBUILD` triggers add.
 //! - Build arguments are not secrets, as with Docker: an image records their values in
@@ -70,7 +70,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::fd::AsRawFd,
@@ -82,10 +82,12 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+pub(super) mod aliases;
 mod client_relay;
 mod context;
 mod output;
 pub mod reclaim;
+pub mod retain;
 #[cfg(test)]
 mod tests;
 
@@ -152,7 +154,7 @@ fn image_id(value: &str) -> bool {
 pub enum Policy {
     /// Reuse a verified image for this build key; build only when it is missing.
     Missing,
-    /// Always build (BuildKit's cache keeps unchanged steps cheap) and re-resolve bases.
+    /// Always run BuildKit. Base selections still use their ordinary freshness policy.
     Rebuild,
 }
 
@@ -180,6 +182,14 @@ pub struct BuildRequest {
     pub policy: Policy,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub image_policy_args: Vec<String>,
+    #[serde(default)]
+    pub image_tag_mode: super::image_policy::ImageTagMode,
+    #[serde(default)]
+    pub command_base_pins: BTreeMap<String, String>,
+    #[serde(default)]
+    pub share_command_base_pins: bool,
 }
 fn default_dockerfile() -> String {
     "Dockerfile".into()
@@ -195,6 +205,11 @@ pub struct BuildOutcome {
     pub reused: bool,
     /// Named build context to the pinned reference it resolved to, for this image.
     pub base_pins: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub base_fallbacks: Vec<super::image_ensure::EnsuredTag>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub base_selections: BTreeMap<String, String>,
+    pub reused_legacy_key: bool,
     /// Build cache bytes the post-build prune reclaimed; `None` when no prune ran or
     /// it failed (the build result stands either way).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,6 +245,8 @@ pub(super) struct Receipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_bytes: Option<u64>,
     base_pins: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    base_image_ids: BTreeSet<String>,
     /// The build declaration this key is a revision of (see [`Inputs::declaration`]).
     /// Receipts from before this field have none and are never reclaimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -256,16 +273,20 @@ pub(super) trait BuildPool {
     type Lease;
     /// Take the provider lease, verify the running pool, its build network and engine.
     fn lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError>;
+    fn try_lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
+        self.lease()
+    }
+    fn observe_build(&self, image: &str) -> Result<(PoolIdentity, Option<Value>), CandidateError> {
+        let (lease, identity) = self.try_lease()?;
+        Ok((identity, self.inspect(&lease, image)?))
+    }
+    fn cleanup_lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
+        self.lease()
+    }
     /// Inspect one image by content ID or tag; `None` when the engine reports it absent.
     fn inspect(&self, lease: &Self::Lease, image: &str) -> Result<Option<Value>, CandidateError>;
-    /// Resolve one base image to its pinned manifest. Network only; no lease is held.
-    /// Returns, with an error, by `deadline` or soon after `canceled` reports true.
-    fn resolve(
-        &self,
-        base: &BaseImage,
-        deadline: Instant,
-        canceled: &dyn Fn() -> bool,
-    ) -> Result<BuildBase, CandidateError>;
+    fn tag_base(&self, lease: &Self::Lease, id: &str, tag: &str) -> Result<(), CandidateError>;
+    fn untag_base(&self, lease: &Self::Lease, tag: &str) -> Result<(), CandidateError>;
     /// The verified builder executable.
     fn builder(&self) -> Result<PathBuf, CandidateError>;
     /// Where the client's filtered output goes.
@@ -300,6 +321,7 @@ pub(super) struct Inputs {
     target: Option<String>,
     args: BTreeMap<String, String>,
     images: Vec<BaseImage>,
+    tag_mode: super::image_policy::ImageTagMode,
     policy: Policy,
     timeout: Duration,
     /// Every included context entry the key walk hashed; a build copies exactly these
@@ -523,12 +545,17 @@ impl IgnoreFiles {
     }
 }
 
-/// Validate the request, resolve paths inside the project without following symlinks,
-/// read and scan the Dockerfile, hash the build context and derive the build key.
-/// Local reads only, apart from the context stat cache under `builds` (the
-/// `run/image-builds` state directory), which is best effort.
-pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, CandidateError> {
-    validate_request(&request)?;
+struct Scanned {
+    root: PathBuf,
+    context: PathBuf,
+    dockerfile: PathBuf,
+    project: context::ProjectRoot,
+    bytes: Vec<u8>,
+    scan: build_scan::DockerfileScan,
+}
+
+fn scan_request(request: &BuildRequest) -> Result<Scanned, CandidateError> {
+    validate_request(request)?;
     let root = fs::canonicalize(&request.project_root).map_err(|_| {
         refusal(
             "native_build_source",
@@ -580,6 +607,37 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
         },
         &|source| private.copy_source(&context, source),
     )?;
+    Ok(Scanned {
+        root,
+        context,
+        dockerfile,
+        project,
+        bytes,
+        scan,
+    })
+}
+
+/// Read only the admitted Dockerfile and list external bases for a forced pull.
+pub fn build_bases(request: &Path) -> Result<Vec<String>, CandidateError> {
+    let request: BuildRequest = state::read_bounded(request, MAX_REQUEST_BYTES)?;
+    Ok(scan_request(&request)?
+        .scan
+        .images
+        .into_iter()
+        .map(|base| base.reference.canonical())
+        .collect())
+}
+
+/// Validate and fingerprint the complete build input without network access.
+pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, CandidateError> {
+    let Scanned {
+        root,
+        context,
+        dockerfile,
+        project,
+        bytes,
+        scan,
+    } = scan_request(&request)?;
     let namespace = namespace(&root, request.branch.as_deref());
     let relative = |path: &Path, base: &Path| -> String {
         path.strip_prefix(base)
@@ -648,6 +706,7 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
         target: request.target,
         args: request.args,
         images: scan.images,
+        tag_mode: request.image_tag_mode,
         policy: request.policy,
         timeout: Duration::from_secs(request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
         recorded: context_digest.recorded,
@@ -715,9 +774,57 @@ impl Drop for Flock {
     }
 }
 
+pub(super) fn image_fence(
+    candidate: &Candidate,
+    mode: libc::c_int,
+) -> Result<impl Drop + use<>, CandidateError> {
+    let root = builds_root(candidate);
+    state::private_directory(&root)?;
+    Flock::try_lock(Flock::open(&root.join("active.lock"))?, mode)?.ok_or_else(|| {
+        refusal(
+            "provider_busy",
+            "Image acquisition or reclamation is in progress; wait for it and retry.",
+        )
+    })
+}
+
+/// Take the shared fence before asking for the provider lease.
+/// A staged background download yields to an admitted foreground operation.
+pub(super) fn check_retention_idle(state_root: &Path) -> Result<(), CandidateError> {
+    let _provider = state::Lock::acquire_existing(&state_root.join("run/smolvm"))?;
+    let fence = Flock::open(&state_root.join("run/image-builds/active.lock"))?;
+    Flock::try_lock(fence, libc::LOCK_EX)?
+        .ok_or_else(|| refusal("provider_busy", "Background image retention deferred."))?;
+    Ok(())
+}
+
+fn idle_retention_fence(candidate: &Candidate) -> Result<Flock, CandidateError> {
+    let root = builds_root(candidate);
+    state::private_directory(&root)?;
+    let lock = Flock::try_lock(Flock::open(&root.join("active.lock"))?, libc::LOCK_EX)?
+        .ok_or_else(|| refusal("provider_busy", "The image fence is in use."))?;
+    // SAFETY: the descriptor remains owned by lock. The provider lease already
+    // excludes mutating work across the flock conversion.
+    if unsafe { libc::flock(lock.0.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
+        return Err(refusal("provider_busy", "The image fence is in use."));
+    }
+    Ok(lock)
+}
+
+pub(super) fn wait_for_image_fence(
+    candidate: &Candidate,
+    policy: &super::image_policy::ImagePolicy,
+) -> Result<impl Drop + use<>, CandidateError> {
+    let limit = Duration::from_secs(60);
+    state::wait_for_image_lock(
+        policy.image_wait(limit)?.min(limit),
+        "image-reclaim",
+        || image_fence(candidate, libc::LOCK_SH),
+    )
+}
+
 /// Refuse to stop the engine while a build operation is admitted. The caller holds the
-/// provider lease: a build takes its shared fence only under that lease, so a build
-/// cannot start between this check and the caller's effect.
+/// provider lease, which prevents further build admission while it stops the engine.
 pub(super) fn require_no_active_build(candidate: &Candidate) -> Result<(), CandidateError> {
     let path = builds_root(candidate).join("active.lock");
     if !path.try_exists().map_err(state::io)? {
@@ -727,7 +834,7 @@ pub(super) fn require_no_active_build(candidate: &Candidate) -> Result<(), Candi
         Some(_probe) => Ok(()),
         None => Err(refusal(
             "provider_busy",
-            "A native image build is running; let it finish or cancel it, then stop the runtime.",
+            "A native image operation is running; let it finish or cancel it, then stop the runtime.",
         )),
     }
 }
@@ -786,17 +893,148 @@ fn owned_image(
     }
 }
 
-/// Run one build operation end to end. See the module documentation for the protocol.
-/// `canceled` reports a pending cancellation request; it is checked before each
-/// unleased step, during base resolution and while the client runs. The time budget
-/// starts here: base resolution and the client share it.
-pub(super) fn run<P: BuildPool>(
+fn reuse_verified(
+    candidate: &Candidate,
+    inputs: &Inputs,
+    path: Option<&Path>,
+    previous: &Receipt,
+    observe: impl FnOnce(&str) -> Result<(PoolIdentity, Option<Value>), CandidateError>,
+) -> Result<Option<BuildOutcome>, CandidateError> {
+    if inputs.policy == Policy::Missing
+        && previous.version == 1
+        && previous.namespace == inputs.namespace
+        && previous.build_key == inputs.key
+        && previous.phase == Phase::ContentIdVerified
+        && previous.checkout == candidate.checkout
+        && let Some(id) = previous.image_id.as_deref().filter(|id| image_id(id))
+    {
+        let (identity, inspected) = observe(id)?;
+        if previous.provider_incarnation != identity.incarnation
+            || previous.engine_id != identity.engine_id
+            || !inspected
+                .is_some_and(|image| owned_image(&image, id, &labels(inputs, &identity)).is_ok())
+        {
+            return Ok(None);
+        }
+        if let Some(path) = path {
+            let mut current = previous.clone();
+            current.provider_boot_id = identity.boot_id.clone();
+            current.declaration = Some(inputs.declaration.clone());
+            current.sequence = path.parent().map(next_sequence);
+            state::write(path, &current)?;
+        }
+        return Ok(Some(reused(inputs, id, &previous.base_pins)));
+    }
+    Ok(None)
+}
+
+fn reuse_receipt<P: BuildPool>(
+    candidate: &Candidate,
+    pool: &P,
+    inputs: &Inputs,
+    expected: Option<&BTreeMap<String, BuildBase>>,
+) -> Result<Option<BuildOutcome>, CandidateError> {
+    if inputs.policy != Policy::Missing {
+        return Ok(None);
+    }
+    let directory = builds_root(candidate).join(&inputs.namespace);
+    let path = directory.join(format!("{}.json", inputs.key));
+    if !path.try_exists().map_err(state::io)? {
+        return Ok(None);
+    }
+    let fence = match image_fence(candidate, libc::LOCK_SH) {
+        Ok(fence) => Some(fence),
+        Err(error) if error.code == "provider_busy" => None,
+        Err(error) => return Err(error),
+    };
+    let _key = if fence.is_some() {
+        let lock = Flock::open(&directory.join(format!("{}.lock", inputs.key)))?;
+        let Some(lock) = Flock::try_lock(lock, libc::LOCK_EX)? else {
+            return Ok(None);
+        };
+        Some(lock)
+    } else {
+        None
+    };
+    let Some(previous) = read_receipt(&path)? else {
+        return Ok(None);
+    };
+    // Exclusive reclaim cannot remove its current or previous build images.
+    // Observe those read-only and leave receipt order unchanged.
+    if fence.is_none()
+        && !previous.image_id.as_ref().is_some_and(|id| {
+            reclaim::current_images(candidate).is_ok_and(|current| current.builds.contains_key(id))
+        })
+    {
+        return Ok(None);
+    }
+    if let Some(expected) = expected
+        && (expected.len() != previous.base_pins.len()
+            || expected
+                .iter()
+                .any(|(name, base)| previous.base_pins.get(name) != Some(&base.pinned_reference)))
+    {
+        return Err(refusal(
+            "native_build_receipt",
+            "A build receipt has unexpected base pins.",
+        ));
+    }
+    if path
+        .with_extension("pending")
+        .try_exists()
+        .map_err(state::io)?
+    {
+        return Ok(None);
+    }
+    reuse_verified(
+        candidate,
+        inputs,
+        fence.is_some().then_some(path.as_path()),
+        &previous,
+        |id| pool.observe_build(id),
+    )
+}
+
+fn reuse_legacy<P: BuildPool>(
+    candidate: &Candidate,
+    pool: &P,
+    inputs: &Inputs,
+) -> Result<Option<BuildOutcome>, CandidateError> {
+    let mut outcome = reuse_receipt(candidate, pool, inputs, None)?;
+    if let Some(reused) = &mut outcome {
+        for base in &inputs.images {
+            let reference = base.reference.canonical();
+            let Some(pin) = reused.base_pins.get(&base.context_name) else {
+                return Ok(None);
+            };
+            let (canonical, _) = registry_image::pinned_syntax(pin)?;
+            let matches = if reference.contains('@') {
+                reference == canonical
+            } else {
+                reference.rsplit_once(':').is_some_and(|(repo, _)| {
+                    canonical
+                        .strip_prefix(repo)
+                        .is_some_and(|suffix| suffix.starts_with('@'))
+                })
+            };
+            if !matches || canonical != *pin {
+                return Ok(None);
+            }
+            reused.base_selections.insert(reference, canonical);
+        }
+        reused.reused_legacy_key = true;
+    }
+    Ok(outcome)
+}
+
+fn run_with_bases<P: BuildPool>(
     candidate: &Candidate,
     pool: &P,
     inputs: &Inputs,
     canceled: &dyn Fn() -> bool,
+    selected: &BTreeMap<String, BuildBase>,
+    deadline: Instant,
 ) -> Result<BuildOutcome, CandidateError> {
-    let deadline = Instant::now() + inputs.timeout;
     let canceled_early = || {
         refusal(
             "native_build_canceled",
@@ -841,6 +1079,7 @@ pub(super) fn run<P: BuildPool>(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(state::io(error)),
     }
+    let alias_path = directory.join(format!("{}.client/base-aliases.json", inputs.key));
     let expected = labels(inputs, &identity);
     let previous = read_receipt(&receipt_path)?;
     if let Some(previous) = &previous {
@@ -853,22 +1092,14 @@ pub(super) fn run<P: BuildPool>(
                 "A build receipt does not match its path; no image was adopted or replaced.",
             ));
         }
-        if inputs.policy == Policy::Missing
-            && previous.phase == Phase::ContentIdVerified
-            && previous.checkout == candidate.checkout
-            && previous.provider_incarnation == identity.incarnation
-            && previous.engine_id == identity.engine_id
-            && let Some(id) = previous.image_id.as_deref().filter(|id| image_id(id))
-            && let Some(inspected) = pool.inspect(&lease, id)?
-            && owned_image(&inspected, id, &expected).is_ok()
+        if let Some(outcome) =
+            reuse_verified(candidate, inputs, Some(&receipt_path), previous, |id| {
+                Ok((identity.clone(), pool.inspect(&lease, id)?))
+            })?
         {
-            // The reused key becomes its declaration's image in use again.
-            let mut current = previous.clone();
-            current.provider_boot_id = identity.boot_id.clone();
-            current.declaration = Some(inputs.declaration.clone());
-            current.sequence = Some(next_sequence(&directory));
-            state::write(&receipt_path, &current)?;
-            return Ok(reused(inputs, id, &previous.base_pins));
+            // Recovery cannot invalidate the verified reuse decision.
+            let _ = aliases::sweep(pool, &lease, &identity, &alias_path);
+            return Ok(outcome);
         }
         if previous.phase == Phase::Building {
             // The key lock proves no live holder: that attempt died mid-build.
@@ -877,39 +1108,17 @@ pub(super) fn run<P: BuildPool>(
             state::write(&receipt_path, &dead)?;
         }
     }
+    aliases::sweep_stranded(&root, pool, &lease, &identity, &alias_path);
+    aliases::sweep(pool, &lease, &identity, &alias_path)?;
     let previous_bytes = previous.as_ref().and_then(|receipt| receipt.image_bytes);
     drop(lease);
     // Snapshots other attempts in this namespace stranded when they were killed.
     remove_stranded_snapshots(&directory);
 
-    // Step 2, unleased: resolve every base image to a pinned manifest.
-    let mut pins = BTreeMap::new();
-    for base in &inputs.images {
-        if canceled() {
-            return Err(canceled_early());
-        }
-        if Instant::now() >= deadline {
-            return Err(expired_early());
-        }
-        let resolved = pool.resolve(base, deadline, canceled).map_err(|error| {
-            if error.code.starts_with("registry_") && error.cause_code.is_some() {
-                error.with_build_base_reference(base.reference.canonical())
-            } else {
-                error
-            }
-        })?;
-        if !image_id(&resolved.source_digest)
-            || !resolved
-                .pinned_reference
-                .ends_with(&format!("@{}", resolved.source_digest))
-        {
-            return Err(refusal(
-                "native_build_base_image",
-                "A build base image did not resolve to a pinned manifest.",
-            ));
-        }
-        pins.insert(base.context_name.clone(), resolved.pinned_reference);
-    }
+    let pins: BTreeMap<_, _> = selected
+        .iter()
+        .map(|(name, base)| (name.clone(), base.pinned_reference.clone()))
+        .collect();
     let builder = pool.builder()?;
     if canceled() {
         return Err(canceled_early());
@@ -955,6 +1164,22 @@ pub(super) fn run<P: BuildPool>(
             "The native runtime's storage disk has too little free space for this build (at least 6 GiB, or twice the last image of this build). Inspect it with `runtime guest-disk-usage` and remove unused images or data; nothing was deleted.",
         ));
     }
+    let mut local = BTreeMap::new();
+    for (name, base) in selected {
+        let present = pool.inspect(&lease, &base.image_id)?.is_some_and(|image| {
+            image["Id"] == base.image_id
+                && image["Os"] == "linux"
+                && image["Architecture"] == "arm64"
+        });
+        if present {
+            local.insert(name.clone(), base.clone());
+        } else if inputs.tag_mode == super::image_policy::ImageTagMode::Offline {
+            return Err(refusal(
+                "image_archive_offline_missing",
+                "The verified build base is not loaded in the guest.",
+            ));
+        }
+    }
     let mut receipt = Receipt {
         version: 1,
         checkout: candidate.checkout.clone(),
@@ -969,11 +1194,19 @@ pub(super) fn run<P: BuildPool>(
         // retry is admitted against it rather than the floor.
         image_bytes: previous_bytes,
         base_pins: pins.clone(),
+        base_image_ids: selected
+            .values()
+            .map(|base| base.image_id.clone())
+            .collect(),
         declaration: Some(inputs.declaration.clone()),
         // Kept from the last verified image of this key until this attempt verifies.
         sequence: previous.as_ref().and_then(|receipt| receipt.sequence),
     };
     state::write(&receipt_path, &receipt)?;
+    let (aliases, local_pins) =
+        aliases::Aliases::prepare(pool, &lease, &identity, alias_path, &local)?;
+    let mut worker_pins = pins.clone();
+    worker_pins.extend(local_pins);
     drop(lease);
 
     // Step 4, unleased: run the client in its own process group.
@@ -996,7 +1229,7 @@ pub(super) fn run<P: BuildPool>(
         inputs,
         &snapshot.context(),
         relay.socket(),
-        &pins,
+        &worker_pins,
         &expected,
     )?;
     inherit_locks(&mut client, &[&fence, &key_lock]);
@@ -1009,6 +1242,7 @@ pub(super) fn run<P: BuildPool>(
     );
     // The client has exited or was stopped; wait for the guest to end its connections.
     relay.finish(client_relay::FINISH_GRACE);
+    drop(aliases);
     let ended = match ended {
         Ok(ended) => ended,
         Err(error) => {
@@ -1107,6 +1341,9 @@ pub(super) fn run<P: BuildPool>(
         tag: inputs.tag(),
         reused: false,
         base_pins: pins,
+        base_fallbacks: Vec::new(),
+        base_selections: BTreeMap::new(),
+        reused_legacy_key: false,
         cache_reclaimed_bytes,
     })
 }
@@ -1133,6 +1370,9 @@ fn reused(inputs: &Inputs, id: &str, pins: &BTreeMap<String, String>) -> BuildOu
         tag: inputs.tag(),
         reused: true,
         base_pins: pins.clone(),
+        base_fallbacks: Vec::new(),
+        base_selections: BTreeMap::new(),
+        reused_legacy_key: false,
         cache_reclaimed_bytes: None,
     }
 }
@@ -1370,12 +1610,13 @@ fn command(
     let encoded = serde_json::to_vec(&bake_definition(inputs, context, &dockerfile, pins, labels))
         .map_err(|_| invalid("Cannot encode the build definition."))?;
     write_private(&definition, &encoded)?;
-    // The policy allows exactly the pinned references the definition names as
+    // The policy allows exactly the private aliases the definition names as
     // contexts, and denies every other image and network source.
     let policy = bake.join(SOURCE_POLICY);
-    let policy_bytes =
-        serde_json::to_vec(&build_policy::document(pins.values().map(String::as_str))?)
-            .map_err(|_| invalid("Cannot encode the build source policy."))?;
+    let policy_bytes = serde_json::to_vec(&build_policy::build_document(
+        pins.values().map(String::as_str),
+    )?)
+    .map_err(|_| invalid("Cannot encode the build source policy."))?;
     write_private(&policy, &policy_bytes)?;
     let mut command = super::process::clean_command(builder);
     command
@@ -1549,15 +1790,29 @@ fn stop_group(child: &mut Child) -> Result<(), CandidateError> {
 /// The live pool: the candidate's running provider and its pinned builder.
 struct LivePool<'a> {
     candidate: &'a Candidate,
+    build_deadline: Option<Instant>,
 }
 
 #[cfg(target_os = "macos")]
-fn connect(candidate: &Candidate) -> Result<super::engine::Engine<'_>, CandidateError> {
-    super::engine::Engine::connect_until(candidate, Instant::now() + LEASE_WAIT, || false)
+fn connect(
+    candidate: &Candidate,
+    deadline: Option<Instant>,
+) -> Result<super::engine::Engine<'_>, CandidateError> {
+    super::engine::Engine::connect_until(
+        candidate,
+        deadline.map_or_else(
+            || Instant::now() + LEASE_WAIT,
+            |deadline| deadline.min(Instant::now() + LEASE_WAIT),
+        ),
+        || deadline.is_some() && CANCEL_REQUESTED.load(Ordering::Acquire),
+    )
 }
 #[cfg(not(target_os = "macos"))]
-fn connect(candidate: &Candidate) -> Result<super::engine::Engine<'_>, CandidateError> {
-    let _ = LEASE_WAIT;
+fn connect(
+    candidate: &Candidate,
+    deadline: Option<Instant>,
+) -> Result<super::engine::Engine<'_>, CandidateError> {
+    let _ = (LEASE_WAIT, deadline);
     super::engine::Engine::connect(candidate)
 }
 
@@ -1610,19 +1865,12 @@ fn verify_build_network(engine: &super::engine::Engine<'_>) -> Result<(), Candid
     Ok(())
 }
 
-impl<'a> BuildPool for LivePool<'a> {
-    type Lease = super::engine::Engine<'a>;
-    fn lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
-        let engine = connect(self.candidate)?;
-        verify_build_network(&engine)?;
+impl<'a> LivePool<'a> {
+    fn identify(
+        engine: super::engine::Engine<'a>,
+    ) -> Result<(super::engine::Engine<'a>, PoolIdentity), CandidateError> {
         let info = engine.request(reqwest::Method::GET, "/v1.53/info", None)?;
-        let engine_id = info["ID"]
-            .as_str()
-            .filter(|id| {
-                !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_graphic())
-            })
-            .ok_or_else(|| refusal("engine_protocol", "The engine reported no usable identity."))?
-            .to_owned();
+        let engine_id = engine_id(&info)?;
         let identity = PoolIdentity {
             incarnation: engine.guest().incarnation().to_owned(),
             boot_id: engine.guest().boot_id().to_owned(),
@@ -1630,6 +1878,48 @@ impl<'a> BuildPool for LivePool<'a> {
             socket: engine.guest().engine_socket()?,
         };
         Ok((engine, identity))
+    }
+}
+
+fn engine_id(info: &Value) -> Result<String, CandidateError> {
+    info["ID"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_graphic()))
+        .map(str::to_owned)
+        .ok_or_else(|| refusal("engine_protocol", "The engine reported no usable identity."))
+}
+impl<'a> BuildPool for LivePool<'a> {
+    type Lease = super::engine::Engine<'a>;
+    fn lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
+        let engine = connect(self.candidate, self.build_deadline)?;
+        verify_build_network(&engine)?;
+        Self::identify(engine)
+    }
+    fn try_lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
+        Self::identify(super::engine::Engine::connect(self.candidate)?)
+    }
+    fn observe_build(&self, image: &str) -> Result<(PoolIdentity, Option<Value>), CandidateError> {
+        let observer = super::engine::Observer::connect(self.candidate)?;
+        observer.info()?;
+        let identity = PoolIdentity {
+            incarnation: observer.guest().incarnation().to_owned(),
+            boot_id: observer.guest().boot_id()?.to_owned(),
+            engine_id: engine_id(&observer.identity_document()?)?,
+            socket: observer.guest().engine_socket()?,
+        };
+        let inspected = match observer.image(image) {
+            Ok(value) => Some(value),
+            Err(error) if error.code == "engine_not_found" => None,
+            Err(error) => return Err(error),
+        };
+        Ok((identity, inspected))
+    }
+    fn cleanup_lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
+        Self {
+            candidate: self.candidate,
+            build_deadline: None,
+        }
+        .lease()
     }
     fn inspect(&self, lease: &Self::Lease, image: &str) -> Result<Option<Value>, CandidateError> {
         match lease.request(
@@ -1642,18 +1932,27 @@ impl<'a> BuildPool for LivePool<'a> {
             Err(error) => Err(error),
         }
     }
-    fn resolve(
+    fn tag_base(
         &self,
-        base: &BaseImage,
-        deadline: Instant,
-        canceled: &dyn Fn() -> bool,
-    ) -> Result<BuildBase, CandidateError> {
-        let reference = base.reference.clone();
-        interruptible(
-            move || registry_image::resolve_build_base(&reference, deadline),
-            deadline,
-            canceled,
-        )
+        lease: &Self::Lease,
+        id: &str,
+        reference: &str,
+    ) -> Result<(), CandidateError> {
+        let (repo, tag) = reference.rsplit_once(':').expect("generated alias");
+        lease.request(
+            reqwest::Method::POST,
+            &format!("/v1.53/images/{id}/tag?repo={repo}&tag={tag}"),
+            None,
+        )?;
+        Ok(())
+    }
+    fn untag_base(&self, lease: &Self::Lease, reference: &str) -> Result<(), CandidateError> {
+        lease.request(
+            reqwest::Method::DELETE,
+            &format!("/v1.53/images/{reference}?force=false&noprune=true"),
+            None,
+        )?;
+        Ok(())
     }
     fn builder(&self) -> Result<PathBuf, CandidateError> {
         artifact::verify_builder(self.candidate)?;
@@ -1711,50 +2010,320 @@ pub(super) fn prune_build_cache(
     })
 }
 
-/// Run a blocking, effect-free network step on its own thread and wait for it until
-/// `deadline` or a cancellation request. An abandoned step ends by its own deadline;
-/// its result is discarded and it changes no local state.
-fn interruptible<T: Send + 'static>(
-    step: impl FnOnce() -> Result<T, CandidateError> + Send + 'static,
-    deadline: Instant,
-    canceled: &dyn Fn() -> bool,
-) -> Result<T, CandidateError> {
-    let (sender, result) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(step());
-    });
-    loop {
-        match result.recv_timeout(POLL) {
-            Ok(outcome) => return outcome,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(refusal(
-                    "native_build_base_image",
-                    "Base-image resolution ended without a result.",
-                ));
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        if canceled() {
-            return Err(refusal(
-                "native_build_canceled",
-                "The image build was canceled before the build client started; no image was adopted.",
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(refusal(
-                "native_build_timeout",
-                "The image build exceeded its time budget before the build client started; no image was adopted.",
-            ));
-        }
+fn key_with_bases(
+    key: &str,
+    selected: &BTreeMap<String, BuildBase>,
+) -> Result<String, CandidateError> {
+    if selected.is_empty() {
+        return Ok(key.into());
     }
+    let pins: BTreeMap<_, _> = selected
+        .iter()
+        .map(|(name, base)| (name, &base.pinned_reference))
+        .collect();
+    serde_json::to_vec(&(key, pins))
+        .map(|encoded| sha256_hex(&encoded))
+        .map_err(|_| invalid("Cannot encode the build key."))
+}
+
+type EnsuredBase = (BuildBase, Option<super::image_ensure::EnsuredTag>);
+
+fn select_build_base(
+    candidate: &Candidate,
+    reference: &str,
+    policy: &super::image_policy::ImagePolicy,
+    observer: Option<&super::engine::Observer<'_>>,
+) -> Result<EnsuredBase, CandidateError> {
+    use super::{
+        image_ensure, image_platform::PlatformPolicy, image_policy::ImageTagMode, image_tag_store,
+    };
+    let platform = PlatformPolicy::Native;
+    let mut tag = if reference.contains('@') {
+        None
+    } else {
+        Some(image_tag_store::resolve(
+            candidate, reference, policy, platform, observer,
+        )?)
+    };
+    let pin = tag.as_ref().map_or(reference, |tag| &tag.pinned_reference);
+    let proof = match image_ensure::recorded_proof(candidate, pin, platform)? {
+        Some(proof) => proof,
+        None if policy.tag_mode != ImageTagMode::Offline && tag.is_none() => {
+            let resolved = registry_image::resolve_pinned(pin, policy, platform)?;
+            image_ensure::publish_proof(candidate, pin, platform, &resolved.proof)?;
+            resolved.proof
+        }
+        None => {
+            return Err(refusal(
+                "image_archive_offline_missing",
+                "The verified base proof is missing.",
+            ));
+        }
+    };
+    let base = proof.verified_build_base(pin, policy.archive_limit)?;
+    let tag = tag
+        .as_mut()
+        .map(|tag| {
+            tag.confirm(|tag| {
+                if tag.image_id != base.image_id {
+                    return Err(refusal(
+                        "native_build_base_image",
+                        "The build base proof differs from the selected image.",
+                    ));
+                }
+                Ok(super::image_ensure::EnsuredTag {
+                    reference: tag.record.reference.clone(),
+                    registry: tag.record.registry.clone(),
+                    source_digest: tag.source_digest.clone(),
+                    resolved_at_unix_seconds: tag.resolved_at_unix_seconds,
+                    source: tag.source,
+                    fallback_reason: tag.fallback_reason.clone(),
+                })
+            })
+        })
+        .transpose()?;
+    Ok((base, tag))
+}
+
+/// Serialize selection only for this reference within the caller's build batch.
+fn share_command_base(
+    batch: &Path,
+    reference: &str,
+    policy: &super::image_policy::ImagePolicy,
+    ensure: impl FnOnce(&str) -> Result<EnsuredBase, CandidateError>,
+) -> Result<EnsuredBase, CandidateError> {
+    if reference.contains('@') {
+        return ensure(reference);
+    }
+    let root = batch.join(sha256_hex(reference.as_bytes()));
+    let _lock = state::wait_for_image_lock(
+        policy.image_wait(Duration::from_secs(60))?,
+        reference,
+        || state::Lock::acquire(&root),
+    )?;
+    let pin = root.join("pin.json");
+    if pin.try_exists().map_err(state::io)? {
+        let selected: String = state::read_bounded(&pin, 1024)?;
+        // Use the immutable reference so a separate command refreshing the tag
+        // cannot redirect this batch after its first selection.
+        let (selected, _) = registry_image::pinned_syntax(&selected)?;
+        let repo = reference
+            .rsplit_once(':')
+            .map_or(reference, |(repo, _)| repo);
+        if !selected
+            .strip_prefix(repo)
+            .is_some_and(|suffix| suffix.starts_with('@'))
+        {
+            return Err(invalid(
+                "The command base pin belongs to another repository.",
+            ));
+        }
+        return ensure(&selected);
+    }
+    let result = ensure(reference)?;
+    state::write(&pin, &result.0.pinned_reference)?;
+    Ok(result)
+}
+
+struct BaseSelections {
+    selected: BTreeMap<String, BuildBase>,
+    fallbacks: Vec<super::image_ensure::EnsuredTag>,
+    selections: BTreeMap<String, String>,
+}
+
+fn acquire_bases(
+    inputs: &Inputs,
+    prior_pins: &BTreeMap<String, String>,
+    mut policy: super::image_policy::ImagePolicy,
+    mut ensure: impl FnMut(
+        &str,
+        &super::image_policy::ImagePolicy,
+    ) -> Result<EnsuredBase, CandidateError>,
+    deadline: Instant,
+) -> Result<BaseSelections, CandidateError> {
+    let mut selected = BTreeMap::new();
+    let mut fallbacks = Vec::new();
+    let mut selections = BTreeMap::new();
+    for base in &inputs.images {
+        if Instant::now() >= deadline {
+            return Err(late_stop(false));
+        }
+        let reference = base.reference.canonical();
+        policy.command_image_pin = prior_pins
+            .get(&reference)
+            .map(|pin| registry_image::pinned_syntax(pin).map(|(canonical, _)| canonical))
+            .transpose()?;
+        let (resolved, tag) = ensure(&reference, &policy)
+            .map_err(|error| error.with_build_base_reference(reference.clone()))?;
+        if let Some(tag) = tag
+            && tag.source == super::image_tag_store::TagSource::Offline
+        {
+            fallbacks.push(tag);
+        }
+        selections.insert(reference, resolved.pinned_reference.clone());
+        selected.insert(base.context_name.clone(), resolved);
+    }
+    Ok(BaseSelections {
+        selected,
+        fallbacks,
+        selections,
+    })
+}
+
+fn base_registry_failed(error: &CandidateError) -> bool {
+    let cause = error.cause_code.as_deref().unwrap_or(error.code);
+    matches!(
+        cause,
+        "registry_http_429"
+            | "registry_unreachable"
+            | "registry_headers_stalled"
+            | "registry_body_stalled"
+    ) || cause
+        .strip_prefix("registry_http_")
+        .and_then(|status| status.parse::<u16>().ok())
+        .is_some_and(|status| (500..600).contains(&status))
+}
+
+fn recover_base_error(
+    error: CandidateError,
+    mode: super::image_policy::ImageTagMode,
+    deadline: Instant,
+    reuse: impl FnOnce() -> Result<Option<BuildOutcome>, CandidateError>,
+) -> Result<BuildOutcome, CandidateError> {
+    use super::image_policy::ImageTagMode::{Normal, Offline, Refresh};
+    let eligible = match mode {
+        Normal => base_registry_failed(&error),
+        Offline => error.code == "image_tag_offline_missing" && error.cause_code.is_none(),
+        Refresh => false,
+    };
+    if eligible
+        && Instant::now() < deadline
+        && let Ok(Some(outcome)) = reuse()
+    {
+        return Ok(outcome);
+    }
+    Err(error)
 }
 
 /// `runtime build-image --request <private-file>`: build or reuse one native image.
 pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome, CandidateError> {
-    let request: BuildRequest = state::read_bounded(request, MAX_REQUEST_BYTES)?;
-    let inputs = prepare(request, &builds_root(candidate))?;
+    let request_path = request;
+    let request: BuildRequest = state::read_bounded(request_path, MAX_REQUEST_BYTES)?;
+    let batch = if request.share_command_base_pins {
+        let parent = request_path
+            .parent()
+            .ok_or_else(|| invalid("Missing build batch directory."))?;
+        crate::reject_aliased_state(parent)?;
+        state::check_private_directory(parent)?;
+        Some(parent.join("base-pins"))
+    } else {
+        None
+    };
+    let flags: Vec<_> = request
+        .image_policy_args
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut policy = super::image_policy::ImagePolicy::from_flags(&flags)?;
+    // Dockerfile admission allows Docker Hub only, even when service images
+    // are allowed to use local registries.
+    policy.local_registries.clear();
+    policy.tag_mode = request.image_tag_mode;
+    let prior_pins = request.command_base_pins.clone();
+    let mut inputs = prepare(request, &builds_root(candidate))?;
+    let deadline = Instant::now() + inputs.timeout;
+    policy.build_deadline = Some(deadline);
+    let pool = LivePool {
+        candidate,
+        build_deadline: Some(deadline),
+    };
+    use super::image_policy::ImageTagMode;
+    let tag_mode = policy.tag_mode;
+    let mut reuse = || -> Result<Option<BuildOutcome>, CandidateError> {
+        if inputs.policy == Policy::Missing && tag_mode != ImageTagMode::Refresh {
+            let mut local = policy.clone();
+            local.tag_mode = ImageTagMode::Offline;
+            if let Ok(bases) = acquire_bases(
+                &inputs,
+                &prior_pins,
+                local,
+                |reference, policy| select_build_base(candidate, reference, policy, None),
+                deadline,
+            ) {
+                let key = key_with_bases(&inputs.key, &bases.selected)?;
+                let original = std::mem::replace(&mut inputs.key, key);
+                let reuse = reuse_receipt(candidate, &pool, &inputs, Some(&bases.selected))?;
+                inputs.key = original;
+                if let Some(mut outcome) = reuse {
+                    outcome.base_selections = bases.selections;
+                    return Ok(Some(outcome));
+                }
+            } else if let Some(outcome) = reuse_legacy(candidate, &pool, &inputs)? {
+                return Ok(Some(outcome));
+            }
+        }
+        Ok(None)
+    };
+    if let Some(outcome) = reuse()? {
+        return Ok(outcome);
+    }
+    let acquisition_fence = match image_fence(candidate, libc::LOCK_SH) {
+        Ok(fence) => Some(fence),
+        Err(error) if error.code == "provider_busy" => None,
+        Err(error) => return Err(error),
+    };
+    let _waited_fence = if acquisition_fence.is_none() {
+        let fence = wait_for_image_fence(candidate, &policy)?;
+        if let Some(outcome) = reuse()? {
+            return Ok(outcome);
+        }
+        Some(fence)
+    } else {
+        None
+    };
+    let observer = super::engine::Observer::connect(candidate)?;
+    let BaseSelections {
+        selected,
+        fallbacks,
+        selections,
+    } = match acquire_bases(
+        &inputs,
+        &prior_pins,
+        policy,
+        |reference, policy| {
+            let ensure = |selected: &str| {
+                if policy.tag_mode == ImageTagMode::Normal {
+                    let mut recorded = policy.clone();
+                    recorded.tag_mode = ImageTagMode::Offline;
+                    if let Ok((base, _)) = select_build_base(candidate, selected, &recorded, None) {
+                        return Ok((base, None));
+                    }
+                }
+                select_build_base(candidate, selected, policy, Some(&observer))
+            };
+            match &batch {
+                Some(batch) => share_command_base(batch, reference, policy, ensure),
+                None => ensure(reference),
+            }
+        },
+        deadline,
+    ) {
+        Ok(bases) => bases,
+        Err(error) => {
+            return recover_base_error(error, tag_mode, deadline, || {
+                reuse_legacy(candidate, &pool, &inputs)
+            });
+        }
+    };
+    // Acquisition keeps the default signal dispositions, like ensure-image.
+    // Exit releases its locks and the next cache writer recovers private
+    // staging. No BuildKit client, temporary base alias or build receipt
+    // exists yet. Install cooperative cancellation before starting BuildKit.
     let _signals = CancelSignals::install()?;
-    run(candidate, &LivePool { candidate }, &inputs, &|| {
-        CANCEL_REQUESTED.load(Ordering::Acquire)
-    })
+    let canceled = || CANCEL_REQUESTED.load(Ordering::Acquire);
+    inputs.key = key_with_bases(&inputs.key, &selected)?;
+    let mut outcome = run_with_bases(candidate, &pool, &inputs, &canceled, &selected, deadline)?;
+    outcome.base_fallbacks = fallbacks;
+    outcome.base_selections = selections;
+    Ok(outcome)
 }

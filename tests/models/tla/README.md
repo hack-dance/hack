@@ -20,8 +20,8 @@ original operation's successful return or runtime effect authority.
 
 The positive exploration exhausts 38 distinct states. Four guard-removal
 controls must fail `NoExistingAdoption`, `OriginalBirthAtCommit`, `NoPendingMatch`
-and `RetirementPreservesData` at their corresponding named action with the exact
-same-state witness. Registry/checker contracts reject incomplete exploration and
+and `RetirementPreservesData` with the exact final-state witness.
+Registry/checker contracts reject incomplete exploration and
 unrelated failures. This model does not prove fsync/crash durability, real guest or
 volume observations, atomic ownership against unsynchronized external writers,
 transport cancellation, SQL contents/retention or NC05 application acceptance.
@@ -517,7 +517,12 @@ quiescent. Atomic renames and durable intent/completion writes are abstractions,
 not fsync proofs. The native implementation is in
 `packages/runtime-core/src/provider/shared_https_recovery.rs`; explicit v3
 frontend selection is in `src/backends/native-project-recovery.ts` and
-`src/backends/native-https-owner.ts`. This model covers the present-socket path
+`src/backends/native-https-owner.ts`. The v1 endpoint has no PID. The macOS
+invocation scan in `provider/identity.rs` excludes foreign users, zombies and
+different executables before reading arguments. Missing identity evidence and
+unreadable arguments of a possible owner both block recovery. The injected
+identity tests cover that boundary, which the eligibility flag abstracts.
+This model covers the present-socket path
 with two moves. The both-absent socket/parent variant has one owner move and
 requires separate concrete absence, process and port regression controls.
 The implementation also refuses completed replay while a newer shared owner is
@@ -671,8 +676,9 @@ notice (traffic drift or a watched listener exit) arms one attempt; attempts are
 single-flight; a refusal before the rebind journal re-arms after a bounded
 backoff; a completed rebind clears it; and a failure after the journal closes
 the schedule. The negative control removes the close guard (`EnforceClose =
-FALSE`) and must fail `NoReplayAfterUnconfirmed` at `Start` with a second attempt
-after an unconfirmed rebind.
+FALSE`) and must fail `NoReplayAfterUnconfirmed` when it starts another attempt
+after an unconfirmed rebind. Earlier attempts may have completed or refused
+before writing a journal.
 
 | Model operation | Source boundary |
 | --- | --- |
@@ -732,7 +738,7 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 | `https` | recovery from any earlier boot with every fault, for a project with HTTPS routes (`Https`) | 608 states; all hold, including `NoArchiveOverListener` |
 | `https-no-retire` | `https` controls: the shared HTTPS owner keeps running after its boot ended | fails in `RecoverRunning` (or `RecoverStopped`): pool running, `https = "live"` bound to the old boot, `fin = TRUE` |
 | `https-archive` | the previous-boot archive cannot prove the owner quiescent | fails with `https = "records"`, `fin = TRUE`, pool running |
-| `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | fails with the pool stopped, `run = "retained"`, `fin = TRUE` |
+| `https-stopped` | `hack down --recover` does not start a stopped pool for a pending finalization | `NoDeadEnd` fails with a stopped pool, a retained run, pending finalization, retired HTTPS records, a free port and no publication. The final step is `TimeWaitEnds`, `ListenerExits`, `RuntimeDown` or `PoolRecover`. |
 | `https-finish-bound` | `https`, but a completed recovery's archive may run only in the boot the recovery ran in (`FinishAnyBoot = FALSE`) | fails once that boot ends with the archive still owed: `https = "records"`, `fin = TRUE`, pool running |
 | `reuse-no-check` | `https`, with the archive's port claim binding with address reuse but of the wildcard alone, without the exact claim of every local address (`ListenerCheck = FALSE`) | `NoArchiveOverListener` fails: the archive runs while another process listens on the port |
 | `idle-restart` | `positive`, plus another project's `up` that stops the running pool to add its share when the pool is idle (`IdleRestart`, HACK-2535) | passes: `NoDeadEnd`, `Recovers` and `NoRestartOverLiveRun` (a run that became live before the stop is never stopped by it) |
@@ -805,7 +811,7 @@ stopped pool as it was recorded.
 | Control | Switches | Result |
 | --- | --- | --- |
 | `positive` | the gone-home release: the path no longer holds the home and the process scan finds no process naming it | 21 states; both invariants hold |
-| `negative` | today: only the clean-stop release from the home's own records | `NoStrandedMapping` fails right after `Delete` (or `Move`) |
+| `negative` | today: only the clean-stop release from the home's own records | `NoStrandedMapping` fails with a held mapping, a deleted, moved or replaced home, and no remaining processes |
 | `path-only` | the gone-home release without the process scan | `NeverReleaseLive` fails: released while a process of the home lives |
 
 | Model action | Implementation boundary |
@@ -833,7 +839,7 @@ with `amd64 = TRUE`, `intent = TRUE`, `config = FALSE`, `registered = FALSE` and
 `engine = TRUE`. Allowing a running pool to gain intent must fail
 `EngineMatchesIntent` in one `RequestRunning` state with `phase = "running"`,
 `intent = TRUE`, `config = FALSE` and `engine = TRUE`. Both controls require TLC
-exit 12, the named action and same-state witness.
+exit 12, the named invariant and final-state witness.
 
 | Model action | Implementation boundary |
 | --- | --- |
@@ -906,35 +912,66 @@ engine scheduling delays.
 ## Stopped retained-pool startup
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground
-Compose startup fails (HACK-1917). The positive control explores 136 states.
-Readiness publishes the run mapping. A failure before readiness lets the graph
-owner's retaining cleanup either complete or be refused; the frontend then makes
-one read-only inspection that authenticates the exact receipt or is refused.
-`NoUnownedResources` requires resources that outlive the frontend under an
-authenticated receipt to have a published mapping; the `negative` control (no
-recording on failure) violates it with an unowned started graph. `NoUnprovenOwner`
-allows only readiness or an authenticated receipt to publish. The
-`refused-inspection` control violates `NoUnrecordedRefusal` to keep the remaining
-gap explicit: when inspection itself is refused, nothing can be authenticated and
-only the runtime journal retains the graph. The model does not cover crashes
-between finalization registration and mapping publication, concurrent starts, or
-the later dead-owner recovery, which other models and runtime tests own.
+Compose startup fails (HACK-1917) and when native `hack up` returns. The positive
+control explores 1720 states; `wait` (`WaitForReady = TRUE`, `hack up --wait`)
+explores 806. The graph reaches `started` (every container started, goals possibly
+unmet) before `ready`. In both modes the run mapping is published at started,
+after the authoritative inspection; only the return moves to ready under `--wait`. A failure before
+that lets the graph owner's retaining cleanup either complete or be refused; the
+frontend then makes one read-only inspection that authenticates the exact receipt
+or is refused. `NoUnownedResources` requires resources that outlive the frontend
+under an authenticated receipt to have a published mapping; the `negative` control
+(no recording on failure) violates it with an unowned started graph.
+`NoUnprovenOwner` allows only the started inspection or an authenticated receipt
+to publish. The `refused-inspection` control violates `NoUnrecordedRefusal` to
+keep the remaining gap explicit: when inspection itself is refused, nothing can be
+authenticated and only the runtime journal retains the graph. The model does not
+cover crashes between finalization registration and mapping publication,
+concurrent starts, or the later dead-owner recovery, which other models and
+runtime tests own.
 
 HACK-1940 extends this same owner model with launcher notification, acceptance,
 owner acknowledgement, return and channel loss. `NoPrematureReturn` requires
-readiness, committed down-hook bookkeeping and acceptance before detached success; `NoLostHandoff` prevents a
-lost pre-acceptance launcher from being handed off later. The
-`detached-before-ready` negative control bypasses both notification gates and returns
-before Ready.
-`Bookkeep` separates graph readiness from successful journal completion and its
-cancellation fence. The `detached-before-bookkeeping` control keeps Ready but
-removes the journal guard, allowing false success while `bookkept = FALSE`.
+started (ready under `--wait`), the saved mapping, committed down-hook bookkeeping
+and acceptance before detached success; `NoReturnWithoutMapping` refuses any
+launcher release before the mapping is saved; `NoLostHandoff` prevents a lost
+pre-acceptance launcher from being handed off later. The `detached-before-started`
+control bypasses the release gates and returns before every container started;
+`detached-before-ready-wait` does the same under `--wait`. The `mapping-after-line`
+control lets `Notify` precede `PublishMapping` (a start killed after its closing
+line would leave no mapping for `down`) and violates `NoReturnWithoutMapping`;
+`mapping-after-line-wait` does the same under `--wait`.
+`Bookkeep` separates the started point from successful journal completion and its
+cancellation fence. The `detached-before-bookkeeping` control keeps the started
+gate but removes the journal guard, allowing false success while `bookkept = FALSE`.
 The delayed, failed and canceled journal regressions in `native-project-start.test.ts`
-map that boundary to `stop.owe` before `onReady`. Source: `native-detached-up.ts`, image onReady after hooks,
-and authored `startupSelection.onReady` after durable publication. The synthetic
+map that boundary to `stop.owe` before the launcher release. The synthetic
 `native-detached-up.test.ts` process fixtures cover post-launcher control,
 pre-acceptance launcher death, timeout and child failure. They do not execute
 real hooks or a VM.
+A `down` between started and ready only queues a stop (`DownRequest`), even
+during a publication; the owner accepts it at its next cancellation check,
+between passes of its start loop (`AcceptStop`), which aborts its wait. The
+frontend cancels separately (`FrontendCancel`, its own `controller.abort()` when
+the stop reaches it or the user interrupts), and only that ends its
+`PublishMapping`, `Bookkeep` and `Notify`. `DownStop` needs both.
+`DownCancelsWait` requires no owner left waiting and no `Ready` after acceptance,
+`StoppedOwnerNotWaiting` requires every stop to go through acceptance,
+`StoppedFrontendCancelled` requires no live frontend after a stop, and
+`DownHooksOnce` requires `down.before` to run once for committed debt. The
+`down-leaves-owner-waiting` control drops the cancel at `AcceptStop`;
+`stop-without-accept` lets a queued stop take effect without the owner's check;
+`stop-before-frontend-cancel` lets the stop finish while the frontend is still
+live and violates `StoppedFrontendCancelled`. One service's publication under the
+lease is a two-step commit (`BeginPublish`, then `CommitPublish` or
+`WithdrawPublish`), and `AcceptStop` waits for it to settle:
+`NoHalfPublicationAfterStop` requires that after a stop no service is published
+but unrecorded or recorded but unpublished. The `stop-mid-publication` control
+lets the owner accept half-way and violates it with a staged, unrecorded route. These are safety invariants,
+not liveness: the runner checks invariants only, and the property is the state
+right after acceptance. See `native-startup-owner/COVERAGE.md` for the source
+mapping (`onStarted`, `onReady`, the detached handshake and `down`) and the
+state chart.
 
 The existing `native-frontend-recovery` model also distinguishes launcher loss
 from retained owner death. `TryLauncherRecovery` abstracts recovery admission:
@@ -984,7 +1021,7 @@ with `attempts = 1`, `bootSelectionMatched = FALSE`, both selected generations
 equal to 1, and `locked = TRUE`. Removing the no-replay guard must fail
 `NoUncertainReplay` in one `Retry` state with `attempts = 2`, `uncertain = TRUE`,
 `bootSelectionMatched = TRUE`, `authority = FALSE` and `locked = TRUE`. Both
-controls require TLC exit 12, the named action and same-state witness; parser
+controls require TLC exit 12, the named invariant and final-state witness. Parser
 errors or other nonzero exits do not qualify.
 
 | Model action | Implementation boundary |
@@ -1307,9 +1344,10 @@ qualification. A passing abstract model does not close those runtime gates.
 
 Runtime contracts in `scripts/lib/tla-runtime-models.ts` require completed positive
 exploration at the stated bound. Negative runs must exit with TLC code 12, name the
-intended invariant, and contain the expected action and violating fields together
-in one state. Parser failures, wrong invariants, split-state evidence and timeouts
-are rejected.
+intended invariant, and contain all required witness fields together in the final
+state of the counterexample. TLC workers can discover the same bad state through
+different transitions, so action labels and source locations are diagnostic.
+Parser failures, wrong invariants, split-state evidence and timeouts are rejected.
 
 ## MCP startup watchdog design
 
@@ -1599,8 +1637,8 @@ its own reviewed source, and a share stays while any graph of that project is li
 or retained.
 
 The positive configuration (three roots, a two-share bound) exhausts **55 distinct
-states**. Four guard-removal controls must fail at the named action with the exact
-same-state witness: `negative` (a graph may select any mounted share) fails
+states**. Four guard-removal controls must fail with the exact final-state
+witness: `negative` (a graph may select any mounted share) fails
 `OwnShareOnly` at `StartGraph`; `unfenced-boot` fails `RunningMountsAudited` at
 `Boot`; `owner-first` fails `OwnerNeverAhead` at `CommitOwner`; and
 `referenced-removal` fails `ReferencedSharesKept` at `CommitRecord`. The controls
@@ -1639,7 +1677,7 @@ storage incarnations. The positive configuration exhausts **6,181 distinct state
 | `StartGraph` / `RemoveContainers` / `Restore` | Graphs use only a verified image of this incarnation and keep a reference to it; data-retaining cleanup removes containers but not the reference; restore never builds. |
 | `Reclaim` / `PruneCache` | Owned, non-current, unreferenced, unused images only, with no build admitted; cache pruning never touches images. |
 
-Three controls each remove one guard and must fail at the named action:
+Three controls each remove one guard and produce a violating state:
 `negative` (reclaim ignores retained references) fails `NoReclaimReferenced` at
 `Reclaim`; `foreign-adoption` (adoption without the label/incarnation check) fails
 `NoForeignAdoption` at `CompleteBuild`; `down-under-build` (down ignores the fence)
@@ -1907,3 +1945,46 @@ Not covered:
 - readiness (healthchecks, their bounds and the end-to-end route probe are in `tests/global-stack-state.test.ts` and `tests/global-readiness.test.ts`);
 - the login path, which only reads the setting and starts routing;
 - a home whose whole logging directory is removed before its first manual start, which then counts as new.
+
+## Native build base aliases
+
+`native-build-alias/BuildAlias.tla` models one loaded base, one attempt and a
+possible restart in a different runtime incarnation. The positive run visits 23
+states. The `old-order` control reaches `blocked`, where every retry sees the
+same missing keeper and refuses. The other controls allow deleting the last tag,
+registry fallback, or sweeping while the child holds the key lock.
+
+| Model action | Code or external step |
+| --- | --- |
+| `Record` | `Aliases::prepare` verifies the keeper and writes the alias journal |
+| `Tag` | `Aliases::prepare` installs the attempt alias after journal publication |
+| `Solve` | `run_with_bases` starts the client with the key lock |
+| `ResolveMissing` | Negative control for a registry request forbidden by the builder source policy |
+| `Finish` | The supervised client exits and the build can publish a verified receipt |
+| `Crash` | The coordinator exits before alias cleanup |
+| `ChildExits` | The surviving client exits and releases its inherited lock |
+| `LoseKeeper` | An external deletion removes the keeper tag and leaves the alias |
+| `RestoreKeeper` | `aliases::sweep` verifies the alias ID and restores its keeper |
+| `Cleanup` | `Aliases::drop` or `aliases::sweep_stranded` untags and removes the journal after the worker releases the key |
+| `Reuse` | `run_with_bases` decides verified reuse before a best-effort alias sweep |
+| `Refuse`, `Retry` | Old sweep runs before reuse and leaves the same journal on every refusal |
+| `ChangeIncarnation` | The guest is replaced after the attempt ends |
+| `DiscardJournal` | `aliases::sweep` discards the journal without using its tags in the replacement guest |
+
+The verified flag abstracts a receipt already available to a retry. The model
+leaves out Docker transport, filesystem durability, and tag identity races
+outside the provider lease. The Rust regressions exercise journal and tag
+recovery, and the classic worker wire count exercises registry isolation.
+
+[Build alias state chart](native-build-alias/build-alias.svg)
+
+## Keeper reclamation
+
+`native-keeper-reclaim/KeeperReclaim.tla` models a superseded base whose keeper
+is its last engine tag. `BeginPin` takes the shared image fence in
+`image_ensure`; `PublishPin` publishes a tag resolution or immutable service ID
+before the shared fence drops. `Reclaim` represents exclusive fence acquisition before taking the provider lease, followed by the
+protected-ID scan and keeper removal. The negative
+control removes the fence guard and can remove the base while pinning. The model
+abstracts failed requests, multiple IDs, graph and build receipts, and Docker's
+last-tag deletion behavior.

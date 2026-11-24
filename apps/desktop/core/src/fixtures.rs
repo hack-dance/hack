@@ -6,9 +6,9 @@
 use std::collections::BTreeMap;
 
 use crate::models::{
-    Autostart, AutostartFailures, BranchRuntime, Container, DaemonApiStatus, DoctorCheck,
-    DoctorReport, InputDiagnostic, LogEntry, ProjectRow, ProjectRuntime, ProjectsPayload,
-    RuntimeService,
+    Autostart, AutostartFailures, BranchCheckout, BranchCopy, BranchRuntime, Container,
+    DaemonApiStatus, DoctorCheck, DoctorReport, InputDiagnostic, LogEntry, ProjectRow,
+    ProjectRuntime, ProjectsPayload, RuntimeService, Worktree,
 };
 use crate::source::{Snapshot, SourceError};
 use crate::state::{Action, LocalContext};
@@ -26,6 +26,7 @@ pub enum Fixture {
     EnvRunning,
     EnvLong,
     EnvEdit,
+    EnvRevealed,
     // List states.
     Loading,
     Empty,
@@ -41,6 +42,7 @@ pub enum Fixture {
     Stopped,
     Starting,
     Running,
+    Remotes,
     Files,
     Degraded,
     Stopping,
@@ -49,6 +51,15 @@ pub enum Fixture {
     /// The selected project's base instance is stopped while two branch
     /// instances (`hack up --branch <name>`) run.
     Branches,
+    GroupedSidebar,
+    CatalogNative,
+    CatalogAll,
+    CatalogEmpty,
+    CatalogPreview,
+    ChangesError,
+    ChangesLoading,
+    ChangesClean,
+    ChangesDirty,
     CopiesEmpty,
     CopiesError,
     CopiesLoading,
@@ -84,7 +95,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 57] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -95,6 +106,7 @@ impl Fixture {
         Self::EnvRunning,
         Self::EnvLong,
         Self::EnvEdit,
+        Self::EnvRevealed,
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -106,12 +118,22 @@ impl Fixture {
         Self::Stopped,
         Self::Starting,
         Self::Running,
+        Self::Remotes,
         Self::Files,
         Self::Degraded,
         Self::Stopping,
         Self::FailedStart,
         Self::NeedsAttention,
         Self::Branches,
+        Self::GroupedSidebar,
+        Self::CatalogNative,
+        Self::CatalogAll,
+        Self::CatalogEmpty,
+        Self::CatalogPreview,
+        Self::ChangesError,
+        Self::ChangesLoading,
+        Self::ChangesClean,
+        Self::ChangesDirty,
         Self::CopiesEmpty,
         Self::CopiesError,
         Self::CopiesLoading,
@@ -146,6 +168,7 @@ impl Fixture {
             Self::EnvRunning => "env-running",
             Self::EnvLong => "env-long",
             Self::EnvEdit => "env-edit",
+            Self::EnvRevealed => "env-revealed",
             Self::Loading => "loading",
             Self::Empty => "empty",
             Self::DaemonDown => "daemon-down",
@@ -157,12 +180,22 @@ impl Fixture {
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Remotes => "remotes",
             Self::Files => "files",
             Self::Degraded => "degraded",
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
             Self::Branches => "branches",
+            Self::GroupedSidebar => "grouped-sidebar",
+            Self::CatalogNative => "catalog-native",
+            Self::CatalogAll => "catalog-all",
+            Self::CatalogEmpty => "catalog-empty",
+            Self::CatalogPreview => "catalog-preview",
+            Self::ChangesError => "changes-error",
+            Self::ChangesLoading => "changes-loading",
+            Self::ChangesClean => "changes-clean",
+            Self::ChangesDirty => "changes-dirty",
             Self::CopiesEmpty => "copies-empty",
             Self::CopiesError => "copies-error",
             Self::CopiesLoading => "copies-loading",
@@ -195,8 +228,6 @@ pub const CLI_VERSION: &str = "5.0.0";
 
 fn container(state: &str, status: &str) -> Container {
     Container {
-        id: None,
-        name: None,
         state: state.into(),
         status: status.into(),
         labels: BTreeMap::new(),
@@ -246,7 +277,6 @@ fn running_branch(branch: &str) -> BranchRuntime {
         name: None,
     });
     BranchRuntime {
-        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
@@ -264,13 +294,13 @@ fn running_branch(branch: &str) -> BranchRuntime {
                 ),
             ],
         },
+        ..BranchRuntime::default()
     }
 }
 
 /// A branch instance whose api exited non-zero.
 fn failed_branch(branch: &str) -> BranchRuntime {
     BranchRuntime {
-        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
@@ -287,6 +317,7 @@ fn failed_branch(branch: &str) -> BranchRuntime {
                 svc("db", container("exited", "Exited (0) 5 minutes ago")),
             ],
         },
+        ..BranchRuntime::default()
     }
 }
 
@@ -304,7 +335,6 @@ fn subdomain_branch(branch: &str) -> BranchRuntime {
         )
     };
     BranchRuntime {
-        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
@@ -315,6 +345,7 @@ fn subdomain_branch(branch: &str) -> BranchRuntime {
                 routed_at("temporal-server"),
             ],
         },
+        ..BranchRuntime::default()
     }
 }
 
@@ -490,6 +521,23 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             }];
             r
         }
+        Fixture::CatalogNative => {
+            let mut row = storefront(vec![], "stopped");
+            row.backend = Some("native".into());
+            row
+        }
+        Fixture::Remotes => {
+            let mut row = storefront(all_up(), "running");
+            row.remotes = serde_json::from_str(r#"[
+              {"service":"redis","target":"unknown","state":"declared","probe":"not checked",
+               "address":null},
+              {"service":"database","target":"staging","state":"declared","probe":"not checked",
+               "address":{"kind":"env_ref","name":"STAGING_DB_HOST","port":5432}},
+              {"service":"search","target":"preview","state":"tunnel not started by this version",
+               "probe":"not checked","address":{"kind":"hostname","hostname":"search.example.invalid","port":443}}
+            ]"#).expect("remote descriptors fixture");
+            row
+        }
         Fixture::Branches => {
             let mut r = storefront(vec![], "stopped");
             r.branch_runtime = owned(vec![
@@ -503,10 +551,47 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             }];
             r
         }
+        Fixture::GroupedSidebar => {
+            let mut r = storefront(vec![], "stopped");
+            let root = "/work/storefront/.worktrees/feature-search";
+            let mut feature = running_branch("feature-search");
+            feature.runtime.working_dir = Some(format!("{root}/.hack"));
+            feature
+                .runtime
+                .services
+                .push(svc("worker", container("exited", "Exited (0) an hour ago")));
+            r.worktrees = vec![
+                Worktree {
+                    path: Some(root.into()),
+                    branch: Some("feature-search".into()),
+                },
+                Worktree {
+                    path: Some(STOREFRONT_WORKTREE.into()),
+                    branch: Some("fix-login".into()),
+                },
+            ];
+            r.branch_runtime = owned(vec![feature, failed_branch("fix-login")]);
+            r.branch_copies = vec![BranchCopy {
+                branch: Some("release-2".into()),
+                branch_name: "release-2".into(),
+                checkout: BranchCheckout {
+                    root: "/work/storefront".into(),
+                    kind: "primary".into(),
+                },
+                url: Some("https://release-2.storefront.hack".into()),
+                defined_services: vec!["deploy".into()],
+                ..BranchCopy::default()
+            }];
+            r.runtime_status = Some("stopped".into());
+            r
+        }
         _ => storefront(all_up(), "running"),
     };
     let mut projects = vec![main];
     projects.extend(others());
+    if f == Fixture::GroupedSidebar {
+        projects.push(simple("example-sync", "stopped", "compose", false));
+    }
     if f == Fixture::NeedsAttention {
         // Unrelated: a second way to need attention.
         projects[3].input_diagnostic = Some(InputDiagnostic {
@@ -530,6 +615,7 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         generated_at: Some("2026-01-01T09:00:00Z".into()),
         detail_level: None,
         runtime_ok: Some(f != Fixture::EngineDown),
+        runtime_checked_at: None,
         runtime_error: (f == Fixture::EngineDown)
             .then(|| "Cannot connect to the Docker daemon".into()),
         projects,
@@ -549,11 +635,11 @@ pub fn local(f: Fixture) -> LocalContext {
     match f {
         Fixture::Starting => LocalContext {
             in_flight: Some(Action::Start),
-            last_failed: vec![],
+            ..LocalContext::default()
         },
         Fixture::Stopping => LocalContext {
             in_flight: Some(Action::Stop),
-            last_failed: vec![],
+            ..LocalContext::default()
         },
         _ => LocalContext::default(),
     }
@@ -728,7 +814,9 @@ pub fn service_usage(_f: Fixture) -> Result<crate::usage::UsageReport, String> {
             {"composeProject": "storefront", "service": "db", "containers": 1, "cpuPercent": 1.4, "memUsedBytes": 388 * MIB, "memLimitBytes": null},
             {"composeProject": "storefront", "service": "web", "containers": 1, "cpuPercent": 0.6, "memUsedBytes": 96 * MIB, "memLimitBytes": null},
             {"composeProject": "storefront", "service": "worker", "containers": 1, "cpuPercent": 87.5, "memUsedBytes": 640 * MIB, "memLimitBytes": null},
-            {"composeProject": "storefront--feature-search", "service": "api", "containers": 1, "cpuPercent": 2.0, "memUsedBytes": 180 * MIB, "memLimitBytes": null}
+            {"composeProject": "storefront--feature-search", "service": "api", "containers": 1, "cpuPercent": 2.0, "memUsedBytes": 180 * MIB, "memLimitBytes": null},
+            {"composeProject": "storefront--feature-search", "service": "web", "containers": 1, "cpuPercent": 0.4, "memUsedBytes": 96 * MIB, "memLimitBytes": null},
+            {"composeProject": "storefront--feature-search", "service": "db", "containers": 1, "cpuPercent": 0.9, "memUsedBytes": 212 * MIB, "memLimitBytes": null}
         ]
     }))
 }

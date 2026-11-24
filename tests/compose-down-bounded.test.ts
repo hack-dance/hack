@@ -901,7 +901,7 @@ describe("compose down leftover-cleanup retry outcome (HACK-2547)", () => {
         Labels: `com.docker.compose.project.working_dir=${canonicalProjectDir}`,
       })}\n`,
       psJsonAfterRm: "[]\n",
-      networks: ["retry-stall_default"],
+      networks: ["hack_default"],
     });
 
     // Shorten only the 2nd composeRuntimeBackend.down call's capMs while still
@@ -945,10 +945,10 @@ describe("compose down leftover-cleanup retry outcome (HACK-2547)", () => {
       timedOut: true,
       capMs: DEFAULT_COMPOSE_DOWN_CAP_MS,
       containers: [],
-      networks: ["retry-stall_default"],
+      networks: ["hack_default"],
     });
     expect(parsed.error.message).toContain("90s cap");
-    expect(parsed.error.message).toContain("retry-stall_default");
+    expect(parsed.error.message).toContain("hack_default");
     expect(parsed.error.message).toContain("hack ps --json");
     expect(parsed.error.message).toContain("hack down");
     expect(parsed.error.message).toContain("--timeout <seconds>");
@@ -964,7 +964,7 @@ describe("compose down leftover-cleanup retry outcome (HACK-2547)", () => {
       "network",
       "ls",
       "--filter",
-      "label=com.docker.compose.project=retry-stall",
+      "label=com.docker.compose.project=hack",
       "--format",
       "{{.Name}}",
     ]);
@@ -980,7 +980,7 @@ describe("compose down leftover-cleanup retry outcome (HACK-2547)", () => {
     expect(textRun.exitCode).toBe(124);
     const textOutput = `${textRun.stdout}\n${textRun.stderr}`;
     expect(textOutput).toContain("90s cap");
-    expect(textOutput).toContain("retry-stall_default");
+    expect(textOutput).toContain("hack_default");
     expect(textOutput).toContain("hack ps --json");
     expect(textOutput).toContain("hack down");
   }, 60_000);

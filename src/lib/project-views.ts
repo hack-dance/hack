@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { YAML } from "bun";
@@ -14,6 +15,7 @@ import {
   type BranchInstanceCheckout,
   type BranchInstanceIdentity,
   type CheckoutOpenSettings,
+  checkoutContext,
   configBranchServiceHosts,
   listNativeBranchRecords,
   listRegistrationCheckouts,
@@ -24,6 +26,12 @@ import {
   resolvePrimaryOpenUrl,
   runtimeServiceHosts,
 } from "./branch-instance-identity.ts";
+import { readBranchUsage } from "./branch-usage.ts";
+import { autoWorktreeBranch, readBranchesFile } from "./branches.ts";
+import {
+  COMPOSE_PROJECT_NAME_TIMEOUT_MS,
+  resolveDesktopComposeProjectName,
+} from "./compose-project-name.ts";
 import {
   type ComposeServiceActivation,
   composeServiceActivation,
@@ -34,13 +42,20 @@ import { composeServiceReadiness } from "./compose-service-readiness.ts";
 export { serializeProjectAutostart } from "./autostart-view.ts";
 
 import { pathExists, readTextFile } from "./fs.ts";
+import {
+  type GitWorktreeListEntry,
+  listGitWorktrees,
+  resolveGitRepositoryIdentity,
+} from "./git-worktree.ts";
 import { isRecord } from "./guards.ts";
+import { withProcessDeadline } from "./process-deadline.ts";
 import {
   type ProjectConfig,
   type ProjectLifecycleCommand,
   type ProjectLifecycleProcess,
   type ProjectOwnershipConfig,
   readProjectConfig,
+  resolveWorktreeAutoBranch,
 } from "./project.ts";
 import {
   assertLegacyProjectInputFamily,
@@ -74,6 +89,9 @@ const NATIVE_OBSERVATION_CONCURRENCY = 4;
 export type BranchRuntime = {
   readonly branch: string;
   readonly runtime: RuntimeProject;
+  readonly composeProject?: string;
+  readonly composeProjectUnresolved?: boolean;
+  readonly checkoutVerified?: boolean;
   /** Explicit identity (R20); absent for unregistered projects. */
   readonly identity?: BranchInstanceIdentity;
 };
@@ -83,6 +101,18 @@ export type NativeBranchRuntime = {
   readonly branch: string;
   readonly store: NativeBranchRecord["store"];
   readonly identity: BranchInstanceIdentity;
+};
+
+type BranchCopy = {
+  readonly branch: string | null;
+  readonly name: string;
+  readonly checkout: BranchInstanceCheckout;
+  readonly url: string | null;
+  readonly definedServices: readonly string[];
+  readonly recorded: boolean;
+  readonly composeProject: string | null;
+  readonly composeProjectUnresolved?: boolean;
+  readonly runtime?: RuntimeProject;
 };
 
 export type MuxSession = {
@@ -151,6 +181,9 @@ export type ProjectView = {
   };
   readonly runtime: RuntimeProject | null;
   readonly branchRuntime: readonly BranchRuntime[];
+  readonly branchCopies?: readonly BranchCopy[];
+  readonly composeProject?: string;
+  readonly composeProjectUnresolved?: boolean;
   /** Native branch instances with a saved run mapping (R19). */
   readonly nativeBranchRuntime?: readonly NativeBranchRuntime[];
   /** The URL `hack open` opens with no target and no branch (R20). */
@@ -193,25 +226,19 @@ type BuildProjectViewsOptions = {
 export async function buildProjectViews(
   opts: BuildProjectViewsOptions
 ): Promise<ProjectView[]> {
-  const byName = new Map(
-    opts.registryProjects.map((p) => [p.name, p] as const)
-  );
   const runtimeByName = new Map(
     opts.runtime.map((p) => [p.project, p] as const)
   );
-  const runtimeByProjectDir = new Map<string, RuntimeProject>();
+  const runtimeByProjectDir = new Map<string, RuntimeProject[]>();
   for (const runtimeProject of opts.runtime) {
     if (!runtimeProject.workingDir) {
       continue;
     }
-    runtimeByProjectDir.set(
-      canonicalPath(runtimeProject.workingDir),
-      runtimeProject
-    );
+    const dir = canonicalPath(runtimeProject.workingDir);
+    const runtimes = runtimeByProjectDir.get(dir) ?? [];
+    runtimes.push(runtimeProject);
+    runtimeByProjectDir.set(dir, runtimes);
   }
-  const registeredProjectDirs = new Set(
-    opts.registryProjects.map((project) => canonicalPath(project.projectDir))
-  );
 
   if (opts.filter) {
     selectRegisteredProjectByName({
@@ -225,21 +252,47 @@ export async function buildProjectViews(
   }
   if (opts.includeUnregistered) {
     for (const runtimeProject of opts.runtime) {
-      const hasRegisteredName = byName.has(runtimeProject.project);
-      const runtimeProjectDir = runtimeProject.workingDir
-        ? canonicalPath(runtimeProject.workingDir)
-        : null;
-      const hasRegisteredProjectDir = runtimeProjectDir
-        ? registeredProjectDirs.has(runtimeProjectDir)
-        : false;
-      if (hasRegisteredName || hasRegisteredProjectDir) {
-        continue;
-      }
       names.add(runtimeProject.project);
     }
   }
   const muxSessions = opts.muxSessions ?? (await listMuxSessions());
 
+  // The desktop daemon request has a 3-second budget. Share one smaller
+  // Git deadline across projects so a slow checkout cannot starve the list.
+  const gitDeadline = performance.now() + 800;
+  const catalogs = new Map<string, CheckoutCatalog>();
+  const checkoutOwners = new Map<string, string>();
+  // A checkout registered directly takes precedence over a linked checkout
+  // recorded by another registration.
+  for (const registration of opts.registryProjects) {
+    checkoutOwners.set(canonicalPath(registration.repoRoot), registration.name);
+    checkoutOwners.set(
+      canonicalPath(registration.projectDir),
+      registration.name
+    );
+  }
+  for (const registration of opts.registryProjects) {
+    const catalog = await describeCheckoutCatalog({
+      registration,
+      deadline: gitDeadline,
+    });
+    catalogs.set(registration.name, catalog);
+    indexLinkedCheckoutOwners({ catalog, checkoutOwners, current: true });
+  }
+  for (const catalog of catalogs.values()) {
+    indexLinkedCheckoutOwners({ catalog, checkoutOwners, current: false });
+  }
+  const runtimeOwners = new Map(
+    opts.runtime.map((runtime) => [
+      runtime,
+      runtime.workingDir
+        ? checkoutOwners.get(canonicalPath(runtime.workingDir))
+        : undefined,
+    ])
+  );
+  // Interpolated names use local Compose config. Share a budget across the
+  // entire snapshot, independently of the Git discovery budget.
+  const composeDeadline = Date.now() + COMPOSE_PROJECT_NAME_TIMEOUT_MS;
   const out: ProjectView[] = [];
   for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
     if (
@@ -249,22 +302,22 @@ export async function buildProjectViews(
       continue;
     }
 
-    const reg = byName.get(name) ?? null;
-    const runtime = reg
-      ? resolveRegisteredRuntime({
-          registration: reg,
-          runtimeByProjectDir,
-          runtimeByName,
-        })
-      : (runtimeByName.get(name) ?? null);
-
-    if (reg) {
+    const catalog = catalogs.get(name);
+    if (catalog) {
       out.push(
         await buildRegisteredProjectView({
           name,
-          registration: reg,
-          runtime,
-          allRuntime: opts.runtime,
+          catalog,
+          composeDeadline,
+          runtimeInProjectDir:
+            runtimeByProjectDir.get(
+              canonicalPath(catalog.registration.projectDir)
+            ) ?? [],
+          runtimeByName,
+          allRuntime: opts.runtime.filter((runtime) => {
+            const owner = runtimeOwners.get(runtime);
+            return owner === undefined || owner === name;
+          }),
           runtimeOk: opts.runtimeOk,
           muxSessions,
         })
@@ -276,24 +329,40 @@ export async function buildProjectViews(
       out.push(
         buildUnregisteredProjectView({
           name,
-          runtime,
+          runtime: runtimeByName.get(name) ?? null,
           runtimeOk: opts.runtimeOk,
         })
       );
     }
   }
 
+  const nestedRuntimeNames = new Set(
+    out.flatMap((view) => [
+      ...(view.kind === "registered" && view.runtime
+        ? [view.runtime.project]
+        : []),
+      ...view.branchRuntime.flatMap((entry) =>
+        entry.identity?.checkout ? [entry.runtime.project] : []
+      ),
+      ...(view.branchCopies ?? []).flatMap((copy) =>
+        copy.runtime ? [copy.runtime.project] : []
+      ),
+    ])
+  );
+  const visible = out.filter(
+    (view) => view.kind === "registered" || !nestedRuntimeNames.has(view.name)
+  );
   const nativeSelected = process.env.HACK_RUNTIME_BACKEND?.trim() === "native";
   const observed: ProjectView[] = [];
   // Native status reads own subprocesses; keep registry size from becoming fan-out.
   for (
     let offset = 0;
-    offset < out.length;
+    offset < visible.length;
     offset += NATIVE_OBSERVATION_CONCURRENCY
   ) {
     observed.push(
       ...(await Promise.all(
-        out
+        visible
           .slice(offset, offset + NATIVE_OBSERVATION_CONCURRENCY)
           .map(async (view) => {
             const base = projectObservation({
@@ -315,29 +384,49 @@ export async function buildProjectViews(
 
 function resolveRegisteredRuntime(opts: {
   readonly registration: RegisteredProject;
-  readonly runtimeByProjectDir: ReadonlyMap<string, RuntimeProject>;
+  readonly baseName: string | null;
+  readonly runtimeInProjectDir: readonly RuntimeProject[];
   readonly runtimeByName: ReadonlyMap<string, RuntimeProject>;
 }): RuntimeProject | null {
-  const runtimeByDir = opts.runtimeByProjectDir.get(
-    canonicalPath(opts.registration.projectDir)
-  );
-  if (runtimeByDir) {
-    return runtimeByDir;
+  for (const name of new Set([opts.baseName, opts.registration.name])) {
+    if (name === null) {
+      continue;
+    }
+    const runtime = opts.runtimeByName.get(name);
+    if (
+      runtime &&
+      (!runtime.workingDir ||
+        resolveOwningCheckout({
+          registration: opts.registration,
+          workingDir: runtime.workingDir,
+        })?.kind === "primary")
+    ) {
+      return runtime;
+    }
   }
-  return opts.runtimeByName.get(opts.registration.name) ?? null;
+  // Keep the legacy directory match for old Compose names. A branch instance
+  // can start in the same directory and must never become the base row.
+  const legacy = opts.runtimeInProjectDir.filter(
+    (runtime) => !runtime.project.includes("--")
+  );
+  return legacy.length === 1 ? (legacy[0] ?? null) : null;
 }
 
 async function buildRegisteredProjectView(opts: {
   readonly name: string;
-  readonly registration: RegisteredProject;
-  readonly runtime: RuntimeProject | null;
+  readonly catalog: CheckoutCatalog;
+  readonly composeDeadline: number;
+  readonly runtimeInProjectDir: readonly RuntimeProject[];
+  readonly runtimeByName: ReadonlyMap<string, RuntimeProject>;
   readonly allRuntime: readonly RuntimeProject[];
   readonly runtimeOk: boolean;
   readonly muxSessions: readonly MuxSession[];
 }): Promise<ProjectView> {
+  const { catalog } = opts;
+  const registration = catalog.original;
   try {
     await assertLegacyProjectInputFamily({
-      projectRoot: opts.registration.repoRoot,
+      projectRoot: registration.repoRoot,
     });
   } catch (error: unknown) {
     if (!(error instanceof ProjectInputSelectionError)) {
@@ -345,30 +434,47 @@ async function buildRegisteredProjectView(opts: {
     }
     return buildUnavailableProjectView({
       name: opts.name,
-      registration: opts.registration,
+      registration,
       error,
       nativeBranchRuntime:
         error.code === "E_NATIVE_PROJECT_UNSUPPORTED"
           ? await describeAuthoredNativeBranchInstances({
-              registration: opts.registration,
+              registration,
             })
           : [],
     });
   }
-  const projectDirOk = await pathExists(opts.registration.projectDir);
+  const { projectDirOk } = catalog;
   const composeFile = resolve(
-    opts.registration.projectDir,
+    registration.projectDir,
     PROJECT_COMPOSE_FILENAME
   );
   const composeExists = projectDirOk && (await pathExists(composeFile));
   const composeDefinition = composeExists
     ? await readComposeServices({ composeFile })
     : null;
+  const config = projectDirOk
+    ? await readRegisteredProjectConfig({ registration })
+    : null;
+  const resolveComposeName: typeof resolveDesktopComposeProjectName = (input) =>
+    withProcessDeadline(opts.composeDeadline, () =>
+      resolveDesktopComposeProjectName(input)
+    );
+  const composeNameInput = {
+    project: { composeFile, projectRoot: registration.repoRoot },
+    cfg: config ?? undefined,
+    composeName: composeDefinition?.name ?? null,
+  };
+  const [baseName, branchBaseName] = await Promise.all([
+    resolveComposeName(composeNameInput),
+    resolveComposeName({ ...composeNameInput, forBranch: true }),
+  ]);
+  const runtime = resolveRegisteredRuntime({ ...opts, registration, baseName });
   const definedServices = composeDefinition?.names ?? null;
   const serviceHosts = composeExists
     ? await readComposeServiceHosts({ composeFile })
     : null;
-  const running = countRunningServices(opts.runtime);
+  const running = countRunningServices(runtime);
   const runtimeConfigured = composeExists;
   const runtimeStatus: ProjectRuntimeStatus = resolveRuntimeStatus({
     projectDirOk,
@@ -381,27 +487,56 @@ async function buildRegisteredProjectView(opts: {
     runtimeOk: opts.runtimeOk,
     running,
   });
+  const checkoutNames = new Map([
+    [
+      composeNameCacheKey(registration.projectDir, false),
+      Promise.resolve(baseName),
+    ],
+    [
+      composeNameCacheKey(registration.projectDir, true),
+      Promise.resolve(branchBaseName),
+    ],
+  ]);
+  const checkoutComposeName: CheckoutComposeName = ({
+    project,
+    cfg,
+    composeName,
+    forBranch,
+  }) => {
+    const key = composeNameCacheKey(project.projectDir, forBranch);
+    let name = checkoutNames.get(key);
+    if (!name) {
+      name = resolveCheckoutName({
+        project,
+        cfg,
+        composeName,
+        forBranch,
+        resolveComposeName,
+      });
+      checkoutNames.set(key, name);
+    }
+    return name;
+  };
   const branchIdentity = await describeBranchInstances({
-    registration: opts.registration,
-    branchRuntime: collectBranchRuntime({
-      baseName: opts.name,
+    ...catalog,
+    checkoutComposeName,
+    allRuntime: opts.allRuntime,
+    branchRuntime: await collectBranchRuntime({
+      ...catalog,
+      baseName: branchBaseName,
+      primaryRuntime: runtime,
+      checkoutComposeName,
       runtimeProjects: opts.allRuntime,
     }),
-    projectDirOk,
   });
   const sessions = collectProjectSessions({
     projectName: opts.name,
-    repoRoot: opts.registration.repoRoot,
+    repoRoot: registration.repoRoot,
     muxSessions: opts.muxSessions,
   });
   const extensions = projectDirOk
     ? await resolveProjectExtensions({
-        projectDir: opts.registration.projectDir,
-      })
-    : null;
-  const config = projectDirOk
-    ? await readRegisteredProjectConfig({
-        registration: opts.registration,
+        projectDir: registration.projectDir,
       })
     : null;
   const lifecycle = resolveProjectLifecycleView({ config });
@@ -414,12 +549,12 @@ async function buildRegisteredProjectView(opts: {
   );
 
   return {
-    projectId: opts.registration.id,
-    autostart: opts.registration.autostart,
+    projectId: registration.id,
+    autostart: registration.autostart,
     name: opts.name,
-    devHost: opts.registration.devHost ?? null,
-    repoRoot: opts.registration.repoRoot,
-    projectDir: opts.registration.projectDir,
+    devHost: registration.devHost ?? null,
+    repoRoot: registration.repoRoot,
+    projectDir: registration.projectDir,
     ownership: config && !config.parseError ? config.ownership : null,
     ...(remotes.length > 0 ? { remotes } : {}),
     definedServices,
@@ -430,13 +565,16 @@ async function buildRegisteredProjectView(opts: {
     serviceHosts,
     runtimeConfigured,
     runtimeStatus,
-    runtime: opts.runtime,
+    runtime,
+    composeProject: baseName ?? undefined,
+    composeProjectUnresolved: baseName === null,
     branchRuntime: branchIdentity.branchRuntime,
+    branchCopies: branchIdentity.branchCopies,
     nativeBranchRuntime: branchIdentity.nativeBranchRuntime,
     openUrl: branchIdentity.openUrl,
     sessions,
     lifecycle,
-    worktrees: opts.registration.worktrees ?? null,
+    worktrees: registration.worktrees ?? null,
     kind: "registered",
     status,
   };
@@ -449,16 +587,22 @@ async function buildRegisteredProjectView(opts: {
  * most the registered checkout plus its worktrees), one small
  * `branch-usage.json` read per instance, and for native instances two
  * directory listings per checkout plus one small JSON read per saved run
- * mapping. No process is spawned and Docker is not contacted, so the read
- * stays proportional to files, not to native status calls.
+ * mapping. Automatic copies share one Git worktree read per repository.
+ * Resolving an interpolated name can invoke local Compose config, without
+ * contacting the Docker engine.
  */
 async function describeBranchInstances(opts: {
   readonly registration: RegisteredProject;
+  readonly gitWorktrees: readonly GitWorktreeListEntry[] | null;
+  readonly verifiedRoots: ReadonlySet<string>;
+  readonly allRuntime: readonly RuntimeProject[];
   readonly branchRuntime: readonly BranchRuntime[];
+  readonly checkoutComposeName: CheckoutComposeName;
   /** Without its project dir a checkout has no settings `hack open` could use. */
   readonly projectDirOk: boolean;
 }): Promise<{
   readonly branchRuntime: readonly BranchRuntime[];
+  readonly branchCopies: readonly BranchCopy[];
   readonly nativeBranchRuntime: readonly NativeBranchRuntime[];
   readonly openUrl: ProjectView["openUrl"];
 }> {
@@ -492,7 +636,8 @@ async function describeBranchInstances(opts: {
     }
     return pending;
   };
-  const primary = listRegistrationCheckouts(opts.registration)[0];
+  const checkouts = listRegistrationCheckouts(opts.registration);
+  const primary = checkouts[0];
   const primarySettings =
     primary && opts.projectDirOk ? await settingsFor(primary) : null;
 
@@ -501,18 +646,21 @@ async function describeBranchInstances(opts: {
     readonly checkout: BranchInstanceCheckout | null;
     readonly runtime: RuntimeProject | null;
   }): Promise<BranchInstanceIdentity> => {
-    // A known owner whose project dir is gone has no settings `hack open`
-    // could use there; only an unknown owner falls back to the registered
-    // checkout.
-    let settings: CheckoutOpenSettings | null = primarySettings;
+    const canReadConfig =
+      !input.checkout ||
+      (input.runtime === null && opts.gitWorktrees === null) ||
+      isCurrentCheckout(input.checkout, opts.verifiedRoots);
+    // Compose reads without an owner can report observed Caddy routes only.
+    let settings = input.runtime === null ? primarySettings : null;
     if (input.checkout) {
-      settings = (await pathExists(input.checkout.projectDir))
-        ? await settingsFor(input.checkout)
-        : null;
+      settings =
+        canReadConfig && (await pathExists(input.checkout.projectDir))
+          ? await settingsFor(input.checkout)
+          : null;
     }
     const named = await resolveBranchInstanceName({
       registration: opts.registration,
-      checkout: input.checkout,
+      checkout: canReadConfig ? input.checkout : null,
       slug: input.slug,
     });
     const open = settings
@@ -566,7 +714,10 @@ async function describeBranchInstances(opts: {
   // checkout does not hide a worktree's instances (an absent store is empty).
   const nativeBranchRuntime: NativeBranchRuntime[] = [];
   const seen = new Set<string>();
-  for (const checkout of listRegistrationCheckouts(opts.registration)) {
+  for (const checkout of checkouts) {
+    if (opts.gitWorktrees && !isCurrentCheckout(checkout, opts.verifiedRoots)) {
+      continue;
+    }
     for (const record of await listNativeBranchRecords({
       checkout,
       store: "runtime",
@@ -588,13 +739,360 @@ async function describeBranchInstances(opts: {
     }
   }
 
+  const branchCopies = await describeBranchCopies({
+    registration: opts.registration,
+    checkouts,
+    settingsFor,
+    checkoutComposeName: opts.checkoutComposeName,
+    runtime: opts.allRuntime,
+    gitWorktrees: opts.gitWorktrees,
+    verifiedRoots: opts.verifiedRoots,
+  });
+  const linkedBaseRuntimes = new Set(branchCopies.map((copy) => copy.runtime));
   return {
-    branchRuntime,
+    branchRuntime: branchRuntime.filter(
+      (entry) => !linkedBaseRuntimes.has(entry.runtime)
+    ),
+    branchCopies,
     nativeBranchRuntime,
     openUrl: primarySettings
       ? resolvePrimaryOpenUrl({ settings: primarySettings, branch: null })
       : null,
   };
+}
+
+type CheckoutCatalog = {
+  readonly original: RegisteredProject;
+  readonly registration: RegisteredProject;
+  readonly projectDirOk: boolean;
+  readonly gitWorktrees: readonly GitWorktreeListEntry[] | null;
+  readonly verifiedRoots: ReadonlySet<string>;
+};
+
+type CheckoutComposeName = (opts: {
+  readonly project: ReturnType<typeof checkoutContext>;
+  readonly cfg?: ProjectConfig;
+  readonly composeName?: string | null;
+  readonly forBranch: boolean;
+}) => Promise<string | null>;
+
+function composeNameCacheKey(path: string, forBranch: boolean): string {
+  return `${canonicalPath(path)}\0${forBranch}`;
+}
+
+async function resolveCheckoutName(
+  opts: Parameters<CheckoutComposeName>[0] & {
+    readonly resolveComposeName: typeof resolveDesktopComposeProjectName;
+  }
+): Promise<string | null> {
+  const cfg = opts.cfg ?? (await readableCheckoutConfig(opts.project));
+  return cfg ? await opts.resolveComposeName({ ...opts, cfg }) : null;
+}
+
+function indexLinkedCheckoutOwners(opts: {
+  readonly catalog: CheckoutCatalog;
+  readonly checkoutOwners: Map<string, string>;
+  readonly current: boolean;
+}): void {
+  const { registration, verifiedRoots } = opts.catalog;
+  for (const checkout of listRegistrationCheckouts(registration).slice(1)) {
+    if (isCurrentCheckout(checkout, verifiedRoots) !== opts.current) {
+      continue;
+    }
+    for (const path of [checkout.root, checkout.projectDir]) {
+      const key = canonicalPath(path);
+      if (!opts.checkoutOwners.has(key)) {
+        opts.checkoutOwners.set(key, registration.name);
+      }
+    }
+  }
+}
+
+/** Extend only this observation's checkout catalog. The registry payload stays as saved. */
+async function describeCheckoutCatalog(opts: {
+  readonly registration: RegisteredProject;
+  readonly deadline: number;
+}): Promise<CheckoutCatalog> {
+  const { registration } = opts;
+  const projectDirOk = await pathExists(registration.projectDir);
+  const timeoutMs = remainingGitTime(opts.deadline);
+  const gitWorktrees =
+    projectDirOk && timeoutMs > 0
+      ? await listGitWorktrees({ repoRoot: registration.repoRoot, timeoutMs })
+      : null;
+  const primary = canonicalPath(registration.repoRoot);
+  if (!gitWorktrees?.some((entry) => canonicalPath(entry.path) === primary)) {
+    return {
+      original: registration,
+      registration,
+      projectDirOk,
+      gitWorktrees: null,
+      verifiedRoots: new Set(),
+    };
+  }
+  const linked = gitWorktrees.slice(1);
+  const verifiedRoots = await verifyLinkedCheckoutRoots(
+    registration.repoRoot,
+    linked,
+    opts.deadline
+  );
+  const registered = registration.worktrees ?? [];
+  const paths = new Set([
+    primary,
+    ...registered.map((entry) => canonicalPath(entry.path)),
+  ]);
+  const discovered = linked
+    .filter((entry) => {
+      const path = canonicalPath(entry.path);
+      return verifiedRoots.has(path) && !paths.has(path);
+    })
+    .map((entry) => ({
+      path: entry.path,
+      branch: entry.branch,
+      lastSeenAt: registration.createdAt,
+    }));
+  return {
+    original: registration,
+    registration: {
+      ...registration,
+      worktrees: [...registered, ...discovered],
+    },
+    projectDirOk,
+    gitWorktrees,
+    verifiedRoots,
+  };
+}
+
+function remainingGitTime(deadline: number): number {
+  return Math.max(0, Math.floor(deadline - performance.now()));
+}
+
+async function verifyLinkedCheckoutRoots(
+  repoRoot: string,
+  linked: readonly GitWorktreeListEntry[],
+  deadline: number
+): Promise<ReadonlySet<string>> {
+  const roots = new Set<string>();
+  const timeoutMs = remainingGitTime(deadline);
+  if (linked.length === 0 || timeoutMs === 0) {
+    return roots;
+  }
+  const family = await resolveGitRepositoryIdentity({ repoRoot, timeoutMs });
+  if (!family) {
+    return roots;
+  }
+  for (
+    let offset = 0;
+    offset < linked.length && remainingGitTime(deadline) > 0;
+    offset += 4
+  ) {
+    await Promise.all(
+      linked.slice(offset, offset + 4).map(async (entry) => {
+        const metadata = await lstat(resolve(entry.path, ".git")).catch(
+          () => null
+        );
+        if (!metadata?.isFile()) {
+          return;
+        }
+        const remaining = remainingGitTime(deadline);
+        if (remaining === 0) {
+          return;
+        }
+        const identity = await resolveGitRepositoryIdentity({
+          repoRoot: entry.path,
+          timeoutMs: remaining,
+        });
+        if (identity === family) {
+          roots.add(canonicalPath(entry.path));
+        }
+      })
+    );
+  }
+  return roots;
+}
+
+/** Configured and previously used instances, independent of container observation. */
+async function describeBranchCopies(opts: {
+  readonly registration: RegisteredProject;
+  readonly checkouts: readonly BranchInstanceCheckout[];
+  readonly gitWorktrees: readonly GitWorktreeListEntry[] | null;
+  readonly verifiedRoots: ReadonlySet<string>;
+  readonly runtime: readonly RuntimeProject[];
+  readonly checkoutComposeName: CheckoutComposeName;
+  readonly settingsFor: (
+    checkout: BranchInstanceCheckout
+  ) => Promise<CheckoutOpenSettings | null>;
+}): Promise<readonly BranchCopy[]> {
+  const worktrees = opts.registration.worktrees ?? [];
+  const gitWorktrees = opts.gitWorktrees;
+  const linked = new Map(
+    gitWorktrees?.slice(1).map((entry) => [canonicalPath(entry.path), entry])
+  );
+  const copies = await Promise.all(
+    opts.checkouts.map(async (checkout) => {
+      if (!isCurrentCheckout(checkout, opts.verifiedRoots)) {
+        const remembered = worktrees.find(
+          (entry) => entry.path === checkout.root
+        );
+        return [
+          {
+            branch: null,
+            name:
+              remembered?.branch ??
+              checkout.root.split("/").at(-1) ??
+              "worktree",
+            checkout,
+            definedServices: [],
+            recorded: false,
+            composeProject: null,
+            url: null,
+          },
+        ];
+      }
+      const exists = await pathExists(checkout.projectDir);
+      const project = checkoutContext({ ...opts, checkout });
+      const config = exists ? await readableCheckoutConfig(project) : null;
+      const [settings, usage] = exists
+        ? await Promise.all([
+            opts.settingsFor(checkout),
+            readBranchUsage({ projectDir: checkout.projectDir }).catch(
+              () => new Map()
+            ),
+          ])
+        : ([null, new Map()] as const);
+      const branches = new Map<string | null, string>(
+        [...usage].map(([slug, entry]) => [slug, entry.name ?? slug])
+      );
+      await addConfiguredBranches({
+        checkout,
+        worktrees,
+        gitWorktrees,
+        linked,
+        config,
+        exists,
+        branches,
+      });
+      const compose =
+        branches.size > 0 && config
+          ? await readComposeServices({
+              composeFile: project.composeFile,
+            }).catch(() => null)
+          : null;
+      const nameFor = (forBranch: boolean) =>
+        compose && config
+          ? opts.checkoutComposeName({
+              project,
+              cfg: config,
+              composeName: compose.name,
+              forBranch,
+            })
+          : Promise.resolve(null);
+      // A linked checkout can explicitly use its own base instance.
+      const worktreeUsesBase =
+        checkout.kind === "worktree" &&
+        linked.has(canonicalPath(checkout.root)) &&
+        config !== null &&
+        !resolveWorktreeAutoBranch(config);
+      const worktreeBase = worktreeUsesBase ? await nameFor(false) : null;
+      const branchBase = [...branches.keys()].some((branch) => branch !== null)
+        ? await nameFor(true)
+        : null;
+      const baseRuntime = worktreeBase
+        ? opts.runtime.find(
+            (row) =>
+              row.project === worktreeBase &&
+              row.workingDir !== null &&
+              canonicalPath(row.workingDir) ===
+                canonicalPath(checkout.projectDir)
+          )
+        : undefined;
+      return [...branches].map(([branch, name]) => ({
+        branch,
+        name,
+        checkout,
+        definedServices: compose?.names ?? [],
+        recorded: branch !== null && usage.has(branch),
+        composeProject:
+          branch === null
+            ? worktreeBase
+            : composeBranchName(branchBase, branch),
+        composeProjectUnresolved:
+          compose !== null &&
+          (branch === null
+            ? worktreeUsesBase && worktreeBase === null
+            : branchBase === null),
+        ...(branch === null && baseRuntime ? { runtime: baseRuntime } : {}),
+        url:
+          settings && (branch || worktreeUsesBase)
+            ? (resolvePrimaryOpenUrl({ settings, branch })?.url ?? null)
+            : null,
+      }));
+    })
+  );
+  return copies.flat();
+}
+
+function isCurrentCheckout(
+  checkout: BranchInstanceCheckout,
+  verifiedRoots: ReadonlySet<string>
+): boolean {
+  return (
+    checkout.kind === "primary" ||
+    verifiedRoots.has(canonicalPath(checkout.root))
+  );
+}
+
+function composeBranchName(base: string | null, branch: string): string | null {
+  return base ? `${base}--${branch}` : null;
+}
+
+async function addConfiguredBranches(opts: {
+  readonly checkout: BranchInstanceCheckout;
+  readonly worktrees: readonly RegisteredProjectWorktree[];
+  readonly gitWorktrees: readonly GitWorktreeListEntry[] | null;
+  readonly linked: ReadonlyMap<string, GitWorktreeListEntry>;
+  readonly config: ProjectConfig | null;
+  readonly exists: boolean;
+  readonly branches: Map<string | null, string>;
+}): Promise<void> {
+  if (opts.checkout.kind === "worktree") {
+    const current = opts.linked.get(canonicalPath(opts.checkout.root));
+    const registeredBranch = opts.gitWorktrees
+      ? null
+      : opts.worktrees.find((entry) => entry.path === opts.checkout.root)
+          ?.branch;
+    const gitBranch = current?.branch;
+    const automatic =
+      gitBranch && opts.config && resolveWorktreeAutoBranch(opts.config)
+        ? autoWorktreeBranch(gitBranch, opts.gitWorktrees)
+        : null;
+    opts.branches.set(
+      automatic,
+      current?.branch ??
+        registeredBranch ??
+        opts.checkout.root.split("/").at(-1) ??
+        "worktree"
+    );
+  }
+  if (opts.checkout.kind === "primary" && opts.exists) {
+    const configured = await readBranchesFile({
+      projectDir: opts.checkout.projectDir,
+    }).catch(() => null);
+    for (const branch of configured?.file.branches ?? []) {
+      opts.branches.set(branch.slug, branch.name);
+    }
+  }
+}
+
+async function readableCheckoutConfig(
+  project: ReturnType<typeof checkoutContext>
+): Promise<ProjectConfig | null> {
+  try {
+    return await readProjectConfig(project);
+  } catch {
+    // A native, conflicting or unreadable checkout cannot supply a Compose target.
+    return null;
+  }
 }
 
 /**
@@ -727,6 +1225,7 @@ export function serializeProjectSummary(
   const runtimes = [
     view.runtime,
     ...view.branchRuntime.map((branch) => branch.runtime),
+    ...(view.branchCopies ?? []).map((copy) => copy.runtime ?? null),
   ].filter((runtime): runtime is RuntimeProject => runtime !== null);
   const containers = runtimes.flatMap((runtime) =>
     [...runtime.services.values()].flatMap((service) => service.containers)
@@ -800,11 +1299,43 @@ export function serializeProjectView(
     runtime_status: view.runtimeStatus,
     ...(view.inputDiagnostic ? { input_diagnostic: view.inputDiagnostic } : {}),
     runtime: view.runtime ? serializeRuntimeProject(view.runtime) : null,
+    compose_project: view.composeProject ?? null,
+    ...(view.composeProjectUnresolved
+      ? { compose_project_unresolved: true }
+      : {}),
     branch_runtime: view.branchRuntime.map((entry) => ({
       branch: entry.branch,
       runtime: serializeRuntimeProject(entry.runtime),
       backend: "compose",
+      ...(entry.composeProject
+        ? { compose_project: entry.composeProject }
+        : {}),
+      ...(entry.composeProjectUnresolved
+        ? { compose_project_unresolved: true }
+        : {}),
+      checkout_verified: entry.checkoutVerified,
       ...serializeBranchInstanceIdentity(entry.identity),
+    })),
+    branch_copies: (view.branchCopies ?? []).map((entry) => ({
+      branch: entry.branch,
+      branch_name: entry.name,
+      checkout: {
+        root: entry.checkout.root,
+        project_dir: entry.checkout.projectDir,
+        kind: entry.checkout.kind,
+      },
+      url: entry.url,
+      defined_services: entry.definedServices,
+      recorded: entry.recorded,
+      ...(entry.composeProject
+        ? { compose_project: entry.composeProject }
+        : {}),
+      ...(entry.composeProjectUnresolved
+        ? { compose_project_unresolved: true }
+        : {}),
+      ...(entry.runtime
+        ? { runtime: serializeRuntimeProject(entry.runtime) }
+        : {}),
     })),
     native_branch_runtime: (view.nativeBranchRuntime ?? []).map((entry) => ({
       branch: entry.branch,
@@ -973,21 +1504,54 @@ function resolveLifecycleCommandService(opts: {
   return `hook-${opts.index + 1}`;
 }
 
-function collectBranchRuntime(opts: {
-  readonly baseName: string;
+async function collectBranchRuntime(opts: {
+  readonly registration: RegisteredProject;
+  readonly verifiedRoots: ReadonlySet<string>;
+  readonly baseName: string | null;
+  readonly primaryRuntime: RuntimeProject | null;
   readonly runtimeProjects: readonly RuntimeProject[];
-}): readonly BranchRuntime[] {
-  const prefix = `${opts.baseName}--`;
+  readonly checkoutComposeName: CheckoutComposeName;
+}): Promise<readonly BranchRuntime[]> {
   const out: BranchRuntime[] = [];
   for (const runtime of opts.runtimeProjects) {
-    if (!runtime.project.startsWith(prefix)) {
+    if (runtime === opts.primaryRuntime || !runtime.project.includes("--")) {
       continue;
     }
-    const branch = runtime.project.slice(prefix.length);
-    if (branch.length === 0) {
-      continue;
+    const checkout = resolveOwningCheckout({
+      registration: opts.registration,
+      workingDir: runtime.workingDir,
+    });
+    let baseName = opts.baseName;
+    const checkoutVerified = checkout
+      ? isCurrentCheckout(checkout, opts.verifiedRoots)
+      : false;
+    if (checkout?.kind === "worktree" && checkoutVerified) {
+      const project = checkoutContext({ ...opts, checkout });
+      baseName = await opts.checkoutComposeName({ project, forBranch: true });
     }
-    out.push({ branch, runtime });
+    // The registered slug is the legacy match for observations without a
+    // checkout. Configured Compose names can be shared by unrelated projects.
+    const matchBase = checkout ? (baseName ?? opts.baseName) : null;
+    const legacyPrefix = `${opts.registration.name}--`;
+    const matchedPrefix = (
+      matchBase ? [`${matchBase}--`, legacyPrefix] : [legacyPrefix]
+    )
+      .sort((a, b) => b.length - a.length)
+      .find((candidate) => runtime.project.startsWith(candidate));
+    if (matchedPrefix && runtime.project !== baseName) {
+      const branch = runtime.project.slice(matchedPrefix.length);
+      if (branch) {
+        out.push({
+          branch,
+          runtime,
+          checkoutVerified,
+          composeProjectUnresolved: checkoutVerified && baseName === null,
+          ...(checkoutVerified && baseName
+            ? { composeProject: `${baseName}--${branch}` }
+            : {}),
+        });
+      }
+    }
   }
   return out;
 }
@@ -1184,6 +1748,7 @@ function parseTmuxSessionFields(
 async function readComposeServices(opts: {
   readonly composeFile: string;
 }): Promise<{
+  name: string | null;
   names: readonly string[];
   readiness: Readonly<Record<string, ServiceReadiness>>;
   activation: ComposeServiceActivation;
@@ -1205,6 +1770,7 @@ async function readComposeServices(opts: {
 
   const servicesRaw = parsed.services;
   return {
+    name: typeof parsed.name === "string" ? parsed.name : null,
     names: isRecord(servicesRaw)
       ? Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b))
       : [],

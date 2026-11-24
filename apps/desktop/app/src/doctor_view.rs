@@ -567,9 +567,6 @@ fn groups(
         .gap(space::S6);
     if let Some(project) = &app.doctor.filter {
         body = body.child(
-    if let Some(report) = view.native_pool.filter(|_| app.doctor.filter.is_none()) {
-        body = body.child(native_pool_card(report, ui));
-    }
             div()
                 .flex()
                 .items_center()
@@ -600,6 +597,9 @@ fn groups(
                 .text_color(p.states.degraded.fg)
                 .child(coverage),
         );
+    }
+    if let Some(report) = view.native_pool.filter(|_| app.doctor.filter.is_none()) {
+        body = body.child(native_pool_card(report, ui));
     }
     for (title, rows) in [("Machine", &machine), ("Projects", &projects)] {
         if rows.is_empty() {

@@ -76,23 +76,60 @@ helper containers by name before exiting.
 
 ## How it copies
 
-Each volume is mounted read-only at `/v` in the helper image the storage
-witness already pins (`oven/bun@sha256:1846adf2…`), with `--rm`,
-`--network none`, a read-only root filesystem and `no-new-privileges`. Docker
-pulls that digest once if it is not cached. Two helper runs read each volume:
+Each owned volume is held by one helper container for its whole copy. Hack
+creates it from the image the storage witness already pins
+(`oven/bun@sha256:1846adf2…`) with a unique name
+(`hack-data-export-<random>`), `--network none`, `--log-driver none` (the raw
+tar crosses the container's attached output, and a daemon's central logging
+driver must never receive volume bytes), a read-only root filesystem,
+`no-new-privileges` and the volume mounted read-only at `/v`, running `sleep
+infinity`. Docker pulls the image digest once if it is not cached.
 
-1. `tar --numeric-owner -cpf - -C /v .` streams the tree to `<key>.tar`. The host
-   computes the tar's sha256 while writing it. Numeric owners, modes, symlinks
-   and hard links are kept; times are kept by tar but are not part of the
-   digest. Extended attributes and ACLs are not copied.
-2. A Bun script computes the tree digest `hack.tree-digest.v1`. Every entry
-   (the root as `.`, then each path relative to the root, as raw bytes) is
-   sorted bytewise. For each entry, seven fields are hashed, each followed by
-   one NUL byte: path, type (`f` `d` `l` `c` `b` `p`), permission bits in
-   octal, uid, gid, size (regular files, otherwise 0) and content (a regular
-   file's sha256, a symlink's target, a device's rdev, otherwise empty). The
-   digest is the sha256 of that stream. A restore runs the same script on the
-   restored volume and compares.
+Once the container holds the mount, Hack inspects the volume again and
+requires the identity it validated before: the same `CreatedAt`, driver,
+mountpoint, options and Compose labels, and the container's own mount must
+name that volume. A volume that was removed, replaced or relabeled in
+between refuses with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`)
+and is not read. Docker creates a volume that is missing when a container
+mounts it, so a volume removed in that gap may be left recreated, empty and
+unlabelled.
+
+Every read then runs in that container through `docker exec`, so all of them
+use the same mount:
+
+1. The tree digest of the source.
+2. `tar --numeric-owner -cpf - -C /v .`, streamed to `<key>.tar`. The host
+   computes the tar's sha256 while writing it.
+3. The tree digest of the source again. If it differs from the first, the
+   volume changed during the copy and the export refuses
+   (`detail.reason: source_changed`).
+
+Finally the container is force-removed and Hack confirms with Docker that it
+is gone, on every path, success or failure.
+
+The tree digest is `hack.tree-digest.v1`, computed by a Bun script in the
+helper. Every entry (the root as `.`, then each path relative to the root, as
+raw bytes) is sorted bytewise. For each entry, seven fields are hashed, each
+followed by one NUL byte: path, type (`f` `d` `l` `c` `b` `p`), permission
+bits in octal, uid, gid, size (regular files, otherwise 0) and content (a
+regular file's sha256, a symlink's target, a device's rdev, otherwise
+empty). The digest is the sha256 of that stream. A restore runs the same
+script on the restored volume and compares.
+
+## Deadlines
+
+Every Docker call is bounded. Metadata calls (the Compose model, inspect,
+`ps`, `create`, `start`, `rm`) default to two minutes,
+`HACK_DATA_COMMAND_TIMEOUT_MS`. Each whole-volume step (a digest, the tar, the
+archive check, an extract) defaults to four hours, about 1 TiB at 75 MiB/s,
+`HACK_DATA_STEP_TIMEOUT_MS`; raise it for larger or slower volumes. Both take
+milliseconds; a value outside the accepted range refuses before anything
+runs. A step past its bound is stopped and refuses with
+`E_DOCKER_UNAVAILABLE` (`detail.reason: step_timeout`). On a timeout, a full
+disk or any other failure the helper container is removed; if Docker cannot
+confirm the removal, the outcome says so (`detail.cleanup: {container,
+removed: false}` and the `docker rm -f` command to run) instead of claiming
+cleanup, and nothing is published.
 
 Unix sockets are not copied. GNU tar skips them (`socket ignored`), so the
 digest leaves them out too and the manifest counts them per volume as

@@ -34,14 +34,24 @@ if (args[0] === "events") {
 } else if (args[0] === "compose") {
   out({ name: "shop", services: {}, volumes: { db: { name: "shop_db" } } });
 } else if (args[0] === "volume" && args[1] === "inspect") {
-  out({ name: "shop_db", driver: "local", labels: { "com.docker.compose.project": "shop", "com.docker.compose.volume": "db" } });
+  out({ name: "shop_db", createdAt: "2026-11-24T00:00:00Z", driver: "local", mountpoint: "/var/lib/docker/volumes/shop_db/_data", options: null, labels: { "com.docker.compose.project": "shop", "com.docker.compose.volume": "db" } });
 } else if (args[0] === "ps") {
   out("");
-} else if (args[0] === "run") {
-  const name = args[args.indexOf("--name") + 1];
+} else if (args[0] === "run" || args[0] === "start") {
+  const name = args[0] === "run" ? args[args.indexOf("--name") + 1] : args.at(-1);
   appendFileSync(feed, JSON.stringify({ Type: "container", Action: "start", Actor: { ID: name, Attributes: { name } } }) + "\\n");
+} else if (args[0] === "create") {
+  out("c".repeat(64));
+} else if (args[0] === "container" && args.includes("{{json .Mounts}}")) {
+  out([{ Type: "volume", Name: "shop_db", Source: "/var/lib/docker/volumes/shop_db/_data", Destination: "/v", RW: false }]);
+} else if (args[0] === "container") {
+  process.stderr.write("Error: No such container: " + args.at(-1) + "\\n");
+  process.exit(1);
+} else if (args[0] === "rm") {
+  out(args.at(-1));
+} else if (args[0] === "exec") {
   if (args.includes("tar")) out("tar bytes");
-  else if (args.includes("bun")) out({ algorithm: "hack.tree-digest.v1", entries: 2, excludedSockets: 0, digest: "a".repeat(64) });
+  else out({ algorithm: "hack.tree-digest.v1", entries: 2, excludedSockets: 0, digest: "a".repeat(64) });
 } else {
   process.exit(97);
 }
@@ -83,20 +93,27 @@ test("a managed DOCKER_HOST reaches every docker argv of an export", async () =>
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as { args: string[]; host: string });
-  const kinds = calls.map((call) =>
-    call.args[0] === "run"
-      ? `run ${call.args[call.args.indexOf("--entrypoint") + 1]}`
-      : call.args.slice(0, call.args[0] === "volume" ? 2 : 1).join(" ")
-  );
+  const kinds = calls.map((call) => {
+    if (call.args[0] === "exec") {
+      return `exec ${call.args[2]}`;
+    }
+    return call.args
+      .slice(0, ["volume", "container"].includes(call.args[0] ?? "") ? 2 : 1)
+      .join(" ");
+  });
   expect(new Set(kinds)).toEqual(
     new Set([
       "compose",
       "volume inspect",
       "ps",
       "events",
-      "run true",
-      "run tar",
-      "run bun",
+      "run",
+      "create",
+      "start",
+      "container inspect",
+      "exec bun",
+      "exec tar",
+      "rm",
     ])
   );
   expect(calls.filter((call) => call.host !== MANAGED_HOST)).toEqual([]);

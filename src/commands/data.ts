@@ -14,6 +14,7 @@ import {
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { resolveDataBackupDeadlines } from "../lib/data-backup-deadlines.ts";
 import { createHostDataBackupDocker } from "../lib/data-backup-docker.ts";
 import {
   type DataExportResult,
@@ -101,13 +102,20 @@ const handleExport: CommandHandlerFor<typeof exportSpec> = async ({
   // project name, project directory and managed env, which can select the
   // engine), with every profile active so a profile-gated service's volume
   // is seen too.
+  // Refuse a malformed deadline override before anything runs.
+  const deadlines = resolveDataBackupDeadlines();
   const model = await resolveComposeRuntimeModel({
     project,
     branch,
     envName: resolveRequestedEnvName({ envOption: args.options.env }),
   });
   const result = await exportProjectData({
-    docker: createHostDataBackupDocker({ env: model.env, cwd: model.cwd }),
+    docker: createHostDataBackupDocker({
+      env: model.env,
+      cwd: model.cwd,
+      captureTimeoutMs: deadlines.commandMs,
+    }),
+    deadlines,
     composeArgs: dataComposeArgs(model),
     project: base,
     branch,

@@ -640,6 +640,51 @@ test("show masks plaintext GitHub tokens in local env cells and Source", async (
   expect((await readFile(path, "utf8")) === text).toBe(true);
 });
 
+test("Config omits PAT-shaped Caddy hosts from routes and route edits", async () => {
+  const f = await fixture();
+  const privateSite = `glpat-${"FixtureOnly".repeat(3)}`;
+  const path = join(f.project, "docker-compose.yml");
+  const text = compose.replace(
+    'caddy: "api.storefront.hack, api.external.hack"',
+    `caddy: "api.storefront.hack, ${privateSite}"`
+  );
+  await writeFile(path, text);
+
+  const report = await show(f.root, f.main);
+  const api = report.services.find((service) => service.name === "api");
+  expect(api?.routes.map((route) => route.host).includes(privateSite)).toBe(
+    false
+  );
+  expect(api?.route_edit?.sites.includes(privateSite)).toBe(false);
+  expect(api?.routes.map((route) => route.host)).toEqual([
+    "api.storefront.hack",
+  ]);
+  expect(api?.route_edit).toEqual({ sites: "api.storefront.hack", port: 3000 });
+  expect(JSON.stringify(report).includes(privateSite)).toBe(false);
+
+  const applied = await cli({
+    root: f.root,
+    cwd: f.main,
+    args: ["apply"],
+    patch: {
+      base: bases(report),
+      changes: [
+        {
+          layer: "2",
+          kind: "route",
+          service: "api",
+          sites: "api.storefront.hack",
+          port: 4000,
+        },
+      ],
+    },
+  });
+  expect(applied.payload.ok).toBe(true);
+  const updated = await readFile(path, "utf8");
+  expect(updated.includes(privateSite)).toBe(true);
+  expect(updated).toContain('caddy.reverse_proxy: "{{upstreams 4000}}"');
+});
+
 test("show and validation previews omit authorization headers and commands", async () => {
   const f = await fixture();
   const [projectPath, composePath] = [

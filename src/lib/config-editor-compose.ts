@@ -544,6 +544,12 @@ function simpleRoute(
     : null;
 }
 
+function publicCaddySites(value: string): string {
+  const sites = splitCaddySites(value);
+  const visible = sites.filter((site) => !isConfigSecret("", site));
+  return visible.length === sites.length ? value : visible.join(", ");
+}
+
 function upstreamPort(value: string | undefined): number | null {
   const port = Number(value?.match(UPSTREAM)?.[1]);
   return validPort(port) ? port : null;
@@ -567,20 +573,21 @@ function serviceRoutes(opts: {
   const routes: RouteView[] = [];
   let droppedAll = false;
   for (const [key, value] of labels) {
-    if (!(isCaddySiteLabel(key) && value.trim())) {
+    if (!isCaddySiteLabel(key)) {
       continue;
     }
+    const sites = publicCaddySites(value);
     const resolved =
       branch === null
-        ? value
-        : rewriteCaddyLabelForBranch({ value, branch, baseHosts }).value;
-    if (branch !== null && !resolved) {
+        ? sites
+        : rewriteCaddyLabelForBranch({ value: sites, branch, baseHosts }).value;
+    if (branch !== null && sites.trim() && !resolved) {
       droppedAll = true;
     }
     const port = upstreamPort(labels.get(`${key}.reverse_proxy`));
     for (const site of splitCaddySites(resolved)) {
       const address = parseRouteAddress(site);
-      if (address) {
+      if (address && !isConfigSecret("", address.host)) {
         routes.push({
           ...address,
           port: port ?? address.port,
@@ -830,6 +837,7 @@ export function composeModel(opts: {
         (labelsNode === undefined && service.labels === undefined)) &&
       !rawService.has("<<") &&
       !(isMap(labelsNode) && labelsNode.has("<<"));
+    const route = directlyEditable ? simpleRoute(service, labels) : null;
     return [
       {
         name,
@@ -841,7 +849,7 @@ export function composeModel(opts: {
         ports: composePorts(service.ports),
         depends_on: dependencies.filter((name) => !isConfigSecret("", name)),
         routes,
-        route_edit: directlyEditable ? simpleRoute(service, labels) : null,
+        route_edit: route && { ...route, sites: publicCaddySites(route.sites) },
         source_fields: COMPOSE_EDIT_FIELDS.filter(
           (field) => !editableComposeField({ source, service: name, field })
         ),
@@ -973,18 +981,23 @@ export function changeComposeRoute(opts: {
   const model = source.services[service];
   const node = source.doc.getIn(path, true);
   const rawService = source.doc.getIn(path.slice(0, -1), true);
-  if (
-    !(
-      isRecord(model) &&
-      simpleRoute(model, composeLabels(model)) &&
-      isMap(rawService)
-    ) ||
-    rawService.has("<<")
-  ) {
+  if (!(isRecord(model) && isMap(rawService)) || rawService.has("<<")) {
     return false;
   }
+  const route = simpleRoute(model, composeLabels(model));
+  if (!route) {
+    return false;
+  }
+  // Route edits contain the visible sites, so retain hidden sites on disk.
+  const privateSites = splitCaddySites(route.sites).filter((site) =>
+    isConfigSecret("", site)
+  );
+  const editedSites =
+    privateSites.length === 0
+      ? sites
+      : [...new Set([...splitCaddySites(sites), ...privateSites])].join(", ");
   const edits = new Map([
-    ["caddy", sites],
+    ["caddy", editedSites],
     ["caddy.reverse_proxy", `{{upstreams ${port}}}`],
   ]);
   if (isSeq(node)) {

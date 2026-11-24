@@ -63,6 +63,14 @@ pub(in crate::provider::graph) fn stable<T>(
     result
 }
 
+/// Phases whose status lists the ports this run's publishers already verified
+/// (`startup_observed_ports`): a start in progress, and a warming one
+/// (`started-observed`), whose services publish one by one as each becomes ready.
+#[cfg(any(target_os = "macos", test))]
+fn reports_startup_ports(phase: &str) -> bool {
+    matches!(phase, "preparing" | "restoring" | STARTED_OBSERVED)
+}
+
 #[cfg(target_os = "macos")]
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
     let observer = super::super::engine::Observer::connect(candidate)?;
@@ -80,10 +88,7 @@ fn inspect_with(
         #[cfg(target_os = "macos")]
         let snapshot = {
             let mut snapshot = snapshot;
-            if matches!(
-                snapshot.receipt.phase.as_str(),
-                "preparing" | "restoring" | super::STARTED_OBSERVED
-            ) {
+            if reports_startup_ports(&snapshot.receipt.phase) {
                 snapshot.startup_observed_ports = super::super::publication::observed_run_ports(
                     candidate,
                     &snapshot.receipt.owner,
@@ -105,6 +110,16 @@ fn inspect_with(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn a_warming_graph_lists_the_ports_already_published() {
+        for phase in ["preparing", "restoring", "started-observed"] {
+            assert!(reports_startup_ports(phase), "{phase}");
+        }
+        for phase in ["ready-observed", "failed-retained", "stopped-data-retained"] {
+            assert!(!reports_startup_ports(phase), "{phase}");
+        }
+    }
 
     struct Read<'a> {
         receipt: &'a Receipt,
@@ -176,6 +191,68 @@ mod tests {
             inspect_with(&candidate, &receipt.run, &read).unwrap();
         }
         assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn status_reports_a_failure_after_started_without_the_lease() {
+        let (_fixture, candidate, mut receipt, root) = fixture();
+        let read = Read {
+            receipt: &receipt,
+            during: &|| {},
+        };
+        let json =
+            serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
+        assert!(json.get("failed_after_started").is_none());
+        receipt.set_phase("stopped-data-retained");
+        state::write(&root.join("state.json"), &receipt).unwrap();
+        state::write(
+            &root.join(startup_failure::AFTER_STARTED),
+            &startup_failure::AfterStarted {
+                code: "graph_timeout".into(),
+                service: Some("web".into()),
+                at: 1,
+            },
+        )
+        .unwrap();
+        let _held = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+        let read = Read {
+            receipt: &receipt,
+            during: &|| {},
+        };
+        let json =
+            serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
+        assert_eq!(
+            json["failed_after_started"],
+            json!({"code":"graph_timeout","service":"web","at":1})
+        );
+        assert!(json["receipt"].get("failed_after_started").is_none());
+        // Invalid content is not reported and never fails the read.
+        fs::write(root.join(startup_failure::AFTER_STARTED), b"{").unwrap();
+        let json =
+            serde_json::to_value(inspect_with(&candidate, &receipt.run, &read).unwrap()).unwrap();
+        assert!(json.get("failed_after_started").is_none());
+        // A record written during the observation is fenced like the journal.
+        let read = Read {
+            receipt: &receipt,
+            during: &|| {
+                state::write(
+                    &root.join(startup_failure::AFTER_STARTED),
+                    &startup_failure::AfterStarted {
+                        code: "graph_timeout".into(),
+                        service: None,
+                        at: 2,
+                    },
+                )
+                .unwrap();
+            },
+        };
+        assert_eq!(
+            inspect_with(&candidate, &receipt.run, &read)
+                .err()
+                .unwrap()
+                .code,
+            "graph_status_changed"
+        );
     }
 
     #[test]

@@ -128,7 +128,11 @@ launchers if requested. After an uncertain outcome, inspect
 `"$CANDIDATE" exec-sessions` and follow the
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
-Native `up --detach` and `up --json` wait for the background owner to report ready.
+Native `up`, `up --detach` and `up --json` return once every container has started;
+the closing line counts the routes still warming, and `--json` says
+`readiness: "warming"`. `up --wait` returns once every service is ready, as before.
+`up.after` hooks run at started: a hook that calls a project URL needs `--wait`.
+`hack exec` and `hack run` wait for ready on their own; `hack open` does not.
 A loopback port can accept connections as soon as its own service is ready.
 During startup, `hack ps` shows verified loopback publications, and
 `hack open <service>` can open a service with one verified loopback address.

@@ -1263,6 +1263,8 @@ test(
     expect(await exited.exited).toBe(0);
     await installNext13Frontend({ scope: f.scope, exitedPid: exited.pid });
     await f.reply("graph inspect", stoppedGraph);
+    // The run mapping at started is read lease-free.
+    await f.reply("graph status", stoppedGraph);
     await f.reply("graph foreground-owner", {
       version: 1,
       run: run.run,
@@ -1313,13 +1315,16 @@ test(
     });
     await f.reply(
       "graph serve-restore",
-      `${JSON.stringify({ kind: "graph_foreground_ready", run: run.run })}\n`
+      // The owner reports every service started, then ready.
+      `${JSON.stringify({ kind: "graph_foreground_started", phase: "started-observed", run: run.run })}\n${JSON.stringify({ kind: "graph_foreground_ready", run: run.run })}\n`
     );
     // This fake owner immediately finishes a retaining stop after its ready event.
     // The frontend still checks its exact stopped graph and finalizes independently.
     const started = await cli({ fixture: f, args: ["up"], env: SHARED });
     expect(started).toMatchObject({ code: 0 });
-    expect(started.output).toContain("Project is ready");
+    // Foreground up announces started, then ready once the owner reports it.
+    expect(started.output).toContain("Project started");
+    expect(started.output).toContain("All services ready");
     expect(started.output).toContain("owned cleanup confirmed");
     expect(await f.calls()).toContain("graph serve-restore");
   },

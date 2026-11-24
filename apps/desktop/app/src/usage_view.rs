@@ -71,7 +71,11 @@ impl HackApp {
     /// `visible`: also require a visible window (live reads); fixtures
     /// render offscreen.
     fn target(&self, visible: bool) -> Option<UsageTarget> {
-        if self.pane != Pane::Project || self.tab != 0 || (visible && !self.window_visible) {
+        if self.pane != Pane::Project
+            || self.tab != 0
+            || self.selected_service().is_some()
+            || (visible && !self.window_visible)
+        {
             return None;
         }
         let key = self.model.selected_key()?;
@@ -107,7 +111,10 @@ impl HackApp {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 if this
-                    .update(cx, |this, cx| this.read_usage_if_due(cx))
+                    .update(cx, |this, cx| {
+                        this.read_usage_if_due(cx);
+                        this.read_stats_if_due(cx);
+                    })
                     .is_err()
                 {
                     return;
@@ -336,6 +343,10 @@ mod tests {
             }
             F.service_usage(root)
         }
+        fn stats_sample(&self) -> Result<hack_desktop_core::stats::StatsReport, String> {
+            self.log("stats sample".into());
+            Ok(hack_desktop_core::stats::StatsReport::default())
+        }
         fn emulated_services(
             &self,
             root: &Path,
@@ -383,6 +394,60 @@ mod tests {
     fn tick(cx: &mut HeadlessAppContext, app: &Entity<HackApp>) {
         cx.update(|cx| app.update(cx, |a, cx| a.read_usage_if_due(cx)));
         cx.run_until_parked();
+    }
+
+    #[test]
+    fn stats_samples_running_services_while_another_pane_is_hidden() {
+        let (mut cx, app, source) = window();
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.window_visible = false;
+                a.pane = Pane::Doctor;
+                a.read_stats_if_due(cx);
+                a.read_stats_if_due(cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(source.take(), ["stats sample"]);
+        cx.update(|cx| app.update(cx, |a, cx| a.read_stats_if_due(cx)));
+        cx.run_until_parked();
+        assert!(
+            source.take().is_empty(),
+            "wait for the next sample interval"
+        );
+    }
+
+    #[test]
+    fn the_services_table_resumes_usage_after_the_stats_service_disappears() {
+        let (mut cx, app, _) = window();
+        let handle = cx.update(|cx| cx.windows()[0]);
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |a, cx| {
+                let key = a.model.selected_key().expect("selected copy");
+                a.select_service(key, "api".into(), window, cx);
+                a.set_service_tab(crate::service_view::ServiceTab::Stats, window, cx);
+                assert!(a.usage_target().is_none());
+                let mut snapshot = a.model.snapshot().unwrap().clone();
+                let project = snapshot
+                    .projects
+                    .projects
+                    .iter_mut()
+                    .find(|p| p.name == "storefront")
+                    .unwrap();
+                project.defined_services.retain(|name| name != "api");
+                project
+                    .runtime
+                    .as_mut()
+                    .unwrap()
+                    .services
+                    .retain(|s| s.service != "api");
+                let token = a.model.begin_refresh();
+                assert!(a.apply_refresh(token, Ok(snapshot), cx));
+                assert!(a.selected_service().is_none());
+                assert!(a.usage_target().is_some());
+            });
+        })
+        .expect("stats window");
     }
 
     #[test]

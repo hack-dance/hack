@@ -23,7 +23,7 @@ const LONG = `${"é".repeat(40)}tail`;
 
 const STUB = [
   "#!/bin/sh",
-  'printf "%s\\n" "$*" >> "$STUB_CAPTURE/docker-args.log"',
+  'printf "%s\\n" "$*" >> "${0%/*}/../capture/docker-args.log"',
   'if [ "$1" = "compose" ]; then',
   '  case " $* " in',
   '    *" logs "*)',
@@ -85,7 +85,6 @@ async function runLogs(args: readonly string[]) {
       root,
       env: {
         PATH: `${join(root, "bin")}:/usr/bin:/bin`,
-        STUB_CAPTURE: capture,
         HACK_NO_INTERACTIVE: "1",
         HACK_DAEMON_AUTOSTART_DISABLE: "1",
         // A closed port: Loki is unreachable, so snapshots use Compose.

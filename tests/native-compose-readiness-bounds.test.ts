@@ -242,6 +242,7 @@ function virtualDeadline(observations: number): void {
 async function waitStartup(opts: {
   readonly observations: number;
   readonly ready?: (state: NativeComposeOwnershipObservation) => boolean;
+  readonly failed?: (state: NativeComposeOwnershipObservation) => boolean;
   readonly observed?: NativeComposeOwnershipObservation[];
 }): Promise<NativeComposeOwnershipObservation | null> {
   virtualDeadline(opts.observations);
@@ -251,6 +252,7 @@ async function waitStartup(opts: {
       restartingServices: ON_FAILURE,
       deadline: Date.now() + DEADLINE_MS,
       ready: opts.ready ?? (() => true),
+      failed: opts.failed,
       observed: (state) => opts.observed?.push(state),
     });
   } finally {
@@ -273,6 +275,66 @@ function expectTopologyRefusal(
 async function expectNoEngineMutation(): Promise<void> {
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 }
+
+test(
+  "startup accepts a fractional deadline from excluded storage time",
+  async () => {
+    await serve(["member", "member"]);
+    const result = await waitNativeComposeStartupOwned({
+      ownership: options,
+      restartingServices: ON_FAILURE,
+      deadline: Date.now() + 30_000.5,
+      ready: () => true,
+    });
+    expect(result?.containers).toHaveLength(2);
+    expect(await inspects()).toBe(4);
+  },
+  TEST_TIMEOUT_MS
+);
+
+test(
+  "an owned observation published at the deadline cannot report readiness",
+  async () => {
+    await serve(["member", "member"]);
+    const deadline = Date.now() + 30_000;
+    const now = spyOn(Date, "now");
+    try {
+      await expect(
+        waitNativeComposeStartupOwned({
+          ownership: options,
+          restartingServices: ON_FAILURE,
+          deadline,
+          ready: () => true,
+          observed: () => {
+            now.mockReturnValue(deadline);
+          },
+        })
+      ).resolves.toBeNull();
+      expect(await inspects()).toBe(4);
+    } finally {
+      now.mockRestore();
+    }
+  },
+  TEST_TIMEOUT_MS
+);
+
+test(
+  "a verified terminal workload failure ends readiness after its first full scan",
+  async () => {
+    await serve(["member", "member"]);
+    const observed: NativeComposeOwnershipObservation[] = [];
+    const result = await waitStartup({
+      observations: 2,
+      ready: () => false,
+      failed: () => true,
+      observed,
+    });
+    expect(result).toBeNull();
+    expect(observed).toHaveLength(1);
+    expect(await inspects()).toBe(4);
+  },
+  TEST_TIMEOUT_MS
+);
 
 test(
   "the virtual readiness clock makes exactly the chosen number of in-loop observations",

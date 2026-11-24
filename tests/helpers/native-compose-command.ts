@@ -57,6 +57,8 @@ export async function fixture(
     readonly runtimeMetadata?: boolean;
     /** Stand-in source run on each `plan` request, before it responds. */
     readonly onPlan?: string;
+    /** Stand-in source run before the Docker fixture handles a request. */
+    readonly onDocker?: string;
     readonly cleanupAllowed?: () => boolean;
     readonly storage?: Readonly<
       Record<
@@ -176,6 +178,7 @@ else {
   const dockerBody = `
 const engine=root+"/engine";
 const volumes=root+"/volumes";
+${opts.onDocker ?? ""}
 ${opts.storage ? nativeComposeStorageDockerFixtureScript(root) : ""}
 const oneoff=${opts.oneoff === true};
 // Replay the ownership fixture's next-query placeholder at a chosen command boundary.

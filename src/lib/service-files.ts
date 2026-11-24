@@ -15,7 +15,7 @@ const CONTAINER_ID = /^[a-f0-9]{64}$/;
 const ANONYMOUS_VOLUME_NAME = /^[a-f0-9]{64}$/;
 const COMPOSE_LABEL = "com.docker.compose";
 // A full inspect includes container env values. Select only fields for this read.
-const INSPECT = `{"id":{{json .Id}},"state":{{json .State.Status}},"service":{{json (index .Config.Labels "${COMPOSE_LABEL}.service")}},"number":{{json (index .Config.Labels "${COMPOSE_LABEL}.container-number")}},"oneOff":{{json (index .Config.Labels "${COMPOSE_LABEL}.oneoff")}},"workingDir":{{json (index .Config.Labels "${COMPOSE_LABEL}.project.working_dir")}},"mounts":{{json .Mounts}},"binds":{{json .HostConfig.Binds}},"configured":{{json .HostConfig.Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}`;
+const INSPECT = `{"id":{{json .Id}},"state":{{json .State.Status}},"service":{{json (index .Config.Labels "${COMPOSE_LABEL}.service")}},"project":{{json (index .Config.Labels "${COMPOSE_LABEL}.project")}},"number":{{json (index .Config.Labels "${COMPOSE_LABEL}.container-number")}},"oneOff":{{json (index .Config.Labels "${COMPOSE_LABEL}.oneoff")}},"workingDir":{{json (index .Config.Labels "${COMPOSE_LABEL}.project.working_dir")}},"mounts":{{json .Mounts}},"binds":{{json .HostConfig.Binds}},"configured":{{json .HostConfig.Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}`;
 // Modern engines label anonymous volumes, including ones inherited via volumes_from.
 const VOLUME =
   '{"name":{{json .Name}},"anonymous":"{{range $key, $_ := .Labels}}{{if eq $key "com.docker.volume.anonymous"}}yes{{end}}{{end}}"}';
@@ -137,6 +137,7 @@ function ownedReplica(opts: {
   readonly ids: ReadonlySet<string>;
   readonly projectDir: string;
   readonly service: string;
+  readonly expectedProject?: string;
 }) {
   const { raw, ids, projectDir, service } = opts;
   const id = getString(raw, "id");
@@ -147,6 +148,8 @@ function ownedReplica(opts: {
   const replica = Number(raw.number);
   if (
     raw.service !== service ||
+    (opts.expectedProject !== undefined &&
+      raw.project !== opts.expectedProject) ||
     raw.state !== "running" ||
     raw.oneOff !== "False" ||
     !(workingDir && isAbsolute(workingDir)) ||
@@ -168,6 +171,7 @@ async function runningReplica(opts: {
   readonly composeArgs: readonly string[];
   readonly service: string;
   readonly projectDir: string;
+  readonly expectedProject?: string;
 }) {
   // Compose resolves the base name, including COMPOSE_PROJECT_NAME in its env
   // or .env, with the same project directory and branch -p as up/exec.
@@ -530,6 +534,7 @@ export async function readServiceFiles(opts: {
   readonly operation: "ls" | "cat";
   readonly project: Pick<ProjectContext, "projectRoot" | "projectDir">;
   readonly composeArgs: readonly string[];
+  readonly expectedProject?: string;
   readonly env: Readonly<Record<string, string>>;
   readonly service: string;
   readonly path: string;
@@ -545,6 +550,7 @@ export async function readServiceFiles(opts: {
     composeArgs: opts.composeArgs.slice(1),
     service: opts.service,
     projectDir: cwd,
+    expectedProject: opts.expectedProject,
   });
   const mounts = await readMounts({
     raw,

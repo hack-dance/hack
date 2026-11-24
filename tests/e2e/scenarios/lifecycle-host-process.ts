@@ -299,43 +299,48 @@ export const lifecycleHostProcessScenario: Scenario = {
           standaloneContainers: true,
         },
       });
-      const failedUp = await cli({
-        args: ["up", "--detach", "--json"],
-        cwd: failingFixture.root,
-        timeoutMs: UP_TIMEOUT_MS,
-      });
-      expect({
-        that: failedUp.exitCode !== 0,
-        message: "invalid compose fixture should fail after lifecycle startup",
-        result: failedUp,
-      });
-      const failedSession = await runCommand({
-        argv: [
-          "tmux",
-          "has-session",
-          "-t",
-          `${failingFixture.name}--lifecycle`,
-        ],
-        cwd: failingFixture.root,
-      });
-      expect({
-        that: failedSession.exitCode !== 0,
-        message: "compose failure left its lifecycle session behind",
-        result: failedSession,
-      });
-      const failedState = await readLifecycleState({
-        path: join(
-          failingFixture.hackDir,
-          ".internal",
-          "lifecycle",
-          "state.json"
-        ),
-      });
-      expect({
-        that: failedState.entries.length === 0,
-        message: "compose failure left lifecycle ownership state behind",
-        result: failedUp,
-      });
+      try {
+        const failedUp = await cli({
+          args: ["up", "--detach", "--json"],
+          cwd: failingFixture.root,
+          timeoutMs: UP_TIMEOUT_MS,
+        });
+        expect({
+          that: failedUp.exitCode !== 0,
+          message:
+            "invalid compose fixture should fail after lifecycle startup",
+          result: failedUp,
+        });
+        const failedSession = await runCommand({
+          argv: [
+            "tmux",
+            "has-session",
+            "-t",
+            `${failingFixture.name}--lifecycle`,
+          ],
+          cwd: failingFixture.root,
+        });
+        expect({
+          that: failedSession.exitCode !== 0,
+          message: "compose failure left its lifecycle session behind",
+          result: failedSession,
+        });
+        const failedState = await readLifecycleState({
+          path: join(
+            failingFixture.hackDir,
+            ".internal",
+            "lifecycle",
+            "state.json"
+          ),
+        });
+        expect({
+          that: failedState.entries.length === 0,
+          message: "compose failure left lifecycle ownership state behind",
+          result: failedUp,
+        });
+      } finally {
+        await downBestEffort({ ctx: { ...ctx, cli }, fixture: failingFixture });
+      }
     } finally {
       try {
         await downBestEffort({ ctx: { ...ctx, cli }, fixture });

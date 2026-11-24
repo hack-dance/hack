@@ -5,28 +5,23 @@ type ModelResult = {
   readonly exitCode: number | null;
   readonly output: string;
 };
-type ModelWitness = {
-  readonly action: string;
-  readonly fields: readonly string[];
-};
+type WitnessFields = readonly string[];
 type ModelContract = {
   readonly name: string;
   readonly module: string;
   readonly negativeModule?: string;
   readonly states: number;
   readonly invariant: string;
-  readonly action: string;
-  readonly fields: readonly string[];
-  readonly alternativeWitnesses?: readonly ModelWitness[];
+  readonly fields: WitnessFields;
+  readonly alternativeWitnesses?: readonly WitnessFields[];
   readonly additionalControls?: readonly {
     readonly name: string;
     readonly module?: "TerminalReuse" | "MetadataAliasing" | "PreReady";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
-    readonly action?: string;
-    readonly fields?: readonly string[];
-    readonly alternativeWitnesses?: readonly ModelWitness[];
+    readonly fields?: WitnessFields;
+    readonly alternativeWitnesses?: readonly WitnessFields[];
   }[];
 };
 
@@ -43,23 +38,14 @@ function pairOf(
   const [first, second] = me === "c1" ? [mine, theirs] : [theirs, mine];
   return `${variable} = (c1 :> ${first} @@ c2 :> ${second})`;
 }
-function runtimeServiceEither(
-  action: string,
-  fields: ClientFields,
-  also?: { readonly action: string; readonly fields: ClientFields }
-) {
-  const witnesses = [
-    { action, fields: fields("c1") },
-    { action, fields: fields("c2") },
-    ...(also
-      ? [
-          { action: also.action, fields: also.fields("c1") },
-          { action: also.action, fields: also.fields("c2") },
-        ]
-      : []),
-  ];
-  const [first, ...alternativeWitnesses] = witnesses;
-  return { ...first, alternativeWitnesses };
+function runtimeServiceEither(first: ClientFields, ...others: ClientFields[]) {
+  return {
+    fields: first("c1"),
+    alternativeWitnesses: [
+      first("c2"),
+      ...others.flatMap((fields) => [fields("c1"), fields("c2")]),
+    ],
+  };
 }
 
 // Bounds and witnesses are reviewed contracts, not learned from each run.
@@ -70,6 +56,20 @@ const laterIncompleteMissingLockStages = [
   "journal",
   "socket",
   "owner",
+] as const;
+const stoppedHttpsWitnessFields = [
+  'pool = "stopped"',
+  'run = "retained"',
+  "fin = TRUE",
+  'https = "records"',
+  'port = "free"',
+  "pub = FALSE",
+] as const;
+const unconfirmedRefreshReplayFields = [
+  "replayed = TRUE",
+  "unconfirmed = TRUE",
+  "closed = FALSE",
+  'journal = "none"',
 ] as const;
 // TLC's two-worker search does not always report the shortest trace: a deeper
 // first violation can be checked first. Each multi-root-share control therefore
@@ -112,16 +112,12 @@ const sharesFields = ([
   `mounted = ${sharesSet(mounted)}`,
   `ownerSet = ${sharesSet(ownerSet)}`,
 ];
-const sharesWitnesses = (
-  action: string,
-  [first, ...others]: readonly [SharesFirstViolation, ...SharesFirstViolation[]]
-) => ({
-  action,
+const sharesWitnesses = ([first, ...others]: readonly [
+  SharesFirstViolation,
+  ...SharesFirstViolation[],
+]) => ({
   fields: sharesFields(first),
-  alternativeWitnesses: others.map((state) => ({
-    action,
-    fields: sharesFields(state),
-  })),
+  alternativeWitnesses: others.map(sharesFields),
 });
 const sharesOwnShareViolations = [
   ["none", "live", "none", "a", "a", "a", "a", "idle", "a", "running"],
@@ -185,14 +181,12 @@ const contracts: readonly ModelContract[] = [
     module: "ProjectRemoteSelection",
     states: 11,
     invariant: "TeardownUsesStartedTarget",
-    action: "Teardown",
     fields: ['hook = "pending"', 'started = "none"', 'record = "none"'],
     additionalControls: [
       {
         name: "stale-negative",
         negative: true,
         invariant: "ActiveLabelWins",
-        action: "Teardown",
         fields: ["stale = TRUE", 'label = "qa"', 'hook = "none"'],
       },
     ],
@@ -202,35 +196,30 @@ const contracts: readonly ModelContract[] = [
     module: "GuestAgent",
     states: 6860,
     invariant: "ResultBeforeRelease",
-    action: "Next",
     fields: ['job = "released"', 'saved = "none"'],
     additionalControls: [
       {
         name: "unclean-restart",
         negative: true,
         invariant: "NoOrphan",
-        action: "AgentRestart",
         fields: ['agent = "online"', "survivor = TRUE", "epoch = 1"],
       },
       {
         name: "wait-eof",
         negative: true,
         invariant: "TerminalReleasable",
-        action: "Next",
         fields: ['job = "exit37"', 'saved = "exit37"', "writerOpen = TRUE"],
       },
       {
         name: "duplicate",
         negative: true,
         invariant: "StartedOnce",
-        action: "Next",
         fields: ["starts = <<2, 0>>", "id = 1"],
       },
       {
         name: "record-running",
         negative: true,
         invariant: "SavedOutcome",
-        action: "Next",
         fields: ['belief = "running"', 'saved = "running"'],
       },
     ],
@@ -240,7 +229,6 @@ const contracts: readonly ModelContract[] = [
     module: "ProjectPrerequisites",
     states: 13,
     invariant: "CheckedBeforeHooks",
-    action: "Login",
     fields: ['phase = "allowed"', "checked = FALSE", "loggedIn = TRUE"],
   },
   {
@@ -248,7 +236,6 @@ const contracts: readonly ModelContract[] = [
     module: "StartStop",
     states: 41,
     invariant: "NoStartAfterSuccessfulDown",
-    action: "ChildStart",
     fields: [
       'holder = "none"',
       "paused = TRUE",
@@ -263,7 +250,6 @@ const contracts: readonly ModelContract[] = [
     module: "LifecycleController",
     states: 21,
     invariant: "NoAdoptedStop",
-    action: "Abort",
     fields: [
       "unsafeStop = TRUE",
       "epoch = 2",
@@ -276,7 +262,6 @@ const contracts: readonly ModelContract[] = [
         name: "pending",
         negative: true,
         invariant: "DurableBeforeLaunch",
-        action: "Launch",
         fields: [
           "unsafeLaunch = TRUE",
           "pending = FALSE",
@@ -291,14 +276,12 @@ const contracts: readonly ModelContract[] = [
     module: "LifecycleSupervisor",
     states: 426,
     invariant: "NoDuplicate",
-    action: "Retry",
     fields: ["duplicate = TRUE", "live = TRUE", "durable = TRUE"],
     additionalControls: [
       {
         name: "sid-reuse",
         negative: true,
         invariant: "NoForeignSignal",
-        action: "RecoverOrphan",
         fields: [
           'identity = "sid-reused"',
           "unsafeSignal = TRUE",
@@ -309,7 +292,6 @@ const contracts: readonly ModelContract[] = [
         name: "witness-loss",
         negative: true,
         invariant: "RecoveryAuthorityRetained",
-        action: "WitnessExit",
         fields: ["snapshot = FALSE", "witness = FALSE", "live = TRUE"],
       },
     ],
@@ -319,7 +301,6 @@ const contracts: readonly ModelContract[] = [
     module: "Migration",
     states: 74,
     invariant: "NoSameRunCleanup",
-    action: "UnsafeRemoveDuringApply",
     fields: [
       'phase = "apply"',
       "legacy = FALSE",
@@ -335,7 +316,6 @@ const contracts: readonly ModelContract[] = [
         name: "stale-repair-proof",
         negative: true,
         invariant: "FreshRunProof",
-        action: "RequestRepair",
         fields: [
           'phase = "apply"',
           "complete = FALSE",
@@ -352,7 +332,6 @@ const contracts: readonly ModelContract[] = [
     module: "Session",
     states: 459,
     invariant: "NoReplay",
-    action: "ReplayStart",
     fields: [
       'stage = "started"',
       "starts = 2",
@@ -365,7 +344,6 @@ const contracts: readonly ModelContract[] = [
         name: "failed-inspect",
         negative: true,
         invariant: "RetiredWithProof",
-        action: "Retire",
         fields: [
           'stage = "retired"',
           "inspectFailed = TRUE",
@@ -379,7 +357,6 @@ const contracts: readonly ModelContract[] = [
         name: "eof-retirement",
         negative: true,
         invariant: "RetiredWithProof",
-        action: "Retire",
         fields: [
           'stage = "retired"',
           "ended = TRUE",
@@ -391,7 +368,6 @@ const contracts: readonly ModelContract[] = [
         name: "wrong-boot",
         negative: true,
         invariant: "RetiredWithProof",
-        action: "Retire",
         fields: [
           'stage = "retired"',
           'boot = "replacement"',
@@ -407,18 +383,9 @@ const contracts: readonly ModelContract[] = [
     module: "Envelope",
     states: 15,
     invariant: "NoRestoreOverPrivate",
-    action: "Fail",
     fields: ['stage = "failed"', "pending = 2", "echo = TRUE", "ack = FALSE"],
     alternativeWitnesses: [
-      {
-        action: "Fail",
-        fields: [
-          'stage = "failed"',
-          "pending = 1",
-          "echo = TRUE",
-          "ack = FALSE",
-        ],
-      },
+      ['stage = "failed"', "pending = 1", "echo = TRUE", "ack = FALSE"],
     ],
   },
   {
@@ -426,15 +393,38 @@ const contracts: readonly ModelContract[] = [
     module: "ShutdownRebase",
     states: 43,
     invariant: "StopAdmitted",
-    action: "Start",
     fields: ['phase = "running"', "archived = TRUE"],
     additionalControls: [
       {
         name: "absence",
         negative: true,
         invariant: "NoUnprovenPrune",
-        action: "Repair",
         fields: ["unsafePrune = TRUE", 'phase = "repaired"'],
+      },
+    ],
+  },
+  {
+    name: "shutdown-receipt",
+    module: "ShutdownReceipt",
+    states: 16,
+    invariant: "CleanupAdmitsRestore",
+    fields: [
+      'phase = "Refused"',
+      'receiptId = "none"',
+      'shutdownId = "original"',
+      'compute = "absent"',
+    ],
+    additionalControls: [
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverRestored",
+        fields: [
+          'phase = "Restored"',
+          'receiptId = "original"',
+          'shutdownId = "original"',
+          'compute = "absent"',
+        ],
       },
     ],
   },
@@ -443,7 +433,6 @@ const contracts: readonly ModelContract[] = [
     module: "Reconcile",
     states: 747_656,
     invariant: "NoForeignAttach",
-    action: "Start",
     fields: ["foreignAttach = TRUE", "unrecordedAttach = FALSE"],
     additionalControls: [
       {
@@ -465,7 +454,6 @@ const contracts: readonly ModelContract[] = [
     module: "CacheReconcile",
     states: 2208,
     invariant: "UnrelatedEditKeepsCache",
-    action: "UpCache",
     fields: ["needlessRebuild = TRUE", "staleMounted = FALSE"],
     additionalControls: [
       {
@@ -493,7 +481,6 @@ const contracts: readonly ModelContract[] = [
     module: "Retirement",
     states: 10_965,
     invariant: "Safe",
-    action: "RequestHostStop",
     fields: ["unsafeSettlement = TRUE", "stopRequested = TRUE"],
     additionalControls: [
       {
@@ -519,7 +506,6 @@ const contracts: readonly ModelContract[] = [
       {
         name: "unconfirmed-host-exit",
         negative: true,
-        action: "Retire",
         fields: ["unsafeRetire = TRUE", "retired = TRUE"],
       },
       { name: "liveness", negative: false, states: 395 },
@@ -530,7 +516,6 @@ const contracts: readonly ModelContract[] = [
     module: "Enrollment",
     states: 38,
     invariant: "NoExistingAdoption",
-    action: "CreateOriginal",
     fields: ['phase = "created"', "volume = 2", "unsafeAdoption = TRUE"],
     additionalControls: [
       {
@@ -538,7 +523,6 @@ const contracts: readonly ModelContract[] = [
         module: "MetadataAliasing",
         negative: true,
         invariant: "NoAliasedMatch",
-        action: "ReadRetained",
         fields: [
           "actualVolume = 2",
           "reportedMetadata = 1",
@@ -552,27 +536,21 @@ const contracts: readonly ModelContract[] = [
         name: "wrong-birth",
         negative: true,
         invariant: "OriginalBirthAtCommit",
-        action: "PublishEnrollment",
         fields: ["captured = 1", "volume = 2", "unsafeCommit = TRUE"],
         alternativeWitnesses: [
-          {
-            action: "PublishEnrollment",
-            fields: ["captured = 2", "volume = 2", "unsafeCommit = TRUE"],
-          },
+          ["captured = 2", "volume = 2", "unsafeCommit = TRUE"],
         ],
       },
       {
         name: "pending-read",
         negative: true,
         invariant: "NoPendingMatch",
-        action: "ReadRetained",
         fields: ['record = "pending"', "matched = TRUE", "unsafeRead = TRUE"],
       },
       {
         name: "retire-data",
         negative: true,
         invariant: "RetirementPreservesData",
-        action: "RetireCompute",
         fields: ["run = 2", "volume = 0", "unsafeRetirement = TRUE"],
       },
     ],
@@ -582,7 +560,6 @@ const contracts: readonly ModelContract[] = [
     module: "Recovery",
     states: 1752,
     invariant: "NoUnreservedPromotion",
-    action: "PromoteCandidate",
     fields: [
       "unsafePromotion = TRUE",
       'stage = "promoted"',
@@ -601,7 +578,6 @@ const contracts: readonly ModelContract[] = [
         module: "PreReady",
         negative: true,
         invariant: "OnlySettledCleanup",
-        action: "Cleanup",
         fields: ["unsafeCleanup = TRUE", "intent = TRUE", "removed = TRUE"],
       },
       {
@@ -609,7 +585,6 @@ const contracts: readonly ModelContract[] = [
         module: "PreReady",
         negative: true,
         invariant: "ReleaseRecorded",
-        action: "Release",
         fields: ["unsafeRelease = TRUE", "release = FALSE", 'owner = "none"'],
       },
       {
@@ -617,7 +592,6 @@ const contracts: readonly ModelContract[] = [
         module: "PreReady",
         negative: true,
         invariant: "NoReplay",
-        action: "StartAnother",
         fields: [
           "starts = 2",
           "intent = TRUE",
@@ -629,7 +603,6 @@ const contracts: readonly ModelContract[] = [
         name: "live-launcher-recovery",
         negative: true,
         invariant: "NoLiveLauncherRecovery",
-        action: "TryLauncherRecovery",
         fields: [
           'launcherRecovery = "unsafe"',
           "launcherAlive = FALSE",
@@ -640,7 +613,6 @@ const contracts: readonly ModelContract[] = [
         name: "live-launcher-refusal-reachable",
         negative: true,
         invariant: "NeverLiveLauncherRefusal",
-        action: "TryLauncherRecovery",
         fields: [
           'launcherRecovery = "refused"',
           "launcherAlive = FALSE",
@@ -651,7 +623,6 @@ const contracts: readonly ModelContract[] = [
         name: "uncommitted-release",
         negative: true,
         invariant: "NoUncommittedAbsence",
-        action: "RemoveOwner",
         fields: [
           "unsafeAbsence = TRUE",
           'stage = "empty"',
@@ -663,54 +634,65 @@ const contracts: readonly ModelContract[] = [
         name: "revoked-authority",
         negative: true,
         invariant: "NoUnissuedEffect",
-        action: "AdvanceResources",
         fields: [
           "unsafeEffect = TRUE",
           "active = FALSE",
           "binding = 1",
           "progress = 1",
         ],
+        alternativeWitnesses: [
+          [
+            "unsafeEffect = TRUE",
+            "active = FALSE",
+            "binding = 1",
+            "progress = 2",
+          ],
+          [
+            "unsafeEffect = TRUE",
+            "active = FALSE",
+            "binding = 1",
+            "progress = 3",
+          ],
+        ],
       },
       {
         name: "changed-binding",
         negative: true,
         invariant: "NoUnissuedEffect",
-        action: "AdvanceResources",
         fields: ["unsafeEffect = TRUE", "binding = 2", "progress = 1"],
+        alternativeWitnesses: [
+          ["unsafeEffect = TRUE", "binding = 2", "progress = 2"],
+          ["unsafeEffect = TRUE", "binding = 2", "progress = 3"],
+        ],
       },
       {
         name: "reserved-crash-reachable",
         negative: true,
         invariant: "NeverReservedCrashCompletion",
-        action: "RemoveDirectory",
         fields: ['crashStage = "reserved"', "progress = 3", 'stage = "done"'],
       },
       {
         name: "promoted-crash-reachable",
         negative: true,
         invariant: "NeverPromotedCrashCompletion",
-        action: "RemoveDirectory",
         fields: ['crashStage = "promoted"', "progress = 3", 'stage = "done"'],
       },
       {
         name: "release-crash-reachable",
         negative: true,
         invariant: "NeverReleaseCrashCompletion",
-        action: "RemoveDirectory",
         fields: ['crashStage = "empty"', "progress = 3", 'stage = "done"'],
       },
       {
         name: "unknown-refusal-reachable",
         negative: true,
         invariant: "NeverUnknownRefusal",
-        action: "RefuseUnknown",
         fields: ['stage = "unknown-retained"', "pending = 2", "savedNext = 0"],
       },
       {
         name: "fresh-release-retention-reachable",
         negative: true,
         invariant: "NeverFreshReleaseRetention",
-        action: "FailFreshRelease",
         fields: [
           'stage = "release-failed"',
           "owner = 1",
@@ -725,7 +707,6 @@ const contracts: readonly ModelContract[] = [
     module: "Witness",
     states: 352,
     invariant: "NoSeedOnReopen",
-    action: "SeedOnResume",
     fields: [
       'operation = "resume"',
       "expected = 1",
@@ -743,7 +724,6 @@ const contracts: readonly ModelContract[] = [
         name: "missing-witness",
         negative: true,
         invariant: "NoWorkloadWithoutWitness",
-        action: "StartWorkload",
         fields: [
           'phase = "running"',
           "expected = 1",
@@ -757,7 +737,6 @@ const contracts: readonly ModelContract[] = [
         name: "wrong-witness",
         negative: true,
         invariant: "NoWorkloadWithoutWitness",
-        action: "StartWorkload",
         fields: [
           'phase = "running"',
           "expected = 1",
@@ -771,7 +750,6 @@ const contracts: readonly ModelContract[] = [
         name: "foreign-metadata",
         negative: true,
         invariant: "NoWorkloadWithoutWitness",
-        action: "StartWorkload",
         fields: [
           'phase = "running"',
           "expected = 1",
@@ -785,7 +763,6 @@ const contracts: readonly ModelContract[] = [
         name: "premature-completion",
         negative: true,
         invariant: "NoUnprovedCompletion",
-        action: "CommitEnrollment",
         fields: [
           'phase = "enrolled"',
           "expected = 1",
@@ -799,7 +776,6 @@ const contracts: readonly ModelContract[] = [
         name: "expectation-replacement",
         negative: true,
         invariant: "NoChangedExpectation",
-        action: "ReplaceExpectation",
         fields: [
           'phase = "checking"',
           "expected = 2",
@@ -812,7 +788,6 @@ const contracts: readonly ModelContract[] = [
         name: "readonly-reenrollment",
         negative: true,
         invariant: "NoReadOnlyReenrollment",
-        action: "ReenrollReadOnly",
         fields: [
           'phase = "checked"',
           "expected = 1",
@@ -828,7 +803,6 @@ const contracts: readonly ModelContract[] = [
         name: "recovery-seed",
         negative: true,
         invariant: "NoSeedOnReopen",
-        action: "SeedOnRecovery",
         fields: [
           'phase = "interrupted"',
           'operation = "recovery"',
@@ -847,7 +821,6 @@ const contracts: readonly ModelContract[] = [
         name: "cold-reachable",
         negative: true,
         invariant: "NeverColdWorkload",
-        action: "StartWorkload",
         fields: [
           'phase = "running"',
           'operation = "cold"',
@@ -865,7 +838,6 @@ const contracts: readonly ModelContract[] = [
         name: "resume-reachable",
         negative: true,
         invariant: "NeverReadOnlyResume",
-        action: "StartWorkload",
         fields: [
           'phase = "running"',
           'operation = "resume"',
@@ -886,7 +858,6 @@ const contracts: readonly ModelContract[] = [
         name: "recovery-reachable",
         negative: true,
         invariant: "NeverEnrolledRecovery",
-        action: "StartWorkload",
         fields: [
           'phase = "running"',
           'operation = "recovery"',
@@ -907,7 +878,6 @@ const contracts: readonly ModelContract[] = [
         name: "empty-intent-refusal-reachable",
         negative: true,
         invariant: "NeverEmptyIntentRefusal",
-        action: "RecoveryDisposition",
         fields: [
           'phase = "refused"',
           'operation = "recovery"',
@@ -928,7 +898,6 @@ const contracts: readonly ModelContract[] = [
         name: "interrupted-missing-reachable",
         negative: true,
         invariant: "NeverInterruptedMissingRefusal",
-        action: "RecoveryDisposition",
         fields: [
           'phase = "refused"',
           'operation = "recovery"',
@@ -949,7 +918,6 @@ const contracts: readonly ModelContract[] = [
         name: "interrupted-matching-reachable",
         negative: true,
         invariant: "NeverInterruptedMatchingRefusal",
-        action: "RecoveryDisposition",
         fields: [
           'phase = "refused"',
           'operation = "recovery"',
@@ -970,7 +938,6 @@ const contracts: readonly ModelContract[] = [
         name: "missing-resume-refusal-reachable",
         negative: true,
         invariant: "NeverMissingResumeRefusal",
-        action: "RefuseResume",
         fields: [
           'phase = "refused"',
           'operation = "resume"',
@@ -992,7 +959,6 @@ const contracts: readonly ModelContract[] = [
         name: "wrong-resume-refusal-reachable",
         negative: true,
         invariant: "NeverWrongResumeRefusal",
-        action: "RefuseResume",
         fields: [
           'phase = "refused"',
           'operation = "resume"',
@@ -1014,7 +980,6 @@ const contracts: readonly ModelContract[] = [
         name: "stale-proof-refusal-reachable",
         negative: true,
         invariant: "NeverStaleProofRefusal",
-        action: "RefuseEnrollment",
         fields: [
           'phase = "refused"',
           'operation = "cold"',
@@ -1032,7 +997,6 @@ const contracts: readonly ModelContract[] = [
         name: "legacy-refusal-reachable",
         negative: true,
         invariant: "NeverLegacyRefusal",
-        action: "RefuseLegacy",
         fields: [
           'phase = "refused"',
           'disposition = "needs-adoption"',
@@ -1053,7 +1017,6 @@ const contracts: readonly ModelContract[] = [
     module: "Material",
     states: 8388,
     invariant: "NoLostRecovery",
-    action: "CommitStop",
     fields: [
       'generation = "stopped"',
       "recoveryReference = FALSE",
@@ -1061,12 +1024,55 @@ const contracts: readonly ModelContract[] = [
       'retirement = "live"',
       'phase = "complete"',
     ],
+    alternativeWitnesses: [
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {1, 2}",
+        'retirement = "intent"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {2}",
+        'retirement = "live"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {1}",
+        'retirement = "live"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {2}",
+        'retirement = "intent"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {1}",
+        'retirement = "intent"',
+        'phase = "complete"',
+      ],
+      [
+        'generation = "stopped"',
+        "recoveryReference = FALSE",
+        "members = {}",
+        'retirement = "live"',
+        'phase = "complete"',
+      ],
+    ],
     additionalControls: [
       {
         name: "unproved-absence",
         negative: true,
         invariant: "NoUnprovedDeletion",
-        action: "DeleteMember",
         fields: [
           'phase = "retiring"',
           'retirement = "intent"',
@@ -1078,7 +1084,6 @@ const contracts: readonly ModelContract[] = [
         name: "uncertain-hook",
         negative: true,
         invariant: "NoUnprovedDeletion",
-        action: "DeleteMember",
         fields: [
           'phase = "retiring"',
           "hookPending = TRUE",
@@ -1090,7 +1095,6 @@ const contracts: readonly ModelContract[] = [
         name: "unknown-child",
         negative: true,
         invariant: "NoUnprovedDeletion",
-        action: "DeleteMember",
         fields: [
           'phase = "retiring"',
           "hookPending = FALSE",
@@ -1102,7 +1106,6 @@ const contracts: readonly ModelContract[] = [
         name: "unknown-stop-child",
         negative: true,
         invariant: "NoUnprovedDeletion",
-        action: "DeleteMember",
         fields: [
           'phase = "retiring"',
           'stopChild = "unknown"',
@@ -1115,7 +1118,6 @@ const contracts: readonly ModelContract[] = [
         name: "stale-reference",
         negative: true,
         invariant: "NoUnprovedDeletion",
-        action: "DeleteMember",
         fields: [
           'phase = "retiring"',
           "anchorVersion = 2",
@@ -1128,7 +1130,6 @@ const contracts: readonly ModelContract[] = [
         name: "stale-finalizer-owner",
         negative: true,
         invariant: "NoStaleCompletion",
-        action: "CommitStop",
         fields: [
           'phase = "complete"',
           'retirement = "retired"',
@@ -1142,7 +1143,6 @@ const contracts: readonly ModelContract[] = [
         name: "stale-finalizer-pending",
         negative: true,
         invariant: "NoStaleCompletion",
-        action: "CommitStop",
         fields: [
           'phase = "complete"',
           'retirement = "retired"',
@@ -1156,7 +1156,6 @@ const contracts: readonly ModelContract[] = [
         name: "missing-without-intent",
         negative: true,
         invariant: "NoInferredIntent",
-        action: "BeginRetirement",
         fields: [
           'phase = "retiring"',
           'retirement = "intent"',
@@ -1168,7 +1167,6 @@ const contracts: readonly ModelContract[] = [
         name: "partial-crash-reachable",
         negative: true,
         invariant: "NeverCompleteAfterPartialCrash",
-        action: "CommitStop",
         fields: [
           'generation = "stopped"',
           'retirement = "retired"',
@@ -1182,7 +1180,6 @@ const contracts: readonly ModelContract[] = [
         name: "missing-source-reachable",
         negative: true,
         invariant: "NeverCompleteWithoutSource",
-        action: "CommitStop",
         fields: [
           'generation = "stopped"',
           'retirement = "retired"',
@@ -1198,7 +1195,6 @@ const contracts: readonly ModelContract[] = [
     module: "DownHooks",
     states: 1246,
     invariant: "Safe",
-    action: "DStart",
     fields: [
       "unsafeBefore = TRUE",
       "beforeOpen = 2",
@@ -1206,27 +1202,22 @@ const contracts: readonly ModelContract[] = [
       'jGen = "D"',
     ],
     alternativeWitnesses: [
-      {
-        action: "FInterrupt",
-        fields: [
-          "unsafeBefore = TRUE",
-          "beforeOpen = 2",
-          'jState = "beforeStarted"',
-          'jGen = "F"',
-        ],
-      },
+      [
+        "unsafeBefore = TRUE",
+        "beforeOpen = 2",
+        'jState = "beforeStarted"',
+        'jGen = "F"',
+      ],
     ],
     additionalControls: [
       {
         name: "unknown-generation",
         negative: true,
-        action: "NewUp",
         fields: ["unsafeGen = TRUE", "newGen = TRUE", 'jState = "absent"'],
       },
       {
         name: "owed-after-interrupt",
         negative: true,
-        action: "FInterruptAtPublish",
         fields: [
           "unsafeOwe = TRUE",
           "upInterrupted = TRUE",
@@ -1238,28 +1229,16 @@ const contracts: readonly ModelContract[] = [
         name: "complete-reachable",
         negative: true,
         invariant: "NeverComplete",
-        action: "FAfterDone",
         fields: [
           'jState = "complete"',
           "afterDone = TRUE",
           "unsafeAfter = FALSE",
-        ],
-        alternativeWitnesses: [
-          {
-            action: "DAfterDone",
-            fields: [
-              'jState = "complete"',
-              "afterDone = TRUE",
-              "unsafeAfter = FALSE",
-            ],
-          },
         ],
       },
       {
         name: "recovery-reachable",
         negative: true,
         invariant: "NeverRecovered",
-        action: "DAfterDone",
         fields: [
           'fpc = "dead"',
           'jState = "complete"',
@@ -1275,7 +1254,6 @@ const contracts: readonly ModelContract[] = [
     module: "DigestCache",
     states: 1943,
     invariant: "CacheNeverStale",
-    action: "CacheHit",
     // Only CacheHit sets staleHit, and only from phase "idle", so these two
     // fields hold in every first violation, whichever tick the two-worker search
     // reaches first (it found the same stale hit at tick 1 and at tick 2).
@@ -1286,7 +1264,6 @@ const contracts: readonly ModelContract[] = [
     module: "StatusStart",
     states: 110,
     invariant: "ReaderNeverFailsStart",
-    action: "ReaderRefusal",
     fields: [
       "failedByReader = TRUE",
       "services = TRUE",
@@ -1299,29 +1276,25 @@ const contracts: readonly ModelContract[] = [
     module: "PublisherStop",
     states: 168,
     invariant: "NoUnsafeCleanup",
-    action: "ReleaseBridge",
     fields: [
       'phase = "bridge-retired"',
       "publisher = TRUE",
       "unsafeCleanup = TRUE",
     ],
     alternativeWitnesses: [
-      {
-        action: "ReleaseBridge",
-        fields: [
-          'phase = "bridge-retired"',
-          "publisher = FALSE",
-          "bridge = FALSE",
-          "unsafeCleanup = TRUE",
-        ],
-      },
+      [
+        'phase = "bridge-retired"',
+        "publisher = FALSE",
+        "bridge = FALSE",
+        "unsafeCleanup = TRUE",
+      ],
+      ['phase = "stopped"', "publisher = FALSE", "unsafeCleanup = TRUE"],
     ],
     additionalControls: [
       {
         name: "uncommitted-exit",
         negative: true,
         invariant: "NoUncommittedExit",
-        action: "ReleaseBridge",
         fields: [
           'phase = "bridge-retired"',
           "owner = TRUE",
@@ -1333,7 +1306,6 @@ const contracts: readonly ModelContract[] = [
         name: "reservation-tail",
         negative: true,
         invariant: "NoStrandedReservation",
-        action: "Retire",
         fields: [
           'phase = "retired"',
           "reservation = TRUE",
@@ -1344,14 +1316,20 @@ const contracts: readonly ModelContract[] = [
         name: "frontend-loss",
         negative: true,
         invariant: "NoSilentOrphan",
-        action: "FrontendLost",
         fields: ['phase = "ready"', "frontend = FALSE", "owner = TRUE"],
+        alternativeWitnesses: [
+          ['phase = "publisher-down"', "frontend = FALSE", "owner = TRUE"],
+          [
+            'phase = "publisher-exit-pending"',
+            "frontend = FALSE",
+            "owner = TRUE",
+          ],
+        ],
       },
       {
         name: "group-signal",
         negative: true,
         invariant: "NoInterruptRace",
-        action: "Interrupt",
         fields: [
           'phase = "enrolled"',
           "publisher = FALSE",
@@ -1363,7 +1341,6 @@ const contracts: readonly ModelContract[] = [
         name: "completion-reachable",
         negative: true,
         invariant: "NeverComplete",
-        action: "Retire",
         fields: [
           'phase = "retired"',
           "bridge = FALSE",
@@ -1374,11 +1351,84 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-route-lookup",
+    module: "RouteLookup",
+    states: 498,
+    invariant: "LiveRouteAllowed",
+    fields: [
+      'lookup = "deny"',
+      'pending = "claimed"',
+      'committed = [a |-> "original", b |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      [
+        'lookup = "deny"',
+        'pending = "staged"',
+        'committed = [a |-> "original", b |-> "claimed"]',
+      ],
+      [
+        'lookup = "deny"',
+        'pending = "absent"',
+        'committed = [a |-> "original", b |-> "staged"]',
+      ],
+    ],
+    additionalControls: [
+      {
+        name: "detached-inode",
+        negative: true,
+        invariant: "LiveRouteAllowed",
+        fields: [
+          'lookup = "deny"',
+          "linked = FALSE",
+          'committed = [a |-> "original", b |-> "claimed"]',
+        ],
+        alternativeWitnesses: ["absent", "staged"].map((phase) => [
+          'lookup = "deny"',
+          "linked = FALSE",
+          `committed = [a |-> "original", b |-> "${phase}"]`,
+        ]),
+      },
+      {
+        name: "stale-claim",
+        negative: true,
+        invariant: "AllowMatchesOpenedClaim",
+        fields: [
+          'lookup = "allow"',
+          'selected = "original"',
+          'opened = [a |-> "absent", b |-> "absent"]',
+        ],
+        alternativeWitnesses: [
+          ["absent", "claimed"],
+          ["absent", "staged"],
+          ["replacement", "absent"],
+          ["replacement", "claimed"],
+          ["replacement", "staged"],
+        ].map(([claim, phase]) => [
+          'lookup = "allow"',
+          'selected = "original"',
+          `opened = [a |-> "${claim}", b |-> "${phase}"]`,
+        ]),
+      },
+      {
+        name: "retirement-reachable",
+        negative: true,
+        invariant: "NeverDetachDuringRetirement",
+        fields: [
+          'lookup = "secondOpen"',
+          "linked = FALSE",
+          'pending = "none"',
+          'selected = "original"',
+          'opened = [a |-> "original", b |-> "staged"]',
+          'committed = [a |-> "original", b |-> "absent"]',
+        ],
+      },
+    ],
+  },
+  {
     name: "native-route-stop",
     module: "Stop",
     states: 202,
     invariant: "NoLostRecovery",
-    action: "CommitStop",
     fields: [
       'generation = "stopped"',
       'phase = "complete"',
@@ -1390,7 +1440,6 @@ const contracts: readonly ModelContract[] = [
         name: "unproved-retirement",
         negative: true,
         invariant: "NoUnprovedRelease",
-        action: "RetireClaims",
         fields: [
           'phase = "released"',
           "claimHeld = FALSE",
@@ -1402,7 +1451,6 @@ const contracts: readonly ModelContract[] = [
         name: "stale-reference",
         negative: true,
         invariant: "NoUnprovedRelease",
-        action: "RetireClaims",
         fields: [
           'phase = "released"',
           "claimHeld = FALSE",
@@ -1416,7 +1464,6 @@ const contracts: readonly ModelContract[] = [
         name: "uncertain-hook",
         negative: true,
         invariant: "NoUnprovedRelease",
-        action: "RetireClaims",
         fields: [
           'phase = "released"',
           "claimHeld = FALSE",
@@ -1429,7 +1476,6 @@ const contracts: readonly ModelContract[] = [
         name: "completion-reachable",
         negative: true,
         invariant: "NeverComplete",
-        action: "CommitStop",
         fields: [
           'generation = "stopped"',
           'phase = "complete"',
@@ -1447,7 +1493,6 @@ const contracts: readonly ModelContract[] = [
     module: "RegistryWriter",
     states: 7721,
     invariant: "NoLiveOwnershipLoss",
-    action: "Reap",
     fields: ["unsafeReap = TRUE", "lock = 0", "guard = 0"],
   },
   {
@@ -1455,7 +1500,6 @@ const contracts: readonly ModelContract[] = [
     module: "Absent",
     states: 247,
     invariant: "NoPrematurePublication",
-    action: "Publish",
     fields: [
       "intent = TRUE",
       "complete = FALSE",
@@ -1463,12 +1507,20 @@ const contracts: readonly ModelContract[] = [
       "published = TRUE",
       "unsafePublication = TRUE",
     ],
+    alternativeWitnesses: [
+      [
+        "intent = TRUE",
+        "complete = TRUE",
+        "retired = FALSE",
+        "published = TRUE",
+        "unsafePublication = TRUE",
+      ],
+    ],
     additionalControls: [
       {
         name: "unwitnessed-cleanup",
         negative: true,
         invariant: "NoUnwitnessedCleanup",
-        action: "CleanupOne",
         fields: [
           "intent = FALSE",
           "progress = 1",
@@ -1481,7 +1533,6 @@ const contracts: readonly ModelContract[] = [
         name: "stale-selection",
         negative: true,
         invariant: "NoUnwitnessedCleanup",
-        action: "CleanupOne",
         fields: [
           "intent = TRUE",
           "selected = 1",
@@ -1489,18 +1540,49 @@ const contracts: readonly ModelContract[] = [
           "progress = 1",
           "unsafeCleanup = TRUE",
         ],
+        alternativeWitnesses: [
+          [
+            "intent = TRUE",
+            "selected = 1",
+            "version = 2",
+            "progress = 2",
+            "unsafeCleanup = TRUE",
+          ],
+        ],
       },
       {
         name: "unconfirmed-retirement",
         negative: true,
         invariant: "NoUnconfirmedRetirement",
-        action: "RetireAbsentPublisher",
         fields: [
           "intent = FALSE",
           "complete = FALSE",
           "progress = 0",
           "retired = TRUE",
           "unsafeRetirement = TRUE",
+        ],
+        alternativeWitnesses: [
+          [
+            "intent = TRUE",
+            "complete = FALSE",
+            "progress = 0",
+            "retired = TRUE",
+            "unsafeRetirement = TRUE",
+          ],
+          [
+            "intent = TRUE",
+            "complete = FALSE",
+            "progress = 1",
+            "retired = TRUE",
+            "unsafeRetirement = TRUE",
+          ],
+          [
+            "intent = TRUE",
+            "complete = FALSE",
+            "progress = 2",
+            "retired = TRUE",
+            "unsafeRetirement = TRUE",
+          ],
         ],
       },
     ],
@@ -1510,7 +1592,6 @@ const contracts: readonly ModelContract[] = [
     module: "MissingLock",
     states: 96,
     invariant: "NoPrematureConsumer",
-    action: "AdmitOrdinary",
     fields: [
       'stage = "owner"',
       'consumer = "ordinary"',
@@ -1522,7 +1603,6 @@ const contracts: readonly ModelContract[] = [
         name: "retired-admission",
         negative: true,
         invariant: "NoPrematureConsumer",
-        action: "AdmitRetired",
         fields: [
           'stage = "owner"',
           'consumer = "retired"',
@@ -1534,7 +1614,6 @@ const contracts: readonly ModelContract[] = [
         name: "stale-proof",
         negative: true,
         invariant: "NoUnprovedCompletion",
-        action: "Commit",
         fields: [
           'stage = "complete"',
           "selected = 1",
@@ -1546,7 +1625,6 @@ const contracts: readonly ModelContract[] = [
         name: "replaced-lock",
         negative: true,
         invariant: "NoUnprovedCompletion",
-        action: "Commit",
         fields: [
           'stage = "complete"',
           'lockPath = "foreign"',
@@ -1557,28 +1635,23 @@ const contracts: readonly ModelContract[] = [
         name: "old-holder",
         negative: true,
         invariant: "NoUncoordinatedLegacy",
-        action: "OldHolderPublish",
         fields: [
           'stage = "intent"',
           'repair = "active"',
           "gate = TRUE",
           "legacyPublished = TRUE",
         ],
-        alternativeWitnesses: laterIncompleteMissingLockStages.map((stage) => ({
-          action: "OldHolderPublish",
-          fields: [
-            `stage = "${stage}"`,
-            'repair = "active"',
-            "gate = TRUE",
-            "legacyPublished = TRUE",
-          ],
-        })),
+        alternativeWitnesses: laterIncompleteMissingLockStages.map((stage) => [
+          `stage = "${stage}"`,
+          'repair = "active"',
+          "gate = TRUE",
+          "legacyPublished = TRUE",
+        ]),
       },
       {
         name: "completion-reachable",
         negative: true,
         invariant: "NeverComplete",
-        action: "Commit",
         fields: [
           'stage = "complete"',
           'lockPath = "replacement"',
@@ -1592,7 +1665,6 @@ const contracts: readonly ModelContract[] = [
     module: "SharedHttps",
     states: 64,
     invariant: "NoPrematureShutdown",
-    action: "FinishClose",
     fields: ['mode = "closed"', "leases = {2}", "unsafeShutdown = TRUE"],
   },
   {
@@ -1600,7 +1672,6 @@ const contracts: readonly ModelContract[] = [
     module: "ArchiveHttps",
     states: 92,
     invariant: "NoPrematurePublication",
-    action: "Publish",
     fields: [
       "intent = TRUE",
       "complete = FALSE",
@@ -1610,24 +1681,20 @@ const contracts: readonly ModelContract[] = [
       "unsafePublication = TRUE",
     ],
     alternativeWitnesses: [
-      {
-        action: "Publish",
-        fields: [
-          "intent = TRUE",
-          "complete = FALSE",
-          'archived = {"owner", "socket"}',
-          "crashed = TRUE",
-          "published = TRUE",
-          "unsafePublication = TRUE",
-        ],
-      },
+      [
+        "intent = TRUE",
+        "complete = FALSE",
+        'archived = {"owner", "socket"}',
+        "crashed = TRUE",
+        "published = TRUE",
+        "unsafePublication = TRUE",
+      ],
     ],
     additionalControls: [
       {
         name: "stale-selection",
         negative: true,
         invariant: "NoUnprovedArchive",
-        action: "ArchiveOwner",
         fields: [
           "intent = TRUE",
           "selected = 1",
@@ -1638,49 +1705,30 @@ const contracts: readonly ModelContract[] = [
           "unsafeArchive = TRUE",
         ],
         alternativeWitnesses: [
-          {
-            action: "ArchiveOwner",
-            fields: [
-              "intent = TRUE",
-              "selected = 1",
-              "version = 2",
-              "engine = TRUE",
-              'admission = "recovery"',
-              'archived = {"owner", "socket"}',
-              "unsafeArchive = TRUE",
-            ],
-          },
-          {
-            action: "ArchiveSocket",
-            fields: [
-              "intent = TRUE",
-              "selected = 1",
-              "version = 2",
-              "engine = TRUE",
-              'admission = "recovery"',
-              'archived = {"socket"}',
-              "unsafeArchive = TRUE",
-            ],
-          },
-          {
-            action: "ArchiveSocket",
-            fields: [
-              "intent = TRUE",
-              "selected = 1",
-              "version = 2",
-              "engine = TRUE",
-              'admission = "recovery"',
-              'archived = {"owner", "socket"}',
-              "unsafeArchive = TRUE",
-            ],
-          },
+          [
+            "intent = TRUE",
+            "selected = 1",
+            "version = 2",
+            "engine = TRUE",
+            'admission = "recovery"',
+            'archived = {"owner", "socket"}',
+            "unsafeArchive = TRUE",
+          ],
+          [
+            "intent = TRUE",
+            "selected = 1",
+            "version = 2",
+            "engine = TRUE",
+            'admission = "recovery"',
+            'archived = {"socket"}',
+            "unsafeArchive = TRUE",
+          ],
         ],
       },
       {
         name: "unproved-archive",
         negative: true,
         invariant: "NoUnprovedArchive",
-        action: "ArchiveOwner",
         fields: [
           "intent = TRUE",
           "eligible = FALSE",
@@ -1690,39 +1738,22 @@ const contracts: readonly ModelContract[] = [
           "unsafeArchive = TRUE",
         ],
         alternativeWitnesses: [
-          {
-            action: "ArchiveOwner",
-            fields: [
-              "intent = TRUE",
-              "eligible = FALSE",
-              "engine = TRUE",
-              'admission = "recovery"',
-              'archived = {"owner", "socket"}',
-              "unsafeArchive = TRUE",
-            ],
-          },
-          {
-            action: "ArchiveSocket",
-            fields: [
-              "intent = TRUE",
-              "eligible = FALSE",
-              "engine = TRUE",
-              'admission = "recovery"',
-              'archived = {"socket"}',
-              "unsafeArchive = TRUE",
-            ],
-          },
-          {
-            action: "ArchiveSocket",
-            fields: [
-              "intent = TRUE",
-              "eligible = FALSE",
-              "engine = TRUE",
-              'admission = "recovery"',
-              'archived = {"owner", "socket"}',
-              "unsafeArchive = TRUE",
-            ],
-          },
+          [
+            "intent = TRUE",
+            "eligible = FALSE",
+            "engine = TRUE",
+            'admission = "recovery"',
+            'archived = {"owner", "socket"}',
+            "unsafeArchive = TRUE",
+          ],
+          [
+            "intent = TRUE",
+            "eligible = FALSE",
+            "engine = TRUE",
+            'admission = "recovery"',
+            'archived = {"socket"}',
+            "unsafeArchive = TRUE",
+          ],
         ],
       },
     ],
@@ -1732,7 +1763,6 @@ const contracts: readonly ModelContract[] = [
     module: "Owner",
     states: 1720,
     invariant: "NoUnownedResources",
-    action: "ExitUnconfirmed",
     fields: [
       'mapping = "none"',
       'phase = "exited"',
@@ -1747,7 +1777,6 @@ const contracts: readonly ModelContract[] = [
         name: "detached-before-bookkeeping",
         negative: true,
         invariant: "NoPrematureReturn",
-        action: "Return",
         fields: [
           'launcher = "returned"',
           "accepted = TRUE",
@@ -1761,7 +1790,6 @@ const contracts: readonly ModelContract[] = [
         name: "detached-before-started",
         negative: true,
         invariant: "NoPrematureReturn",
-        action: "Return",
         fields: [
           'launcher = "returned"',
           "accepted = TRUE",
@@ -1773,7 +1801,6 @@ const contracts: readonly ModelContract[] = [
         name: "detached-before-ready-wait",
         negative: true,
         invariant: "NoPrematureReturn",
-        action: "Return",
         fields: ['launcher = "returned"', "accepted = TRUE", "readied = FALSE"],
       },
       {
@@ -1781,7 +1808,6 @@ const contracts: readonly ModelContract[] = [
         name: "mapping-after-line",
         negative: true,
         invariant: "NoReturnWithoutMapping",
-        action: "Notify",
         fields: [
           'launcher = "notified"',
           'mapping = "none"',
@@ -1794,7 +1820,6 @@ const contracts: readonly ModelContract[] = [
         name: "mapping-after-line-wait",
         negative: true,
         invariant: "NoReturnWithoutMapping",
-        action: "Notify",
         fields: ['launcher = "notified"', 'mapping = "none"', "readied = TRUE"],
       },
       {
@@ -1803,7 +1828,6 @@ const contracts: readonly ModelContract[] = [
         name: "stop-mid-publication",
         negative: true,
         invariant: "NoHalfPublicationAfterStop",
-        action: "DownStop",
         fields: [
           'phase = "stopped"',
           'pub = "publishing"',
@@ -1817,7 +1841,6 @@ const contracts: readonly ModelContract[] = [
         name: "down-leaves-owner-waiting",
         negative: true,
         invariant: "DownCancelsWait",
-        action: "AcceptStop",
         fields: [
           'phase = "started"',
           'down = "accepted"',
@@ -1830,7 +1853,6 @@ const contracts: readonly ModelContract[] = [
         name: "stop-without-accept",
         negative: true,
         invariant: "StoppedOwnerNotWaiting",
-        action: "DownStop",
         fields: [
           'phase = "stopped"',
           'down = "done"',
@@ -1844,7 +1866,6 @@ const contracts: readonly ModelContract[] = [
         name: "stop-before-frontend-cancel",
         negative: true,
         invariant: "StoppedFrontendCancelled",
-        action: "DownStop",
         fields: [
           'phase = "stopped"',
           'down = "done"',
@@ -1873,7 +1894,6 @@ const contracts: readonly ModelContract[] = [
     module: "RestartIntent",
     states: 40,
     invariant: "InterruptLeavesNoIntent",
-    action: "Interrupt",
     fields: [
       "crashed = FALSE",
       "interrupted = TRUE",
@@ -1887,23 +1907,11 @@ const contracts: readonly ModelContract[] = [
         name: "no-resume",
         negative: true,
         invariant: "NoRecoveryLoop",
-        action: "Crash",
         fields: [
           "crashed = TRUE",
           'graph = "stopped"',
           'intent = "prepared"',
           'restart = "failed"',
-        ],
-        alternativeWitnesses: [
-          {
-            action: "OwnerStops",
-            fields: [
-              "crashed = TRUE",
-              'graph = "stopped"',
-              'intent = "prepared"',
-              'restart = "failed"',
-            ],
-          },
         ],
       },
       {
@@ -1912,22 +1920,12 @@ const contracts: readonly ModelContract[] = [
         name: "shared-group-loop",
         negative: true,
         invariant: "NoRecoveryLoop",
-        action: "Interrupt",
         fields: [
           'graph = "stopped"',
           'intent = "prepared"',
           'owner = "retired"',
           'restart = "failed"',
         ],
-        alternativeWitnesses: ["Crash", "OwnerStops"].map((action) => ({
-          action,
-          fields: [
-            'graph = "stopped"',
-            'intent = "prepared"',
-            'owner = "retired"',
-            'restart = "failed"',
-          ],
-        })),
       },
     ],
   },
@@ -1936,14 +1934,12 @@ const contracts: readonly ModelContract[] = [
     module: "LeaseWait",
     states: 19,
     invariant: "NoEffectWhileHeld",
-    action: "Acquire",
     fields: ['holder = "second"', 'waiter = "acquired"', "earlyEffect = TRUE"],
     additionalControls: [
       {
         name: "acquisition-reachable",
         negative: true,
         invariant: "NeverAcquired",
-        action: "Acquire",
         fields: [
           'holder = "second"',
           'waiter = "acquired"',
@@ -1954,7 +1950,6 @@ const contracts: readonly ModelContract[] = [
         name: "expiry-reachable",
         negative: true,
         invariant: "NeverExpired",
-        action: "Expire",
         fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
       },
     ],
@@ -1964,7 +1959,6 @@ const contracts: readonly ModelContract[] = [
     module: "Resume",
     states: 71,
     invariant: "NoSubstitutedBoot",
-    action: "Boot",
     fields: [
       'phase = "pending"',
       "attempts = 1",
@@ -1978,7 +1972,6 @@ const contracts: readonly ModelContract[] = [
         name: "uncertain-replay",
         negative: true,
         invariant: "NoUncertainReplay",
-        action: "Retry",
         fields: [
           'phase = "pending"',
           "attempts = 2",
@@ -2003,7 +1996,6 @@ const contracts: readonly ModelContract[] = [
     states: 220_686,
     // Development's second sample taken before the startup lease.
     invariant: "SecondSampleUnderLease",
-    action: "Recheck",
     fields: ['pc = "Proven"', 'profile = "development"'],
     additionalControls: [
       // The implementation's other path, a cleanly stopped pool's start: root files
@@ -2013,35 +2005,30 @@ const contracts: readonly ModelContract[] = [
         name: "window-not-enforced",
         negative: true,
         invariant: "WindowRespected",
-        action: "Recheck",
         fields: ['pc = "Qualified"', 'profile = "development"'],
       },
       {
         name: "unchained-recheck",
         negative: true,
         invariant: "ChainUnbroken",
-        action: "Recheck",
         fields: ['pc = "Qualified"', "swapouts = 1"],
       },
       {
         name: "unchained-boot",
         negative: true,
         invariant: "BootBaselineIsLastSample",
-        action: "AdmitBoot",
         fields: ['pc = "BootAdmitted"', "baseline = <<1>>", "swapouts = 1"],
       },
       {
         name: "research-two-samples",
         negative: true,
         invariant: "ResearchThreeSamples",
-        action: "Start",
         fields: ['pc = "Started"', 'profile = "research"', "vm = TRUE"],
       },
       {
         name: "root-unchecked",
         negative: true,
         invariant: "StartFromProvenRoot",
-        action: "RecheckRoot",
         fields: ['pc = "RootProven"', "rootOk = FALSE", "rootProved = TRUE"],
       },
       // Without the tree recheck under the lease, a tree that changed after
@@ -2050,7 +2037,6 @@ const contracts: readonly ModelContract[] = [
         name: "changed-tree-start",
         negative: true,
         invariant: "NoStartFromChangedTree",
-        action: "Start",
         fields: [
           'pc = "Started"',
           "treeOk = FALSE",
@@ -2062,21 +2048,18 @@ const contracts: readonly ModelContract[] = [
         name: "development-start-reachable",
         negative: true,
         invariant: "NeverStartsDevelopment",
-        action: "Start",
         fields: ['profile = "development"', "vm = TRUE"],
       },
       {
         name: "research-start-reachable",
         negative: true,
         invariant: "NeverStartsResearch",
-        action: "Start",
         fields: ['profile = "research"', "vm = TRUE"],
       },
       {
         name: "moved-alias-start-reachable",
         negative: true,
         invariant: "NeverStartsOnMovedAlias",
-        action: "Start",
         fields: ['alias = "moved"', "selected = 2", "vm = TRUE"],
       },
       // The first sample recorded without its predicate check.
@@ -2084,7 +2067,6 @@ const contracts: readonly ModelContract[] = [
         name: "first-sample-unchecked",
         negative: true,
         invariant: "SamplesTakenOnPassingHost",
-        action: "Open",
         fields: ['pc = "Opened"', "hostOk = FALSE"],
       },
       // The same for Development's sample under the lease ...
@@ -2092,7 +2074,6 @@ const contracts: readonly ModelContract[] = [
         name: "second-sample-unchecked",
         negative: true,
         invariant: "SamplesTakenOnPassingHost",
-        action: "Recheck",
         fields: [
           'pc = "Qualified"',
           'profile = "development"',
@@ -2104,7 +2085,6 @@ const contracts: readonly ModelContract[] = [
         name: "research-sample-unchecked",
         negative: true,
         invariant: "SamplesTakenOnPassingHost",
-        action: "ResearchSample",
         fields: ['pc = "Opened"', 'profile = "research"', "hostOk = FALSE"],
       },
       // What few samples do not see, as reachable facts: a start admitted
@@ -2113,7 +2093,6 @@ const contracts: readonly ModelContract[] = [
         name: "development-dip-start-reachable",
         negative: true,
         invariant: "NeverStartsDevelopmentAcrossADip",
-        action: "Start",
         fields: [
           'profile = "development"',
           "acrossDip = TRUE",
@@ -2125,7 +2104,6 @@ const contracts: readonly ModelContract[] = [
         name: "research-dip-start-reachable",
         negative: true,
         invariant: "NeverStartsResearchAcrossADip",
-        action: "Start",
         fields: [
           'profile = "research"',
           "acrossDip = TRUE",
@@ -2138,7 +2116,6 @@ const contracts: readonly ModelContract[] = [
         name: "boot-dip-start-reachable",
         negative: true,
         invariant: "NeverStartsAcrossADipBeforeBoot",
-        action: "Start",
         fields: ["bootAcrossDip = TRUE", "dips = 1", "vm = TRUE"],
       },
       // The pre-boot observation admitted without its predicate check ...
@@ -2146,7 +2123,6 @@ const contracts: readonly ModelContract[] = [
         name: "boot-host-unchecked",
         negative: true,
         invariant: "BootSampleOnPassingHost",
-        action: "AdmitBoot",
         fields: ['pc = "BootAdmitted"', "hostOk = FALSE"],
       },
       // ... or without comparing its swapout count with the baseline.
@@ -2154,7 +2130,6 @@ const contracts: readonly ModelContract[] = [
         name: "boot-swapouts-unchecked",
         negative: true,
         invariant: "BootSampleMatchesBaseline",
-        action: "AdmitBoot",
         fields: ['pc = "BootAdmitted"', "baseline = <<0>>", "swapouts = 1"],
       },
       // The record of an earlier passing sample that may replace the
@@ -2163,14 +2138,12 @@ const contracts: readonly ModelContract[] = [
         name: "reuse-other-boot",
         negative: true,
         invariant: "ReusedRecordSameBoot",
-        action: "Reuse",
         fields: ['pc = "Qualified"', 'reusedBoot = "other"'],
       },
       {
         name: "reuse-too-young",
         negative: true,
         invariant: "WindowRespected",
-        action: "Reuse",
         fields: [
           'pc = "Qualified"',
           'reusedBoot = "this"',
@@ -2181,7 +2154,6 @@ const contracts: readonly ModelContract[] = [
         name: "reuse-too-old",
         negative: true,
         invariant: "ReusedRecordWithinBound",
-        action: "Reuse",
         fields: [
           'pc = "Qualified"',
           'reusedBoot = "this"',
@@ -2192,7 +2164,6 @@ const contracts: readonly ModelContract[] = [
         name: "reuse-changed-count",
         negative: true,
         invariant: "ReusedRecordSameSwapouts",
-        action: "Reuse",
         fields: [
           'pc = "Qualified"',
           'reusedBoot = "this"',
@@ -2205,7 +2176,6 @@ const contracts: readonly ModelContract[] = [
         name: "record-unchecked",
         negative: true,
         invariant: "RecordsFromPassingSamples",
-        action: "OtherRecords",
         fields: ['recBoot = "this"', "recOk = FALSE", "hostOk = FALSE"],
       },
       // Reachable: a start that replaced its wait with a record, one that
@@ -2215,21 +2185,18 @@ const contracts: readonly ModelContract[] = [
         name: "reuse-start-reachable",
         negative: true,
         invariant: "NeverStartsOnReuse",
-        action: "Start",
         fields: ['reusedBoot = "this"', 'reusedAge = "ok"', "vm = TRUE"],
       },
       {
         name: "reuse-miss-start-reachable",
         negative: true,
         invariant: "NeverStartsPastAnUnusableRecord",
-        action: "Start",
         fields: ['reusedBoot = "none"', "missed = TRUE", "vm = TRUE"],
       },
       {
         name: "reuse-dip-start-reachable",
         negative: true,
         invariant: "NeverStartsOnReuseAcrossADip",
-        action: "Start",
         fields: [
           'reusedBoot = "this"',
           "reusedDip = TRUE",
@@ -2244,25 +2211,25 @@ const contracts: readonly ModelContract[] = [
     module: "Shares",
     states: 55,
     invariant: "OwnShareOnly",
-    ...sharesWitnesses("StartGraph", sharesOwnShareViolations),
+    ...sharesWitnesses(sharesOwnShareViolations),
     additionalControls: [
       {
         name: "unfenced-boot",
         negative: true,
         invariant: "RunningMountsAudited",
-        ...sharesWitnesses("Boot", sharesUnfencedBootViolations),
+        ...sharesWitnesses(sharesUnfencedBootViolations),
       },
       {
         name: "owner-first",
         negative: true,
         invariant: "OwnerNeverAhead",
-        ...sharesWitnesses("CommitOwner", sharesOwnerFirstViolations),
+        ...sharesWitnesses(sharesOwnerFirstViolations),
       },
       {
         name: "referenced-removal",
         negative: true,
         invariant: "ReferencedSharesKept",
-        ...sharesWitnesses("CommitRecord", sharesReferencedRemovalViolations),
+        ...sharesWitnesses(sharesReferencedRemovalViolations),
       },
     ],
   },
@@ -2271,7 +2238,6 @@ const contracts: readonly ModelContract[] = [
     module: "Rebind",
     states: 21,
     invariant: "NoEarlyAdmission",
-    action: "Release",
     fields: [
       'phase = "active"',
       "admitted = TRUE",
@@ -2295,7 +2261,6 @@ const contracts: readonly ModelContract[] = [
         module: "TerminalReuse",
         negative: true,
         invariant: "NoPrematureNewGrant",
-        action: "RegisterNew",
         fields: [
           'phase = "one-off"',
           "grants = {3}",
@@ -2308,7 +2273,6 @@ const contracts: readonly ModelContract[] = [
         name: "wrong-readiness",
         negative: true,
         invariant: "NoWrongTerminalReadiness",
-        action: "Review",
         fields: [
           'phase = "reviewed"',
           "completed = {2}",
@@ -2320,7 +2284,6 @@ const contracts: readonly ModelContract[] = [
         name: "failed-completed",
         negative: true,
         invariant: "NoWrongTerminalReadiness",
-        action: "Review",
         fields: [
           'phase = "reviewed"',
           "completed = {2}",
@@ -2338,33 +2301,57 @@ const contracts: readonly ModelContract[] = [
     module: "LoggingOptIn",
     states: 1014,
     invariant: "FreshNeverStartsUnasked",
-    action: "Install",
     fields: [
       "existing = FALSE",
       "asked = FALSE",
       "running = TRUE",
       'setting = "unset"',
     ],
+    alternativeWitnesses: [
+      ["existing = FALSE", "asked = FALSE", "running = TRUE", 'setting = "on"'],
+    ],
     additionalControls: [
       {
         name: "legacy-unset-off",
         negative: true,
         invariant: "ExistingHomeKept",
-        action: "Install",
         fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
-        alternativeWitnesses: [
-          {
-            action: "Up",
-            fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
-          },
-        ],
       },
       {
         name: "off-removes-volumes",
         negative: true,
         invariant: "NoSurpriseDataLoss",
-        action: "UpFlag",
         fields: ["prevData = TRUE", "data = FALSE", 'setting = "off"'],
+        alternativeWitnesses: [
+          [
+            "prevData = TRUE",
+            "data = FALSE",
+            'setting = "unset"',
+            'last = "upFlag"',
+            "running = FALSE",
+          ],
+          [
+            "prevData = TRUE",
+            "data = FALSE",
+            'setting = "on"',
+            'last = "upFlag"',
+            "running = FALSE",
+          ],
+          [
+            "prevData = TRUE",
+            "data = FALSE",
+            'setting = "unset"',
+            'last = "install"',
+            "running = FALSE",
+          ],
+          [
+            "prevData = TRUE",
+            "data = FALSE",
+            'setting = "unset"',
+            'last = "up"',
+            "running = FALSE",
+          ],
+        ],
       },
       {
         // The first start does not save an existing home's choice: with its
@@ -2372,23 +2359,11 @@ const contracts: readonly ModelContract[] = [
         name: "decision-not-saved",
         negative: true,
         invariant: "ExistingHomeKept",
-        action: "Install",
         fields: [
           "existing = TRUE",
           'setting = "unset"',
           "dir = FALSE",
           "running = FALSE",
-        ],
-        alternativeWitnesses: [
-          {
-            action: "Up",
-            fields: [
-              "existing = TRUE",
-              'setting = "unset"',
-              "dir = FALSE",
-              "running = FALSE",
-            ],
-          },
         ],
       },
       {
@@ -2397,7 +2372,6 @@ const contracts: readonly ModelContract[] = [
         name: "unsaved-silent",
         negative: true,
         invariant: "OffMeansStopped",
-        action: "UpFlag",
         fields: ['setting = "off"', "unsaved = FALSE", "running = TRUE"],
       },
     ],
@@ -2409,14 +2383,15 @@ const contracts: readonly ModelContract[] = [
     module: "ProcessExit",
     states: 298,
     invariant: "NoExitWithPendingHold",
-    action: "SnapshotSettled",
     fields: ['phase = "flushing"', "snap = {}", "buffered = FALSE"],
+    alternativeWitnesses: [
+      ['phase = "flushing"', "snap = {}", "buffered = TRUE"],
+    ],
     additionalControls: [
       {
         name: "no-end",
         negative: true,
         invariant: "NoLostOutput",
-        action: "Exit",
         fields: ['phase = "exited"', "buffered = TRUE"],
       },
     ],
@@ -2428,7 +2403,6 @@ const contracts: readonly ModelContract[] = [
     module: "IngressRecord",
     states: 922_875,
     invariant: "TrustedRecordIsCurrent",
-    action: "Write",
     // Addresses and changers are symmetric, so a two-worker search may end
     // on either; the pinned fields are the ones every first witness shares.
     fields: ["gen = 1", "settled = FALSE", "extSinceWrite = FALSE"],
@@ -2451,21 +2425,19 @@ const contracts: readonly ModelContract[] = [
     module: "AutoRefresh",
     states: 141,
     invariant: "NoReplayAfterUnconfirmed",
-    action: "Start",
-    fields: [
-      "replayed = TRUE",
-      "unconfirmed = TRUE",
-      "closed = FALSE",
-      'journal = "none"',
-      "attempts = 2",
-    ],
+    fields: [...unconfirmedRefreshReplayFields, "attempts = 2"],
+    // Earlier attempts may complete or refuse before an unconfirmed refresh.
+    // The negative config allows up to five attempts.
+    alternativeWitnesses: [3, 4, 5].map((attempts) => [
+      ...unconfirmedRefreshReplayFields,
+      `attempts = ${attempts}`,
+    ]),
   },
   {
     name: "relay-lifecycle-barrier",
     module: "Barrier",
     states: 1590,
     invariant: "NoUnretiredTarget",
-    action: "BeginEffect",
     fields: [
       "unsafeCommit = TRUE",
       'phase = "effect-started"',
@@ -2473,13 +2445,28 @@ const contracts: readonly ModelContract[] = [
       "ownerAlive = TRUE",
       "connections = {1, 2}",
     ],
+    alternativeWitnesses: [
+      [
+        "unsafeCommit = TRUE",
+        'phase = "effect-started"',
+        "journal = TRUE",
+        "ownerAlive = TRUE",
+        "connections = {2}",
+      ],
+      [
+        "unsafeCommit = TRUE",
+        'phase = "effect-started"',
+        "journal = TRUE",
+        "ownerAlive = TRUE",
+        "connections = {1}",
+      ],
+    ],
   },
   {
     name: "relay-authorization",
     module: "Authorization",
     states: 7,
     invariant: "NoLateWrite",
-    action: "Write",
     fields: ["active = FALSE", "lateWrite = TRUE", 'phase = "done"'],
   },
   {
@@ -2487,7 +2474,6 @@ const contracts: readonly ModelContract[] = [
     module: "Cancellation",
     states: 10,
     invariant: "NoLatePublication",
-    action: "Publish",
     fields: ["cancelled = TRUE", "latePublication = TRUE"],
   },
   {
@@ -2495,7 +2481,6 @@ const contracts: readonly ModelContract[] = [
     module: "Startup",
     states: 27,
     invariant: "NoRevokedGrant",
-    action: "Timeout",
     fields: ["granted = TRUE", "killed = TRUE"],
   },
   {
@@ -2503,7 +2488,6 @@ const contracts: readonly ModelContract[] = [
     module: "Routing",
     states: 11,
     invariant: "NoWrongReservation",
-    action: "Connect",
     fields: ["observed = 1", "delivered = 2"],
   },
   {
@@ -2511,7 +2495,6 @@ const contracts: readonly ModelContract[] = [
     module: "Lifetime",
     states: 9,
     invariant: "NoAuthorityAfterDown",
-    action: "StartBind",
     fields: ["running = FALSE", "authority = TRUE"],
   },
   {
@@ -2519,7 +2502,6 @@ const contracts: readonly ModelContract[] = [
     module: "Journal",
     states: 50,
     invariant: "Safe",
-    action: "Recover",
     fields: ["alive = TRUE", "recoveredLive = TRUE"],
   },
   {
@@ -2529,47 +2511,40 @@ const contracts: readonly ModelContract[] = [
     module: "BridgeBatch",
     states: 14_674,
     invariant: "Safe",
-    action: "Relays",
     fields: ['opc = "late"', 'relay = [r |-> "running", p |-> "running"]'],
     additionalControls: [
       {
         name: "child-fence",
         negative: true,
-        action: "ChildLaunch",
         fields: ["staleLaunch = TRUE", 'lease = "free"'],
       },
       {
         name: "release-order",
         negative: true,
-        action: "CleanStop",
         fields: ['rpc = "late"', 'lease = "cleanup"'],
       },
       {
         name: "ready-reachable",
         negative: true,
         invariant: "NeverReady",
-        action: "Await",
         fields: ['opc = "ready"', 'cpc = [r |-> "done", p |-> "done"]'],
       },
       {
         name: "release-reachable",
         negative: true,
         invariant: "NeverReleased",
-        action: "CleanDrop",
         fields: ['rpc = "done"', 'lease = "free"'],
       },
       {
         name: "release-after-ready",
         negative: true,
         invariant: "NeverReleasedAfterReady",
-        action: "CleanDrop",
         fields: ['rpc = "done"', "everReady = TRUE"],
       },
       {
         name: "stale-stop-reachable",
         negative: true,
         invariant: "NeverStaleStop",
-        action: "Fence3",
         fields: ['opc = "failed"', 'lease = "free"'],
       },
     ],
@@ -2579,44 +2554,51 @@ const contracts: readonly ModelContract[] = [
     module: "PerServicePublication",
     states: 811,
     invariant: "Safe",
-    action: "Record",
     fields: [
       'recorded = {"first"}',
       'child = [first |-> "gated", second |-> "absent"]',
     ],
     alternativeWitnesses: [
-      {
-        action: "Record",
-        fields: [
-          'recorded = {"second"}',
-          'child = [first |-> "absent", second |-> "gated"]',
-        ],
-      },
+      [
+        'recorded = {"second"}',
+        'child = [first |-> "absent", second |-> "gated"]',
+      ],
+      [
+        'recorded = {"second"}',
+        'child = [first |-> "gated", second |-> "gated"]',
+      ],
+      [
+        'recorded = {"second"}',
+        'child = [first |-> "committed", second |-> "gated"]',
+      ],
     ],
     additionalControls: [
       {
         name: "bind-before-commit",
         negative: true,
-        action: "Bind",
         fields: [
           'child = [first |-> "uncommitted-bind", second |-> "absent"]',
           "recorded = {}",
         ],
         alternativeWitnesses: [
-          {
-            action: "Bind",
-            fields: [
-              'child = [first |-> "absent", second |-> "uncommitted-bind"]',
-              "recorded = {}",
-            ],
-          },
+          [
+            'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+            "recorded = {}",
+          ],
+          [
+            'child = [first |-> "gated", second |-> "uncommitted-bind"]',
+            "recorded = {}",
+          ],
+          [
+            'child = [first |-> "committed", second |-> "uncommitted-bind"]',
+            "recorded = {}",
+          ],
         ],
       },
       {
         name: "dead-authorization",
         negative: true,
         invariant: "NoDeadAuthorizedBind",
-        action: "Bind",
         fields: ["lateBind = TRUE", 'phase = "dead"'],
       },
     ],
@@ -2629,39 +2611,29 @@ const contracts: readonly ModelContract[] = [
     module: "LoopbackPort",
     states: 1008,
     invariant: "Safe",
-    action: "Recover",
     fields: ["retiredLive = TRUE", "alive = [a |-> TRUE, b |-> TRUE]"],
+    alternativeWitnesses: [
+      ["retiredLive = TRUE", "alive = [a |-> FALSE, b |-> TRUE]"],
+      ["retiredLive = TRUE", "alive = [a |-> TRUE, b |-> FALSE]"],
+    ],
     additionalControls: [
       {
         name: "no-probe",
         negative: true,
-        action: "Publish",
         fields: ["shared = TRUE", 'holders = {"a", "foreign"}'],
         // TLC's two workers may report either owner as the second listener.
-        alternativeWitnesses: [
-          {
-            action: "Publish",
-            fields: ["shared = TRUE", 'holders = {"b", "foreign"}'],
-          },
-        ],
+        alternativeWitnesses: [["shared = TRUE", 'holders = {"b", "foreign"}']],
       },
       {
         name: "stale-target",
         negative: true,
-        action: "Forward",
         fields: ["staleForward = TRUE", "target = [a |-> 0, b |-> 0]"],
       },
       {
         name: "ack-before-close",
         negative: true,
-        action: "Retire",
         fields: ["ackedListening = TRUE", 'holders = {"a"}'],
-        alternativeWitnesses: [
-          {
-            action: "Retire",
-            fields: ["ackedListening = TRUE", 'holders = {"b"}'],
-          },
-        ],
+        alternativeWitnesses: [["ackedListening = TRUE", 'holders = {"b"}']],
       },
     ],
   },
@@ -2674,7 +2646,6 @@ const contracts: readonly ModelContract[] = [
     module: "ArchiveBound",
     states: 75,
     invariant: "AlwaysRecoverable",
-    action: "PoolStop",
     fields: ['phase = "stopped"', 'intent = "complete"'],
   },
   {
@@ -2682,7 +2653,6 @@ const contracts: readonly ModelContract[] = [
     module: "Publication",
     states: 16,
     invariant: "Safe",
-    action: "Retire",
     fields: ['process = "native"', "intent = FALSE"],
   },
   {
@@ -2691,7 +2661,6 @@ const contracts: readonly ModelContract[] = [
     negativeModule: "FirstBroken",
     states: 24,
     invariant: "Safe",
-    action: "Recover",
     fields: ["occupied = TRUE", "recovered = TRUE"],
   },
   {
@@ -2700,7 +2669,6 @@ const contracts: readonly ModelContract[] = [
     negativeModule: "FenceBroken",
     states: 7,
     invariant: "Safe",
-    action: "Recover",
     fields: ['phase = "stopped"', "alive = TRUE"],
   },
   {
@@ -2709,7 +2677,6 @@ const contracts: readonly ModelContract[] = [
     negativeModule: "StageBroken",
     states: 9,
     invariant: "Safe",
-    action: "Discard",
     fields: ['phase = "discarded"', "alive = TRUE"],
   },
   {
@@ -2725,7 +2692,6 @@ const contracts: readonly ModelContract[] = [
     module: "Instance",
     states: 7649,
     invariant: "SessionSafe",
-    action: "Succeed",
     fields: [
       'session = "absent"',
       'epoch = <<"b", "adopted">>',
@@ -2734,90 +2700,56 @@ const contracts: readonly ModelContract[] = [
     // TLC's two workers may report either up as the adopter, and the kill
     // may land after the adopter's Succeed (reported at Cleanup).
     alternativeWitnesses: [
-      {
-        action: "Succeed",
-        fields: [
-          'session = "absent"',
-          'epoch = <<"a", "adopted">>',
-          'pc = [a |-> "succeeded", b |-> "done"]',
-        ],
-      },
-      {
-        action: "Cleanup",
-        fields: [
-          'session = "absent"',
-          'epoch = <<"b", "adopted">>',
-          'pc = [a |-> "done", b |-> "succeeded"]',
-        ],
-      },
-      {
-        action: "Cleanup",
-        fields: [
-          'session = "absent"',
-          'epoch = <<"a", "adopted">>',
-          'pc = [a |-> "succeeded", b |-> "done"]',
-        ],
-      },
+      [
+        'session = "absent"',
+        'epoch = <<"a", "adopted">>',
+        'pc = [a |-> "succeeded", b |-> "done"]',
+      ],
     ],
     additionalControls: [
       {
         name: "no-revalidation",
         negative: true,
         invariant: "Reclaimable",
-        action: "Publish",
         fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
         alternativeWitnesses: [
-          {
-            action: "Publish",
-            fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
-          },
+          ['session = "alive"', 'token = "b"', 'entry = "a"'],
         ],
       },
       {
         name: "epoch-failure-unstopped",
         negative: true,
         invariant: "Reclaimable",
-        action: "RecordFailUnstopped",
         fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
         alternativeWitnesses: [
-          {
-            action: "RecordFailUnstopped",
-            fields: ['session = "alive"', 'token = "b"', 'entry = "none"'],
-          },
+          ['session = "alive"', 'token = "b"', 'entry = "none"'],
         ],
       },
       {
         name: "stale-finalize",
         negative: true,
         invariant: "Reclaimable",
-        action: "Finalize",
         fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
         // TLC's two workers may report either up as the displaced one.
         alternativeWitnesses: [
-          {
-            action: "Finalize",
-            fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
-          },
+          ['session = "alive"', 'token = "a"', 'entry = "b"'],
         ],
       },
       {
         name: "abandoned-create",
         negative: true,
         invariant: "Reclaimable",
-        action: "LateCreate",
         fields: ['session = "alive"', 'token = "a"', 'entry = "none"'],
         alternativeWitnesses: [
-          {
-            action: "LateCreate",
-            fields: ['session = "alive"', 'token = "b"', 'entry = "none"'],
-          },
+          ['session = "alive"', 'token = "b"', 'entry = "none"'],
+          ['session = "alive"', 'token = "a"', 'entry = "b"'],
+          ['session = "alive"', 'token = "b"', 'entry = "a"'],
         ],
       },
       {
         name: "abandoned-replace",
         negative: true,
         invariant: "SessionSafe",
-        action: "LateKill",
         fields: [
           'session = "absent"',
           'pc = [a |-> "succeeded", b |-> "done"]',
@@ -2825,34 +2757,13 @@ const contracts: readonly ModelContract[] = [
         // The stale kill can land before or after the victim's Succeed;
         // either up can be the victim.
         alternativeWitnesses: [
-          {
-            action: "LateKill",
-            fields: [
-              'session = "absent"',
-              'pc = [a |-> "done", b |-> "succeeded"]',
-            ],
-          },
-          {
-            action: "Succeed",
-            fields: [
-              'session = "absent"',
-              'pc = [a |-> "succeeded", b |-> "done"]',
-            ],
-          },
-          {
-            action: "Succeed",
-            fields: [
-              'session = "absent"',
-              'pc = [a |-> "done", b |-> "succeeded"]',
-            ],
-          },
+          ['session = "absent"', 'pc = [a |-> "done", b |-> "succeeded"]'],
         ],
       },
       {
         name: "unlocked-failure-cleanup",
         negative: true,
         invariant: "SessionSafe",
-        action: "LateKill",
         fields: [
           'session = "absent"',
           'pc = [a |-> "done", b |-> "succeeded"]',
@@ -2860,60 +2771,31 @@ const contracts: readonly ModelContract[] = [
         // The stale kill can land before or after the victim's Succeed;
         // either up can be the victim.
         alternativeWitnesses: [
-          {
-            action: "LateKill",
-            fields: [
-              'session = "absent"',
-              'pc = [a |-> "succeeded", b |-> "done"]',
-            ],
-          },
-          {
-            action: "Succeed",
-            fields: [
-              'session = "absent"',
-              'pc = [a |-> "done", b |-> "succeeded"]',
-            ],
-          },
-          {
-            action: "Succeed",
-            fields: [
-              'session = "absent"',
-              'pc = [a |-> "succeeded", b |-> "done"]',
-            ],
-          },
+          ['session = "absent"', 'pc = [a |-> "succeeded", b |-> "done"]'],
         ],
       },
       {
         name: "unfenced-launch",
         negative: true,
         invariant: "NoForeignLaunch",
-        action: "StartProcesses",
         fields: ["foreign = TRUE", 'token = "b"', 'entry = "b"'],
         alternativeWitnesses: [
-          {
-            action: "StartProcesses",
-            fields: ["foreign = TRUE", 'token = "a"', 'entry = "a"'],
-          },
+          ["foreign = TRUE", 'token = "a"', 'entry = "a"'],
         ],
       },
       {
         name: "release-on-failed-stop",
         negative: true,
         invariant: "HelpersKeptForSession",
-        action: "DownStopFailed",
         fields: ['down = "failed"', "released = TRUE", 'session = "alive"'],
       },
       {
         name: "timeout-as-absence",
         negative: true,
         invariant: "Reclaimable",
-        action: "Publish",
         fields: ['session = "alive"', 'token = "a"', 'entry = "b"'],
         alternativeWitnesses: [
-          {
-            action: "Publish",
-            fields: ['session = "alive"', 'token = "b"', 'entry = "a"'],
-          },
+          ['session = "alive"', 'token = "b"', 'entry = "a"'],
         ],
       },
     ],
@@ -2923,7 +2805,6 @@ const contracts: readonly ModelContract[] = [
     module: "RestartPolicy",
     states: 134,
     invariant: "NoIncarnationAfterStop",
-    action: "DaemonRestart",
     fields: [
       'phase = "stopping"',
       'policy = "armed"',
@@ -2933,35 +2814,27 @@ const contracts: readonly ModelContract[] = [
     // DaemonRestart needs a present container, so a stop-requested phase is
     // either stopping or, after terminal proof, stopped.
     alternativeWitnesses: [
-      {
-        action: "DaemonRestart",
-        fields: [
-          'phase = "stopped"',
-          'policy = "armed"',
-          'engine = "running"',
-          "lateStart = TRUE",
-        ],
-      },
+      [
+        'phase = "stopped"',
+        'policy = "armed"',
+        'engine = "running"',
+        "lateStart = TRUE",
+      ],
     ],
     additionalControls: [
       {
         name: "rebind-reachable",
         negative: true,
         invariant: "NeverRebound",
-        action: "Rebind",
         fields: ['phase = "serving"', 'engine = "running"', "bound = 2"],
         alternativeWitnesses: [
-          {
-            action: "Rebind",
-            fields: ['phase = "serving"', 'engine = "running"', "bound = 3"],
-          },
+          ['phase = "serving"', 'engine = "running"', "bound = 3"],
         ],
       },
       {
         name: "unproved-terminal",
         negative: true,
         invariant: "TerminalProof",
-        action: "ObserveTerminal",
         fields: [
           'phase = "stopped"',
           'engine = "running"',
@@ -2970,43 +2843,37 @@ const contracts: readonly ModelContract[] = [
         ],
         // A non-terminal engine is either running or has a pending restart.
         alternativeWitnesses: [
-          {
-            action: "ObserveTerminal",
-            fields: [
-              'phase = "stopped"',
-              'engine = "restarting"',
-              "cancelled = TRUE",
-              "unsafeTerminal = TRUE",
-            ],
-          },
+          [
+            'phase = "stopped"',
+            'engine = "restarting"',
+            "cancelled = TRUE",
+            "unsafeTerminal = TRUE",
+          ],
         ],
       },
       {
         name: "stale-generation",
         negative: true,
         invariant: "NoStaleIncarnation",
-        action: "Use",
         fields: [
           'phase = "serving"',
           'engine = "restarting"',
           "bound = 1",
           "staleUse = TRUE",
         ],
-        alternativeWitnesses: restartPolicyStaleUses.slice(1).map((use) => ({
-          action: "Use",
-          fields: [
+        alternativeWitnesses: restartPolicyStaleUses
+          .slice(1)
+          .map((use) => [
             'phase = "serving"',
             `engine = "${use.engine}"`,
             `bound = ${use.bound}`,
             "staleUse = TRUE",
-          ],
-        })),
+          ]),
       },
       {
         name: "completion-reachable",
         negative: true,
         invariant: "NeverRemoved",
-        action: "Remove",
         fields: [
           'phase = "removed"',
           'engine = "absent"',
@@ -3022,14 +2889,12 @@ const contracts: readonly ModelContract[] = [
     module: "BaseScheduling",
     states: 12,
     invariant: "NoForegroundImport",
-    action: "Cold",
     fields: ['phase = "solving"', "foregroundDownload = TRUE"],
     additionalControls: [
       {
         name: "unsafe-overlap",
         negative: true,
         invariant: "OnlyIdleRetention",
-        action: "Stop",
         fields: ['phase = "stopping"', "retention = TRUE"],
       },
     ],
@@ -3039,28 +2904,24 @@ const contracts: readonly ModelContract[] = [
     module: "BuildAlias",
     states: 23,
     invariant: "BaseSurvives",
-    action: "Cleanup",
     fields: ["base = FALSE", "alias = FALSE"],
     additionalControls: [
       {
         name: "old-order",
         negative: true,
         invariant: "CanRecover",
-        action: "Refuse",
         fields: ['phase = "blocked"', "keeper = FALSE", "alias = TRUE"],
       },
       {
         name: "unsafe-remote",
         negative: true,
         invariant: "NoRegistryFallback",
-        action: "ResolveMissing",
         fields: ["wire = TRUE", 'phase = "solving"'],
       },
       {
         name: "unsafe-sweep",
         negative: true,
         invariant: "NoLiveSweep",
-        action: "Cleanup",
         fields: ["sweptLive = TRUE", "alias = FALSE"],
       },
     ],
@@ -3070,7 +2931,6 @@ const contracts: readonly ModelContract[] = [
     module: "KeeperReclaim",
     states: 5,
     invariant: "PinPreservesImage",
-    action: "Reclaim",
     fields: ['fence = "pinning"', "keeper = FALSE"],
   },
   {
@@ -3078,14 +2938,12 @@ const contracts: readonly ModelContract[] = [
     module: "BuildBatch",
     states: 296,
     invariant: "NoLiveReturn",
-    action: "Return",
     fields: ["result = -2"],
     additionalControls: [
       {
         name: "cancel-wins",
         negative: true,
         invariant: "FirstOutcome",
-        action: "Return",
         fields: ["active = {}"],
       },
     ],
@@ -3095,41 +2953,62 @@ const contracts: readonly ModelContract[] = [
     module: "BuildRetention",
     states: 6181,
     invariant: "NoReclaimReferenced",
-    action: "Reclaim",
     fields: ["refs = {1}", "removed = 1", "fence = FALSE"],
     // Two-worker TLC can first reclaim image 2; require the same exact
     // referenced-image violation rather than accepting an arbitrary failure.
-    alternativeWitnesses: [
-      {
-        action: "Reclaim",
-        fields: ["refs = {2}", "removed = 2", "fence = FALSE"],
-      },
-    ],
+    alternativeWitnesses: [["refs = {2}", "removed = 2", "fence = FALSE"]],
     additionalControls: [
       {
         name: "foreign-adoption",
         negative: true,
         invariant: "NoForeignAdoption",
-        action: "CompleteBuild",
         fields: [
           'receipt = [phase |-> "verified", image |-> 2, inc |-> 1]',
           "owner = <<1, 0, 0>>",
         ],
         alternativeWitnesses: [
-          {
-            action: "CompleteBuild",
-            fields: [
-              'receipt = [phase |-> "verified", image |-> 1, inc |-> 1]',
-              "owner = <<0, 1, 0>>",
-            ],
-          },
+          [
+            'receipt = [phase |-> "verified", image |-> 1, inc |-> 1]',
+            "owner = <<0, 1, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 3, inc |-> 1]',
+            "owner = <<1, 0, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 3, inc |-> 1]',
+            "owner = <<0, 1, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 1, inc |-> 1]',
+            "owner = <<0, 0, 1>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 2, inc |-> 1]',
+            "owner = <<0, 0, 1>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 2, inc |-> 1]',
+            "owner = <<1, 0, 1>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 3, inc |-> 1]',
+            "owner = <<1, 1, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 2, inc |-> 2]',
+            "owner = <<2, 0, 0>>",
+          ],
+          [
+            'receipt = [phase |-> "verified", image |-> 1, inc |-> 2]',
+            "owner = <<0, 2, 0>>",
+          ],
         ],
       },
       {
         name: "down-under-build",
         negative: true,
         invariant: "DownNotUnderBuild",
-        action: "Down",
         fields: ['build = "running"', "engineUp = FALSE", "fence = TRUE"],
       },
     ],
@@ -3140,8 +3019,11 @@ const contracts: readonly ModelContract[] = [
     negativeModule: "RelayFenceBroken",
     states: 16,
     invariant: "Safe",
-    action: "Launch",
     fields: ["retired = <<1>>", "alive = 1"],
+    alternativeWitnesses: [
+      ["retired = <<1, 2>>", "alive = 1"],
+      ["retired = <<1, 2>>", "alive = 2"],
+    ],
   },
   {
     // HACK-2456: a pool that stops or dies under a live run. Positive: the
@@ -3156,29 +3038,16 @@ const contracts: readonly ModelContract[] = [
     module: "PoolStop",
     states: 210,
     invariant: "NoDeadEnd",
-    action: "OwnerCrash",
     fields: [
       'pool = "stopped"',
       'run = "ready"',
       'owner = "dead"',
       "pub = TRUE",
     ],
-    alternativeWitnesses: [
-      {
-        action: "OwnerNotices",
-        fields: [
-          'pool = "stopped"',
-          'run = "ready"',
-          'owner = "dead"',
-          "pub = TRUE",
-        ],
-      },
-    ],
     additionalControls: [
       {
         name: "by-hand",
         negative: true,
-        action: "RuntimeUp",
         fields: [
           'pool = "running"',
           "runBoot = 1",
@@ -3188,48 +3057,31 @@ const contracts: readonly ModelContract[] = [
         // TLC's two workers may report the same dead end one boot later, after
         // an extra `runtime up` and stop before the start (fault bound 3).
         alternativeWitnesses: [
-          {
-            action: "RuntimeUp",
-            fields: [
-              'pool = "running"',
-              "runBoot = 2",
-              "boot = 4",
-              'owner = "dead"',
-            ],
-          },
+          ['pool = "running"', "runBoot = 2", "boot = 4", 'owner = "dead"'],
+          ['pool = "running"', "runBoot = 1", "boot = 4", 'owner = "dead"'],
         ],
       },
       {
         name: "strict",
         negative: true,
-        action: "RecoverStopped",
         fields: [
           'pool = "running"',
           "runBoot = 1",
           "boot = 3",
           'owner = "dead"',
         ],
-        alternativeWitnesses: [
-          {
-            action: "RuntimeUp",
-            fields: [
-              'pool = "running"',
-              "runBoot = 1",
-              "boot = 3",
-              'owner = "dead"',
-            ],
-          },
-        ],
       },
       {
         name: "crash-in-recovery",
         negative: true,
-        action: "RecoverStopped",
         fields: [
           'pool = "running"',
           "runBoot = 1",
           "boot = 3",
           "recovering = TRUE",
+        ],
+        alternativeWitnesses: [
+          ['pool = "running"', "runBoot = 2", "boot = 4", "recovering = TRUE"],
         ],
       },
       // The shared HTTPS owner (HACK-2456, seen on a real VM). `https` is this
@@ -3241,32 +3093,12 @@ const contracts: readonly ModelContract[] = [
       {
         name: "https-no-retire",
         negative: true,
-        action: "RecoverRunning",
         fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
-        // TLC's two workers may report the recovery's own boot instead.
-        alternativeWitnesses: [
-          {
-            action: "RecoverStopped",
-            fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
-          },
-        ],
       },
       {
         name: "https-archive",
         negative: true,
-        action: "RecoverRunning",
         fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
-        // The owner may retire before or after the graph recovery.
-        alternativeWitnesses: [
-          {
-            action: "OwnerRetire",
-            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
-          },
-          {
-            action: "RecoverStopped",
-            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
-          },
-        ],
       },
       {
         // HACK-2550: a completed recovery whose archive could not run before its
@@ -3274,49 +3106,13 @@ const contracts: readonly ModelContract[] = [
         // the recovery's own boot.
         name: "https-finish-bound",
         negative: true,
-        action: "RuntimeUp",
         fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
-        alternativeWitnesses: [
-          {
-            action: "RecoverStopped",
-            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
-          },
-          {
-            action: "TimeWaitEnds",
-            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
-          },
-          {
-            action: "OwnerRetire",
-            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
-          },
-        ],
       },
       {
         name: "https-stopped",
         negative: true,
-        action: "OwnerRetire",
-        fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
-        alternativeWitnesses: [
-          {
-            action: "RuntimeDown",
-            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
-          },
-          {
-            action: "TimeWaitEnds",
-            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
-          },
-          {
-            action: "PoolRecover",
-            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
-          },
-          // The same stranded finalization, reported one step later: a `Listen`
-          // fault earlier in the trace leaves `ListenerExits` as the last enabled
-          // step, which `NoDeadEnd` counts as progress (seen on the B1 factory).
-          {
-            action: "ListenerExits",
-            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
-          },
-        ],
+        // All first violations have a retired HTTPS owner and a free port.
+        fields: stoppedHttpsWitnessFields,
       },
       {
         // HACK-2550: the archive's port claim binds with address reuse so the
@@ -3326,18 +3122,7 @@ const contracts: readonly ModelContract[] = [
         name: "reuse-no-check",
         negative: true,
         invariant: "NoArchiveOverListener",
-        action: "Finalize",
         fields: ['port = "listener"', "overListener = TRUE", 'https = "none"'],
-        alternativeWitnesses: [
-          {
-            action: "FinishCompleted",
-            fields: [
-              'port = "listener"',
-              "overListener = TRUE",
-              'https = "none"',
-            ],
-          },
-        ],
       },
       // HACK-2535: another project's `up` stops an idle running pool to add its
       // share. A run that became live before that stop is never stopped by it;
@@ -3348,7 +3133,6 @@ const contracts: readonly ModelContract[] = [
         name: "idle-restart-one-check",
         negative: true,
         invariant: "NoRestartOverLiveRun",
-        action: "RestartStop",
         fields: ["stoppedLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
       },
     ],
@@ -3357,26 +3141,24 @@ const contracts: readonly ModelContract[] = [
     // HACK-2524: release a checkout's run mapping whose native home is gone. The
     // positive control releases when the path no longer holds the home and no
     // process names it; `negative` is today (the clean-stop release from the
-    // home's own records), which strands a deleted home; `path-only` ignores the
+    // home's own records), which strands a deleted, moved or replaced home.
+    // The recorded path can be replaced before the old processes exit.
+    // `path-only` ignores the
     // process scan and releases while the home's run is still alive.
     name: "native-run-mapping-release",
     module: "MappingRelease",
     states: 21,
     invariant: "NoStrandedMapping",
-    action: "Delete",
     fields: ['home = "deleted"', 'mapping = "held"', "procs = FALSE"],
     alternativeWitnesses: [
-      {
-        action: "Move",
-        fields: ['home = "moved"', 'mapping = "held"', "procs = FALSE"],
-      },
+      ['home = "moved"', 'mapping = "held"', "procs = FALSE"],
+      ['home = "replaced"', 'mapping = "held"', "procs = FALSE"],
     ],
     additionalControls: [
       {
         name: "path-only",
         negative: true,
         invariant: "NeverReleaseLive",
-        action: "GoneHomeRelease",
         fields: ['mapping = "released"', "procs = TRUE", "unsafe = TRUE"],
       },
     ],
@@ -3389,25 +3171,20 @@ const contracts: readonly ModelContract[] = [
     module: "ProbeReadiness",
     states: 175_757,
     invariant: "OneCompile",
-    action: "Begin",
     fields: ["restarts = 1", 'app = "slow"'],
-    alternativeWitnesses: [
-      { action: "Begin", fields: ["restarts = 1", 'app = "hanging"'] },
-    ],
+    alternativeWitnesses: [["restarts = 1", 'app = "hanging"']],
     additionalControls: [
       { name: "legacy", negative: false, states: 132_615 },
       {
         name: "no-host-bound",
         negative: true,
         invariant: "BoundedStarting",
-        action: "Observe",
         fields: ['verdict = "starting"', "skewed = TRUE", "vt = 15"],
       },
       {
         name: "no-tolerance",
         negative: true,
         invariant: "NoFalseFailure",
-        action: "Observe",
         fields: ['verdict = "unhealthy"', 'app = "slow"'],
       },
       {
@@ -3415,14 +3192,12 @@ const contracts: readonly ModelContract[] = [
         name: "exhausts",
         negative: true,
         invariant: "NeverExhausted",
-        action: "Expire",
         fields: ['health = "unhealthy"', "failures = 2"],
       },
       {
         name: "tight-bound",
         negative: true,
         invariant: "NoPrematureFailure",
-        action: "Observe",
         fields: ['verdict = "unhealthy"', 'vh = "starting"'],
       },
     ],
@@ -3432,7 +3207,6 @@ const contracts: readonly ModelContract[] = [
     module: "Emulation",
     states: 13,
     invariant: "NoUntranslatedAmd64",
-    action: "StartAmd64",
     fields: [
       "amd64 = TRUE",
       "intent = TRUE",
@@ -3445,7 +3219,6 @@ const contracts: readonly ModelContract[] = [
         name: "running-upgrade",
         negative: true,
         invariant: "EngineMatchesIntent",
-        action: "RequestRunning",
         fields: [
           'phase = "running"',
           "intent = TRUE",
@@ -3463,7 +3236,6 @@ const contracts: readonly ModelContract[] = [
     module: "StartGraph",
     states: 1_656_372,
     invariant: "NoEffectWithoutIntent",
-    action: "Create",
     fields: ["intents = {}", "acted = TRUE", 'up = "running"'],
     additionalControls: [
       { name: "positive-reboot", negative: false, states: 81_534 },
@@ -3471,7 +3243,6 @@ const contracts: readonly ModelContract[] = [
         name: "ignore-deps",
         negative: true,
         invariant: "DepsBeforeStart",
-        action: "Start",
         fields: [
           startGraphBad("start"),
           "rgen = [a |-> 0, b |-> 1]",
@@ -3482,21 +3253,18 @@ const contracts: readonly ModelContract[] = [
         name: "no-publish-fence",
         negative: true,
         invariant: "NoPublishToReplaced",
-        action: "Publish",
         fields: [startGraphBad("publish"), "route = [a |-> 1, b |-> 0]"],
       },
       {
         name: "reuse-by-name",
         negative: true,
         invariant: "ReturnIsCurrent",
-        action: "Return",
         fields: [startGraphBad("return"), "boot = 1", 'up = "returned"'],
       },
       {
         name: "no-unpublish",
         negative: true,
         invariant: "NoReplaceWhileRouted",
-        action: "RemoveOld",
         fields: [
           startGraphBad("replace"),
           "route = [a |-> 1, b |-> 0]",
@@ -3507,7 +3275,6 @@ const contracts: readonly ModelContract[] = [
         name: "keep-across-boot",
         negative: true,
         invariant: "ReturnIsCurrent",
-        action: "Return",
         // Without the boot fence a dependent may also start on a stale
         // dependency, so both flags are set.
         fields: [
@@ -3516,26 +3283,16 @@ const contracts: readonly ModelContract[] = [
           'up = "returned"',
         ],
         alternativeWitnesses: [
-          {
-            action: "Return",
-            fields: [startGraphBad("return"), "boot = 2", 'up = "returned"'],
-          },
+          [startGraphBad("return"), "boot = 2", 'up = "returned"'],
         ],
       },
       {
         name: "blind-retry",
         negative: true,
         invariant: "OneContainerPerService",
-        action: "Create",
         fields: ["rgen = [a |-> 2, b |-> 0]", "nextGen = [a |-> 3, b |-> 1]"],
         alternativeWitnesses: [
-          {
-            action: "Create",
-            fields: [
-              "rgen = [a |-> 0, b |-> 2]",
-              "nextGen = [a |-> 1, b |-> 3]",
-            ],
-          },
+          ["rgen = [a |-> 0, b |-> 2]", "nextGen = [a |-> 1, b |-> 3]"],
         ],
       },
       {
@@ -3544,7 +3301,6 @@ const contracts: readonly ModelContract[] = [
         name: "reachable-noop",
         negative: true,
         invariant: "NeverNoOpUp",
-        action: "Return",
         fields: ["base = TRUE", "acted = FALSE", 'up = "returned"'],
       },
     ],
@@ -3556,13 +3312,12 @@ const contracts: readonly ModelContract[] = [
     // the two other positives. Each control removes one guard, except
     // `no-epoch`, which removes the boot id together with the observation (the
     // observation alone keeps boot skips sound). A `bad` flag is set only by the
-    // action that breaks its invariant, so the flag and the action pin the
-    // failure; `no-epoch` also pins the second boot to tell it from no-verify.
+    // action that breaks its invariant, so the flag identifies the failure.
+    // `no-epoch` also pins the second boot to tell it from no-verify.
     name: "step-store",
     module: "StepStore",
     states: 1_082_240,
     invariant: "NoUnsoundSkip",
-    action: "Skip",
     fields: [
       "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
       "done = TRUE",
@@ -3607,7 +3362,6 @@ const contracts: readonly ModelContract[] = [
         name: "no-pin",
         negative: true,
         invariant: "NoPruneInUse",
-        action: "PruneFinish",
         fields: [
           "bad = [pull |-> FALSE, skip |-> FALSE, use |-> TRUE, mixed |-> FALSE, stale |-> FALSE]",
           "pruning = <<0, 0>>",
@@ -3625,7 +3379,6 @@ const contracts: readonly ModelContract[] = [
         name: "ignore-ttl",
         negative: true,
         invariant: "NoSilentStaleTag",
-        action: "UseTag",
         fields: [
           "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> FALSE, stale |-> TRUE]",
           "resolved = FALSE",
@@ -3636,7 +3389,6 @@ const contracts: readonly ModelContract[] = [
         name: "resolve-per-use",
         negative: true,
         invariant: "OneDigestPerCommand",
-        action: "UseTag",
         fields: [
           "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> TRUE, stale |-> FALSE]",
           'cmd = "running"',
@@ -3677,18 +3429,13 @@ const contracts: readonly ModelContract[] = [
     module: "ImageBatch",
     states: 3233,
     invariant: "Safe",
-    action: "Import",
-    fields: [
-      'phase = <<"import", "import", "queued", "queued">>',
-      "verified = {1, 2}",
-    ],
+    ...imageBatchImportOverlap(),
   },
   {
     name: "native-image-presence",
     module: "ImagePresence",
     states: 7712,
     invariant: "Safe",
-    action: "Readback",
     fields: [
       'phase = "ready"',
       'source = "cached"',
@@ -3700,7 +3447,6 @@ const contracts: readonly ModelContract[] = [
         name: "expired-tag",
         negative: true,
         invariant: "TagSafe",
-        action: "ResolveTag",
         fields: [
           'mode = "normal"',
           'recorded = "expired"',
@@ -3711,7 +3457,6 @@ const contracts: readonly ModelContract[] = [
         name: "eviction",
         negative: true,
         invariant: "NeverEvictionRefusal",
-        action: "Create",
         fields: [
           'phase = "create_refused"',
           'guest = "absent"',
@@ -3722,13 +3467,28 @@ const contracts: readonly ModelContract[] = [
         name: "reachability",
         negative: true,
         invariant: "NeverSkipsRead",
-        action: "Readback",
         fields: [
           'phase = "ready"',
           'receipt = "complete"',
           'guest = "present"',
           "verified = FALSE",
           "observed = TRUE",
+        ],
+        alternativeWitnesses: [
+          [
+            'phase = "ready"',
+            'receipt = "loading"',
+            'guest = "present"',
+            "verified = FALSE",
+            "observed = TRUE",
+          ],
+          [
+            'phase = "ready"',
+            'receipt = "none"',
+            'guest = "present"',
+            "verified = FALSE",
+            "observed = TRUE",
+          ],
         ],
       },
     ],
@@ -3740,12 +3500,11 @@ const contracts: readonly ModelContract[] = [
     module: "RuntimeService",
     states: 1_006_849,
     invariant: "LockedOwner",
-    action: "Bind",
     fields: ["lock = 0", "svcLease = 0"],
-    alternativeWitnesses: ["lock = 1", "lock = 2"].map((lock) => ({
-      action: "Bind",
-      fields: [lock, "svcLease = 0"],
-    })),
+    alternativeWitnesses: ["lock = 1", "lock = 2"].map((lock) => [
+      lock,
+      "svcLease = 0",
+    ]),
     additionalControls: [
       {
         // The effect runs before the durable intent record: a crash after
@@ -3753,7 +3512,7 @@ const contracts: readonly ModelContract[] = [
         name: "effect-before-accept",
         negative: true,
         invariant: "AtMostOnce",
-        ...runtimeServiceEither("Begin", (me) => [
+        ...runtimeServiceEither((me) => [
           pairOf("effects", me, "2", "0"),
           'intent = (c1 :> "none" @@ c2 :> "none")',
         ]),
@@ -3763,7 +3522,7 @@ const contracts: readonly ModelContract[] = [
         name: "no-dedupe",
         negative: true,
         invariant: "AtMostOnce",
-        ...runtimeServiceEither("Begin", (me) => [
+        ...runtimeServiceEither((me) => [
           pairOf("effects", me, "2", "0"),
           "oneLease = NoClient",
         ]),
@@ -3775,15 +3534,8 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "AtMostOnce",
         ...runtimeServiceEither(
-          "OneShotBegin",
           (me) => [pairOf("effects", me, "2", "0"), "svcLease = 0"],
-          {
-            action: "Begin",
-            fields: (me) => [
-              pairOf("effects", me, "2", "0"),
-              "oneLease = NoClient",
-            ],
-          }
+          (me) => [pairOf("effects", me, "2", "0"), "oneLease = NoClient"]
         ),
       },
       {
@@ -3791,7 +3543,6 @@ const contracts: readonly ModelContract[] = [
         name: "ignore-skew",
         negative: true,
         invariant: "SameBuild",
-        action: "Admit",
         fields: ["svcLease = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
       },
       {
@@ -3800,7 +3551,7 @@ const contracts: readonly ModelContract[] = [
         name: "inspect-while-held",
         negative: true,
         invariant: "ReportHonest",
-        ...runtimeServiceEither("Begin", (me) => [
+        ...runtimeServiceEither((me) => [
           pairOf("report", me, '"notdone"', '"none"'),
           pairOf("world", me, '"started"', '"none"'),
         ]),
@@ -3810,7 +3561,6 @@ const contracts: readonly ModelContract[] = [
         name: "reach-unknown",
         negative: true,
         invariant: "NeverUnknown",
-        action: "AnswerUnknown",
         fields: ["svcLease = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
       },
       {
@@ -3818,7 +3568,6 @@ const contracts: readonly ModelContract[] = [
         name: "reach-not-done",
         negative: true,
         invariant: "NeverNotDone",
-        action: "Inspect",
         fields: ["lock = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
       },
       {
@@ -3826,7 +3575,6 @@ const contracts: readonly ModelContract[] = [
         name: "reach-one-shot",
         negative: true,
         invariant: "NeverOneShotDone",
-        action: "OneShotEnd",
         fields: [
           "svcLease = 0",
           "oneLease = NoClient",
@@ -3839,7 +3587,7 @@ const contracts: readonly ModelContract[] = [
         name: "reach-inconclusive",
         negative: true,
         invariant: "NeverInconclusive",
-        ...runtimeServiceEither("Inspect", (me) => [
+        ...runtimeServiceEither((me) => [
           pairOf("report", me, '"unknown"', '"none"'),
           pairOf("world", me, '"started"', '"none"'),
         ]),
@@ -3848,48 +3596,71 @@ const contracts: readonly ModelContract[] = [
   },
 ];
 
+/** A first parallel-import violation has two importers among four jobs. */
+function imageBatchImportOverlap(): {
+  readonly fields: WitnessFields;
+  readonly alternativeWitnesses: readonly WitnessFields[];
+} {
+  // A failed job may have stopped before or after its archive was verified.
+  const jobStates = [
+    { phase: "queued", verified: false, worker: false },
+    { phase: "fetch", verified: false, worker: true },
+    { phase: "ready", verified: true, worker: true },
+    { phase: "import", verified: true, worker: true },
+    { phase: "confirmed", verified: true, worker: false },
+    { phase: "failed", verified: false, worker: false },
+    { phase: "failed", verified: true, worker: false },
+  ] as const;
+  const combinations = [1, 2, 3, 4].reduce<(typeof jobStates)[number][][]>(
+    (prefixes) =>
+      prefixes.flatMap((prefix) => jobStates.map((job) => [...prefix, job])),
+    [[]]
+  );
+  const [fields, ...alternativeWitnesses] = combinations
+    .filter(
+      (jobs) =>
+        jobs.filter(({ phase }) => phase === "import").length === 2 &&
+        jobs.filter(({ worker }) => worker).length <= 3
+    )
+    .map((jobs) => [
+      `phase = <<${jobs.map(({ phase }) => `"${phase}"`).join(", ")}>>`,
+      `verified = {${jobs.flatMap(({ verified }, index) => (verified ? [index + 1] : [])).join(", ")}}`,
+    ]);
+  if (!fields) {
+    throw new Error("Missing image batch import overlap states.");
+  }
+  return { fields, alternativeWitnesses };
+}
+
 /**
  * StatKeyedHash witnesses: every state in which a lookup would hit, written out
  * over the controls' finite bounds (times 0..4, contents "A"/"B"). A hit is a
  * valid entry whose key equals the current stat key; with `stale` its hash also
- * differs from the content, which is exactly a `HitIsFresh` violation. Only
- * `HashStore`, `Write` and `SetMtime` change the entry, the content or the times,
- * so the first violating state follows one of them. Matching the violating state
- * itself keeps the check independent of which content TLC's search reaches first.
+ * differs from the content, which is exactly a `HitIsFresh` violation.
  */
 function statKeyedHits(opts: {
   readonly withCtime: boolean;
   readonly stale: boolean;
 }): {
-  readonly action: string;
-  readonly fields: readonly string[];
-  readonly alternativeWitnesses: readonly ModelWitness[];
+  readonly fields: WitnessFields;
+  readonly alternativeWitnesses: readonly WitnessFields[];
 } {
   const times = [0, 1, 2, 3, 4];
   const other = (hash: string): string => (hash === "A" ? "B" : "A");
-  const witnesses = ["HashStore", "Write", "SetMtime"].flatMap((action) =>
-    times.flatMap((mtime) =>
-      (opts.withCtime ? times : [0]).flatMap((ctime) =>
-        ["A", "B"].map(
-          (hash): ModelWitness => ({
-            action,
-            fields: [
-              `entry = [valid |-> TRUE, key |-> <<${mtime}, ${ctime}>>, hash |-> "${hash}"]`,
-              `mtime = ${mtime}`,
-              ...(opts.withCtime ? [`ctime = ${ctime}`] : []),
-              ...(opts.stale ? [`content = "${other(hash)}"`] : []),
-            ],
-          })
-        )
-      )
+  const [fields, ...alternativeWitnesses] = times.flatMap((mtime) =>
+    (opts.withCtime ? times : [0]).flatMap((ctime) =>
+      ["A", "B"].map((hash) => [
+        `entry = [valid |-> TRUE, key |-> <<${mtime}, ${ctime}>>, hash |-> "${hash}"]`,
+        `mtime = ${mtime}`,
+        ...(opts.withCtime ? [`ctime = ${ctime}`] : []),
+        ...(opts.stale ? [`content = "${other(hash)}"`] : []),
+      ])
     )
   );
-  const [first, ...rest] = witnesses as [ModelWitness, ...ModelWitness[]];
-  return {
-    action: first.action,
-    fields: first.fields,
-    alternativeWitnesses: rest,
-  };
+  if (!fields) {
+    throw new Error("Missing stat-keyed hash witness states.");
+  }
+  return { fields, alternativeWitnesses };
 }
 
 export const runtimeModels = contracts.map((contract) => ({
@@ -3901,7 +3672,6 @@ export const runtimeModels = contracts.map((contract) => ({
       ...control,
       states: control.states ?? contract.states,
       invariant: control.invariant ?? contract.invariant,
-      action: control.action ?? contract.action,
       fields: control.fields ?? contract.fields,
     };
     return {

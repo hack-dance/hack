@@ -80,16 +80,17 @@ fn environment_crash_child() {
     .unwrap();
     panic!("fault helper unexpectedly completed");
 }
-/// The helper child's stdout and stderr, kept in one file so a failure can show why the
-/// child exited (the helper's values are synthetic). Keep it outside the project directory.
+/// The helper child's stdout and stderr, kept in one file in a directory of its own
+/// (never the project's) so a failure can show why the child exited (the helper's
+/// values are synthetic).
 fn child_log(path: &Path) -> Result<(Stdio, Stdio), CandidateError> {
     let file = fs::File::create(path).map_err(state::io)?;
     let other = file.try_clone().map_err(state::io)?;
     Ok((Stdio::from(file), Stdio::from(other)))
 }
 /// Print the helper child's output when the attempt it served failed.
-fn report_child<T>(
-    outcome: &std::thread::Result<Result<T, CandidateError>>,
+fn report_child<T, E: std::fmt::Debug>(
+    outcome: &std::thread::Result<Result<T, E>>,
     log: &Path,
     context: &str,
 ) {
@@ -148,7 +149,8 @@ fn managed_driver_loss_preserves_cleanup_and_requires_fresh_restore() -> Result<
         (true, "after-start"),
     ] {
         let fixture = tests::Fixture::new();
-        // Outside the project: a file in it changes the reviewed source a restore replays.
+        // Outside the project directory: the project is reviewed as source, and a
+        // log growing inside it changes that review between run and recovery.
         let logs = tests::Fixture::new();
         let log = logs.0.join("helper-child.log");
         let run = format!(
@@ -295,7 +297,8 @@ fn cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases()
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let fixture = tests::Fixture::new();
-    // Outside the project: a file in it changes the reviewed source a restore replays.
+    // Outside the project directory: the project is reviewed as source, and a
+    // log growing inside it changes that review between run and recovery.
     let logs = tests::Fixture::new();
     let log = logs.0.join("helper-child.log");
     let run = format!(
@@ -404,7 +407,8 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
         Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))?;
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let fixture = tests::Fixture::new();
-    // Outside the project: a file in it changes the reviewed source a restore replays.
+    // Outside the project directory: the project is reviewed as source, and a
+    // log growing inside it changes that review between run and recovery.
     let logs = tests::Fixture::new();
     let log = logs.0.join("helper-child.log");
     let run = format!(
@@ -557,5 +561,6 @@ fn interrupted_environment_archival_exports_and_prunes_without_replay() -> Resul
     if root.exists() {
         cleanup(&candidate, &run, true)?;
     }
+    report_child(&outcome, &log, "archive-after-environment-move");
     outcome.unwrap()
 }

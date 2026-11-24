@@ -1713,6 +1713,7 @@ mod tests {
             key: "web".into(),
             name: "owned-web".into(),
             id: None,
+            cleanup_observed_create: false,
             image: None,
             phase: "running".into(),
             amd64_emulation: None,

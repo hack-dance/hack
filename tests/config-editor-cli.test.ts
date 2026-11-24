@@ -711,6 +711,32 @@ test("show omits credential-bearing map keys from legacy project data and env pr
   });
 });
 
+test("legacy OAuth reports redact scalar credentials and preserve routing settings", async () => {
+  const f = await fixture();
+  const credential = `ghp_${"FixtureOnly".repeat(4)}`;
+  const path = join(f.project, "hack.toml");
+  await rm(join(f.project, "hack.config.json"));
+
+  for (const [oauth, expected] of [
+    [`oauth = "${credential}"\n`, "[redacted]"],
+    [
+      `[oauth]\nenabled = true\ntld = "oauth.hack"\ntoken = "${credential}"\n`,
+      { enabled: true, tld: "oauth.hack", token: "[redacted]" },
+    ],
+  ] as const) {
+    const text = `name = "storefront"\n${oauth}`;
+    await writeFile(path, text);
+    const report = await show(f.root, f.main);
+    expect(JSON.stringify(report).includes(credential)).toBe(false);
+    expect(report.project).toEqual({ name: "storefront", oauth: expected });
+    expect(report.layers.find((layer) => layer.id === "1")).toMatchObject({
+      hidden: true,
+      source: null,
+    });
+    expect((await readFile(path, "utf8")) === text).toBe(true);
+  }
+});
+
 test("show masks plaintext GitHub tokens in local env cells and Source", async () => {
   const f = await fixture();
   const byName = "fixture-opaque-pat-sentinel";

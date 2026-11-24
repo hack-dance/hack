@@ -669,10 +669,11 @@ function scrubLegacyProject(
       if (isConfigSecret("", key)) {
         return [];
       }
+      const publicOauth = key === "oauth" && isRecord(value);
       if (
         ["startup", "lifecycle"].includes(key) ||
         isPrivateOverlayValue(value, privateOverlays) ||
-        (isConfigSecret(key, value) && key !== "oauth")
+        (isConfigSecret(key, value) && !publicOauth)
       ) {
         return [[key, "[redacted]"]];
       }

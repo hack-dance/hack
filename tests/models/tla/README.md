@@ -911,35 +911,66 @@ engine scheduling delays.
 ## Stopped retained-pool startup
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground
-Compose startup fails (HACK-1917). The positive control explores 136 states.
-Readiness publishes the run mapping. A failure before readiness lets the graph
-owner's retaining cleanup either complete or be refused; the frontend then makes
-one read-only inspection that authenticates the exact receipt or is refused.
-`NoUnownedResources` requires resources that outlive the frontend under an
-authenticated receipt to have a published mapping; the `negative` control (no
-recording on failure) violates it with an unowned started graph. `NoUnprovenOwner`
-allows only readiness or an authenticated receipt to publish. The
-`refused-inspection` control violates `NoUnrecordedRefusal` to keep the remaining
-gap explicit: when inspection itself is refused, nothing can be authenticated and
-only the runtime journal retains the graph. The model does not cover crashes
-between finalization registration and mapping publication, concurrent starts, or
-the later dead-owner recovery, which other models and runtime tests own.
+Compose startup fails (HACK-1917) and when native `hack up` returns. The positive
+control explores 1720 states; `wait` (`WaitForReady = TRUE`, `hack up --wait`)
+explores 806. The graph reaches `started` (every container started, goals possibly
+unmet) before `ready`. In both modes the run mapping is published at started,
+after the authoritative inspection; only the return moves to ready under `--wait`. A failure before
+that lets the graph owner's retaining cleanup either complete or be refused; the
+frontend then makes one read-only inspection that authenticates the exact receipt
+or is refused. `NoUnownedResources` requires resources that outlive the frontend
+under an authenticated receipt to have a published mapping; the `negative` control
+(no recording on failure) violates it with an unowned started graph.
+`NoUnprovenOwner` allows only the started inspection or an authenticated receipt
+to publish. The `refused-inspection` control violates `NoUnrecordedRefusal` to
+keep the remaining gap explicit: when inspection itself is refused, nothing can be
+authenticated and only the runtime journal retains the graph. The model does not
+cover crashes between finalization registration and mapping publication,
+concurrent starts, or the later dead-owner recovery, which other models and
+runtime tests own.
 
 HACK-1940 extends this same owner model with launcher notification, acceptance,
 owner acknowledgement, return and channel loss. `NoPrematureReturn` requires
-readiness, committed down-hook bookkeeping and acceptance before detached success; `NoLostHandoff` prevents a
-lost pre-acceptance launcher from being handed off later. The
-`detached-before-ready` negative control bypasses both notification gates and returns
-before Ready.
-`Bookkeep` separates graph readiness from successful journal completion and its
-cancellation fence. The `detached-before-bookkeeping` control keeps Ready but
-removes the journal guard, allowing false success while `bookkept = FALSE`.
+started (ready under `--wait`), the saved mapping, committed down-hook bookkeeping
+and acceptance before detached success; `NoReturnWithoutMapping` refuses any
+launcher release before the mapping is saved; `NoLostHandoff` prevents a lost
+pre-acceptance launcher from being handed off later. The `detached-before-started`
+control bypasses the release gates and returns before every container started;
+`detached-before-ready-wait` does the same under `--wait`. The `mapping-after-line`
+control lets `Notify` precede `PublishMapping` (a start killed after its closing
+line would leave no mapping for `down`) and violates `NoReturnWithoutMapping`;
+`mapping-after-line-wait` does the same under `--wait`.
+`Bookkeep` separates the started point from successful journal completion and its
+cancellation fence. The `detached-before-bookkeeping` control keeps the started
+gate but removes the journal guard, allowing false success while `bookkept = FALSE`.
 The delayed, failed and canceled journal regressions in `native-project-start.test.ts`
-map that boundary to `stop.owe` before `onReady`. Source: `native-detached-up.ts`, image onReady after hooks,
-and authored `startupSelection.onReady` after durable publication. The synthetic
+map that boundary to `stop.owe` before the launcher release. The synthetic
 `native-detached-up.test.ts` process fixtures cover post-launcher control,
 pre-acceptance launcher death, timeout and child failure. They do not execute
 real hooks or a VM.
+A `down` between started and ready only queues a stop (`DownRequest`), even
+during a publication; the owner accepts it at its next cancellation check,
+between passes of its start loop (`AcceptStop`), which aborts its wait. The
+frontend cancels separately (`FrontendCancel`, its own `controller.abort()` when
+the stop reaches it or the user interrupts), and only that ends its
+`PublishMapping`, `Bookkeep` and `Notify`. `DownStop` needs both.
+`DownCancelsWait` requires no owner left waiting and no `Ready` after acceptance,
+`StoppedOwnerNotWaiting` requires every stop to go through acceptance,
+`StoppedFrontendCancelled` requires no live frontend after a stop, and
+`DownHooksOnce` requires `down.before` to run once for committed debt. The
+`down-leaves-owner-waiting` control drops the cancel at `AcceptStop`;
+`stop-without-accept` lets a queued stop take effect without the owner's check;
+`stop-before-frontend-cancel` lets the stop finish while the frontend is still
+live and violates `StoppedFrontendCancelled`. One service's publication under the
+lease is a two-step commit (`BeginPublish`, then `CommitPublish` or
+`WithdrawPublish`), and `AcceptStop` waits for it to settle:
+`NoHalfPublicationAfterStop` requires that after a stop no service is published
+but unrecorded or recorded but unpublished. The `stop-mid-publication` control
+lets the owner accept half-way and violates it with a staged, unrecorded route. These are safety invariants,
+not liveness: the runner checks invariants only, and the property is the state
+right after acceptance. See `native-startup-owner/COVERAGE.md` for the source
+mapping (`onStarted`, `onReady`, the detached handshake and `down`) and the
+state chart.
 
 The existing `native-frontend-recovery` model also distinguishes launcher loss
 from retained owner death. `TryLauncherRecovery` abstracts recovery admission:

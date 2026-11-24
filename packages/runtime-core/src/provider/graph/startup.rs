@@ -416,6 +416,8 @@ pub(super) fn attach(
 
 #[cfg(target_os = "macos")]
 mod runtime;
+#[cfg(target_os = "macos")]
+pub(in crate::provider::graph) use runtime::StartupRequests;
 #[cfg(all(test, target_os = "macos"))]
 pub(super) use runtime::control_root as legacy_control_root;
 #[cfg(target_os = "macos")]

@@ -28,6 +28,85 @@ use super::owner_loop::{Action, OwnerLoop};
 pub(in crate::provider::graph) use transport::DeadOwner;
 pub(in crate::provider::graph) use transport::retire_recovered_publisher as retire_publisher_path;
 use transport::{Publication, WireRequest};
+/// Answers the owner's transport while the start loop runs (see
+/// `startup::StartupRequests`): a status request with the on-disk receipt's phase
+/// (`runtime_verified: false`, `runtime_error: "graph_starting"`: nothing is verified
+/// mid-start); a stop with data retained is held, and cancels the start; any other
+/// request is refused with `graph_starting`, to be retried after ready.
+struct StartupServer {
+    listener: std::os::unix::net::UnixListener,
+    root: std::path::PathBuf,
+    run: String,
+    owner: String,
+    stop: std::rc::Rc<std::cell::RefCell<Option<std::os::unix::net::UnixStream>>>,
+}
+impl startup::StartupRequests for StartupServer {
+    fn serve(&mut self) -> bool {
+        // A few connections per check, each read with a short timeout, so one slow
+        // client delays the start loop by at most about a second per connection.
+        for _ in 0..4 {
+            if self.stop.borrow().is_some() {
+                break;
+            }
+            let Ok((mut stream, _)) = self.listener.accept() else {
+                break;
+            };
+            if transport::peer(&stream).is_err() || stream.set_nonblocking(false).is_err() {
+                continue;
+            }
+            let Ok(request) = transport::read::<WireRequest>(
+                &mut stream,
+                Duration::from_secs(1),
+                transport::REQUEST_LIMIT,
+            ) else {
+                continue;
+            };
+            if request.version != 1 || request.run != self.run || !request.exclusive() {
+                continue;
+            }
+            let plain = request.restore.is_none()
+                && request.job.is_none()
+                && request.refresh_dependencies.is_none();
+            let reply = match request.remove_data {
+                Some(false) if plain => {
+                    *self.stop.borrow_mut() = Some(stream);
+                    break;
+                }
+                None if plain => self.status(),
+                _ => json!({"ok":false,"run":self.run,"code":"graph_starting"}),
+            };
+            let _ = transport::write(&mut stream, &reply, Duration::from_secs(1));
+        }
+        self.stop.borrow().is_some()
+    }
+}
+impl StartupServer {
+    fn status(&self) -> Value {
+        let receipt = super::load_at(self.root.clone(), &self.run, &self.owner)
+            .map(|(receipt, _)| receipt)
+            .and_then(|receipt| Ok((redelivery::generation(&receipt)?, receipt)));
+        match receipt {
+            Ok((generation, receipt)) => json!({"ok":true,"run":receipt.run,"phase":receipt.phase,
+                "plan":receipt.plan_id,"generation":generation,"foreground_alive":true,
+                "runtime_verified":false,"runtime_error":"graph_starting","publisher_ports":[]}),
+            Err(error) => json!({"ok":false,"run":self.run,"code":error.code}),
+        }
+    }
+}
+/// Answer a stop held during the start with the cleanup's result, as after ready.
+fn reply_stop(
+    stop: Option<std::os::unix::net::UnixStream>,
+    cleaned: Result<&Receipt, &'static str>,
+    run: &str,
+) {
+    let Some(mut stream) = stop else { return };
+    let reply = match cleaned {
+        Ok(cleaned) => json!({"ok":true,"run":cleaned.run,"phase":cleaned.phase,"receipt":cleaned}),
+        Err(code) => json!({"ok":false,"run":run,"code":code}),
+    };
+    let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
+}
+
 fn refused() -> CandidateError {
     CandidateError::new(
         "graph_owner_recovery",
@@ -247,6 +326,21 @@ fn serve_input<'a>(
         }
     };
     runtime.set_startup_cancellation(Some(signals::startup_pending));
+    let stop_request = std::rc::Rc::new(std::cell::RefCell::new(None));
+    // Best effort: without it the owner answers only after the start, as before.
+    if let (Ok(listener), Ok(root), Ok(owner)) = (
+        publication.startup_listener(),
+        super::directory(candidate, &run_id),
+        super::state::Owner::load(candidate),
+    ) {
+        runtime.set_startup_requests(Some(Box::new(StartupServer {
+            listener,
+            root,
+            run: run_id.clone(),
+            owner: owner.token,
+            stop: std::rc::Rc::clone(&stop_request),
+        })));
+    }
     // Explicit slots reserve as one batch so earlier automatic allocations
     // cannot consume slots requested by services that are still starting.
     let early = route_slots
@@ -292,6 +386,8 @@ fn serve_input<'a>(
         )
     };
     runtime.set_startup_cancellation(None);
+    runtime.set_startup_requests(None);
+    let stop_request = stop_request.borrow_mut().take();
     let mut publishers = runtime
         .early_publications
         .take()
@@ -317,17 +413,34 @@ fn serve_input<'a>(
                     return Err(error);
                 }
             }
-            if !finish_before_admission(
+            if finish_before_admission(
                 &mut publication,
                 candidate,
                 &run_id,
                 runtime.admission_started(),
-            )? && publishers.cleanup(candidate, &mut runtime, false).is_ok()
-                && publishers
-                    .reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))
-                    .is_ok()
-            {
+            )? {
+                reply_stop(stop_request, Err(error.code), &run_id);
+                return Err(error);
+            }
+            let cleaned = publishers
+                .cleanup(candidate, &mut runtime, false)
+                .and_then(|cleaned| {
+                    publishers
+                        .reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))?;
+                    Ok(cleaned)
+                });
+            // A stop requested during the start is answered as after ready.
+            let stopped = stop_request.is_some();
+            reply_stop(
+                stop_request,
+                cleaned.as_ref().map_err(|error| error.code),
+                &run_id,
+            );
+            if let Ok(cleaned) = cleaned {
                 publication.finish()?;
+                if stopped {
+                    return Ok(cleaned);
+                }
             }
             return Err(error);
         }
@@ -536,6 +649,10 @@ fn serve_input<'a>(
                 lifecycle.cleanup_attempted = true;
                 match publishers.cleanup(candidate, &mut runtime, remove_data) {
                     Ok(cleaned) => {
+                        // Explicit, unlike this owner's own cleanup after a failure.
+                        if let Ok(root) = super::directory(candidate, &cleaned.run) {
+                            super::explicit_cleanup_done(&root);
+                        }
                         publishers.reap_after_cleanup(
                             &signals,
                             Instant::now() + Duration::from_secs(5),

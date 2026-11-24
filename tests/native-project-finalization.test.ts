@@ -15,6 +15,7 @@ import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
   isNativeProjectFinalizationToken,
+  nativeFinalizationLeaseAdded,
   recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
@@ -59,6 +60,82 @@ function httpsLease(run: Awaited<ReturnType<typeof fixture>>["run"]) {
     planId: run.planId,
   };
 }
+test("a frontend registered before its mapping adds its HTTPS lease to the same lifetime, keeping its attempt", async () => {
+  const opts = await fixture();
+  const first = await beginNativeProjectFinalization({
+    ...opts,
+    httpsPort: null,
+  });
+  expect(first.token.version).toBe(2);
+  // A lease for another attempt never replaces the registered lifetime.
+  await expectClosedRefusal(
+    beginNativeProjectFinalization({
+      ...opts,
+      httpsPort: 18_443,
+      httpsLease: httpsLease(opts.run),
+    }),
+    "finalization"
+  );
+  // The same frontend's lease, same attempt: one lifetime, now with the lease.
+  const leased = await beginNativeProjectFinalization({
+    ...opts,
+    httpsPort: 18_443,
+    httpsLease: { ...httpsLease(opts.run), attempt: first.token.attempt },
+  });
+  expect(leased.token).toMatchObject({
+    version: 3,
+    attempt: first.token.attempt,
+  });
+  // A second registration without a lease still refuses replacement.
+  await expectClosedRefusal(
+    beginNativeProjectFinalization({ ...opts, httpsPort: null }),
+    "finalization"
+  );
+  // A down that captured the first token accepts exactly this upgrade.
+  expect(nativeFinalizationLeaseAdded(first.token, leased.token)).toBe(true);
+  expect(nativeFinalizationLeaseAdded(leased.token, first.token)).toBe(false);
+  expect(
+    nativeFinalizationLeaseAdded(first.token, {
+      ...leased.token,
+      run: "e".repeat(32),
+    })
+  ).toBe(false);
+  await leased.complete();
+});
+
+test("an operation lock left by a crashed holder is taken over; a live holder's is not", async () => {
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization({
+    ...opts,
+    httpsPort: null,
+  });
+  const lock = join(
+    opts.scope.nativeHome,
+    ".hack-local",
+    "frontend-finalization",
+    lifetime.token.scope,
+    opts.run.run,
+    "operation.lock"
+  );
+  // A holder that exited inside the lock: the next operation proceeds.
+  const gone = Bun.spawn([process.execPath, "-e", ""]);
+  await gone.exited;
+  await mkdir(lock, { mode: 0o700 });
+  await writeFile(join(lock, "holder.json"), JSON.stringify({ pid: gone.pid }));
+  await lifetime.complete();
+  expect(await readdir(join(lock, ".."))).not.toContain("operation.lock");
+  // A live holder (this process) keeps its lock.
+  await mkdir(lock, { mode: 0o700 });
+  await writeFile(
+    join(lock, "holder.json"),
+    JSON.stringify({ pid: process.pid })
+  );
+  await expect(
+    beginNativeProjectFinalization({ ...opts, httpsPort: null })
+  ).rejects.toThrow();
+  await rm(lock, { recursive: true });
+});
+
 test("shared HTTPS finalization v3 binds the exact lease and never inherits a stale completion", async () => {
   const opts = await fixture();
   const lease = httpsLease(opts.run);

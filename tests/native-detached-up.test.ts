@@ -216,9 +216,12 @@ for (const mode of [
             services: {
               started: ["web"],
               completed: ["seed"],
+              // The fixture owner predates `readiness`: it reads as ready.
+              warming: [],
               stopped: [],
               failed: [],
             },
+            readiness: "ready",
             durationMs: expect.any(Number),
           },
         });

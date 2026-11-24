@@ -737,7 +737,7 @@ pub(super) fn load_cached(
     candidate: &Candidate,
     archive: &CachedArchive<'_>,
     policy: &ImagePolicy,
-    observer: &Observer<'_>,
+    (observer, existing_engine): (&Observer<'_>, Option<&Engine<'_>>),
     resolved_config: impl FnOnce() -> Result<String, CandidateError>,
 ) -> Result<ImageReceipt, CandidateError> {
     let guest = observer.guest();
@@ -754,8 +754,14 @@ pub(super) fn load_cached(
         || observer.image(archive.image),
         resolved_config,
         |file| {
+            if let Some(engine) = existing_engine {
+                return import(candidate, archive, Some(archive.pin), policy, file, engine);
+            }
             let engine = measure(Step::ImageImportConnect, None, |_| {
-                connect_for_import(candidate, IMPORT_LEASE_WAIT)
+                connect_for_import(
+                    candidate,
+                    policy.image_wait(IMPORT_LEASE_WAIT)?.min(IMPORT_LEASE_WAIT),
+                )
             })?;
             import(candidate, archive, Some(archive.pin), policy, file, &engine)
         },
@@ -999,10 +1005,12 @@ fn import(
         let upload = file
             .try_clone()
             .map_err(|_| error("Cannot read the image archive."))?;
+        let timeout = load_timeout(length);
+        let timeout = policy.image_wait(timeout)?.min(timeout);
         state::write(&path, &receipt)?;
         let result = engine.load_archive(
             reqwest::blocking::Body::sized(HeldTail::new(upload, &validated, expected_sha), length),
-            load_timeout(length),
+            timeout,
         );
         // A lost response is reconciled only by independent content-ID readback.
         if !present()? {

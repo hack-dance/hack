@@ -126,6 +126,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "37aa309a4918e62e24e397d8", // HACK-2167: accurate env/output security guidance
     "d36febde4c0ef56eb4f46ff3", // HACK-2166: value-free env listing guidance
     "884c592f76a62574ceb34914", // HACK-2468: opt-in logging stack guidance
+    "6fcbcfe5f110d2cbf93ffa59", // Compose remote selection guidance
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -174,6 +175,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "6669bc4f42a5bd9942631946", // HACK-2167: accurate env/output security guidance
     "184c83fdac4d052587059eda", // HACK-2167: accurate env/output security guidance
     "c60f5a6609978cbffda4cb6c", // HACK-2166: value-free env listing guidance
+    "3e1bf59cba2968877f6411b8", // Compose remote selection guidance
   ]),
 };
 

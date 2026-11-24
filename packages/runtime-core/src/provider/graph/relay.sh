@@ -96,6 +96,15 @@ if test "$action" = remove && test ! -e "$root" && test ! -L "$root"; then
  printf 'removed\n'; exit
 fi
 private_dir "$base"; private_dir "$root"
+if test "$action" = remove && test "$serial" -ne 0 &&
+   { test "$phase" = stopped || test "$phase" = discarded; } &&
+   test ! -e "$root/owner" && test ! -L "$root/owner"; then
+ # The owner marker is removed last. Under the exact terminal slot fence,
+ # resume an interrupted rmdir only if the allocation is empty.
+ test ! -e "$socket"; test ! -L "$socket"
+ rmdir "$root"
+ printf 'removed\n'; exit
+fi
 private_file "$root/owner"; test "$(cat "$root/owner")" = "$marker"
 if test "$action" = remove && test "$serial" -ne 0 && test "$phase" = discarded; then
  check_staging

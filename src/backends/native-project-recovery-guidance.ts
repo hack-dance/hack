@@ -4,6 +4,9 @@ import {
   NativeRuntimeRequestError,
 } from "./native-runtime-client.ts";
 
+const FRESH_NATIVE_HOME_GUIDANCE =
+  "To start independently, use a separate project checkout and keep this home for its data. Follow the fresh native home instructions at https://github.com/hack-dance/hack/blob/next/docs/versions/v5/native/setup.md#manual-homes";
+
 /** Name a usable next command without turning uncertainty into cleanup authority. */
 export function nativeRecoveryGuidance(code: string | undefined): string {
   if (code === "provider_pin_changed") {
@@ -16,6 +19,9 @@ export function nativeRecoveryGuidance(code: string | undefined): string {
   }
   if (code === "publisher_identity_unconfirmed") {
     return "Recovery waits for the process holding the recorded publisher PID to exit when its identity cannot be confirmed. After it exits, rerun hack down --recover.";
+  }
+  if (code === "graph_live_owner_recovery") {
+    return `Run hack ps --json to inspect the retained state. ${FRESH_NATIVE_HOME_GUIDANCE}`;
   }
   if (code === "provider_busy" || code === "native_request_timeout") {
     return "Run hack down --recover to retry this run's cleanup with data retained.";

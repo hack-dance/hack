@@ -54,13 +54,21 @@ impl Fixture {
         metadata: Value,
         values: &crate::project::native::ManagedValues,
     ) -> selection::Prepared {
+        self.prepared_for(RUN, metadata, values)
+    }
+    fn prepared_for(
+        &self,
+        run: &str,
+        metadata: Value,
+        values: &crate::project::native::ManagedValues,
+    ) -> selection::Prepared {
         let metadata: EnvMetadata = serde_json::from_value(json!({"metadata_version":1,"overlay":null,"overlay_exists":false,"workloads":metadata,"inactive_scopes":[]})).unwrap();
         selection::select(
             &self.candidate,
             selection::Options {
                 project: &self.project,
                 branch: Some("fixture"),
-                run: RUN,
+                run,
                 profiles: &[],
                 explicit_overlay: None,
                 metadata,
@@ -1582,6 +1590,112 @@ fn native_reservations_count_against_the_common_budget_and_uncertainty_blocks_ad
         .is_err()
     );
     assert_eq!(counted, 0);
+}
+
+#[test]
+fn full_native_inventory_reports_the_bound_before_guest_work() {
+    let fixture = Fixture::new(basic());
+    for index in 0..storage_inventory::RUN_LIMIT {
+        let run = format!("{index:032x}");
+        let prepared = fixture.prepared_for(&run, json!({"web":{}}), &BTreeMap::new());
+        fixture.session(prepared);
+    }
+    let error = reservations_using(
+        &fixture.candidate,
+        OWNER,
+        BOOT,
+        true,
+        |_, _| unreachable!("full inventory refuses before inspecting guest resources"),
+        |_| unreachable!("full inventory refuses before resource admission"),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "native_graph_attempt_limit");
+    assert!(error.message.contains("64 attempts"));
+    assert!(
+        error
+            .message
+            .contains("hack doctor --native-cleanup inspect")
+    );
+}
+
+#[test]
+fn full_native_inventory_archives_oldest_removed_and_preserves_confirmation() {
+    use super::super::archive;
+
+    let fixture = Fixture::new(basic());
+    let candidate = &fixture.candidate;
+    let archive_root = archive::directory(candidate, &"0".repeat(32))
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    state::private_directory(&archive_root).unwrap();
+    for index in 0..320 {
+        let run = format!("{index:032x}");
+        let prepared = fixture.prepared_for(&run, json!({"web":{}}), &BTreeMap::new());
+        let (_, mut session) = fixture.session(prepared);
+        session.receipt.phase = Phase::Removed;
+        for resource in session.receipt.resources.values_mut() {
+            resource.phase = "removed".into();
+        }
+        journal::save(&session.root, &session.receipt).unwrap();
+        fs::File::open(session.root.join("state.json"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1000 - index))
+            .unwrap();
+        if index < 256 {
+            fs::rename(&session.root, archive_root.join(&run)).unwrap();
+        }
+    }
+    let oldest = format!("{:032x}", 319);
+    let expired = format!("{:032x}", 255);
+    reservations_using(
+        candidate,
+        OWNER,
+        BOOT,
+        true,
+        |_, _| unreachable!(),
+        |_| unreachable!(),
+    )
+    .unwrap();
+    assert_eq!(fs::read_dir(&archive_root).unwrap().count(), 256);
+    assert!(
+        archive::inspection_directory(candidate, &expired)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        archive::inspection_directory(candidate, &"0".repeat(32))
+            .unwrap()
+            .is_some()
+    );
+    assert!(journal::absent(candidate, &oldest).unwrap());
+    assert!(journal::load(candidate, &oldest, OWNER, BOOT).is_err());
+    let (receipt, archived) = archive::load_inspection(candidate, &oldest, OWNER, BOOT).unwrap();
+    assert_eq!(receipt.phase, Phase::Removed);
+    let snapshot = snapshot(
+        &Fake {
+            root: archived.clone(),
+            run: oldest.clone(),
+            source: None,
+            state: RefCell::new(FakeState::default()),
+        },
+        receipt.clone(),
+    )
+    .unwrap();
+    assert!(snapshot.observations.values().all(Option::is_none));
+    assert!(journal::reserve(candidate, &receipt).is_err());
+    assert!(archive::load_inspection(candidate, &oldest, &"d".repeat(32), BOOT).is_err());
+
+    let mut invalid = receipt;
+    invalid.phase = Phase::RemovalIntent;
+    journal::save(&archived, &invalid).unwrap();
+    assert!(archive::load_inspection(candidate, &oldest, OWNER, BOOT).is_err());
+    assert!(
+        archive::inspection_directory(candidate, RUN)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[cfg(feature = "environment-launcher")]

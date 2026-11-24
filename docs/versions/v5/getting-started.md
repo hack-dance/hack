@@ -119,9 +119,10 @@ Hack checks it before startup hooks. If the check fails, follow the displayed
 login command and try again. Use `hack config validate` to verify declarations
 without running the checks.
 
-When the project declares remotes, `hack ps` shows each default target with
-its configured address. An environment-backed hostname displays the variable
-name. This view reports declarations and whether their connection was checked.
+When the project declares remotes, `hack ps` shows the observed target or
+`unknown` if it cannot identify one. An environment-backed hostname displays
+the variable name. Start the whole project with `hack up`. Use `hack down`
+followed by `hack up` to restart it.
 
 The desktop preview shows those descriptors on the registered project's
 **Services** tab. It shows the environment variable name for an

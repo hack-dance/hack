@@ -73,6 +73,7 @@ export const dataExportScenario: Scenario = {
     const external = `${project}-external`;
     const runner = `${project}-web-1`;
     const scratch = `${project}-restore`;
+    const writer = `${project}-writer`;
     await Bun.write(
       join(fixture.hackDir, "docker-compose.yml"),
       [
@@ -278,8 +279,80 @@ export const dataExportScenario: Scenario = {
         message: "a running project container should refuse the export",
         result: refused,
       });
+      expectExit({
+        result: await docker(ctx, ["rm", "--force", runner]),
+        codes: [0],
+        message: "remove the stand-in project container",
+      });
+
+      // A short-lived writer that starts and exits while a copy helper runs:
+      // no `docker ps` check can see it, the live event subscription does.
+      // A large file keeps the copy window open long enough to aim at it.
+      expectExit({
+        result: await docker(ctx, [
+          "run",
+          "--rm",
+          "--network",
+          "none",
+          "--volume",
+          `${data}:/v`,
+          "--entrypoint",
+          "sh",
+          HELPER,
+          "-c",
+          "head -c 268435456 /dev/zero >/v/big.bin",
+        ]),
+        codes: [0],
+        message: "write a large file to widen the copy window",
+      });
+      const racing = ctx.cli({
+        args: ["data", "export", "--json", "--out", out],
+        cwd: fixture.root,
+        timeoutMs: TIMEOUT_MS,
+      });
+      const helper = /^hack-data-export-[a-f0-9]{24}$/m;
+      let aimed = false;
+      for (let attempt = 0; attempt < 600 && !aimed; attempt += 1) {
+        const running = await docker(ctx, ["ps", "--format", "{{.Names}}"]);
+        if (helper.test(running.stdout)) {
+          expectExit({
+            result: await docker(ctx, [
+              "run",
+              "--rm",
+              "--name",
+              writer,
+              "--network",
+              "none",
+              "--volume",
+              `${data}:/x`,
+              "--entrypoint",
+              "true",
+              HELPER,
+            ]),
+            codes: [0],
+            message: "the short-lived writer should run and exit",
+          });
+          aimed = true;
+        } else {
+          await Bun.sleep(25);
+        }
+      }
+      const raced = await racing;
+      const race = extractJsonObject<ExportPayload>({ text: raced.stdout });
+      const mounts = (race?.error?.detail as { mounts?: { name: string }[] })
+        ?.mounts;
+      expect({
+        that:
+          aimed &&
+          raced.exitCode === 1 &&
+          race?.error?.code === "E_PROJECT_RUNNING" &&
+          mounts?.some((mount) => mount.name === writer) === true,
+        message:
+          "a writer that started and exited during the copy should refuse publication",
+        result: raced,
+      });
     } finally {
-      await docker(ctx, ["rm", "--force", runner]);
+      await docker(ctx, ["rm", "--force", runner, writer]);
       await docker(ctx, ["volume", "rm", data, foreign, external, scratch]);
     }
   },

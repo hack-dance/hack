@@ -40,7 +40,29 @@ export interface DataBackupDocker {
     readonly argv: readonly string[];
     readonly path: string;
   }): Promise<DataBackupStreamResult>;
+  /**
+   * Start a long-running `argv` (a `docker events` subscription) and call
+   * `onLine` for each complete stdout line, in order.
+   */
+  watch(
+    argv: readonly string[],
+    onLine: (line: string) => void
+  ): DataBackupWatch;
 }
+
+/** A running subscription started by {@link DataBackupDocker.watch}. */
+export interface DataBackupWatch {
+  /** Settles once the child has exited and its stdout is fully read. */
+  readonly done: Promise<{ readonly exitCode: number }>;
+  /**
+   * SIGTERM, a bounded drain of what it already wrote, then SIGKILL if it is
+   * still running; always awaits the exit. Idempotent.
+   */
+  stop(): Promise<void>;
+}
+
+/** How long a stopped subscription may take to drain before SIGKILL. */
+const WATCH_DRAIN_MS = 2000;
 
 function utf8(latin1: string): string {
   return Buffer.from(latin1, "latin1").toString("utf8");
@@ -118,6 +140,63 @@ export function createHostDataBackupDocker(opts: {
       } finally {
         await file.close();
       }
+    },
+    watch(argv, onLine) {
+      const proc = Bun.spawn([...argv], {
+        env: childEnvironment(process.env, env),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "ignore",
+      });
+      const done = (async () => {
+        const decoder = new TextDecoder();
+        let pending = "";
+        try {
+          await eachChunk(proc.stdout, (chunk) => {
+            pending += decoder.decode(chunk, { stream: true });
+            let newline = pending.indexOf("\n");
+            while (newline >= 0) {
+              onLine(pending.slice(0, newline));
+              pending = pending.slice(newline + 1);
+              newline = pending.indexOf("\n");
+            }
+            return Promise.resolve();
+          });
+        } finally {
+          if (pending !== "") {
+            onLine(pending);
+          }
+        }
+        return { exitCode: await proc.exited };
+      })();
+      let stopping: Promise<void> | undefined;
+      return {
+        done,
+        stop() {
+          stopping ??= (async () => {
+            if (proc.exitCode === null && proc.signalCode === null) {
+              proc.kill("SIGTERM");
+            }
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const drained = await Promise.race([
+              done.then(
+                () => true,
+                () => true
+              ),
+              new Promise<false>((resolve) => {
+                timer = setTimeout(() => resolve(false), WATCH_DRAIN_MS);
+              }),
+            ]);
+            clearTimeout(timer);
+            if (!drained) {
+              proc.kill("SIGKILL");
+            }
+            await proc.exited;
+            await done.catch(() => undefined);
+          })();
+          return stopping;
+        },
+      };
     },
   };
 }

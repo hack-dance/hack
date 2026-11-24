@@ -16,20 +16,32 @@ import { exportProjectData } from "../src/lib/data-backup-export.ts";
 const MANAGED_HOST = "unix:///managed/engine.sock";
 
 const STUB = `
-const { appendFileSync } = require("node:fs");
+const { appendFileSync, readFileSync, existsSync } = require("node:fs");
 const args = process.argv.slice(2);
 appendFileSync(process.env.DATA_STUB_LOG, JSON.stringify({ args, host: process.env.DOCKER_HOST ?? null }) + "\\n");
+const feed = process.env.DATA_STUB_LOG + ".events";
 const out = (value) => process.stdout.write(typeof value === "string" ? value : JSON.stringify(value) + "\\n");
-if (args[0] === "compose") {
+if (args[0] === "events") {
+  // A live subscription: replay what runs append, until SIGTERM.
+  let offset = 0;
+  process.on("SIGTERM", () => process.exit(0));
+  const tick = () => {
+    const text = existsSync(feed) ? readFileSync(feed, "utf8") : "";
+    if (text.length > offset) { process.stdout.write(text.slice(offset)); offset = text.length; }
+    setTimeout(tick, 10);
+  };
+  tick();
+} else if (args[0] === "compose") {
   out({ name: "shop", services: {}, volumes: { db: { name: "shop_db" } } });
 } else if (args[0] === "volume" && args[1] === "inspect") {
   out({ name: "shop_db", driver: "local", labels: { "com.docker.compose.project": "shop", "com.docker.compose.volume": "db" } });
-} else if (args[0] === "ps" || args[0] === "events") {
+} else if (args[0] === "ps") {
   out("");
-} else if (args[0] === "run" && args.includes("tar")) {
-  out("tar bytes");
-} else if (args[0] === "run" && args.includes("bun")) {
-  out({ algorithm: "hack.tree-digest.v1", entries: 2, excludedSockets: 0, digest: "a".repeat(64) });
+} else if (args[0] === "run") {
+  const name = args[args.indexOf("--name") + 1];
+  appendFileSync(feed, JSON.stringify({ Type: "container", Action: "start", Actor: { ID: name, Attributes: { name } } }) + "\\n");
+  if (args.includes("tar")) out("tar bytes");
+  else if (args.includes("bun")) out({ algorithm: "hack.tree-digest.v1", entries: 2, excludedSockets: 0, digest: "a".repeat(64) });
 } else {
   process.exit(97);
 }
@@ -77,7 +89,15 @@ test("a managed DOCKER_HOST reaches every docker argv of an export", async () =>
       : call.args.slice(0, call.args[0] === "volume" ? 2 : 1).join(" ")
   );
   expect(new Set(kinds)).toEqual(
-    new Set(["compose", "volume inspect", "ps", "events", "run tar", "run bun"])
+    new Set([
+      "compose",
+      "volume inspect",
+      "ps",
+      "events",
+      "run true",
+      "run tar",
+      "run bun",
+    ])
   );
   expect(calls.filter((call) => call.host !== MANAGED_HOST)).toEqual([]);
   expect(process.env.DOCKER_HOST).toBe(inherited);

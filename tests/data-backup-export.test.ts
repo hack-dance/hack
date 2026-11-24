@@ -22,6 +22,7 @@ import {
   dataBackupTimestamp,
 } from "../src/lib/data-backup-format.ts";
 import { planDeclaredVolumes } from "../src/lib/data-backup-volumes.ts";
+import { FakeDockerEvents } from "./helpers/data-backup-events.ts";
 
 const PROJECT = "shop";
 const COMPOSE = ["docker", "compose", "-f", "/p/.hack/docker-compose.yml"];
@@ -42,42 +43,22 @@ type FakeState = {
   /** Running names reported only from the Nth `ps` round on (0-based). */
   runningFromRound?: { round: number; filter: string; names: string[] };
   failTarFor?: string;
-  /** Extra `docker events` lines, such as a foreign container's mount. */
-  extraEvents?: unknown[];
+  /** The live event stream every `docker run` reports to. */
+  events: FakeDockerEvents;
+  /** Called on each `docker ps`, e.g. to inject a mount right after a check. */
+  onPs?: () => void;
   calls: string[][];
-  /** Helper runs seen, in order: the container ID the fake gave each. */
+  /** Helper runs seen, in order (markers included). */
   helpers?: { id: string; name: string; volume: string }[];
 };
 
 function helperRun(state: FakeState, argv: readonly string[]): string {
   state.helpers ??= [];
   const name = argv[argv.indexOf("--name") + 1] ?? "";
-  const volume = mountedVolume(argv);
-  state.helpers.push({ id: `c${state.helpers.length}`, name, volume });
+  const volume = argv.includes("--volume") ? mountedVolume(argv) : "";
+  const id = state.events.run(argv);
+  state.helpers.push({ id, name, volume });
   return volume;
-}
-
-function events(state: FakeState): string {
-  const lines: unknown[] = [];
-  for (const helper of state.helpers ?? []) {
-    lines.push(
-      {
-        Type: "container",
-        Action: "start",
-        Actor: { ID: helper.id, Attributes: { name: helper.name } },
-      },
-      {
-        Type: "volume",
-        Action: "mount",
-        Actor: {
-          ID: helper.volume,
-          Attributes: { container: helper.id, destination: "/v" },
-        },
-      }
-    );
-  }
-  lines.push(...(state.extraEvents ?? []));
-  return lines.map((line) => `${JSON.stringify(line)}\n`).join("");
 }
 
 function ok(stdout = ""): DataBackupProcessResult {
@@ -123,6 +104,7 @@ function fakeDocker(state: FakeState): DataBackupDocker {
         );
       }
       if (args[0] === "ps") {
+        state.onPs?.();
         const filter = args[args.indexOf("--filter") + 1] ?? "";
         const late = state.runningFromRound;
         const round = Math.floor(psCalls / psFilterCount(state));
@@ -135,11 +117,11 @@ function fakeDocker(state: FakeState): DataBackupDocker {
         ];
         return Promise.resolve(ok(names.map((n) => `${n}\n`).join("")));
       }
-      if (args[0] === "events") {
-        return Promise.resolve(ok(events(state)));
-      }
       if (args[0] === "run") {
         const volume = helperRun(state, argv);
+        if (argv.includes("true")) {
+          return Promise.resolve(ok());
+        }
         return Promise.resolve(
           ok(
             `${JSON.stringify({
@@ -168,6 +150,7 @@ function fakeDocker(state: FakeState): DataBackupDocker {
         sha256: createHash("sha256").update(bytes).digest("hex"),
       };
     },
+    watch: (argv, onLine) => state.events.watch(argv, onLine),
   };
 }
 
@@ -228,6 +211,7 @@ function baseState(overrides: Partial<FakeState> = {}): FakeState {
     },
     running: {},
     calls: [],
+    events: new FakeDockerEvents(),
     ...overrides,
   };
 }
@@ -343,7 +327,7 @@ describe("exportProjectData", () => {
     ]);
     // Foreign and external volumes are never mounted; external is never inspected.
     const mounted = state.calls
-      .filter((argv) => argv[1] === "run")
+      .filter((argv) => argv[1] === "run" && argv.includes("--volume"))
       .map(mountedVolume);
     expect(new Set(mounted)).toEqual(new Set(["shop_db", "custom-cache"]));
     expect(
@@ -382,7 +366,9 @@ describe("exportProjectData", () => {
       volumes: { shop_db: owned("db") },
     });
     await exportProjectData(input(state));
-    const runs = state.calls.filter((argv) => argv[1] === "run");
+    const runs = state.calls.filter(
+      (argv) => argv[1] === "run" && argv.includes("--volume")
+    );
     expect(runs).toHaveLength(2);
     for (const argv of runs) {
       expect(argv.slice(0, 3)).toEqual(["docker", "run", "--rm"]);
@@ -419,7 +405,10 @@ describe("exportProjectData", () => {
     expect(error.code).toBe("E_PROJECT_RUNNING");
     expect(error.message).toContain("`hack down --branch=x`");
     expect(error.detail).toEqual({ running: ["shop-web-1"] });
-    expect(state.calls.some((argv) => argv[1] === "run")).toBeFalse();
+    expect(
+      state.calls.some((argv) => argv[1] === "run" && argv.includes("--volume"))
+    ).toBeFalse();
+    expect(state.events.open).toBeFalse();
     expect(await readdir(root)).toEqual([]);
   });
 
@@ -452,31 +441,22 @@ describe("exportProjectData", () => {
     ]);
   });
 
-  test("a short-lived writer seen only in volume events keeps the backup unpublished", async () => {
+  test("a short-lived writer that mounts during the copy keeps the backup unpublished", async () => {
+    const events = new FakeDockerEvents();
+    // While the tar helper runs, another container mounts the volume and is
+    // gone again before any ps check (a --rm writer).
+    events.afterRun = (argv) => {
+      if (argv.includes("tar")) {
+        events.mount("shop_db", "f".repeat(64));
+        events.start("f".repeat(64), "adhoc-writer");
+        // A mount of an unrelated volume is ignored.
+        events.mount("other", "e".repeat(64));
+      }
+    };
     const state = baseState({
       model: model({ db: { name: "shop_db" } }),
       volumes: { shop_db: owned("db") },
-      extraEvents: [
-        {
-          Type: "container",
-          Action: "start",
-          Actor: { ID: "f".repeat(64), Attributes: { name: "adhoc-writer" } },
-        },
-        {
-          Type: "volume",
-          Action: "mount",
-          Actor: {
-            ID: "shop_db",
-            Attributes: { container: "f".repeat(64), destination: "/data" },
-          },
-        },
-        // A mount of an unrelated volume is ignored.
-        {
-          Type: "volume",
-          Action: "mount",
-          Actor: { ID: "other", Attributes: { container: "e".repeat(64) } },
-        },
-      ],
+      events,
     });
     const error = await caught(exportProjectData(input(state)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
@@ -488,19 +468,51 @@ describe("exportProjectData", () => {
     });
     const parent = join(root, "home", "data-backups", PROJECT);
     expect(await readdir(parent)).toEqual(["20261123T140501Z.partial"]);
+    expect(events.open).toBeFalse();
   });
 
-  test("a mount by a container with no start event in the window is foreign", async () => {
+  test("a mount between the first running check and the first copy is seen", async () => {
+    const events = new FakeDockerEvents();
     const state = baseState({
       model: model({ db: { name: "shop_db" } }),
       volumes: { shop_db: owned("db") },
-      extraEvents: [
-        {
-          Type: "volume",
-          Action: "mount",
-          Actor: { ID: "shop_db", Attributes: { container: "d".repeat(64) } },
-        },
+      events,
+    });
+    let injected = false;
+    state.onPs = () => {
+      if (!injected) {
+        injected = true;
+        // Arrives after this check reads nothing running, before any copy.
+        queueMicrotask(() => {
+          events.mount("shop_db", "b".repeat(64));
+          events.start("b".repeat(64), "early-writer");
+        });
+      }
+    };
+    const error = await caught(exportProjectData(input(state)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({
+      mounts: [
+        { volume: "shop_db", container: "b".repeat(64), name: "early-writer" },
       ],
+    });
+    // The subscription was live before that check: the start marker ran first.
+    const first = state.calls.findIndex((argv) => argv[1] === "run");
+    const ps = state.calls.findIndex((argv) => argv[1] === "ps");
+    expect(first).toBeLessThan(ps);
+  });
+
+  test("a mount by a container whose start was never seen is foreign", async () => {
+    const events = new FakeDockerEvents();
+    events.afterRun = (argv) => {
+      if (argv.includes("tar")) {
+        events.mount("shop_db", "d".repeat(64));
+      }
+    };
+    const state = baseState({
+      model: model({ db: { name: "shop_db" } }),
+      volumes: { shop_db: owned("db") },
+      events,
     });
     const error = await caught(exportProjectData(input(state)));
     expect(error.code).toBe("E_PROJECT_RUNNING");
@@ -509,20 +521,61 @@ describe("exportProjectData", () => {
     });
   });
 
-  test("mounts by this run's own helpers publish, and the event read is bounded", async () => {
+  test("an event stream that ends before it is stopped refuses publication", async () => {
+    const events = new FakeDockerEvents();
+    events.afterRun = (argv) => {
+      if (argv.includes("tar")) {
+        events.end();
+      }
+    };
+    const state = baseState({
+      model: model({ db: { name: "shop_db" } }),
+      volumes: { shop_db: owned("db") },
+      events,
+    });
+    const error = await caught(exportProjectData(input(state)));
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).toContain("lost its watch");
+    const parent = join(root, "home", "data-backups", PROJECT);
+    expect(await readdir(parent)).toEqual(["20261123T140501Z.partial"]);
+  });
+
+  test("copying starts only after the start marker proves the stream live", async () => {
+    const events = new FakeDockerEvents();
+    events.deliverStarts = false;
+    const state = baseState({
+      model: model({ db: { name: "shop_db" } }),
+      volumes: { shop_db: owned("db") },
+      events,
+    });
+    const error = await caught(
+      exportProjectData(input(state, { markerTimeoutMs: 20 }))
+    );
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).toContain("start marker");
+    // Only the marker ran; no helper read the volume.
+    expect(
+      state.calls.filter(
+        (argv) => argv[1] === "run" && argv.includes("--volume")
+      )
+    ).toEqual([]);
+    expect(events.open).toBeFalse();
+  });
+
+  test("mounts by this run's own helpers publish; markers bracket the copy", async () => {
     const state = baseState({
       model: model({ db: { name: "shop_db" } }),
       volumes: { shop_db: owned("db") },
     });
     await exportProjectData(input(state));
     const names = (state.helpers ?? []).map((helper) => helper.name);
-    expect(names).toHaveLength(2);
-    expect(new Set(names).size).toBe(2);
-    const query = state.calls.find((argv) => argv[1] === "events") ?? [];
-    expect(query).toContain("--since");
-    expect(query).toContain("--until");
-    expect(query.join(" ")).toContain("--filter type=volume");
-    expect(query.join(" ")).toContain("--filter event=mount");
+    expect(names).toHaveLength(4);
+    expect(new Set(names).size).toBe(4);
+    expect(names[0]).toMatch(/^hack-data-export-[a-f0-9]{24}-start$/);
+    expect(names[3]).toMatch(/^hack-data-export-[a-f0-9]{24}-end$/);
+    expect(state.events.watches).toBe(1);
+    expect(state.events.open).toBeFalse();
+    expect(state.calls.some((argv) => argv[1] === "events")).toBeFalse();
   });
 
   test("a failure mid-way leaves only the partial directory; a rerun never reuses it", async () => {
@@ -545,7 +598,10 @@ describe("exportProjectData", () => {
       exportProjectData(input(retry, { outDir: out }))
     );
     expect(conflict.code).toBe("E_PATH_CONFLICT");
-    expect(retry.calls.some((argv) => argv[1] === "run")).toBeFalse();
+    // No helper read a volume; only the event-stream marker ran.
+    expect(
+      retry.calls.some((argv) => argv[1] === "run" && argv.includes("--volume"))
+    ).toBeFalse();
 
     // A later run takes a new timestamp and publishes beside the leftover.
     const later = new Date(NOW.getTime() + 1000);
@@ -579,6 +635,9 @@ describe("exportProjectData", () => {
             "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
         }),
       streamToFile: () => Promise.reject(new Error("not reached")),
+      watch: () => {
+        throw new Error("not reached");
+      },
     };
     const error = await caught(
       exportProjectData({ ...input(baseState()), docker })

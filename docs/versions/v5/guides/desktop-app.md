@@ -39,6 +39,7 @@ refuses, the app cannot do.
 | Resources | Registered project containers and observed attachments, plus allocated and logical host file totals for the selected native home. Partial scans are labeled. | `hackd`; `hack ps --json`; `hack native disk-usage --json` |
 | Services tab | Each service, its state and its routes. For a running Compose project, also CPU and memory per service, and an **emulated** mark on a service whose image runs under CPU emulation. | `hackd`; `hack ps --json`; `hack usage --json --by-service` |
 | Logs tab | Live logs with pause, search and a filter for one service. | `hack logs --json` |
+| Files tab | Browse a running Compose service's directories, preview files, copy container paths and open worktree files in an editor. | `hack files ls --json`, `hack files cat --json` |
 | Env tab | Variable names and values per overlay and scope. See below. | `hack env list`, `get`, `add` |
 | Terminal panel | Log and shell tabs inside the window. On Linux, only in a build with the `terminal` feature. | `hack logs --pretty`, shells |
 | Setup | One card per setup step: the CLI, the runtime, `hackd`, routing and DNS, certificate trust, the login service. | read-only checks |
@@ -72,6 +73,18 @@ Your choice is saved in the app's settings file
 `~/.config`). No environment
 variable selects the CLI.
 
+## The Files tab
+
+Choose a Compose service to start in its working directory. Click a directory
+to browse it, or enter a relative or absolute path under **Go to file**.
+**Show hidden** includes filenames that start with a dot.
+
+Each row shows where the file lives. **Worktree** files come from the checkout
+and can open in your host editor. **Container** files and files in a named
+**volume** have read-only previews. **Copy path** copies the container path.
+The preview shows up to 64 KiB of text. The tab needs a CLI that exposes
+`hack.files.v1` and a running container with common shell utilities.
+
 ## The Env tab
 
 The Env tab shows one overlay at a time. Tabs across the top choose the
@@ -97,6 +110,18 @@ Some things still need the CLI: creating an overlay
 (`hack env overlay add <name>`) and, when the key is missing, choosing another
 key for one run (`--key-file`, `--key-env`). The app shows these as inactive
 buttons that name the command. See [Share environment and secrets](share-environment.md).
+
+## Follow-up banners and Doctor
+
+The project pane shows the highest-priority follow-up. Dismiss it until the
+check changes or the app relaunches. Open **Doctor** to see machine and project
+checks, or **Check again** to refresh the results.
+
+In a build with the terminal panel, **Run** opens that panel. **Fix all** runs
+available repairs one at a time and checks each result before continuing. It
+stops when a repair fails, a check cannot confirm it, or you choose **Stop**.
+Enter a password only at the system prompt in the terminal. Use **Review** for
+an available upgrade.
 
 ## The upgrade review pane
 

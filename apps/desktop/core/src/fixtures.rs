@@ -42,6 +42,7 @@ pub enum Fixture {
     Stopped,
     Starting,
     Running,
+    Files,
     Degraded,
     Stopping,
     FailedStart,
@@ -70,6 +71,11 @@ pub enum Fixture {
     ChangesLoading,
     ChangesClean,
     ChangesDirty,
+    CopiesEmpty,
+    CopiesError,
+    CopiesLoading,
+    CopiesPartial,
+    CopiesReady,
     // Doctor pane.
     /// Findings across areas, machine and project scoped, one failed run.
     Doctor,
@@ -83,6 +89,11 @@ pub enum Fixture {
     DoctorLink,
     /// No projects registered: the Doctor pane still shows machine checks.
     DoctorEmpty,
+    BannerDns,
+    BannersSheet,
+    DoctorHealth,
+    DoctorFixAll,
+    ErrorsSheet,
     // hackd pane (HACK-2288 item 6).
     /// hackd running, a login run under way, always-on projects in every
     /// state the summary shows.
@@ -99,7 +110,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 72] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -122,6 +133,7 @@ impl Fixture {
         Self::Stopped,
         Self::Starting,
         Self::Running,
+        Self::Files,
         Self::Degraded,
         Self::Stopping,
         Self::FailedStart,
@@ -148,6 +160,11 @@ impl Fixture {
         Self::ChangesLoading,
         Self::ChangesClean,
         Self::ChangesDirty,
+        Self::CopiesEmpty,
+        Self::CopiesError,
+        Self::CopiesLoading,
+        Self::CopiesPartial,
+        Self::CopiesReady,
         Self::Doctor,
         Self::DoctorClean,
         Self::PoolUnknown,
@@ -156,6 +173,11 @@ impl Fixture {
         Self::PoolIdle,
         Self::DoctorLink,
         Self::DoctorEmpty,
+        Self::BannerDns,
+        Self::BannersSheet,
+        Self::DoctorHealth,
+        Self::DoctorFixAll,
+        Self::ErrorsSheet,
         Self::Hackd,
         Self::HackdOff,
         Self::Upgrade,
@@ -188,6 +210,7 @@ impl Fixture {
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Files => "files",
             Self::Degraded => "degraded",
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
@@ -214,6 +237,11 @@ impl Fixture {
             Self::ChangesLoading => "changes-loading",
             Self::ChangesClean => "changes-clean",
             Self::ChangesDirty => "changes-dirty",
+            Self::CopiesEmpty => "copies-empty",
+            Self::CopiesError => "copies-error",
+            Self::CopiesLoading => "copies-loading",
+            Self::CopiesPartial => "copies-partial",
+            Self::CopiesReady => "copies-ready",
             Self::Doctor => "doctor",
             Self::DoctorClean => "doctor-clean",
             Self::PoolUnknown => "pool-unknown",
@@ -222,6 +250,11 @@ impl Fixture {
             Self::PoolIdle => "pool-idle",
             Self::DoctorLink => "doctor-link",
             Self::DoctorEmpty => "doctor-empty",
+            Self::BannerDns => "h17-app-banner-dns",
+            Self::BannersSheet => "h18-banners-sheet",
+            Self::DoctorHealth => "h19-doctor",
+            Self::DoctorFixAll => "h20-doctor-fix-all",
+            Self::ErrorsSheet => "h25-errors-sheet",
             Self::Hackd => "hackd",
             Self::HackdOff => "hackd-off",
             Self::Upgrade => "upgrade",
@@ -244,6 +277,7 @@ fn container(state: &str, status: &str) -> Container {
         name: None,
         state: state.into(),
         status: status.into(),
+        labels: BTreeMap::new(),
         ..Container::default()
     }
 }
@@ -270,6 +304,25 @@ fn checkout_dir(branch: &str) -> String {
 
 /// A running branch instance of storefront with web and api routes.
 fn running_branch(branch: &str) -> BranchRuntime {
+    let mut api = routed(
+        "running",
+        "Up 2 hours (healthy)",
+        &format!("api.{branch}.storefront.hack"),
+    );
+    api.name = Some(format!("storefront--{branch}-api-1"));
+    api.image = Some("storefront-api:dev".into());
+    api.labels
+        .insert("caddy.reverse_proxy".into(), "{{upstreams 3000}}".into());
+    api.labels.insert(
+        "com.docker.compose.project".into(),
+        format!("storefront--{branch}"),
+    );
+    api.mounts.push(crate::models::ContainerMount {
+        source: checkout_dir(branch).trim_end_matches("/.hack").into(),
+        destination: "/app".into(),
+        kind: "bind".into(),
+        name: None,
+    });
     BranchRuntime {
         owner: None,
         branch: branch.into(),
@@ -277,14 +330,7 @@ fn running_branch(branch: &str) -> BranchRuntime {
             project: Some(format!("storefront--{branch}")),
             working_dir: Some(checkout_dir(branch)),
             services: vec![
-                svc(
-                    "api",
-                    routed(
-                        "running",
-                        "Up 20 minutes (healthy)",
-                        &format!("api.{branch}.storefront.hack"),
-                    ),
-                ),
+                svc("api", api),
                 svc("db", container("running", "Up 20 minutes")),
                 svc(
                     "web",
@@ -514,7 +560,7 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             r.runtime = None;
             r
         }
-        Fixture::Running => {
+        Fixture::Running | Fixture::Files => {
             let mut r = storefront(all_up(), "running");
             r.branch_runtime = owned(vec![
                 running_branch("feature-search"),
@@ -674,12 +720,14 @@ fn doctor(f: Fixture) -> DoctorReport {
             }
             .into(),
             detail: String::new(),
+            fix: None,
         },
         DoctorCheck {
             native_pool: None,
             id: "caddy local ca".into(),
             status: "warn".into(),
             detail: "Local CA is not trusted by the system".into(),
+            fix: None,
         },
     ];
     if f == Fixture::NeedsAttention {
@@ -688,6 +736,7 @@ fn doctor(f: Fixture) -> DoctorReport {
             id: "project config".into(),
             status: "error".into(),
             detail: "notes: hack.config.json is not valid JSON".into(),
+            fix: None,
         });
     }
     DoctorReport {
@@ -1078,6 +1127,7 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
         id: id.into(),
         status: status.into(),
         detail: detail.into(),
+        fix: None,
     };
     let report = |checks: Vec<DoctorCheck>| {
         Ok(DoctorReport {

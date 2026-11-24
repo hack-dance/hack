@@ -366,6 +366,102 @@ fn usage(candidate: &Candidate, root: &Path) -> Result<(usize, u64), CandidateEr
     }
     Ok((count, bytes))
 }
+/// Evict one verified cache entry at the slot limit, under both the cache lease
+/// and the graph inventory lease. The rename leaves a complete active inventory
+/// even if the process stops before unlinking the retired archive.
+fn free_archive_slot(
+    candidate: &Candidate,
+    root: &Path,
+    coordinator: &ImageCache,
+) -> Result<u64, CandidateError> {
+    let _graph_lease = lifecycle::graph_inventory_lease(candidate)?;
+    let referenced = super::image_build::reclaim::referenced_images(candidate)?;
+    let pins = coordinator.pins.lock().unwrap();
+    let mut oldest = None;
+    for entry in fs::read_dir(root).map_err(state::io)? {
+        let entry = entry.map_err(state::io)?;
+        if entry.file_name() == "operation.lock" {
+            continue;
+        }
+        let dir = entry.path();
+        let receipt_path = dir.join("receipt.json");
+        let receipt = read_receipt(&receipt_path)?;
+        let (_, pin) = registry_image::pinned_syntax(&receipt.reference)?;
+        // A worker can validate or import with the coordinator state unlocked.
+        // A new worker cannot enter that state until this eviction finishes.
+        if referenced.contains(&receipt.image_id)
+            || referenced.contains(pin.as_str())
+            || pins
+                .get(&receipt.reference)
+                .is_some_and(|held| held.try_lock().is_err())
+        {
+            continue;
+        }
+        let modified = fs::metadata(&receipt_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(state::io)?;
+        let key = (modified, dir, receipt.archive_bytes);
+        if oldest.as_ref().is_none_or(|prior| &key < prior) {
+            oldest = Some(key);
+        }
+    }
+    let (_, victim, bytes) = oldest.ok_or_else(|| {
+        refused(
+            "Image cache has 64 archives and every archive is referenced by retained graph state or in use.",
+        )
+    })?;
+    let parent = root
+        .parent()
+        .ok_or_else(|| refused("Archive cache parent is missing."))?;
+    let retired = parent.join(".image-archive-retired");
+    remove_retired_archive(&retired)?;
+    fs::rename(victim, &retired).map_err(state::io)?;
+    sync_directory(root)?;
+    sync_directory(parent)?;
+    remove_retired_archive(&retired)?;
+    sync_directory(parent)?;
+    Ok(bytes)
+}
+
+fn sync_directory(path: &Path) -> Result<(), CandidateError> {
+    fs::File::open(path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(state::io)
+}
+
+fn remove_retired_archive(path: &Path) -> Result<(), CandidateError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(state::io(error)),
+        Ok(_) => state::check_private_directory(path)?,
+    }
+    // With the cache lease held a prior unlink may already have removed either
+    // of these files. Check both before removing either, and preserve unknown files.
+    let mut files = Vec::new();
+    for entry in fs::read_dir(path).map_err(state::io)?.take(3) {
+        let entry = entry.map_err(state::io)?;
+        let file = entry.path();
+        match entry.file_name().to_str() {
+            Some("image.tar") => {
+                archive_size(&file)?;
+            }
+            Some("receipt.json") => {
+                read_receipt(&file)?;
+            }
+            _ => {
+                return Err(refused(
+                    "Unknown retired archive cache files; no files were removed.",
+                ));
+            }
+        }
+        files.push(file);
+    }
+    for file in files {
+        fs::remove_file(file).map_err(state::io)?;
+    }
+    fs::remove_dir(path).map_err(state::io)
+}
+
 #[derive(Debug, Serialize)]
 pub struct EnsuredTag {
     pub reference: String,
@@ -473,8 +569,8 @@ fn check_registry_config(
 /// and validate/import via the owned guest's existing loader. The engine must already
 /// be running before acquisition. A cache miss acquires at most the policy's per-image
 /// budget and the cache's remaining budget (at most 64 archives); an image whose
-/// manifest exceeds that refuses before any layer transfer. This operation never prunes
-/// or adopts conflicting files. Runtime ownership is checked again by the loader after
+/// manifest exceeds that refuses before any layer transfer. At 64 archives, an
+/// online miss can retire the oldest archive unreferenced by retained graph state. Runtime ownership is checked again by the loader after
 /// network work.
 pub fn ensure(
     candidate: &Candidate,
@@ -993,15 +1089,22 @@ fn ensure_pinned_coordinated(
         (dir, receipt)
     } else {
         let limit = loop {
-            let (count, bytes) = occupied;
+            let (mut count, mut bytes) = occupied;
+            let remaining = policy.cache_limit.saturating_sub(bytes);
+            if remaining.min(policy.archive_limit) < MIN_SLOT
+                || (count == MAX_ARCHIVES && policy.tag_mode == ImageTagMode::Offline)
+            {
+                return Err(refused(
+                    "Image cache admission requires a free slot within 64 archives and the configured cache budget.",
+                ));
+            }
+            if count == MAX_ARCHIVES {
+                bytes -= free_archive_slot(candidate, &root, coordinator)?;
+                count -= 1;
+            }
             let limit = policy
                 .archive_limit
                 .min(policy.cache_limit.saturating_sub(bytes));
-            if count >= MAX_ARCHIVES || limit < MIN_SLOT {
-                return Err(refused(
-                    "Image cache admission requires a free slot within 64 archives and the configured cache budget; no automatic deletion.",
-                ));
-            }
             let reserved: u64 = state.reservations.values().sum();
             if count + state.reservations.len() < MAX_ARCHIVES
                 && policy.cache_limit.saturating_sub(bytes + reserved) >= limit
@@ -1425,33 +1528,59 @@ mod tests {
     }
 
     #[test]
-    fn cache_count_budget_refuses_without_deleting_existing_archives() {
+    fn cache_count_retires_oldest_unreferenced_archive_at_64() {
         let f = Fixture::new();
-        for n in 0..MAX_ARCHIVES {
-            ensure_pinned(
-                &f.1,
-                &pin(n),
+        let root = f.1.state_root.join("artifacts/images");
+        let slot = |n| root.join(entry_key(&pin(n), ImagePlatform::LinuxArm64));
+        let coordinator = ImageCache::default();
+        let cache = |reference| {
+            ensure_pinned_coordinated(
+                (&f.1, &coordinator),
+                &pin(reference),
                 &ImagePolicy::default(),
                 PlatformPolicy::Native,
+                |_, _| unreachable!(),
                 acquire,
-                |_, _, _, _, _| Ok(()),
+                |_, _, _, _| Ok(()),
             )
-            .unwrap();
+        };
+        for n in 0..MAX_ARCHIVES {
+            cache(n).unwrap();
+            fs::File::open(slot(n).join("receipt.json"))
+                .unwrap()
+                .set_modified(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000 + n as u64),
+                )
+                .unwrap();
         }
-        let error = ensure_pinned(
-            &f.1,
-            &pin(99),
-            &ImagePolicy::default(),
-            PlatformPolicy::Native,
-            |_, _, _, _| panic!("must not acquire"),
-            |_, _, _, _, _| panic!("must not load"),
-        )
-        .unwrap_err();
-        assert!(error.message.contains("64 archives"));
-        assert_eq!(
-            usage(&f.1, &f.1.state_root.join("artifacts/images")).unwrap(),
-            (64, 448)
+
+        let archived = f.1.state_root.join("run/native-graph-archive/fixture");
+        state::private_directory(&archived).unwrap();
+        let receipt = archived.join("state.json");
+        fs::write(&receipt, pin(0)).unwrap();
+        let importing = coordinator.pins.lock().unwrap()[&pin(1)].clone();
+        let active_import = importing.lock().unwrap();
+        cache(99).unwrap();
+        assert!(slot(0).exists());
+        assert!(slot(1).exists());
+        assert!(!slot(2).exists());
+        drop(active_import);
+        assert!(slot(99).exists());
+        assert_eq!(usage(&f.1, &root).unwrap(), (64, 448));
+
+        // All fixture archives use the same content ID, so this protects every slot.
+        let id = read_receipt(&slot(0).join("receipt.json"))
+            .unwrap()
+            .image_id;
+        fs::write(&receipt, id).unwrap();
+        assert!(
+            cache(100)
+                .unwrap_err()
+                .message
+                .contains("every archive is referenced")
         );
+        assert!(!slot(100).exists());
+        assert_eq!(usage(&f.1, &root).unwrap(), (64, 448));
     }
     #[test]
     fn aggregate_byte_budget_bounds_each_acquisition_and_refuses_a_full_cache_without_pruning() {

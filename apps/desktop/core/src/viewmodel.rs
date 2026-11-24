@@ -14,10 +14,12 @@
 
 use std::collections::HashMap;
 
-use crate::models::ProjectRow;
+use crate::models::{
+    LifecycleResult, ProjectRow, ProjectRuntime, StoppedContainerExecution, Worktree,
+};
 pub use crate::source::UpdateSide;
-use crate::source::{ActionOutcome, DaemonRecovery, Snapshot, SourceError};
-use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
+use crate::source::{ActionOutcome, DaemonRecovery, ServiceActionError, Snapshot, SourceError};
+use crate::state::{self, Action, LocalContext, ProjectState, ServiceStopEvidence, ServiceView};
 
 /// One runnable instance: a project's base instance (`branch: None`) or one
 /// of its branch instances.
@@ -25,6 +27,8 @@ use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
 pub struct InstanceKey {
     pub project: String,
     pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<String>,
 }
 
 impl InstanceKey {
@@ -34,6 +38,7 @@ impl InstanceKey {
         Self {
             project: name.into(),
             branch: None,
+            checkout: None,
         }
     }
 
@@ -43,7 +48,26 @@ impl InstanceKey {
         Self {
             project: name.into(),
             branch: Some(branch.into()),
+            checkout: None,
         }
+    }
+
+    /// A branch instance tied to its owning checkout.
+    #[must_use]
+    pub fn branch_at(
+        name: impl Into<String>,
+        branch: impl Into<String>,
+        checkout: Option<String>,
+    ) -> Self {
+        Self {
+            checkout,
+            ..Self::branch(name, branch)
+        }
+    }
+
+    #[must_use]
+    pub fn is_main(&self) -> bool {
+        self.branch.is_none() && self.checkout.is_none()
     }
 }
 
@@ -54,6 +78,31 @@ impl std::fmt::Display for InstanceKey {
             Some(b) => write!(f, "{} · {b}", self.project),
         }
     }
+}
+
+/// Navigation intent for the service detail pane, scoped to an instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceDestination {
+    Info,
+    Stats,
+    Logs,
+    Terminal,
+    Files,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceSelection {
+    pub instance: InstanceKey,
+    pub name: String,
+    pub destination: ServiceDestination,
+}
+
+/// The checkout and runtime a live reader or terminal panel was opened for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTarget {
+    pub root: String,
+    pub native: bool,
+    pub compose_project: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -125,6 +174,9 @@ pub struct Row {
     /// The base instance.
     pub key: InstanceKey,
     pub name: String,
+    pub root: Option<String>,
+    pub url: Option<String>,
+    pub running_services: usize,
     /// The base instance's state.
     pub state: ProjectState,
     pub always_on: bool,
@@ -132,6 +184,7 @@ pub struct Row {
     pub selected: bool,
     /// Branch instances, sorted by branch.
     pub branches: Vec<BranchRow>,
+    pub unaddressed_worktrees: Vec<Worktree>,
 }
 
 /// One branch instance under its project's row.
@@ -142,6 +195,11 @@ pub struct BranchRow {
     pub state: ProjectState,
     pub url: Option<String>,
     pub selected: bool,
+    pub checkout: Option<String>,
+    pub worktree: bool,
+    /// True when there is no runtime and the engine listing was successful.
+    pub not_started: bool,
+    pub running_services: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -186,6 +244,8 @@ pub struct DetailView {
     pub actions: Vec<Action>,
     pub busy: bool,
     pub services: Vec<ServiceView>,
+    #[serde(skip)]
+    pub runtime_addressable: bool,
     pub remotes: Vec<crate::models::RemoteStatus>,
     /// Services to offer a shell in: the running services of the last read
     /// that reported this instance's runtime. A failed read, a read with the
@@ -241,6 +301,7 @@ pub struct AppModel {
     snapshot: Option<Snapshot>,
     last_error: Option<SourceError>,
     selected: Option<InstanceKey>,
+    selected_service: Option<ServiceSelection>,
     local: HashMap<InstanceKey, LocalContext>,
     service_actions: HashMap<InstanceKey, String>,
     action_errors: HashMap<InstanceKey, String>,
@@ -297,18 +358,58 @@ fn reported_shells(s: &Snapshot, row: &ProjectRow) -> Option<Vec<String>> {
     (row.runtime_status.as_deref() == Some("stopped")).then(Vec::new)
 }
 
-/// Every instance a snapshot reports: each project and its branches.
+fn branch_keys(p: &ProjectRow) -> Vec<InstanceKey> {
+    let observed = p
+        .branch_runtime
+        .iter()
+        .map(|br| InstanceKey::branch_at(&p.name, &br.branch, p.branch_owner(br)));
+    let configured = p
+        .branch_copies
+        .iter()
+        .filter(|copy| {
+            copy.branch.is_some()
+                || copy.compose_project.is_some()
+                || copy.compose_project_unresolved
+        })
+        .map(|copy| InstanceKey {
+            project: p.name.clone(),
+            branch: copy.branch.clone(),
+            checkout: Some(copy.checkout.root.clone()),
+        });
+    let mut keys: Vec<_> = observed.chain(configured).collect();
+    keys.sort_by(|a, b| a.branch.cmp(&b.branch).then(a.checkout.cmp(&b.checkout)));
+    keys.dedup();
+    keys
+}
+
+/// Borrow the runtime behind each navigable instance. An observed branch takes
+/// precedence over a configured copy with the same key, just as in the sidebar.
+pub(crate) fn instance_runtimes(
+    project: &ProjectRow,
+) -> impl Iterator<Item = (InstanceKey, &ProjectRuntime)> {
+    project
+        .runtime
+        .iter()
+        .map(move |runtime| (InstanceKey::project(&project.name), runtime))
+        .chain(branch_keys(project).into_iter().filter_map(move |key| {
+            let checkout = key.checkout.as_deref();
+            let branch = key.branch.as_deref();
+            let copy = project.branch_copy_at(branch, checkout);
+            let observed =
+                branch.and_then(|branch| project.branch_observation_at(branch, checkout, copy));
+            let runtime = observed
+                .map(|branch| &branch.runtime)
+                .or_else(|| copy.and_then(|copy| copy.runtime.as_ref()))?;
+            Some((key, runtime))
+        }))
+}
+
+/// Every instance a snapshot reports: each project and its copies.
 fn instance_keys(s: &Snapshot) -> Vec<InstanceKey> {
     s.projects
         .projects
         .iter()
-        .flat_map(|p| {
-            std::iter::once(InstanceKey::project(p.name.clone())).chain(
-                p.branch_runtime
-                    .iter()
-                    .map(|b| InstanceKey::branch(p.name.clone(), b.branch.clone())),
-            )
-        })
+        .flat_map(|p| std::iter::once(InstanceKey::project(&p.name)).chain(branch_keys(p)))
         .collect()
 }
 
@@ -317,19 +418,37 @@ fn instance_keys(s: &Snapshot) -> Vec<InstanceKey> {
 fn instance_row(s: &Snapshot, key: &InstanceKey) -> Option<ProjectRow> {
     let p = s.projects.projects.iter().find(|p| p.name == key.project)?;
     match &key.branch {
-        None => Some(p.clone()),
-        Some(b) => p.instance(b),
+        None if key.is_main() => Some(p.clone()),
+        None => p
+            .branch_copy_at(None, key.checkout.as_deref())
+            .filter(|copy| copy.compose_project.is_some() || copy.compose_project_unresolved)
+            .map(|copy| p.configured_instance(copy)),
+        Some(b) => p.instance_at(b, key.checkout.as_deref()),
     }
 }
 
 fn instance_exists(s: &Snapshot, key: &InstanceKey) -> bool {
-    s.projects.projects.iter().any(|p| {
-        p.name == key.project
-            && key
-                .branch
-                .as_ref()
-                .is_none_or(|b| p.branch_runtime.iter().any(|r| &r.branch == b))
-    })
+    instance_row(s, key).is_some()
+}
+
+fn select_instance(s: &Snapshot, key: InstanceKey) -> InstanceKey {
+    if key.is_main() || instance_exists(s, &key) {
+        return key;
+    }
+    // Callers with only a slug can select it when there is exactly one copy.
+    if key.checkout.is_none()
+        && let Some(project) = s.projects.projects.iter().find(|p| p.name == key.project)
+    {
+        let mut matches = branch_keys(project)
+            .into_iter()
+            .filter(|copy| copy.branch == key.branch);
+        if let Some(copy) = matches.next()
+            && matches.next().is_none()
+        {
+            return copy;
+        }
+    }
+    InstanceKey::project(key.project)
 }
 
 impl AppModel {
@@ -357,6 +476,39 @@ impl AppModel {
             next.insert(key, entry);
         }
         self.shells = next;
+    }
+
+    fn remember_service_stops(&mut self, snapshot: &Snapshot) {
+        if snapshot.projects.engine_down() {
+            return;
+        }
+        for (key, local) in &mut self.local {
+            if local.service_stops.is_empty() {
+                continue;
+            }
+            let row = instance_row(snapshot, key);
+            let exited: std::collections::BTreeMap<_, _> = row
+                .as_ref()
+                .and_then(|row| row.runtime.as_ref())
+                .iter()
+                .flat_map(|runtime| &runtime.services)
+                .flat_map(|service| &service.containers)
+                .filter(|container| container.state.eq_ignore_ascii_case("exited"))
+                .filter_map(|container| {
+                    container
+                        .id
+                        .as_ref()
+                        .map(|id| (id, container.started_at.as_ref()))
+                })
+                .collect();
+            let checked = snapshot.projects.runtime_checked_at.as_deref();
+            local.service_stops.retain(|id, receipt| {
+                checked.is_none_or(|time| time <= receipt.stopped_at.as_str())
+                    || exited.get(id).is_some_and(|started_at| {
+                        started_at.is_none_or(|start| start == &receipt.started_at)
+                    })
+            });
+        }
     }
 
     /// Start a read. Results from before an action boundary or a newer
@@ -475,6 +627,7 @@ impl AppModel {
         self.loaded_once = false;
         // Shells the other CLI's reads reported are not this one's.
         self.shells.clear();
+        self.selected_service = None;
     }
 
     /// Which CLI the model is showing: capture it when work starts, and
@@ -502,15 +655,17 @@ impl AppModel {
     pub fn apply(&mut self, event: Event) -> bool {
         match event {
             Event::Refreshed(Ok(mut s)) => {
+                let previous_checkout = self.selected_row().and_then(|row| row.repo_root);
                 self.keep_pending_native(&mut s);
                 self.loaded_once = true;
                 self.clear_recovered_failures(&s);
                 self.last_error = None;
+                self.remember_service_stops(&s);
                 self.selected = match self.selected.take() {
                     Some(k) if instance_exists(&s, &k) => Some(k),
                     // A branch instance that went away: its project's base.
                     Some(k)
-                        if k.branch.is_some()
+                        if !k.is_main()
                             && instance_exists(&s, &InstanceKey::project(k.project.clone())) =>
                     {
                         Some(InstanceKey::project(k.project))
@@ -519,6 +674,15 @@ impl AppModel {
                 };
                 self.remember_shells(&s);
                 self.snapshot = Some(s);
+                if self.selected_service.as_ref().is_some_and(|service| {
+                    self.selected.as_ref() != Some(&service.instance)
+                        || self.selected_row().is_none_or(|row| {
+                            row.repo_root != previous_checkout
+                                || !state::services(&row).iter().any(|s| s.name == service.name)
+                        })
+                }) {
+                    self.selected_service = None;
+                }
                 false
             }
             Event::Refreshed(Err(SourceError::Pending)) => false,
@@ -528,19 +692,14 @@ impl AppModel {
                 false
             }
             Event::Select(name) => {
+                self.selected_service = None;
                 self.selected = Some(InstanceKey::project(name));
                 false
             }
             Event::SelectInstance(key) => {
-                // A branch instance the current snapshot does not have
-                // selects its project's base instead.
-                let missing = key.branch.is_some()
-                    && self
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|s| !instance_exists(s, &key));
-                self.selected = Some(if missing {
-                    InstanceKey::project(key.project)
+                self.selected_service = None;
+                self.selected = Some(if let Some(s) = self.snapshot.as_ref() {
+                    select_instance(s, key)
                 } else {
                     key
                 });
@@ -700,7 +859,7 @@ impl AppModel {
         &mut self,
         key: InstanceKey,
         action: Action,
-        result: Result<ActionOutcome, SourceError>,
+        result: Result<LifecycleResult, ServiceActionError>,
     ) -> bool {
         let Some(service) = self.service_actions.remove(&key) else {
             return false;
@@ -708,27 +867,57 @@ impl AppModel {
         self.action_epoch += 1;
         let failed = &mut self.local.entry(key.clone()).or_default().last_failed;
         match result {
-            Ok(ActionOutcome::Lifecycle(result)) => {
+            Ok(receipt) => {
                 failed.retain(|name| name != &service);
-                if action == Action::Restart && result.services.failed.contains(&service) {
+                if action == Action::Restart && receipt.services.failed.contains(&service) {
                     failed.push(service);
+                }
+                if let Some(stopped_at) = receipt.stopped_at {
+                    self.record_service_stop(&key, receipt.stopped_containers, &stopped_at);
                 }
             }
             Err(error) => {
                 if action == Action::Restart
                     && let SourceError::Cli {
                         failed: reported, ..
-                    } = &error
+                    } = error.source.as_ref()
                     && reported.contains(&service)
                     && !failed.contains(&service)
                 {
                     failed.push(service);
                 }
-                self.action_errors.insert(key, describe(&error));
+                if let Some(receipt) = error.stopped {
+                    self.record_service_stop(&key, receipt.stopped_containers, &receipt.stopped_at);
+                }
+                self.action_errors.insert(key, describe(&error.source));
             }
-            Ok(ActionOutcome::Opened(_)) => {}
         }
         true
+    }
+
+    /// Remember only executions whose stop was confirmed by the CLI.
+    fn record_service_stop(
+        &mut self,
+        key: &InstanceKey,
+        containers: Vec<StoppedContainerExecution>,
+        stopped_at: &str,
+    ) {
+        if containers.is_empty() {
+            return;
+        }
+        self.local
+            .entry(key.clone())
+            .or_default()
+            .service_stops
+            .extend(containers.into_iter().map(|container| {
+                (
+                    container.id,
+                    ServiceStopEvidence {
+                        started_at: container.started_at,
+                        stopped_at: stopped_at.to_owned(),
+                    },
+                )
+            }));
     }
 
     /// Can an action start for this instance now? Each instance has its
@@ -758,6 +947,97 @@ impl AppModel {
     #[must_use]
     pub fn selected_key(&self) -> Option<InstanceKey> {
         self.selected.clone()
+    }
+
+    #[must_use]
+    pub fn runtime_target(&self, key: &InstanceKey) -> Option<RuntimeTarget> {
+        let row = instance_row(self.snapshot.as_ref()?, key)?;
+        if !self.can_target_compose(&row) {
+            return None;
+        }
+        let native = row.is_native();
+        Some(RuntimeTarget {
+            root: row.repo_root?,
+            native,
+            compose_project: if native {
+                None
+            } else {
+                row.compose_project
+                    .or_else(|| row.runtime.and_then(|runtime| runtime.project))
+            },
+        })
+    }
+
+    #[must_use]
+    pub fn selected_runtime_target(&self) -> Option<RuntimeTarget> {
+        self.runtime_target(self.selected.as_ref()?)
+    }
+
+    #[must_use]
+    pub fn instance_checkout(&self, key: &InstanceKey) -> Option<(String, bool)> {
+        let row = instance_row(self.snapshot.as_ref()?, key)?;
+        if row.checkout_verified == Some(false) {
+            return None;
+        }
+        let native = row.is_native();
+        Some((row.repo_root?, native))
+    }
+
+    /// Select a service in the current copy without resetting copy-level navigation.
+    pub fn select_service(&mut self, name: String, destination: ServiceDestination) {
+        let Some(instance) = self.selected_key() else {
+            return;
+        };
+        self.selected_service = Some(ServiceSelection {
+            instance,
+            name,
+            destination,
+        });
+    }
+
+    #[must_use]
+    pub fn selected_service(&self) -> Option<&ServiceSelection> {
+        self.selected_service.as_ref()
+    }
+
+    pub fn clear_service_selection(&mut self) {
+        self.selected_service = None;
+    }
+
+    /// Search includes service names in closed copies, without expanding them.
+    #[must_use]
+    pub fn project_has_service_match(&self, name: &str, query: &str) -> bool {
+        let Some(project) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.projects.projects.iter().find(|p| p.name == name))
+        else {
+            return false;
+        };
+        project
+            .defined_services
+            .iter()
+            .map(String::as_str)
+            .chain(
+                project
+                    .runtime
+                    .iter()
+                    .chain(project.branch_runtime.iter().map(|b| &b.runtime))
+                    .flat_map(|runtime| runtime.services.iter().map(|s| s.service.as_str())),
+            )
+            .chain(
+                project
+                    .branch_copies
+                    .iter()
+                    .flat_map(|copy| copy.defined_services.iter().map(String::as_str)),
+            )
+            .chain(
+                project
+                    .native
+                    .iter()
+                    .flat_map(|report| report.items.iter().map(|item| item.service.as_str())),
+            )
+            .any(|service| service.to_lowercase().contains(query))
     }
 
     /// The selected instance's row: the project row, or the row derived
@@ -825,13 +1105,45 @@ impl AppModel {
             for p in &s.projects.projects {
                 let key = InstanceKey::project(p.name.clone());
                 let branches = self.branch_rows(p);
+                let mut unaddressed: std::collections::BTreeMap<_, _> = p
+                    .worktrees
+                    .iter()
+                    .filter_map(|w| Some((w.path.clone()?, w.clone())))
+                    .collect();
+                for copy in p.branch_copies.iter().filter(|c| {
+                    c.branch.is_none()
+                        && c.compose_project.is_none()
+                        && !c.compose_project_unresolved
+                        && c.checkout.kind == "worktree"
+                }) {
+                    let path = copy.checkout.root.clone();
+                    unaddressed.insert(
+                        path.clone(),
+                        Worktree {
+                            path: Some(path),
+                            branch: Some(copy.branch_name.clone()),
+                        },
+                    );
+                }
+                for path in branches.iter().filter_map(|b| b.checkout.as_ref()) {
+                    unaddressed.remove(path);
+                }
                 let row = Row {
                     state: self.observed_state(p, &self.local_for(&key)),
                     always_on: p.autostart.as_ref().is_some_and(|a| a.enabled),
                     selected: self.selected.as_ref() == Some(&key),
                     name: p.name.clone(),
+                    root: p.repo_root.clone(),
+                    url: p.route(),
+                    running_services: if self.last_error.is_some() {
+                        0
+                    } else {
+                        state::services(p).iter().filter(|s| s.running).count()
+                            + branches.iter().map(|b| b.running_services).sum::<usize>()
+                    },
                     key,
                     branches,
+                    unaddressed_worktrees: unaddressed.into_values().collect(),
                 };
                 let active_branches = row.branches.iter().filter(|b| b.state.is_active()).count();
                 active_instances += active_branches + usize::from(row.state.is_active());
@@ -870,23 +1182,45 @@ impl AppModel {
     }
 
     fn branch_rows(&self, p: &ProjectRow) -> Vec<BranchRow> {
-        let mut rows: Vec<BranchRow> = p
-            .branch_runtime
-            .iter()
-            .filter_map(|br| {
-                let row = p.instance(&br.branch)?;
-                let key = InstanceKey::branch(p.name.clone(), br.branch.clone());
+        let mut rows: Vec<BranchRow> = branch_keys(p)
+            .into_iter()
+            .filter_map(|key| {
+                let slug = key.branch.as_deref();
+                let checkout = key.checkout.clone();
+                let configured = p.branch_copy_at(slug, checkout.as_deref());
+                let row = match slug {
+                    Some(slug) => p.instance_at(slug, checkout.as_deref())?,
+                    None => p.configured_instance(configured?),
+                };
+                let runtime = p
+                    .branch_runtime
+                    .iter()
+                    .find(|br| Some(br.branch.as_str()) == slug && p.branch_owner(br) == checkout);
+                let worktree = configured.is_some_and(|copy| copy.checkout.kind == "worktree")
+                    || checkout.as_ref().is_some_and(|root| {
+                        p.worktrees.iter().any(|w| w.path.as_ref() == Some(root))
+                    });
+                let state = self.observed_state(&row, &self.local_for(&key));
                 Some(BranchRow {
-                    state: self.observed_state(&row, &self.local_for(&key)),
-                    url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
+                    not_started: row.runtime.is_none()
+                        && state == ProjectState::Stopped
+                        && configured.is_some_and(|copy| !copy.recorded),
+                    state,
+                    url: row.route(),
                     selected: self.selected.as_ref() == Some(&key),
-                    branch: br.branch.clone(),
+                    branch: runtime
+                        .and_then(|br| br.branch_name.clone())
+                        .or_else(|| configured.map(|c| c.branch_name.clone()))
+                        .or_else(|| slug.map(str::to_owned))
+                        .unwrap_or_else(|| "worktree".to_owned()),
                     key,
+                    worktree,
+                    checkout,
+                    running_services: state::services(&row).iter().filter(|s| s.running).count(),
                 })
             })
             .collect();
         rows.sort_by(|a, b| a.branch.cmp(&b.branch));
-        rows.dedup_by(|a, b| a.branch == b.branch);
         rows
     }
 
@@ -896,11 +1230,17 @@ impl AppModel {
         let row = self.selected_row()?;
         let local = self.local_for(&key);
         let st = self.observed_state(&row, &local);
-        let mut services = state::services(&row);
+        let mut services = state::services_with_stops(&row, &local);
+        let can_target = self.can_target_compose(&row);
+        let can_target_runtime = self.last_error.is_none() && can_target && row.owns_runtime();
+        for service in &mut services {
+            service.compose_container &= can_target_runtime;
+        }
         if self.last_error.is_some() {
             for service in &mut services {
                 service.running = false;
                 service.completed = false;
+                service.intentionally_stopped = false;
                 service.exit_code = None;
                 service.status = "Status unknown".into();
             }
@@ -913,7 +1253,7 @@ impl AppModel {
             } else {
                 row.backend.clone().unwrap_or_else(|| "compose".into())
             },
-            url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
+            url: row.route(),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
             // The marker lives on the project's own row (a branch instance's
             // derived row has none); it names the instance it is for.
@@ -922,7 +1262,7 @@ impl AppModel {
                 .as_ref()
                 .and_then(|s| s.projects.projects.iter().find(|p| p.name == key.project))
                 .and_then(|p| p.autostart.as_ref())
-                .filter(|a| a.branch == key.branch)
+                .filter(|a| a.branch == key.branch && (key.is_main() || key.branch.is_some()))
                 // The state line already says it (`state::derive`) when this
                 // instance's row carries the marker (the base instance); a
                 // branch instance's derived row does not, so keep it there.
@@ -937,25 +1277,39 @@ impl AppModel {
                 }),
             actions: if row.is_native()
                 || self.last_error.is_some()
-                || (row.branch.is_some() && row.repo_root.is_none())
+                || (!key.is_main() && row.repo_root.is_none())
             {
                 vec![]
+            } else if !can_target {
+                st.actions()
+                    .iter()
+                    .copied()
+                    .filter(|action| *action == Action::Open && row.route().is_some())
+                    .collect()
             } else {
                 st.actions().to_vec()
             },
             note: if row.is_native() {
                 Some(NATIVE_ACTIONS_NOTE.to_owned())
-            } else if row.branch.is_some() && row.repo_root.is_none() {
+            } else if !key.is_main() && row.repo_root.is_none() {
                 Some(UNKNOWN_CHECKOUT_NOTE.to_owned())
+            } else if row.compose_project_unresolved {
+                Some("The Compose project name could not be resolved.".into())
+            } else if !can_target {
+                Some("The Compose project belongs to a different checkout or configuration.".into())
             } else {
                 None
             },
             busy: self.action_in_flight(&key),
-            shells: self
-                .shells
-                .get(&key)
-                .map(|(names, _)| names.clone())
-                .unwrap_or_default(),
+            runtime_addressable: can_target && row.repo_root.is_some(),
+            shells: if can_target {
+                self.shells
+                    .get(&key)
+                    .map(|(names, _)| names.clone())
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            },
             shells_stale: self.last_error.is_some()
                 || self.shells.get(&key).is_some_and(|(_, stale)| *stale),
             // The daemon only reports authored targets from the registered checkout.
@@ -970,6 +1324,35 @@ impl AppModel {
             state: st,
             key,
         })
+    }
+
+    fn can_target_compose(&self, row: &ProjectRow) -> bool {
+        if row.compose_project_unresolved || row.checkout_verified == Some(false) {
+            return false;
+        }
+        let Some(expected) = &row.compose_project else {
+            return true;
+        };
+        if let Some(runtime) = &row.runtime {
+            return runtime.project.as_ref() == Some(expected) && row.owns_runtime();
+        }
+        !self
+            .snapshot
+            .iter()
+            .flat_map(|s| &s.projects.projects)
+            .any(|project| {
+                project
+                    .runtime
+                    .iter()
+                    .chain(project.branch_runtime.iter().map(|item| &item.runtime))
+                    .chain(
+                        project
+                            .branch_copies
+                            .iter()
+                            .filter_map(|copy| copy.runtime.as_ref()),
+                    )
+                    .any(|runtime| runtime.project.as_ref() == Some(expected))
+            })
     }
 }
 
@@ -986,12 +1369,11 @@ fn first_by_group(s: &Snapshot, local: &HashMap<InstanceKey, LocalContext>) -> O
         .map(|p| {
             let base = active(p, &InstanceKey::project(p.name.clone()));
             let any_branch = p.branch_runtime.iter().any(|br| {
-                p.instance(&br.branch).is_some_and(|row| {
-                    active(
-                        &row,
-                        &InstanceKey::branch(p.name.clone(), br.branch.clone()),
-                    )
-                })
+                let checkout = p.branch_owner(br);
+                p.instance_at(&br.branch, checkout.as_deref())
+                    .is_some_and(|row| {
+                        active(&row, &InstanceKey::branch_at(&p.name, &br.branch, checkout))
+                    })
             });
             (!(base || any_branch), p.name.as_str())
         })
@@ -1035,10 +1417,10 @@ mod tests {
         assert_eq!(detail.remotes[0].address_label(), "$DB_HOST:5432");
         assert_eq!(detail.remotes[0].probe, "not checked");
         assert!(!format!("{detail:?}").contains("fixture-value"));
-        model.apply(Event::SelectInstance(InstanceKey {
-            project: "storefront".into(),
-            branch: Some("fix-login".into()),
-        }));
+        model.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "fix-login",
+        )));
         assert!(model.detail().unwrap().remotes.is_empty());
     }
 
@@ -1050,11 +1432,7 @@ mod tests {
         let key = model.selected_key().unwrap();
         model.local.entry(key.clone()).or_default().last_failed = vec!["web".into(), "api".into()];
         let observed = model.detail().unwrap().state;
-        let ok = || {
-            Ok(ActionOutcome::Lifecycle(
-                crate::models::LifecycleResult::default(),
-            ))
-        };
+        let ok = || Ok(LifecycleResult::default());
 
         assert!(model.start_service_action(&key, "api"));
         assert!(!model.can_start(&key));
@@ -1069,7 +1447,8 @@ mod tests {
             code: "E_RESTART".into(),
             message: "Restart failed".into(),
             failed: vec!["api".into()],
-        });
+        }
+        .into());
         assert!(model.finish_service_action(key.clone(), Action::Restart, failure));
         assert_eq!(model.local_for(&key).last_failed, ["web", "api"]);
         assert!(model.start_service_action(&key, "api"));
@@ -1120,13 +1499,13 @@ mod tests {
             .find(|p| p.name == "storefront")
             .unwrap();
         row.branch_runtime.push(BranchRuntime {
-            owner: None,
             branch: "elsewhere".into(),
             runtime: ProjectRuntime {
                 project: Some("storefront--elsewhere".into()),
                 working_dir: Some("/unregistered/checkout/.hack".into()),
                 services: vec![],
             },
+            ..BranchRuntime::default()
         });
         let mut m = AppModel::new();
         m.apply(Event::Refreshed(Ok(snap)));
@@ -2048,7 +2427,11 @@ mod tests {
     }
 
     fn branch(b: &str) -> InstanceKey {
-        InstanceKey::branch("storefront", b)
+        let root = match b {
+            "fix-login" => "/work/storefront-wt/fix-login",
+            _ => "/work/storefront",
+        };
+        InstanceKey::branch_at("storefront", b, Some(root.into()))
     }
 
     #[test]
@@ -2257,5 +2640,437 @@ mod tests {
             assert_eq!(d.name, "storefront");
             assert_eq!(d.url.as_deref(), Some("https://storefront.hack"));
         }
+    }
+
+    #[test]
+    fn stopped_copies_keep_routes_and_scope_service_selection() {
+        let mut model = model(Fixture::GroupedSidebar);
+        let feature = InstanceKey::branch_at(
+            "storefront",
+            "feature-search",
+            Some("/work/storefront/.worktrees/feature-search".into()),
+        );
+        let release = branch("release-2");
+        model.apply(Event::SelectInstance(feature.clone()));
+        model.select_service("api".into(), ServiceDestination::Files);
+        model.apply(Event::Refreshed(fixtures::snapshot(
+            Fixture::GroupedSidebar,
+        )));
+        assert_eq!(
+            model.selected_service().map(|s| &s.instance),
+            Some(&feature)
+        );
+        assert!(model.start_service_action(&feature, "api"));
+        assert!(model.detail().unwrap().busy);
+        assert!(model.detail().unwrap().state.is_active());
+        assert!(model.can_start(&release));
+        model.finish_service_action(feature, Action::Stop, Ok(LifecycleResult::default()));
+
+        model.apply(Event::SelectInstance(release.clone()));
+        assert!(model.selected_service().is_none());
+        model.apply(Event::Refreshed(fixtures::snapshot(
+            Fixture::GroupedSidebar,
+        )));
+        let detail = model.detail().unwrap();
+        assert_eq!(detail.key, release);
+        assert_eq!(detail.state, ProjectState::Stopped);
+        assert_eq!(detail.services[0].name, "deploy");
+        assert_eq!(
+            detail.url.as_deref(),
+            Some("https://release-2.storefront.hack")
+        );
+    }
+
+    #[test]
+    fn a_worktree_copy_does_not_show_services_from_the_primary_checkout() {
+        let mut snapshot = fixtures::snapshot(Fixture::GroupedSidebar).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        project.defined_services.push("primary-only".into());
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snapshot)));
+        model.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "feature-search",
+        )));
+        let services = model.detail().unwrap().services;
+        assert_eq!(services.len(), 4);
+        assert!(!services.iter().any(|s| s.name == "primary-only"));
+    }
+
+    #[test]
+    fn a_shared_slug_never_redirects_selection_when_the_runtime_disappears() {
+        use crate::models::{BranchCheckout, BranchCopy};
+        let mut snapshot = fixtures::snapshot(Fixture::Branches).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        let worktree = "/work/storefront-wt/fix-login";
+        project.branch_copies.push(BranchCopy {
+            branch: Some("release-2".into()),
+            branch_name: "release-2".into(),
+            checkout: BranchCheckout {
+                root: worktree.into(),
+                kind: "worktree".into(),
+            },
+            defined_services: vec!["core".into()],
+            ..BranchCopy::default()
+        });
+        let mut after = snapshot.clone();
+        after
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .branch_runtime
+            .retain(|runtime| runtime.branch != "release-2");
+
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snapshot)));
+        let row = model
+            .list()
+            .running
+            .into_iter()
+            .find(|r| r.name == "storefront")
+            .unwrap();
+        assert_eq!(
+            row.branches
+                .iter()
+                .filter(|r| r.key.branch.as_deref() == Some("release-2"))
+                .count(),
+            2
+        );
+        model.apply(Event::SelectInstance(branch("release-2")));
+        model.select_service("core".into(), ServiceDestination::Files);
+        assert_eq!(
+            model.selected_row().unwrap().repo_root.as_deref(),
+            Some("/work/storefront")
+        );
+        model.apply(Event::Refreshed(Ok(after)));
+        assert_eq!(
+            model.selected_key(),
+            Some(InstanceKey::project("storefront"))
+        );
+        assert!(model.selected_service().is_none());
+    }
+
+    #[test]
+    fn partial_stop_keeps_the_error_and_records_only_confirmed_replicas() {
+        let mut snapshot = fixtures::snapshot(Fixture::GroupedSidebar).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        let runtime = &mut project.branch_runtime[0].runtime;
+        runtime.services.retain(|service| service.service == "api");
+        let containers = &mut runtime.services[0].containers;
+        containers[0].id = Some("confirmed".into());
+        containers[0].started_at = Some("2026-11-23T00:00:00.000Z".into());
+        let mut replica = containers[0].clone();
+        replica.id = Some("unconfirmed".into());
+        containers.push(replica);
+
+        let key = InstanceKey::branch_at(
+            "storefront",
+            "feature-search",
+            Some("/work/storefront/.worktrees/feature-search".into()),
+        );
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snapshot.clone())));
+        model.apply(Event::SelectInstance(key.clone()));
+        assert!(model.start_service_action(&key, "api"));
+        model.finish_service_action(
+            key,
+            Action::Stop,
+            Err(crate::runner::RunError::Cli(crate::models::CliError {
+                code: "E_COMPOSE_FAILED".into(),
+                message: "Could not stop api (Docker exit 1).".into(),
+                detail: Some(serde_json::json!({
+                    "stoppedContainers": [{ "id": "confirmed", "startedAt": "2026-11-23T00:00:00.000Z" }],
+                    "stoppedAt": "2026-11-23T00:00:30.000Z"
+                })),
+            })
+            .into()),
+        );
+
+        let mut refresh = |replicas: usize| {
+            let project = snapshot
+                .projects
+                .projects
+                .iter_mut()
+                .find(|p| p.name == "storefront")
+                .unwrap();
+            for container in
+                &mut project.branch_runtime[0].runtime.services[0].containers[..replicas]
+            {
+                container.state = "exited".into();
+                container.status = "Exited (137)".into();
+            }
+            model.apply(Event::Refreshed(Ok(snapshot.clone())));
+            model.detail().unwrap()
+        };
+        let partial = refresh(1);
+        assert!(matches!(partial.state, ProjectState::Running { .. }));
+        assert_eq!(
+            partial.last_error.as_deref(),
+            Some("E_COMPOSE_FAILED: Could not stop api (Docker exit 1).")
+        );
+        assert!(matches!(refresh(2).state, ProjectState::FailedStart { .. }));
+    }
+
+    #[test]
+    fn a_retained_stopped_container_can_restart_and_a_host_process_cannot() {
+        let mut snapshot = fixtures::snapshot(Fixture::GroupedSidebar).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        let runtime = &mut project.branch_runtime[0].runtime;
+        runtime.services.retain(|service| service.service == "api");
+        let container = &mut runtime.services[0].containers[0];
+        container.id = Some("stopped-api".into());
+        container.started_at = Some("2026-11-23T00:00:00.000000111Z".into());
+        container.state = "exited".into();
+        container.status = "Exited (137) 2 seconds ago".into();
+        let mut completed_replica = container.clone();
+        completed_replica.id = Some("completed-replica".into());
+        completed_replica.status = "Exited (0) 2 seconds ago".into();
+        runtime.services[0].containers.push(completed_replica);
+        let key = InstanceKey::branch_at(
+            "storefront",
+            "feature-search",
+            Some("/work/storefront/.worktrees/feature-search".into()),
+        );
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snapshot.clone())));
+        model.apply(Event::SelectInstance(key.clone()));
+        assert!(matches!(
+            model.detail().unwrap().state,
+            ProjectState::FailedStart { .. }
+        ));
+        model.record_service_stop(
+            &key,
+            vec![StoppedContainerExecution {
+                id: "stopped-api".into(),
+                started_at: "2026-11-23T00:00:00.000000111Z".into(),
+            }],
+            "2026-11-23T00:00:30.000Z",
+        );
+        let mut cached = snapshot.clone();
+        cached.projects.runtime_checked_at = Some("2026-11-23T00:00:29.999Z".into());
+        let project = cached
+            .projects
+            .projects
+            .iter_mut()
+            .find(|row| row.name == "storefront")
+            .unwrap();
+        let api = &mut project.branch_runtime[0].runtime.services[0].containers[0];
+        api.state = "running".into();
+        api.status = "Up".into();
+        model.apply(Event::Refreshed(Ok(cached)));
+        let mut partial = snapshot.clone();
+        partial.projects.runtime_checked_at = Some("2026-11-23T00:00:31.000Z".into());
+        let project = partial
+            .projects
+            .projects
+            .iter_mut()
+            .find(|row| row.name == "storefront")
+            .unwrap();
+        let containers = &mut project.branch_runtime[0].runtime.services[0].containers;
+        containers[0].started_at = None;
+        containers.swap(0, 1);
+        model.apply(Event::Refreshed(Ok(partial)));
+        assert!(matches!(
+            model.detail().unwrap().state,
+            ProjectState::Unknown { .. }
+        ));
+        assert_eq!(model.detail().unwrap().services[0].status, "Status unknown");
+        model.apply(Event::Refreshed(Ok(snapshot.clone())));
+        let detail = model.detail().unwrap();
+        assert_eq!(detail.state, ProjectState::Stopped);
+        assert!(detail.services[0].intentionally_stopped);
+        assert!(detail.services[0].compose_container);
+
+        let mut restarted = snapshot.clone();
+        restarted.projects.runtime_checked_at = Some("2026-11-23T00:01:00.000Z".into());
+        let project = restarted
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        let container = &mut project.branch_runtime[0].runtime.services[0].containers[0];
+        // The same ID restarted and crashed during the batch. Its newer
+        // execution began before the batch finished, even in the same ms.
+        container.started_at = Some("2026-11-23T00:00:00.000000222Z".into());
+        model.apply(Event::Refreshed(Ok(restarted)));
+        let detail = model.detail().unwrap();
+        assert!(matches!(detail.state, ProjectState::FailedStart { .. }));
+        assert!(!detail.services[0].intentionally_stopped);
+
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        let containers = &mut project.branch_runtime[0].runtime.services[0].containers;
+        let mut synthetic = containers[0].clone();
+        synthetic.id = Some("host-api".into());
+        synthetic
+            .labels
+            .insert("hack.lifecycle.process".into(), "true".into());
+        containers.push(synthetic);
+        model.apply(Event::Refreshed(Ok(snapshot)));
+        assert!(!model.detail().unwrap().services[0].compose_container);
+    }
+
+    #[test]
+    fn a_linked_base_marks_the_primary_compose_target_as_taken() {
+        use crate::models::{BranchCheckout, BranchCopy};
+        let mut snapshot = fixtures::snapshot(Fixture::GroupedSidebar).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        project.compose_project = Some("storefront".into());
+        project.runtime = None;
+        let owner = "/work/storefront/.worktrees/feature-search";
+        let mut runtime = project.branch_runtime.remove(0).runtime;
+        runtime.project = Some("storefront".into());
+        project.branch_copies.push(BranchCopy {
+            branch_name: "feature-search".into(),
+            checkout: BranchCheckout {
+                root: owner.into(),
+                kind: "worktree".into(),
+            },
+            compose_project: Some("storefront".into()),
+            runtime: Some(runtime),
+            ..BranchCopy::default()
+        });
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snapshot)));
+        model.apply(Event::Select("storefront".into()));
+        assert!(model.detail().unwrap().actions.is_empty());
+        let worktree = model
+            .list()
+            .running
+            .into_iter()
+            .find(|row| row.name == "storefront")
+            .unwrap()
+            .branches
+            .into_iter()
+            .find(|row| row.branch == "feature-search")
+            .unwrap();
+        assert!(worktree.state.is_active());
+        model.apply(Event::SelectInstance(worktree.key));
+        let detail = model.detail().unwrap();
+        assert!(detail.actions.contains(&Action::Stop));
+        assert!(
+            detail
+                .services
+                .iter()
+                .any(|service| service.running && service.compose_container)
+        );
+    }
+
+    #[test]
+    fn an_unresolved_compose_name_cannot_start_another_checkouts_stack() {
+        let mut snapshot = fixtures::snapshot(Fixture::GroupedSidebar).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        project.runtime = None;
+        project.compose_project = None;
+        project.compose_project_unresolved = true;
+        project.branch_copies[0].compose_project_unresolved = true;
+        let mut runtime = project.branch_runtime[0].runtime.clone();
+        let working_dir = "/work/billing-api/.hack";
+        runtime.project = Some("shared".into());
+        runtime.working_dir = Some(working_dir.into());
+        for container in runtime
+            .services
+            .iter_mut()
+            .flat_map(|service| &mut service.containers)
+        {
+            container.labels.insert(
+                "com.docker.compose.project.working_dir".into(),
+                working_dir.into(),
+            );
+        }
+        let other = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "billing-api")
+            .unwrap();
+        other.runtime = Some(runtime);
+
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snapshot)));
+        model.apply(Event::Select("storefront".into()));
+        assert!(!model.detail().unwrap().actions.contains(&Action::Start));
+        assert!(model.selected_runtime_target().is_none());
+        model.apply(Event::SelectInstance(branch("release-2")));
+        let detail = model.detail().unwrap();
+        assert_eq!(detail.branch.as_deref(), Some("release-2"));
+        assert!(!detail.actions.contains(&Action::Start));
+        assert!(model.selected_runtime_target().is_none());
+    }
+
+    #[test]
+    fn a_legacy_stack_cannot_retarget_compose_actions() {
+        let mut snapshot = fixtures::snapshot(Fixture::Branches).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        let legacy = project
+            .branch_runtime
+            .iter_mut()
+            .find(|br| br.branch == "feature-search")
+            .unwrap();
+        legacy.compose_project = Some("new--feature-search".into());
+        legacy.checkout_verified = Some(true);
+        let mut current = legacy.clone();
+        current.runtime.project.clone_from(&current.compose_project);
+        let mut model = AppModel::new();
+        model.apply(Event::Refreshed(Ok(snapshot.clone())));
+        model.apply(Event::SelectInstance(branch("feature-search")));
+        assert_eq!(model.detail().unwrap().actions, [Action::Open]);
+        assert!(!model.detail().unwrap().runtime_addressable);
+        assert!(model.detail().unwrap().shells.is_empty());
+        assert_eq!(
+            model.instance_checkout(&model.selected_key().unwrap()),
+            Some(("/work/storefront".into(), false))
+        );
+        let p = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        p.branch_runtime.push(current);
+        model.apply(Event::Refreshed(Ok(snapshot)));
+        assert!(model.detail().unwrap().actions.contains(&Action::Stop));
     }
 }

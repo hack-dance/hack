@@ -34,11 +34,12 @@ case " $* " in
             printf '%s\n' '[{"Service":"web","Name":"sample-web-1","State":"running","Status":"Up","ExitCode":0}]'
             exit 0 ;;
         esac
-        printf '%s\\n' '{"Service":"web","Name":"sample-web-1","State":"running","Status":"Up","ExitCode":0}'
+        printf '{"ID":"fixture-web","Service":"web","Name":"sample-web-1","State":"running","Status":"Up","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n' "$PWD"
         case " $* " in
           *" --all "*)
             if [ -f "$STUB_ROOT/started" ]; then
-              printf '%s\\n' '{"Service":"worker","Name":"sample-worker-1","State":"exited","Status":"Exited (127)","ExitCode":127}' '{"Service":"install","Name":"sample-install-1","State":"exited","Status":"Exited (0)","ExitCode":0}'
+              printf '{"ID":"fixture-worker","Service":"worker","Name":"sample-worker-1","State":"exited","Status":"Exited (127)","ExitCode":127,"Labels":"com.docker.compose.project.working_dir=%s"}\\n' "$PWD"
+              printf '{"ID":"fixture-install","Service":"install","Name":"sample-install-1","State":"exited","Status":"Exited (0)","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n' "$PWD"
             fi ;;
         esac ;;
       *)

@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { prepareForegroundComposeEnvOverride } from "../../src/lib/compose-env-at-rest.ts";
 import {
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
@@ -767,21 +768,55 @@ else {
   }
 
   /** A published v3 adoption over reference-form generated overrides. */
-  async function publishedManagedAdoption() {
+  async function publishedManagedAdoption(
+    foreground?: "references" | "empty" | "empty-omitted"
+  ) {
     Reflect.deleteProperty(process.env, "CI");
     Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
     await trackedManagedCheckout();
     const files = await managedGenerated();
-    await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
-    await setProjectEnvValue({
-      projectRoot,
-      projectDir: join(projectRoot, ".hack"),
-      envName: null,
-      scope: "global",
-      key: "MANAGED",
-      value: CANARY,
-      secret: true,
-    });
+    const projectDir = join(projectRoot, ".hack");
+    if (foreground === "empty" || foreground === "empty-omitted") {
+      await writeOwnedFixture(
+        join(projectDir, "hack.env.default.yaml"),
+        JSON.stringify({
+          version: 1,
+          secretsprovider: "project_key",
+          values: {},
+        })
+      );
+    } else {
+      await writeFile(
+        join(projectRoot, ".hack.secret.key"),
+        "synthetic-v3-key"
+      );
+      await setProjectEnvValue({
+        projectRoot,
+        projectDir,
+        envName: null,
+        scope: "global",
+        key: "MANAGED",
+        value: CANARY,
+        secret: true,
+      });
+    }
+    if (foreground) {
+      const alias = await prepareForegroundComposeEnvOverride({
+        projectDir,
+        text:
+          foreground === "references"
+            ? await readFile(files[2] ?? "", "utf8")
+            : undefined,
+      });
+      if (!alias) {
+        throw new Error("Expected a synthetic foreground reference alias");
+      }
+      container().configFiles =
+        foreground === "empty-omitted"
+          ? files.slice(0, -1).join(",")
+          : [...files.slice(0, -1), alias].join(",");
+      await save();
+    }
     const binary = await managedEnvCompilerFixture(
       join(root, "managed-compiler")
     );

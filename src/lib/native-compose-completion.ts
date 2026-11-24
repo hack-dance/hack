@@ -3,6 +3,10 @@ import { isRecord } from "./guards.ts";
 import type { NativeComposeOwnershipObservation } from "./native-compose-ownership.ts";
 
 type PrivateDocument = Readonly<Record<string, unknown>>;
+type ProposedGeneration = {
+  readonly generationId: string;
+  readonly identity: { readonly composeProject: string };
+};
 const ON_FAILURE_RESTART = /^on-failure(?::[1-9][0-9]*)?$/;
 function invalid(): never {
   throw new HackCliError({
@@ -31,14 +35,49 @@ export function nativeComposeOnFailureServices(
     .map(([name]) => name);
 }
 
+function proposedContainer(
+  observed: NativeComposeOwnershipObservation,
+  generation: ProposedGeneration,
+  name: string
+) {
+  const matches = observed.containers.filter(
+    (container) => !container.oneoff && container.service === name
+  );
+  const current = matches[0];
+  return matches.length === 1 &&
+    current?.generationId === generation.generationId &&
+    current.name === `${generation.identity.composeProject}-${name}-1`
+    ? current
+    : undefined;
+}
+
+/** A non-restarting initializer has a terminal failure in the proposed generation. */
+export function nativeComposeStartupJobFailed(
+  document: PrivateDocument,
+  observed: NativeComposeOwnershipObservation,
+  generation: ProposedGeneration
+): boolean {
+  return Object.entries(serviceMap(document)).some(([name, value]) => {
+    if (
+      !(
+        isRecord(value) &&
+        isRecord(value.labels) &&
+        value.labels["io.hack.native-config.workload"] === "job" &&
+        (value.restart === undefined || value.restart === "no")
+      )
+    ) {
+      return false;
+    }
+    const current = proposedContainer(observed, generation, name);
+    return current?.state === "exited" && current.exitCode !== 0;
+  });
+}
+
 /** Readiness belongs to the exact proposed generation, not an older healthy graph. */
 export function nativeComposeWorkloadsReady(
   document: PrivateDocument,
   observed: NativeComposeOwnershipObservation,
-  generation: {
-    readonly generationId: string;
-    readonly identity: { readonly composeProject: string };
-  },
+  generation: ProposedGeneration,
   required = Object.keys(serviceMap(document))
 ): boolean {
   return required.every((name) => {
@@ -46,22 +85,15 @@ export function nativeComposeWorkloadsReady(
     if (!(isRecord(value) && isRecord(value.labels))) {
       return invalid();
     }
-    const matches = observed.containers.filter(
-      (container) => !container.oneoff && container.service === name
-    );
-    const current = matches[0];
-    if (
-      matches.length !== 1 ||
-      current?.generationId !== generation.generationId ||
-      current.name !== `${generation.identity.composeProject}-${name}-1`
-    ) {
+    const current = proposedContainer(observed, generation, name);
+    if (!current) {
       return false;
     }
     if (value.labels["io.hack.native-config.workload"] === "job") {
-      return current?.state === "exited" && current.exitCode === 0;
+      return current.state === "exited" && current.exitCode === 0;
     }
     return (
-      current?.state === "running" &&
+      current.state === "running" &&
       (!Object.hasOwn(value, "healthcheck") || current.health === "healthy")
     );
   });

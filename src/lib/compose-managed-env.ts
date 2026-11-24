@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { YAML } from "bun";
 
 const EMPTY_MAPPING_SPACE = /: \n/g;
+export const EMPTY_COMPOSE_ENV_REFERENCE_OVERRIDE = "services: {}\n";
 
 /**
  * Literal projection that Hack versions before the reference writer kept at

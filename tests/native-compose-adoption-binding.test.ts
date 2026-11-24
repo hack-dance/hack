@@ -20,7 +20,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  composeEnvOverridePath,
+  prepareForegroundComposeEnvOverride,
+} from "../src/lib/compose-env-at-rest.ts";
+import {
   acquireLegacyComposeAdoptionBinding,
+  inspectLegacyComposeAdoptionResources,
   inspectLegacyComposeSourceBindResources,
   LegacyComposeAdoptionBindingError,
 } from "../src/lib/native-compose-adoption-binding.ts";
@@ -29,7 +34,11 @@ import {
   type LegacyComposeJobState,
   legacyComposeFreshJobResult,
 } from "../src/lib/native-compose-adoption-jobs.ts";
-import { planLegacyComposeSourceBindAdoption } from "../src/lib/native-compose-adoption-plan.ts";
+import {
+  planLegacyComposeAdoption,
+  planLegacyComposeSourceBindAdoption,
+} from "../src/lib/native-compose-adoption-plan.ts";
+import { hasLegacyComposeGeneratedSources } from "../src/lib/native-compose-adoption-projection.ts";
 import { legacyComposeRetainedPlan } from "../src/lib/native-compose-adoption-readiness.ts";
 import { acquireNativeConfigImportInputs } from "../src/lib/native-config-import-inputs.ts";
 import { mapLegacyNativeStorageAdoption } from "../src/lib/native-config-import-plan.ts";
@@ -1241,6 +1250,53 @@ test("stopped configured NetworkID drift and malformed running state refuse", as
   await save();
   await refusal(acquired.assertFresh({ projectRoot }));
 });
+test("adoption accepts only a byte-identical foreground env alias in the canonical position", async () => {
+  const projectDir = join(projectRoot, ".hack");
+  const composeFile = join(projectDir, "docker-compose.yml");
+  const canonicalEnv = composeEnvOverridePath({ projectDir });
+  const alias = await prepareForegroundComposeEnvOverride({
+    projectDir,
+    text: 'services:\n  db:\n    environment:\n      PRIVATE: "${FIXTURE_PRIVATE}"\n',
+  });
+  if (!alias) {
+    throw new Error("expected a foreground reference file");
+  }
+  expect(await hasLegacyComposeGeneratedSources(projectRoot)).toBe(true);
+  const { intent } = planLegacyComposeAdoption({
+    configText: await readFile(join(projectDir, "hack.config.json"), "utf8"),
+    composeText: await readFile(composeFile, "utf8"),
+  });
+  if (!intent) {
+    throw new Error("expected a verified storage intent");
+  }
+  const composeFiles = [composeFile, canonicalEnv];
+  const observe = () =>
+    inspectLegacyComposeAdoptionResources({
+      root: projectRoot,
+      intent,
+      composeFiles,
+      timeoutMs: FIXTURE_PROBE_DEADLINE_MS,
+    });
+  container().configFiles = [composeFile, alias].join(",");
+  await save();
+  const binding = await observe();
+  expect(binding).toMatchObject({
+    binding_version: 2,
+    composeFiles,
+    containers: [{ id: ID, name: "fixture-db-1", service: "db" }],
+  });
+  container().configFiles = composeFile;
+  await save();
+  await refusal(observe());
+  container().configFiles = [alias, composeFile].join(",");
+  await save();
+  await refusal(observe());
+  container().configFiles = [composeFile, alias].join(",");
+  await save();
+  await writeFile(alias, "services: {}\n");
+  await refusal(observe());
+});
+
 test("exact existing identities are private, frozen and repeatedly verified without writes", async () => {
   const before = await readFile(join(projectRoot, ".hack/docker-compose.yml"));
   const acquired = await acquireFixtureBinding({ projectRoot });

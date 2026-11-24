@@ -102,7 +102,7 @@ Every invariant holds in `positive` and `root-before-lease`.
 ## Controls that must fail
 
 Each control keeps every invariant and changes one constant. The registry requires
-TLC exit 12, the named invariant, the named action and the same-state fields. A
+TLC exit 12, the named invariant and the final-state fields. A
 control stops at its first violation, so it has no state count of its own.
 
 | Control | Change | Violated invariant | At |

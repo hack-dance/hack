@@ -36,7 +36,7 @@ case " $* " in
     if [ -f "$marker" ]; then exit 0; fi
     case " $* " in
       *" --format "*)
-        printf '%s\\n' '{"ID":"c1","Service":"api","Name":"shop-api-1","State":"running","Status":"Up","ExitCode":0}' ;;
+        printf '{"ID":"c1","Service":"api","Name":"shop-api-1","State":"running","Status":"Up","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n' "$PWD" ;;
     esac
     exit 0 ;;
   *) printf '%s\\n' '${COMPOSE_OUT}'; exit 0 ;;

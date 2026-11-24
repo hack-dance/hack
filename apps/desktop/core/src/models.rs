@@ -366,11 +366,24 @@ pub struct Container {
     /// Docker status text, for example `Up 5 minutes (healthy)`.
     #[serde(deserialize_with = "null_default")]
     pub status: String,
+    pub image: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub mounts: Vec<ContainerMount>,
     /// Container labels. Branch instances carry their routes in `caddy`.
     #[serde(deserialize_with = "null_default")]
     pub labels: std::collections::BTreeMap<String, String>,
     /// The container's compose working directory.
     pub working_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ContainerMount {
+    pub name: Option<String>,
+    pub source: String,
+    pub destination: String,
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 impl Container {
@@ -549,6 +562,15 @@ pub struct DoctorCheck {
     #[serde(rename = "nativePool", skip_serializing_if = "Option::is_none")]
     pub native_pool: Option<NativePoolReport>,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<DoctorCheckFix>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DoctorCheckFix {
+    pub kind: String,
+    pub args: Vec<String>,
 }
 
 /// The machine Doctor check for this CLI's selected native home.

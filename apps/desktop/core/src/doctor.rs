@@ -141,6 +141,7 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "native ca repair"
         | "native https owner"
         | "native https route"
+        | "native disk usage"
         | "native temporary aliases"
         | "native pool idle" => (Native, Machine),
         "native settings"
@@ -522,6 +523,19 @@ impl DoctorRun {
             result,
         }
     }
+
+    /// A unique result from the exact, observed checkout. An absent or duplicate
+    /// result cannot enroll a repair or confirm that it worked.
+    #[must_use]
+    pub fn checked_project_finding(&self, id: &str) -> Option<&DoctorCheck> {
+        let report = self.result.as_ref().ok()?;
+        if self.project.is_none() || !self.probe_started || !project_evidence(self, report) {
+            return None;
+        }
+        let mut matches = report.checks.iter().filter(|check| check.id == id);
+        let check = matches.next()?;
+        matches.next().is_none().then_some(check)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,6 +545,7 @@ pub struct DoctorView {
     /// Distinct checks that reported an explicit `ok` and no failure elsewhere.
     pub passed: usize,
     pub native_pool: Option<crate::models::NativePoolReport>,
+    pub passed_checks: Vec<(String, Option<String>)>,
     /// Runs that produced no report: (project or "machine", reason).
     pub failed_runs: Vec<(String, String)>,
     pub projects_total: usize,
@@ -714,6 +729,7 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
             status,
             detail,
             native_pool: pool,
+            ..
         } in &report.checks
         {
             if id == "native pool idle"
@@ -843,11 +859,15 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
             _ => groups.push((c.area, vec![c])),
         }
     }
-    let passed = ok.keys().filter(|k| !failing.contains_key(*k)).count();
+    let passed_checks: Vec<_> = ok
+        .into_keys()
+        .filter(|k| !failing.contains_key(k))
+        .collect();
     DoctorView {
         groups,
-        passed,
         native_pool,
+        passed: passed_checks.len(),
+        passed_checks,
         failed_runs,
         projects_total,
         projects_checked,
@@ -1151,6 +1171,7 @@ mod tests {
             id: id.into(),
             status: status.into(),
             detail: detail.into(),
+            fix: None,
         }
     }
 

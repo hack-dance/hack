@@ -118,6 +118,10 @@ more processes or publishing. After-hook cleanup takes the copy locks and
 checks the current launch and session cleanup epoch. Adoption changes the
 epoch before Compose dispatch. These host-process transitions are outside
 the finite start/stop model and covered by controller and private tmux tests.
+Whole-copy Restart uses the same releasable locks for its attached startup
+hooks. A successful after-hook returns to the same launch ID before its
+readiness result can be accepted. The private tmux tests cover a successor
+launch and an exception while reacquiring a lock after a persistent hook.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

@@ -1221,14 +1221,23 @@ process.exit(await child.exited);
 }, 30_000);
 
 test.each([
-  ["ordinary", "before"],
-  ["ordinary", "after"],
-  ["Desktop", "before"],
-  ["Desktop", "after"],
+  ["ordinary", "up", "before"],
+  ["ordinary", "up", "after"],
+  ["Desktop", "up", "before"],
+  ["Desktop", "up", "after"],
+  ["ordinary", "restart", "before"],
+  ["ordinary", "restart", "after"],
+  ["Desktop", "restart", "before"],
+  ["Desktop", "restart", "after"],
 ] as const)(
-  "%s Start can stop the same copy in an up.%s hook",
-  async (mode, phase) => {
+  "%s %s can stop the same copy in an up.%s hook",
+  async (mode, operation, phase) => {
     const projectDir = join(root, "project", ".hack");
+    await installComposeNameFixture({ startContainers: true });
+    if (operation === "restart") {
+      const started = await run(["up", "-d", "--json"]);
+      expect(started.exitCode, started.stderr + started.stdout).toBe(0);
+    }
     const down = [
       process.execPath,
       "--preload",
@@ -1250,13 +1259,12 @@ test.each([
         },
       })
     );
-    await installComposeNameFixture({ startContainers: true });
     const flags =
       mode === "Desktop"
         ? ["--target", "local", "--expect-compose-project", "sample"]
         : [];
     const result = await run(
-      ["up", "-d", "--json", ...flags],
+      [operation, ...(operation === "up" ? ["-d"] : []), "--json", ...flags],
       false,
       undefined,
       {
@@ -1276,21 +1284,102 @@ test.each([
   20_000
 );
 
+for (const hookExit of [0, 7]) {
+  test.skipIf(!Bun.which("tmux"))(
+    `Start with after-hook exit ${hookExit} preserves the successor launch and mux session`,
+    async () => {
+      const projectDir = join(root, "project", ".hack");
+      const entered = join(root, "first-after-hook");
+      const release = join(root, "release-after-hook");
+      const command = `if [ "\${HACK_FIXTURE_PAUSE_AFTER:-}" = 1 ]; then : > ${quoteShellWord(entered)}; while [ ! -f ${quoteShellWord(release)} ]; do /bin/sleep 0.02; done; exit ${hookExit}; fi`;
+      await writeOwnedFixture(
+        join(projectDir, "hack.config.json"),
+        JSON.stringify({
+          name: "sample",
+          sessions: { mux: "tmux" },
+          lifecycle: {
+            processes: [{ name: "fixture-client", command: "/bin/sleep 60" }],
+            up: { after: [{ name: "fixture-after", command }] },
+          },
+        })
+      );
+      await installComposeNameFixture({ startContainers: true });
+      const env = {
+        PATH: `${join(root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      };
+      const first = run(["up", "-d", "--json"], false, undefined, {
+        ...env,
+        HACK_FIXTURE_PAUSE_AFTER: "1",
+      });
+      try {
+        await Promise.race([
+          waitForCondition(
+            () => Bun.file(entered).exists(),
+            "Start did not reach its after-hook"
+          ),
+          first.then(({ stdout, stderr }) => {
+            throw new Error(
+              `Start exited before its hook: ${stdout || stderr}`
+            );
+          }),
+        ]);
+        const [created] = await readLifecycleState({ projectDir });
+        expect(created?.backend).toBe("tmux");
+        const second = await run(["up", "-d", "--json"], false, undefined, env);
+        expect(second.exitCode, second.stderr + second.stdout).toBe(0);
+        const adopted = await readLifecycleState({ projectDir });
+        expect(adopted).toHaveLength(1);
+        expect(adopted[0]?.ownershipToken).toBe(created?.ownershipToken);
+        expect(adopted[0]?.cleanupEpoch).not.toBe(created?.cleanupEpoch);
+        const launch = { projectDir, composeProject: "sample" };
+        const successor = await readProjectRuntimeStateEntry(launch);
+        expect(successor?.launchId).toBeDefined();
+        await Bun.write(release, "release");
+        const prior = await first;
+        expect(prior.exitCode).toBe(hookExit || 1);
+        if (hookExit === 0) {
+          expect(JSON.parse(prior.stdout).error.code).toBe("E_CANCELLED");
+        }
+        expect(await readProjectRuntimeStateEntry(launch)).toEqual(successor);
+        expect(await readLifecycleState({ projectDir })).toEqual(adopted);
+        expect(await Bun.file(join(root, "compose-running")).exists()).toBe(
+          true
+        );
+      } finally {
+        await Bun.write(release, "release");
+        await first;
+        const stopped = await run(["down", "--json"], false, undefined, env);
+        expect(stopped.exitCode, stopped.stderr + stopped.stdout).toBe(0);
+      }
+    },
+    35_000
+  );
+}
+
 test.skipIf(!Bun.which("tmux"))(
-  "a failed after-hook preserves the session adopted by a newer mux Start",
+  "a failed hook lock reacquisition retires its persistent process",
   async () => {
     const projectDir = join(root, "project", ".hack");
-    const entered = join(root, "first-after-hook");
-    const release = join(root, "release-after-hook");
-    const command = `if [ "\${HACK_FIXTURE_FAIL_AFTER:-}" = 1 ]; then : > ${quoteShellWord(entered)}; while [ ! -f ${quoteShellWord(release)} ]; do /bin/sleep 0.02; done; exit 7; fi`;
+    const lockDir = join(root, "home", ".hack", "autostart-locks");
     await writeOwnedFixture(
       join(projectDir, "hack.config.json"),
       JSON.stringify({
         name: "sample",
         sessions: { mux: "tmux" },
         lifecycle: {
-          processes: [{ name: "fixture-client", command: "/bin/sleep 60" }],
-          up: { after: [{ name: "fixture-after", command }] },
+          up: {
+            before: [
+              {
+                name: "persistent",
+                command: "/bin/sleep 60",
+                persistent: true,
+              },
+              {
+                name: "refuse-reentry",
+                command: `/bin/chmod 0777 ${quoteShellWord(lockDir)}`,
+              },
+            ],
+          },
         },
       })
     );
@@ -1298,37 +1387,17 @@ test.skipIf(!Bun.which("tmux"))(
     const env = {
       PATH: `${join(root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`,
     };
-    const first = run(["up", "-d", "--json"], false, undefined, {
-      ...env,
-      HACK_FIXTURE_FAIL_AFTER: "1",
-    });
     try {
-      await Promise.race([
-        waitForCondition(
-          () => Bun.file(entered).exists(),
-          "Start did not reach its after-hook"
-        ),
-        first.then(({ stdout, stderr }) => {
-          throw new Error(`Start exited before its hook: ${stdout || stderr}`);
-        }),
-      ]);
-      const [created] = await readLifecycleState({ projectDir });
-      expect(created?.backend).toBe("tmux");
-      const second = await run(["up", "-d", "--json"], false, undefined, env);
-      expect(second.exitCode, second.stderr + second.stdout).toBe(0);
-      const adopted = await readLifecycleState({ projectDir });
-      expect(adopted).toHaveLength(1);
-      expect(adopted[0]?.ownershipToken).toBe(created?.ownershipToken);
-      expect(adopted[0]?.cleanupEpoch).not.toBe(created?.cleanupEpoch);
-      await Bun.write(release, "release");
-      expect((await first).exitCode).toBe(7);
-      expect(await readLifecycleState({ projectDir })).toEqual(adopted);
-      expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+      const result = await run(["up", "-d", "--json"], false, undefined, env);
+      expect(result.exitCode, result.stderr + result.stdout).toBe(1);
+      expect(result.stdout).toContain("lock directory is unsafe");
+      expect(await readLifecycleState({ projectDir })).toEqual([]);
+      expect(await Bun.file(join(root, "compose-running")).exists()).toBe(
+        false
+      );
     } finally {
-      await Bun.write(release, "release");
-      await first;
-      const stopped = await run(["down", "--json"], false, undefined, env);
-      expect(stopped.exitCode, stopped.stderr + stopped.stdout).toBe(0);
+      await chmod(lockDir, 0o700);
+      await run(["down", "--json"], false, undefined, env);
     }
   },
   35_000

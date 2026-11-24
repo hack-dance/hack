@@ -56,7 +56,9 @@ registry and container cleanup to one project family.
 After `hack down`, `hack data export` copies the project's own Compose named
 volumes into verified tar files under `~/.hack/data-backups/` (or `--out <dir>`).
 It refuses while the project runs and skips external and foreign volumes. It
-works on Compose only and cannot restore yet; see
+works on Compose only and cannot restore yet. If a refusal reports a helper
+container it could not confirm removing, run the `hack data cleanup --nonce …`
+command it prints; see
 [Data backup](https://github.com/hack-dance/hack/blob/next/docs/reference/data-backup.md).
 
 ## Native backend

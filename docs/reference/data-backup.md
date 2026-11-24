@@ -229,21 +229,24 @@ exists (two runs in the same second), the export refuses with
 ## Restore (`hack data import`)
 
 `hack data import <backup-dir> [--from-project <name>] [--json]` takes the
-same `--path`, `--project`, `--branch` and `--env` selection and managed env
-as export, and refuses the native backend the same way. It never overwrites,
-deletes or relabels data it does not own.
+same `--path`, `--project`, `--branch` and `--env` selection, the same Compose
+model as `hack up`, the same managed env and the same deadlines as export,
+and refuses the native backend the same way. It never overwrites, deletes or
+relabels data it does not own.
 
-Before any change it checks, in order:
+Before any write it checks, in order:
 
 1. **The backup.** A `.partial` directory, a directory without
    `manifest.json`, a manifest that is not `hack.data-backup.v1`, or a tar
    that is missing, is not a regular file, or differs in size or sha256 from
    the manifest refuses with `E_BACKUP_INVALID`. The backup id is the sha256
    of `manifest.json`.
-2. **The source project.** The backup's `composeProject` must equal this
-   instance's Compose project. To restore into a branch instance or a renamed
-   project, pass `--from-project <backup's compose project>`; a missing or
-   different value refuses with `E_USAGE`.
+2. **The source project and names.** The backup's `composeProject` must
+   equal this instance's Compose project, and each target's Docker name must
+   hash to the backup's `nameSha256`. To restore into a branch instance, a
+   renamed project or under a changed volume name, pass `--from-project
+   <backup's compose project>`; a missing or different value refuses with
+   `E_USAGE`.
 3. **One import at a time.** The import holds
    `$HACK_HOME/data-imports/<compose project>/.lock` for its whole run. A
    second import of the same project refuses with `E_LOCKED` after a
@@ -261,52 +264,61 @@ Before any change it checks, in order:
 | Target | Result |
 | --- | --- |
 | Absent | Created with `docker volume create` and Compose's labels (`com.docker.compose.project`, `com.docker.compose.volume`, `com.docker.compose.version` from `docker compose version --short`) plus `io.hack.data-backup.source=<backup id>` |
-| Exists, labeled for this project and key, empty | Used as it is |
+| Exists, labeled for this project and key, empty | Used as it is (emptiness is checked in a read-only held helper) |
 | Exists, labeled for this project and key, with data | Refused (`not_empty`), unless it is this import's own interrupted copy (below) |
 | Labels name another project or key, or none | Refused (`foreign`); never mounted or changed |
 | Declared with a driver other than `local` or with `driver_opts`, or existing with such a driver or options | Refused (`unsupported_driver`): import restores into plain local volumes only for now, so data never lands in an unintended backing store such as an NFS mount |
 
-Any refusal names every conflicting volume in one `E_DATA_TARGET_CONFLICT`
-(`error.detail.conflicts`) and changes nothing. Move the volume aside, or back
-it up with `hack data export`, then rerun. Compose accepts a volume created by
-import as its own: it carries the same labels Compose writes, and Compose does
-not require its config-hash label.
+Any refusal names every conflicting volume, by key, in one
+`E_DATA_TARGET_CONFLICT` (`error.detail.conflicts`) and writes nothing. Move
+the volume aside, or back it up with `hack data export`, then rerun. Compose
+accepts a volume created by import as its own: it carries the same labels
+Compose writes, and Compose does not require its config-hash label.
 
-Then, per target: an absent target is created, and because
-`docker volume create` returns an existing volume of that name unchanged,
-Hack inspects the result and requires this backup's
-`io.hack.data-backup.source` label, the expected Compose labels, a plain
-local driver without options and an empty tree; anything else (a volume that
-appeared meanwhile) refuses as `changed` before anything is written. The
-journal then records `started`; the tar is streamed into the pinned helper (`--rm`, `--network none`,
-read-only root, `no-new-privileges`, the volume read-write at `/v`) running
-`tar --numeric-owner -xpf - -C /v`; and the helper computes the same
-`hack.tree-digest.v1` digest as export. A digest or entry count that differs
-from the manifest marks the journal `failed`, leaves the volume as it is and
-exits 1 (`E_UNEXPECTED`). After all targets, the import checks Docker's mount
-events and running containers again, as export does; only then are the
-journals marked `complete`.
+Then, per target, through one held helper container as export uses (unique
+`hack-data-import-<random>` name, `--log-driver none`, `--network none`,
+read-only root, `no-new-privileges`, the volume read-write at `/v`):
+
+1. An absent target is created. Because `docker volume create` returns an
+   existing volume of that name unchanged, Hack inspects the result and
+   requires this backup's source label, the expected Compose labels and a
+   plain local driver without options.
+2. The helper is created holding the volume, and the volume must still be
+   the one validated or just created (same `CreatedAt`, driver, mountpoint,
+   options and labels) and, unless it is our own interrupted copy, empty.
+   Anything else refuses as `changed` before anything is written.
+3. The journal records `started`; our own interrupted copy is cleared
+   (`find /v -mindepth 1 -delete`); the tar is streamed in through `docker
+   exec` running `tar --numeric-owner -xpf - -C /v`; and the helper computes
+   the same `hack.tree-digest.v1` digest as export.
+4. A digest or entry count that differs from the manifest marks the journal
+   `failed`, leaves the volume as it is and exits 1 (`E_UNEXPECTED`); a step
+   past its deadline refuses with `E_DOCKER_UNAVAILABLE` (`step_timeout`).
+   The helper is removed and its removal confirmed on every path, as for
+   export.
+
+After all targets, the import checks running containers again and closes
+the event fence, as export does; only then are the journals marked
+`complete`.
 
 ### Interruption and recovery
 
 The journal is `$HACK_HOME/data-imports/<compose project>/<key>.json`
-(`hack.data-import-journal.v1`: backup id, backup path, key, target volume,
-state `started`, `complete` or `failed`), written atomically. On a rerun, a
-non-empty target is treated as this import's own partial copy only when all
-of these hold: its `io.hack.data-backup.source` label is the same backup id,
-the journal names the same backup and target, and the journal is not
-`complete`. That copy is cleared inside the helper
-(`find /v -mindepth 1 -delete`) and restored again. Any other non-empty
-volume is refused as above, including one that already holds a completed
-restore of this backup (`already_imported`).
+(`hack.data-import-journal.v1`: backup id, backup path, key, the sha256 of
+the target's Docker name, state `started`, `complete` or `failed`), written
+atomically. On a rerun, a non-empty target is treated as this import's own
+partial copy only when all of these hold: its `io.hack.data-backup.source`
+label is the same backup id, the journal names the same backup and target,
+and the journal is not `complete`. That copy is cleared inside the helper and
+restored again. Any other non-empty volume is refused as above, including one
+that already holds a completed restore of this backup (`already_imported`).
 
 An existing empty volume that the import filled has no source label (Docker
 labels cannot be added later), so if that import is interrupted a rerun
-refuses it; the message names the volume to remove with `docker volume rm`
-after checking it.
+refuses it; the message says to remove that volume after checking it.
 
 `--json` prints the standard envelope with `data.schema` `hack.data-import.v1`:
 `backup`, `backupId`, `sourceComposeProject`, `composeProject`, `volumes[]`
-(`key`, `name`, `target` `created`, `empty` or `replaced-partial`, `entries`,
+(`key`, `target` `created`, `empty` or `replaced-partial`, `entries`,
 `excludedSockets`, `contentDigest`) and `skipped[]` (`key`, `reason`
-`undeclared` or `external`).
+`undeclared` or `external`). Docker volume names appear in neither.

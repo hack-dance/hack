@@ -217,6 +217,7 @@ test("buildProjectViews includes defined services and runtime status", async () 
   const runtime = [
     makeRuntimeProject({
       name: "alpha",
+      workingDir: alpha.projectDir,
       containersByService: {
         api: [
           makeContainer({

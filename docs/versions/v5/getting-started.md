@@ -11,7 +11,8 @@ For a read-only inventory, use `hack projects --json --observe`. It lists
 registered projects even when hackd is off, preserves the registry, and starts
 no services or engine connection. Add `--runtime` only to opt in to Docker
 queries: contacting an on-demand engine can start it. Unknown runtime state stays unknown; native projects use their
-native `ps` observer. See the [listing contract](../cli.md).
+native `ps` observer. Full listings include routes for registered worktrees
+and Hack branches before the copy starts. See the [listing contract](../cli.md).
 
 ```mermaid
 ---
@@ -123,6 +124,13 @@ When the project declares remotes, `hack ps` shows the observed target or
 `unknown` if it cannot identify one. An environment-backed hostname displays
 the variable name. Start the whole project with `hack up`. Use `hack down`
 followed by `hack up` to restart it.
+
+The desktop preview's **Add service** tab offers a small Compose image catalog.
+Copy an entry under the existing `services:` mapping, then use **Start project**
+to apply the updated Compose configuration. For PostgreSQL, MySQL, and MinIO,
+set the listed variables in the Env tab under the matching service scope before
+starting. The CLI has no command for adding
+one service to an existing project's configuration.
 
 The desktop preview shows those descriptors on the registered project's
 **Services** tab. It shows the environment variable name for an

@@ -620,8 +620,15 @@ fn the_start_loop_answers_status_and_holds_a_stop() {
     let pin = Pin::load(&candidate, &run).unwrap();
     let receipts = super::super::tests::Fixture::new();
     let owner = "b".repeat(32);
+    // A receipt the start loop could have written: `load_at` refuses one with no
+    // resources (`graph_receipt`), and a real start always records its resources
+    // before the owner serves requests.
     let receipt: Receipt = serde_json::from_value(json!({"version":1,"run":run,"owner":owner,
-        "namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"preparing","readiness":{},"resources":{}}))
+        "namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"preparing",
+        "readiness":{"web":"started"},
+        "resources":{"container:web":{"key":"web","kind":"container",
+            "name":format!("hkg-{run}-container-0"),"id":"e".repeat(64),"phase":"started",
+            "image":format!("sha256:{}", "f".repeat(64))}}}))
     .unwrap();
     super::super::state::write(&receipts.0.join("state.json"), &receipt).unwrap();
     let stop = std::rc::Rc::new(std::cell::RefCell::new(None));

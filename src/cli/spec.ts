@@ -44,6 +44,7 @@ import { tuiCommand } from "../commands/tui.ts";
 import { updateCommand } from "../commands/update.ts";
 import { upgradeCommand } from "../commands/upgrade.ts";
 import { usageCommand } from "../commands/usage.ts";
+import { useCommand } from "../commands/use.ts";
 import { versionCommand } from "../commands/version.ts";
 import { xCommand } from "../commands/x.ts";
 import { HACK_VERSION } from "../lib/hack-version.ts";
@@ -73,6 +74,7 @@ export const CLI_SPEC = defineCli({
     downCommand,
     restartCommand,
     psCommand,
+    useCommand,
     pullCommand,
     tuiCommand,
     runCommand,

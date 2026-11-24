@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { dataComposeArgs } from "../../../src/commands/data.ts";
 import { HackCliError } from "../../../src/lib/cli-result.ts";
@@ -81,9 +81,14 @@ export const dataExportScenario: Scenario = {
     const data = `${project}_data`;
     const foreign = `${project}-foreign`;
     const external = `${project}-external`;
-    const runner = `${project}-web-1`;
+    // Container names that carry a value, as `container_name:
+    // worker-${STORAGE_TOKEN}` would: no refusal may print them. Not a
+    // credential, a recognizable canary.
+    const token = "storage-token-canary-e2e";
+    const runner = `${project}-worker-${token}`;
     const scratch = `${project}-restore`;
-    const writer = `${project}-writer`;
+    const writer = `${project}-writer-${token}`;
+    const holder = `${project}-bind-holder-${token}`;
     await Bun.write(
       join(fixture.hackDir, "docker-compose.yml"),
       [
@@ -318,7 +323,8 @@ export const dataExportScenario: Scenario = {
           refusal?.error?.code === "E_PROJECT_RUNNING" &&
           // A short ID, never the name (which carries the project name).
           JSON.stringify(refusal.error.detail) ===
-            JSON.stringify({ running: [standIn.stdout.trim().slice(0, 12)] }),
+            JSON.stringify({ running: [standIn.stdout.trim().slice(0, 12)] }) &&
+          !refused.stdout.includes(token),
         message: "a running project container should refuse the export",
         result: refused,
       });
@@ -327,6 +333,7 @@ export const dataExportScenario: Scenario = {
         codes: [0],
         message: "remove the stand-in project container",
       });
+      await bindHolderRefuses({ ctx, fixture, out, volume: data, holder });
 
       // A short-lived writer that starts and exits while a copy helper runs:
       // no `docker ps` check can see it, the live event subscription does.
@@ -398,31 +405,51 @@ export const dataExportScenario: Scenario = {
           race?.error?.code === "E_PROJECT_RUNNING" &&
           writerId.length === 12 &&
           mounts?.some((mount) => mount.container === writerId) === true &&
-          !raced.stdout.includes(writer),
+          !raced.stdout.includes(token),
         message:
           "a writer that started and exited during the copy should refuse publication",
         result: raced,
       });
 
-      await removedBeforeHold({ ctx, fixture, project, volume: data });
+      // Removed after every copy, right before the publish: Docker allows
+      // the removal (a bind is no volume reference), so only the identity
+      // recheck before the rename can refuse.
+      await removedDuringExport({
+        ctx,
+        fixture,
+        project,
+        volume: data,
+        stage: "before-publish",
+      });
+      await recreateVolume({ ctx, project, volume: data });
+      await removedDuringExport({
+        ctx,
+        fixture,
+        project,
+        volume: data,
+        stage: "before-hold",
+      });
     } finally {
-      await docker(ctx, ["rm", "--force", runner, writer]);
+      await docker(ctx, ["rm", "--force", runner, writer, holder]);
       await docker(ctx, ["volume", "rm", data, foreign, external, scratch]);
     }
   },
 };
 
 /**
- * The volume is removed between validation and the hold: export refuses and
- * Docker creates nothing, since the hold binds the Mountpoint and never
- * mounts the volume by name. A wrapper around the real engine removes the
- * volume right before the helper's create.
+ * The volume is removed during the export: export refuses and Docker
+ * creates nothing, since the hold binds the Mountpoint and never mounts the
+ * volume by name. A wrapper around the real engine removes the volume right
+ * before the helper's create (`before-hold`), or after every copy, at the
+ * last running check (`before-publish`), where only the identity recheck
+ * before the rename can see it.
  */
-async function removedBeforeHold(opts: {
+async function removedDuringExport(opts: {
   readonly ctx: ScenarioContext;
   readonly fixture: MonorepoFixture;
   readonly project: string;
   readonly volume: string;
+  readonly stage: "before-hold" | "before-publish";
 }): Promise<void> {
   const { ctx, fixture, project } = opts;
   const data = opts.volume;
@@ -431,20 +458,29 @@ async function removedBeforeHold(opts: {
     cwd: fixture.hackDir,
   });
   let removed = false;
+  let copied = false;
+  const at = (argv: readonly string[]): boolean =>
+    opts.stage === "before-hold"
+      ? argv[1] === "create" && argv.includes("--mount")
+      : copied && argv[1] === "ps";
   const racingDocker: DataBackupDocker = {
     ...real,
-    capture: async (argv, opts) => {
-      if (!removed && argv[1] === "create" && argv.includes("--mount")) {
+    capture: async (argv, captureOpts) => {
+      if (argv[1] === "exec") {
+        copied = true;
+      }
+      if (!removed && at(argv)) {
         removed = true;
         expectExit({
           result: await docker(ctx, ["volume", "rm", data]),
           codes: [0],
-          message: "remove the validated volume before the hold",
+          message: `remove the validated volume (${opts.stage})`,
         });
       }
-      return await real.capture(argv, opts);
+      return await real.capture(argv, captureOpts);
     },
   };
+  const outDir = join(ctx.tempRoot, `race-out-${opts.stage}`);
   let raceRefusal: unknown = null;
   try {
     await exportProjectData({
@@ -458,7 +494,7 @@ async function removedBeforeHold(opts: {
       project,
       branch: null,
       hackHome: ctx.hackHome,
-      outDir: join(ctx.tempRoot, "race-out"),
+      outDir,
       hackVersion: "e2e",
     });
   } catch (error: unknown) {
@@ -471,6 +507,8 @@ async function removedBeforeHold(opts: {
     "--filter",
     `name=^${data}$`,
   ]);
+  // Nothing was published: at most the `.partial` directory is left.
+  const leftInOut = await readdir(outDir).catch(() => [] as string[]);
   expect({
     that:
       removed &&
@@ -478,8 +516,102 @@ async function removedBeforeHold(opts: {
       isRecord(raceRefusal.detail) &&
       raceRefusal.detail.reason === "volume_changed" &&
       listed.exitCode === 0 &&
-      listed.stdout.trim() === "",
-    message: `a volume removed before the hold should refuse and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()})`,
+      listed.stdout.trim() === "" &&
+      leftInOut.every((entry) => entry.endsWith(".partial")),
+    message: `a volume removed ${opts.stage} should refuse, publish nothing and not be recreated (raceRefusal: ${String(raceRefusal)}, listed: ${listed.stdout.trim()}, out: ${leftInOut.join(",")})`,
+  });
+}
+
+/** Create the `data` volume again, with Compose's labels and one file. */
+async function recreateVolume(opts: {
+  readonly ctx: ScenarioContext;
+  readonly project: string;
+  readonly volume: string;
+}): Promise<void> {
+  for (const argv of [
+    ["volume", "create", ...labels(opts.project, "data"), opts.volume],
+    [
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--volume",
+      `${opts.volume}:/v`,
+      "--entrypoint",
+      "sh",
+      HELPER,
+      "-c",
+      "echo again >/v/a.txt",
+    ],
+  ]) {
+    expectExit({
+      result: await docker(opts.ctx, argv),
+      codes: [0],
+      message: `docker ${argv.slice(0, 2).join(" ")} should succeed`,
+    });
+  }
+}
+
+/**
+ * A container already running with a read-only bind of the volume's
+ * Mountpoint (Hack's own hold technique) is not found by
+ * `docker ps --filter volume=`; the inspection of every running container
+ * refuses the export, naming it by short ID.
+ */
+async function bindHolderRefuses(opts: {
+  readonly ctx: ScenarioContext;
+  readonly fixture: MonorepoFixture;
+  readonly out: string;
+  readonly volume: string;
+  readonly holder: string;
+}): Promise<void> {
+  const { ctx } = opts;
+  const mountpoint = await docker(ctx, [
+    "volume",
+    "inspect",
+    "--format",
+    "{{.Mountpoint}}",
+    opts.volume,
+  ]);
+  const started = await docker(ctx, [
+    "run",
+    "--detach",
+    "--network",
+    "none",
+    "--name",
+    opts.holder,
+    "--mount",
+    `type=bind,src=${mountpoint.stdout.trim()},dst=/x,readonly`,
+    "--entrypoint",
+    "sleep",
+    HELPER,
+    "300",
+  ]);
+  expectExit({
+    result: started,
+    codes: [0],
+    message: "a container binding the volume's Mountpoint should start",
+  });
+  const refused = await ctx.cli({
+    args: ["data", "export", "--json", "--out", opts.out],
+    cwd: opts.fixture.root,
+    timeoutMs: TIMEOUT_MS,
+  });
+  const refusal = extractJsonObject<ExportPayload>({ text: refused.stdout });
+  expect({
+    that:
+      refused.exitCode === 1 &&
+      refusal?.error?.code === "E_PROJECT_RUNNING" &&
+      JSON.stringify(refusal.error.detail) ===
+        JSON.stringify({ running: [started.stdout.trim().slice(0, 12)] }) &&
+      !refused.stdout.includes(opts.holder),
+    message: "a running container binding the Mountpoint should refuse",
+    result: refused,
+  });
+  expectExit({
+    result: await docker(ctx, ["rm", "--force", opts.holder]),
+    codes: [0],
+    message: "remove the bind holder",
   });
 }
 

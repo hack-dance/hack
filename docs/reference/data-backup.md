@@ -54,9 +54,16 @@ Bind mounts, tmpfs mounts and anonymous volumes are not backed up.
 
 The export refuses with `E_PROJECT_RUNNING` (exit 1) when a container of the
 instance is running, or when any other container that mounts one of the
-copied volumes is running. `error.detail.running` lists their short (12
-character) container IDs, never their names; stop the project with
-`hack down` and retry. Hack never stops anything for an export.
+copied volumes is running. `docker ps --filter volume=` sees only volume
+mounts by name, so at both running checks (before the first copy and after
+the last) Hack also lists every running container (`docker ps --quiet`) and
+inspects each one it did not create, by ID, in one call bounded by
+`HACK_DATA_COMMAND_TIMEOUT_MS`. A bind whose `Source` is a copied volume's
+`Mountpoint`, a path inside it, or a directory above it counts as using that
+volume, by the same path rule as the event check below. A running container
+that cannot be inspected refuses too (`detail.reason: unchecked_running`).
+`error.detail.running` lists their short (12 character) container IDs, never
+their names; stop the project with `hack down` and retry. Hack never stops anything for an export.
 
 Before its first check, the export subscribes to Docker's live event
 stream (`docker events`, volume `mount` and container `start` events, with no
@@ -143,6 +150,18 @@ requires the identity it validated before: the same `CreatedAt`, driver,
 mountpoint, options and Compose labels, and the container's mount must be
 that directory. A volume replaced or relabeled in between refuses the same
 way and is not read.
+
+Hack cannot pin a volume against removal. A bind of its `Mountpoint` is not
+a Docker volume reference, so `docker volume rm` succeeds while the helper
+holds it: on Docker 29.9.2 the removal exits 0, `docker volume inspect` then
+fails, and the helper's `/v` is left an empty tree. Every digest taken after
+such a removal agrees on that empty tree. Hack therefore rechecks the
+volume's identity (by inspect only; it never creates a volume) right after
+the hold, again after the copy and the second digest, and once more for
+every copied volume immediately before the rename that publishes the
+backup. A volume that is gone, or replaced under the same name, refuses
+with `E_PROJECT_RUNNING` (`detail.reason: volume_changed`) and leaves the
+copy in `<backup>.partial/`.
 
 On Docker Desktop and OrbStack the daemon runs in a VM, and the
 `Mountpoint` is a path inside that VM; the daemon resolves the bind there.

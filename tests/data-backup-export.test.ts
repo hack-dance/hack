@@ -19,6 +19,7 @@ import {
   dataBackupHelperImage,
   dataBackupTimestamp,
 } from "../src/lib/data-backup-format.ts";
+import { refuseRunning } from "../src/lib/data-backup-helper.ts";
 import { planDeclaredVolumes } from "../src/lib/data-backup-volumes.ts";
 import {
   COMPOSE,
@@ -382,6 +383,77 @@ describe("exportProjectData", () => {
 });
 
 describe("binding to the validated volume", () => {
+  test("a volume removed after the hold, before the first digest, is not published empty", async () => {
+    // Docker lets `docker volume rm` succeed under a bind hold and leaves
+    // the helper an empty tree, so all three digests agree on nothing.
+    const fake = engine({ only: "db" });
+    let removed = false;
+    fake.onExec = () => {
+      if (!removed) {
+        removed = true;
+        fake.removeVolume("shop_db");
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(error.message).toContain("was removed while it was being copied");
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+    // Export never creates a volume.
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+    expect(fake.leftovers()).toEqual([]);
+  });
+
+  test("a volume removed during the copy refuses publication", async () => {
+    const fake = engine({ only: "db" });
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar")) {
+        fake.removeVolume("shop_db");
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ key: "db", reason: "volume_changed" });
+    expect(fake.volumes.has("shop_db")).toBeFalse();
+  });
+
+  test("a volume removed, or replaced under its name, between the copy and the publish is refused", async () => {
+    for (const replace of [false, true]) {
+      const fake = engine({ only: "db" });
+      // The last running check runs after every copy, before the publish.
+      fake.runningFromCall = null;
+      let copied = false;
+      fake.onExec = (_container, args) => {
+        if (args.includes("--interactive") || args.includes("-e")) {
+          copied = true;
+        }
+      };
+      let psAfterCopy = false;
+      fake.onPs = () => {
+        if (copied && !psAfterCopy) {
+          psAfterCopy = true;
+          fake.removeVolume("shop_db");
+          if (replace) {
+            fake.volume("shop_db", owned("db", "rows-db"));
+          }
+        }
+      };
+      const out = join(root, replace ? "replaced" : "removed");
+      const error = await caught(
+        exportProjectData(input(fake, { outDir: out }))
+      );
+      expect({ replace, code: error.code, detail: error.detail }).toEqual({
+        replace,
+        code: "E_PROJECT_RUNNING",
+        detail: { key: "db", reason: "volume_changed" },
+      });
+      expect(error.message).toContain("after it was copied");
+      // Not published: the manifest and tar stay in `.partial`.
+      expect(await readdir(out)).toEqual(["20261123T140501Z.partial"]);
+      expect(fake.volumes.has("shop_db")).toBe(replace);
+    }
+  });
+
   test("a volume replaced after validation is refused and the helper removed", async () => {
     const fake = engine({ only: "db" });
     // Between the ownership check and the hold, the volume is removed and
@@ -1124,8 +1196,8 @@ describe("foreign container starts are inspected by ID", () => {
       fake.calls.some(
         (argv) =>
           argv[2] === "inspect" &&
-          argv.includes("{{json .Mounts}}") &&
-          argv.at(-1) === id
+          argv.includes("{{.Id}} {{json .Mounts}}") &&
+          argv.includes(id)
       )
     ).toBeTrue();
   });
@@ -1152,5 +1224,108 @@ describe("foreign container starts are inspected by ID", () => {
     );
     expect(inspected).toHaveLength(1);
     expect(ours.has(inspected[0]?.at(-1) ?? "")).toBeTrue();
+  });
+});
+
+describe("containers already running are inspected for binds", () => {
+  const MOUNTPOINT = "/var/lib/docker/volumes/shop_db/_data";
+
+  test("a container running before the export that binds an owned Mountpoint, a path inside or above it, refuses before any copy", async () => {
+    for (const source of [
+      MOUNTPOINT,
+      `${MOUNTPOINT}/pgdata`,
+      "/var/lib/docker/volumes",
+    ]) {
+      const fake = engine({ only: "db" });
+      const id = fake.runningContainer("pre-existing", [
+        { Type: "bind", Source: source, Destination: "/data" },
+      ]);
+      const error = await caught(
+        exportProjectData(input(fake, { outDir: join(root, "pre") }))
+      );
+      expect({ source, code: error.code, detail: error.detail }).toEqual({
+        source,
+        code: "E_PROJECT_RUNNING",
+        detail: { running: [id.slice(0, 12)] },
+      });
+      expect(creates(fake)).toEqual([]);
+    }
+  });
+
+  test("a container that starts binding the Mountpoint and is still running at the last check refuses publication", async () => {
+    const fake = engine({ only: "db" });
+    let id = "";
+    fake.onExec = (_container, args) => {
+      if (args.includes("tar") && id === "") {
+        // Already past the start event window: no start is emitted.
+        id = fake.runningContainer("late", [
+          { Type: "bind", Source: MOUNTPOINT, Destination: "/data" },
+        ]);
+      }
+    };
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({ running: [id.slice(0, 12)] });
+    expect(await readdir(partialDir())).toEqual(["db.tar"]);
+  });
+
+  test("a running container with unrelated binds publishes", async () => {
+    const fake = engine({ only: "db" });
+    fake.runningContainer("unrelated", [
+      { Type: "bind", Source: "/srv/app", Destination: "/app" },
+      { Type: "volume", Name: "other", Source: "/x", Destination: "/x" },
+    ]);
+    const result = await exportProjectData(input(fake));
+    expect(result.manifest.volumes.map((volume) => volume.key)).toEqual(["db"]);
+  });
+
+  test("a running container Docker does not answer for refuses closed", async () => {
+    const fake = engine({ only: "db" });
+    const gone = fake.runningContainer("vanishing", []);
+    const real = fake.docker();
+    const docker: DataBackupDocker = {
+      ...real,
+      capture: async (argv, opts) => {
+        const result = await real.capture(argv, opts);
+        // It exited and was removed between `ps` and the inspect.
+        if (argv.includes("{{.Id}} {{json .Mounts}}")) {
+          fake.containers.delete(gone);
+          return await real.capture(argv, opts);
+        }
+        return result;
+      },
+    };
+    const error = await caught(exportProjectData({ ...input(fake), docker }));
+    expect(error.code).toBe("E_PROJECT_RUNNING");
+    expect(error.detail).toEqual({
+      unchecked: [gone.slice(0, 12)],
+      reason: "unchecked_running",
+    });
+    expect(creates(fake)).toEqual([]);
+  });
+
+  test("this run's own containers are excluded by ID", async () => {
+    const fake = engine({ only: "db" });
+    const own = fake.runningContainer("hack-data-export-own", [
+      { Type: "bind", Source: MOUNTPOINT, Destination: "/v" },
+    ]);
+    const watched = [{ name: "shop_db", mountpoint: MOUNTPOINT }];
+    const check = (exclude: ReadonlySet<string>) =>
+      refuseRunning({
+        docker: fake.docker(),
+        composeProject: PROJECT,
+        volumes: watched,
+        exclude,
+        timeoutMs: 1000,
+        stopCommand: "hack down",
+        lead: "Running.",
+        command: "export",
+      });
+    await check(new Set([own]));
+    const error = await caught(check(new Set()));
+    expect(error.detail).toEqual({ running: [own.slice(0, 12)] });
+    // The exclusion is by the full ID only, never by name.
+    const byName = await caught(check(new Set(["hack-data-export-own"])));
+    expect(byName.detail).toEqual({ running: [own.slice(0, 12)] });
   });
 });

@@ -410,6 +410,15 @@ describe("deadlines and cleanup", () => {
     expect(fake.leftovers()).toEqual([]);
   });
 
+  test("an interrupted step is E_CANCELLED and the helper is removed", async () => {
+    const fake = engine({ only: "db" });
+    fake.tarExit.shop_db = 130;
+    const error = await caught(exportProjectData(input(fake)));
+    expect(error.code).toBe("E_CANCELLED");
+    expect(error.message).toContain("Interrupted");
+    expect(fake.leftovers()).toEqual([]);
+  });
+
   test("a full disk while writing the tar removes the helper container", async () => {
     const fake = engine({ only: "db" });
     fake.tarThrows.shop_db = Object.assign(new Error("no space"), {

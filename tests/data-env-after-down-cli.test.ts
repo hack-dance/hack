@@ -32,7 +32,9 @@ const STUB = [
   '    *" up "*) rm -f "$marker"; exit 0 ;;',
   '    *" ps "*)',
   '      if [ -f "$marker" ]; then exit 0; fi',
-  '      printf "%s\\n" \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0}\'',
+  // Compose labels each container with its project directory; `up`
+  // refuses containers that do not carry this checkout's.
+  '      printf \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n\' "$STUB_WORKDIR"',
   "      exit 0",
   "      ;;",
   // `hack data export` reads the model next: fail it, so the test sees
@@ -113,6 +115,7 @@ async function hack(args: readonly string[]) {
         PATH: `${join(root, "bin")}:/usr/bin:/bin`,
         HACK_NO_INTERACTIVE: "1",
         STUB_LOG: log,
+        STUB_WORKDIR: join(projectRoot, ".hack"),
       },
     }),
     stdin: "ignore",

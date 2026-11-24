@@ -3968,14 +3968,40 @@ export async function resolveComposeRuntimeModel(opts: {
   readonly envName?: string | null;
 }): Promise<ComposeRuntimeModel> {
   const cfg = await readProjectConfig(opts.project);
-  const baseProjectName = await resolveComposeProjectName({
+  // Without --env and without any runtime-state record for the project, no
+  // lifecycle key can hold a selection: refuse an ambiguous env first,
+  // before the target resolution below reads the execution env (which can
+  // ask the secret store) or Docker.
+  if (
+    opts.envName === undefined &&
+    (await readProjectRuntimeState({ projectDir: opts.project.projectDir }))
+      .length === 0
+  ) {
+    await refuseUnrecordedEnvWithOverlays({
+      project: opts.project,
+      projectName: sanitizeProjectSlug(
+        await resolveComposeProjectName({ project: opts.project, cfg })
+      ),
+    });
+  }
+  // The Compose project, its base and the lifecycle key exactly as `hack
+  // down` (and `hack files`) resolve them: the base `up` launched with (a
+  // saved launch or pin, else the name Compose resolves, which for an
+  // unnamed file is the directory's), the instance's lifecycle key with the
+  // legacy-key fallback, the env project name the launch recorded, and the
+  // env selection recorded under that key.
+  const target = await resolveComposeCommandTarget({
     project: opts.project,
     cfg,
+    branch: opts.branch,
+    options: {
+      env: opts.envName === undefined ? undefined : (opts.envName ?? "base"),
+    },
+    readOnly: true,
   });
-  const projectName = sanitizeProjectSlug(baseProjectName);
-  const composeProjectName = opts.branch
-    ? `${baseProjectName}--${opts.branch}`
-    : null;
+  const baseProjectName = target.base;
+  const projectName = target.lifecycle.projectName;
+  const composeProjectName = target.composeProjectName;
   const devHost = await resolveRuntimeDevHost({
     project: opts.project,
     branch: opts.branch,
@@ -3988,14 +4014,7 @@ export async function resolveComposeRuntimeModel(opts: {
   // down` resolves it. A successful `hack down` removes that record, so
   // without it the configured default is only unambiguous when the project
   // has no overlays; otherwise refuse before any Docker effect.
-  const envName = await resolveStoredRuntimeEnvName({
-    requestedEnvName: opts.envName,
-    projectDir: opts.project.projectDir,
-    composeProject: resolveLifecycleComposeProjectName({
-      projectName,
-      branch: opts.branch,
-    }),
-  });
+  const envName = opts.envName === undefined ? target.envName : opts.envName;
   if (envName === undefined) {
     await refuseUnrecordedEnvWithOverlays({
       project: opts.project,

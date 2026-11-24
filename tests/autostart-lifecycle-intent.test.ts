@@ -1221,45 +1221,117 @@ process.exit(await child.exited);
 }, 30_000);
 
 test.each([
-  "before",
-  "after",
-] as const)("ordinary Start can stop the same copy in an up.%s hook", async (phase) => {
-  const projectDir = join(root, "project", ".hack");
-  const down = [
-    process.execPath,
-    "--preload",
-    DOCKER_TRUST_PRELOAD,
-    cli,
-    "--no-interactive",
-    "down",
-    "--json",
-  ]
-    .map(quoteShellWord)
-    .join(" ");
-  const hook = phase === "after" ? `${down} && exit 7` : down;
-  await writeOwnedFixture(
-    join(projectDir, "hack.config.json"),
-    JSON.stringify({
-      name: "sample",
-      lifecycle: {
-        up: { [phase]: [{ name: "stop-same-copy", command: hook }] },
-      },
-    })
-  );
-  await installComposeNameFixture({ startContainers: true });
-  const result = await run(["up", "-d", "--json"], false, undefined, {
-    PATH: `${join(root, "bin")}:/usr/bin:/bin`,
-  });
-  expect(result.exitCode, result.stderr + result.stdout).toBe(
-    phase === "before" ? 0 : 7
-  );
-  const invoked = await Bun.file(join(root, "compose-down")).json();
-  expect(invoked).toContain("down");
-  expect(invoked).toContain(projectDir);
-  expect(await Bun.file(join(root, "compose-running")).exists()).toBe(
-    phase === "before"
-  );
-}, 20_000);
+  ["ordinary", "before"],
+  ["ordinary", "after"],
+  ["Desktop", "before"],
+  ["Desktop", "after"],
+] as const)(
+  "%s Start can stop the same copy in an up.%s hook",
+  async (mode, phase) => {
+    const projectDir = join(root, "project", ".hack");
+    const down = [
+      process.execPath,
+      "--preload",
+      DOCKER_TRUST_PRELOAD,
+      cli,
+      "--no-interactive",
+      "down",
+      "--json",
+    ]
+      .map(quoteShellWord)
+      .join(" ");
+    const hook = phase === "after" ? `${down} && exit 7` : down;
+    await writeOwnedFixture(
+      join(projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "sample",
+        lifecycle: {
+          up: { [phase]: [{ name: "stop-same-copy", command: hook }] },
+        },
+      })
+    );
+    await installComposeNameFixture({ startContainers: true });
+    const flags =
+      mode === "Desktop"
+        ? ["--target", "local", "--expect-compose-project", "sample"]
+        : [];
+    const result = await run(
+      ["up", "-d", "--json", ...flags],
+      false,
+      undefined,
+      {
+        PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+      }
+    );
+    expect(result.exitCode, result.stderr + result.stdout).toBe(
+      phase === "before" ? 0 : 7
+    );
+    const invoked = await Bun.file(join(root, "compose-down")).json();
+    expect(invoked).toContain("down");
+    expect(invoked).toContain(projectDir);
+    expect(await Bun.file(join(root, "compose-running")).exists()).toBe(
+      phase === "before"
+    );
+  },
+  20_000
+);
+
+test.skipIf(!Bun.which("tmux"))(
+  "a failed after-hook preserves the session adopted by a newer mux Start",
+  async () => {
+    const projectDir = join(root, "project", ".hack");
+    const entered = join(root, "first-after-hook");
+    const release = join(root, "release-after-hook");
+    const command = `if [ "\${HACK_FIXTURE_FAIL_AFTER:-}" = 1 ]; then : > ${quoteShellWord(entered)}; while [ ! -f ${quoteShellWord(release)} ]; do /bin/sleep 0.02; done; exit 7; fi`;
+    await writeOwnedFixture(
+      join(projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "sample",
+        sessions: { mux: "tmux" },
+        lifecycle: {
+          processes: [{ name: "fixture-client", command: "/bin/sleep 60" }],
+          up: { after: [{ name: "fixture-after", command }] },
+        },
+      })
+    );
+    await installComposeNameFixture({ startContainers: true });
+    const env = {
+      PATH: `${join(root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    };
+    const first = run(["up", "-d", "--json"], false, undefined, {
+      ...env,
+      HACK_FIXTURE_FAIL_AFTER: "1",
+    });
+    try {
+      await Promise.race([
+        waitForCondition(
+          () => Bun.file(entered).exists(),
+          "Start did not reach its after-hook"
+        ),
+        first.then(({ stdout, stderr }) => {
+          throw new Error(`Start exited before its hook: ${stdout || stderr}`);
+        }),
+      ]);
+      const [created] = await readLifecycleState({ projectDir });
+      expect(created?.backend).toBe("tmux");
+      const second = await run(["up", "-d", "--json"], false, undefined, env);
+      expect(second.exitCode, second.stderr + second.stdout).toBe(0);
+      const [adopted] = await readLifecycleState({ projectDir });
+      expect(adopted?.ownershipToken).toBe(created?.ownershipToken);
+      expect(adopted?.cleanupEpoch).not.toBe(created?.cleanupEpoch);
+      await Bun.write(release, "release");
+      expect((await first).exitCode).toBe(7);
+      expect(await readLifecycleState({ projectDir })).toEqual([adopted]);
+      expect(await Bun.file(join(root, "compose-running")).exists()).toBe(true);
+    } finally {
+      await Bun.write(release, "release");
+      await first;
+      const stopped = await run(["down", "--json"], false, undefined, env);
+      expect(stopped.exitCode, stopped.stderr + stopped.stdout).toBe(0);
+    }
+  },
+  35_000
+);
 
 test("parallel sibling writes keep each copy's runtime pin and overlay", async () => {
   const projectDir = join(root, "project", ".hack");

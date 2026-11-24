@@ -3001,6 +3001,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
           env: opts.env,
           composeProject: opts.composeProject,
           definitionHash,
+          revalidateSession: opts.runAttachedHook !== undefined,
           ...(sessionOwnership ? { sessionOwnership } : {}),
         }),
       abortProcesses: () => Promise.resolve(),
@@ -3023,6 +3024,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     env: opts.env,
     composeProject: opts.composeProject,
     definitionHash,
+    revalidateSession: opts.runAttachedHook !== undefined,
     ...(sessionOwnership ? { sessionOwnership } : {}),
   });
   const beforeCode = await runLifecycleCommands({
@@ -3568,6 +3570,7 @@ export async function startLifecycleProcesses(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly composeProject: string;
   readonly definitionHash: string;
+  readonly revalidateSession?: boolean;
   readonly sessionOwnership?: SharedHelperSessionOwnership;
   /** Mux backends; defaults to the project's configured backends. */
   readonly mux?: () => Promise<ResolvedMux>;
@@ -3595,6 +3598,7 @@ export async function startLifecycleProcesses(opts: {
     env: opts.env,
     composeProject: opts.composeProject,
     definitionHash: opts.definitionHash,
+    revalidateSession: opts.revalidateSession,
     ...(opts.sessionOwnership
       ? { sessionOwnership: opts.sessionOwnership }
       : {}),
@@ -7702,9 +7706,10 @@ async function handleUp(
       lockedComposeName,
     });
   };
-  // Foreground up owns the terminal until shutdown; its existing supervisor
-  // handles stopping. Never hold this startup lock for that whole lifetime.
-  if (!(login || input.args.options.detach || input.args.options.json)) {
+  // Local Compose startup admits its copy after resolving the final name,
+  // so it can release both locks around attached hooks. Login admits here
+  // to preserve the trusted unattended intent check.
+  if (!login) {
     return await run();
   }
   return await withAutostartCommandLock({
@@ -8258,27 +8263,25 @@ function createComposeStartAdmission(opts: {
   readonly branch: string | null;
   readonly composeProject: string;
 }) {
+  const withLocks = <T>(run: () => Promise<T>, signal?: AbortSignal) =>
+    withComposeCopyLock({
+      ...opts,
+      signal,
+      run: () => withComposeNameLock(opts.composeProject, run, signal),
+    });
   let owner:
     | { readonly release: () => void; readonly settled: Promise<void> }
     | undefined;
   return {
+    withLocks,
     async enter(): Promise<void> {
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       const cancellation = new AbortController();
-      const settled = withComposeCopyLock({
-        ...opts,
-        signal: cancellation.signal,
-        run: () =>
-          withComposeNameLock(
-            opts.composeProject,
-            () => {
-              entered.resolve();
-              return release.promise;
-            },
-            cancellation.signal
-          ),
-      });
+      const settled = withLocks(() => {
+        entered.resolve();
+        return release.promise;
+      }, cancellation.signal);
       const signals = installLifecycleSignalCleanup({
         cleanup: async () => {
           cancellation.abort();
@@ -8644,9 +8647,31 @@ async function runResolvedComposeUp({
     guard: ReturnType<typeof installForegroundTerminationGuard> | null;
   } = { guard: null };
   let detachedComposeSucceeded = false;
+  let releasedForAfterHook = false;
   let afterHooks: Promise<number> | undefined;
+  const cleanupLifecycle: LifecycleOperationCleanup = async (options) => {
+    if (!lifecycleCleanup) {
+      return;
+    }
+    if (!(releasedForAfterHook && admission)) {
+      return await lifecycleCleanup(options);
+    }
+    return await admission.withLocks(async () => {
+      const record = await readProjectRuntimeStateEntry({
+        projectDir: project.projectDir,
+        composeProject: lifecycleComposeProject,
+      });
+      // The attached hook let other operations act on this copy. A newer
+      // launch or completed Down now owns the outcome. The controller also
+      // checks its cleanup epoch if an adopting Start has yet to dispatch.
+      if (publishedLaunch && record?.launchId === publishedLaunch.launchId) {
+        await engine.verify();
+        return await lifecycleCleanup?.(options);
+      }
+    }, options?.force);
+  };
   const cleanupOnSignal = signalCleanupKeepingStartedHelpers({
-    cleanup: lifecycleCleanup,
+    cleanup: lifecycleCleanup ? cleanupLifecycle : null,
     containerStartBegun: () => containerStartBegun,
     keepSharedHelpers: () => keepSharedHelpers,
   });
@@ -9002,8 +9027,9 @@ async function runResolvedComposeUp({
       }
     }
     if (!serviceScoped) {
-      if (cfg.lifecycle?.up?.after?.length) {
-        await admission?.leave();
+      if (admission && cfg.lifecycle?.up?.after?.length) {
+        releasedForAfterHook = true;
+        await admission.leave();
       }
       afterHooks = runLifecycleCommands({
         title: "Lifecycle (up after)",
@@ -9024,7 +9050,7 @@ async function runResolvedComposeUp({
 
     if (afterCode !== 0) {
       await engine.verify();
-      await lifecycleCleanup?.();
+      await cleanupLifecycle();
       if (!json) {
         writeUpHookBlocker("after", afterCode, failedHook, retryCommand);
         return afterCode;
@@ -9047,7 +9073,7 @@ async function runResolvedComposeUp({
         readOnCapturedDockerEngine(engine.verify, () => readStartup(true)),
     }).finally(clearServiceWait);
     if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
-      await lifecycleCleanup?.();
+      await cleanupLifecycle();
       await discardPublishedRuntimeSelection();
       const message = composeStartupIncompleteMessage({
         composeProject: composeProjectName ?? baseProjectName,
@@ -9143,7 +9169,7 @@ async function runResolvedComposeUp({
       throw error;
     }
     await retainHelpersIfContainersMayRun();
-    await lifecycleCleanup?.();
+    await cleanupLifecycle();
     await discardPublishedRuntimeSelection();
     throw error;
   } finally {

@@ -222,6 +222,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
       typeof createLifecycleProcessController
     >[0]["sessionOwnership"];
     readonly prepareLaunch?: () => Promise<void>;
+    readonly revalidateSession?: boolean;
     readonly muxCommandTimeoutMs?: number;
     readonly env?: Readonly<Record<string, string>>;
     readonly composeProject?: string;
@@ -243,6 +244,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
         : {}),
       composeProject: opts.composeProject ?? COMPOSE_PROJECT,
       definitionHash: "sha256:test",
+      revalidateSession: opts.revalidateSession,
       ...(opts.sessionOwnership
         ? { sessionOwnership: opts.sessionOwnership }
         : {}),
@@ -371,6 +373,45 @@ test("the controller adopts and stops a verified legacy lifecycle session by its
 });
 
 const PROCESS = { name: "helper-client", command: "sleep 600" };
+
+test("a resumed controller cannot republish the session retired during its hook", async () => {
+  const { controller, entries, mux, stop } = await fixture();
+  const start = controller({
+    sessionOwnership: undefined,
+    revalidateSession: true,
+  });
+  await start.startMany({ processes: [PROCESS] });
+  await stop();
+  expect(mux.sessions.has(SESSION)).toBe(false);
+  await expect(start.finalize()).rejects.toBeInstanceOf(
+    LifecycleSessionDisplacedError
+  );
+  expect(await entries()).toEqual([]);
+});
+
+test("a creator cannot clean up a session adopted before the newer Start dispatches Compose", async () => {
+  const { controller, entries, mux, stop } = await fixture();
+  const creator = controller({
+    sessionOwnership: undefined,
+    revalidateSession: true,
+  });
+  await creator.startMany({ processes: [PROCESS] });
+  await creator.finalize();
+  const [created] = await entries();
+  const adopter = controller({
+    sessionOwnership: undefined,
+    revalidateSession: true,
+  });
+  await adopter.startMany({ processes: [PROCESS] });
+  const [adopted] = await entries();
+  expect(adopted?.cleanupEpoch).toBeDefined();
+  expect(adopted?.cleanupEpoch).not.toBe(created?.cleanupEpoch);
+  await creator.getOperationCleanup()?.();
+  expect(mux.sessions.get(SESSION)).toBe(created?.ownershipToken);
+  expect(mux.killed).toEqual([]);
+  await adopter.finalize();
+  await stop();
+});
 
 test("operation cleanup recovers a birth missed by the launch observation", async () => {
   const { controller, entries, bin } = await fixture("tmux");

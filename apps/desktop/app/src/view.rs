@@ -29,7 +29,7 @@ use crate::doctor_view::Pane;
 use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 
 use hack_desktop_core::source::target_keys;
-use hack_desktop_core::state::{Action, ProjectState};
+use hack_desktop_core::state::{Action, ProjectState, ServiceView};
 use hack_desktop_core::viewmodel::{
     AppModel, Banner, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken, Row,
 };
@@ -695,6 +695,25 @@ impl HackApp {
         .detach();
     }
 
+    pub(crate) fn can_run_service_action(
+        &self,
+        detail: &DetailView,
+        service: &ServiceView,
+        action: Action,
+    ) -> bool {
+        detail.backend == "compose"
+            && detail.runtime_addressable
+            && !detail.busy
+            && !self.machine.busy()
+            && self.model.can_start(&detail.key)
+            && service.compose_container
+            && match action {
+                Action::Restart => true,
+                Action::Stop => service.running,
+                _ => false,
+            }
+    }
+
     pub(crate) fn run_service_action(
         &mut self,
         key: InstanceKey,
@@ -709,16 +728,15 @@ impl HackApp {
             return;
         };
         let valid_service = self.model.detail().is_some_and(|detail| {
-            detail.services.iter().any(|row| {
-                row.name == service
-                    && row.compose_container
-                    && (action != Action::Stop || row.running)
-            })
+            detail
+                .services
+                .iter()
+                .any(|row| row.name == service && self.can_run_service_action(&detail, row, action))
         });
         if !valid_service {
             return;
         }
-        if !self.live || self.machine.busy() || !self.model.start_service_action(&key, service) {
+        if !self.live || !self.model.start_service_action(&key, service) {
             return;
         }
         self.action_started.insert(key.clone(), Instant::now());

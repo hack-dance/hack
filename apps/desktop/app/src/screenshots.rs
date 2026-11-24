@@ -180,6 +180,23 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                         hack_desktop_core::viewmodel::ServiceDestination::Logs
                     );
                     assert_eq!(_app.read(cx).selected_service(), Some("api"));
+                    {
+                        use hack_desktop_core::state::Action;
+                        let app = _app.read(cx);
+                        let detail = app.model.detail().expect("selected copy detail");
+                        let mut row = detail
+                            .services
+                            .iter()
+                            .find(|row| row.name == "api")
+                            .expect("running service")
+                            .clone();
+                        assert!(app.can_run_service_action(&detail, &row, Action::Stop));
+                        row.running = false;
+                        assert!(app.can_run_service_action(&detail, &row, Action::Restart));
+                        assert!(!app.can_run_service_action(&detail, &row, Action::Stop));
+                        row.compose_container = false;
+                        assert!(!app.can_run_service_action(&detail, &row, Action::Restart));
+                    }
                     _app.update(cx, |app, cx| {
                         app.set_service_tab(crate::service_view::ServiceTab::Info, window, cx);
                     });

@@ -100,7 +100,7 @@ publishes only the captured engine evidence. Start and Restart recheck that
 evidence after the write. Restart settles its publication before after-hooks
 and cancels those hooks as owned process groups. Scoped readiness uses the same
 captured-engine check, and the explicit default socket matches the implicit one.
-Ordinary detached Compose startup holds the logical checkout lock and then
+Detached manual Compose startup holds the logical checkout lock and then
 the final-name lock through cache initialization and Compose dispatch. The
 locks are released for attached hooks. Saved engine evidence and checkout
 ownership are checked on readmission before managed-process or Compose effects.
@@ -112,6 +112,12 @@ references. Signal handling for Start settles staged launch publication before
 re-raising. The CLI regressions cover both two-checkout name contention and
 SIGTERM before dispatch. These checks assume cooperating Hack commands. The
 model does not represent direct Docker CLI writes or terminal job control.
+The CLI also covers same-copy Down invoked from Desktop and ordinary Start
+hooks. Mux resumption checks persisted and live ownership before starting
+more processes or publishing. After-hook cleanup takes the copy locks and
+checks the current launch and session cleanup epoch. Adoption changes the
+epoch before Compose dispatch. These host-process transitions are outside
+the finite start/stop model and covered by controller and private tmux tests.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
 `runtime-backend.ts` now forwards cancellation to each owned detached Compose

@@ -301,7 +301,7 @@ impl HackApp {
                     .on_click(move |_, _, cx| cx.open_url(&url)),
             );
         }
-        if service.compose_container && service.running && !detail.busy && !self.machine.busy() {
+        if self.can_run_service_action(detail, service, Action::Stop) {
             let name = service.name.clone();
             let key = detail.key.clone();
             actions = actions.child(
@@ -387,7 +387,6 @@ impl HackApp {
     ) -> Div {
         let p = ui.p;
         let url = service_url(svc);
-        let can_change = !detail.busy && !self.machine.busy();
         let items = [
             (
                 ServiceCommand::Open,
@@ -417,13 +416,13 @@ impl HackApp {
                 ServiceCommand::Restart,
                 Glyph::Restart,
                 "Restart".into(),
-                svc.compose_container && can_change,
+                self.can_run_service_action(detail, svc, Action::Restart),
             ),
             (
                 ServiceCommand::Stop,
                 Glyph::Stop,
                 "Stop".into(),
-                svc.compose_container && svc.running && can_change,
+                self.can_run_service_action(detail, svc, Action::Stop),
             ),
             (
                 ServiceCommand::Copy,

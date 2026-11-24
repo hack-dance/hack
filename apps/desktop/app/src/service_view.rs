@@ -405,9 +405,11 @@ impl HackApp {
             (Status::of_service(s), label)
         });
         let copy = detail.branch.as_deref().unwrap_or("main");
-        let menu = self.service_actions_menu(detail, facts, ui, cx);
-        let can_act = self.can_act_on_service(detail);
-        let can_stop = can_act && service.is_some_and(|s| s.running);
+        let menu = self.service_actions_menu(detail, service, facts, ui, cx);
+        let can_act =
+            service.is_some_and(|row| self.can_run_service_action(detail, row, Action::Restart));
+        let can_stop =
+            service.is_some_and(|row| self.can_run_service_action(detail, row, Action::Stop));
         div()
             .flex()
             .flex_col()
@@ -500,27 +502,13 @@ impl HackApp {
             }))
     }
 
-    fn can_act_on_service(&self, detail: &DetailView) -> bool {
-        detail.backend == "compose"
-            && !detail.busy
-            && !self.machine.busy()
-            && detail.actions.contains(&Action::Restart)
-    }
-
     fn run_selected_service_action(&mut self, action: Action, cx: &mut Context<Self>) {
         let Some(name) = self.selected_service().map(str::to_owned) else {
             return;
         };
-        let Some(detail) = self.model.detail().filter(|d| self.can_act_on_service(d)) else {
+        let Some(detail) = self.model.detail() else {
             return;
         };
-        if !detail
-            .services
-            .iter()
-            .any(|s| s.name == name && (action != Action::Stop || s.running))
-        {
-            return;
-        }
         self.service_pane.menu = None;
         self.run_service_action(detail.key, &name, action, cx);
     }
@@ -528,6 +516,7 @@ impl HackApp {
     fn service_actions_menu(
         &self,
         detail: &DetailView,
+        service: Option<&ServiceView>,
         facts: &ServiceFacts,
         ui: &Ui,
         cx: &mut Context<Self>,
@@ -571,7 +560,7 @@ impl HackApp {
                 ),
             );
         }
-        if self.can_act_on_service(detail) {
+        if service.is_some_and(|row| self.can_run_service_action(detail, row, Action::Restart)) {
             menu = menu.child(menu_separator(ui)).child(
                 menu_row("service-menu-restart", Glyph::Restart, "Restart", false, ui).on_click(
                     cx.listener(|this, _, _, cx| {
@@ -579,11 +568,7 @@ impl HackApp {
                     }),
                 ),
             );
-            if detail
-                .services
-                .iter()
-                .any(|s| Some(s.name.as_str()) == self.selected_service() && s.running)
-            {
+            if service.is_some_and(|row| self.can_run_service_action(detail, row, Action::Stop)) {
                 menu = menu.child(
                     menu_row("service-menu-stop", Glyph::Stop, "Stop", false, ui).on_click(
                         cx.listener(|this, _, _, cx| {

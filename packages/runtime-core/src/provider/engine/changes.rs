@@ -15,11 +15,20 @@ use std::time::{Duration, Instant};
 /// Set by the reader thread on each event, cleared by [`EngineChanges::wait`].
 type Signal = Arc<(Mutex<bool>, Condvar)>;
 
+/// The open stream, kept to shut it down (which ends the reader); `closed` once the
+/// waiter is dropped, so a connect that finishes later shuts its stream at once.
+#[derive(Default)]
+struct Stream {
+    stream: Option<UnixStream>,
+    closed: bool,
+}
+
+/// The reader thread connects, subscribes and reads; nothing of it runs on the
+/// start loop's own path, so the loop's deadline is never spent on the subscribe.
+/// Until the stream is up (or if it never is), a wait is the old sleep.
 pub(in crate::provider) struct EngineChanges {
     signal: Signal,
-    /// The stream, kept to shut it down (which ends the reader) on drop.
-    stream: Option<UnixStream>,
-    reader: Option<std::thread::JoinHandle<()>>,
+    stream: Arc<Mutex<Stream>>,
 }
 
 impl EngineChanges {
@@ -27,51 +36,44 @@ impl EngineChanges {
     pub(in crate::provider) fn sleeping() -> Self {
         Self {
             signal: Signal::default(),
-            stream: None,
-            reader: None,
+            stream: Arc::new(Mutex::new(Stream {
+                stream: None,
+                closed: true,
+            })),
         }
     }
 
-    /// Follow `run`'s container events on the engine socket at `path`. A socket
-    /// that cannot be reached within a second gives [`EngineChanges::sleeping`].
+    /// Follow `run`'s container events on the engine socket at `path`, opened in
+    /// the background: this returns at once.
     pub(in crate::provider) fn follow(path: &Path, run: &str) -> Self {
-        Self::open(path, run).unwrap_or_else(Self::sleeping)
-    }
-
-    fn open(path: &Path, run: &str) -> Option<Self> {
-        if !run.bytes().all(|b| b.is_ascii_hexdigit()) || run.is_empty() {
-            return None;
+        if run.is_empty() || !run.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Self::sleeping();
         }
-        let mut stream =
-            crate::provider::agent::connect_until(path, Instant::now() + Duration::from_secs(1))
-                .ok()?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(1)))
-            .ok()?;
-        stream.write_all(request(run).as_bytes()).ok()?;
-        let signal = Signal::default();
-        let reader = {
-            let signal = signal.clone();
-            let stream = stream.try_clone().ok()?;
-            std::thread::Builder::new()
-                .name("engine-changes".into())
-                .spawn(move || read_events(stream, &signal))
-                .ok()?
+        let changes = Self {
+            signal: Signal::default(),
+            stream: Arc::default(),
         };
-        Some(Self {
-            signal,
-            stream: Some(stream),
-            reader: Some(reader),
-        })
+        let (signal, stream, path, run) = (
+            changes.signal.clone(),
+            changes.stream.clone(),
+            path.to_owned(),
+            run.to_owned(),
+        );
+        // Detached: a connect still pending when the waiter drops ends by itself
+        // (bounded), and its stream is then shut at once.
+        let _ = std::thread::Builder::new()
+            .name("engine-changes".into())
+            .spawn(move || {
+                if let Some(reader) = subscribe(&path, &run, &stream) {
+                    read_events(reader, &signal);
+                }
+            });
+        changes
     }
 
     /// Wait until an event arrived since the last wait, or `timeout` passed. An
     /// event that arrived before this call returns at once, so none is missed.
     pub(in crate::provider) fn wait(&self, timeout: Duration) {
-        if self.reader.is_none() {
-            std::thread::sleep(timeout);
-            return;
-        }
         let (lock, changed) = &*self.signal;
         let Ok(guard) = lock.lock() else {
             std::thread::sleep(timeout);
@@ -85,13 +87,34 @@ impl EngineChanges {
 
 impl Drop for EngineChanges {
     fn drop(&mut self) {
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-        }
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        if let Ok(mut shared) = self.stream.lock() {
+            shared.closed = true;
+            if let Some(stream) = shared.stream.take() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
         }
     }
+}
+
+/// Connect and send the subscription, on the reader thread. The stream is
+/// registered for shutdown before the request, and refused once closed.
+fn subscribe(path: &Path, run: &str, shared: &Mutex<Stream>) -> Option<UnixStream> {
+    let mut stream =
+        crate::provider::agent::connect_until(path, Instant::now() + Duration::from_secs(1))
+            .ok()?;
+    {
+        let mut shared = shared.lock().ok()?;
+        if shared.closed {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return None;
+        }
+        shared.stream = Some(stream.try_clone().ok()?);
+    }
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .ok()?;
+    stream.write_all(request(run).as_bytes()).ok()?;
+    Some(stream)
 }
 
 fn request(run: &str) -> String {
@@ -150,9 +173,25 @@ mod tests {
         (socket, path, listener)
     }
 
+    /// The reader has seen an event the next wait has not consumed yet.
+    fn observed(changes: &EngineChanges) -> bool {
+        *changes.signal.0.lock().unwrap()
+    }
+    fn until(condition: impl Fn() -> bool) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(Instant::now() < end, "condition not reached in 5 s");
+            std::thread::yield_now();
+        }
+    }
+
     #[test]
     fn an_event_wakes_the_wait_and_one_before_it_is_not_missed() {
+        use std::sync::mpsc::channel;
         let (_socket, path, listener) = socket("wake");
+        let (sent, first) = channel();
+        let (go, second) = channel::<()>();
+        let (done, finished) = channel::<()>();
         let engine = std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().unwrap();
             let mut head = [0_u8; 512];
@@ -160,32 +199,34 @@ mod tests {
             let head = String::from_utf8_lossy(&head[..read]).into_owned();
             peer.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
                 .unwrap();
-            // One event before the first wait, then one while it waits.
             peer.write_all(b"10\r\n{\"status\":\"x\"}\n\r\n").unwrap();
-            std::thread::sleep(Duration::from_millis(300));
+            sent.send(()).unwrap();
+            second.recv().unwrap();
             peer.write_all(b"10\r\n{\"status\":\"y\"}\n\r\n").unwrap();
-            std::thread::sleep(Duration::from_millis(300));
+            // Keep the stream open until the test is done with it.
+            let _ = finished.recv();
             head
         });
         let changes = EngineChanges::follow(&path, RUN);
-        std::thread::sleep(Duration::from_millis(100));
+        // The first event is read before the first wait begins: that wait must
+        // return at once rather than wait for the next one.
+        first.recv().unwrap();
+        until(|| observed(&changes));
+        changes.wait(Duration::from_secs(5));
+        assert!(!observed(&changes), "the wait did not consume the event");
+        // The second event wakes a wait already in progress (or one about to start).
+        go.send(()).unwrap();
         let started = Instant::now();
         changes.wait(Duration::from_secs(5));
         assert!(
-            started.elapsed() < Duration::from_millis(50),
-            "missed the earlier event"
-        );
-        let started = Instant::now();
-        changes.wait(Duration::from_secs(5));
-        let waited = started.elapsed();
-        assert!(
-            waited >= Duration::from_millis(100) && waited < Duration::from_secs(2),
-            "{waited:?}"
+            started.elapsed() < Duration::from_secs(4),
+            "the event did not wake the wait"
         );
         // Nothing more: the pass interval bounds the wait, as the sleep did.
         let started = Instant::now();
         changes.wait(Duration::from_millis(150));
         assert!(started.elapsed() >= Duration::from_millis(150));
+        done.send(()).unwrap();
         drop(changes);
         let head = engine.join().unwrap();
         assert!(head.starts_with("GET /v1.53/events?filters="), "{head}");
@@ -197,32 +238,54 @@ mod tests {
     }
 
     #[test]
-    fn without_a_stream_the_wait_sleeps_the_whole_interval() {
+    fn opening_never_waits_and_without_a_stream_the_wait_sleeps_the_interval() {
+        // An absent socket: the subscribe retries its connect in the background
+        // for up to a second; `follow` and `drop` do not wait for it.
         let absent = path("absent");
-        for changes in [
-            EngineChanges::follow(&absent.0, RUN),
-            EngineChanges::follow(&absent.0, "not a run"),
-            EngineChanges::sleeping(),
+        for (follow, changes) in [
+            (true, EngineChanges::follow(&absent.0, RUN)),
+            (true, EngineChanges::follow(&absent.0, "not a run")),
+            (false, EngineChanges::sleeping()),
         ] {
             let started = Instant::now();
             changes.wait(Duration::from_millis(60));
-            assert!(started.elapsed() >= Duration::from_millis(60));
+            assert!(started.elapsed() >= Duration::from_millis(60), "{follow}");
+            let started = Instant::now();
+            drop(changes);
+            assert!(started.elapsed() < Duration::from_millis(500), "{follow}");
         }
+        let started = Instant::now();
+        let changes = EngineChanges::follow(&absent.0, RUN);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "follow waited on the connect"
+        );
+        drop(changes);
     }
 
     #[test]
     fn dropping_it_ends_the_reader_while_the_engine_keeps_the_stream_open() {
+        use std::sync::mpsc::channel;
         let (_socket, path, listener) = socket("drop");
+        let (subscribed, accepted) = channel();
         let engine = std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().unwrap();
+            let mut head = [0_u8; 512];
+            let _ = peer.read(&mut head).unwrap();
             peer.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
                 .unwrap();
-            std::thread::sleep(Duration::from_secs(2));
+            subscribed.send(()).unwrap();
+            // The reader closing its end ends this read.
+            let mut rest = Vec::new();
+            let _ = peer.read_to_end(&mut rest);
         });
         let changes = EngineChanges::follow(&path, RUN);
+        accepted.recv().unwrap();
+        until(|| changes.stream.lock().unwrap().stream.is_some());
         let started = Instant::now();
         drop(changes);
         assert!(started.elapsed() < Duration::from_secs(1));
+        // The engine side sees the stream shut down.
         engine.join().unwrap();
     }
 }

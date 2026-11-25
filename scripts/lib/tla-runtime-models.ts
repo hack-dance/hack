@@ -3212,6 +3212,33 @@ const contracts: readonly ModelContract[] = [
         invariant: "NoDownOverLiveRun",
         fields: ["downOverLive = TRUE", 'pool = "stopped"', 'run = "ready"'],
       },
+      // HACK-2715 (seen on a real VM): a native-authored project shares the pool.
+      // After `runtime down --force` (or a crash) each project comes back by its
+      // own commands (`CanComeUp`, `NativeCanComeUp`). Each control is `next`
+      // before the fix for one part: admission refused the native run of the
+      // ended boot, so the Compose start was refused for good; the native
+      // recovery accepted only its own boot; its down --recover did not start a
+      // stopped pool.
+      { name: "two-projects", negative: false, states: 2197 },
+      {
+        name: "admission-ended-boot",
+        negative: true,
+        invariant: "CanComeUp",
+        fields: ['nrun = "ready"', "nrunBoot = 1"],
+        alternativeWitnesses: [['nrun = "ready"', "nrunBoot = 2"]],
+      },
+      {
+        name: "native-same-boot",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "running"', 'nrun = "ready"', 'nowner = "dead"'],
+      },
+      {
+        name: "native-stopped-pool",
+        negative: true,
+        invariant: "NativeCanComeUp",
+        fields: ['pool = "stopped"', 'nrun = "ready"', 'nowner = "dead"'],
+      },
     ],
   },
   {

@@ -15,7 +15,7 @@ const LIMIT: usize = 64 * 1024;
 fn refused() -> CandidateError {
     error(
         "native_graph_live_owner_recovery",
-        "Native same-boot recovery requires an exact settled resource selection, dead boot-qualified publisher and unchanged durable progress; pending effects and evidence are retained.",
+        "Native dead-owner recovery requires an exact settled resource selection, dead boot-qualified publisher and unchanged durable progress; pending effects and evidence are retained.",
     )
 }
 fn digest(bytes: &[u8]) -> String {

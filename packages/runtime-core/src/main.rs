@@ -6,7 +6,7 @@ mod prepared_base_cli;
 mod runtime_setup_cli;
 mod runtime_up_cli;
 mod source_watch_retry;
-use hack_runtime_core::provider::{LiveRuns, RuntimeStatus};
+use hack_runtime_core::provider::{AfterForcedStop, LiveRuns, RuntimeStatus};
 use hack_runtime_core::{CANDIDATE_VERSION, Candidate, CandidateError};
 use serde::Serialize;
 use std::path::Path;
@@ -435,7 +435,7 @@ fn run() -> Result<(), CandidateError> {
     if let Some(live) = runtime_down_form(command.as_slice()) {
         let candidate = discover_candidate(&requested)?;
         let result = runtime_down(&candidate, live)?;
-        report_interrupted_runs(&result);
+        report_interrupted_runs(&candidate, &result);
         print_json(&result)?;
         return Ok(());
     }
@@ -1511,7 +1511,7 @@ fn run() -> Result<(), CandidateError> {
                 "recover" => hack_runtime_core::provider::recover(&candidate),
                 _ => return Err(CandidateError::new("unsupported_command", HELP)),
             }?;
-            report_interrupted_runs(&result);
+            report_interrupted_runs(&candidate, &result);
             if *action == "up" {
                 sweep_running_pool(&result.phase, result.process_alive);
             }
@@ -1527,26 +1527,68 @@ fn run() -> Result<(), CandidateError> {
 /// follows as usual.
 fn runtime_down(candidate: &Candidate, live: LiveRuns) -> Result<RuntimeStatus, CandidateError> {
     hack_runtime_core::provider::down(candidate, live).inspect_err(|error| {
-        if let Some(line) = live_runs_refusal_line(error) {
+        if let Some(line) = live_runs_refusal_line(error, |run| {
+            hack_runtime_core::provider::after_forced_stop(candidate, run)
+        }) {
             eprintln!("{line}");
         }
     })
 }
 
 /// The stderr line of a `runtime down` refused over live runs (HACK-2477); `None` for
-/// any other error. The ids are the `live_runs` of `runtime status`.
-fn live_runs_refusal_line(error: &CandidateError) -> Option<String> {
+/// any other error. The ids are the `live_runs` of `runtime status`. It names, for each
+/// run, what recovers it after `--force` (HACK-2715), from `kind`.
+fn live_runs_refusal_line(
+    error: &CandidateError,
+    kind: impl Fn(&str) -> AfterForcedStop,
+) -> Option<String> {
     if error.code != "runtime_down_live_runs" {
         return None;
     }
     let runs = error
         .refusals
         .as_ref()
-        .map(|refusals| refusals.live_runs.join(", "))
+        .map(|refusals| refusals.live_runs.clone())
         .unwrap_or_default();
     Some(format!(
-        "Did not stop the native runtime: project runs are running in it ({runs}). Run hack down in each project first (hack down --recover for a run whose hack up has exited), or runtime down --force to stop it under them."
+        "Did not stop the native runtime: project runs are running in it ({}). Run hack down in each project first (hack down --recover for a run whose hack up has exited), or runtime down --force to stop it under them. After --force: {}",
+        runs.join(", "),
+        forced_stop_plan(&runs, kind)
     ))
+}
+
+/// For each run stopped (or about to be stopped) with the pool, the command that brings
+/// it back in its project, grouped by [`AfterForcedStop`] (HACK-2715). Names a command
+/// only where it works; a run nothing recovers from a stopped pool is said to need
+/// `hack down` before the pool stops.
+fn forced_stop_plan(runs: &[String], kind: impl Fn(&str) -> AfterForcedStop) -> String {
+    let group = |wanted: AfterForcedStop| {
+        runs.iter()
+            .filter(|run| kind(run) == wanted)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    let up = group(AfterForcedStop::HackUp);
+    if !up.is_empty() {
+        parts.push(format!(
+            "hack up in its project recovers {up} (Compose) with its data kept"
+        ));
+    }
+    let native = group(AfterForcedStop::DownRecoverThenUp);
+    if !native.is_empty() {
+        parts.push(format!(
+            "hack down --recover, then hack up, in its project recovers {native} (native-authored) with its data kept"
+        ));
+    }
+    let stranded = group(AfterForcedStop::StopFirst);
+    if !stranded.is_empty() {
+        parts.push(format!(
+            "nothing recovers {stranded} from a stopped pool (a native-authored run with persistent data, a live source, a custom network or a managed environment, or an unreadable receipt): its data is kept, but stop it with hack down in its project before the pool stops"
+        ));
+    }
+    format!("{}.", parts.join("; "))
 }
 
 /// What a `runtime down` command does with live runs: refuse (plain) or stop the pool
@@ -1561,21 +1603,37 @@ fn runtime_down_form(arguments: &[&str]) -> Option<LiveRuns> {
     }
 }
 
-/// Typed by hand: say what stopped with the pool and what brings it back (HACK-2456).
-fn report_interrupted_runs(result: &RuntimeStatus) {
+/// Typed by hand: say what stopped with the pool and what brings each run back
+/// (HACK-2456, HACK-2715).
+fn report_interrupted_runs(candidate: &Candidate, result: &RuntimeStatus) {
+    if let Some(line) = interrupted_runs_line(result, |run| {
+        hack_runtime_core::provider::after_forced_stop(candidate, run)
+    }) {
+        eprintln!("{line}");
+    }
+}
+
+fn interrupted_runs_line(
+    result: &RuntimeStatus,
+    kind: impl Fn(&str) -> AfterForcedStop,
+) -> Option<String> {
     if let Some(runs) = result
         .interrupted_runs
         .as_ref()
         .filter(|runs| !runs.is_empty())
     {
-        eprintln!(
-            "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. Run hack up in each project to start the runtime again and recover its run.",
-            runs.len()
-        );
+        Some(format!(
+            "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. To start the runtime again and recover them: {}",
+            runs.len(),
+            forced_stop_plan(runs, kind)
+        ))
     } else if result.interrupted_runs_unknown {
-        eprintln!(
-            "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a project recovers its run."
-        );
+        Some(
+            "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a Compose project, or hack down --recover then hack up in a native-authored one, recovers its run when its receipt can be read."
+                .to_owned(),
+        )
+    } else {
+        None
     }
 }
 
@@ -2303,10 +2361,10 @@ mod usage_tests {
     /// `--recover` way out, and `--force`; other errors print nothing of it.
     #[test]
     fn a_live_runs_refusal_names_its_runs_and_the_ways_out() {
-        use super::{CandidateError, live_runs_refusal_line};
+        use super::{AfterForcedStop, CandidateError, live_runs_refusal_line};
         let runs = vec!["a".repeat(32), "b".repeat(32)];
         let refused = CandidateError::new("runtime_down_live_runs", "x").with_live_runs(runs);
-        let line = live_runs_refusal_line(&refused).unwrap();
+        let line = live_runs_refusal_line(&refused, |_| AfterForcedStop::HackUp).unwrap();
         assert!(line.contains(&format!("({}, {})", "a".repeat(32), "b".repeat(32))));
         for named in ["hack down", "hack down --recover", "runtime down --force"] {
             assert!(line.contains(named), "{named}");
@@ -2315,7 +2373,46 @@ mod usage_tests {
             "runtime_down_runs_unreadable",
             "process_identity_unavailable",
         ] {
-            assert!(live_runs_refusal_line(&CandidateError::new(other, "x")).is_none());
+            assert!(
+                live_runs_refusal_line(&CandidateError::new(other, "x"), |_| {
+                    AfterForcedStop::HackUp
+                })
+                .is_none()
+            );
         }
+    }
+
+    /// HACK-2715: after `--force`, a Compose run comes back with `hack up`, a native-authored
+    /// one with `hack down --recover` then `hack up`, and a run nothing recovers from a
+    /// stopped pool is named as such instead of being promised a recovery. Each run is
+    /// named once, under its own command.
+    #[test]
+    fn the_forced_stop_plan_names_the_command_that_works_for_each_run() {
+        use super::{AfterForcedStop, CandidateError, forced_stop_plan, live_runs_refusal_line};
+        let (compose, native, stranded) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+        let kind = |run: &str| match run.as_bytes()[0] {
+            b'a' => AfterForcedStop::HackUp,
+            b'b' => AfterForcedStop::DownRecoverThenUp,
+            _ => AfterForcedStop::StopFirst,
+        };
+        let runs = vec![compose.clone(), native.clone(), stranded.clone()];
+        let plan = forced_stop_plan(&runs, kind);
+        assert!(plan.contains(&format!(
+            "hack up in its project recovers {compose} (Compose)"
+        )));
+        assert!(plan.contains(&format!(
+            "hack down --recover, then hack up, in its project recovers {native} (native-authored)"
+        )));
+        assert!(plan.contains(&format!("nothing recovers {stranded} from a stopped pool")));
+        for run in [&compose, &native, &stranded] {
+            assert_eq!(plan.matches(run.as_str()).count(), 1, "{run}");
+        }
+        // A native-authored run is never promised that hack up alone recovers it.
+        let only_native = forced_stop_plan(std::slice::from_ref(&native), kind);
+        assert!(!only_native.contains("hack up in its project recovers"));
+        assert!(!only_native.contains("nothing recovers"));
+        let refused = CandidateError::new("runtime_down_live_runs", "x").with_live_runs(runs);
+        let line = live_runs_refusal_line(&refused, kind).unwrap();
+        assert!(line.ends_with(&plan), "{line}");
     }
 }

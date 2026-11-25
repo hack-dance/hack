@@ -995,10 +995,26 @@ their receipts say.
 `runtime down --force` stops the pool anyway, as a crash or a host reboot would. The
 projects' containers stop with the guest and their data is kept. Its JSON lists the
 runs that were live in `interrupted_runs`, or sets `interrupted_runs_unknown` when they
-could not be read. It also writes one line on stderr saying how many it stopped.
-`hack up` in each of those projects starts the pool again and recovers its run. Hack's
-own scripts pass `--force` only where they stop a pool on purpose, such as test
-disposal, the host watchdog and the qualification run's emergency stop.
+could not be read. It also writes one line on stderr saying how many it stopped and,
+for each run, the command that brings it back in its project:
+
+- A Compose run: `hack up` starts the pool again and recovers the run, data kept.
+- A native-authored run (`hack.project.json`): `hack down --recover` starts the pool
+  again and recovers the run in the new boot, data kept; then `hack up` starts it.
+  The recovery removes the run's stopped containers, which the engine keeps on the
+  pool's disk after the boot ends.
+- A native-authored run with persistent data, a live source, a custom network or a
+  managed environment: nothing recovers it from an ended boot yet, because that state
+  is bound to the boot that made it. Its recovery refuses with
+  `native_graph_ended_boot_unsupported` and keeps its containers, data and evidence.
+  Stop such a run with `hack down` before the pool stops.
+
+A plain `runtime down` refusal names the same command for each live run before you
+pass `--force`. Until a native-authored run of an ended boot is recovered, the stopped
+containers it still has count toward the pool's capacity for other projects' starts,
+as an exited Compose container does; they never block those starts. Hack's own scripts
+pass `--force` only where they stop a pool on purpose, such as test disposal, the host
+watchdog and the qualification run's emergency stop.
 
 How a run moves across a pool stop. It is checked as the TLA+ model
 `tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
@@ -1038,6 +1054,18 @@ stateDiagram-v2
     recover --> stranded : [boot not known]
     finalizing --> retained : lease released or archived
 
+    state "native ready" as nready
+    state "native orphaned" as norphaned
+    state "native removed" as nremoved
+    state "native refused" as nrefused
+    [*] --> nready : native-authored hack up
+    nready --> norphaned : forced down, owner dies
+    norphaned --> nrecover : hack down, recover
+    state nrecover <<choice>>
+    nrecover --> nremoved : [graph2, no env]
+    nrecover --> nrefused : [data, source or env]
+    nremoved --> nready : hack up
+
     note right of ready
         runtime down refuses a live
         run and names it; only
@@ -1071,14 +1099,37 @@ stateDiagram-v2
     note left of retained
         INV NoDeadEnd: some named
         command always acts.
+        INV CanComeUp: hack up starts
+        it even when another
+        project's native run of an
+        ended boot is left: its
+        stopped containers reserve
+        their limits.
         PROP Recovers.
+    end note
+    note right of norphaned
+        Receipt names the ended boot.
+        hack down --recover starts a
+        stopped pool, then removes
+        the stopped containers in
+        the new boot, data kept.
+        INV NativeCanComeUp.
+    end note
+    note right of nrefused
+        Data, source, custom network
+        or managed env: refused by
+        name, data kept. runtime
+        down names it before --force.
     end note
 
     class ready ok
+    class nready ok
     class orphaned wait
+    class norphaned wait
     class crashed wait
     class finalizing wait
     class stranded fail
+    class nrefused fail
 ```
 
 `runtime down` first quiesces the guest engine, which leaves the pool in phase

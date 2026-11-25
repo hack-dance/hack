@@ -666,6 +666,85 @@ pub(super) fn load(
     }
     Ok((receipt, root))
 }
+/// Which boot of this pool a receipt belongs to, against the pool's current boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReceiptBoot {
+    /// The receipt's containers belong to the current boot.
+    Current,
+    /// The receipt belongs to an earlier boot of this pool owner, which has ended: the
+    /// pool runs one guest boot at a time, so any other boot of the same owner stopped
+    /// (`runtime down --force`, a crash or a host reboot). Nothing of that boot can
+    /// still run its effects; its containers, if still present, are stopped in the
+    /// engine's persisted state (HACK-2715).
+    Ended,
+}
+/// Strict same-owner read of one run's journal in any boot of this pool, saying which
+/// boot it belongs to. The current boot id must be a valid guest boot id. The owner,
+/// wire schema, private ancestors and no staging file are checked as for every load.
+pub(super) fn load_any_boot(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+    boot: &str,
+) -> Result<(Receipt, PathBuf, ReceiptBoot), CandidateError> {
+    if !crate::provider::environment_recovery::uuid(boot) {
+        return Err(refused());
+    }
+    let (receipt, root) = load_validated(candidate, run, Some(owner))?;
+    let which = if receipt.boot == boot {
+        ReceiptBoot::Current
+    } else {
+        ReceiptBoot::Ended
+    };
+    Ok((receipt, root, which))
+}
+/// Whether a receipt of an ended boot may be recovered in the current boot (HACK-2715):
+/// only a graph2 receipt (no persistent data, live source or custom topology) with no
+/// managed environment allocation. Persistent data references and environment
+/// allocations are bound to the guest boot that made them, and no guest rollover of
+/// either exists, so such a run of an ended boot is refused with its data and evidence
+/// kept. Source and topology recovery are outside the recovery proof in any boot
+/// (`require_recovery_settled`). `lifecycle::pool_users::after_forced_stop` names the
+/// same rule to the user before `runtime down --force`.
+pub(super) fn ended_boot_recoverable(
+    candidate: &Candidate,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    if receipt.version != 2
+        || receipt.source.is_some()
+        || receipt.topology.is_some()
+        || !receipt.data.is_empty()
+        || receipt.data_tool.is_some()
+        || crate::provider::native_environment::retained_runs(candidate)?
+            .contains(receipt.review.scope().run)
+    {
+        return Err(error(
+            "native_graph_ended_boot_unsupported",
+            "This native run belongs to a pool boot that has ended (runtime down --force, a crash or a host reboot), and it keeps persistent data, a live source, a custom network topology or a managed environment, which recovery from an ended boot does not support; its containers, data and evidence are kept.",
+        ));
+    }
+    Ok(())
+}
+/// The journal a cleanup-only recovery acts on: one of the current boot, or (with
+/// `ended_boot`) one of an ended boot of this pool owner that
+/// [`ended_boot_recoverable`] admits. Every other load stays same-boot ([`load`]).
+pub(super) fn load_for_recovery(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+    boot: &str,
+    ended_boot: bool,
+) -> Result<(Receipt, PathBuf, ReceiptBoot), CandidateError> {
+    if !ended_boot {
+        let (receipt, root) = load(candidate, run, owner, boot)?;
+        return Ok((receipt, root, ReceiptBoot::Current));
+    }
+    let (receipt, root, which) = load_any_boot(candidate, run, owner, boot)?;
+    if which == ReceiptBoot::Ended {
+        ended_boot_recoverable(candidate, &receipt)?;
+    }
+    Ok((receipt, root, which))
+}
 /// Old boot history releases capacity only after strict same-owner removal validation.
 pub(super) fn load_admission(
     candidate: &Candidate,

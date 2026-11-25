@@ -34,6 +34,10 @@ import {
   NativeAuthoredStopUnavailableError,
 } from "../backends/native-authored-stop-errors.ts";
 import {
+  NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED,
+  startStoppedPoolForAuthoredRecovery,
+} from "../backends/native-authored-stopped-pool.ts";
+import {
   nativeAuthoredUnreservedStartSelected,
   retireNativeAuthoredUnreservedStart,
 } from "../backends/native-authored-unreserved-start.ts";
@@ -42,6 +46,7 @@ import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
   NATIVE_RUNTIME_NOT_RUNNING,
+  NativeRuntimeRequestError,
   nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
@@ -504,6 +509,17 @@ function commandFailure(options: {
     if (options.signal.aborted) {
       return options.signal.reason === 143 ? 143 : 130;
     }
+    if (
+      options.error instanceof NativeRuntimeRequestError &&
+      options.error.nativeCode === NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED
+    ) {
+      throw new HackCliError({
+        code: "E_LIFECYCLE_FAILED",
+        message:
+          "Native project recovery is not supported for this run: its pool stopped under it (runtime down --force, a crash or a host reboot), and it keeps persistent data, a live source, a custom network or a managed environment, which recovery from an ended pool boot does not support. Its containers, data and evidence are kept; nothing was removed.",
+        detail: { nativeCode: NATIVE_GRAPH_ENDED_BOOT_UNSUPPORTED },
+      });
+    }
     throw new HackCliError({
       code: "E_LIFECYCLE_FAILED",
       message:
@@ -540,6 +556,8 @@ type Seams = {
   readonly retireUnreserved?: typeof retireNativeAuthoredUnreservedStart;
   /** Read-only empty-selection seam for repeated recovery (HACK-1312). */
   readonly nothingToRecover?: typeof nativeAuthoredProjectNothingToRecover;
+  /** Starts a stopped pool before a recovery (HACK-2715). */
+  readonly startStoppedPool?: typeof startStoppedPoolForAuthoredRecovery;
   readonly observe?: typeof nativeAuthoredProjectPs;
   readonly logs?: typeof nativeAuthoredProjectLogs;
   readonly stop?: typeof stopNativeAuthoredProject;
@@ -627,6 +645,12 @@ async function runRecovery(input: LifecycleInput): Promise<number> {
     });
     return 0;
   }
+  // HACK-2715: a run whose pool stopped under it (runtime down --force, a crash
+  // or a host reboot) is recovered in a new boot, so a stopped pool starts first.
+  await (input.seams.startStoppedPool ?? startStoppedPoolForAuthoredRecovery)({
+    runtime: input.runtime,
+    projectRoot: input.scope.projectRoot,
+  });
   await (input.seams.recover ?? recoverNativeAuthoredProject)({
     runtime: input.runtime,
     scope: input.scope,

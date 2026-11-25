@@ -655,7 +655,14 @@ read (`runtime_down_runs_unreadable`). Only a pool that really runs is refused (
 `running`, recorded provider alive, observed under the lease): a provider that died under the
 pool and a stalled `quiescing` stop get the down they had before. `runtime down --force` stops the pool under such runs
 and reports them in `interrupted_runs` (HACK-2477). In code, `provider::down` takes
-`LiveRuns::Refuse` or `LiveRuns::Interrupt` explicitly.
+`LiveRuns::Refuse` or `LiveRuns::Interrupt` explicitly. Both the refusal's stderr line and
+the forced stop's name, per run, what recovers it (`provider::after_forced_stop`, HACK-2715):
+`hack up` for a Compose run; `hack down --recover`, then `hack up`, for a native-authored
+graph2 run, whose dead-owner recovery accepts a run of an ended boot of the pool
+(`journal::load_for_recovery`); and nothing for a native run with persistent data, a live
+source, a custom topology or a managed environment, which refuses with
+`native_graph_ended_boot_unsupported`, data kept. Graph admission counts an ended boot's native
+run by its present stopped containers instead of refusing it.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.

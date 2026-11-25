@@ -1021,8 +1021,10 @@ async function recoverUsing(
             await bindings(store, saved.record, remaining, held);
             await both();
             const selected = saved.record.native;
+            // Known only when this attempt ran the runtime cleanup (HACK-2715).
+            let sameBoot: boolean | null = null;
             if (saved.record.phase === "prepared") {
-              parseNativeAuthoredRecoveryResult({
+              ({ same_boot: sameBoot } = parseNativeAuthoredRecoveryResult({
                 expected: selected,
                 value: await request({
                   runtime,
@@ -1043,7 +1045,7 @@ async function recoverUsing(
                   signal,
                   boundNativeAuthoredRecoveryDrain: "cleanup",
                 }),
-              });
+              }));
               await both();
               await bindings(store, saved.record, remaining, held);
               await both();
@@ -1109,7 +1111,7 @@ async function recoverUsing(
               version: 1,
               kind: "native-graph-live-owner-recovered",
               run: selected.run,
-              same_boot: true,
+              same_boot: sameBoot,
               publication_retired: true,
               receipt: removed,
             };

@@ -390,7 +390,8 @@ test("native recovered result closes outcome flags unknown fields and nested pri
   const canary = "private-recovery-result-canary";
   for (const value of [
     { ...result(), publication_retired: false },
-    { ...result(), same_boot: false },
+    { ...result(), same_boot: "false" },
+    { ...result(), same_boot: null },
     { ...result(), run: "9".repeat(32) },
     { ...result(), values: canary },
     { ...result(), receipt: receipt() },
@@ -414,6 +415,22 @@ test("native recovered result closes outcome flags unknown fields and nested pri
     } catch (error) {
       expect(String(error)).not.toContain(canary);
     }
+  }
+});
+
+test("HACK-2715: a recovery from an ended pool boot reports same_boot false and is otherwise the same result", () => {
+  const expected = parseNativeAuthoredRecoverySelection({
+    value: selection(),
+    admitted: parseNativeAuthoredReceipt(receipt()),
+  });
+  for (const sameBoot of [true, false]) {
+    const parsed = parseNativeAuthoredRecoveryResult({
+      value: { ...result(), same_boot: sameBoot },
+      expected,
+    });
+    expect(parsed.same_boot).toBe(sameBoot);
+    expect(parsed.receipt.phase).toBe("removed");
+    expect(parsed.publication_retired).toBe(true);
   }
 });
 

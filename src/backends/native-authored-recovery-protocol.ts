@@ -25,7 +25,13 @@ export type NativeAuthoredRecoveryResult = {
   readonly version: 1;
   readonly kind: "native-graph-live-owner-recovered";
   readonly run: string;
-  readonly same_boot: true;
+  /**
+   * Whether the run belonged to the current pool boot. `false` when it was
+   * recovered from a boot that ended under it (`runtime down --force`, a crash
+   * or a host reboot, HACK-2715). `null` in a resumed frontend recovery whose
+   * runtime cleanup completed in an earlier attempt.
+   */
+  readonly same_boot: boolean | null;
   readonly publication_retired: true;
   readonly receipt: NativeAuthoredReceipt;
 };
@@ -189,7 +195,7 @@ export function parseNativeAuthoredRecoveryResult(opts: {
     value.version !== 1 ||
     value.kind !== "native-graph-live-owner-recovered" ||
     value.run !== expected.run ||
-    value.same_boot !== true ||
+    typeof value.same_boot !== "boolean" ||
     value.publication_retired !== true
   ) {
     return refused();
@@ -206,7 +212,7 @@ export function parseNativeAuthoredRecoveryResult(opts: {
     version: 1,
     kind: "native-graph-live-owner-recovered",
     run: expected.run,
-    same_boot: true,
+    same_boot: value.same_boot === true,
     publication_retired: true,
     receipt,
   };

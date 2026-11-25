@@ -13,6 +13,7 @@ import {
   NativeAuthoredReservedStartError,
   NativeAuthoredStopUnavailableError,
 } from "../src/backends/native-authored-stop-errors.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
@@ -244,6 +245,69 @@ macTest(
     expect(result).toHaveProperty("code", "E_LIFECYCLE_FAILED");
     expect(String(result)).not.toContain("Private diagnostic");
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "HACK-2715: down --recover starts a stopped pool before the recovery and names an ended-boot run it cannot recover",
+  async () => {
+    const selected = await fixture();
+    const options = {
+      ...selected.options,
+      operation: "down" as const,
+      recover: true,
+    };
+    const order: string[] = [];
+    const run = (recover: () => Promise<unknown>) =>
+      tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        serve: () => {
+          throw new Error("Recovery cannot invoke startup.");
+        },
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(false),
+        startStoppedPool: (value) => {
+          order.push(`pool:${value.projectRoot}`);
+          return Promise.resolve(true);
+        },
+        recover: () => {
+          order.push("recover");
+          return recover() as ReturnType<typeof recoverNativeAuthoredProject>;
+        },
+      }).catch((error: unknown) => error);
+    expect(await run(() => Promise.resolve({}))).toBe(0);
+    expect(order).toEqual([`pool:${selected.root}`, "recover"]);
+    order.length = 0;
+    const refused = await run(() =>
+      Promise.reject(
+        new NativeRuntimeRequestError({
+          message: "refused",
+          nativeCode: "native_graph_ended_boot_unsupported",
+        })
+      )
+    );
+    expect(order).toEqual([`pool:${selected.root}`, "recover"]);
+    expect(refused).toBeInstanceOf(HackCliError);
+    expect(refused).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect(String((refused as HackCliError).message)).toContain(
+      "recovery from an ended pool boot does not support"
+    );
+    // Nothing to recover never starts the pool.
+    order.length = 0;
+    expect(
+      await tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        unreservedSelected: () => Promise.resolve(false),
+        nothingToRecover: () => Promise.resolve(true),
+        startStoppedPool: () => {
+          order.push("pool");
+          return Promise.resolve(true);
+        },
+      })
+    ).toBe(0);
+    expect(order).toEqual([]);
   }
 );
 

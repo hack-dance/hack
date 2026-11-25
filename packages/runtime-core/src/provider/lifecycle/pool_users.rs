@@ -165,9 +165,8 @@ const LIVE_PHASES: [(&str, &[&str]); 2] = [
 ///
 /// `runtime down` refuses while there are any and names them (HACK-2477,
 /// [`refuse_live_runs`]); `runtime down --force` stops the pool under them and reports
-/// them: their containers stop with the guest, and `hack up` (or `hack down
-/// --recover`) in each project starts the pool again and recovers the run with its data
-/// kept. Like the rest of this module it reads without a lock: `None` when an inventory
+/// them: their containers stop with the guest, and each run's project recovers it as
+/// [`after_forced_stop`] names (HACK-2715). Like the rest of this module it reads without a lock: `None` when an inventory
 /// or a receipt cannot be read, so the caller says it could not tell instead of naming
 /// nothing.
 pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
@@ -206,6 +205,89 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
     live.sort();
     Some(live)
 }
+/// What brings a run back after `runtime down --force` (or a crash) stopped the pool
+/// under it (HACK-2715), as its project names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterForcedStop {
+    /// A Compose run (`run/graphs`): `hack up` in its project starts the pool and
+    /// recovers the run from the ended boot, data kept.
+    HackUp,
+    /// A native-authored run (`run/native-graphs`) that recovery from an ended boot
+    /// admits (a graph2 receipt: no persistent data, live source, custom network
+    /// topology or managed environment): `hack down --recover` in its project starts the
+    /// pool and recovers it, then `hack up` starts it again.
+    DownRecoverThenUp,
+    /// A native-authored run whose recovery from an ended boot is not supported
+    /// (`native_graph_ended_boot_unsupported`), or whose receipt cannot be read: stop it
+    /// with `hack down` before the pool stops. Its data is kept either way.
+    StopFirst,
+}
+
+/// Native receipt fields bound to the guest boot or outside the recovery proof:
+/// persistent data, its verifier, a live source and a custom topology.
+const BOOT_BOUND_FIELDS: [&str; 5] = ["data", "data_mounts", "data_tool", "source", "topology"];
+
+/// Whether a native-graph environment allocation record names this run. `None` when
+/// the store cannot be read.
+fn native_environment_names(state_root: &Path, run: &str) -> Option<bool> {
+    let parent = state_root.join("run/native-environment-leases");
+    match fs::symlink_metadata(&parent) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+        Ok(metadata) if !metadata.is_dir() => return None,
+        Ok(_) => (),
+    }
+    state::check_private_directory(&parent).ok()?;
+    for (index, entry) in fs::read_dir(&parent)
+        .ok()?
+        .take(MAX_ENTRIES + 1)
+        .enumerate()
+    {
+        if index == MAX_ENTRIES {
+            return None;
+        }
+        let entry = entry.ok()?;
+        let name = entry.file_name().into_string().ok()?;
+        if name == LOCK_FILE || !name.ends_with(".json") {
+            continue;
+        }
+        let record: serde_json::Value = state::read(&entry.path()).ok()?;
+        if record["binding"]["run"].as_str() == Some(run) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// What recovers `run` after a forced stop (HACK-2715), read without a lock from its
+/// receipt like the rest of this module. Anything unreadable is [`AfterForcedStop::StopFirst`]:
+/// this names a command only when it is known to work.
+pub fn after_forced_stop(state_root: &Path, run: &str) -> AfterForcedStop {
+    if !is_graph_run(run) {
+        return AfterForcedStop::StopFirst;
+    }
+    if fs::symlink_metadata(state_root.join("run/graphs").join(run)).is_ok_and(|m| m.is_dir()) {
+        return AfterForcedStop::HackUp;
+    }
+    let Ok(receipt) = state::read::<serde_json::Value>(
+        &state_root
+            .join("run/native-graphs")
+            .join(run)
+            .join("state.json"),
+    ) else {
+        return AfterForcedStop::StopFirst;
+    };
+    let graph2 = receipt["version"] == 2
+        && BOOT_BOUND_FIELDS
+            .iter()
+            .all(|field| receipt.get(field).is_none());
+    if graph2 && native_environment_names(state_root, run) == Some(false) {
+        AfterForcedStop::DownRecoverThenUp
+    } else {
+        AfterForcedStop::StopFirst
+    }
+}
+
 /// The refusal code of `runtime down` while graph runs are live (HACK-2477).
 pub(super) const DOWN_LIVE_RUNS: &str = "runtime_down_live_runs";
 /// The refusal code of `runtime down` when the receipts cannot be read (HACK-2477).
@@ -218,8 +300,8 @@ pub(super) const DOWN_RUNS_UNREAD: &str = "runtime_down_runs_unreadable";
 /// the provider lease, and graph starts take that lease before they write a live
 /// receipt, so no run turns live between this check and the stop.
 pub(super) fn refuse_live_runs(state_root: &Path) -> Result<(), CandidateError> {
-    const LIVE: &str = "Native project runs are running in this pool (listed in live_runs, the same ids as runtime status live_runs), so runtime down stopped nothing. Run hack down in each project first (hack down --recover for a run whose hack up has exited), or runtime down --force to stop the pool under them; hack up then recovers each run with its data kept.";
-    const UNREAD: &str = "The native pool's project runs could not be read, so runtime down stopped nothing. Usually a run directory under run/graphs or run/native-graphs of this home has no readable state.json, for example after a start crashed before its first save; runtime status then counts it in graph_runs and omits live_runs. Run runtime down --force to stop the pool anyway; hack up then recovers each run with its data kept.";
+    const LIVE: &str = "Native project runs are running in this pool (listed in live_runs, the same ids as runtime status live_runs), so runtime down stopped nothing. Run hack down in each project first (hack down --recover for a run whose hack up has exited), or runtime down --force to stop the pool under them. After --force, hack up recovers a Compose project's run with its data kept; a native-authored project (hack.project.json) needs hack down --recover, then hack up; a native-authored run with persistent data, a live source, a custom network or a managed environment cannot be recovered after --force, so stop it with hack down first. The stderr line names the command for each run.";
+    const UNREAD: &str = "The native pool's project runs could not be read, so runtime down stopped nothing. Usually a run directory under run/graphs or run/native-graphs of this home has no readable state.json, for example after a start crashed before its first save; runtime status then counts it in graph_runs and omits live_runs. Run runtime down --force to stop the pool anyway; a run whose receipt cannot be read may then need inspection before it recovers.";
     match live_graph_runs(state_root) {
         None => Err(CandidateError::new(DOWN_RUNS_UNREAD, UNREAD)),
         Some(runs) if !runs.is_empty() => {
@@ -421,6 +503,65 @@ mod tests {
                 .get("live_runs")
                 .is_none()
         );
+    }
+
+    /// HACK-2715: what a refusal or a forced stop names for each run. A Compose run
+    /// comes back with `hack up`; a native-authored graph2 run without a managed
+    /// environment with `hack down --recover` then `hack up`; a native run with
+    /// boot-bound state (data, source, topology or a managed environment) or an
+    /// unreadable receipt is never promised a recovery.
+    #[test]
+    fn after_a_forced_stop_each_run_is_named_with_the_command_that_recovers_it() {
+        let home = Home::new();
+        let write = |directory: &str, run: &str, receipt: serde_json::Value| {
+            let dir = home.dir(&format!("{directory}/{run}"));
+            state::write(&dir.join("state.json"), &receipt).unwrap();
+        };
+        let (compose, native, data, topology, environment, unread, absent) = (
+            "a".repeat(32),
+            "b".repeat(32),
+            "c".repeat(32),
+            "d".repeat(32),
+            "e".repeat(32),
+            "f".repeat(32),
+            "9".repeat(32),
+        );
+        write(
+            "run/graphs",
+            &compose,
+            serde_json::json!({ "phase": "ready-observed" }),
+        );
+        let graph2 = serde_json::json!({ "version": 2, "phase": "ready-observed" });
+        write("run/native-graphs", &native, graph2.clone());
+        write(
+            "run/native-graphs",
+            &data,
+            serde_json::json!({ "version": 4, "phase": "ready-observed", "data": {}, "data_mounts": {} }),
+        );
+        write(
+            "run/native-graphs",
+            &topology,
+            serde_json::json!({ "version": 5, "phase": "ready-observed", "topology": {} }),
+        );
+        write("run/native-graphs", &environment, graph2);
+        let leases = home.dir("run/native-environment-leases");
+        fs::write(leases.join(LOCK_FILE), b"").unwrap();
+        state::write(
+            &leases.join("slot.json"),
+            &serde_json::json!({ "binding": { "run": environment } }),
+        )
+        .unwrap();
+        home.dir(&format!("run/native-graphs/{unread}"));
+        let kind = |run: &str| after_forced_stop(&home.0, run);
+        assert_eq!(kind(&compose), AfterForcedStop::HackUp);
+        assert_eq!(kind(&native), AfterForcedStop::DownRecoverThenUp);
+        for run in [&data, &topology, &environment, &unread, &absent] {
+            assert_eq!(kind(run), AfterForcedStop::StopFirst, "{run}");
+        }
+        assert_eq!(kind("not-a-run"), AfterForcedStop::StopFirst);
+        // An unreadable environment store names no command.
+        fs::write(leases.join("broken.json"), b"{").unwrap();
+        assert_eq!(kind(&native), AfterForcedStop::StopFirst);
     }
 
     #[test]

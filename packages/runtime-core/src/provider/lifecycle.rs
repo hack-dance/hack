@@ -2828,6 +2828,15 @@ fn provider_running(owner: &Owner) -> Result<bool, CandidateError> {
     }
 }
 
+pub use pool_users::AfterForcedStop;
+
+/// What brings `run` back after `runtime down --force` (or a crash) stopped the pool
+/// under it, so a refusal or the forced stop's report names only a command that works
+/// for that run (HACK-2715). Read-only and lock-free, from the run's receipt.
+pub fn after_forced_stop(candidate: &Candidate, run: &str) -> AfterForcedStop {
+    pool_users::after_forced_stop(&candidate.state_root, run)
+}
+
 pub fn down(candidate: &Candidate, on_live: LiveRuns) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
         down_observed(candidate, None, on_live)
@@ -2921,7 +2930,11 @@ fn down_observed(
     verify_live(candidate, &owner)?;
     // Stopping a running pool stops every graph's containers with the guest. Only a
     // forced down gets here with live runs (HACK-2477); it reports them, as a crash or
-    // host reboot ends the same way, and `hack up` recovers each run (HACK-2456).
+    // host reboot ends the same way. Each run's project recovers it from the ended
+    // boot: `hack up` for Compose (HACK-2456), `hack down --recover` then `hack up` for
+    // a native-authored graph2 run (HACK-2715); nothing records per run here, since the
+    // receipt's own boot and the engine's persisted stopped containers are the evidence
+    // that recovery re-proves. `after_forced_stop` names what applies to each run.
     let live = pool_users::live_graph_runs(&candidate.state_root);
     let peak = read_memory_peak(&candidate.state_root, &owner, |script, args, deadline| {
         agent::exec_until(

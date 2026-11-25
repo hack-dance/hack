@@ -23,6 +23,7 @@ mod changes_view;
 mod clipboard;
 #[cfg(hack_terminal)]
 mod command_control;
+mod config_view;
 mod copies_view;
 mod doctor_view;
 #[cfg(hack_terminal)]
@@ -35,6 +36,7 @@ mod health_fixtures;
 mod health_model;
 mod logs_view;
 mod machine_view;
+mod resource_inventory_view;
 mod resources_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
@@ -302,11 +304,20 @@ fn main() {
                                 app.show_project();
                             }
                         }
+                        if f.name().starts_with("config-") {
+                            app.show_configuration_fixture(f.name(), window, cx);
+                        }
                         if f.name().starts_with("resources-") {
                             if f.name() == "resources-unavailable" {
                                 app.simulate_daemon_unavailable(false);
                             }
                             app.show_resources(cx);
+                            if matches!(
+                                f.name(),
+                                "resources-inventory" | "resources-confirm" | "resources-partial"
+                            ) {
+                                app.show_resource_inventory_fixture(f.name());
+                            }
                         }
                         if f.name().starts_with("catalog-") {
                             app.show_catalog_fixture(f.name(), window, cx);

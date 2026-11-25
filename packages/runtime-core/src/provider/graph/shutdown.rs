@@ -54,10 +54,23 @@ pub(super) fn stop_owned(
     fence: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     let evidence = begin_stop(root, receipt)?;
+    let observed = stop_selected(engine, receipt, true)?;
+    publish_stop(root, receipt, evidence, observed, fence)
+}
+
+/// Stop the exact selected containers. Scoped rollback retains its own
+/// durable resource intent until it has verified removal.
+pub(super) fn stop_selected(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    disarm: bool,
+) -> Result<BTreeMap<String, Terminal>, CandidateError> {
     // Stop wins against engine restarts: disarm every admitted policy and
     // confirm it with a fresh observation before the first stop request. A
     // restart already pending in the engine is cancelled by the stop itself.
-    disarm_owned(engine, receipt)?;
+    if disarm {
+        disarm_owned(engine, receipt)?;
+    }
     let mut selected = Vec::new();
     for resource in receipt
         .resources
@@ -94,7 +107,7 @@ pub(super) fn stop_owned(
         }
         observed.insert(format!("container:{}", resource.key), terminal);
     }
-    publish_stop(root, receipt, evidence, observed, fence)
+    Ok(observed)
 }
 
 fn begin_stop(root: &Path, receipt: &Receipt) -> Result<Evidence, CandidateError> {

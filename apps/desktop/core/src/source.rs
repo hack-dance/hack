@@ -429,6 +429,18 @@ impl From<RunError> for CopiesError {
 }
 
 pub trait Source: Send + Sync {
+    fn resource_inventory(&self) -> Result<crate::resource_inventory::InventoryReport, String> {
+        Err("Resource inventory is unavailable for this source.".into())
+    }
+
+    fn resource_removal(
+        &self,
+        _id: &str,
+        _confirmation: Option<&str>,
+    ) -> Result<crate::resource_inventory::RemovalPlan, String> {
+        Err("Resource removal is unavailable for this source.".into())
+    }
+
     /// Preview a catalog edit, or save the exact revision previously previewed.
     ///
     /// # Errors
@@ -445,6 +457,22 @@ pub trait Source: Send + Sync {
     /// Observe the project family in the selected checkout.
     fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, CopiesError> {
         Err(RunError::NotFound.into())
+    }
+
+    fn config_read(
+        &self,
+        _root: Option<&Path>,
+        _field: crate::config_form::Field,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        Err("Configuration is unavailable")
+    }
+    fn config_write(
+        &self,
+        _report: &crate::config_form::Report,
+        _field: crate::config_form::Field,
+        _input: &str,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        Err("Configuration is unavailable")
     }
 
     /// Read names-only env metadata; diagnostics must never contain CLI output.
@@ -675,10 +703,11 @@ pub trait Source: Send + Sync {
         self.act(repo_root, native, branch, action)
     }
 
-    /// Run a service-scoped lifecycle action on a Compose instance.
+    /// Start a selected service on either backend, or stop or restart on Compose.
     fn act_on_service(
         &self,
         _repo_root: &Path,
+        _native: bool,
         _branch: Option<&str>,
         _compose_project: Option<&str>,
         _service: &str,
@@ -1941,6 +1970,77 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn resource_inventory(&self) -> Result<crate::resource_inventory::InventoryReport, String> {
+        self.runner
+            .run_schema_json(&["resources", "list", "--json"], None, Duration::from_secs(60), "hack.resources.v1")
+            .map_err(|_| "Resource inventory unavailable. Check that the selected CLI supports hack resources.".into())
+    }
+
+    fn resource_removal(
+        &self,
+        id: &str,
+        confirmation: Option<&str>,
+    ) -> Result<crate::resource_inventory::RemovalPlan, String> {
+        let mut args = vec!["resources", "remove", id, "--json"];
+        if let Some(token) = confirmation {
+            args.extend(["--confirm", token]);
+        } else {
+            args.push("--dry-run");
+        }
+        self.runner
+            .run_schema_json(
+                &args,
+                None,
+                Duration::from_secs(30),
+                "hack.resource-remove.v1",
+            )
+            .map_err(|error| match error {
+                RunError::Cli(error) => error.message,
+                _ => "Resource removal could not be confirmed. Refresh the inventory.".into(),
+            })
+    }
+
+    fn config_read(
+        &self,
+        root: Option<&Path>,
+        field: crate::config_form::Field,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        let root = root
+            .map(|path| trusted_root(path).map_err(|_| "Checkout unavailable"))
+            .transpose()?;
+        let runner = self.runner.fixed();
+        let mut report = crate::config_form::read(&runner, root, field)?;
+        if field.kind == crate::config_form::Kind::Overlay
+            && let Some(root) = report.root.as_deref()
+            && let crate::env::EnvView::Report(env) = self.env(root, false)
+        {
+            report.names = env
+                .overlays
+                .iter()
+                .map(|overlay| overlay.name.clone())
+                .collect();
+        }
+        Ok(report)
+    }
+
+    fn config_write(
+        &self,
+        report: &crate::config_form::Report,
+        field: crate::config_form::Field,
+        input: &str,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        let runner = self.runner.fixed();
+        if runner.resolve_program().ok().as_ref() != Some(&report.executable) {
+            return Err("The selected CLI changed. Check again.");
+        }
+        if let Some(root) = &report.root
+            && trusted_root(root).ok().as_ref() != Some(root)
+        {
+            return Err("The checkout changed. Check again.");
+        }
+        crate::config_form::write(&runner, report, field, input)
+    }
+
     fn open_logs(
         &self,
         repo_root: &Path,
@@ -2332,6 +2432,7 @@ impl Source for LiveSource {
     fn act_on_service(
         &self,
         repo_root: &Path,
+        native: bool,
         branch: Option<&str>,
         compose_project: Option<&str>,
         service: &str,
@@ -2342,7 +2443,7 @@ impl Source for LiveSource {
         // `--service=<name>` always stays the value of the service selector.
         let stop_option = format!("--service={service}");
         let mut args = match action {
-            Action::Stop => vec![
+            Action::Stop if !native => vec![
                 "down",
                 "--json",
                 "--no-interactive",
@@ -2350,12 +2451,20 @@ impl Source for LiveSource {
                 "local",
                 &stop_option,
             ],
+            Action::Start if native => {
+                validate_branch(service)?;
+                let mut args = with_branch(Action::Start.cli_args(), branch);
+                args.push(service);
+                return Ok(self
+                    .runner_for(true)
+                    .run_json_to_completion(&args, Some(&root))?);
+            }
             Action::Start if !service.is_empty() && !service.starts_with('-') => {
                 let mut args = Action::Start.cli_args().to_vec();
                 args.extend(["--target", "local", service]);
                 args
             }
-            Action::Restart if !service.is_empty() && !service.starts_with('-') => {
+            Action::Restart if !native && !service.is_empty() && !service.starts_with('-') => {
                 vec![
                     "restart",
                     "--json",
@@ -5685,6 +5794,44 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
         let lines: Vec<String> = a.lines().map(str::to_owned).collect();
         let _ = std::fs::remove_file(dir.join("argv"));
         lines
+    }
+
+    #[test]
+    fn catalog_start_uses_native_runner_and_preserves_branch() {
+        let b = std::fs::canonicalize(base("catalog-native-argv")).unwrap();
+        let hack = b.join("hack");
+        crate::test_support::script(
+            &hack,
+            "#!/bin/sh\nprintf '%s\n' \"$HACK_RUNTIME_BACKEND\" \"$@\" > \"$HACK_HOME/argv\"\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
+        );
+        let source = LiveSource::new(fixture_runner(&hack), None);
+        let project = b.join("project");
+        make_project(&project, ".hack", "docker-compose.yml");
+        let result = source.act_on_service(
+            &project,
+            true,
+            Some("test"),
+            Some("copy"),
+            "redis",
+            Action::Start,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let args = argv(&b);
+        assert_eq!(
+            args,
+            [
+                "native",
+                "up",
+                "--branch",
+                "test",
+                "--detach",
+                "--json",
+                "--no-interactive",
+                "redis",
+                "--path",
+                project.to_str().unwrap(),
+            ]
+        );
     }
 
     #[test]

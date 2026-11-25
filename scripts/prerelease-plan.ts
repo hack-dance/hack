@@ -344,6 +344,9 @@ export const PRERELEASE_CI_JOBS = [
   "Config compiler (macos-15-intel)",
 ] as const;
 
+// ci.yml's compose-upgrade-trial `if:` requires workflow_dispatch and inputs.compose_upgrade_trial.
+const PRERELEASE_OPT_IN_CI_JOBS = ["compose-upgrade-trial"] as const;
+
 /** Markers are executed steps of the existing fan-in, not inferred from a run's color. */
 export function ciEvidence(jobs: unknown) {
   const fanins = array(jobs)
@@ -431,9 +434,16 @@ export function requireExactHeadCi({
     }
   }
   if (
-    completed.some(
-      (job) => job.status !== "completed" || job.conclusion !== "success"
-    )
+    completed.some((job) => {
+      const skippedOptIn =
+        branch === "next" &&
+        job.conclusion === "skipped" &&
+        PRERELEASE_OPT_IN_CI_JOBS.some((name) => name === job.name);
+      return (
+        job.status !== "completed" ||
+        (job.conclusion !== "success" && !skippedOptIn)
+      );
+    })
   ) {
     throw new Error(
       "Every job in the exact-head CI run must succeed without skips"

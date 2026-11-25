@@ -256,6 +256,44 @@ fn observe(
 }
 
 #[test]
+#[ignore = "Requires an owned, running development VM"]
+fn foreground_relay_rejects_a_stale_pool_boot() {
+    let candidate =
+        Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap())).unwrap();
+    let stale_boot = {
+        let engine = graph::Engine::connect(&candidate).unwrap();
+        // A valid UUID different from the one verified by this engine.
+        if engine.guest().boot_id() == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" {
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        } else {
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        }
+    };
+    let mut random = [0; 16];
+    fs::File::open("/dev/urandom")
+        .unwrap()
+        .read_exact(&mut random)
+        .unwrap();
+    let run: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    let result = graph::HostRelayRuntime::new_for_run_in_boot(
+        &candidate,
+        Path::new("/tmp/unused-control-only-artifact"),
+        &"a".repeat(64),
+        Vec::new(),
+        &run,
+        true,
+        Some(stale_boot),
+    );
+    assert!(matches!(result, Err(error) if error.code == "graph_startup_pool_boot"));
+    assert!(
+        !graph::directory(&candidate, &run)
+            .unwrap()
+            .join("state.json")
+            .exists()
+    );
+}
+
+#[test]
 #[ignore = "Owned development VM, pinned image, matching environment-launcher candidate CLI, external watchdog required"]
 fn private_owner_restore_preserves_data_and_retires_values() {
     let deadline = Instant::now() + Duration::from_secs(80);
@@ -485,7 +523,9 @@ fn private_owner_restore_preserves_data_and_retires_values() {
     transport::write(
         &mut socket,
         &WireRequest {
+            cancel_append: false,
             version: 1,
+            extend: None,
             refresh_dependencies: None,
             run: run.clone(),
             remove_data: None,
@@ -564,3 +604,5 @@ mod retired_recovery_cleanup;
 mod same_boot_absent_relay;
 mod same_boot_recovery;
 mod source_device_rebind;
+
+mod targeted_start;

@@ -134,8 +134,10 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     pub(crate) tab: usize,
+    pub(crate) resource_inventory: crate::resource_inventory_view::InventoryPane,
     pub(crate) sidebar_menu: Option<String>,
     pub(crate) changes: crate::changes_view::ChangesPane,
+    pub(crate) configuration: crate::config_view::Configuration,
     pub(crate) catalog: crate::service_catalog::ServiceCatalog,
     pub(crate) service_pane: crate::service_view::ServicePane,
     pub(crate) service_focus: gpui_kit::FocusHandle,
@@ -222,13 +224,26 @@ impl HackApp {
             }
         })
         .detach();
+        let config_input = cx.new(|cx| InputState::new(window, cx).placeholder("Setting value"));
+        cx.subscribe(
+            &config_input,
+            |this: &mut HackApp, _, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.configuration.clear_feedback();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let mut this = Self {
             model: AppModel::new(),
             source,
             logs,
             tab: 0,
+            resource_inventory: Default::default(),
             sidebar_menu: None,
             changes: Default::default(),
+            configuration: crate::config_view::Configuration::new(config_input),
             catalog: crate::service_catalog::ServiceCatalog {
                 input: catalog_input,
                 selected: 0,
@@ -495,6 +510,7 @@ impl HackApp {
             self.sidebar_menu = None;
         }
         if selection_changed {
+            self.configuration.invalidate_project();
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
             self.files = Default::default();
@@ -780,13 +796,14 @@ impl HackApp {
         if !valid_service {
             return;
         }
-        self.dispatch_service_action(key, root, service, action, cx);
+        self.dispatch_service_action(key, root, false, service, action, cx);
     }
 
     pub(crate) fn dispatch_service_action(
         &mut self,
         key: InstanceKey,
         root: PathBuf,
+        native: bool,
         service: &str,
         action: Action,
         cx: &mut Context<Self>,
@@ -809,6 +826,7 @@ impl HackApp {
                 .spawn(async move {
                     source.act_on_service(
                         &root,
+                        native,
                         branch.as_deref(),
                         compose_project.as_deref(),
                         &service,
@@ -1179,6 +1197,7 @@ impl HackApp {
         if before != after {
             self.clear_selected_service();
             self.model.source_changed();
+            self.configuration.invalidate();
             self.changes = Default::default();
             self.action_started.clear();
             self.copies = Default::default();
@@ -1368,6 +1387,13 @@ impl HackApp {
                     .on_click(cx.listener(|this, _, _, cx| this.show_resources(cx))),
             )
             .child(
+                machine_row("configuration", Glyph::Pencil, "Configuration", div(), ui)
+                    .when(self.pane == Pane::Configuration, |d| d.bg(p.surface_1))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_configuration(window, cx)),
+                    ),
+            )
+            .child(
                 machine_row(
                     "doctor",
                     Glyph::Stethoscope,
@@ -1405,6 +1431,7 @@ impl HackApp {
     pub(crate) fn show_resources(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Resources;
         self.user_navigated();
+        self.refresh_resource_inventory(cx);
         cx.notify();
     }
 
@@ -2116,12 +2143,18 @@ impl Render for HackApp {
             None
         };
         let main: AnyElement = match &list.phase {
+            _ if self.pane == Pane::Configuration => self.render_configuration(&ui, cx),
             _ if self.pane == Pane::BannersSheet => crate::health_fixtures::banners(&ui, cx),
             _ if self.pane == Pane::ErrorsSheet => {
                 crate::health_fixtures::errors(self, &ui, window, cx)
             }
             // Setup applies whatever the project list shows, a missing CLI
             // included.
+            _ if self.pane == Pane::Resources
+                && (self.live || self.resource_inventory.report.is_some()) =>
+            {
+                crate::resource_inventory_view::render(self, &ui, cx).into_any_element()
+            }
             _ if self.pane == Pane::Resources => crate::resources_view::render(self, &ui, cx),
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),

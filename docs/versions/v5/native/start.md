@@ -112,6 +112,52 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+For a native project backed by a Compose file, use `hack up redis` or pass
+several service names to start that selection and its `depends_on` dependencies.
+Hack adds them to the current run if the project is already up. Running services
+keep their container IDs and publications, and `hack ps` shows the combined run.
+`hack up redis --json` uses the same lifecycle fields as a targeted Compose
+start. An unknown service returns `E_SERVICE_NOT_FOUND`.
+
+A later plain `hack up` starts the other active services. An already-owned
+stopped service starts again. Running services keep the settings they started
+with. Hack reports a warning if a selected running service's Compose declaration
+changed. On native, use `hack restart` to apply those changes. If the owner is
+still warming or starting another selection, a second targeted start returns
+`E_NATIVE_STILL_STARTING` through the owner. Use `hack ps` to check its progress
+and retry.
+
+Adding routes or loopback ports requires enough free bridge sockets in the
+running pool. Hack checks capacity before recording or creating the selected
+services. Adding host relay bindings still requires a fresh graph start.
+
+On failure, the owner tries to remove the new resources and returns previously
+stopped services to a stopped state with their routes and loopback ports closed.
+A retry can start and publish those services again. If the owner cannot confirm
+rollback, `hack ps` reports a degraded run and shows the service states it can
+verify. Restart supervision continues for services outside the failed start.
+Ctrl-C asks the owner to cancel the append. `up` prints the number of services it
+may need to roll back. Its wait budget covers their stop grace periods in sequence,
+plus time for the owner to notice the cancellation and finish cleanup. If the owner
+confirms rollback, `up` reports cancellation and exits
+130. A second Ctrl-C ends the wait while the owner continues cleanup. If the
+append committed or `up` stops waiting without confirmation, it reports
+`E_NATIVE_START_OUTCOME_UNKNOWN` and asks you to check `hack ps`.
+
+`hack down` cancels the start and stops the whole run, including any service
+created midway. The owner can answer after an in-flight image inspection,
+volume preparation or container operation settles. Confirmed
+`hack down --remove-data` during a service append also cancels it and stops
+the run, then removes its owned volumes once the stop is confirmed.
+If the owner exited, use
+`hack down --recover`. Recovery uses the last committed receipt for cleanup
+and keeps interrupted writes as evidence. After a retaining `down`, `ps` shows
+`stopped-data-retained`. A later `up` selects services from the current Compose
+review and reattaches the named data that those services still use.
+
+After this version, older prereleases cannot read run receipts. Run `hack down`
+before downgrading.
+
 **Build base registry refusal (`registry_image`).** Foreground and detached
 starts can report `Image unavailable: could not resolve build base` when the
 registry cannot resolve a Dockerfile base. Check the reported reason, restore
@@ -141,6 +187,11 @@ the owner retires the ports it has already published. HTTPS addresses still
 depend on the HTTPS frontend being ready.
 Once HTTPS is ready for a project, starting or stopping another project in the
 same native home leaves its routes available.
+
+If the VM provider exits unexpectedly, run `hack up -d` again to recover the
+project with its data retained. The new start owns the replacement boot and
+keeps its HTTPS routes and loopback ports served after recovery.
+
 Text output reports each build as it finishes, including its service names,
 outcome and elapsed time. Build output stays with foreground `hack up`.
 See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the

@@ -4,12 +4,38 @@ Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
 repository, so teammates and agents use the same definition.
 
-In the desktop preview, **Resources** lists observed containers and their
-attached image, named volumes and networks by project and branch. Open a
-project for its normal lifecycle actions, open its Compose logs, or go to
-**Doctor** for cleanup guidance and the native-pool state. The Resources pane
-is read-only. Detached resources and disk usage require a broader Hack
-inventory report.
+Use `hack resources list --json` or the desktop **Resources** pane to
+inspect observed containers and attachments. The report includes Docker's
+disk-size estimates, the native home's allocated bytes, and retained native
+volume observations where available. Inspect a resource to see its project
+and branch, open available Compose logs, or go to **Doctor** for cleanup
+guidance and native pool status. A detached row has no known checkout or runtime mapping for its Compose project.
+
+Use `hack resources remove volume:<name> --dry-run --json` to review removal,
+then pass its token with `--confirm`. Interactive removal prompts before
+deleting. The desktop presents the same preview and requires explicit
+confirmation. Cleanup requires a matching launch receipt and fresh engine
+evidence, so growing the inventory alone never grants cleanup permission.
+A named Compose volume needs zero container references, no registry or run
+mapping for its Compose project name, and verified absence of every checkout
+that launched that instance. Missing or changed checkout parents block
+removal. A stopped container of an active project also stays protected.
+A checkout moved to a new path where Hack has never launched it can count as
+detached after its old registry entry is pruned. Hack only knows paths it has
+recorded.
+
+Hack serializes its own operations by Compose project name. Docker has no
+compare-and-delete by volume identity. An out-of-band recreation in the final
+instant between identity validation and removal can delete the replacement
+volume. Docker's non-forced removal still refuses a volume mounted by any
+container, including a stopped one.
+
+Native runs are discovered in the selected native home, including authored
+projects and Compose projects absent from the registry. Inventory uses the
+run's display receipt to identify the checkout and branch. Earlier runs
+without that receipt, missing checkouts, and an unavailable pool are reported
+as partial. Retained volumes with an unidentified owner appear without a
+project name. Native persistent data remains protected for graph restore.
 
 ## Project, instance and branch instance
 

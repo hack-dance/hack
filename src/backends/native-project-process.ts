@@ -127,6 +127,8 @@ export async function serveNativeProjectGraph(
     readonly onReady: () => Promise<void>;
     /** Every goal met and every route published, after a started return. */
     readonly onAllReady?: () => void;
+    /** A targeted start committed additional route publications. */
+    readonly onRoutesAdded?: () => void;
   }
 ): Promise<number> {
   const started = opts.returnAtStarted === true;
@@ -173,6 +175,17 @@ export async function serveNativeProjectGraph(
     onEvent: (line) => {
       if (started && ownerFrame(line, "graph_foreground_ready", opts.run)) {
         opts.onAllReady?.();
+        return;
+      }
+      if (
+        ownerFrame(
+          line,
+          "graph_foreground_routes_added",
+          opts.run,
+          "ready-observed"
+        )
+      ) {
+        opts.onRoutesAdded?.();
         return;
       }
       const notice = nativePublisherExitNotice(line, opts.run);

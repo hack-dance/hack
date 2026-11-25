@@ -1,4 +1,5 @@
 //! Audit capabilities omitted by SmolVM's retained running configuration.
+use super::PoolLayout;
 use super::state::Owner;
 use crate::{Candidate, CandidateError, reject_aliased_state};
 use rusqlite::{Connection, OpenFlags};
@@ -56,6 +57,7 @@ pub(super) fn verify_value(
         return Err(invalid());
     }
     verify_record(
+        owner.socket_layout,
         record,
         &owner.machine,
         &owner.token,
@@ -126,6 +128,7 @@ pub(super) fn pin_created_network(
     }
     let network = owner.network.pin(&record)?;
     verify_record(
+        owner.socket_layout,
         &record,
         &owner.machine,
         &owner.token,
@@ -207,7 +210,15 @@ fn verify_database(
     network: super::NetworkIntent,
 ) -> Result<(), CandidateError> {
     let record = read_database(path, machine)?;
-    verify_record(&record, machine, token, bridge, dependencies, network)
+    verify_record(
+        PoolLayout::Legacy,
+        &record,
+        machine,
+        token,
+        bridge,
+        dependencies,
+        network,
+    )
 }
 
 pub(super) fn read_database(path: &Path, machine: &str) -> Result<Value, CandidateError> {
@@ -261,6 +272,7 @@ pub(super) fn read_database(path: &Path, machine: &str) -> Result<Value, Candida
 }
 
 fn verify_record(
+    layout: PoolLayout,
     record: &Value,
     machine: &str,
     token: &str,
@@ -271,10 +283,10 @@ fn verify_record(
     network.verify(record)?;
     super::dependency_socket::check_capacity(bridge, dependencies.map(|(intent, _)| intent))
         .map_err(|_| invalid())?;
-    let mut mappings = super::BridgeIntent::mappings(bridge);
+    let mut mappings = super::BridgeIntent::mappings(layout, bridge);
     if let Some((intent, home)) = dependencies {
         super::DependencySocketIntent::new(intent.slots).map_err(|_| invalid())?;
-        let values = intent.mappings(home);
+        let values = intent.mappings(layout, home);
         mappings
             .as_array_mut()
             .ok_or_else(invalid)?
@@ -662,6 +674,7 @@ mod tests {
         bridge: Option<super::super::BridgeIntent>,
     ) -> Result<(), CandidateError> {
         verify_record(
+            PoolLayout::Legacy,
             record,
             machine,
             token,
@@ -702,6 +715,7 @@ mod tests {
         ]);
         let verify = |record: &Value| {
             verify_record(
+                PoolLayout::Legacy,
                 record,
                 "owned",
                 "token",
@@ -779,6 +793,7 @@ mod tests {
         let path = std::env::var("HACK_TEST_PROVIDER_GATEWAY_RECORD").unwrap();
         let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         verify_record(
+            PoolLayout::Legacy,
             &record,
             "probe",
             "synthetic-owner",
@@ -792,6 +807,7 @@ mod tests {
         altered["allowed_cidrs"] = json!(["0.0.0.0/0"]);
         assert!(
             verify_record(
+                PoolLayout::Legacy,
                 &altered,
                 "probe",
                 "synthetic-owner",
@@ -1108,5 +1124,29 @@ mod tests {
         verify_isolated_database(&path, "owned", "token", None).unwrap();
         drop(connection);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn compact_mappings_are_audited_only_in_the_selected_layout() {
+        let bridge = Some(crate::provider::BridgeIntent::new(1).unwrap());
+        let dependencies = crate::provider::DependencySocketIntent::new(1).unwrap();
+        let home = Path::new("/fixture");
+        let mut record = fixture();
+        record["published_sockets"] = json!([
+            {"direction":"expose","guest_path":"/run/hb/00"},
+            {"direction":"mount","host_path":"/fixture/dependency-00.sock","guest_path":"/run/hd/00"}
+        ]);
+        let verify = |layout| {
+            verify_record(
+                layout,
+                &record,
+                "owned",
+                "token",
+                bridge,
+                Some((dependencies, home)),
+                crate::provider::NetworkIntent::Isolated,
+            )
+        };
+        verify(PoolLayout::CompactV1).unwrap();
+        assert!(verify(PoolLayout::Legacy).is_err());
     }
 }

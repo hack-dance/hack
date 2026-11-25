@@ -65,6 +65,7 @@ jobs:
         with:
           name: stable-package-${{ matrix.target }}
           if-no-files-found: error
+          retention-days: 7
           compression-level: 0
           path: |
             dist/release/hack-*.tar.gz

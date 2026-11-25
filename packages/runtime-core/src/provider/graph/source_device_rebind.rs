@@ -711,14 +711,16 @@ mod tests {
         fs::write(fixture.0.join("compose.yaml"), "services: {}\n").unwrap();
         let candidate = Candidate::discover(&fixture.0).unwrap();
         let share = ProjectShareIntent::approve(&fixture.0, true).unwrap();
-        let mut owner = state::Owner::create(
+        let mut owner = state::Owner::create_with_project_share(
             &candidate,
             crate::provider::Profile::Research,
             None,
             crate::provider::NetworkIntent::Isolated,
+            None,
+            Some(share),
         )
         .unwrap();
-        owner.project_share = Some(share.clone());
+        let share = owner.project_share.clone().unwrap();
         owner.guest_boot_id = Some("new".into());
         owner.save(&candidate).unwrap();
         struct Alias(PathBuf, PathBuf);

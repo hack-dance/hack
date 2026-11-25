@@ -192,3 +192,36 @@ test("explicit host aliases preserve existing declarations and still require sep
     })
   ).toThrow("conflicts");
 });
+
+test("targeted review keeps an adapted probe for a selected running dependency", () => {
+  const adapted = adaptNativeProject({
+    input: {
+      ...input(),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { image: "example/app" },
+          worker: {
+            image: "example/worker",
+            depends_on: { web: { condition: "service_healthy" } },
+          },
+        },
+      }),
+      omittedServiceSpecs: new Set(["web", "unrelated"]),
+    },
+    selection: {
+      version: 1,
+      httpProbes: {
+        web: { port: 3000, path: "/health" },
+        unrelated: { port: 3001, path: "/health" },
+      },
+      additionalHostnames: { web: ["extra.example.test"] },
+    },
+  });
+  const compose = JSON.parse(adapted.normalizedComposeJson);
+  expect(compose.services.web.healthcheck["x-hack-http"]).toMatchObject({
+    port: 3000,
+    path: "/health",
+  });
+  expect(compose.services.web.labels).toBeUndefined();
+  expect(compose.services.unrelated).toBeUndefined();
+});

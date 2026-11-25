@@ -113,6 +113,14 @@ export const PUBLISHED_RELEASES: Readonly<
     manager: "892c4cdf3a99e309df4b4d406f7e76e2b422b72f4dd2a47bef1f0b36dd29ee27",
     archive: "b77eb0908d62db66fda707ec66e2c237ae217ea340b128ebafcb57d0ee60e59d",
   },
+  "5.0.0-next.25": {
+    manager: "dfba3ea7bfcfbeffd5de38e0d3b0818657912764cd184d949e04deec00edb153",
+    archive: "01f5a7a469a6087c78a1491a9ac82feffb48018a534fa227a8a636e1b8c3aed1",
+  },
+  "5.0.0-next.26": {
+    manager: "8467fe1b4ff48074ab1fd8d1ad96dcbc9f72639de9432dae59b1817fa9f97748",
+    archive: "3146de32ea692882f9be489ce4f6fc2bc264ea7cdc9905ad1388305281e84718",
+  },
 };
 
 /**
@@ -160,6 +168,34 @@ export const PUBLISHED_LINUX_RELEASES: Readonly<
         "f52beab69e5ec62e237da74ae64a0cdef7887bcae51380ca6a0270e4b45e4d27",
       archive:
         "1636630b2a378c8d3aeb97f8015cd3c8d61c3db4d8a6e49637085d020ad7fbf6",
+    },
+  },
+  "5.0.0-next.25": {
+    "linux-x86_64": {
+      manager:
+        "6219e16a7b2d3eb83eaa440315829c4d77fb20af0f74664d04d8491899ea6404",
+      archive:
+        "30a79d0df88a947df76f229eee658dd40c7b2ab0faf42345c5ee3a71ba683912",
+    },
+    "linux-arm64": {
+      manager:
+        "a07bd7d5cd8cf6c0788c1ab2d9cd29d481850e73065709683d3c2c372182fbc4",
+      archive:
+        "9cd6943ccab29d18c7facd29051a1910b6a8e7e12f1ce5ed921a55e1e352bf44",
+    },
+  },
+  "5.0.0-next.26": {
+    "linux-x86_64": {
+      manager:
+        "03a03c78db05cfe0e60504e6cdbc27816398fdd310a984fa09058f037c966179",
+      archive:
+        "264a1143728f2616844a5b1c7502d54f76accfb12f1f7f401ce240ae1fffac66",
+    },
+    "linux-arm64": {
+      manager:
+        "3a4c3eca6e3c6df615342a3e4b39ac2dae2dd74d6b74e001595d87f7d244e4d9",
+      archive:
+        "b25ed73e6ef0e6a045b2d426bab31e613a2e78742298bbf88e3388809f6048f7",
     },
   },
 };

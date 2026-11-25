@@ -95,6 +95,19 @@ fn assert_legacy_serialization(report: &PlanReport) {
 const OPTIONAL: &str = "services:\n  app:\n    image: alpine:3.21\n    depends_on:\n      db:\n        condition: service_healthy\n        required: false\n      cache:\n        condition: service_started\n  cache:\n    image: alpine:3.21\n  db:\n    image: alpine:3.21\n    profiles: [database]\n    healthcheck:\n      test: [CMD, 'true']\n";
 
 #[test]
+fn plan_exposes_the_parsed_compose_stop_grace_for_append_cancellation() {
+    let fixture = Fixture::new(
+        "services:\n  worker:\n    image: alpine:3.21\n    stop_grace_period: 1s250ms\n  other:\n    image: alpine:3.21\n",
+    );
+    let plan = fixture.plan().plan;
+    assert_eq!(
+        plan.services["worker"].stop_grace_period_nanos,
+        Some(1_250_000_000)
+    );
+    assert_eq!(plan.services["other"].stop_grace_period_nanos, None);
+}
+
+#[test]
 fn optional_dependency_on_an_inactive_service_is_skipped_with_a_warning() {
     let fixture = Fixture::new(OPTIONAL);
     let report = fixture.plan();

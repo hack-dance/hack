@@ -1,4 +1,5 @@
 //! Explicit guest-to-host transport capacity, never application authorization.
+use super::PoolLayout;
 use super::state;
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,8 @@ use std::{
 
 pub mod quiescent_recovery;
 pub mod recovery;
+
+pub(super) const MAX_POOL_SOCKETS: u8 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,9 +30,9 @@ impl DependencySocketIntent {
         }
         Ok(Self { slots })
     }
-    pub(super) fn mappings(self, home: &Path) -> Value {
+    pub(super) fn mappings(self, layout: PoolLayout, home: &Path) -> Value {
         json!(
-            self.paths(home)
+            self.paths(layout, home)
                 .into_iter()
                 .map(|path| json!({
                     "direction":"mount", "host_path":path.host_path, "guest_path":path.guest_path
@@ -37,12 +40,12 @@ impl DependencySocketIntent {
                 .collect::<Vec<_>>()
         )
     }
-    pub(super) fn paths(self, home: &Path) -> Vec<DependencySocketPath> {
+    pub(super) fn paths(self, layout: PoolLayout, home: &Path) -> Vec<DependencySocketPath> {
         (0..self.slots)
             .map(|slot| DependencySocketPath {
                 slot,
                 host_path: home.join(format!("dependency-{slot:02}.sock")),
-                guest_path: format!("/run/hack-dependencies/dependency-{slot:02}.sock"),
+                guest_path: layout.dependency(slot),
             })
             .collect()
     }
@@ -81,7 +84,7 @@ pub(super) fn check_capacity(
         super::BridgeIntent::new(intent.slots)?;
     }
     if u16::from(bridge.map_or(0, |v| v.slots)) + u16::from(dependencies.map_or(0, |v| v.slots))
-        > 32
+        > u16::from(MAX_POOL_SOCKETS)
     {
         return Err(refused(
             "Combined application and dependency socket capacity exceeds 32.",
@@ -151,7 +154,7 @@ pub fn dependency_socket_paths(
     guest.verify()?;
     Ok(owner
         .dependency_sockets
-        .map(|intent| intent.paths(&owner.short_home))
+        .map(|intent| intent.paths(owner.socket_layout, &owner.short_home))
         .unwrap_or_default())
 }
 
@@ -164,7 +167,7 @@ pub(super) fn observe(
     };
     DependencySocketIntent::new(intent.slots)?;
     let home = candidate.state_root.join("run/smolvm/home");
-    observe_paths(&home, intent.paths(&owner.short_home))
+    observe_paths(&home, intent.paths(owner.socket_layout, &owner.short_home))
 }
 
 fn observe_paths(
@@ -253,7 +256,7 @@ mod tests {
         assert!(check_capacity(Some(super::super::BridgeIntent::new(31).unwrap()), one).is_ok());
         assert!(check_capacity(Some(super::super::BridgeIntent::new(32).unwrap()), one).is_err());
         assert_eq!(
-            intent.mappings(Path::new("/private/owned")),
+            intent.mappings(PoolLayout::Legacy, Path::new("/private/owned")),
             json!([
                 {"direction":"mount","host_path":"/private/owned/dependency-00.sock","guest_path":"/run/hack-dependencies/dependency-00.sock"}
             ])
@@ -263,7 +266,7 @@ mod tests {
     fn socket_metadata_never_claims_listener_or_application_readiness() {
         let fixture = Fixture::new();
         let intent = DependencySocketIntent::new(1).unwrap();
-        let observe = || observe_paths(&fixture.0, intent.paths(&fixture.0));
+        let observe = || observe_paths(&fixture.0, intent.paths(PoolLayout::Legacy, &fixture.0));
         let absent = observe().unwrap();
         assert!(absent[0].socket_identity.is_none());
         assert!(!absent[0].application_ready);

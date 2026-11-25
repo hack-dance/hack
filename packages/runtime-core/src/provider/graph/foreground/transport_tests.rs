@@ -2,6 +2,73 @@ use super::*;
 use crate::owned_tmp_root::OwnedTmpRoot;
 use serde_json::json;
 
+fn append_request(version: u8) -> WireRequest {
+    serde_json::from_value(json!({
+        "version":version, "run":"a".repeat(32),
+        "extend":{"generation":"b".repeat(64),"project":"project","file":"compose.yaml",
+            "profiles":[],"namespace":"c".repeat(64),"original_hash":"d".repeat(64),
+            "plan":"e".repeat(64),"compose":"{}","shared_source":false,"readiness":{},
+            "routes":[],"timeout_seconds":30}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn extension_frame_leaves_the_socket_live_until_the_client_disconnects() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let request = append_request(2);
+    write_extension(&client, &request, Duration::from_secs(1)).unwrap();
+    assert!(
+        read_request(&server, Duration::from_secs(1))
+            .unwrap()
+            .extend
+            .is_some()
+    );
+    let watch = AppendClientWatch::new(&server).unwrap();
+    assert!(!watch.disconnected());
+    drop(client);
+    assert!(watch.disconnected());
+}
+
+#[test]
+fn extension_write_half_close_requests_cancel_but_keeps_rollback_reply_readable() {
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let budget = Duration::from_secs(1);
+    write_extension(&client, &append_request(2), budget).unwrap();
+    let request = read_request(&server, budget).unwrap();
+    let watch = AppendClientWatch::new(&server).unwrap();
+    assert!(!watch.disconnected());
+
+    client.shutdown(Shutdown::Write).unwrap();
+    assert!(watch.disconnected());
+    let reply = json!({"ok":false,"run":request.run,"code":"graph_cancelled"});
+    write(&mut server, &reply, budget).unwrap();
+    assert_eq!(
+        read::<serde_json::Value>(&mut client, budget, 1024).unwrap(),
+        reply
+    );
+}
+
+#[test]
+fn legacy_append_gets_an_explicit_version_refusal() {
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let budget = Duration::from_secs(1);
+    let mut legacy = serde_json::to_value(append_request(1)).unwrap();
+    legacy["extend"]["combined"] =
+        json!({"plan_id":"1".repeat(64),"normalized_sha256":"2".repeat(64)});
+    write(&mut client, &legacy, budget).unwrap();
+    let request = read_request(&server, budget).unwrap();
+    assert!(super::super::service_start::refuse_legacy_append(
+        &mut server,
+        &request
+    ));
+    let reply: serde_json::Value = read(&mut client, budget, 1024).unwrap();
+    assert_eq!(reply["ok"], false);
+    assert_eq!(reply["run"], request.run);
+    assert_eq!(reply["code"], "graph_append_protocol_version");
+    assert!(reply["message"].as_str().unwrap().contains("5.0.0-next.26"));
+}
+
 #[test]
 fn publication_refuses_a_replaced_operation_lock_and_preserves_it() {
     let fixture = super::super::super::tests::Fixture::new();
@@ -551,15 +618,29 @@ fn replaced_socket_or_inherited_listener_refuses_retirement() {
 
 #[test]
 fn framed_half_close_keeps_job_client_alive_until_reader_closes() {
-    let (mut client, mut server) = UnixStream::pair().unwrap();
-    let watch = ClientWatch::new(&server).unwrap();
-    write(
-        &mut client,
-        &json!({"version":1,"run":"owned","remove_data":null}),
-        Duration::from_secs(1),
-    )
-    .unwrap();
-    let _: serde_json::Value = read(&mut server, Duration::from_secs(1), REQUEST_LIMIT).unwrap();
+    assert_live_half_close(json!({
+        "version":1,"run":"owned","remove_data":null,
+        "job":{"service":"web","command":{
+            "plan":"plan","generation":"generation","boot":"boot","argv":["true"],
+            "workdir":null,"timeout_seconds":30,"environment":"fixture input"
+        }}
+    }));
+}
+
+#[test]
+fn framed_half_close_keeps_dependency_refresh_client_alive_until_reader_closes() {
+    assert_live_half_close(json!({
+        "version":1,"run":"owned","remove_data":null,
+        "refresh_dependencies":{"plan":"plan","generation":"generation","boot":"boot"}
+    }));
+}
+
+fn assert_live_half_close(request: serde_json::Value) {
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let budget = Duration::from_secs(1);
+    write(&mut client, &request, budget).unwrap();
+    read_request(&server, budget).unwrap();
+    let watch = ClientWatch::half_closed(&server).unwrap();
     assert!(!watch.disconnected());
     drop(client);
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -600,7 +681,9 @@ fn legacy_requests_and_private_schema_are_strict() {
 fn maximum_private_text_roundtrips_with_bounded_escaped_frame() {
     let private = "\\".repeat(PRIVATE_LIMIT);
     let request = WireRequest {
+        cancel_append: false,
         version: 1,
+        extend: None,
         refresh_dependencies: None,
         run: "a".repeat(32),
         remove_data: None,

@@ -47,6 +47,12 @@ import {
   refuseRemoteStart,
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
+import {
+  type CheckoutWitness,
+  readComposeContainerIds,
+  recordComposeResourceReceipts,
+  recordResourceCheckout,
+} from "../lib/resource-receipts.ts";
 import { printUpTimings } from "../lib/up-timings-output.ts";
 import {
   selectLifecycleAddress,
@@ -172,6 +178,7 @@ import {
 } from "../backends/native-runtime-client.ts";
 import { requireNativeSetup } from "../backends/native-runtime-setup.ts";
 import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
+import { NativeUnknownServiceError } from "../backends/native-service-selection.ts";
 import {
   buildComposeArgs,
   composeRuntimeBackend,
@@ -462,6 +469,7 @@ import {
   runLokiSnapshotWithFallback,
 } from "../lib/logs.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
+import { nativeAppendRollbackMessage } from "../lib/native-append-cancellation.ts";
 import {
   readNativeComposeDocument,
   refuseNativeComposeBackendFeatures,
@@ -903,7 +911,7 @@ const downOptions = [
     type: "boolean",
     long: "--remove-data",
     description:
-      "Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first)",
+      "Native backend: delete owned data volumes after confirmed stop (can cancel a service append, asks first)",
   } as const),
   optYes,
   optJson,
@@ -1085,7 +1093,7 @@ export const initCommand = withHandler(initSpec, handleInit);
 
 const upSpec = defineCommand({
   name: "up",
-  summary: "Start project services (docker compose up)",
+  summary: "Start the project or selected services",
   group: "Project",
   options: upOptions,
   positionals: serviceLifecyclePositionals,
@@ -6949,7 +6957,9 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
       return;
     case "stopping":
       logger.step({
-        message: "Stopping the native project; waiting for owned cleanup…",
+        message: event.appendRollback
+          ? nativeAppendRollbackMessage(event.appendRollback.services)
+          : "Stopping the native project; waiting for owned cleanup…",
       });
       return;
     case "stopped":
@@ -7060,6 +7070,9 @@ async function handleNativeUp({
     ReturnType<typeof resolveNativeRuntimeSelection>
   >;
 }): Promise<number> {
+  const targets = args.positionals.services?.length
+    ? [...new Set(args.positionals.services)]
+    : undefined;
   refuseUnsupportedNativeUpOptions({
     restart,
     detach: args.options.detach,
@@ -7077,6 +7090,13 @@ async function handleNativeUp({
     projectOpt: args.options.project,
     touchRegistration: false,
   });
+  if (targets) {
+    const available = await readComposeServiceNames(project.composeFile);
+    const unknown = targets.find((target) => !available.includes(target));
+    if (available.length > 0 && unknown !== undefined) {
+      throw new NativeUnknownServiceError(unknown);
+    }
+  }
   // HACK-2358: refuse an invalid setting before anything starts or stops,
   // and say what is kept local. A detached owner's output is not shown; its
   // launcher printed these already.
@@ -7110,6 +7130,8 @@ async function handleNativeUp({
       requestedEnvName,
     }),
     restart,
+    targets,
+    profiles: parseCsvList(args.options.profile),
     buildsEnabled: nativeBuildsEnabled(),
     // The printed Compose fallback selects the same project and branch.
     projectRoot: project.projectRoot,
@@ -7174,6 +7196,7 @@ async function handleNativeUp({
       branch,
     },
     composeFile: project.composeFile,
+    targets,
     imageTagMode: nativeImageTagMode(args.options),
     envName: requestedEnvName,
     // An explicit --profile only; otherwise native start resolves Compose's
@@ -7238,17 +7261,24 @@ async function handleNativeUp({
         ...services,
       };
       resultTiming?.();
+      if (!isNativeDetachedOwnerProcess()) {
+        for (const warning of services.warnings ?? []) {
+          logger.warn({ message: warning });
+        }
+      }
       nativeDetachedUpReady(data);
     },
     startTimeoutSeconds: resolveNativeStartTimeoutSeconds({
       env: process.env,
       project: cfg.native?.startTimeoutSeconds,
     }),
-    waitForReady: nativeUpWaitsForReady({
-      wait: args.options.wait,
-      json: args.options.json,
-      interactive: canPrompt(),
-    }),
+    waitForReady:
+      targets !== undefined ||
+      nativeUpWaitsForReady({
+        wait: args.options.wait,
+        json: args.options.json,
+        interactive: canPrompt(),
+      }),
     // HACK-2456: the pool stopped under this run; `hack down --recover`
     // starts it and stops the run with data retained before this start.
     // Restart keeps its own refusals.
@@ -7283,7 +7313,10 @@ async function handleNativeUp({
       if (event.phase === "build-settled") {
         nativeDetachedUpBuildProgress(event);
       } else {
-        nativeDetachedUpProgress(event.phase);
+        nativeDetachedUpProgress(
+          event.phase,
+          event.phase === "services" ? event.appendRollback : undefined
+        );
       }
       if (event.phase === "ready" || event.phase === "started") {
         ready = true;
@@ -7905,6 +7938,7 @@ async function launchNativeDetachedUp(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly json: boolean;
+  readonly targeted?: boolean;
   readonly action?: "up" | "restart";
   readonly scope: Parameters<
     typeof explainUnconfirmedNativeDetachedStart
@@ -7915,6 +7949,7 @@ async function launchNativeDetachedUp(opts: {
       cwd: opts.cwd,
       args: opts.args,
       json: opts.json,
+      targeted: opts.targeted,
       action: opts.action,
     });
   } catch (error) {
@@ -8014,6 +8049,21 @@ async function handleUpUnlocked({
       action: "up",
       options: args.options,
     });
+    if (args.positionals.services?.length) {
+      await reportNativeLocalDirectoriesBeforeLaunch({
+        ctx,
+        path: args.options.path,
+        project: args.options.project,
+        json: args.options.json === true,
+      });
+      return await launchNativeDetachedUp({
+        cwd: ctx.cwd,
+        args: [...childArgs, "--", ...args.positionals.services],
+        json: args.options.json === true,
+        targeted: true,
+        scope: null,
+      });
+    }
     // The instance the child will start, for explaining an unconfirmed start.
     let launchScope: Parameters<
       typeof explainUnconfirmedNativeDetachedStart
@@ -8166,6 +8216,21 @@ async function handleUpUnlocked({
       exitCode: 1,
     });
   }
+}
+
+function abortableReceiptDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 const UP_RETRY_VALUE_OPTIONS = new Set([
@@ -9014,6 +9079,58 @@ async function runResolvedComposeUp({
   // Set right before Compose may start containers. A signal from then on
   // keeps the shared helpers: a start still in flight can start services
   // after any snapshot, so no probe could prove them absent.
+  let priorResourceContainers:
+    | { daemon: string; ids: readonly string[] }
+    | undefined;
+  let cleanupCheckouts: readonly CheckoutWitness[] | undefined;
+  let foregroundReceipts: Promise<void> | undefined;
+  const foregroundReceiptStop = new AbortController();
+  const recordLaunchCheckout = async () => {
+    if (cleanupCheckouts) {
+      return;
+    }
+    try {
+      cleanupCheckouts = await recordResourceCheckout(
+        lifecycleComposeProject,
+        project.projectRoot
+      );
+      const captured = await engine.capture();
+      if (captured.daemon.kind === "verified") {
+        const ids = await readComposeContainerIds({
+          projectDir: project.projectDir,
+          composeProject: lifecycleComposeProject,
+          env: envOverrides.env,
+        });
+        if (ids) {
+          priorResourceContainers = { daemon: captured.daemon.id, ids };
+        }
+      }
+    } catch {
+      // Receipt capture is optional and must not block Compose startup.
+    }
+  };
+  const recordResourceReceipts = async () => {
+    try {
+      const captured = await engine.capture();
+      if (cleanupCheckouts && captured.daemon.kind === "verified") {
+        await recordComposeResourceReceipts({
+          projectDir: project.projectDir,
+          composeFile: project.composeFile,
+          checkout: project.projectRoot,
+          project: projectName,
+          composeProject: lifecycleComposeProject,
+          branch,
+          launch: captured.launchId,
+          daemon: captured.daemon.id,
+          checkouts: cleanupCheckouts,
+          priorContainers: priorResourceContainers,
+          env: envOverrides.env,
+        });
+      }
+    } catch {
+      // Receipts are optional evidence. Startup success does not depend on them.
+    }
+  };
   let containerStartBegun = false;
   const foregroundTermination: {
     guard: ReturnType<typeof installForegroundTerminationGuard> | null;
@@ -9199,6 +9316,7 @@ async function runResolvedComposeUp({
               await verifyOwnership();
               await scopedMutation?.stage();
               await publishRuntimeSelection();
+              await recordLaunchCheckout();
               await engine.verify();
             },
             onCreateDispatched: () => {
@@ -9213,6 +9331,18 @@ async function runResolvedComposeUp({
                 // Compose still owns the terminal. Observe release errors
                 // after it exits, without an unhandled promise in the interim.
                 foregroundRelease?.catch(() => undefined);
+                foregroundReceipts = (async () => {
+                  for (const delay of [250, 750, 2000, 5000, 10_000]) {
+                    await abortableReceiptDelay(
+                      delay,
+                      foregroundReceiptStop.signal
+                    );
+                    if (foregroundReceiptStop.signal.aborted) {
+                      return;
+                    }
+                    await recordResourceReceipts();
+                  }
+                })();
               }
             },
             beforeStart: async () => {
@@ -9224,6 +9354,7 @@ async function runResolvedComposeUp({
               } else {
                 await scopedMutation?.stage();
                 await publishRuntimeSelection();
+                await recordLaunchCheckout();
                 await engine.verify();
               }
             },
@@ -9276,7 +9407,17 @@ async function runResolvedComposeUp({
         run: (path) => launch([...composeFilesWithMetadata, path]),
       });
     };
-    const guarded = await launchWithEnv().finally(settlePublication);
+    const guarded = await launchWithEnv().finally(async () => {
+      foregroundReceiptStop.abort();
+      try {
+        await settlePublication();
+      } finally {
+        await foregroundReceipts;
+      }
+      if (!detach && composeDispatched) {
+        await recordResourceReceipts();
+      }
+    });
     cancellation.signal.throwIfAborted();
     if ("bootstrapCode" in guarded) {
       const { bootstrapCode } = guarded;
@@ -9364,6 +9505,7 @@ async function runResolvedComposeUp({
       detachedComposeSucceeded = true;
       // The containers now run: a later failure keeps their helpers.
       keepSharedHelpers?.();
+      await recordResourceReceipts();
     }
     const observationBudgetMs = detach
       ? Math.max(

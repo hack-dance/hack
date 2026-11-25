@@ -335,7 +335,7 @@ Runs the command array in .hack/dev.json from its repository root. The runner ow
 
 ## `hack up [services...]`
 
-Start project services (docker compose up)
+Start the project or selected services
 
 ### Usage
 
@@ -399,7 +399,7 @@ hack down [options]
 | `--service <name>` | Stop only this local Compose service, keeping its containers and project resources |
 | `--timeout <seconds>` | Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
-| `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
+| `--remove-data` | Native backend: delete owned data volumes after confirmed stop (can cancel a service append, asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
@@ -1951,6 +1951,78 @@ hack projects prune [options]
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--dry-run` | Report prune candidates without changing registry entries or containers |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack resources`
+
+Inspect and clean up Hack-managed resources
+
+### Usage
+
+```bash
+hack resources <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack resources list` | List observed Hack resources and disk use |
+| `hack resources remove <id>` | Preview or confirm removal of a verified unused resource |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack resources list`
+
+List observed Hack resources and disk use
+
+### Usage
+
+```bash
+hack resources list [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack resources remove <id>`
+
+Preview or confirm removal of a verified unused resource
+
+### Usage
+
+```bash
+hack resources remove <id> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `id` | A container:<id> or volume:<name> from resources list |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--dry-run` | Show exactly what would be removed without changing anything |
+| `--confirm <token>` | Confirm the exact removal reviewed with --dry-run |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

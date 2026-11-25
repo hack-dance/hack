@@ -105,11 +105,56 @@ if [ "$3-$4" = runtime-build-image ] && [ -f '${stub}/runtime-build-image.hold' 
   for i in $(seq 1 400); do sleep 0.05; done
   exit 99
 fi
+if [ "$3-$4" = graph-extend ] && [ -f '${stub}/append-cancel' ]; then
+  outcome=$(cat '${stub}/append-cancel')
+  previous=
+  for flag in "$@"; do
+    if [ "$previous" = --cancel-wait-ms ]; then
+      printf %s "$flag" > ./append-cancel-wait
+    fi
+    previous="$flag"
+  done
+  append_term() {
+    printf %s received > ./interrupt-seen
+    case "$outcome" in
+      rollback|slow-rollback|serial-rollback)
+        if [ "$outcome" = slow-rollback ]; then sleep 8; fi
+        if [ "$outcome" = serial-rollback ]; then sleep 10; sleep 10; fi
+        printf %s '{"code":"graph_owner_recovery","cause_code":"graph_cancelled"}' >&2
+        exit 1 ;;
+      committed) cat '${stub}/graph-extend.out'; exit 0 ;;
+      *) exec sleep 90 ;;
+    esac
+  }
+  trap append_term TERM
+  printf '%s' "$$" > ./interrupt-pid
+  printf '%s' ready > ./interrupt-ready
+  for i in $(seq 1 400); do sleep 0.05; done
+  exit 99
+fi
 if [ -f '${stub}/'"$3-$4"'.hold' ]; then
   printf '%s' ready > './interrupt-ready'
   exec sleep 20
 fi
 printf '%s\\n' "$*" >> '${stub}/calls'
+if [ "$3-$4" = graph-extend ]; then
+  previous=
+  for flag in "$@"; do
+    if [ "$previous" = --combined-normalized-file ]; then
+      cp "$flag" '${stub}/combined-extend.json' || exit 98
+    fi
+    previous="$flag"
+  done
+fi
+if [ "$3-$4" = project-plan ] && [ -f '${stub}/normalized-plan.ts' ]; then
+  previous=
+  for flag in "$@"; do
+    if [ "$previous" = --normalized-file ]; then
+      exec '${process.execPath}' '${stub}/normalized-plan.ts' "$flag"
+    fi
+    previous="$flag"
+  done
+fi
 if [ -f '${stub}/'"$3-$4"'.out' ]; then
   if [ -f '${stub}/'"$3-$4"'.after-inspect' ]; then cp '${stub}/'"$3-$4"'.after-inspect' '${stub}/graph-inspect.out'; fi
   cat '${stub}/'"$3-$4"'.out'; exit 0
@@ -132,11 +177,12 @@ exit 1
       join(stub, `${request.replace(" ", "-")}.err`),
       JSON.stringify(failure)
     );
-  const calls = async () =>
+  const argv = async () =>
     (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
       .split("\n")
-      .filter(Boolean)
-      .map((line) => line.split(" ").slice(2, 4).join(" "));
+      .filter(Boolean);
+  const calls = async () =>
+    (await argv()).map((line) => line.split(" ").slice(2, 4).join(" "));
   const env = (extra: Record<string, string> = {}) =>
     privateCliEnv({
       root,
@@ -164,6 +210,7 @@ exit 1
     scope,
     binary,
     compose,
+    argv,
     reply,
     fail,
     finishOn,
@@ -244,6 +291,503 @@ async function scriptUpThroughReview(
 }
 
 const SHARED = { HACK_NATIVE_SHARED_SOURCE: "1" };
+
+test(
+  "a second targeted up asks the busy graph's owner before waiting for the provider",
+  async () => {
+    const f = await fixture();
+    await saveNativeProjectRun({ ...f.scope, run });
+    await f.fail("graph inspect", { code: "provider_busy" });
+    await f.reply("graph owner-status", {
+      ok: true,
+      run: run.run,
+      plan: run.planId,
+      phase: "ready-observed",
+      foreground_alive: true,
+      runtime_verified: false,
+      runtime_error: "graph_starting",
+    });
+    const result = await cli({
+      fixture: f,
+      args: ["up", "web", "--detach", "--json"],
+      env: SHARED,
+    });
+    expect(result.code, result.output).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      error: { code: "E_NATIVE_STILL_STARTING" },
+    });
+    expect(await f.calls()).toEqual(["graph inspect", "graph owner-status"]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test.each([
+  { json: false, outcome: "rollback" },
+  { json: true, outcome: "rollback" },
+  { json: false, outcome: "slow-rollback" },
+  { json: true, outcome: "slow-rollback" },
+  { json: true, outcome: "serial-rollback" },
+  { json: false, outcome: "force" },
+  { json: true, outcome: "force" },
+  { json: false, outcome: "unconfirmed" },
+  { json: true, outcome: "unconfirmed" },
+  { json: true, outcome: "committed" },
+])(
+  "Ctrl-C on targeted up with $outcome (JSON: $json)",
+  async ({ json, outcome }) => {
+    const image = `sha256:${"e".repeat(64)}`;
+    const shortGrace = outcome === "unconfirmed";
+    const serial = outcome === "serial-rollback";
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: { image, stop_grace_period: "30s" },
+          slow: {
+            image,
+            depends_on: ["web"],
+            ...(shortGrace ? { stop_grace_period: "1s" } : {}),
+          },
+          ...(serial ? { other: { image } } : {}),
+        },
+      })
+    );
+    await saveNativeProjectRun({ ...f.scope, run });
+    await f.reply("graph inspect", {
+      journal_incomplete: false,
+      receipt: {
+        run: run.run,
+        owner: run.owner,
+        namespace: run.namespace,
+        plan_id: run.planId,
+        phase: "ready-observed",
+        readiness: { web: "started" },
+      },
+      observations: { "container:web": { state: "running", health: "none" } },
+    });
+    await f.reply("graph owner-status", {
+      ok: true,
+      run: run.run,
+      plan: run.planId,
+      phase: "ready-observed",
+      foreground_alive: true,
+      runtime_verified: true,
+      generation: "1".repeat(64),
+      service_images: { web: image },
+    });
+    await f.reply("runtime status", { phase: "running", process_alive: true });
+    await scriptUpThroughReview(f, {
+      services: {
+        web: { active: true, stop_grace_period_nanos: 30_000_000_000 },
+        slow: {
+          active: true,
+          stop_grace_period_nanos: shortGrace ? 1_000_000_000 : null,
+        },
+        ...(serial ? { other: { active: true } } : {}),
+      },
+    });
+    if (outcome === "committed") {
+      await f.reply("graph extend", {
+        ok: true,
+        phase: "ready-observed",
+        receipt: {
+          run: run.run,
+          owner: run.owner,
+          namespace: run.namespace,
+          plan_id: run.planId,
+          phase: "ready-observed",
+          readiness: { web: "started", slow: "started" },
+        },
+        started: ["slow"],
+        changed: [],
+      });
+    }
+    await writeFile(join(f.root, "stub", "append-cancel"), outcome);
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        entrypoint,
+        "--path",
+        f.project,
+        "up",
+        "slow",
+        ...(serial ? ["other"] : []),
+        ...(json ? ["--json"] : []),
+      ],
+      {
+        cwd: f.project,
+        env: f.env(SHARED),
+        detached: true,
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: SPAWN_TIMEOUT_MS - 5000,
+      }
+    );
+    const stderr = new Response(child.stderr).text();
+    const stdout = new Response(child.stdout).text();
+    try {
+      await waitForFileContent({
+        path: join(f.project, "interrupt-ready"),
+        complete: (value) => (value === "ready" ? value : undefined),
+        what: "targeted owner request",
+        budgetMs: 10_000,
+      });
+      const interruptedAt = performance.now();
+      process.kill(-child.pid, "SIGINT");
+      if (outcome === "force") {
+        await waitForFileContent({
+          path: join(f.project, "interrupt-seen"),
+          complete: (value) => (value === "received" ? value : undefined),
+          what: "append cancellation signal",
+          budgetMs: 4000,
+        });
+        process.kill(-child.pid, "SIGINT");
+      }
+      const code = await child.exited;
+      const confirmed =
+        serial || outcome === "rollback" || outcome === "slow-rollback";
+      expect(code, await stderr).toBe(confirmed ? 130 : 1);
+      expect(await stderr).toContain(
+        serial
+          ? "Cancelling, rolling back 2 services"
+          : "Cancelling, rolling back 1 service"
+      );
+      const defaultGraceWait = serial ? 65_000 : 55_000;
+      expect(
+        await readFile(join(f.project, "append-cancel-wait"), "utf8")
+      ).toBe(String(shortGrace ? 46_000 : defaultGraceWait));
+      expect(await readFile(join(f.project, "interrupt-seen"), "utf8")).toBe(
+        "received"
+      );
+      if (outcome === "force" || outcome === "unconfirmed") {
+        await waitForFileContent({
+          path: join(f.project, "interrupt-pid"),
+          complete: (value) => {
+            // A positive fixture PID is required before probing liveness.
+            const pid = Number(value);
+            if (!Number.isSafeInteger(pid) || pid < 2) {
+              return undefined;
+            }
+            try {
+              process.kill(pid, 0);
+              return undefined;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+                return pid;
+              }
+              throw error;
+            }
+          },
+          what: "forced native append client exit",
+          budgetMs: 4000,
+        });
+        const elapsed = performance.now() - interruptedAt;
+        if (shortGrace) {
+          expect(elapsed).toBeGreaterThanOrEqual(45_900);
+        }
+        expect(elapsed).toBeLessThan(shortGrace ? 54_000 : 14_000);
+      }
+      if (confirmed) {
+        if (json) {
+          expect(JSON.parse(await stdout)).toMatchObject({
+            ok: false,
+            error: {
+              code: "E_CANCELLED",
+              message: "Native project startup interrupted.",
+            },
+          });
+        } else {
+          expect(await stderr).toContain("Native project startup interrupted.");
+        }
+        expect(await stderr).not.toContain("The start may have completed");
+        expect(await stdout).not.toContain("E_NATIVE_START_OUTCOME_UNKNOWN");
+      } else if (json) {
+        expect(JSON.parse(await stdout)).toMatchObject({
+          ok: false,
+          error: {
+            code: "E_NATIVE_START_OUTCOME_UNKNOWN",
+            message: "The start may have completed; check hack ps",
+          },
+        });
+      } else {
+        expect(await stderr).toContain(
+          "The start may have completed; check hack ps"
+        );
+      }
+      expect(await loadNativeProjectRun(f.scope)).toEqual(run);
+      expect(await f.calls()).not.toContain("graph cleanup");
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+      }
+      await child.exited;
+    }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test.each(["missing", "exited"] as const)(
+  "plain native up reaches the owner extension for %s services",
+  async (state) => {
+    const image = `sha256:${"e".repeat(64)}`;
+    // Bun accepts the authored tag and delivers tag-free normalized JSON.
+    const f = await fixture(
+      `x-example: !override fixture\nservices:\n  web: {init: true, image: ${image}}\n  redis: {init: true, image: ${image}}\n`
+    );
+    const services = state === "missing" ? ["web"] : ["web", "redis"];
+    const receipt = {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan_id: run.planId,
+      phase: "ready-observed",
+      relay_startup: {},
+      readiness: Object.fromEntries(services.map((name) => [name, "started"])),
+      resources: Object.fromEntries(
+        services.map((name) => [
+          `container:${name}`,
+          {
+            kind: "container",
+            key: name,
+            phase: "started",
+            id: "9".repeat(64),
+          },
+        ])
+      ),
+    };
+    await saveNativeProjectRun({ ...f.scope, run });
+    const snapshot = {
+      journal_incomplete: false,
+      receipt,
+      observations: Object.fromEntries(
+        services.map((name) => [
+          `container:${name}`,
+          state === "exited"
+            ? { state: "exited", code: 0 }
+            : { state: "running", health: "none" },
+        ])
+      ),
+    };
+    await f.reply("graph inspect", snapshot);
+    await f.reply("graph status", snapshot);
+    await f.fail("graph retained-preflight", {
+      code: "graph_foreground_owner_running",
+    });
+    await f.reply("graph owner-status", {
+      ok: true,
+      run: run.run,
+      plan: run.planId,
+      phase: receipt.phase,
+      foreground_alive: true,
+      runtime_verified: true,
+      generation: "1".repeat(64),
+      service_images: Object.fromEntries(services.map((name) => [name, image])),
+    });
+    await f.reply("runtime status", { phase: "running", process_alive: true });
+    await scriptUpThroughReview(f, {
+      services: { web: { active: true }, redis: { active: true } },
+    });
+    await writeFile(
+      join(f.root, "stub", "normalized-plan.ts"),
+      `const content = await Bun.file(Bun.argv[2]).text();
+const hash = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+const { services } = JSON.parse(content);
+await Bun.write(new URL("./normalized-" + hash + ".json", import.meta.url), content);
+console.log(JSON.stringify({
+  plan_id: hash,
+  start_refusals: [],
+  plan: {
+    namespace: "${run.namespace}",
+    compose_sha256: hash,
+    enrollment_compatible: true,
+    services: Object.fromEntries(Object.keys(services).map(name => [name, {active: true}]))
+  }
+}));`
+    );
+    const started = state === "exited" ? ["redis", "web"] : ["redis"];
+    await f.reply("graph extend", {
+      ok: true,
+      phase: receipt.phase,
+      started,
+      changed: [],
+      receipt,
+    });
+    const result = await cli({
+      fixture: f,
+      args: ["up", "-d", "--json"],
+      env: SHARED,
+    });
+    expect(result.code, result.output).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      data: { services: { started } },
+    });
+    const calls = await f.calls();
+    expect(calls.filter((call) => call === "graph extend")).toHaveLength(1);
+    const append = (await f.argv()).find((line) =>
+      line.includes(" graph extend ")
+    );
+    const fullHash = append?.match(
+      /--combined-plan ([a-f0-9]{64}) --combined-normalized-sha256 \1/
+    )?.[1];
+    if (!fullHash) {
+      throw new Error(
+        "Expected the full normalized review in the append request"
+      );
+    }
+    const normalized = await readFile(
+      join(f.root, "stub", `normalized-${fullHash}.json`),
+      "utf8"
+    );
+    expect(
+      await readFile(join(f.root, "stub", "combined-extend.json"), "utf8")
+    ).toBe(normalized);
+    const full = JSON.parse(normalized);
+    expect(full).toMatchObject({
+      "x-example": "fixture",
+      services: { web: { init: true, image }, redis: { init: true, image } },
+    });
+    expect(Object.keys(full.services)).toEqual(["web", "redis"]);
+    expect(createHash("sha256").update(normalized).digest("hex")).toBe(
+      fullHash
+    );
+    expect(calls).not.toContain("graph serve");
+    expect(calls).not.toContain("runtime up");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "targeted native up refuses an unknown service before any graph request",
+  async () => {
+    const f = await fixture();
+    const result = await cli({
+      fixture: f,
+      args: ["up", "missing", "--json"],
+      env: SHARED,
+    });
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_SERVICE_NOT_FOUND",
+        message: "Unknown Compose service: missing.",
+      },
+    });
+    expect(await f.calls()).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "targeted native up uses the mapped owner and emits the Compose lifecycle shape",
+  async () => {
+    const image = `sha256:${"e".repeat(64)}`;
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: { image },
+          redis: { image, depends_on: ["cache"] },
+          cache: { image },
+          unused: { image, ports: ["18080:80/udp"] },
+        },
+      })
+    );
+    await saveNativeProjectRun({ ...f.scope, run });
+    const receipt = {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan_id: run.planId,
+      phase: "ready-observed",
+      readiness: { web: "started" },
+    };
+    const generation = "1".repeat(64);
+    await f.reply("graph inspect", { journal_incomplete: false, receipt });
+    await f.reply("graph owner-status", {
+      ok: true,
+      run: run.run,
+      plan: run.planId,
+      phase: "ready-observed",
+      foreground_alive: true,
+      runtime_verified: true,
+      generation,
+      service_images: { web: image },
+    });
+    await f.reply("runtime status", { phase: "running", process_alive: true });
+    await scriptUpThroughReview(f, {
+      services: { cache: { active: true }, redis: { active: true } },
+    });
+    await f.reply("graph extend", {
+      ok: true,
+      phase: "ready-observed",
+      started: ["cache", "redis"],
+      changed: [],
+      receipt: {
+        ...receipt,
+        readiness: { ...receipt.readiness, cache: "started", redis: "started" },
+      },
+    });
+
+    const result = await cli({
+      fixture: f,
+      args: ["up", "redis", "--json"],
+      env: SHARED,
+    });
+    expect(result.code, result.output).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      data: {
+        action: "up",
+        project: "refusal-fixture",
+        branch: null,
+        composeProject: "refusal-fixture",
+        services: {
+          started: ["cache", "redis"],
+          completed: [],
+          stopped: [],
+          failed: [],
+        },
+        durationMs: expect.any(Number),
+      },
+    });
+    const calls = await f.calls();
+    expect(calls.filter((request) => request === "graph extend")).toHaveLength(
+      1
+    );
+    expect(calls).not.toContain("runtime up");
+    expect(calls).not.toContain("graph serve");
+    expect(calls).not.toContain("graph cleanup");
+    expect(await loadNativeProjectRun(f.scope)).toEqual(run);
+
+    await rm(join(f.root, "stub", "graph-extend.out"));
+    const message = "The running pool has insufficient free bridge sockets.";
+    await f.fail("graph extend", {
+      code: "graph_owner_recovery",
+      cause_code: "bridge_capacity_exhausted",
+      message,
+      message_fixed: true,
+    });
+    const refused = await cli({
+      fixture: f,
+      args: ["up", "redis", "--json"],
+      env: SHARED,
+    });
+    expect(refused.code).toBe(1);
+    expect(JSON.parse(refused.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_STARTUP_INCOMPLETE",
+        detail: {
+          nativeCode: "graph_owner_recovery",
+          causeCode: "bridge_capacity_exhausted",
+          message,
+        },
+      },
+    });
+  },
+  SPAWN_TIMEOUT_MS
+);
 
 test(
   "detached static UDP refusal names its fix and reports no start through the source CLI",

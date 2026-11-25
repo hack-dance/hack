@@ -642,6 +642,7 @@ import { displayNativePs } from "./native-ps-display.ts";
 import {
   answerNativeAlreadyRunning,
   explainUnconfirmedNativeDetachedStart,
+  selectNativeAuthoredUp,
 } from "./native-up-already-running.ts";
 import {
   type AutostartDownTarget,
@@ -8072,6 +8073,13 @@ async function handleUpUnlocked({
     const alreadyRunning = await answerNativeAlreadyRunning({
       native,
       json: args.options.json === true,
+      resolveAuthored: () =>
+        selectNativeAuthoredUp({
+          cwd: ctx.cwd,
+          path: args.options.path,
+          project: args.options.project,
+          branch: args.options.branch,
+        }),
       selection: {
         path: args.options.path,
         project: args.options.project,

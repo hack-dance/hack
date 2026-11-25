@@ -64,20 +64,28 @@ with the supervised host-process capability below.
 ## Support matrix
 
 Every slice requires macOS; any other host refuses before input acquisition. Each
-row lists the admitted form and the requests that refuse with
-`E_NATIVE_PROJECT_UNSUPPORTED` before managed value resolution, compiler work or
-provider contact. A refusal names no option value, path or project detail.
+row lists the admitted form and the requests that refuse before managed value
+resolution, compiler work or provider contact. A refusal names no option value,
+path or project detail. The two refusal columns are separate, stable contracts:
 
-| Command | Supported form | Refuses before input acquisition |
-| --- | --- | --- |
-| `up` | Whole-project foreground or detached (`-d`, `--detach`, or `--json`); `--branch`, `--profile` and `--env` (including `--env base`) keep their compiler contracts | `--recover`, service subsets, single-service, command, workdir, follow, tail and format options, other unsupported options |
-| `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`, `--detach`, `--profile` and `--env` overrides, service subsets including an empty selection, single-service, command, workdir, follow, tail and format options |
-| `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
-| `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
-| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 0 through 1000 with follow, 1 through 1000 with no-follow (default 200), plain or `--json`; `--since` and `--timestamps` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
-| `exec` | `exec SERVICE -- COMMAND ARG...`; terminal input/output selects a TTY session, otherwise finite exec with closed stdin; optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
-| `run` | `run SERVICE -- COMMAND ARG...` through a ready foreground owner, closed stdin, no TTY, optional absolute `--workdir`; member must have no mounts | The `exec` option refusals above; source, persistent-data or private-env mounts refuse before the one-off effect |
-| `restart` | Whole-project proven stop followed by fresh foreground `up`; `--branch`, `--profile` and `--env` select the fresh generation | Service subsets, `--json`, `--detach`, `--target`, recovery and other unsupported foreground options; missing or unproven stop prevents startup |
+- `E_NATIVE_PROJECT_UNSUPPORTED`: a well-formed command that authored projects do
+  not support yet. Authored dispatch refuses it.
+- `E_USAGE`: a command form that is not valid for any native project, refused by
+  the shared option checks before the CLI knows the project is authored. Image and
+  Compose-file projects get the same code for the same form; see the
+  [native command table](../native/limits.md#commands-on-native). The plain-text
+  message is the option error, for example `Option(s) not valid for "ps": --detach`.
+
+| Command | Supported form | `E_NATIVE_PROJECT_UNSUPPORTED` | `E_USAGE` |
+| --- | --- | --- | --- |
+| `up` | Whole-project foreground or detached (`-d`, `--detach`, or `--json`); `--branch`, `--profile` and `--env` (including `--env base`) keep their compiler contracts. A second detached `up` of a running project exits 0 and reports it as already running, in the same JSON shape as a Compose-file project | None: authored `up` refuses only the forms in the next column | `--recover`; service subsets and single-service selection; `--target` and `--progress`; command, workdir, follow, tail and format options |
+| `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`; `--profile` and `--env` overrides | `--detach`; service subsets, including an empty selection; single-service, command, workdir, follow, tail and format options |
+| `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`; explicit empty or named `--profile`; `--env` overrides | `--detach`; service subsets; single-service, command, workdir, follow, tail and format options |
+| `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch`. A project with no saved attempt, including one whose only remaining record is authenticated completed recovery history, reports `not_started` and exits 0 | `--profile` | `--env`; service subsets or a single service; `--recover`, `--detach`, command, workdir, follow, tail and format options |
+| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 0 through 1000 with follow, 1 through 1000 with no-follow (default 200), plain or `--json`; `--since` and `--timestamps` with follow | Omitted or malformed service selection; out-of-range `--tail`; TTY-configured services in follow mode | More than one service; non-integer `--tail`; pretty format, `--until`, query filters and `--profile` (native logs refuse them for every project); `--env`, `--recover`, `--detach`, command and workdir options |
+| `exec` | `exec SERVICE -- COMMAND ARG...`; terminal input/output selects a TTY session, otherwise finite exec with closed stdin; optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, `--profile`, `--env` | `--detach` (background commands do not run authored projects yet); `--json` (it requires `--detach`); service subsets, follow, tail and format options, `--recover` |
+| `run` | `run SERVICE -- COMMAND ARG...` through a ready foreground owner, closed stdin, no TTY, optional absolute `--workdir`; member must have no mounts | The `exec` refusals in this column; source, persistent-data or private-env mounts refuse before the one-off effect | The `exec` refusals in this column |
+| `restart` | Whole-project proven stop followed by fresh foreground `up`; `--branch`, `--profile` and `--env` select the fresh generation | Service subsets, `--json`, `--target`, frontend recovery and other unsupported foreground options; missing or unproven stop prevents startup | `--detach` (no backend accepts it); a malformed `--target` or frontend recovery value |
 
 Both backends remain experimental. This table records the refusal boundary of the
 current slices; it is not a parity claim against the Compose owner and does not
@@ -418,9 +426,10 @@ arrives after the proven stop and before the fresh start returns 130 with nothin
 restarted. Each half uses the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget
 separately; neither renews the other.
 
-Service subsets, `--json`, detached restart, `--target` and the frontend recovery
-options refuse with `E_NATIVE_PROJECT_UNSUPPORTED` before input acquisition or any
-stop request. Portable stand-in controls cover the stop-then-start ordering,
+Service subsets, `--json`, `--target` and the frontend recovery options refuse
+with `E_NATIVE_PROJECT_UNSUPPORTED` before input acquisition or any stop request.
+`--detach` and malformed option values refuse earlier with `E_USAGE`, as on every
+backend. Portable stand-in controls cover the stop-then-start ordering,
 failed-stop retention and cancellation between the halves; installed live restart
 acceptance remains a separate host-serialized gate.
 

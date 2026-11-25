@@ -66,13 +66,37 @@ mod unix {
     };
 
     const MIN_AGE: Duration = Duration::from_secs(300);
-    const BUDGET: Duration = Duration::from_millis(200);
-    const ENUMERATION_BUDGET: Duration = Duration::from_millis(100);
     const MAX_ENTRIES: usize = 8192;
     const MAX_CANDIDATES: usize = 128;
 
+    /// Wall-clock limits for one scan, measured from its start.
+    ///
+    /// Production always uses [`LIMITS`]. A scan that reaches a limit stops,
+    /// reports `incomplete` and leaves the rest for a later scan, so a loaded
+    /// host can defer work but never makes a partial scan look complete.
+    /// Tests that check entry or candidate counts pass wider limits so the
+    /// result does not depend on how fast the host lists a directory.
+    #[derive(Clone, Copy)]
+    struct Limits {
+        /// Time allowed for listing the directory.
+        enumeration: Duration,
+        /// Time allowed for the whole scan, including recovery and removal.
+        total: Duration,
+    }
+
+    const LIMITS: Limits = Limits {
+        enumeration: Duration::from_millis(100),
+        total: Duration::from_millis(200),
+    };
+
     pub(super) fn scan(root: &Path, fix: bool, include_unverified_volumes: bool) -> Report {
-        scan_at(root, fix, include_unverified_volumes, SystemTime::now())
+        scan_at(
+            root,
+            fix,
+            include_unverified_volumes,
+            SystemTime::now(),
+            LIMITS,
+        )
     }
 
     fn scan_at(
@@ -80,9 +104,11 @@ mod unix {
         fix: bool,
         include_unverified_volumes: bool,
         now: SystemTime,
+        limits: Limits,
     ) -> Report {
         let mut report = Report::default();
         let started = Instant::now();
+        let deadline = started + limits.total;
         // SAFETY: geteuid has no preconditions.
         let uid = unsafe { libc::geteuid() };
         let run = || -> io::Result<Report> {
@@ -105,7 +131,7 @@ mod unix {
             let mut quarantines = Vec::new();
             let mut more = false;
             for entry in fs::read_dir(root)? {
-                if started.elapsed() >= ENUMERATION_BUDGET {
+                if started.elapsed() >= limits.enumeration {
                     report.incomplete = true;
                     break;
                 }
@@ -136,7 +162,7 @@ mod unix {
             }
             for name in quarantines {
                 if !fix
-                    || started.elapsed() >= BUDGET
+                    || Instant::now() >= deadline
                     || recover_quarantine(
                         root,
                         &directory,
@@ -144,7 +170,7 @@ mod unix {
                         uid,
                         &trusted,
                         include_unverified_volumes,
-                        started,
+                        deadline,
                     )
                     .is_err()
                 {
@@ -153,7 +179,7 @@ mod unix {
             }
             let mut last = previous;
             for name in names {
-                if started.elapsed() >= BUDGET
+                if Instant::now() >= deadline
                     || report.dangling.len() + report.uncertain_volume.len() == MAX_CANDIDATES
                 {
                     more = true;
@@ -179,7 +205,7 @@ mod unix {
                 }
                 if same_parent(root, &parent)
                     && matches!(orphan(&path, uid, now, &trusted), Ok(Some(current)) if current == alias)
-                    && started.elapsed() < BUDGET
+                    && Instant::now() < deadline
                     && remove_checked(
                         root,
                         &directory,
@@ -189,7 +215,7 @@ mod unix {
                         || {
                             volume_uncertain(&alias.target, &trusted)
                                 .is_ok_and(|risk| risk == Some(alias.uncertain_volume))
-                                && started.elapsed() < BUDGET
+                                && Instant::now() < deadline
                         },
                     )
                     .is_ok()
@@ -455,7 +481,7 @@ mod unix {
         uid: u32,
         trusted: &[Option<&Path>],
         include_unverified_volumes: bool,
-        started: Instant,
+        deadline: Instant,
     ) -> io::Result<()> {
         let (original, identity, modified) =
             quarantine_name(name).ok_or(io::ErrorKind::InvalidInput)?;
@@ -487,7 +513,7 @@ mod unix {
         } else {
             false
         };
-        if started.elapsed() >= BUDGET {
+        if Instant::now() >= deadline {
             return Err(io::ErrorKind::TimedOut.into());
         }
         if remove {
@@ -614,6 +640,14 @@ mod unix {
         use super::*;
         use std::os::unix::fs::symlink;
 
+        /// Limits no test host reaches, for tests that check counts rather than
+        /// timing. With [`LIMITS`], a loaded host can stop the listing early,
+        /// which is correct behavior but not the behavior under test.
+        const WIDE: Limits = Limits {
+            enumeration: Duration::from_secs(3600),
+            total: Duration::from_secs(3600),
+        };
+
         fn with_root(test: impl FnOnce(&Path)) {
             struct Scratch(PathBuf);
             impl Drop for Scratch {
@@ -658,12 +692,12 @@ mod unix {
 
                 assert!(scan(root, true, false).dangling.is_empty());
                 let later = SystemTime::now() + MIN_AGE + Duration::from_secs(1);
-                let preview = scan_at(root, false, false, later);
+                let preview = scan_at(root, false, false, later, WIDE);
                 assert_eq!(preview.dangling, [old]);
                 assert!(preview.removed.is_empty());
                 assert!(root.join(old).is_symlink());
 
-                let fixed = scan_at(root, true, false, later);
+                let fixed = scan_at(root, true, false, later, WIDE);
                 assert_eq!(fixed.removed, [old]);
                 assert!(!root.join(old).is_symlink());
                 assert!(root.join(live).is_symlink());
@@ -748,7 +782,7 @@ mod unix {
                         fs::create_dir_all(&target).unwrap();
                     }
                     assert!(scan(root, false, false).incomplete);
-                    assert!(!scan(root, true, false).incomplete);
+                    assert!(!scan_at(root, true, false, SystemTime::now(), WIDE).incomplete);
                     assert!(!staged.exists());
                     if restore {
                         assert_eq!(fs::read_link(&link).unwrap(), target);
@@ -820,10 +854,10 @@ mod unix {
                     symlink(target, root.join(name)).unwrap();
                 }
                 let now = SystemTime::now() + MIN_AGE;
-                let first = scan_at(root, true, false, now);
+                let first = scan_at(root, true, false, now, WIDE);
                 assert_eq!(first.uncertain_volume.len(), MAX_CANDIDATES);
                 assert!(first.removed.is_empty());
-                let second = scan_at(root, true, false, now);
+                let second = scan_at(root, true, false, now, WIDE);
                 assert_eq!(
                     second.uncertain_volume,
                     [format!("hkl-{MAX_CANDIDATES:012x}")]
@@ -843,11 +877,11 @@ mod unix {
                 )
                 .unwrap();
                 let now = SystemTime::now() + MIN_AGE;
-                let automatic = scan_at(root, true, false, now);
+                let automatic = scan_at(root, true, false, now, WIDE);
                 assert_eq!(automatic.uncertain_volume, [name]);
                 assert!(automatic.removed.is_empty());
                 assert!(link.is_symlink());
-                let explicit = scan_at(root, true, true, now);
+                let explicit = scan_at(root, true, true, now, WIDE);
                 assert_eq!(explicit.removed, [name]);
             });
         }
@@ -864,8 +898,37 @@ mod unix {
                     root.join(name),
                 )
                 .unwrap();
-                let report = scan_at(root, true, false, SystemTime::now() + MIN_AGE);
+                let report = scan_at(root, true, false, SystemTime::now() + MIN_AGE, WIDE);
+                // Counting unrelated names would exceed MAX_ENTRIES and report
+                // more work, whatever order the directory lists them in.
+                assert!(!report.incomplete);
                 assert_eq!(report.removed, [name]);
+            });
+        }
+
+        #[test]
+        fn a_listing_past_its_time_limit_defers_instead_of_finishing() {
+            with_root(|root| {
+                let name = "hkl-000000000001";
+                symlink(
+                    root.join("absent/.hack-local/run/smolvm/home"),
+                    root.join(name),
+                )
+                .unwrap();
+                let now = SystemTime::now() + MIN_AGE;
+                // A slow host can reach the listing limit before any entry,
+                // as happened on a loaded CI runner with production limits.
+                let expired = Limits {
+                    enumeration: Duration::ZERO,
+                    ..WIDE
+                };
+                let deferred = scan_at(root, true, false, now, expired);
+                assert!(deferred.incomplete);
+                assert!(deferred.removed.is_empty());
+                assert!(root.join(name).is_symlink());
+                let next = scan_at(root, true, false, now, WIDE);
+                assert!(!next.incomplete);
+                assert_eq!(next.removed, [name]);
             });
         }
 
@@ -925,7 +988,7 @@ mod unix {
                     .incomplete
                 );
                 drop(held);
-                assert!(!scan(root, true, false).incomplete);
+                assert!(!scan_at(root, true, false, SystemTime::now(), WIDE).incomplete);
             });
         }
     }

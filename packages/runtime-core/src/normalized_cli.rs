@@ -80,40 +80,41 @@ fn hex(value: &str) -> bool {
 }
 impl Selection<'_> {
     pub fn load(&self) -> Result<Input, CandidateError> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(Path::new(self.file))
-            .map_err(|_| invalid())?;
-        let before = file.metadata().map_err(|_| invalid())?;
-        if !before.is_file()
-            || before.nlink() != 1
-            || before.len() == 0
-            || before.len() > LIMIT as u64
-        {
-            return Err(invalid());
-        }
-        let mut bytes = Vec::new();
-        (&mut file)
-            .take((LIMIT + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|_| invalid())?;
-        let after = file.metadata().map_err(|_| invalid())?;
-        if bytes.len() as u64 != before.len()
-            || after.len() != before.len()
-            || after.mtime() != before.mtime()
-            || after.mtime_nsec() != before.mtime_nsec()
-            || after.ctime() != before.ctime()
-            || after.ctime_nsec() != before.ctime_nsec()
-        {
-            return Err(invalid());
-        }
         Ok(Input {
-            bytes,
+            bytes: load_file(self.file)?,
             original: self.original.to_owned(),
             namespace: self.namespace.to_owned(),
         })
     }
+}
+
+pub(crate) fn load_file(path: &str) -> Result<Vec<u8>, CandidateError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(Path::new(path))
+        .map_err(|_| invalid())?;
+    let before = file.metadata().map_err(|_| invalid())?;
+    if !before.is_file() || before.nlink() != 1 || before.len() == 0 || before.len() > LIMIT as u64
+    {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    let after = file.metadata().map_err(|_| invalid())?;
+    if bytes.len() as u64 != before.len()
+        || after.len() != before.len()
+        || after.mtime() != before.mtime()
+        || after.mtime_nsec() != before.mtime_nsec()
+        || after.ctime() != before.ctime()
+        || after.ctime_nsec() != before.ctime_nsec()
+    {
+        return Err(invalid());
+    }
+    Ok(bytes)
 }
 impl Input {
     pub fn options<'a>(&'a self, options: PlanOptions<'a>) -> NormalizedComposeOptions<'a> {

@@ -493,6 +493,14 @@ pub(super) fn prepare_shared_changed(
     prepare_shared_review(engine, plan, receipt, revision, false)
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn review_shared_contract(
+    plan: &PlanData,
+) -> Result<project::live_source::Contract, CandidateError> {
+    let current = project::snapshot::capture_plan(plan)?;
+    project::live_source::Contract::from_plan(plan, current.receipt())
+}
+
 /// Used only by the normalized hostname transition verifier under the provider lease.
 pub(super) fn prepare_shared_hostnames(
     engine: &Engine<'_>,

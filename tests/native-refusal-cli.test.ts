@@ -110,6 +110,15 @@ if [ -f '${stub}/'"$3-$4"'.hold' ]; then
   exec sleep 20
 fi
 printf '%s\\n' "$*" >> '${stub}/calls'
+if [ "$3-$4" = graph-extend ]; then
+  previous=
+  for flag in "$@"; do
+    if [ "$previous" = --combined-normalized-file ]; then
+      cp "$flag" '${stub}/combined-extend.json' || exit 98
+    fi
+    previous="$flag"
+  done
+fi
 if [ "$3-$4" = project-plan ] && [ -f '${stub}/normalized-plan.ts' ]; then
   previous=
   for flag in "$@"; do
@@ -487,6 +496,9 @@ console.log(JSON.stringify({
       join(f.root, "stub", `normalized-${fullHash}.json`),
       "utf8"
     );
+    expect(
+      await readFile(join(f.root, "stub", "combined-extend.json"), "utf8")
+    ).toBe(normalized);
     const full = JSON.parse(normalized);
     expect(full).toMatchObject({
       "x-example": "fixture",

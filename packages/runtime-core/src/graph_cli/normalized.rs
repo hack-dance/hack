@@ -150,12 +150,15 @@ pub(super) fn command(
             let combined = match (
                 singles.get("--combined-plan"),
                 singles.get("--combined-normalized-sha256"),
+                singles.get("--combined-normalized-file"),
             ) {
-                (None, None) => None,
-                (Some(plan), Some(normalized)) => Some(graph::foreground::CombinedExtensionInput {
-                    plan_id: (*plan).to_owned(),
-                    normalized_sha256: (*normalized).to_owned(),
-                }),
+                (None, None, None) => None,
+                (Some(plan), Some(normalized), Some(file)) => {
+                    let bytes = crate::normalized_cli::load_file(file)?;
+                    Some(graph::foreground::CombinedExtensionInput::new(
+                        plan, normalized, &bytes,
+                    )?)
+                }
                 _ => return Err(invalid()),
             };
             return graph::foreground::extend_request(

@@ -85,9 +85,58 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn refused(message: &'static str) -> CandidateError {
     error("graph_extend", message)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn reviews_services(plan: &project::PlanData, owned: &BTreeSet<&str>) -> bool {
+    plan.services
+        .iter()
+        .filter(|(_, service)| service.active)
+        .map(|(name, _)| name.as_str())
+        .eq(owned.iter().copied())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn review_combined(
+    candidate: &Candidate,
+    compose: project::NormalizedComposeOptions<'_>,
+    document: &Value,
+    full: Option<(&str, &str, &[u8])>,
+    owned: &BTreeSet<&str>,
+) -> Result<project::PlanReport, CandidateError> {
+    if let Some((expected_plan, expected_hash, bytes)) = full {
+        let report = project::plan_normalized(
+            candidate,
+            project::NormalizedComposeOptions {
+                compose_bytes: bytes,
+                ..compose
+            },
+        )?;
+        if report.plan.compose_sha256 != expected_hash {
+            return Err(refused(
+                "Combined normalized input differs from its reviewed bytes.",
+            ));
+        }
+        if report.plan_id == expected_plan
+            && report.plan.enrollment_compatible
+            && reviews_services(&report.plan, owned)
+        {
+            return Ok(report);
+        }
+        // A changed source inventory can change the plan ID while an append is
+        // being prepared. Fall back to the owner's known combined declarations.
+    }
+    let bytes = document.to_string();
+    project::plan_normalized(
+        candidate,
+        project::NormalizedComposeOptions {
+            compose_bytes: bytes.as_bytes(),
+            ..compose
+        },
+    )
 }
 
 /// The newly compiled graph uses existing resources by logical key. Existing
@@ -289,25 +338,24 @@ pub(super) fn run(
     } else {
         next_input
     };
-    let (input_plan_id, normalized_sha256) = if let Some(full) = full_identity {
-        (full.plan_id, full.normalized_sha256)
-    } else {
-        // A partial or changed graph is intentionally distinct from the whole
-        // file. The later restore must reconcile its resources to that review.
-        let bytes = combined.document.to_string();
-        let plan = project::plan_normalized(
-            candidate,
-            project::NormalizedComposeOptions {
-                compose_bytes: bytes.as_bytes(),
-                ..options.compose
-            },
-        )?;
-        (plan.plan_id, plan.plan.compose_sha256)
-    };
+    let combined_services = receipt
+        .readiness
+        .keys()
+        .chain(prepared.configs.keys())
+        .map(String::as_str)
+        .collect();
+    let reviewed = review_combined(
+        candidate,
+        options.compose,
+        &combined.document,
+        full_identity.as_ref().and_then(|full| full.review()),
+        &combined_services,
+    )?;
+    let combined_covers_owned = reviews_services(&reviewed.plan, &combined_services);
     let combined_identity = NormalizedInputIdentity {
         namespace: receipt.namespace.clone(),
         original_compose_sha256: options.compose.expected_compose_sha256.to_owned(),
-        normalized_compose_sha256: normalized_sha256,
+        normalized_compose_sha256: reviewed.plan.compose_sha256.clone(),
     };
     let bridge_count = prepared
         .resources
@@ -390,6 +438,15 @@ pub(super) fn run(
     if receipt.source.is_none() {
         receipt.source = source.map(|source| source.binding);
     }
+    // Keep the approved share and cache publication. Its execution contract
+    // must describe the combined review, even when only the old services bind source.
+    let combined_contract = receipt
+        .source
+        .as_ref()
+        .filter(|binding| binding.shared.is_some() && combined_covers_owned)
+        .map(|_| source::review_shared_contract(&reviewed.plan))
+        .transpose()?;
+    startup.check_cancelled()?;
     receipt.extending = prepared
         .configs
         .keys()
@@ -473,7 +530,14 @@ pub(super) fn run(
             .ok_or_else(|| refused("Targeted start requires the owner's publication set."))?;
         publications.verify_extension(candidate, &receipt)?;
         receipt.normalized_input = Some(combined_identity);
-        receipt.input_plan_id = Some(input_plan_id);
+        receipt.input_plan_id = Some(reviewed.plan_id);
+        if let Some(contract) = combined_contract {
+            let source = receipt
+                .source
+                .as_mut()
+                .ok_or_else(|| refused("Missing combined source binding."))?;
+            source.shared_contract = Some(contract);
+        }
         receipt.extending.clear();
         state::write(&root.join("state.json"), &receipt)?;
         Ok(templates)
@@ -602,6 +666,77 @@ mod tests {
         assert!(authored_digests(authored).is_none());
         let normalized = br#"{"x-example":"fixture","services":{"web":{"image":"alpine"}}}"#;
         assert_eq!(authored_digests(normalized).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn combined_shared_contract_matches_later_plain_restore_review() {
+        let fixture = super::super::tests::Fixture::new();
+        let home = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&home.0).unwrap();
+        let image = format!("sha256:{}", "c".repeat(64));
+        let web =
+            json!({"image":image,"network_mode":"none","volumes":["./src:/app:ro","zdata:/data"]});
+        let full = format!(
+            r#"{{"services":{{"web":{web},"redis":{{"image":"{image}","network_mode":"none","volumes":["adata:/data"]}}}},"volumes":{{"zdata":{{}},"adata":{{}}}}}}"#
+        );
+        fs::create_dir(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/marker"), "source").unwrap();
+        fs::write(fixture.0.join("compose.yaml"), &full).unwrap();
+        let namespace = candidate.plan(&fixture.0).unwrap().namespace;
+        let original = digest(full.as_bytes());
+        let partial = json!({"services":{"web":web},"volumes":{"zdata":{}}}).to_string();
+        let compose = project::NormalizedComposeOptions {
+            project: &fixture.0,
+            branch: None,
+            expected_namespace: &namespace,
+            compose_file: Path::new("compose.yaml"),
+            expected_compose_sha256: &original,
+            compose_bytes: partial.as_bytes(),
+            profiles: &[],
+        };
+        let cold = project::plan_normalized(&candidate, compose).unwrap();
+        let cold_contract = source::review_shared_contract(&cold.plan).unwrap();
+        let full_options = project::NormalizedComposeOptions {
+            compose_bytes: full.as_bytes(),
+            ..compose
+        };
+        let reviewed = project::plan_normalized(&candidate, full_options).unwrap();
+        let synthetic: Value = serde_json::from_str(&full).unwrap();
+        assert_ne!(synthetic.to_string(), full);
+        let combined = review_combined(
+            &candidate,
+            compose,
+            &synthetic,
+            Some((&reviewed.plan_id, &original, full.as_bytes())),
+            &BTreeSet::from(["redis", "web"]),
+        )
+        .unwrap();
+        assert_eq!(combined.plan_id, reviewed.plan_id);
+        assert_eq!(combined.plan.compose_sha256, original);
+        let contract = source::review_shared_contract(&combined.plan).unwrap();
+
+        // Restore may observe a new inventory with the same execution input.
+        fs::write(fixture.0.join("src/marker"), "edited source").unwrap();
+        let restore = project::plan_normalized(&candidate, full_options).unwrap();
+        let current = project::snapshot::capture_plan(&restore.plan).unwrap();
+        assert_eq!(
+            cold_contract
+                .verify(&restore.plan, current.receipt())
+                .unwrap_err()
+                .code,
+            "live_source_contract"
+        );
+        contract.verify(&restore.plan, current.receipt()).unwrap();
+        assert!(
+            review_combined(
+                &candidate,
+                compose,
+                &synthetic,
+                Some((&reviewed.plan_id, &"0".repeat(64), full.as_bytes())),
+                &BTreeSet::from(["redis", "web"]),
+            )
+            .is_err()
+        );
     }
 
     #[test]

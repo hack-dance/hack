@@ -953,7 +953,12 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 && ["--dependencies", "--expect-dependencies"].contains(&key))
             || (["serve-restore", "extend"].contains(action) && key == "--expect-generation")
             || (*action == "extend"
-                && ["--combined-plan", "--combined-normalized-sha256"].contains(&key))
+                && [
+                    "--combined-plan",
+                    "--combined-normalized-sha256",
+                    "--combined-normalized-file",
+                ]
+                .contains(&key))
             || (*action == "recover-cleanup" && key == "--expect-receipt")
             || (*action == "retire-recovered-publisher" && key == "--expect-owner")
             || key == "--run-id"

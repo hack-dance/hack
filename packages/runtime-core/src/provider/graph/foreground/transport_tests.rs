@@ -34,7 +34,10 @@ fn extension_frame_leaves_the_socket_live_until_the_client_disconnects() {
 fn legacy_append_gets_an_explicit_version_refusal() {
     let (mut client, mut server) = UnixStream::pair().unwrap();
     let budget = Duration::from_secs(1);
-    write(&mut client, &append_request(1), budget).unwrap();
+    let mut legacy = serde_json::to_value(append_request(1)).unwrap();
+    legacy["extend"]["combined"] =
+        json!({"plan_id":"1".repeat(64),"normalized_sha256":"2".repeat(64)});
+    write(&mut client, &legacy, budget).unwrap();
     let request = read_request(&server, budget).unwrap();
     assert!(super::super::service_start::refuse_legacy_append(
         &mut server,

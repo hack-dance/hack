@@ -5,13 +5,32 @@ use super::*;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CombinedInput {
-    pub plan_id: String,
-    pub normalized_sha256: String,
+    plan_id: String,
+    normalized_sha256: String,
+    // Older append frames still decode so the owner can return a version reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compose: Option<transport::PrivateText>,
 }
 
 impl CombinedInput {
+    pub fn new(plan: &str, normalized: &str, bytes: &[u8]) -> Result<Self, CandidateError> {
+        Ok(Self {
+            plan_id: plan.to_owned(),
+            normalized_sha256: normalized.to_owned(),
+            compose: Some(transport::PrivateText::from_bytes(bytes)?),
+        })
+    }
+
     pub(in crate::provider::graph) fn valid(&self) -> bool {
         super::super::hex(&self.plan_id, 64) && super::super::hex(&self.normalized_sha256, 64)
+    }
+
+    pub(in crate::provider::graph) fn review(&self) -> Option<(&str, &str, &[u8])> {
+        Some((
+            &self.plan_id,
+            &self.normalized_sha256,
+            self.compose.as_ref()?.as_bytes(),
+        ))
     }
 }
 use crate::project::{NormalizedComposeOptions, PlanOptions, execution::Condition};

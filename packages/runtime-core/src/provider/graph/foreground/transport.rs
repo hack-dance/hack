@@ -83,8 +83,10 @@ pub(super) struct JobCommand {
     pub environment: PrivateText,
 }
 const PRIVATE_LIMIT: usize = crate::provider::managed_environment::MAX_INPUT_BYTES;
-// JSON string escaping may double the private envelope, plus fixed routing metadata.
+// JSON string escaping may double the selected input and private environment.
 pub(super) const REQUEST_LIMIT: usize = 4 * PRIVATE_LIMIT + 32 * 1024;
+// Append may also forward the normalized review for the whole graph.
+const APPEND_REQUEST_LIMIT: usize = REQUEST_LIMIT + 2 * crate::project::yaml::MAX_BYTES;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1179,7 +1181,7 @@ pub(super) fn read_request(
     budget: Duration,
 ) -> Result<WireRequest, CandidateError> {
     let deadline = Instant::now() + budget;
-    let request: WireRequest = read_frame(stream, deadline, REQUEST_LIMIT)?;
+    let request: WireRequest = read_frame(stream, deadline, APPEND_REQUEST_LIMIT)?;
     if request.keeps_write_open() && request.exclusive() {
         return Ok(request);
     }
@@ -1235,7 +1237,7 @@ pub(super) fn write_extension(
     if !request.keeps_write_open() || !request.exclusive() {
         return Err(refused());
     }
-    write_bounded(stream, request, budget, REQUEST_LIMIT)
+    write_bounded(stream, request, budget, APPEND_REQUEST_LIMIT)
 }
 pub(super) fn write_job<T: Serialize>(
     stream: &mut UnixStream,

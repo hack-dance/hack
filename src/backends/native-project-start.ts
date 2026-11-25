@@ -3047,7 +3047,11 @@ async function nativeCombinedExtensionInput(opts: {
   readonly hostDependencies: readonly NativeHostDependency[];
   readonly currentImages: ReadonlyMap<string, string>;
   readonly specs: Readonly<Record<string, Record<string, unknown>>>;
-}): Promise<readonly string[]> {
+}): Promise<{
+  readonly planId: string;
+  readonly normalized: string;
+  readonly normalizedComposeJson: string;
+} | null> {
   const { start, deps, selection, profiles } = opts;
   try {
     let full = await deps.prepare({
@@ -3058,7 +3062,7 @@ async function nativeCombinedExtensionInput(opts: {
       env: process.env,
     });
     if (full.originalSha256 !== opts.pinned.originalSha256) {
-      return [];
+      return null;
     }
     full = await prepareNativeProjectAdaptation({
       input: full,
@@ -3095,20 +3099,20 @@ async function nativeCombinedExtensionInput(opts: {
     }
     const compose: unknown = JSON.parse(full.normalizedComposeJson);
     if (!(isRecord(compose) && isRecord(compose.services))) {
-      return [];
+      return null;
     }
     const current = new Set(opts.currentImages.keys());
     const active = new Set<string>();
     for (const [name, spec] of Object.entries(compose.services)) {
       if (!isRecord(spec)) {
-        return [];
+        return null;
       }
       if (!nativeServiceActive(spec, profiles)) {
         continue;
       }
       const image = opts.currentImages.get(name) ?? opts.specs[name]?.image;
       if (typeof image !== "string" || !IMAGE.test(image)) {
-        return [];
+        return null;
       }
       current.delete(name);
       active.add(name);
@@ -3120,7 +3124,7 @@ async function nativeCombinedExtensionInput(opts: {
       current.size > 0 ||
       Object.keys(opts.specs).some((name) => !active.has(name))
     ) {
-      return [];
+      return null;
     }
     full = { ...full, normalizedComposeJson: JSON.stringify(compose) };
     const services = prepareNativeProjectServices(
@@ -3151,16 +3155,11 @@ async function nativeCombinedExtensionInput(opts: {
       run: async (review) =>
         isRecord(review.report.plan) &&
         review.report.plan.compose_sha256 === normalized
-          ? [
-              "--combined-plan",
-              review.planId,
-              "--combined-normalized-sha256",
-              normalized,
-            ]
-          : [],
+          ? { planId: review.planId, normalized, normalizedComposeJson }
+          : null,
     });
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -3189,7 +3188,7 @@ async function extendNativeProjectGraph({
   readonly cacheFlags: readonly string[];
   readonly routeFlags: readonly string[];
   readonly readinessArgs: readonly string[];
-  readonly combined: readonly string[];
+  readonly combined: Awaited<ReturnType<typeof nativeCombinedExtensionInput>>;
   readonly budgetSeconds: number;
   readonly progress: ReturnType<typeof progressReporter>;
   readonly signal: AbortSignal;
@@ -3206,9 +3205,30 @@ async function extendNativeProjectGraph({
     reviewedPlan: review.report.plan,
     run,
   });
-  progress({ phase: "services", services, appending: true });
-  admitted();
+  let combinedDirectory: string | undefined;
   try {
+    const combinedArgs: string[] = [];
+    if (combined) {
+      combinedDirectory = await nativeRuntimeTempDirectory(
+        "hack-native-combined-"
+      );
+      const path = join(combinedDirectory, "compose.json");
+      await writeFile(path, combined.normalizedComposeJson, {
+        mode: 0o600,
+        flag: "wx",
+      });
+      combinedArgs.push(
+        "--combined-plan",
+        combined.planId,
+        "--combined-normalized-sha256",
+        combined.normalized,
+        "--combined-normalized-file",
+        path
+      );
+    }
+    requireActiveStartup(signal);
+    progress({ phase: "services", services, appending: true });
+    admitted();
     const response = await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
@@ -3222,7 +3242,7 @@ async function extendNativeProjectGraph({
         review.planId,
         "--expect-generation",
         extension.generation,
-        ...combined,
+        ...combinedArgs,
         ...nativeSharedSourceFlags(review.report.plan),
         ...cacheFlags,
         ...readinessArgs,
@@ -3289,6 +3309,9 @@ async function extendNativeProjectGraph({
     throw error;
   } finally {
     delivery.payload?.fill(0);
+    if (combinedDirectory) {
+      await rm(combinedDirectory, { recursive: true, force: true });
+    }
   }
 }
 

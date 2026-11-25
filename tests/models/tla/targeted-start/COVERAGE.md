@@ -36,3 +36,9 @@ authored interactive exec requests. The macOS recovery fixtures
 exercise a pending receipt before and after enrollment, then restore the
 original selection and its named data. These checks cover the socket lifecycle,
 the interrupted first write and the retained restore layout outside the model.
+The append commit records the new normalized review and the matching shared
+source execution contract together. The model abstracts those fingerprints.
+The shared-source regression checks that the cold contract rejects the
+expanded plan and that the combined contract admits the same plan after a
+source edit. The VM CLI fixture also checks exec on the running graph and
+reads both named-volume markers after a retaining down and plain up.

@@ -1,0 +1,26 @@
+stateDiagram-v2
+  direction TB
+  [*] --> checking: rollback
+  checking --> restored: already the original
+  checking --> staged: step output at path
+  checking --> staged: empty, output kept aside
+  checking --> conflict: changed, no overwrite
+  staged --> aside: rename into displaced/
+  aside --> restored: hard-link original
+  aside --> conflict: name taken meanwhile
+  staged --> interrupted: SIGKILL
+  aside --> interrupted: SIGKILL
+  interrupted --> checking: plain rerun
+  conflict --> checking: rerun with overwrite
+  restored --> [*]
+  note right of aside
+    Path is empty here
+    Output kept as keptAs
+  end note
+  note right of conflict
+    Other aside file is reported
+    Nothing is deleted
+  end note
+  class restored ok
+  class conflict fail
+  class interrupted wait

@@ -335,6 +335,21 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2188: without resume, a rerun refuses a restore that was only
+    // interrupted after moving the step's output aside.
+    name: "upgrade-restore",
+    module: "Restore",
+    states: 104,
+    invariant: "InterruptedRestoreResumes",
+    fields: [
+      'target = "none"',
+      'aside = <<"S">>',
+      'outcome = "conflict"',
+      'phase = "idle"',
+      "force = FALSE",
+    ],
+  },
+  {
     name: "interactive-session",
     module: "Session",
     states: 459,

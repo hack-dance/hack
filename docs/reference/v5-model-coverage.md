@@ -293,6 +293,26 @@ recorded snapshot after-state remains authoritative after a refused retry. Real
 SIGKILL regressions at both journal publication boundaries preserve a user's
 revert through a subsequent resume. Missing or damaged original agent blobs refuse
 resume even when the removed target is absent; absence alone is not recovery proof.
+
+### Upgrade rollback interruption (HACK-2188)
+
+![Upgrade rollback interruption](upgrade-restore.svg) ([source](upgrade-restore.mmd))
+
+[`upgrade-restore/Restore.tla`](../../tests/models/tla/upgrade-restore/COVERAGE.md)
+follows one restored target through check, stage, displacement and
+publication, with a crash after every step, one concurrent user write and an
+optional overwrite. It exhausts 104 states. Its negative control, the code
+before this fix, fails `InterruptedRestoreResumes`: a rollback killed after it
+moved the step's output aside left the path empty and every plain rerun refused
+it. Displaced files now carry a key of their target path, and a rerun that finds
+an empty path whose newest displaced file is the recorded after state finishes
+the restore; any other displaced file is reported, never adopted. Real SIGKILL
+regressions cover every restore boundary of a three-target snapshot and of a
+real `ignore-rules` apply, and a rollback straight after each of the seven apply
+boundaries (unrecorded targets need `--overwrite`, as documented). Both test
+files run in CI on macOS and Linux. Uncovered: power loss, fsync durability,
+cross-filesystem and no-hard-link refusals under interruption, and a user who
+deletes a restored file before a later rollback.
 Pre-write agent admission enforces the saved after-state; post-write verification
 admits only the owner's authorized removal output before advancing that state.
 An unchanged injected failure followed by a real removal/restore regression

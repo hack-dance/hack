@@ -8,7 +8,8 @@
  * build refuses. This check says it first, with the same remedy as that
  * refusal.
  *
- * It reads the Compose file and, only when a service builds, asks the runtime
+ * It reads the Compose file and, only when a service builds and
+ * `HACK_NATIVE_BUILDS=0` does not turn native builds off, asks the runtime
  * for its read-only setup inspection. It never installs or downloads anything,
  * and `--fix` does not either: adding the builder needs the download consent
  * that `hack native setup --accept-downloads` gives.
@@ -24,6 +25,7 @@
  * build and `hack native setup` verify the bytes and say so.
  */
 
+import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import type {
   invokeNativeRuntime,
   NativeRuntimeSelection,
@@ -50,8 +52,9 @@ export type NativeBuilderReport = {
   /** Services with a Compose `build`, whatever their profiles. */
   readonly buildServices: number;
   /**
-   * What the runtime reported. `not_checked` when no service builds, so the
-   * runtime was not asked; `unknown` when it was asked and did not say.
+   * What the runtime reported. `not_checked` when no service builds or
+   * `HACK_NATIVE_BUILDS=0` turns native builds off, so the runtime was not
+   * asked; `unknown` when it was asked and did not say.
    */
   readonly builder: NativeSetupBuilderState | "unknown" | "not_checked";
 };
@@ -77,6 +80,8 @@ export function nativeBuilderCheckResult(opts: {
   readonly launcher?: CandidateLauncher;
   /** The user's home directory (default: `os.homedir()`). */
   readonly homeDir?: string;
+  /** Whether native builds are on (default true; `HACK_NATIVE_BUILDS=0` is off). */
+  readonly buildsEnabled?: boolean;
 }): {
   readonly name: typeof NATIVE_BUILDER_CHECK;
   readonly status: "ok" | "warn";
@@ -93,14 +98,25 @@ export function nativeBuilderCheckResult(opts: {
       nativeBuilder: { buildServices: 0, builder: "not_checked" },
     };
   }
-  const nativeBuilder = {
-    buildServices: opts.buildServices,
-    builder: opts.builder,
-  };
   const one = opts.buildServices === 1;
   const scope = one
     ? "1 service builds an image"
     : `${opts.buildServices} services build an image`;
+  if (opts.buildsEnabled === false) {
+    return {
+      name,
+      status: "ok",
+      message: `${scope}, but HACK_NATIVE_BUILDS=0 turns native builds off, so this project does not need the native image builder.`,
+      nativeBuilder: {
+        buildServices: opts.buildServices,
+        builder: "not_checked",
+      },
+    };
+  }
+  const nativeBuilder = {
+    buildServices: opts.buildServices,
+    builder: opts.builder,
+  };
   switch (opts.builder) {
     case "prepared":
       return {
@@ -147,10 +163,18 @@ export async function checkNativeImageBuilder(opts: {
   readonly invoke?: typeof invokeNativeRuntime;
   readonly launcher?: CandidateLauncher;
   readonly homeDir?: string;
+  /** Whether native builds are on (default: `nativeBuildsEnabled()`). */
+  readonly buildsEnabled?: boolean;
 }): Promise<ReturnType<typeof nativeBuilderCheckResult>> {
   const buildServices = countNativeBuildServices(opts.compose);
-  if (buildServices === 0) {
-    return nativeBuilderCheckResult({ buildServices, builder: "not_checked" });
+  const buildsEnabled = opts.buildsEnabled ?? nativeBuildsEnabled();
+  // Builds turned off need no builder, so the runtime is not asked either.
+  if (buildServices === 0 || !buildsEnabled) {
+    return nativeBuilderCheckResult({
+      buildServices,
+      builder: "not_checked",
+      buildsEnabled,
+    });
   }
   const reported = await inspectNativeSetup({
     runtime: opts.runtime,

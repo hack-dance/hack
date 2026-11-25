@@ -6272,7 +6272,9 @@ test("retained startup asks the runtime for each build, a restart's resolved ima
   const retained = `sha256:${"e".repeat(64)}`;
   const rebuilt = `sha256:${"7".repeat(64)}`;
   const previous = process.env.HACK_NATIVE_BUILDS;
-  process.env.HACK_NATIVE_BUILDS = "1";
+  // Unset: builds are on by default (HACK-2532), so this reaches the
+  // in-process admission path with no opt-in.
+  Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
   try {
     for (const [restart, reused] of [
       [false, false],

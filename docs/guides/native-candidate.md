@@ -328,7 +328,9 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `environment_delivery`, `native_runtime_setup`, `shared_source_grant_required`,
   `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent),
   `gcloud_adc_mount_refused`, `native_source_over_limit` and
-  `native_source_unmeasured`. Runtime findings use the
+  `native_source_unmeasured`. `build_requires_opt_in` keeps its name from when
+  native builds were opt-in: it now means `HACK_NATIVE_BUILDS=0` turned builds off
+  for a service that builds an image. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
@@ -397,7 +399,7 @@ Compose backend. Native support for them is planned after v5.
 | Foreign external network | Exact external names `hack-dev` and `hack-logging` map to fresh native-owned project bridges, including logical aliases; they do not attach to Docker networks or share cross-project container DNS. Native publishes routes independently of Docker’s global Caddy. Other external networks stay refused by name. A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
 | Duplicate Hack network aliases | Two logical declarations name the same `hack-dev` or `hack-logging` identity. Keep one declaration and attach its services to that declaration; native refuses instead of silently splitting connectivity. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
-| Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. With `HACK_NATIVE_BUILDS=1` (see below), only a build field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`, counts; native build admission reviews the values of those four fields itself. |
+| Build outside the basic form | With native builds on (the default; see below), a service `build` field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`. Native build admission reviews the values of those four fields itself. With `HACK_NATIVE_BUILDS=0`, any `build` outside the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`) counts, and so does `image` together with `build`; build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
 | Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64. A missing or `null` `platform` is unset and passes. `linux/amd64` passes only for a service that the `HACK_NATIVE_ADAPTATION` selection opts in to [amd64 emulation](#amd64-emulation-with-rosetta-2); every other platform value stays on the Compose backend. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
@@ -463,10 +465,14 @@ volumes. On the native backend it refuses before reading anything and names the
 rerun: `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. See
 [Legacy Compose adoption](../reference/native-compose-adoption.md).
 
-Native image-project `up` builds Compose `build:` services only when you opt in
-with `HACK_NATIVE_BUILDS=1` (and the usual `HACK_NATIVE_SHARED_SOURCE=1`). Without
-it, a `build:` service refuses before any hook or VM effect and names the variable.
-With it:
+Native image-project `up` builds Compose `build:` services by default (with the
+usual `HACK_NATIVE_SHARED_SOURCE=1`). `HACK_NATIVE_BUILDS=0` is the only off switch:
+with it, a `build:` service refuses before any hook or VM effect and names the
+variable. Only the exact value `0` turns builds off. Any other value keeps them on,
+including the earlier opt-in `HACK_NATIVE_BUILDS=1` and words such as `false`, `off`
+or `no`. Launches that do not read your shell profile, such as login autostart and
+the daemon's lifecycle restarts, do not see a `HACK_NATIVE_BUILDS=0` set only there,
+so they build. With builds on:
 
 - Accepted forms are `build: <context>` and a mapping of `context`, `dockerfile`,
   `target` and `args`. Paths follow Compose (the context is relative to the Compose
@@ -475,7 +481,7 @@ With it:
   interpolation, a list item without `=` (host variable inheritance), `null`, other
   build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
   remote contexts and `image` together with `build` refuse. Values are never shown.
-  With `HACK_NATIVE_BUILDS=1`, `up` names the first such service and the field in the
+  With builds on, `up` names the first such service and the field in the
   three-line form, for example `! build  web uses build.ssh (SSH agent forwarding into
   a native build is not supported)`, then the Compose-backend command. Only Compose's
   own build field names are printed; any other key is not.
@@ -646,14 +652,14 @@ the same adaptation selection as native `up` without `--env` before it reports. 
 finds an external network, the message also names the `isolatedNetworks` selection
 above, which keeps that network's project on native.
 
-A basic build is not one of these features, but without `HACK_NATIVE_BUILDS=1`
-native image-project `up` refuses it, so doctor does not report it as ok then. On the
-native backend the check warns, names the variable and the next steps (set
-`HACK_NATIVE_BUILDS=1`, preview the authored native conversion with
-`hack config import --dry-run`, or select the Compose backend), and its JSON adds
-`composeBackend.nativeUpRefusals: ["basic_build"]`. On the Compose backend the same
-note is informational. With `HACK_NATIVE_BUILDS=1` set, doctor classifies builds the
-way native builds admit them and reports no basic-build refusal.
+A basic build is not one of these features. By default doctor classifies builds the
+way native builds admit them and reports no basic-build refusal. With
+`HACK_NATIVE_BUILDS=0`, native image-project `up` refuses a basic build, so doctor
+does not report it as ok then. On the native backend the check warns, names the
+variable and the next steps (unset `HACK_NATIVE_BUILDS`, preview the authored native
+conversion with `hack config import --dry-run`, or select the Compose backend), and
+its JSON adds `composeBackend.nativeUpRefusals: ["basic_build"]`. On the Compose
+backend the same note is informational.
 
 Publication control tokens are delivered to the relay through a one-shot inherited
 pipe (`--control-fd 0`), never through process arguments. The relay reads exactly
@@ -1491,7 +1497,7 @@ no tree and keeps its private `-repairing-` staging directory. Without a kept ar
 refuses (`provider_repair_unavailable`); prepare a fresh candidate home instead.
 
 The pins also name a BuildKit client (`buildx`, `darwin-arm64`), the image builder
-for native image builds (`HACK_NATIVE_BUILDS=1`). `runtime setup` installs it, as
+for native image builds (on by default). `runtime setup` installs it, as
 described above. The manual command stays for offline and manual homes:
 
 ```sh
@@ -1539,7 +1545,9 @@ record without hashing the builder, so bytes changed under an intact record stil
 read as `prepared` there; setup and builds verify the bytes. `hack doctor` on
 the native backend adds a `native image builder` check: a warning with the same
 remedy when the project has a `build:` service and the home has no image builder,
-or one whose record does not match the pinned release.
+or one whose record does not match the pinned release. With `HACK_NATIVE_BUILDS=0`
+the check is ok without asking the runtime: builds are off, so the project does not
+need the builder (`nativeBuilder.builder` is `not_checked`).
 Doctor never installs or downloads it, with `--fix` either.
 
 Every message about the image builder names one setup command: the `hack up`
@@ -1553,8 +1561,8 @@ path. Other printed commands are unchanged and name a candidate launcher by its
 full path ([printed commands](candidate-install.md#printed-commands-name-your-launcher)).
 
 `runtime build-image --request <file> --json` builds one image in the running
-runtime's engine with that client. Native `up` calls it for `build:` services when
-`HACK_NATIVE_BUILDS=1` is set; you can also run it directly. The request is a private
+runtime's engine with that client. Native `up` calls it for `build:` services unless
+`HACK_NATIVE_BUILDS=0` turns builds off; you can also run it directly. The request is a private
 JSON file (a singly linked, mode-`0600` file owned by you):
 
 ```json
@@ -1595,7 +1603,7 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   `rebuild` always builds. The key (version 2) covers the Dockerfile and
   `.dockerignore` bytes, target, arguments and versions, and every context entry the
   ignore file lets the build read: its path, kind, permission bits, contents, symlink
-  target and hard-link group, as described with `HACK_NATIVE_BUILDS` above. It does
+  target and hard-link group, as described with native builds above. It does
   not cover network responses, cache mounts or a moved base-image tag.
 - The runtime must have network egress and the isolated build network that a runtime
   started by this version sets up. An older runtime refuses with
@@ -4680,6 +4688,42 @@ alone never proves that services stopped.
 `hack down --recover` uses the ordinary authenticated stop when the graph owner
 is still running, including when its frontend was lost. It does not treat a live
 owner as dead or bypass its cleanup checks.
+
+After a lost foreground `up`, the owner's own stop races the `down --recover`
+that follows (HACK-2097). When the authenticated stop finds the owner it selected
+as running already gone (`graph_owner_recovery`), `down --recover` (and plain
+`down`) selects the owner again. While the owner is still running or its
+publication reads `uncertain` (a retirement in progress), it waits up to 15 s,
+says so on one line, and selects again every 250 ms; it never treats such an
+owner as dead. Then it acts on what it finds. An owner that retired its
+publication after its own stop leaves a stopped receipt, which the command
+confirms (receipt `stopped-data-retained`, containers absent) without replaying
+cleanup or hooks. An owner that died before its stop is recovered with the
+same-boot `graph recover-live-owner` for the newly selected receipt, and one that
+died after its stop wrote the retained receipt is retired with
+`graph retire-unadmitted-owner`. In each case the lost frontend's shutdown is
+then recovered as below, so `hack up` starts the run again with its data. An
+owner still running or retiring when the wait ends is refused with the next
+step: wait for it to exit, then run the same command again. An owner that died
+during its own stop (receipt `cleanup-intent`) is refused by name: the same-boot
+recovery does not resume that stop, and the refusal points to the explicit
+`graph recover-cleanup` across a pool stop described below, whose `prepare`
+admits `cleanup-intent`. Refusals name the command that ran, `down` or
+`down --recover`. The sequence is checked as the TLA+ model
+`tests/models/tla/native-down-lost-frontend`.
+
+![down --recover after a lost foreground](../reference/native-down-lost-frontend.svg)
+
+If the runtime still cannot prove a same-boot recovery
+(`graph_live_owner_recovery`), the refusal keeps data and evidence and names the
+next step: wait for an owner that is still running or stopping, then run
+`hack down --recover` again. If it still refuses after the owner exited, the run
+cannot be recovered in this boot. A start that failed or never finished
+(`failed-retained`, `preparing`) or an owner that died during its own stop
+(`cleanup-intent`) uses the explicit `graph recover-cleanup` across a pool stop
+described below. That cleanup refuses a restore or restart in progress
+(`restoring`, `restarting`): an owner that died there has no supported
+retirement, and the refusal says so instead of naming it.
 
 `hack up` and `hack restart` refuse a run whose foreground publication is still
 present and name the next step: a running owner must be stopped with Ctrl-C or

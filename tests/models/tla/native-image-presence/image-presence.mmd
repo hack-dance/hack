@@ -1,5 +1,5 @@
 ---
-title: ImagePresence · cached archive readback
+title: ImagePresence · archive readback
 ---
 stateDiagram-v2
     direction TB
@@ -20,7 +20,7 @@ stateDiagram-v2
     verified --> ready: Reconcile [present]
     verified --> refused: Reconcile [refusal]
     verified --> upload: Reconcile [absent]
-    upload --> ready: Upload [readback observed]
+    upload --> ready: Upload [observed]
     ready --> ready: Evict [present]
     ready --> created: Create [present]
     ready --> create_refused: Create [absent]
@@ -32,17 +32,19 @@ stateDiagram-v2
     class ready,created ok
     class refused,create_refused fail
     note right of tag
-        Fresh normal commands use the record.
-        Refresh or expiry checks the registry.
-        Fallback needs proof and presence.
-        Explicit refresh refuses on error.
+        Fresh commands use the record.
+        Refresh or expiry asks registry.
+        Fallback needs proof, presence.
+        Forced refresh refuses on error.
     end note
     note right of ready
-        INV: success observed the exact image.
-        Upload requires a verified archive.
+        INV: success saw exact image.
+        Upload needs a verified archive.
+        A cached archive is hashed once.
     end note
     note right of refused
-        Foreign intent and unknown or wrong
-        guest identity refuse. A same-boot
-        unresolved load with absence refuses.
+        Foreign intent refuses.
+        Unknown or wrong guest refuses.
+        Same-boot unresolved load
+        with absence refuses.
     end note

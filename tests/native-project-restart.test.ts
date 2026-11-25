@@ -1487,7 +1487,9 @@ test("stopped recovery reviews retained image IDs and resolves tags only after o
 test("restart checks an active build service's build key, pins its retained image, drops its build declaration and leaves inactive ones unbuilt", async () => {
   const listener = await listenerIntentFixture();
   const previous = process.env.HACK_NATIVE_BUILDS;
-  process.env.HACK_NATIVE_BUILDS = "1";
+  // Unset: builds are on by default (HACK-2532), so this reaches the
+  // in-process admission path with no opt-in.
+  Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
   try {
     let reviewed: Record<string, unknown> | undefined;
     let inactive: Record<string, unknown> | undefined;

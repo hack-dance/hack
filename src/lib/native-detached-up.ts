@@ -65,6 +65,7 @@ import {
 import {
   NATIVE_AUTHORED_ATTEMPT_LIMIT,
   NativeAuthoredAttemptLimitError,
+  nativeStartOutcomeUnknown,
 } from "./native-up-refusals.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
@@ -108,7 +109,10 @@ type StartupFailure = {
 };
 let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
 let publishProgress:
-  | ((phase: Exclude<NativeDetachedStartPhase, "launching">) => void)
+  | ((
+      phase: Exclude<NativeDetachedStartPhase, "launching">,
+      appending?: boolean
+    ) => void)
   | undefined;
 type BuildProgress = NativeBuildSettlement & {
   readonly kind: "build-settled";
@@ -137,12 +141,15 @@ function stopProgressHeartbeat(): void {
  * report as a heartbeat, so the launcher does not count image work against its
  * budget. A foreground start has no launcher and reports nothing.
  */
-export function nativeDetachedUpProgress(phase: string): void {
+export function nativeDetachedUpProgress(
+  phase: string,
+  appending?: boolean
+): void {
   if (!(publishProgress && isNativeDetachedStartPhase(phase))) {
     return;
   }
   stopProgressHeartbeat();
-  publishProgress(phase);
+  publishProgress(phase, appending);
   if (phase === "images") {
     const report = publishProgress;
     progressHeartbeat = setInterval(
@@ -857,6 +864,7 @@ export async function runNativeDetachedOwner(opts: {
       | {
           readonly kind: "progress";
           readonly images?: readonly string[];
+          readonly appending?: true;
           readonly phase: Exclude<NativeDetachedStartPhase, "launching">;
         }
   ): Promise<void> =>
@@ -957,7 +965,7 @@ export async function runNativeDetachedOwner(opts: {
       send(event);
     }
   };
-  publishProgress = (phase) => {
+  publishProgress = (phase, appending) => {
     if (ready || stopping) {
       stopProgressHeartbeat();
       return;
@@ -965,6 +973,7 @@ export async function runNativeDetachedOwner(opts: {
     send({
       kind: "progress",
       phase,
+      ...(appending ? { appending: true } : {}),
       ...(phase === "images" && workingImages.length
         ? { images: workingImages }
         : {}),
@@ -1110,6 +1119,7 @@ function watchStartDeadline(opts: {
     if (
       isRecord(value) &&
       (Object.keys(value).length === 2 ||
+        (value.phase === "services" && value.appending === true) ||
         (value.phase === "images" && Array.isArray(value.images))) &&
       value.kind === "progress" &&
       isNativeDetachedStartPhase(value.phase)
@@ -1218,6 +1228,7 @@ export async function startNativeDetachedUp(opts: {
   const result = Promise.withResolvers<Ready>();
   let failed = false;
   let cancellationCode: number | undefined;
+  let appending = false;
   let shellVariablesReported = false;
   let exitGrace: ReturnType<typeof setTimeout> | undefined;
   const exited = new Promise<void>((resolve) => {
@@ -1242,13 +1253,15 @@ export async function startNativeDetachedUp(opts: {
       return;
     }
     failed = true;
-    cancellationCode = code;
+    cancellationCode = appending ? 1 : code;
     result.reject(
-      new HackCliError({
-        code: "E_CANCELLED",
-        message:
-          "Native detached startup interrupted; ordinary owned stop was requested. Inspect hack ps before retrying.",
-      })
+      appending
+        ? nativeStartOutcomeUnknown()
+        : new HackCliError({
+            code: "E_CANCELLED",
+            message:
+              "Native detached startup interrupted; ordinary owned stop was requested. Inspect hack ps before retrying.",
+          })
     );
   };
   const interrupt = () => cancel(130);
@@ -1270,6 +1283,14 @@ export async function startNativeDetachedUp(opts: {
   child.on("message", (value: unknown) => {
     if (failed) {
       return;
+    }
+    if (
+      isRecord(value) &&
+      value.kind === "progress" &&
+      value.phase === "services" &&
+      value.appending === true
+    ) {
+      appending = true;
     }
     let imageBlocked: NativeImageBatchError | NativeImageBlocker | undefined;
     if (!ready && isRecord(value) && value.kind === "image-blocker") {

@@ -58,6 +58,7 @@ fn send(
     transport::write(
         &mut stream,
         &WireRequest {
+            cancel_append: false,
             version: 1,
             extend: None,
             refresh_dependencies: None,
@@ -147,7 +148,7 @@ pub(super) fn handle(
         run,
         &request.service,
     )?;
-    let watch = transport::ClientWatch::new(stream)?;
+    let watch = transport::ClientWatch::half_closed(stream)?;
     let deadline = Instant::now() + Duration::from_secs(command.timeout_seconds);
     runtime.set_startup_cancellation(Some(signals::startup_pending));
     let active = one_off::runtime::begin(
@@ -190,8 +191,13 @@ pub(super) fn pending_cleanup(
     if request.run != run {
         return None;
     }
-    if request.remove_data.is_some() {
-        return Some((stream, request));
+    if request.exclusive() {
+        if refuse_without_append(&mut stream, &request) {
+            return None;
+        }
+        if request.remove_data.is_some() {
+            return Some((stream, request));
+        }
     }
     let _ = transport::write(
         &mut stream,
@@ -270,5 +276,20 @@ mod tests {
             transport::write(&mut client, &request, Duration::from_secs(1)).unwrap();
             assert!(pending_cleanup(server, "owned").is_none());
         }
+    }
+
+    #[test]
+    fn append_only_stop_cannot_cancel_an_active_job() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let budget = Duration::from_secs(1);
+        transport::write(
+            &mut client,
+            &json!({"version":1,"run":"owned","remove_data":false,"cancel_append":true}),
+            budget,
+        )
+        .unwrap();
+        assert!(pending_cleanup(server, "owned").is_none());
+        let response: Value = transport::read(&mut client, budget, 1024).unwrap();
+        assert_eq!(response["code"], "graph_append_not_active");
     }
 }

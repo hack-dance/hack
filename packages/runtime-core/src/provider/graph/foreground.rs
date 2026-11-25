@@ -43,7 +43,7 @@ struct StartupServer {
     run: String,
     owner: String,
     stop: std::rc::Rc<std::cell::RefCell<Option<std::os::unix::net::UnixStream>>>,
-    client: Option<transport::ClientWatch>,
+    client: Option<transport::AppendClientWatch>,
     ports: Vec<Value>,
 }
 impl startup::StartupRequests for StartupServer {
@@ -63,7 +63,10 @@ impl startup::StartupRequests for StartupServer {
             let Ok(request) = transport::read_request(&stream, Duration::from_secs(1)) else {
                 continue;
             };
-            if request.run != self.run {
+            if request.run != self.run || !request.exclusive() {
+                continue;
+            }
+            if service_start::refuse_legacy_append(&mut stream, &request) {
                 continue;
             }
             let plain = request.restore.is_none()
@@ -71,7 +74,7 @@ impl startup::StartupRequests for StartupServer {
                 && request.refresh_dependencies.is_none()
                 && request.extend.is_none();
             let reply = match request.remove_data {
-                Some(false) if plain => {
+                Some(false) if plain && (!request.cancel_append || self.client.is_some()) => {
                     *self.stop.borrow_mut() = Some(stream);
                     break;
                 }
@@ -84,7 +87,7 @@ impl startup::StartupRequests for StartupServer {
             || self
                 .client
                 .as_ref()
-                .is_some_and(transport::ClientWatch::disconnected)
+                .is_some_and(transport::AppendClientWatch::disconnected)
     }
 }
 impl StartupServer {
@@ -113,6 +116,24 @@ fn reply_stop(
         Err(code) => json!({"ok":false,"run":run,"code":code}),
     };
     let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
+}
+
+fn refuse_without_append(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &WireRequest,
+) -> bool {
+    if service_start::refuse_legacy_append(stream, request) {
+        return true;
+    }
+    if !request.cancel_append {
+        return false;
+    }
+    let _ = transport::write(
+        stream,
+        &json!({"ok":false,"run":request.run,"code":"graph_append_not_active"}),
+        Duration::from_secs(1),
+    );
+    true
 }
 
 fn refused() -> CandidateError {
@@ -569,10 +590,13 @@ fn serve_input<'a>(
                 };
                 (stream, request)
             };
-            if request.run != receipt.run {
+            if request.run != receipt.run || !request.exclusive() {
                 continue;
             }
             publication.verify()?;
+            if refuse_without_append(&mut stream, &request) {
+                continue;
+            }
             if let Some(extend) = request.extend {
                 let has_routes = extend.has_routes();
                 let stop = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -583,7 +607,7 @@ fn serve_input<'a>(
                         run: receipt.run.clone(),
                         owner: receipt.owner.clone(),
                         stop: std::rc::Rc::clone(&stop),
-                        client: Some(transport::ClientWatch::new(&stream)?),
+                        client: Some(transport::AppendClientWatch::new(&stream)?),
                         ports: publishers.port_status(),
                     })
                 })();
@@ -622,6 +646,7 @@ fn serve_input<'a>(
                     queued = Some((
                         stream,
                         WireRequest {
+                            cancel_append: false,
                             version: 1,
                             run: receipt.run.clone(),
                             remove_data: Some(false),
@@ -856,6 +881,21 @@ pub fn request(
     run: &str,
     remove_data: Option<bool>,
 ) -> Result<Value, CandidateError> {
+    request_with_append_guard(candidate, run, remove_data, false)
+}
+
+/// Hold a retaining stop only while the live owner is appending services.
+/// The frontend can then perform its independently fenced data-only removal.
+pub fn cancel_append_request(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    request_with_append_guard(candidate, run, Some(false), true)
+}
+
+fn request_with_append_guard(
+    candidate: &Candidate,
+    run: &str,
+    remove_data: Option<bool>,
+    cancel_append: bool,
+) -> Result<Value, CandidateError> {
     let pin = transport::Pin::load(candidate, run)?;
     // A cleanup diagnostic may name only services in this pinned run's receipt.
     // Retain its identity before the effect and compare again after the reply.
@@ -864,6 +904,7 @@ pub fn request(
     transport::write(
         &mut stream,
         &WireRequest {
+            cancel_append,
             version: 1,
             extend: None,
             refresh_dependencies: None,
@@ -1038,6 +1079,7 @@ pub fn restore_request(
     }
     let bytes = managed.forward(plan, run)?;
     let request = WireRequest {
+        cancel_append: false,
         version: 1,
         extend: None,
         refresh_dependencies: None,

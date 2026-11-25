@@ -910,7 +910,7 @@ const downOptions = [
     type: "boolean",
     long: "--remove-data",
     description:
-      "Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first)",
+      "Native backend: delete owned data volumes after confirmed stop (can cancel a service append, asks first)",
   } as const),
   optYes,
   optJson,
@@ -7310,7 +7310,10 @@ async function handleNativeUp({
       if (event.phase === "build-settled") {
         nativeDetachedUpBuildProgress(event);
       } else {
-        nativeDetachedUpProgress(event.phase);
+        nativeDetachedUpProgress(
+          event.phase,
+          event.phase === "services" && event.appending
+        );
       }
       if (event.phase === "ready" || event.phase === "started") {
         ready = true;

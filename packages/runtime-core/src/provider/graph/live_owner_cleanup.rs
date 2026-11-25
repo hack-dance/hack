@@ -573,23 +573,7 @@ fn finish_retirement(
         return Err(refused());
     }
     host_relay::cleanup_preflight(engine, receipt, root, false)?;
-    for resource in receipt.resources.values() {
-        let observed = inspect_resource(engine, receipt, resource)?;
-        if resource.kind == Kind::Volume {
-            if observed.is_some() != plan_reconcile::retained_volume(resource) {
-                return Err(refused());
-            }
-        } else {
-            let mut by_name = resource.clone();
-            by_name.id = None;
-            if resource.phase != "absent"
-                || observed.is_some()
-                || inspect_resource(engine, receipt, &by_name)?.is_some()
-            {
-                return Err(refused());
-            }
-        }
-    }
+    verify_retired_resources(engine, receipt)?;
     startup::verify_cleanup(engine, receipt)?;
     probes::verify_cleanup(engine, receipt)?;
     let publisher = foreground::transport::root(candidate, &receipt.run)?;
@@ -646,6 +630,35 @@ fn finish_retirement(
     verify()?;
     dependency_slots::recover_cleaned(candidate, receipt, None)?;
     verify()
+}
+
+pub(super) fn verify_retired_resources(
+    engine: &impl Inspection,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    for resource in receipt.resources.values() {
+        let observed = inspect_resource(engine, receipt, resource)?;
+        if resource.kind == Kind::Volume {
+            // A reserved content-addressed cache can already exist for
+            // another graph. Inspection still requires matching ownership.
+            let retained = plan_reconcile::retained_volume(resource);
+            if (retained && observed.is_none())
+                || (!retained && resource.cache.is_none() && observed.is_some())
+            {
+                return Err(refused());
+            }
+        } else {
+            let mut by_name = resource.clone();
+            by_name.id = None;
+            if resource.phase != "absent"
+                || observed.is_some()
+                || inspect_resource(engine, receipt, &by_name)?.is_some()
+            {
+                return Err(refused());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Completed cleanup grants archival, not refresh replay. The same exact ready

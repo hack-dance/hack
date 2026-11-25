@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     net::Shutdown,
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, RawFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
         unix::{
             fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
@@ -27,6 +27,8 @@ pub(super) struct WireRequest {
     pub version: u8,
     pub run: String,
     pub remove_data: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_append: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,17 +51,18 @@ impl WireRequest {
     }
 
     pub fn exclusive(&self) -> bool {
-        [
-            self.remove_data.is_some(),
-            self.restore.is_some(),
-            self.job.is_some(),
-            self.refresh_dependencies.is_some(),
-            self.extend.is_some(),
-        ]
-        .into_iter()
-        .filter(|selected| *selected)
-        .count()
-            <= 1
+        (!self.cancel_append || self.remove_data == Some(false))
+            && [
+                self.remove_data.is_some(),
+                self.restore.is_some(),
+                self.job.is_some(),
+                self.refresh_dependencies.is_some(),
+                self.extend.is_some(),
+            ]
+            .into_iter()
+            .filter(|selected| *selected)
+            .count()
+                <= 1
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -1177,14 +1180,10 @@ pub(super) fn read_request(
 ) -> Result<WireRequest, CandidateError> {
     let deadline = Instant::now() + budget;
     let request: WireRequest = read_frame(stream, deadline, REQUEST_LIMIT)?;
-    if !request.exclusive() {
-        return Err(refused());
-    }
-    if request.keeps_write_open() {
+    if request.keeps_write_open() && request.exclusive() {
         return Ok(request);
     }
-    if request.version != 1 || request.extend.is_some() || receive(stream, &mut [0], deadline)? != 0
-    {
+    if request.version != 1 || receive(stream, &mut [0], deadline)? != 0 {
         return Err(refused());
     }
     Ok(request)
@@ -1579,12 +1578,69 @@ pub(in crate::provider::graph) fn resume_recovered_publisher(
     )
 }
 
-/// An open extension stream carries exactly one request. EOF or unexpected
-/// additional bytes cancel the effect without touching the rest of the run.
+/// Legacy Compose and authored clients half-close as part of framing. Watch the peer's
+/// read side so a request EOF does not cancel an active operation.
 pub(in crate::provider::graph) struct ClientWatch {
-    stream: UnixStream,
+    queue: OwnedFd,
 }
 impl ClientWatch {
+    pub fn half_closed(stream: &UnixStream) -> Result<Self, CandidateError> {
+        // SAFETY: kqueue creates a new owned descriptor or reports failure.
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(refused());
+        }
+        // SAFETY: the successful kqueue call transfers this descriptor to OwnedFd.
+        let queue = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: fd remains owned by queue for this fcntl operation.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(refused());
+        }
+        let change = libc::kevent {
+            ident: stream.as_raw_fd() as usize,
+            filter: libc::EVFILT_WRITE,
+            flags: libc::EV_ADD | libc::EV_ENABLE,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: changelist is initialized; the kernel copies it before return.
+        if unsafe { libc::kevent(fd, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
+            return Err(refused());
+        }
+        Ok(Self { queue })
+    }
+    pub fn disconnected(&self) -> bool {
+        // SAFETY: kevent writes at most one initialized event to this local storage.
+        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: queue is owned; event and timeout remain live for this call.
+        let count = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                &mut event,
+                1,
+                &timeout,
+            )
+        };
+        count < 0
+            || (count == 1
+                && (event.filter != libc::EVFILT_WRITE
+                    || event.flags & (libc::EV_EOF | libc::EV_ERROR) != 0))
+    }
+}
+
+/// An open extension stream carries exactly one request. EOF or unexpected
+/// additional bytes cancel the effect without touching the rest of the run.
+pub(in crate::provider::graph) struct AppendClientWatch {
+    stream: UnixStream,
+}
+impl AppendClientWatch {
     pub fn new(stream: &UnixStream) -> Result<Self, CandidateError> {
         Ok(Self {
             stream: stream.try_clone().map_err(|_| refused())?,

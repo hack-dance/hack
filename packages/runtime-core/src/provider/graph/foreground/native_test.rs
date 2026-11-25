@@ -485,6 +485,7 @@ fn private_owner_restore_preserves_data_and_retires_values() {
     transport::write(
         &mut socket,
         &WireRequest {
+            cancel_append: false,
             version: 1,
             extend: None,
             refresh_dependencies: None,

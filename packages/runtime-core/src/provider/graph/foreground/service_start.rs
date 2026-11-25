@@ -46,6 +46,25 @@ impl ExtendRequest {
     }
 }
 
+pub(super) fn refuse_legacy_append(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &WireRequest,
+) -> bool {
+    if request.version != 1 || request.extend.is_none() {
+        return false;
+    }
+    let refusal = CandidateError::new(
+        "graph_append_protocol_version",
+        "Appending services requires a CLI with native append protocol v2 (5.0.0-next.26 or later).",
+    );
+    let _ = transport::write(
+        stream,
+        &owner_failure(&request.run, &refusal),
+        Duration::from_secs(1),
+    );
+    true
+}
+
 /// Forward normalized input and optional private delivery to the exact live owner.
 /// A lost reply never retries the start.
 pub fn request(
@@ -97,6 +116,7 @@ pub fn request(
     transport::write_extension(
         &stream,
         &WireRequest {
+            cancel_append: false,
             version: 2,
             run: run.into(),
             remove_data: None,

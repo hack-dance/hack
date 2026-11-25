@@ -2,17 +2,21 @@ use super::*;
 use crate::owned_tmp_root::OwnedTmpRoot;
 use serde_json::json;
 
-#[test]
-fn extension_frame_leaves_the_socket_live_until_the_client_disconnects() {
-    let (client, server) = UnixStream::pair().unwrap();
-    let request: WireRequest = serde_json::from_value(json!({
-        "version":2, "run":"a".repeat(32),
+fn append_request(version: u8) -> WireRequest {
+    serde_json::from_value(json!({
+        "version":version, "run":"a".repeat(32),
         "extend":{"generation":"b".repeat(64),"project":"project","file":"compose.yaml",
             "profiles":[],"namespace":"c".repeat(64),"original_hash":"d".repeat(64),
             "plan":"e".repeat(64),"compose":"{}","shared_source":false,"readiness":{},
             "routes":[],"timeout_seconds":30}
     }))
-    .unwrap();
+    .unwrap()
+}
+
+#[test]
+fn extension_frame_leaves_the_socket_live_until_the_client_disconnects() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let request = append_request(2);
     write_extension(&client, &request, Duration::from_secs(1)).unwrap();
     assert!(
         read_request(&server, Duration::from_secs(1))
@@ -20,10 +24,27 @@ fn extension_frame_leaves_the_socket_live_until_the_client_disconnects() {
             .extend
             .is_some()
     );
-    let watch = ClientWatch::new(&server).unwrap();
+    let watch = AppendClientWatch::new(&server).unwrap();
     assert!(!watch.disconnected());
     drop(client);
     assert!(watch.disconnected());
+}
+
+#[test]
+fn legacy_append_gets_an_explicit_version_refusal() {
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let budget = Duration::from_secs(1);
+    write(&mut client, &append_request(1), budget).unwrap();
+    let request = read_request(&server, budget).unwrap();
+    assert!(super::super::service_start::refuse_legacy_append(
+        &mut server,
+        &request
+    ));
+    let reply: serde_json::Value = read(&mut client, budget, 1024).unwrap();
+    assert_eq!(reply["ok"], false);
+    assert_eq!(reply["run"], request.run);
+    assert_eq!(reply["code"], "graph_append_protocol_version");
+    assert!(reply["message"].as_str().unwrap().contains("5.0.0-next.26"));
 }
 
 #[test]
@@ -575,15 +596,29 @@ fn replaced_socket_or_inherited_listener_refuses_retirement() {
 
 #[test]
 fn framed_half_close_keeps_job_client_alive_until_reader_closes() {
-    let (mut client, mut server) = UnixStream::pair().unwrap();
-    let watch = ClientWatch::new(&server).unwrap();
-    write(
-        &mut client,
-        &json!({"version":1,"run":"owned","remove_data":null}),
-        Duration::from_secs(1),
-    )
-    .unwrap();
-    let _: serde_json::Value = read(&mut server, Duration::from_secs(1), REQUEST_LIMIT).unwrap();
+    assert_live_half_close(json!({
+        "version":1,"run":"owned","remove_data":null,
+        "job":{"service":"web","command":{
+            "plan":"plan","generation":"generation","boot":"boot","argv":["true"],
+            "workdir":null,"timeout_seconds":30,"environment":"fixture input"
+        }}
+    }));
+}
+
+#[test]
+fn framed_half_close_keeps_dependency_refresh_client_alive_until_reader_closes() {
+    assert_live_half_close(json!({
+        "version":1,"run":"owned","remove_data":null,
+        "refresh_dependencies":{"plan":"plan","generation":"generation","boot":"boot"}
+    }));
+}
+
+fn assert_live_half_close(request: serde_json::Value) {
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let budget = Duration::from_secs(1);
+    write(&mut client, &request, budget).unwrap();
+    read_request(&server, budget).unwrap();
+    let watch = ClientWatch::half_closed(&server).unwrap();
     assert!(!watch.disconnected());
     drop(client);
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -624,6 +659,7 @@ fn legacy_requests_and_private_schema_are_strict() {
 fn maximum_private_text_roundtrips_with_bounded_escaped_frame() {
     let private = "\\".repeat(PRIVATE_LIMIT);
     let request = WireRequest {
+        cancel_append: false,
         version: 1,
         extend: None,
         refresh_dependencies: None,

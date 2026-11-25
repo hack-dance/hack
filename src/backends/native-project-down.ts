@@ -865,33 +865,14 @@ async function nativeProjectDownOnce(opts: {
         return observed;
       }
       if (
-        isRecord(observed) &&
-        isRecord(observed.receipt) &&
-        observed.receipt.phase === "ready-observed" &&
-        observed.receipt.run === run.run &&
-        observed.receipt.plan_id === run.planId
-      ) {
-        const extending = observed.receipt.extending;
-        if (Array.isArray(extending) && extending.length > 0) {
-          return observed;
-        }
-        // Before its first receipt commit, an extension only shows up on
-        // the startup socket. Ordinary ready owners have no such marker.
-        const owner = await invoke({
+        await appendingNativeGraph(observed, {
           runtime: opts.runtime,
-          cwd: opts.scope.projectRoot,
-          args: ["graph", "owner-status", "--run-id", run.run, "--json"],
-          timeoutMs: 2000,
-        }).catch(() => undefined);
-        if (
-          isRecord(owner) &&
-          owner.ok === true &&
-          owner.run === run.run &&
-          owner.plan === run.planId &&
-          owner.runtime_error === "graph_starting"
-        ) {
-          return observed;
-        }
+          projectRoot: opts.scope.projectRoot,
+          run,
+          invoke,
+        })
+      ) {
+        return observed;
       }
       return await leased();
     }
@@ -1279,7 +1260,7 @@ function requireActiveRemoval(signal: AbortSignal | undefined): void {
   }
 }
 
-/** Thrown when the graph still runs: removal never stops compute itself. */
+/** Steady running graphs require an explicit retaining stop. */
 function removalRequiresStop(): Error {
   return new ClosedCliError(
     "Native data removal requires a stopped project; run `hack down` first, then `hack down --remove-data`. Nothing was removed."
@@ -1296,6 +1277,84 @@ function sameRun(receipt: Record<string, unknown>, run: NativeProjectRun) {
     receipt.plan_id === run.planId &&
     isRecord(receipt.resources)
   );
+}
+
+async function appendingNativeGraph(
+  observed: unknown,
+  opts: {
+    readonly runtime: NativeRuntimeSelection;
+    readonly projectRoot: string;
+    readonly run: NativeProjectRun;
+    readonly invoke: typeof invokeNativeRuntime;
+    readonly signal?: AbortSignal;
+  }
+): Promise<boolean> {
+  const { run, runtime, projectRoot, invoke, signal } = opts;
+  if (
+    !(
+      isRecord(observed) &&
+      isRecord(observed.receipt) &&
+      sameRun(observed.receipt, run)
+    ) ||
+    observed.receipt.phase !== "ready-observed"
+  ) {
+    return false;
+  }
+  const extending = observed.receipt.extending;
+  if (Array.isArray(extending) && extending.length > 0) {
+    return true;
+  }
+  // Prior to the first receipt write, the append only shows up on the owner socket.
+  const owner = await invoke({
+    runtime,
+    cwd: projectRoot,
+    args: ["graph", "owner-status", "--run-id", run.run, "--json"],
+    timeoutMs: 2000,
+    signal,
+  }).catch(() => undefined);
+  return (
+    isRecord(owner) &&
+    owner.ok === true &&
+    owner.run === run.run &&
+    owner.plan === run.planId &&
+    owner.runtime_error === "graph_starting"
+  );
+}
+
+async function stopAppendingNativeGraph(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  const { runtime, projectRoot, run, invoke, signal } = opts;
+  requireActiveRemoval(signal);
+  try {
+    await invoke({
+      runtime,
+      cwd: projectRoot,
+      args: [
+        "graph",
+        "cleanup",
+        "--run-id",
+        run.run,
+        "--cancel-append",
+        "--json",
+      ],
+      timeoutMs: 590_000,
+      signal,
+    });
+  } catch (error) {
+    // The owner refuses if the append committed during confirmation.
+    if (
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCauseCode === "graph_append_not_active"
+    ) {
+      throw removalRequiresStop();
+    }
+    throw removalRefused(error);
+  }
 }
 
 /**
@@ -1390,8 +1449,9 @@ function confirmRemoved(value: unknown, run: NativeProjectRun): void {
 
 /**
  * Explicit retained-data removal for a stopped native Compose-file project
- * (Compose parity: `down --volumes`). It never stops compute or runs hooks:
- * a running graph refuses, so `hack down` must stop it first. Under the
+ * (Compose parity: `down --volumes`). An append in progress can be canceled
+ * with a retaining stop that only the appending owner may accept. A steady
+ * running graph requires a separate stop. Under the
  * native operation lock and after the original frontend's finalization, it
  * asks the graph owner for `graph cleanup --remove-data --retained-only`,
  * which deletes only receipt-owned volumes behind a durable cleanup intent
@@ -1416,10 +1476,10 @@ export async function nativeProjectRemoveData(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   /**
-   * Asked once, after a read-only check that the exact saved run is stopped
+   * Asked once, after observing the exact saved run stopped or appending
    * and before any lock or effect. `false` keeps everything.
    */
-  readonly confirm?: () => Promise<boolean>;
+  readonly confirm?: (appending: boolean) => Promise<boolean>;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly finalizationTimeoutMs?: number;
   /** Ordinary cancellation (SIGINT/SIGTERM in the command). */
@@ -1427,13 +1487,14 @@ export async function nativeProjectRemoveData(opts: {
 }) {
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const { signal } = opts;
-  const inspect = (run: NativeProjectRun) =>
+  const inspect = (run: NativeProjectRun, busyWaitMs?: number) =>
     inspectNativeProjectGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       run: run.run,
       invoke,
       signal,
+      busyWaitMs,
     });
   const notStarted = {
     backend: "native",
@@ -1444,8 +1505,34 @@ export async function nativeProjectRemoveData(opts: {
   if (!selected) {
     return notStarted;
   }
-  removalStart(await inspect(selected), selected);
-  if (opts.confirm && !(await opts.confirm())) {
+  let observed: unknown;
+  let providerBusy = false;
+  try {
+    observed = await inspect(selected, 0);
+  } catch (error) {
+    if (!isNativeProviderBusy(error)) {
+      throw error;
+    }
+    providerBusy = true;
+    observed = await observeStartingNativeProjectGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run: selected.run,
+      invoke,
+      signal,
+    }).catch(() => undefined);
+  }
+  const appending = await appendingNativeGraph(observed, {
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    run: selected,
+    invoke,
+    signal,
+  });
+  if (!appending) {
+    removalStart(providerBusy ? await inspect(selected) : observed, selected);
+  }
+  if (opts.confirm && !(await opts.confirm(appending))) {
     return {
       backend: "native",
       status: "kept",
@@ -1468,8 +1555,17 @@ export async function nativeProjectRemoveData(opts: {
     if (!isDeepStrictEqual(run, selected)) {
       throw removalRefused();
     }
-    const start = removalStart(await inspect(run), run);
     const finalization = await captureFinalization({ scope: opts.scope, run });
+    if (appending) {
+      await stopAppendingNativeGraph({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        run,
+        invoke,
+        signal,
+      });
+    }
+    const start = removalStart(await inspect(run), run);
     try {
       await waitNativeProjectFinalization({
         scope: opts.scope,

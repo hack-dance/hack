@@ -761,6 +761,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut profiles = Vec::new();
     let mut remove_data = false;
     let mut retained_only = false;
+    let mut cancel_append = false;
     let mut environment_stdin = false;
     let mut automatic_dependency_slots = false;
     let mut report_started = false;
@@ -864,6 +865,13 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 return Err(invalid());
             }
             retained_only = true;
+            continue;
+        }
+        if key == "--cancel-append" {
+            if cancel_append || *action != "cleanup" {
+                return Err(invalid());
+            }
+            cancel_append = true;
             continue;
         }
         let value = *args.get(index).ok_or_else(invalid)?;
@@ -1171,6 +1179,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             }
         }
         "cleanup" => {
+            if cancel_append {
+                if remove_data || retained_only {
+                    return Err(invalid());
+                }
+                #[cfg(target_os = "macos")]
+                return graph::foreground::cancel_append_request(candidate, run);
+                #[cfg(not(target_os = "macos"))]
+                return Err(invalid());
+            }
             // Stopped-only data removal never reaches a live owner, so a graph
             // restored after the caller confirmed it stopped is never stopped by it.
             if retained_only && !remove_data {

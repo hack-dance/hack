@@ -2,6 +2,13 @@ import { HackCliError } from "./cli-result.ts";
 
 export const NATIVE_AUTHORED_ATTEMPT_LIMIT = "native_graph_attempt_limit";
 
+export function nativeStartOutcomeUnknown(): HackCliError {
+  return new HackCliError({
+    code: "E_NATIVE_START_OUTCOME_UNKNOWN",
+    message: "The start may have completed; check hack ps",
+  });
+}
+
 export class NativeAuthoredAttemptLimitError extends HackCliError {
   constructor() {
     super({

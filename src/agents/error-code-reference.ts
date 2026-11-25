@@ -26,6 +26,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The native owner is still starting the project or selected services.",
     readFirst: "`hack ps --json`",
   },
+  E_NATIVE_START_OUTCOME_UNKNOWN: {
+    meaning:
+      "The selected service start was interrupted before its result arrived.",
+    readFirst: "`hack ps --json`",
+  },
   E_UNSUPPORTED_PLATFORM: {
     meaning:
       "The command needs a platform this host is not, such as the native runtime outside Apple Silicon macOS.",

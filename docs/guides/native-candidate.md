@@ -2818,8 +2818,11 @@ It refuses an active, changed
 or uncertain mapping rather than allocating a new data volume. When a Compose edit changes
 the graph's images, volumes or other resources, the retained data cannot be adopted and
 `up` says so. Either revert the edit, or discard the data explicitly with
-`hack down --remove-data` (Compose parity: `docker compose down --volumes`). It works only
-on a stopped project: run `hack down` first. It asks for confirmation (`--yes` skips the
+`hack down --remove-data` (Compose parity: `docker compose down --volumes`). Run
+`hack down` first on a running project. During a service append, confirmed
+`hack down --remove-data` can ask the appending owner to cancel the start and stop
+the run before attempting removal. The owner refuses this stop if the append
+has already completed. The command asks for confirmation (`--yes` skips the
 question; `--json` requires `--yes`), runs no lifecycle hooks, and asks the graph owner to
 delete only the volumes that this run created. Shared dependency caches are released, not
 deleted. The request uses `graph cleanup --remove-data --retained-only`: the runtime

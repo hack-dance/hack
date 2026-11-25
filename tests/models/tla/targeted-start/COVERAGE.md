@@ -27,8 +27,12 @@ durability and live VM routing. The [Pele state chart](../../../../docs/referenc
 shows the same transitions.
 
 The CLI regression simulates a held provider lease and checks that requests
-reach the owner for a second start or a stop. The owner transport fixture checks that EOF on an
-open extension request signals cancellation. The macOS recovery fixtures
+reach the owner for a second start or a stop. Confirmed data removal first uses
+the modeled stop when the owner is appending, then runs a separate stopped-only
+removal. The tests cover refusal if the append finishes before the owner sees
+the stop. The owner transport tests cover EOF cancellation on an open append
+stream and the distinct half-close behavior of job, dependency refresh and
+authored interactive exec requests. The macOS recovery fixtures
 exercise a pending receipt before and after enrollment, then restore the
 original selection and its named data. These checks cover the socket lifecycle,
 the interrupted first write and the retained restore layout outside the model.

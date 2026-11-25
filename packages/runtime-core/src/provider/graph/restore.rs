@@ -734,7 +734,7 @@ fn restore_inputs(
     Ok(session.receipt)
 }
 
-fn retain_restore_failure(
+pub(super) fn retain_restore_failure(
     root: &std::path::Path,
     receipt: &mut Receipt,
     fresh: bool,

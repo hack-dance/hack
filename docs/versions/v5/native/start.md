@@ -135,9 +135,17 @@ On failure, the owner tries to remove the new resources and returns previously
 stopped services to a stopped state with their routes and loopback ports closed.
 A retry can start and publish those services again. If the owner cannot confirm
 rollback, `hack ps` reports a degraded run and shows the service states it can
-verify. Restart supervision continues for services outside the failed start. Ctrl-C
-cancels the targeted start. `hack down` cancels the start and stops the whole
-run, including any service created midway. If the owner exited, use
+verify. Restart supervision continues for services outside the failed start.
+Ctrl-C disconnects the start request. The owner cancels an uncommitted start.
+If the client loses the result, it returns `E_NATIVE_START_OUTCOME_UNKNOWN`
+and asks you to check `hack ps`.
+
+`hack down` cancels the start and stops the whole run, including any service
+created midway. The owner can answer after an in-flight image inspection,
+volume preparation or container operation settles. Confirmed
+`hack down --remove-data` during a service append also cancels it and stops
+the run, then removes its owned volumes once the stop is confirmed.
+If the owner exited, use
 `hack down --recover`. Recovery uses the last committed receipt for cleanup
 and keeps interrupted writes as evidence. After a retaining `down`, `ps` shows
 `stopped-data-retained`. A later `up` selects services from the current Compose

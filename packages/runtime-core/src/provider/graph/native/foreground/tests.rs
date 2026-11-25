@@ -108,6 +108,44 @@ fn status(receipt: Receipt) -> Reply {
 }
 
 #[test]
+fn authored_interactive_exec_half_close_keeps_client_alive_until_reader_closes() {
+    use std::os::unix::net::UnixStream;
+
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    let review = &receipt.review;
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let budget = Duration::from_secs(1);
+    transport::write(
+        &mut client,
+        &Request {
+            version: 2,
+            kind: RequestKind::NativeGraphControl,
+            run: RUN.into(),
+            review: review.review_id().into(),
+            action: Action::InteractiveExec,
+            console_size: Some([24, 80]),
+            session: Some("12345678-abcd-abcd-abcd-123456789abc".into()),
+            logs: None,
+            exec: Some(runtime::ExecSelection {
+                service: "web".into(),
+                argv: vec!["/bin/sh".into()],
+                workdir: None,
+            }),
+            one_off: None,
+        },
+        budget,
+    )
+    .unwrap();
+    let request: Request = transport::read(&mut server, budget, 512 * 1024).unwrap();
+    request.validate(review).unwrap();
+    let watch = transport::ClientWatch::half_closed(&server).unwrap();
+    assert!(!watch.disconnected());
+    drop(client);
+    assert!(watch.disconnected());
+}
+
+#[test]
 fn real_compiler_review_crosses_authenticated_native_socket_without_compose_fields() {
     let fixture = Fixture::new();
     let receipt = fixture.receipt();

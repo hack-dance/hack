@@ -1343,4 +1343,76 @@ mod tests {
             "graph_resource_exists"
         );
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn down_retires_failed_reconciled_restore_with_an_existing_reserved_cache() {
+        struct Guest(BTreeMap<String, Value>);
+        impl Inspection for Guest {
+            fn incarnation(&self) -> &str {
+                unreachable!()
+            }
+            fn boot_id(&self) -> Result<&str, CandidateError> {
+                unreachable!()
+            }
+            fn verify(&self) -> Result<(), CandidateError> {
+                unreachable!()
+            }
+            fn get(&self, path: &str) -> Result<Value, CandidateError> {
+                self.0
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| error("engine_not_found", "Resource absent."))
+            }
+            fn probe_status(&self, _: &str) -> Result<Option<String>, CandidateError> {
+                unreachable!()
+            }
+        }
+
+        let (project, mut receipt, _) = cached_project();
+        let (_, projection) =
+            reconcile_cached(&project, &receipt, cached("one", "/bin/install-v2"));
+        receipt.resources = projection.resources;
+        assert_eq!(receipt.resources["volume:deps"].phase, "reserved");
+        receipt.set_phase("restoring");
+        let fixture = super::super::tests::Fixture::new();
+        restore::retain_restore_failure(&fixture.0, &mut receipt, true, true).unwrap();
+        assert_eq!(receipt.phase, "failed-retained");
+
+        // Recovery has confirmed compute absence and committed the retained
+        // receipt. The newly selected cache already exists for a sibling.
+        for resource in receipt
+            .resources
+            .values_mut()
+            .filter(|r| r.kind != Kind::Volume)
+        {
+            resource.phase = "absent".into();
+        }
+        receipt.set_phase("stopped-data-retained");
+        let cache = &receipt.resources["volume:deps"];
+        let data = &receipt.resources["volume:data"];
+        let volume = |resource: &Resource| {
+            (
+                format!("/v1.53/volumes/{}", resource.name),
+                json!({"Name":resource.name,"Driver":"local","Labels":expected_labels(&receipt, resource)}),
+            )
+        };
+        let mut guest = Guest(BTreeMap::from([volume(cache), volume(data)]));
+        live_owner_cleanup::verify_retired_resources(&guest, &receipt).unwrap();
+        guest.0.get_mut(&volume(cache).0).unwrap()["Labels"] = json!({});
+        assert_eq!(
+            live_owner_cleanup::verify_retired_resources(&guest, &receipt)
+                .unwrap_err()
+                .code,
+            "graph_foreign_resource"
+        );
+        guest.0.remove(&volume(cache).0);
+        guest.0.remove(&volume(data).0);
+        assert_eq!(
+            live_owner_cleanup::verify_retired_resources(&guest, &receipt)
+                .unwrap_err()
+                .code,
+            "graph_live_owner_recovery"
+        );
+    }
 }

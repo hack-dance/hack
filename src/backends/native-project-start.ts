@@ -29,6 +29,7 @@ import {
   requireWrappableNativeProcesses,
 } from "../lib/native-process-wrappers.ts";
 import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
+import { nativeStartOutcomeUnknown } from "../lib/native-up-refusals.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
@@ -2614,6 +2615,7 @@ export type NativeStartupProgress =
   | {
       readonly phase: "services";
       readonly services: readonly string[];
+      readonly appending?: true;
     }
   | ({ readonly phase: "dependency-wait" } & NativeDependencyWaitProgress)
   | {
@@ -3204,7 +3206,7 @@ async function extendNativeProjectGraph({
     reviewedPlan: review.report.plan,
     run,
   });
-  progress({ phase: "services", services });
+  progress({ phase: "services", services, appending: true });
   admitted();
   try {
     const response = await deps.invoke({
@@ -4552,8 +4554,13 @@ async function startNativeProjectAttempt(
     });
   } catch (error) {
     failed = true;
-    if (extension && controller.signal.aborted) {
-      throw new NativeStartupCanceledError(stopSignals.interruptedExit());
+    if (
+      extension &&
+      servicesRequested &&
+      (controller.signal.aborted ||
+        (error instanceof NativeRuntimeRequestError && error.stopSignal))
+    ) {
+      throw nativeStartOutcomeUnknown();
     }
     throw foregroundStartFailure({
       error,

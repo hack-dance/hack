@@ -129,6 +129,51 @@ fn missing_owner_requires_explicit_recovery_without_creating_state() {
     );
     assert!(!path.exists());
 }
+
+#[test]
+fn append_only_stop_is_held_during_append_and_refused_during_cold_start() {
+    for appending in [false, true] {
+        let (_fixture, candidate, run) = fixture();
+        let _publisher_root = owned_root(&candidate, &run);
+        let mut publication = Publication::bind(&candidate, &run).unwrap();
+        let (_append_client, append_server) = UnixStream::pair().unwrap();
+        let stop = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let mut server = StartupServer {
+            listener: publication.startup_listener().unwrap(),
+            root: super::super::directory(&candidate, &run).unwrap(),
+            run: run.clone(),
+            owner: "a".repeat(32),
+            stop: std::rc::Rc::clone(&stop),
+            client: appending.then(|| transport::AppendClientWatch::new(&append_server).unwrap()),
+            ports: Vec::new(),
+        };
+        let budget = Duration::from_secs(1);
+        let mut client = Pin::load(&candidate, &run).unwrap().connect().unwrap();
+        transport::write(
+            &mut client,
+            &json!({"version":1,"run":run,"remove_data":false,"cancel_append":true}),
+            budget,
+        )
+        .unwrap();
+        assert_eq!(startup::StartupRequests::serve(&mut server), appending);
+        if appending {
+            let held = stop.borrow_mut().take().expect("append cleanup request");
+            reply_stop(Some(held), Err("test_cleanup"), &run);
+        } else {
+            assert!(stop.borrow().is_none());
+        }
+        let reply: Value = transport::read(&mut client, budget, 1024).unwrap();
+        assert_eq!(
+            reply["code"],
+            if appending {
+                "test_cleanup"
+            } else {
+                "graph_starting"
+            }
+        );
+        publication.finish().unwrap();
+    }
+}
 #[test]
 fn owner_cleanup_refusal_exposes_only_bounded_code() {
     let run = "a".repeat(32);
@@ -303,6 +348,7 @@ fn cross_process_status_waits_for_request_after_accept() {
         transport::write(
             &mut stream,
             &transport::WireRequest {
+                cancel_append: false,
                 version: 1,
                 extend: None,
                 refresh_dependencies: None,

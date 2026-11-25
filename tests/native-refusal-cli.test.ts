@@ -286,9 +286,9 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
-test(
-  "Ctrl-C disconnects the targeted runtime client and leaves the project mapping",
-  async () => {
+test.each([false, true])(
+  "Ctrl-C reports an uncertain targeted start and leaves the project mapping (JSON: %s)",
+  async (json) => {
     const image = `sha256:${"e".repeat(64)}`;
     const f = await fixture(
       JSON.stringify({ services: { web: { image }, slow: { image } } })
@@ -319,7 +319,15 @@ test(
     await scriptUpThroughReview(f, { services: { slow: { active: true } } });
     await f.hold("graph extend");
     const child = Bun.spawn(
-      [process.execPath, entrypoint, "--path", f.project, "up", "slow"],
+      [
+        process.execPath,
+        entrypoint,
+        "--path",
+        f.project,
+        "up",
+        "slow",
+        ...(json ? ["--json"] : []),
+      ],
       {
         cwd: f.project,
         env: f.env(SHARED),
@@ -340,9 +348,20 @@ test(
       });
       child.kill("SIGINT");
       const code = await child.exited;
-      expect(code, await stderr).toBe(130);
-      expect(await stderr).toContain("Native project startup interrupted.");
-      expect(await stdout).toBe("");
+      expect(code, await stderr).toBe(1);
+      if (json) {
+        expect(JSON.parse(await stdout)).toMatchObject({
+          ok: false,
+          error: {
+            code: "E_NATIVE_START_OUTCOME_UNKNOWN",
+            message: "The start may have completed; check hack ps",
+          },
+        });
+      } else {
+        expect(await stderr).toContain(
+          "The start may have completed; check hack ps"
+        );
+      }
       expect(await loadNativeProjectRun(f.scope)).toEqual(run);
       expect(await f.calls()).not.toContain("graph cleanup");
     } finally {

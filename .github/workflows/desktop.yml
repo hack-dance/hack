@@ -100,6 +100,8 @@ jobs:
         with:
           path: ${{ runner.temp }}/ghostty-inputs
           key: desktop-ghostty-inputs-${{ runner.os }}-${{ hashFiles('apps/desktop/term/scripts/provision-ghostty.sh') }}
+      - name: Test the provisioning download fallback (offline, fake curl)
+        run: bash term/scripts/test-provision-ghostty.sh
       - name: Provision pinned libghostty-vt inputs (checksummed)
         run: bash term/scripts/provision-ghostty.sh --dir "$RUNNER_TEMP/ghostty-inputs" --emit github >> "$GITHUB_ENV"
       - name: Install pinned per-test process runner
@@ -166,6 +168,8 @@ jobs:
         with:
           path: ${{ runner.temp }}/ghostty-inputs
           key: desktop-ghostty-inputs-${{ runner.os }}-${{ hashFiles('apps/desktop/term/scripts/provision-ghostty.sh') }}
+      - name: Test the provisioning download fallback (offline, fake curl)
+        run: bash term/scripts/test-provision-ghostty.sh
       - name: Provision pinned Zig and libghostty-vt inputs (checksummed)
         run: bash term/scripts/provision-ghostty.sh --dir "$RUNNER_TEMP/ghostty-inputs" --emit github >> "$GITHUB_ENV"
       - name: Install pinned per-test process runner

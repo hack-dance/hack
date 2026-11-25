@@ -1,15 +1,14 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import { writeSync } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { expect, test } from "bun:test";
 import {
   COMPOSE_CLIENT_FULL_OUTPUT_HINT,
+  COMPOSE_CLIENT_LINE_CHARS,
   COMPOSE_CLIENT_PROMPT_HINT,
+  COMPOSE_CLIENT_TAIL_CHARS,
+  COMPOSE_CLIENT_WARNING_CHARS,
+  type ComposeClientCapture,
   composeClientWarnings,
   openComposeClientCapture,
   sanitizeComposeClientLines,
-  tryOpenComposeClientCapture,
   writeComposeClientFailure,
   writeComposeClientTail,
   writeComposeClientWarnings,
@@ -19,55 +18,125 @@ import {
   composeQuoteRedactValues,
 } from "../src/lib/compose-ps-result.ts";
 
-let dir = "";
+const encoder = new TextEncoder();
+const feed = (
+  capture: ComposeClientCapture,
+  text: string,
+  stream: "stdout" | "stderr" = "stderr"
+) => capture.write(encoder.encode(text), stream);
 
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), "hack-compose-client-"));
-});
+/** The most the capture may hold, however much the client prints. */
+const RETAINED_BOUND =
+  COMPOSE_CLIENT_TAIL_CHARS +
+  COMPOSE_CLIENT_WARNING_CHARS +
+  2 * COMPOSE_CLIENT_LINE_CHARS;
 
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
-
-test("the capture file is unlinked as soon as it opens", async () => {
-  const capture = openComposeClientCapture(dir);
-  try {
-    expect(await readdir(dir)).toEqual([]);
-    writeSync(capture.fd, "one\ntwo\n");
-    expect(capture.tail()).toEqual(["one", "two"]);
-  } finally {
-    capture.close();
-  }
-  // A second close and a read after close are harmless.
+test("the capture holds lines in memory, and nothing after close", () => {
+  const capture = openComposeClientCapture();
+  feed(capture, "one\ntwo\n");
+  expect(capture.tail()).toEqual(["one", "two"]);
   capture.close();
+  // A second close, a write and a read after close are harmless.
+  capture.close();
+  feed(capture, "three\n");
   expect(capture.tail()).toEqual([]);
   expect(capture.warnings()).toEqual([]);
+  expect(capture.retainedChars()).toBe(0);
 });
 
-test("an unusable temporary directory leaves the client's lines uncaptured", () => {
-  expect(tryOpenComposeClientCapture(join(dir, "missing"))).toBeUndefined();
-});
-
-test("the tail keeps only the last lines and drops a partial first line", () => {
-  const capture = openComposeClientCapture(dir);
+test("the tail keeps only the last lines and cuts an overlong line", () => {
+  const capture = openComposeClientCapture();
   try {
-    // One line longer than the 64 KiB window, so the window starts inside it.
-    writeSync(capture.fd, `${"x".repeat(70_000)}\n`);
+    feed(capture, `${"x".repeat(70_000)}\n`);
     for (let index = 1; index <= 30; index += 1) {
-      writeSync(capture.fd, `line ${index}\n`);
+      feed(capture, `line ${index}\n`);
     }
-    const tail = capture.tail({ lines: 5 });
-    expect(tail).toEqual([
+    expect(capture.tail({ lines: 5 })).toEqual([
       "line 26",
       "line 27",
       "line 28",
       "line 29",
       "line 30",
     ]);
-    // The cut line is dropped rather than quoted in part.
     const all = capture.tail({ lines: 10_000 });
-    expect(all[0]).toBe("line 1");
-    expect(all).toHaveLength(30);
+    expect(all).toHaveLength(31);
+    // The overlong line is kept only up to its bound, then quoted shorter.
+    expect(all[0]?.startsWith("xxx")).toBe(true);
+    expect(all[1]).toBe("line 1");
+  } finally {
+    capture.close();
+  }
+});
+
+test("a verbose client cannot grow the capture past its bound", () => {
+  const capture = openComposeClientCapture();
+  try {
+    // About 20 MiB over both streams, far past every cap.
+    const block =
+      `${"#12 [build 3/9] RUN make all ".padEnd(199, ".")}\n`.repeat(1024);
+    for (let round = 0; round < 50; round += 1) {
+      feed(capture, block, round % 2 === 0 ? "stdout" : "stderr");
+      expect(capture.retainedChars()).toBeLessThanOrEqual(RETAINED_BOUND);
+    }
+    // One endless line without a break is bounded too.
+    for (let round = 0; round < 100; round += 1) {
+      feed(capture, "y".repeat(64 * 1024), "stdout");
+    }
+    expect(capture.retainedChars()).toBeLessThanOrEqual(RETAINED_BOUND);
+    feed(capture, "\nfailed to solve: process did not complete\n", "stdout");
+    expect(capture.tail({ lines: 1 })).toEqual([
+      "failed to solve: process did not complete",
+    ]);
+    expect(capture.retainedChars()).toBeLessThanOrEqual(RETAINED_BOUND);
+  } finally {
+    capture.close();
+  }
+});
+
+test("a warning printed after more than 64 KiB of output still shows, as do earlier ones", () => {
+  const capture = openComposeClientCapture();
+  try {
+    feed(capture, "WARN[0000] early warning\n");
+    for (let index = 0; index < 2000; index += 1) {
+      feed(capture, `#7 ${index} building layer ${"z".repeat(60)}\n`, "stdout");
+    }
+    feed(
+      capture,
+      'time="2026-01-01T00:00:01Z" level=warning msg="late warning after the build"\n'
+    );
+    for (let index = 0; index < 2000; index += 1) {
+      feed(capture, ` Container shop-api-${index}  Started\n`, "stdout");
+    }
+    expect(capture.warnings()).toEqual([
+      "early warning",
+      "late warning after the build",
+    ]);
+  } finally {
+    capture.close();
+  }
+});
+
+test("each stream is split into lines on its own, across chunk and character boundaries", () => {
+  const capture = openComposeClientCapture();
+  try {
+    feed(capture, "out-", "stdout");
+    feed(capture, "err-", "stderr");
+    feed(capture, "one\r", "stdout");
+    feed(capture, "one\n", "stderr");
+    feed(capture, "\nout-two\n", "stdout");
+    // A multi-byte character split across two chunks.
+    const bytes = encoder.encode("café\n");
+    capture.write(bytes.subarray(0, 4), "stderr");
+    capture.write(bytes.subarray(4), "stderr");
+    // A question Compose asks has no line break after it.
+    feed(capture, "Recreate (data will be lost)? [y/N] ", "stderr");
+    expect(capture.tail({ lines: 10 })).toEqual([
+      "out-one",
+      "err-one",
+      "out-two",
+      "café",
+      "Recreate (data will be lost)? [y/N]",
+    ]);
   } finally {
     capture.close();
   }
@@ -140,9 +209,9 @@ function failureReport(opts: {
   readonly text: string;
   readonly phase: "images" | "start";
 }): string[] {
-  const capture = openComposeClientCapture(dir);
+  const capture = openComposeClientCapture();
   try {
-    writeSync(capture.fd, opts.text);
+    feed(capture, opts.text);
     let out = "";
     writeComposeClientFailure({
       capture,

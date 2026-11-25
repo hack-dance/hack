@@ -15,7 +15,6 @@ export async function runWithTerminalGroup(opts: {
   readonly env: Record<string, string>;
   readonly stdout?: RunOptions["stdout"];
   readonly stderr?: RunOptions["stderr"];
-  readonly outputFd?: RunOptions["outputFd"];
   readonly stdin?: RunOptions["stdin"];
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
@@ -65,13 +64,16 @@ export async function runWithTerminalGroup(opts: {
     terminal.close();
     return 143;
   }
+  const stdout =
+    options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit");
   const child = Bun.spawn([...invocation, TTY_SUPERVISOR_ARGUMENT], {
     cwd: options.cwd,
     env: options.hackReexec
       ? hackReexecEnvironment(options.env)
       : childEnvironment(options.env),
     stdin: options.stdin ?? "inherit",
-    ...supervisorOutput(options),
+    stdout: options.onOutput ? "pipe" : stdout,
+    stderr: options.onOutput ? "pipe" : (options.stderr ?? "inherit"),
     ipc(message: unknown) {
       if (
         typeof message !== "object" ||
@@ -101,12 +103,7 @@ export async function runWithTerminalGroup(opts: {
       }
     },
   });
-  if (
-    typeof child.stdout === "object" &&
-    child.stdout &&
-    typeof child.stderr === "object" &&
-    child.stderr
-  ) {
+  if (typeof child.stdout === "object" && child.stdout && child.stderr) {
     options.onOutput?.({ stdout: child.stdout, stderr: child.stderr });
   }
   function finishCommand(message: object): void {
@@ -249,28 +246,6 @@ export async function runWithTerminalGroup(opts: {
   }
   await options.onExit?.(result);
   return result.exitCode;
-}
-
-/** The supervisor's stdout and stderr; the command it starts inherits them. */
-function supervisorOutput(options: {
-  readonly stdout?: RunOptions["stdout"];
-  readonly stderr?: RunOptions["stderr"];
-  readonly outputFd?: RunOptions["outputFd"];
-  readonly onOutput?: unknown;
-}): {
-  readonly stdout: "pipe" | "inherit" | "ignore" | number;
-  readonly stderr: "pipe" | "inherit" | "ignore" | number;
-} {
-  if (options.onOutput) {
-    return { stdout: "pipe", stderr: "pipe" };
-  }
-  if (options.outputFd !== undefined) {
-    return { stdout: options.outputFd, stderr: options.outputFd };
-  }
-  return {
-    stdout: options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit"),
-    stderr: options.stderr ?? "inherit",
-  };
 }
 
 function observeAbort(

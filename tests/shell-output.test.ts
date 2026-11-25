@@ -70,3 +70,57 @@ process.exit(code);`
     );
   }
 }
+
+for (const terminal of [false, true]) {
+  test.skipIf(terminal && !Bun.which("python3"))(
+    `${terminal ? "TTY" : "pipe"} output sink receives both streams in full before run returns`,
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "hack-shell-sink-"));
+      try {
+        const script = join(root, "run.ts");
+        // More than a pipe buffer, so an unread pipe would stall the child.
+        const child = `process.stdout.write('o'.repeat(1_000_000) + '\\n'); console.error(${JSON.stringify(STDERR)}); process.exitCode = 3;`;
+        await writeFile(
+          script,
+          `import {writeFileSync} from 'node:fs';
+import {run} from ${JSON.stringify(join(import.meta.dir, "../src/lib/shell.ts"))};
+const bytes={stdout:0,stderr:0};let stderr='';
+const code=await run([process.execPath,'-e',${JSON.stringify(child)}],{stdin:'ignore',forwardSignals:true,timeoutMs:10000,outputSink:{write(chunk,stream){bytes[stream]+=chunk.length;if(stream==='stderr'){stderr+=new TextDecoder().decode(chunk);}}}});
+writeFileSync(${JSON.stringify(join(root, "result.json"))},JSON.stringify({code,bytes,stderr}));
+process.exit(0);`
+        );
+        const proc = Bun.spawn(
+          terminal
+            ? ["python3", "-c", terminalProbe, root, process.execPath, script]
+            : [process.execPath, script],
+          { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+        );
+        const [capturedOut, capturedErr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        const result = JSON.parse(
+          await readFile(join(root, "result.json"), "utf8")
+        );
+        expect(result).toEqual({
+          code: 3,
+          bytes: { stdout: 1_000_001, stderr: STDERR.length + 1 },
+          stderr: `${STDERR}\n`,
+        });
+        // Nothing reached this process's own streams.
+        const ownOut = terminal
+          ? await readFile(join(root, "stdout"), "utf8")
+          : capturedOut;
+        const ownErr = terminal
+          ? await readFile(join(root, "stderr"), "utf8")
+          : capturedErr;
+        expect(ownOut).toBe("");
+        expect(ownErr).toBe("");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    20_000
+  );
+}

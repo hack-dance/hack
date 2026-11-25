@@ -21,6 +21,7 @@ import {
 import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
 import { reportLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
+import type { OutputSink } from "../lib/output-sink.ts";
 import { exec, type RunOptions, run } from "../lib/shell.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
@@ -70,14 +71,13 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   };
   readonly detach: boolean;
   /**
-   * Detached only: an open descriptor (owned and closed by the caller after
-   * `up` settles) that receives the Compose client's stdout and stderr for
-   * the images and start phases instead of the terminal. Their stdin is then
+   * Detached only: receives the Compose client's stdout and stderr for the
+   * images and start phases instead of the terminal. Their stdin is then
    * closed, so a client prompt fails instead of waiting unseen. The caller
-   * reports progress from its own observations and quotes the capture only
-   * when the start fails.
+   * reports progress from its own observations and quotes what the sink kept
+   * only when the start fails.
    */
-  readonly clientOutputFd?: number;
+  readonly clientOutput?: OutputSink;
   /**
    * Detached only: receives each line Hack itself prints to stderr while a
    * Compose phase runs (dependency cache progress, startup notices), so a
@@ -830,10 +830,10 @@ function startupNotice(opts: RuntimeUpOptions, line: string): void {
 /** Where a detached Compose phase's client stdio goes. */
 function composeClientStdio(
   opts: RuntimeUpOptions
-): Pick<RunOptions, "stdin" | "stdout" | "outputFd"> {
-  return opts.clientOutputFd === undefined
+): Pick<RunOptions, "stdin" | "stdout" | "outputSink"> {
+  return opts.clientOutput === undefined
     ? { stdout: childStdoutTarget(opts.routeStdoutToStderr) }
-    : { stdin: "ignore", outputFd: opts.clientOutputFd };
+    : { stdin: "ignore", outputSink: opts.clientOutput };
 }
 
 /** `--wait` for `docker compose up -d`, only when asked. */

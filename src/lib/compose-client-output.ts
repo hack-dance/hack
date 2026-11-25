@@ -1,7 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createTextOutput } from "../ui/text-output.ts";
 import {
   isComposeWarningLine,
@@ -9,6 +5,7 @@ import {
   sensitiveInheritedValues,
 } from "./compose-ps-result.ts";
 import type { ComposeStartupPhase } from "./compose-startup-budget.ts";
+import type { OutputSink } from "./output-sink.ts";
 
 /** How many of the Compose client's last lines a failed start shows. */
 export const COMPOSE_CLIENT_TAIL_LINES = 20;
@@ -26,8 +23,19 @@ export const COMPOSE_CLIENT_PROMPT_HINT =
   "Compose asked a question, and a detached `hack up` cannot answer it. Run `hack up` in the foreground to answer it.";
 /** How many distinct Compose warnings a successful start repeats. */
 export const COMPOSE_CLIENT_WARNING_LINES = 5;
-/** Bytes read from each end of the capture; the rest is never loaded. */
-const WINDOW_BYTES = 64 * 1024;
+/** Characters of the client's last lines the capture keeps, across both streams. */
+export const COMPOSE_CLIENT_TAIL_CHARS = 64 * 1024;
+/** Most of the client's last lines the capture keeps; a failed start quotes at most 40. */
+const TAIL_LINES_KEPT = 256;
+/**
+ * Characters one captured line keeps; the rest of a longer line is dropped.
+ * Quoted lines are cut to 240 characters after redaction, far inside this.
+ */
+export const COMPOSE_CLIENT_LINE_CHARS = 8 * 1024;
+/** Distinct warning lines kept from the whole output (a warning often has two forms). */
+const WARNING_LINES_KEPT = 64;
+/** Characters those warning lines may hold together. */
+export const COMPOSE_CLIENT_WARNING_CHARS = 64 * 1024;
 
 const LINE_BREAKS = /[\r\n\u0085\u2028\u2029]+/;
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
@@ -37,18 +45,23 @@ const WARNING_PREFIX = /^(?:warn(?:ing)?\[\d+\]|warn(?:ing)?:?)\s*/i;
 const PROMPT_LINE = /[[(]\s*y\s*\/\s*n\s*[\])]/i;
 
 /**
- * The detached Compose client's own stdout and stderr for one `hack up`.
+ * What a detached `hack up` keeps of the Compose client's own stdout and
+ * stderr, fed chunk by chunk through its {@link OutputSink} side.
  *
- * Ownership: {@link openComposeClientCapture} returns an open descriptor to
- * a file that is already unlinked, so the descriptor is the only reference
- * and no crash, signal or kill can leave the file behind. Compose children
- * inherit it and share its offset, so the images and start phases append in
- * order. The opener calls `close` exactly once, after every child that
- * received the descriptor has exited; reads after `close` return nothing.
- * Reads use positioned I/O and never move the shared offset.
+ * Bounds: nothing is written to disk, and memory stays bounded however much
+ * the client prints. The capture keeps the last lines (at most
+ * {@link COMPOSE_CLIENT_TAIL_CHARS} characters) for a failed start, and the
+ * distinct warning lines from the whole output (at most
+ * {@link COMPOSE_CLIENT_WARNING_CHARS}) for a successful one, so a warning
+ * printed after a long build still shows. Each line keeps at most
+ * {@link COMPOSE_CLIENT_LINE_CHARS} characters. The two streams are split
+ * into lines separately, so their partial lines never mix.
+ *
+ * Ownership: the opener feeds every phase into one capture and calls
+ * `close` after the last phase has settled; writes and reads after `close`
+ * do nothing and return nothing.
  */
-export interface ComposeClientCapture {
-  readonly fd: number;
+export interface ComposeClientCapture extends OutputSink {
   /** Sanitized last lines, oldest first, for a failed start. */
   tail(opts?: {
     readonly lines?: number;
@@ -59,79 +72,108 @@ export interface ComposeClientCapture {
     readonly limit?: number;
     readonly redactValues?: Iterable<string>;
   }): string[];
+  /** Characters held now, for checking the bounds above. */
+  retainedChars(): number;
   close(): void;
 }
 
-export function openComposeClientCapture(
-  dir: string = tmpdir()
-): ComposeClientCapture {
-  const path = join(dir, `hack-compose-client-${randomUUID()}.log`);
-  // `wx+` refuses an existing name (including a planted symlink).
-  const fd = openSync(path, "wx+", 0o600);
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    closeSync(fd);
-    throw error;
-  }
+export function openComposeClientCapture(): ComposeClientCapture {
   let open = true;
-  const read = (from: "head" | "tail") => {
-    if (!open) {
-      return { text: "", cut: false };
-    }
-    const size = fstatSync(fd).size;
-    const length = Math.min(size, WINDOW_BYTES);
-    const buffer = Buffer.alloc(length);
-    const position = from === "tail" ? size - length : 0;
-    const bytes = readSync(fd, buffer, 0, length, position);
-    return {
-      text: new TextDecoder().decode(buffer.subarray(0, bytes)),
-      cut: size > length,
-    };
+  const streams = {
+    stdout: { decoder: new TextDecoder(), pending: "" },
+    stderr: { decoder: new TextDecoder(), pending: "" },
   };
+  let tailLines: string[] = [];
+  let tailChars = 0;
+  let warningLines = new Set<string>();
+  let warningChars = 0;
+  const keep = (raw: string) => {
+    const line = cleanComposeClientLine(raw);
+    if (line.length === 0) {
+      return;
+    }
+    tailLines.push(line);
+    tailChars += line.length;
+    while (
+      tailLines.length > 1 &&
+      (tailChars > COMPOSE_CLIENT_TAIL_CHARS ||
+        tailLines.length > TAIL_LINES_KEPT)
+    ) {
+      tailChars -= tailLines.shift()?.length ?? 0;
+    }
+    if (
+      isComposeWarningLine(line) &&
+      !warningLines.has(line) &&
+      warningLines.size < WARNING_LINES_KEPT &&
+      warningChars + line.length <= COMPOSE_CLIENT_WARNING_CHARS
+    ) {
+      warningLines.add(line);
+      warningChars += line.length;
+    }
+  };
+  // Lines still waiting for their break, such as a question Compose asked.
+  const pending = () =>
+    [streams.stdout.pending, streams.stderr.pending]
+      .map(cleanComposeClientLine)
+      .filter((line) => line.length > 0);
   return {
-    fd,
-    tail: (opts) => {
-      const { text, cut } = read("tail");
-      return sanitizeComposeClientLines({
-        text,
-        // A window that starts mid-file starts mid-line too.
-        dropFirst: cut,
-        redactValues: opts?.redactValues,
-      }).slice(-(opts?.lines ?? COMPOSE_CLIENT_TAIL_LINES));
-    },
-    warnings: (opts) => {
-      const { text, cut } = read("head");
-      const lines = text.split(LINE_BREAKS);
-      return composeClientWarnings({
-        // A head window that ends mid-file ends mid-line too.
-        text: (cut ? lines.slice(0, -1) : lines).join("\n"),
-        limit: opts?.limit ?? COMPOSE_CLIENT_WARNING_LINES,
-        redactValues: opts?.redactValues,
-      });
-    },
-    close: () => {
-      if (open) {
-        open = false;
-        closeSync(fd);
+    write: (chunk, name) => {
+      if (!open) {
+        return;
       }
+      const stream = streams[name];
+      const text = stream.decoder.decode(chunk, { stream: true });
+      let first = true;
+      for (const piece of text.split(LINE_BREAKS)) {
+        if (!first) {
+          keep(stream.pending);
+          stream.pending = "";
+        }
+        first = false;
+        const room = COMPOSE_CLIENT_LINE_CHARS - stream.pending.length;
+        if (room > 0) {
+          stream.pending += piece.slice(0, room);
+        }
+      }
+    },
+    tail: (opts) =>
+      open
+        ? sanitizeComposeClientLines({
+            text: [...tailLines, ...pending()].join("\n"),
+            redactValues: opts?.redactValues,
+          }).slice(-(opts?.lines ?? COMPOSE_CLIENT_TAIL_LINES))
+        : [],
+    warnings: (opts) =>
+      open
+        ? composeClientWarnings({
+            text: [...warningLines, ...pending()].join("\n"),
+            limit: opts?.limit ?? COMPOSE_CLIENT_WARNING_LINES,
+            redactValues: opts?.redactValues,
+          })
+        : [],
+    retainedChars: () =>
+      tailChars +
+      warningChars +
+      streams.stdout.pending.length +
+      streams.stderr.pending.length,
+    close: () => {
+      open = false;
+      tailLines = [];
+      tailChars = 0;
+      warningLines = new Set();
+      warningChars = 0;
+      streams.stdout.pending = "";
+      streams.stderr.pending = "";
     },
   };
 }
 
-/**
- * {@link openComposeClientCapture}, or undefined when the temporary
- * directory refuses the file: the start then passes the client's lines
- * through as before rather than failing over a display choice.
- */
-export function tryOpenComposeClientCapture(
-  dir?: string
-): ComposeClientCapture | undefined {
-  try {
-    return openComposeClientCapture(dir);
-  } catch {
-    return;
-  }
+/** One client line without escapes, tabs, control characters or edge space. */
+function cleanComposeClientLine(line: string): string {
+  return Bun.stripANSI(line)
+    .replaceAll("\t", " ")
+    .replaceAll(CONTROL_CHARACTERS, "")
+    .trim();
 }
 
 /**
@@ -141,21 +183,15 @@ export function tryOpenComposeClientCapture(
  */
 export function sanitizeComposeClientLines(opts: {
   readonly text: string;
-  readonly dropFirst?: boolean;
   readonly redactValues?: Iterable<string>;
 }): string[] {
   const redactValues = [
     ...(opts.redactValues ?? []),
     ...sensitiveInheritedValues({ env: process.env }),
   ];
-  const raw = opts.text.split(LINE_BREAKS);
-  return (opts.dropFirst ? raw.slice(1) : raw)
-    .map((line) =>
-      Bun.stripANSI(line)
-        .replaceAll("\t", " ")
-        .replaceAll(CONTROL_CHARACTERS, "")
-        .trim()
-    )
+  return opts.text
+    .split(LINE_BREAKS)
+    .map(cleanComposeClientLine)
     .filter((line) => line.length > 0)
     .map((line) => redactComposeOutputLine({ line, redactValues }));
 }

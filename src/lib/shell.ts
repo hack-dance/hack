@@ -6,6 +6,7 @@ import {
   beginNativeCpuChild,
   nativeCpuCommandCategory,
 } from "./native-cpu-diagnostics.ts";
+import { type OutputSink, pumpOutput } from "./output-sink.ts";
 import { boundedTimeoutMs } from "./process-deadline.ts";
 import { waitForOwnedProcessGroupSettlement } from "./process-group-settlement.ts";
 import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
@@ -262,12 +263,13 @@ export interface RunOptions {
   readonly stdout?: "inherit" | "stderr" | "ignore";
   readonly stderr?: "inherit" | "ignore";
   /**
-   * Send the child's stdout and stderr to this open descriptor (for example
-   * an unlinked capture file) instead of this process's streams; it takes
-   * precedence over `stdout` and `stderr`. The caller owns the descriptor and
-   * closes it after the run settles. Works with and without a terminal group.
+   * Send the child's stdout and stderr to this sink, chunk by chunk, instead
+   * of this process's streams; it takes precedence over `stdout` and
+   * `stderr`. `run` returns only after both streams end, or after
+   * OUTPUT_DRAIN_GRACE_MS once the command settles if a descendant still
+   * holds them. Works with and without a terminal group.
    */
-  readonly outputFd?: number;
+  readonly outputSink?: OutputSink;
   /** Non-TTY owner-supplied descriptors. The caller holds them through settlement;
    * run captures numbers synchronously and never reopens names or closes the FDs. */
   readonly privateIo?: {
@@ -369,21 +371,31 @@ export async function run(
     (process.stdin.isTTY || hasControllingTerminal())
   ) {
     const { runWithTerminalGroup } = await import("./tty-run.ts");
-    return await runWithTerminalGroup({
-      command,
-      cwd: options.cwd,
-      hackReexec: options.hackReexec,
-      env: buildSpawnEnv(options.env, options.unsetEnvKeys, options.hackReexec),
-      stdout: options.stdout,
-      stderr: options.stderr,
-      outputFd: options.outputFd,
-      stdin: options.stdin,
-      timeoutMs: options.timeoutMs,
-      signal,
-      beforeSpawn,
-      onSpawn,
-      onExit,
-    });
+    const output = sinkPump(options.outputSink);
+    try {
+      return await runWithTerminalGroup({
+        command,
+        cwd: options.cwd,
+        hackReexec: options.hackReexec,
+        env: buildSpawnEnv(
+          options.env,
+          options.unsetEnvKeys,
+          options.hackReexec
+        ),
+        stdout: options.stdout,
+        stderr: options.stderr,
+        stdin: options.stdin,
+        timeoutMs: options.timeoutMs,
+        signal,
+        beforeSpawn,
+        onSpawn,
+        onExit,
+        // The supervisor's pipes, which the command it starts inherits.
+        onOutput: output.attach,
+      });
+    } finally {
+      await output.settle();
+    }
   }
   const ownsProcessGroup =
     options.timeoutMs !== undefined ||
@@ -397,17 +409,12 @@ export async function run(
     cwd: options.cwd,
     env: buildSpawnEnv(options.env, options.unsetEnvKeys, options.hackReexec),
     stdin: options.privateIo?.stdin ?? options.stdin ?? "inherit",
-    stdout:
-      options.privateIo?.stdout ??
-      options.outputFd ??
-      (options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit")),
-    stderr:
-      options.privateIo?.stderr ??
-      options.outputFd ??
-      options.stderr ??
-      "inherit",
+    ...childOutput(options),
     detached: ownsProcessGroup,
   });
+  // Read from the first moment, so a chatty child never fills its pipe.
+  const output = sinkPump(options.outputSink);
+  output.attach?.(proc);
   const observeCpu = beginNativeCpuChild(
     proc,
     nativeCpuCommandCategory(command)
@@ -471,12 +478,65 @@ export async function run(
       return false;
     }
   };
-  const [result] = await Promise.all([
-    completion,
-    onSpawn({ pid: proc.pid, ownsProcessGroup, resumeSuspended }),
-  ]);
-  await onExit(result);
-  return result.exitCode;
+  try {
+    const [result] = await Promise.all([
+      completion,
+      onSpawn({ pid: proc.pid, ownsProcessGroup, resumeSuspended }),
+    ]);
+    await onExit(result);
+    return result.exitCode;
+  } finally {
+    await output.settle();
+  }
+}
+
+/** The non-terminal child's stdout and stderr targets. */
+function childOutput(options: RunOptions): {
+  readonly stdout: "inherit" | "ignore" | "pipe" | number;
+  readonly stderr: "inherit" | "ignore" | "pipe" | number;
+} {
+  if (options.outputSink) {
+    return {
+      stdout: options.privateIo?.stdout ?? "pipe",
+      stderr: options.privateIo?.stderr ?? "pipe",
+    };
+  }
+  return {
+    stdout:
+      options.privateIo?.stdout ??
+      (options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit")),
+    stderr: options.privateIo?.stderr ?? options.stderr ?? "inherit",
+  };
+}
+
+/**
+ * Feeds a child's piped streams into `sink` once attached; `settle` waits for
+ * them as pumpOutput describes. Without a sink, nothing attaches.
+ */
+function sinkPump(sink: OutputSink | undefined): {
+  readonly attach?: (streams: {
+    readonly stdout: unknown;
+    readonly stderr: unknown;
+  }) => void;
+  settle(): Promise<void>;
+} {
+  if (!sink) {
+    return { settle: async () => undefined };
+  }
+  let pump: ReturnType<typeof pumpOutput> | undefined;
+  return {
+    attach: ({ stdout, stderr }) => {
+      if (
+        stdout instanceof ReadableStream &&
+        stderr instanceof ReadableStream
+      ) {
+        pump = pumpOutput({ stdout, stderr, sink });
+      }
+    },
+    settle: async () => {
+      await pump?.settle();
+    },
+  };
 }
 
 /** Detached noninteractive children keep cancellation scoped to their group. */

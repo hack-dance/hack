@@ -285,7 +285,7 @@ import {
 } from "../lib/cli-result.ts";
 import {
   type ComposeClientCapture,
-  tryOpenComposeClientCapture,
+  openComposeClientCapture,
   writeComposeClientFailure,
   writeComposeClientWarnings,
 } from "../lib/compose-client-output.ts";
@@ -9276,7 +9276,7 @@ async function runResolvedComposeUp({
       reportComposeStartupBudget({ budgets, detach });
     }
     // Human detached starts print Hack's rows instead of the client's lines.
-    clientOutput = progress ? tryOpenComposeClientCapture() : undefined;
+    clientOutput = progress ? openComposeClientCapture() : undefined;
     // The quoted lines keep values the env layers mark non-secret.
     const quoteRedactValues = composeQuoteRedactValues({
       redactValues: preflightRedactValues,
@@ -9414,7 +9414,7 @@ async function runResolvedComposeUp({
             composeProject: composeProjectName,
             profiles,
             detach,
-            clientOutputFd: clientOutput?.fd,
+            clientOutput,
             cwd: dirname(project.composeFile),
             env: envOverrides.env,
             routeStdoutToStderr: json,
@@ -9777,7 +9777,7 @@ async function runResolvedComposeUp({
     } finally {
       foregroundTermination.guard?.dispose();
       signalCleanup.dispose();
-      // Every Compose child that held the descriptor has exited by now.
+      // Every Compose phase that fed the capture has settled by now.
       clientOutput?.close();
     }
   }

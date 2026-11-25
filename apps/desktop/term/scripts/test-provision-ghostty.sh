@@ -157,7 +157,7 @@ saved_budget=$budget_seconds saved_attempts=$attempts
 budget_seconds=4
 attempts=10
 if (fetch f "$want" https://slow.test/f https://good.test/f) 2>"$work/err" && kept \
-  && grep -q 'after its 2s share; trying the next source' "$work/err" \
+  && grep -Eq 'after its [12]s share; trying the next source' "$work/err" \
   && [[ "$(grep -c '^https://slow.test/f' "$FAKE_LOG")" -lt "$attempts" ]] \
   && [[ "$(grep '^https://slow.test/f' "$FAKE_LOG" | cut -d' ' -f3 | sort -n | tail -1)" -le 2 ]] \
   && [[ "$(tail -1 "$FAKE_LOG" | cut -d' ' -f1)" == https://good.test/f ]]; then

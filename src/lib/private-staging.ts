@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import projectPrivateFiles from "../project-private-files.json";
 import { publishFileExclusive } from "./exclusive-publish.ts";
 import { isRecord } from "./guards.ts";
 
@@ -23,7 +24,7 @@ import { isRecord } from "./guards.ts";
  * staging write in it and by `hack doctor --fix`. Staging siblings written by
  * earlier Hack versions are swept the same way.
  */
-export const PRIVATE_STAGING_DIRNAME = ".hack-staging";
+export const PRIVATE_STAGING_DIRNAME = projectPrivateFiles.privateStagingDir;
 
 /**
  * A staging file younger than this may belong to a write still in progress,

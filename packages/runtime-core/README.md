@@ -563,7 +563,7 @@ BuildKit `RUN` steps use; `guest-build-network.sh` isolates it from the guest, t
 gateway and link-local metadata, and the engine client refuses any container create
 that does not name an owned network or `none`. Cold builds need free guest storage
 (at least 6 GiB, or twice the key's last image), successful builds prune BuildKit
-cache to 8 GiB, and `runtime reclaim-build-images` removes only owned, superseded,
+cache to 4 GiB, and `runtime reclaim-build-images` removes only owned, superseded,
 unreferenced images (`provider/image_build/reclaim.rs`; model
 `tests/models/tla/native-build-retention`). Native `up` calls the build operation
 for Compose `build:` services only when `HACK_NATIVE_BUILDS=1` is set. The client reaches
@@ -594,6 +594,10 @@ another test's spawned child to inherit a socket and delay EOF. Retries are zero
 The admission-pool test group retains the old mutex's serialization of whole-host
 disk-handle scans. Ignored helpers remain ignored and their owning tests still invoke
 them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+Candidate core runs the rest of each scheduled test suite and its doctests after
+a test failure. A failed qualification pass still stops subsequent repetitions.
+The job runs independent later checks and summarizes failed step IDs. Setup
+dependencies and the kill-harness check still require their input artifacts.
 Focused target selections such as `bun run test:local --lib` or `--test <name>`
 skip doctests, matching Cargo; explicit `--doc` selection runs through Cargo alone.
 The wrapper accepts Cargo build, feature and target options; nextest-specific
@@ -890,7 +894,11 @@ for a security fix, so each bump stays small enough to review against upstream n
    a prepared base built and verified (its overlay inventory), a pool without internet,
    template expansion and digests, exact disk identity, restart, down and up, network
    modes, the dependency-socket relay, Rosetta and a web-plus-database project, then
-   prints the timing and idle-footprint measurements to compare. What `down --recover`
+   prints the timing and idle-footprint measurements to compare. After the warm runs,
+   the full qualification adds a worker to the stopped web and database fixture,
+   then removes it. It checks service-name reachability from the worker, the same run
+   and database volume, independent SQL readback, and observed compute absence after
+   each stop. What `down --recover`
    does after a lost foreground, and how the pool recovers from an unclean provider
    stop, are recorded in `qualification.json` but not asserted: exit 0 does not show
    that recovery works, so read those recorded outcomes. With `--keep-going`, a failed
@@ -914,6 +922,11 @@ With `--keep-going`, recorded and thrown step failures both settle owned process
 before advancing; unconfirmed cleanup skips later steps. Restart keeps the previous
 foreground tracked through replacement failure and its bounded exit wait.
 
+The mount-socket step verifies a 64 KiB transfer in each direction, then opens
+256 successive connections through one running relay and checks every
+download's digest. The step repeats the bidirectional transfer after restart.
+Look for the 256-connection check in the qualification evidence.
+
 `--caddy`, `--caddy-sha256` and `--https-port` together select native HTTPS. They also
 route the fixture's `web` service at `web.provider-qual.hack.local`. The web and
 database step then fetches that route with `curl`, resolved to loopback and trusting
@@ -921,6 +934,12 @@ only the home's own Caddy root. Because the fixture is routed, every step runs w
 the HTTPS frontend, including startup, restart, recovery, the warm runs and the idle
 samples. So qualify the baseline pin and the new pin with the same HTTPS options.
 `qualification.json` records `https: true` or `false` next to the measurements.
+
+The full run checks the Development disk budget before the first boot, while
+the owned pool is running, and after a clean runtime stop. It records the
+observed free bytes and requires the corresponding 58 GiB, 16 GiB and 16 GiB
+floors. To qualify admission near those floors, run on a dedicated test
+filesystem with the relevant amount of free space.
 
 ## Provider owner receipt compatibility
 
@@ -1459,6 +1478,22 @@ standalone retention exports: archive and prune do not remove them, so the direc
 holds one file per environment-attached run: about 160 bytes per current-boot
 retired slot plus one summary per sealed boot, capped at 4 MiB and refused, never
 truncated, beyond that.
+
+The three ignored owned-VM tests in `provider::graph::environment_crash_test`
+(`managed_driver_loss_preserves_cleanup_and_requires_fresh_restore`,
+`cleanup_driver_loss_recovers_uncommitted_absence_and_retires_leases` and
+`interrupted_environment_archival_exports_and_prunes_without_replay`) kill an owned
+helper child at a fault point and check recovery. They need a caller-owned, freshly
+started Development pool and a loaded pinned Linux ARM64 Bun image that provides
+`/usr/local/bin/bun` (for example `oven/bun:1.4.4-slim`). Set `HACK_LOCAL_TEST_ROOT` to
+the pool's candidate home and `HACK_LOCAL_TEST_IMAGE` to the loaded
+`sha256:<config digest>`. Build the library tests with `--features environment-launcher`
+using the pinned Rust and Zig 0.15.2 (`cargo test --features environment-launcher --lib
+--no-run`), then run each exact test name with `--ignored --exact --nocapture
+--test-threads=1` under a 300-second external watchdog. A failure prints the helper
+child's output. The archival test cleans up without the trailing compaction, the state
+an enrolled relay cleanup or a refused compaction leaves, because archive moves only
+records that are still active.
 No retained evidence is automatically deleted to admit new work. This environment
 budget does not increase the runtime's separate container, CPU or memory limits and
 does not establish 32-branch qualification.
@@ -1707,8 +1742,9 @@ Candidate provider launches explicitly set `SMOLVM_DISK_TRIM=0`, including
 restart and recovery; ambient values cannot enable automatic guest trim. Pinned
 Smol accepts `0` as disabled and forwards it to its guest agent. Its imago discard
 path can truncate backing files, conflicting with the candidate's exact retained
-disk-size identity. Automatic trim remains disabled until safe disk reclamation
-is supported and qualified. This does not relax disk identity checks or repair
+disk-size identity. Explicit image reclaim can request a single discard of guest
+storage under its verified operation lease after freeing at least 256 MiB.
+Periodic trim remains disabled. This does not relax disk identity checks or repair
 previously shortened files, and does not change the separate memory-reclamation
 policy. Already running providers require an owned stop/start to receive the setting.
 

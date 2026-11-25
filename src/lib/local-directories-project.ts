@@ -198,10 +198,11 @@ export async function trackNativeLocalDirectories(opts: {
   };
   try {
     const dir = resolve(opts.project.projectDir, ".internal");
-    await ensureDir(dir);
+    await ensureDir(dir, 0o700);
     await writeTextFileIfChanged(
       resolve(dir, RECORD_FILE),
-      `${JSON.stringify(next, null, 2)}\n`
+      `${JSON.stringify(next, null, 2)}\n`,
+      0o600
     );
   } catch {
     // Best-effort: only the next comparison is lost.

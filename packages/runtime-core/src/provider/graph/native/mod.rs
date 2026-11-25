@@ -1,5 +1,7 @@
 //! Native authored lowering; runtime ownership and effects are separately admitted.
 use super::*;
+
+mod archive;
 use crate::{project::native::NativeInputs, provider::native_input};
 pub mod endpoints;
 #[cfg(target_os = "macos")]
@@ -181,6 +183,7 @@ fn configuration_with_source(
             key: key.clone(),
             name: format!("hkn-{}-network-{index}", review.scope().run),
             id: None,
+            cleanup_observed_create: false,
             image: None,
             phase: "reserved".into(),
             amd64_emulation: None,
@@ -212,6 +215,7 @@ fn configuration_with_source(
             key: name.clone(),
             name: format!("hkn-{}-container-{index}", review.scope().run),
             id: None,
+            cleanup_observed_create: false,
             image: Some(workload.image.clone()),
             phase: "reserved".into(),
             amd64_emulation: None,

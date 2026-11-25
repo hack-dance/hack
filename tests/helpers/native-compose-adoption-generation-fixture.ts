@@ -2,7 +2,6 @@ import { afterEach, beforeEach, test as boundedTest, expect } from "bun:test";
 import {
   chmod,
   lstat,
-  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -12,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { prepareForegroundComposeEnvOverride } from "../../src/lib/compose-env-at-rest.ts";
 import {
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
@@ -30,6 +30,11 @@ import { completedJobFixtureSources } from "../e2e/scenarios/native-compose-adop
 import { createCompletedJobFixtureSettlement } from "../e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 import { restoreEnv } from "./env.ts";
 import { managedEnvCompilerFixture } from "./managed-env-compiler.ts";
+import {
+  mkdirOwnedFixture,
+  ownedFixtureCommand,
+  writeOwnedFixture,
+} from "./owned-fixture.ts";
 import { privateCliEnv } from "./private-cli-env.ts";
 /** Each test file owns a fixture closure; hooks never share mutable state across files. */
 export function createAdoptionGenerationFixture() {
@@ -202,12 +207,12 @@ export function createAdoptionGenerationFixture() {
       await mkdtemp(join(tmpdir(), "native-adoption-binding-"))
     );
     projectRoot = join(root, "checkout");
-    await mkdir(join(projectRoot, ".hack"), { recursive: true });
-    await writeFile(
+    await mkdirOwnedFixture(join(projectRoot, ".hack"), true);
+    await writeOwnedFixture(
       join(projectRoot, ".hack/hack.config.json"),
       '{"name":"fixture"}\n'
     );
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/docker-compose.yml"),
       `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    environment:\n      PRIVATE: ${CANARY}\n      EMPTY: ""\n    volumes:\n      - data:/var/lib/database\nvolumes:\n  data:\n    name: ${VOLUME}\n`
     );
@@ -346,7 +351,7 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
     );
     await chmod(join(root, "docker"), 0o700);
     process.env.PATH = root;
-    await mkdir(join(projectRoot, ".git"));
+    await mkdirOwnedFixture(join(projectRoot, ".git"));
     await save();
   });
 
@@ -372,7 +377,7 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
   }
 
   async function ownedBridge() {
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/docker-compose.yml"),
       `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    environment:\n      PRIVATE: ${CANARY}\n      EMPTY: ""\n    networks:\n      lab:\n        aliases: [db-alias]\n    volumes:\n      - data:/var/lib/database\nnetworks:\n  lab:\n    driver: bridge\n    internal: true\nvolumes:\n  data:\n    name: ${VOLUME}\n`
     );
@@ -389,7 +394,7 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
   }
 
   async function twoOwnedBridges() {
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/docker-compose.yml"),
       `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    environment:\n      PRIVATE: ${CANARY}\n      EMPTY: ""\n    networks:\n      edge:\n        aliases: [writer]\n      lab:\n        aliases: [database]\n    volumes:\n      - data:/var/lib/database\nnetworks:\n  edge:\n    driver: bridge\n    internal: false\n  lab:\n    driver: bridge\n    internal: true\nvolumes:\n  data:\n    name: ${VOLUME}\n`
     );
@@ -471,7 +476,7 @@ else { const raw=await Bun.stdin.text(); await Bun.write(${JSON.stringify(join(r
 
   async function dependencyFixture() {
     const worker = "c".repeat(64);
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/docker-compose.yml"),
       JSON.stringify({
         name: "fixture",
@@ -547,7 +552,7 @@ else { const raw=await Bun.stdin.text(); await Bun.write(${JSON.stringify(join(r
   async function completedJobFixture() {
     const app = await dependencyFixture(),
       job = "e".repeat(64);
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/docker-compose.yml"),
       JSON.stringify({
         name: "fixture",
@@ -606,11 +611,11 @@ else { const raw=await Bun.stdin.text(); await Bun.write(${JSON.stringify(join(r
       image: `sha256:${"d".repeat(64)}`,
       marker: "retained-seed",
     });
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/hack.config.json"),
       JSON.stringify(authored.config)
     );
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/docker-compose.yml"),
       JSON.stringify(authored.compose)
     );
@@ -688,8 +693,8 @@ else {
       join(projectRoot, ".hack/docker-compose.yml"),
       "utf8"
     );
-    await mkdir(join(projectRoot, ".hack/.internal"), { recursive: true });
-    await writeFile(
+    await mkdirOwnedFixture(join(projectRoot, ".hack/.internal"), true);
+    await writeOwnedFixture(
       join(projectRoot, ".hack/hack.env.default.yaml"),
       JSON.stringify({
         version: 1,
@@ -721,8 +726,8 @@ else {
       join(projectRoot, ".hack/.internal/compose.runtime.override.yml"),
       join(projectRoot, ".hack/.internal/compose.env.override.yml"),
     ];
-    await writeFile(files[1] ?? "", runtime);
-    await writeFile(files[2] ?? "", env);
+    await writeOwnedFixture(files[1] ?? "", runtime);
+    await writeOwnedFixture(files[2] ?? "", env);
     container().configFiles = files.join(",");
     await save();
     return files;
@@ -744,37 +749,74 @@ else {
         "fixture",
       ],
     ]) {
-      const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
-        env: {
-          PATH: priorPath ?? "/usr/bin:/bin",
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-        },
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      });
+      const child = Bun.spawn(
+        ownedFixtureCommand(["/usr/bin/git", "-C", projectRoot, ...args]),
+        {
+          env: {
+            PATH: priorPath ?? "/usr/bin:/bin",
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_GLOBAL: "/dev/null",
+          },
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        }
+      );
       expect(await child.exited).toBe(0);
     }
     await symlink("/usr/bin/git", join(root, "git"));
   }
 
   /** A published v3 adoption over reference-form generated overrides. */
-  async function publishedManagedAdoption() {
+  async function publishedManagedAdoption(
+    foreground?: "references" | "empty" | "empty-omitted"
+  ) {
     Reflect.deleteProperty(process.env, "CI");
     Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
     await trackedManagedCheckout();
     const files = await managedGenerated();
-    await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
-    await setProjectEnvValue({
-      projectRoot,
-      projectDir: join(projectRoot, ".hack"),
-      envName: null,
-      scope: "global",
-      key: "MANAGED",
-      value: CANARY,
-      secret: true,
-    });
+    const projectDir = join(projectRoot, ".hack");
+    if (foreground === "empty" || foreground === "empty-omitted") {
+      await writeOwnedFixture(
+        join(projectDir, "hack.env.default.yaml"),
+        JSON.stringify({
+          version: 1,
+          secretsprovider: "project_key",
+          values: {},
+        })
+      );
+    } else {
+      await writeFile(
+        join(projectRoot, ".hack.secret.key"),
+        "synthetic-v3-key"
+      );
+      await setProjectEnvValue({
+        projectRoot,
+        projectDir,
+        envName: null,
+        scope: "global",
+        key: "MANAGED",
+        value: CANARY,
+        secret: true,
+      });
+    }
+    if (foreground) {
+      const alias = await prepareForegroundComposeEnvOverride({
+        projectDir,
+        text:
+          foreground === "references"
+            ? await readFile(files[2] ?? "", "utf8")
+            : undefined,
+      });
+      if (!alias) {
+        throw new Error("Expected a synthetic foreground reference alias");
+      }
+      container().configFiles =
+        foreground === "empty-omitted"
+          ? files.slice(0, -1).join(",")
+          : [...files.slice(0, -1), alias].join(",");
+      await save();
+    }
     const binary = await managedEnvCompilerFixture(
       join(root, "managed-compiler")
     );
@@ -922,21 +964,24 @@ else {
     Reflect.deleteProperty(process.env, "CI");
     Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
     await rm(join(projectRoot, ".git"), { recursive: true });
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/hack.config.json"),
       '{"name":"fixture","worktree":{"auto_branch":false}}\n'
     );
     const git = async (args: readonly string[]) => {
-      const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
-        env: {
-          PATH: priorPath ?? "/usr/bin:/bin",
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-        },
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      });
+      const child = Bun.spawn(
+        ownedFixtureCommand(["/usr/bin/git", "-C", projectRoot, ...args]),
+        {
+          env: {
+            PATH: priorPath ?? "/usr/bin:/bin",
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_GLOBAL: "/dev/null",
+          },
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        }
+      );
       expect(await child.exited).toBe(0);
     };
     await git(["init", "--quiet", "-b", "main"]);
@@ -966,7 +1011,7 @@ else {
       join(projectRoot, ".hack/docker-compose.yml"),
       "utf8"
     );
-    await writeFile(
+    await writeOwnedFixture(
       join(projectRoot, ".hack/hack.config.json"),
       JSON.stringify({
         name: "fixture",
@@ -983,12 +1028,12 @@ else {
       composeProject: physical,
     });
     expect(fragment).toBeTruthy();
-    await mkdir(join(projectRoot, ".hack/.branch"));
+    await mkdirOwnedFixture(join(projectRoot, ".hack/.branch"));
     const fragmentPath = join(
       projectRoot,
       ".hack/.branch/compose.linked.runtime.override.yml"
     );
-    await writeFile(fragmentPath, fragment ?? "");
+    await writeOwnedFixture(fragmentPath, fragment ?? "");
     container().name = `/${physical}-db-1`;
     container().project = physical;
     container().configFiles = `${join(projectRoot, ".hack/docker-compose.yml")},${fragmentPath}`;

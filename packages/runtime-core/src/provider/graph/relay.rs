@@ -710,6 +710,87 @@ mod tests {
         assert!(!run(&socket, "1", "tmpfs").status.success());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn remove_resumes_after_owner_unlink_only_for_empty_fenced_allocation() {
+        use std::fs::{self, DirBuilder, File, OpenOptions};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::{
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, symlink},
+            net::UnixListener,
+        };
+        use std::process::Command;
+
+        let fixture = super::super::tests::Fixture::new();
+        let base = &fixture.0;
+        let slot = base.join("relay-slots/slot-0");
+        let allocation = "a".repeat(32);
+        let root = base.join("graph-relays").join(&allocation);
+        let socket = base.join("bridge-00.sock");
+        let mut dirs = DirBuilder::new();
+        dirs.mode(0o700).recursive(true);
+        dirs.create(&slot).unwrap();
+        dirs.create(&root).unwrap();
+        let state = slot.join("state");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&state)
+            .unwrap();
+        let owner = base.metadata().unwrap();
+        let program = script("", "remove")
+            .replace(
+                "test \"$(findmnt -n -o FSTYPE --target /run/hack-local)\" = tmpfs",
+                ":",
+            )
+            .replace("/run/hack-local", base.to_str().unwrap())
+            .replace("0:0:", &format!("{}:{}:", owner.uid(), owner.gid()));
+        let run = |identity: &str, generation: &str| {
+            Command::new("/bin/sh")
+                .args(["-c", &program, "relay-remove", "remove", identity, "marker"])
+                .arg(&socket)
+                .args(["digest", "1", "1", "1", generation, "0"])
+                .output()
+                .unwrap()
+        };
+        let write_phase = |phase| fs::write(&state, format!("7 {allocation} {phase}\n")).unwrap();
+        write_phase("launching");
+        assert!(!run(&allocation, "7").status.success());
+        write_phase("stopped");
+        for wrong_generation in ["0", "6", "8"] {
+            assert!(!run(&allocation, wrong_generation).status.success());
+        }
+        assert!(!run(&"b".repeat(32), "7").status.success());
+        let directory = File::open(base).unwrap();
+        let listener = UnixListener::bind(format!(
+            "/proc/self/fd/{}/bridge-00.sock",
+            directory.as_raw_fd()
+        ))
+        .unwrap();
+        assert!(!run(&allocation, "7").status.success());
+        assert!(socket.exists());
+        drop(listener);
+        fs::remove_file(&socket).unwrap();
+        let unknown = root.join(".unexpected");
+        fs::write(&unknown, "keep").unwrap();
+        assert!(!run(&allocation, "7").status.success());
+        assert_eq!(fs::read(&unknown).unwrap(), b"keep");
+        fs::remove_file(&unknown).unwrap();
+        symlink("missing", root.join("owner")).unwrap();
+        assert!(!run(&allocation, "7").status.success());
+        fs::remove_file(root.join("owner")).unwrap();
+        for phase in ["stopped", "discarded"] {
+            write_phase(phase);
+            let result = run(&allocation, "7");
+            assert!(result.status.success(), "{:?}", result.stderr);
+            assert_eq!(result.stdout, b"removed\n");
+            assert!(!root.exists());
+            assert_eq!(run(&allocation, "7").stdout, b"removed\n");
+            dirs.create(&root).unwrap();
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn retirement_inspection_refuses_reused_pid_before_live_classification() {

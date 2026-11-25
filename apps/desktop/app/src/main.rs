@@ -10,6 +10,8 @@
 //!                                      click-through, on fixtures
 //! hack-desktop --screenshots <dir>     (feature `screenshots`) render every
 //!                                      fixture, light and dark, offscreen
+//! hack-desktop --command-screenshots <dir>
+//!                                      render only the shared drawer fixtures
 //! hack-desktop --drive <steps> [--hidden]
 //!                                      (feature `terminal`) run a steps file
 //!                                      in the real window, quit, and report
@@ -17,18 +19,35 @@
 //!                                      (see `drive.rs`)
 //! ```
 
+mod changes_view;
 mod clipboard;
+#[cfg(hack_terminal)]
+mod command_control;
+mod config_view;
+mod copies_view;
 mod doctor_view;
 #[cfg(hack_terminal)]
 mod drive;
 mod env_view;
+mod files_view;
+mod follow_up_view;
+mod health_commands;
+mod health_fixtures;
+mod health_model;
 mod logs_view;
 mod machine_view;
+mod resource_inventory_view;
+mod resources_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+mod service_catalog;
+mod service_view;
 mod setup_view;
+mod sidebar_view;
+mod stats_view;
 #[cfg(hack_terminal)]
 mod terminal;
+mod theme;
 mod upgrade_view;
 mod usage_view;
 mod view;
@@ -45,6 +64,8 @@ pub(crate) struct Args {
     pub logs_fixture: Option<hack_desktop_core::logs::fixtures::LogsFixture>,
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
+    pub service_screenshots: Option<std::path::PathBuf>,
+    pub command_screenshots: Option<std::path::PathBuf>,
     pub sequence: Option<std::path::PathBuf>,
     /// `--drive`: run the steps file in a child app and report.
     pub drive: Option<std::path::PathBuf>,
@@ -59,7 +80,7 @@ pub(crate) struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>] [--drive <steps> [--hidden]]"
+        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir> | --command-screenshots <dir>] [--drive <steps> [--hidden]]"
     );
     std::process::exit(2)
 }
@@ -70,6 +91,8 @@ fn parse_args() -> Args {
         logs_fixture: None,
         theme: None,
         screenshots: None,
+        service_screenshots: None,
+        command_screenshots: None,
         sequence: None,
         drive: None,
         drive_child: None,
@@ -124,6 +147,12 @@ fn parse_args() -> Args {
                 });
             }
             "--screenshots" => a.screenshots = Some(it.next().unwrap_or_else(|| usage()).into()),
+            "--service-screenshots" => {
+                a.service_screenshots = Some(it.next().unwrap_or_else(|| usage()).into())
+            }
+            "--command-screenshots" => {
+                a.command_screenshots = Some(it.next().unwrap_or_else(|| usage()).into());
+            }
             "--sequence" => a.sequence = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--drive-child" => {
                 let steps = it.next().unwrap_or_else(|| usage());
@@ -203,19 +232,41 @@ fn main() {
         return;
     }
     #[cfg(feature = "screenshots")]
+    if let Some(dir) = &args.service_screenshots {
+        screenshots::service_pane(dir);
+        return;
+    }
+    #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.screenshots {
         screenshots::run(dir, args.fixture);
         return;
     }
+    if let Some(dir) = &args.command_screenshots {
+        #[cfg(all(feature = "screenshots", hack_terminal))]
+        {
+            screenshots::run_command_drawer(dir);
+            return;
+        }
+        #[cfg(not(all(feature = "screenshots", hack_terminal)))]
+        {
+            let _ = dir;
+            eprintln!("--command-screenshots needs the terminal and screenshots features");
+            std::process::exit(2);
+        }
+    }
     #[cfg(not(feature = "screenshots"))]
-    if args.screenshots.is_some() || args.sequence.is_some() {
+    if args.screenshots.is_some() || args.sequence.is_some() || args.service_screenshots.is_some() {
         eprintln!("--screenshots and --sequence need a build with --features screenshots");
         std::process::exit(2);
     }
     gpui_kit::application()
         .with_assets(hack_desktop_ui::icons::Assets)
         .run(move |cx| {
-            gpui_kit::init(cx);
+            theme::init(cx);
+            #[cfg(all(feature = "screenshots", target_os = "linux"))]
+            if args.fixture.is_some() || args.logs_fixture.is_some() {
+                theme::capture_fonts(cx);
+            }
             view::bind_keys(cx);
             let fixture = args.fixture.or(args.logs_fixture.map(|l| {
                 if l == hack_desktop_core::logs::fixtures::LogsFixture::Stopped {
@@ -231,10 +282,10 @@ fn main() {
                 WindowOptions {
                     focus: false,
                     show: false,
-                    ..window_options()
+                    ..health_fixtures::window_options(fixture)
                 }
             } else {
-                window_options()
+                health_fixtures::window_options(fixture)
             };
             let (window, app) = gpui_kit::open_window(options, cx, move |window, cx| {
                 match theme {
@@ -246,14 +297,41 @@ fn main() {
                     app.watch_window(window, cx);
                     if let Some(f) = fixture {
                         app.select(fixtures::selected(f));
+                        health_fixtures::open(&mut app, f, window, cx);
                         if fixtures::loads_doctor(f) {
                             app.show_doctor_now();
                             if !fixtures::opens_doctor(f) {
                                 app.show_project();
                             }
                         }
+                        if f.name().starts_with("config-") {
+                            app.show_configuration_fixture(f.name(), window, cx);
+                        }
+                        if f.name().starts_with("resources-") {
+                            if f.name() == "resources-unavailable" {
+                                app.simulate_daemon_unavailable(false);
+                            }
+                            app.show_resources(cx);
+                            if matches!(f.name(), "resources-inventory" | "resources-confirm") {
+                                app.show_resource_inventory_fixture(
+                                    f.name() == "resources-confirm",
+                                );
+                            }
+                        }
+                        if f.name().starts_with("catalog-") {
+                            app.show_catalog_fixture(f.name(), window, cx);
+                        }
+                        if f.name().starts_with("changes-") {
+                            app.show_changes_fixture(f.name());
+                        }
+                        if f.name().starts_with("copies-") {
+                            app.show_copies_fixture(f.name());
+                        }
                         if f.name().starts_with("env-") {
                             app.show_env_fixture(f.name(), window, cx);
+                        }
+                        if f == Fixture::Files {
+                            app.show_files_fixture(window, cx);
                         }
                         if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
                             app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);

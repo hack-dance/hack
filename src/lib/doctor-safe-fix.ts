@@ -62,10 +62,10 @@ export async function runDoctorSafeFix(opts: { readonly startDir: string }) {
     confirmed,
     check: {
       name: DOCTOR_SAFE_FIX_ID,
-      status: confirmed ? ("ok" as const) : ("error" as const),
+      status: confirmed ? "ok" : "error",
       message: confirmed
         ? "Managed ignore block verified; existing user lines preserved."
         : "Selected repair could not verify the managed ignore block; unsafe, unreadable and read-only files are left unchanged.",
-    },
+    } as const,
   };
 }

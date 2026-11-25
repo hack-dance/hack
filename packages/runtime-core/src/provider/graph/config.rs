@@ -23,6 +23,8 @@ pub(super) struct Prepared {
     /// logical volume. Only [`retain_recorded_legacy_caches`] may select one.
     pub legacy_caches: BTreeMap<String, dependency_cache::CacheBinding>,
     pub configs: BTreeMap<String, Value>,
+    /// Services with an injected start interval, and whether the period was also injected.
+    pub default_health_cadence: BTreeMap<String, DefaultHealthCadence>,
     pub probes: BTreeMap<String, super::super::http_probe::HttpProbe>,
     pub resources: BTreeMap<String, Resource>,
     pub namespace: String,
@@ -788,6 +790,7 @@ pub(super) fn prepare_delivery(
                     |cache| cache.name(),
                 ),
                 id: None,
+                cleanup_observed_create: false,
                 image: None,
                 phase: "reserved".into(),
                 amd64_emulation: None,
@@ -796,6 +799,7 @@ pub(super) fn prepare_delivery(
         }
     }
     let mut configs = BTreeMap::new();
+    let mut default_health_cadence = BTreeMap::new();
     let mut probes = BTreeMap::new();
     for (index, (name, service)) in plan.services.iter().filter(|(_, s)| s.active).enumerate() {
         let values = &inputs.services[name];
@@ -813,6 +817,7 @@ pub(super) fn prepare_delivery(
             key: name.clone(),
             name: format!("hkg-{run}-container-{index}"),
             id: None,
+            cleanup_observed_create: false,
             image: Some(image.clone()),
             phase: "reserved".into(),
             amd64_emulation: service.amd64_emulation,
@@ -996,6 +1001,15 @@ pub(super) fn prepare_delivery(
             config["Healthcheck"] = json!({"Test":["NONE"]});
         } else if let Some(health) = &service.healthcheck {
             let mut value = json!({});
+            if !health.disabled && health.start_interval_nanos.is_none() {
+                default_health_cadence.insert(
+                    name.clone(),
+                    DefaultHealthCadence {
+                        period: health.start_period_nanos.is_none(),
+                        data_volumes: BTreeSet::new(),
+                    },
+                );
+            }
             if let Some(test) = &values.health_test {
                 value["Test"] = json!(test);
             }
@@ -1050,11 +1064,68 @@ pub(super) fn prepare_delivery(
         legacy_caches,
         graph,
         configs,
+        default_health_cadence,
         probes,
         resources,
         namespace: plan.namespace.clone(),
         plan_id: inputs.review.plan_id.clone(),
     })
+}
+
+pub(super) struct DefaultHealthCadence {
+    pub period: bool,
+    pub data_volumes: BTreeSet<String>,
+}
+
+impl DefaultHealthCadence {
+    pub(super) fn apply(&self, config: &mut Value, created: &BTreeSet<String>) {
+        if !self.data_volumes.is_disjoint(created) {
+            use_authored_health_cadence(config, self.period);
+        }
+    }
+}
+
+pub(super) fn data_health_volumes(
+    config: &Value,
+    resources: &BTreeMap<String, Resource>,
+    image_volumes: &Value,
+) -> BTreeSet<String> {
+    let image_targets = image_volumes
+        .as_object()
+        .into_iter()
+        .flat_map(|volumes| volumes.keys())
+        .map(|target| image_volumes::normalized(target))
+        .collect::<BTreeSet<_>>();
+    config["HostConfig"]["Mounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|mount| mount["Type"] == "volume")
+        .filter_map(|mount| {
+            let source = mount["Source"].as_str()?;
+            let volume = resources
+                .values()
+                .find(|resource| resource.kind == Kind::Volume && resource.name == source)?;
+            // Source copies are binds, and both current and legacy dependency caches
+            // have a cache binding. An anonymous Compose mount counts only if it
+            // covers a data target declared by the verified image.
+            (volume.cache.is_none()
+                && (!volume.key.starts_with(crate::project::ANONYMOUS_PREFIX)
+                    || mount["Target"].as_str().is_some_and(|target| {
+                        image_targets.contains(&image_volumes::normalized(target))
+                    })))
+            .then(|| source.to_owned())
+        })
+        .collect()
+}
+
+pub(super) fn use_authored_health_cadence(config: &mut Value, default_period: bool) {
+    if let Some(health) = config["Healthcheck"].as_object_mut() {
+        health.remove("StartInterval");
+        if default_period {
+            health.remove("StartPeriod");
+        }
+    }
 }
 
 /// Primary network preserves declaration order; every declared network receives

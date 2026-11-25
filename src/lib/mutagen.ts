@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 
@@ -10,7 +10,17 @@ import { execOrThrow } from "./shell.ts";
 const DEFAULT_MUTAGEN_VERSION = "0.18.1";
 const MUTAGEN_RELEASE_BASE_URL =
   "https://github.com/mutagen-io/mutagen/releases/download";
-const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+// Upstream v0.18.1 SHA256SUMS, verified against each release archive.
+const MUTAGEN_SHA256 = {
+  darwin_amd64:
+    "7d06f7d8fcfe90bc7e55cc834a2f2f20c2e0af9ea9bc35911fc4341ad56a9bbf",
+  darwin_arm64:
+    "6f810416d9e5fc4fd5e18431146f8b3c5a2056ba5a24f76c1e66da86eb3257e2",
+  linux_amd64:
+    "7735286c778cc438418209f24d03a64f3a0151c8065ef0fe079cfaf093af6f8f",
+  linux_arm64:
+    "bcba735aebf8cbc11da9b3742118a665599ac697fa06bc5751cac8dcd540db8a",
+} as const;
 const MUTAGEN_AGENT_BUNDLE_FILENAME = "mutagen-agents.tar.gz";
 
 type MutagenPlatform = "darwin" | "linux";
@@ -22,6 +32,7 @@ type MutagenArtifact = {
   readonly arch: MutagenArch;
   readonly filename: string;
   readonly downloadUrl: string;
+  readonly sha256: string;
 };
 
 export type BundledMutagenInstallOutcome =
@@ -37,6 +48,8 @@ export type BundledMutagenInstallOutcome =
         | "unsupported-platform"
         | "tar-not-found"
         | "download-failed"
+        | "unpinned-version"
+        | "checksum-mismatch"
         | "failed";
       readonly message?: string;
     };
@@ -97,10 +110,20 @@ export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenIns
     return { ok: true, installed: false, mutagenPath: installPath };
   }
 
+  const version =
+    (process.env.HACK_MUTAGEN_VERSION ?? "").trim() || DEFAULT_MUTAGEN_VERSION;
+  if (version !== DEFAULT_MUTAGEN_VERSION) {
+    return {
+      ok: false,
+      reason: "unpinned-version",
+      message: "HACK_MUTAGEN_VERSION has no release checksum pinned by Hack.",
+    };
+  }
+
   const artifact = resolveMutagenArtifact({
     platform: process.platform,
     arch: process.arch,
-    version: resolveMutagenVersion(),
+    version,
   });
   if (!artifact) {
     return { ok: false, reason: "unsupported-platform" };
@@ -112,24 +135,37 @@ export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenIns
   }
 
   const tmpRoot = await mkdtemp(resolve(tmpdir(), "hack-mutagen-"));
-  const downloadedTarballPath = resolve(tmpRoot, artifact.filename);
+  const tarballPath = resolve(tmpRoot, artifact.filename);
   const localTarballPath = resolveBundledMutagenTarball({
     filename: artifact.filename,
   });
-  const tarballPath = localTarballPath ?? downloadedTarballPath;
 
   try {
-    await ensureDir(dirname(installPath));
-    await ensureDir(dirname(agentBundlePath));
-    if (!localTarballPath) {
+    if (localTarballPath) {
+      // Verify and extract the same private copy, even if the asset is replaced.
+      await copyFile(localTarballPath, tarballPath);
+    } else {
       const downloaded = await downloadMutagenTarball({
         url: artifact.downloadUrl,
-        outPath: downloadedTarballPath,
+        outPath: tarballPath,
       });
       if (!downloaded.ok) {
         return downloaded;
       }
     }
+
+    const digest = new Bun.CryptoHasher("sha256")
+      .update(await Bun.file(tarballPath).arrayBuffer())
+      .digest("hex");
+    if (digest !== artifact.sha256) {
+      return {
+        ok: false,
+        reason: "checksum-mismatch",
+        message: "Mutagen archive does not match its pinned release checksum.",
+      };
+    }
+    await ensureDir(dirname(installPath));
+    await ensureDir(dirname(agentBundlePath));
 
     await execOrThrow(
       [tar, "-xzf", tarballPath, "-C", dirname(installPath), "mutagen"],
@@ -161,16 +197,14 @@ export function getManagedMutagenInstallPath(): string {
   return resolve(resolveGlobalHackDir(), "bin", "mutagen");
 }
 
-function resolveMutagenVersion(): string {
-  const override = (process.env.HACK_MUTAGEN_VERSION ?? "").trim();
-  return SEMVER_PATTERN.test(override) ? override : DEFAULT_MUTAGEN_VERSION;
-}
-
 function resolveMutagenArtifact(input: {
   readonly platform: string;
   readonly arch: string;
   readonly version: string;
 }): MutagenArtifact | null {
+  if (input.version !== DEFAULT_MUTAGEN_VERSION) {
+    return null;
+  }
   let platform: MutagenPlatform | null = null;
   if (input.platform === "darwin") {
     platform = "darwin";
@@ -198,6 +232,7 @@ function resolveMutagenArtifact(input: {
     arch,
     filename,
     downloadUrl: `${MUTAGEN_RELEASE_BASE_URL}/v${input.version}/${filename}`,
+    sha256: MUTAGEN_SHA256[`${platform}_${arch}`],
   };
 }
 

@@ -1,0 +1,10 @@
+stateDiagram-v2
+    state "Dispatch in authored order" as Dispatch
+    state "Abort siblings, keep first outcome" as Drain
+    state "Return with no live builds" as Done
+    [*] --> Dispatch
+    Dispatch --> Dispatch: Slot available
+    Dispatch --> Drain: Failure or Ctrl-C
+    Dispatch --> Done: All succeeded and settled
+    Drain --> Done: All builds settled
+    Done --> [*]

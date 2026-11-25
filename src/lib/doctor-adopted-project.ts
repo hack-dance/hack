@@ -130,7 +130,7 @@ export const ADOPTED_PROJECT_NOT_APPLICABLE_MESSAGE =
  * (`warn` for a pending adoption) or in the adopted commands.
  */
 export function adoptedProjectNotApplicableResults(): readonly {
-  readonly name: string;
+  readonly name: (typeof ADOPTED_PROJECT_NOT_APPLICABLE_CHECKS)[number];
   readonly status: "ok";
   readonly message: string;
 }[] {

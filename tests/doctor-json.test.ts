@@ -69,7 +69,7 @@ test("buildDoctorJsonData tags only the machine audit with its stable schema id"
       message: "/usr/bin/bun",
       durationMs: 2,
     },
-  ];
+  ] as const;
   expect(buildDoctorJsonData({ results }).schema).toBe(1);
   expect(buildDoctorJsonData({ results, machine: false }).schema).toBe(1);
   const machine = buildDoctorJsonData({ results, machine: true });

@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     thread,
 };
 
@@ -389,6 +389,11 @@ fn full_setup_orchestration_downloads_once_and_reuses_without_prepare() {
         "installed"
     );
     server.join().unwrap();
+    let downloads = download_directory(&candidate);
+    for name in ["provider.tgz", "engine.tgz"] {
+        assert!(!downloads.join(name).exists());
+    }
+    assert_eq!(fs::read(downloads.join("guest.apk")).unwrap(), b"hello");
     assert_eq!(
         install(
             &candidate,
@@ -419,6 +424,74 @@ fn full_setup_orchestration_downloads_once_and_reuses_without_prepare() {
         .status,
         "reused"
     );
+}
+
+#[test]
+fn offline_inputs_and_unproven_or_aliased_cache_entries_are_preserved() {
+    let root = Fixture::new();
+    let candidate = Candidate::discover(&root.0).unwrap();
+    let (pin, server) = server(vec![
+        (
+            "get /provider.tgz",
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+        ),
+        (
+            "get /engine.tgz",
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+        ),
+    ]);
+    let files = fixture_pins(&pin);
+    let downloads = download_directory(&candidate);
+    state::private_directory(&downloads).unwrap();
+    let client = client();
+    for pin in &files[..2] {
+        download::acquire_provider_archive(&client, &downloads, pin).unwrap();
+    }
+    server.join().unwrap();
+    let archive = downloads.join("provider.tgz");
+    let engine = downloads.join("engine.tgz");
+    fs::write(downloads.join("guest.apk"), b"hello").unwrap();
+    let inputs = OfflineInputs {
+        archive: &archive,
+        engine_archive: &engine,
+        network_tools: &downloads,
+        builder: None,
+    };
+    install(
+        &candidate,
+        Some(inputs),
+        &files,
+        fixture_prepare,
+        fixture_verify,
+    )
+    .unwrap();
+    install(
+        &candidate,
+        Some(inputs),
+        &files,
+        fixture_prepare,
+        fixture_verify,
+    )
+    .unwrap();
+    assert_eq!(fs::read(&archive).unwrap(), b"hello");
+    assert_eq!(fs::read(&engine).unwrap(), b"hello");
+
+    fs::rename(&archive, root.0.join("original")).unwrap();
+    std::os::unix::fs::symlink(root.0.join("original"), &archive).unwrap();
+    fs::rename(&engine, root.0.join("old-engine")).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&engine)
+        .unwrap()
+        .write_all(b"hello")
+        .unwrap();
+    assert!(download::remove_provider_archive(&downloads, &files[0]).is_err());
+    assert!(download::remove_provider_archive(&downloads, &files[1]).is_err());
+    install(&candidate, None, &files, fixture_prepare, fixture_verify).unwrap();
+    assert!(archive.symlink_metadata().unwrap().is_symlink());
+    assert_eq!(fs::read(&engine).unwrap(), b"hello");
 }
 
 #[test]
@@ -697,13 +770,13 @@ fn per_read_timeout_and_overall_deadline_bound_a_slow_body() {
 fn existing_install_observation_never_writes_or_acquires_inputs() {
     let root = Fixture::new();
     let candidate = Candidate::discover(&root.0).unwrap();
-    assert!(!observe_existing(&candidate, &|_| panic!("absent install verified")).unwrap());
+    assert!(!observe_existing(&candidate, &|_| panic!("absent install verified"), None).unwrap());
     assert!(!candidate.state_root.exists());
     let target = candidate.state_root.join("providers");
     state::private_directory(&target).unwrap();
     fs::write(target.join("complete"), b"verified").unwrap();
     assert_eq!(
-        observe_existing(&candidate, &fixture_verify)
+        observe_existing(&candidate, &fixture_verify, None)
             .unwrap_err()
             .code,
         "setup_existing_invalid"
@@ -711,10 +784,10 @@ fn existing_install_observation_never_writes_or_acquires_inputs() {
     assert!(!candidate.state_root.join("run").exists());
     let _lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
     drop(_lock);
-    assert!(observe_existing(&candidate, &fixture_verify).unwrap());
+    assert!(observe_existing(&candidate, &fixture_verify, None).unwrap());
     assert!(!download_directory(&candidate).exists());
     fs::write(target.join("complete"), b"changed").unwrap();
-    let error = observe_existing(&candidate, &fixture_verify).unwrap_err();
+    let error = observe_existing(&candidate, &fixture_verify, None).unwrap_err();
     assert_eq!(error.code, "setup_existing_invalid");
     assert!(!error.message.contains(root.0.to_str().unwrap()));
 }
@@ -869,7 +942,12 @@ fn killed_preparation_and_publication_rerun_without_network_or_partial_install()
             let _ = self.0.wait();
         }
     }
-    for phase in ["preparation", "before_rename", "after_rename"] {
+    for phase in [
+        "preparation",
+        "before_rename",
+        "after_rename",
+        "between_unlinks",
+    ] {
         let root = Fixture::new();
         let candidate = Candidate::discover(&root.0).unwrap();
         let (pin, server) = server(vec![
@@ -916,27 +994,25 @@ fn killed_preparation_and_publication_rerun_without_network_or_partial_install()
         child.0.wait().unwrap();
         server.join().unwrap(); // dead server proves recovery uses the verified cache
         let target = candidate.state_root.join("providers");
-        assert_eq!(target.exists(), phase == "after_rename");
-        let result = install(
-            &candidate,
-            None,
-            &fixture_pins(&pin),
-            fixture_prepare,
-            fixture_verify,
-        )
-        .unwrap();
+        let published = matches!(phase, "after_rename" | "between_unlinks");
+        assert_eq!(target.exists(), published);
+        let downloads = download_directory(&candidate);
+        assert_eq!(
+            downloads.join("provider.tgz").exists(),
+            phase != "between_unlinks"
+        );
+        assert!(downloads.join("engine.tgz").is_file());
+        let pins = fixture_pins(&pin);
+        if phase == "between_unlinks" {
+            assert!(observe_existing(&candidate, &fixture_verify, Some(&pins)).unwrap());
+            assert!(!downloads.join("engine.tgz").exists());
+        }
+        let result = install(&candidate, None, &pins, fixture_prepare, fixture_verify).unwrap();
         assert_eq!(
             result.status,
-            if phase == "after_rename" {
-                "reused"
-            } else {
-                "installed"
-            }
+            if published { "reused" } else { "installed" }
         );
-        assert_eq!(
-            result.files.len(),
-            if phase == "after_rename" { 0 } else { 3 }
-        );
+        assert_eq!(result.files.len(), if published { 0 } else { 3 });
         assert!(
             result
                 .files
@@ -945,6 +1021,8 @@ fn killed_preparation_and_publication_rerun_without_network_or_partial_install()
         );
         fixture_verify(&candidate).unwrap();
         assert!(!target.join("incomplete").exists());
+        assert!(!downloads.join("provider.tgz").exists());
+        assert!(!downloads.join("engine.tgz").exists());
     }
 }
 
@@ -1450,7 +1528,7 @@ fn a_complete_home_gains_only_the_builder_and_only_with_consent() {
     let tree = artifact::tree_fixture::prepare(&candidate, &root.0);
     let verify = |candidate: &Candidate| artifact::verify_tree(candidate, &tree).map(drop);
     drop(state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap());
-    assert!(observe_existing(&candidate, &verify).unwrap());
+    assert!(observe_existing(&candidate, &verify, None).unwrap());
     let providers = candidate.state_root.join("providers");
     let before = snapshot(&providers);
     let record = fs::read(providers.join(tree.record_name())).unwrap();
@@ -1529,7 +1607,7 @@ fn a_complete_home_gains_only_the_builder_and_only_with_consent() {
         ]
     );
     verify(&candidate).unwrap();
-    assert!(observe_existing(&candidate, &verify).unwrap());
+    assert!(observe_existing(&candidate, &verify, None).unwrap());
     build_time_verify(&candidate).unwrap();
     assert_eq!(
         fs::read(download_directory(&candidate).join("builder.bin")).unwrap(),

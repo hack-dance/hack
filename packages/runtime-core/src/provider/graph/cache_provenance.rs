@@ -303,6 +303,7 @@ mod tests {
             key: "deps".into(),
             name: "owned".into(),
             id: Some("a".repeat(64)),
+            cleanup_observed_create: false,
             image: Some(format!("sha256:{}", "b".repeat(64))),
             phase: "started".into(),
             amd64_emulation: None,
@@ -398,11 +399,13 @@ mod tests {
             key: "data".into(),
             name: cache.name(),
             id: None,
+            cleanup_observed_create: false,
             image: None,
             phase: "created".into(),
             amd64_emulation: None,
         };
         let mut receipt = Receipt {
+            started_from: None,
             normalized_input: None,
             relay_startup: None,
             relay_cleanup: None,

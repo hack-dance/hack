@@ -235,6 +235,29 @@ pub(super) trait Driver {
     fn service_ready(&mut self, _service: &str, _container_id: &str) -> Result<(), CandidateError> {
         Ok(())
     }
+
+    fn service_ready_leased(
+        &mut self,
+        _engine: &Engine<'_>,
+        _receipt: &Receipt,
+        service: &str,
+        container_id: &str,
+    ) -> Result<(), CandidateError> {
+        self.service_ready(service, container_id)
+    }
+
+    /// Whether this start reports "every service started" (`--report-started`).
+    /// Only then does `AllStarted` move the receipt to `started-observed` and call
+    /// [`Driver::all_started`]; otherwise it changes nothing on disk. Default: no.
+    fn reports_started(&self) -> bool {
+        false
+    }
+    /// Every service of `run` has started; the receipt is already saved in
+    /// `started-observed`. Called at most once per attempt, only when
+    /// [`Driver::reports_started`], before `verify`, never after a failure.
+    fn all_started(&mut self, _run: &str) -> Result<(), CandidateError> {
+        Ok(())
+    }
 }
 
 /// Named routes rely on the engine-owned hosts file and the image resolver policy.
@@ -398,6 +421,8 @@ pub(super) fn attach(
 
 #[cfg(target_os = "macos")]
 mod runtime;
+#[cfg(target_os = "macos")]
+pub(in crate::provider::graph) use runtime::StartupRequests;
 #[cfg(all(test, target_os = "macos"))]
 pub(super) use runtime::control_root as legacy_control_root;
 #[cfg(target_os = "macos")]

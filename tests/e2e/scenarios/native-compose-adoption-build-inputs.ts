@@ -1,6 +1,10 @@
-import { lstat, mkdir, readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "../../helpers/owned-fixture.ts";
 import { adoptionDependencyReadAllowed } from "./native-compose-adoption-dependency-inputs.ts";
 import {
   type AdoptionDependencyFirstPrepare,
@@ -89,8 +93,8 @@ export async function prepareRetainedBuildFixtureSources(opts: {
   const rootMode = opts.mode === "root-specific";
   const context = rootMode ? opts.root : join(opts.root, ".hack");
   const definition = rootMode ? ".hack/toolchain/Dockerfile" : "Dockerfile";
-  await mkdir(join(opts.root, ".hack/toolchain"), { recursive: true });
-  await Bun.write(
+  await mkdirOwnedFixture(join(opts.root, ".hack/toolchain"), true);
+  await writeOwnedFixture(
     retainedBuildFixtureMarker(opts.root, opts.mode),
     marker(opts.mode)
   );
@@ -106,17 +110,23 @@ export async function prepareRetainedBuildFixtureSources(opts: {
       : []),
     "",
   ].join("\n");
-  await Bun.write(join(context, definition), dockerfile);
+  await writeOwnedFixture(join(context, definition), dockerfile);
   if (rootMode) {
-    await Bun.write(
+    await writeOwnedFixture(
       join(opts.root, "mise.toml"),
       "# synthetic retained build input\n"
     );
     // The shadowed root ignore deliberately selects a different file. Both raw
     // inputs remain privately pinned, while only the specific rules feed COPY.
-    await Bun.write(join(opts.root, "wrong-marker"), "shadowed-root-ignore\n");
-    await Bun.write(join(opts.root, ".dockerignore"), "**\n!wrong-marker\n");
-    await Bun.write(
+    await writeOwnedFixture(
+      join(opts.root, "wrong-marker"),
+      "shadowed-root-ignore\n"
+    );
+    await writeOwnedFixture(
+      join(opts.root, ".dockerignore"),
+      "**\n!wrong-marker\n"
+    );
+    await writeOwnedFixture(
       join(context, `${definition}.dockerignore`),
       [
         "**",
@@ -138,7 +148,10 @@ export async function prepareRetainedBuildFixtureSources(opts: {
       ].join("\n")
     );
   } else {
-    await Bun.write(join(context, ".dockerignore"), "**\n!data-marker\n");
+    await writeOwnedFixture(
+      join(context, ".dockerignore"),
+      "**\n!data-marker\n"
+    );
   }
 }
 

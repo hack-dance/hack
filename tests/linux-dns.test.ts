@@ -1,5 +1,12 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1509,7 +1516,9 @@ describe("review round two", () => {
   test.skipIf(process.platform !== "linux")(
     "the printed manual plan pastes into a shell as is",
     async () => {
-      const home = await mkdtemp(join(tmpdir(), "hack-linux-dns-paste-"));
+      const home = await realpath(
+        await mkdtemp(join(tmpdir(), "hack-linux-dns-paste-"))
+      );
       const saved = {
         HOME: process.env.HOME,
         XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,

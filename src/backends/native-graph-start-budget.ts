@@ -36,11 +36,12 @@ export const NATIVE_START_STATUS_INTERVAL_MS = 5000;
 /** An older status snapshot is not used to describe a timeout. */
 export const NATIVE_START_STATUS_STALE_MS = 30_000;
 /**
- * Receipt phases of a start still reaching readiness. A snapshot in any
- * other phase (cleanup, removed, ready, retained) does not describe the graph
- * at its deadline and is never kept.
+ * Receipt phases of a start still reaching readiness, including
+ * `started-observed` (every container started, some goal still unmet: the
+ * usual shape of a timeout). A snapshot in any other phase (cleanup, removed,
+ * ready, retained) does not describe the graph at its deadline and is never kept.
  */
-const STARTUP_PHASES = new Set(["preparing", "restoring"]);
+const STARTUP_PHASES = new Set(["preparing", "restoring", "started-observed"]);
 /**
  * The frontend's own wait outlasts the runtime's deadline by this much, so
  * the runtime reports `graph_timeout` (and the graph can be inspected) first.

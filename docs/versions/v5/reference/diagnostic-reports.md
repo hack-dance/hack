@@ -12,6 +12,8 @@ Doctor emits the shared `{ok:true,data:DoctorJsonData}` envelope even when a com
 
 Update JSON is its own UpdateOutput union. Handled ok:false has a string error and exits 1; ok:true exits 0. The optional mutagen report appears after a successful update installation. An already-available dependency yields available:true/installed:false/path:string; successful provisioning yields available:true and the actual installation result. Provisioning failure can still leave top-level ok:true/installed:true; inspect mutagen.warning/available. Path null means no dependency found. Omitted warning is distinct from an empty string.  A synthetic provisioning fragment is `{"available":false,"installed":false,"path":null,"warning":"<provisioning diagnostic>"}`.
 
+Managed Mutagen provisioning verifies the release archive against the version and platform checksum pinned by Hack. An unpinned `HACK_MUTAGEN_VERSION` or a checksum mismatch refuses new provisioning. A complete managed installation is reused regardless of that override. Existing files are preserved when verification fails.
+
 Host ps emits a bare HostPsReport and returns 0 after gathering observations, including when the process snapshot is unavailable. It does not return an envelope. snapshotAvailable:false and nullable live metrics mean unknown observation, not proof of stopped processes. Command records carry no argv, environment or output. Record parsing strips unrecognized properties. All current serializer fields are documented below despite its broad inferred/Record return types.
 
 

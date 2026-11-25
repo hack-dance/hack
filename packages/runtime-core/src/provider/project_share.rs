@@ -359,11 +359,24 @@ mod tests {
             fs::write(project.join("package.json"), "{}").unwrap();
             let pointer = fs::read_to_string(project.join(".git")).unwrap();
             let gitdir = PathBuf::from(pointer.trim().strip_prefix("gitdir: ").unwrap());
+            // Git inherits the caller's umask. These fixtures start with safe
+            // registration metadata before each test introduces its own faults.
+            let common = main.join(".git");
+            for directory in [&main, &common, &common.join("worktrees"), &gitdir, &project] {
+                fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            for path in [
+                project.join(".git"),
+                gitdir.join("commondir"),
+                gitdir.join("gitdir"),
+            ] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+            }
             Self {
                 _fixture: fixture,
                 home,
                 project,
-                common: main.join(".git"),
+                common,
                 gitdir,
             }
         }
@@ -520,8 +533,10 @@ mod tests {
             fixture.gitdir.join("gitdir"),
         ] {
             let permissions = fs::metadata(&path).unwrap().permissions();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
-            assert!(fixture.approve().is_err(), "accepted {}", path.display());
+            for mode in [permissions.mode() | 0o020, 0o777] {
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                assert!(fixture.approve().is_err(), "accepted {}", path.display());
+            }
             fs::set_permissions(&path, permissions).unwrap();
             assert!(fixture.approve().is_ok());
         }

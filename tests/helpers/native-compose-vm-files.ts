@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { restoreEnv } from "./env.ts";
+import { mkdirOwnedFixture } from "./owned-fixture.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
 /** Register this in each test file; Bun caches imports but scopes test hooks. */
@@ -79,7 +80,7 @@ export async function vmFileFixture() {
   await mkdir(join(root, "client"), { mode: 0o700 });
   await writeFile(join(root, "client/config.json"), "{}", { mode: 0o600 });
   const checkout = join(root, "checkout");
-  await mkdir(join(checkout, ".hack"), { recursive: true });
+  await mkdirOwnedFixture(join(checkout, ".hack"), true);
   await writeFile(join(checkout, "settings"), VM_BYTES, { mode: 0o600 });
   await writeFile(
     join(checkout, ".hack/hack.project.json"),

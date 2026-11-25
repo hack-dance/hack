@@ -126,6 +126,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Worktree-local env override files: `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.",
       "Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).",
       "Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.internal/compose.runtime.override.yml`, `.hack/.branch/compose.<branch>.override.yml`, `.hack/.branch/compose.<branch>.runtime.override.yml`.",
+      "Use `hack use` to inspect Compose remote selections and save a stopped checkout preference. For projects with remotes, start the whole project with `hack up`.",
       "Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).",
       "Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.",
       "Ignore rules: hack owns a committed `.hack/.gitignore` (created by init; for an existing project without it, `hack doctor` warns and `hack doctor --fix` creates or repairs it; runtime commands never write it and keep `git status` clean via the repo-local `info/exclude`) covering machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`) plus the retired `tickets/` cache path for upgrade safety; keep it committed, and if generated files leaked into git, `hack doctor --fix` untracks them (files stay on disk).",
@@ -161,6 +162,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     bullets: [
       "If `.hack/` is missing: `hack init`",
       "Start services: `hack up --detach` (or `hack up -d`)",
+      "Native `hack up` returns once every container has started, while health checks and routes are still warming; use `hack up --wait` before calling a project URL. `hack exec` and `hack run` wait for ready on their own.",
       "Check status: `hack ps` or `hack status`",
       "Open app URL: `hack open --json`",
       "Restart: `hack restart`",

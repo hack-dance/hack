@@ -4,7 +4,7 @@
 use gpui_kit::component::{Icon, Sizable as _, switch::Switch};
 use gpui_kit::{
     Div, ElementId, Hsla, IntoElement, ParentElement, SharedString, Stateful, Styled, div,
-    prelude::*, px,
+    prelude::*, px, relative,
 };
 
 use crate::icons::Glyph;
@@ -143,8 +143,8 @@ pub fn project_row(
         .gap(space::S4)
         .rounded(radius::CONTROL)
         .cursor_pointer()
-        .when(selected, |d| d.bg(p.surface_1))
-        .hover(move |d| d.bg(p.surface_1))
+        .when(selected, |d| d.bg(p.selection))
+        .when(!selected, |d| d.hover(move |d| d.bg(p.surface_1)))
         .child(dot(status, ui))
         .child(
             div()
@@ -190,8 +190,8 @@ pub fn branch_row(
         .gap(space::S3)
         .rounded(radius::CONTROL)
         .cursor_pointer()
-        .when(selected, |d| d.bg(p.surface_1))
-        .hover(move |d| d.bg(p.surface_1))
+        .when(selected, |d| d.bg(p.selection))
+        .when(!selected, |d| d.hover(move |d| d.bg(p.surface_1)))
         .child(icon(Glyph::Branch, size::ICON, p.text_muted))
         .child(dot(status, ui))
         .child(
@@ -342,7 +342,7 @@ pub fn always_on_switch(checked: bool, disabled_reason: Option<&'static str>, ui
 /// underline. The caller adds the click handler.
 pub fn pill_tab(
     id: impl Into<ElementId>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     sel: bool,
     ui: &Ui,
 ) -> Stateful<Div> {
@@ -361,16 +361,16 @@ pub fn pill_tab(
         } else {
             p.text_secondary
         })
-        .when(sel, |d| d.bg(p.surface_1))
+        .when(sel, |d| d.bg(p.selection))
         .when(!sel, |d| d.hover(move |d| d.text_color(p.text_primary)))
-        .child(label)
+        .child(label.into())
 }
 
 /// Pill tabs, for renders that need no click handlers.
 pub fn pill_tabs(labels: &[&'static str], selected: usize, ui: &Ui) -> Div {
     let mut row = div().flex().items_center().gap(space::S2);
     for (i, label) in labels.iter().enumerate() {
-        row = row.child(pill_tab(("tab", i), label, i == selected, ui));
+        row = row.child(pill_tab(("tab", i), *label, i == selected, ui));
     }
     row
 }
@@ -499,50 +499,60 @@ pub struct ServiceRow {
     pub route: Result<String, String>,
 }
 
-const COL_STATE: f32 = 92.;
-const COL_MEM: f32 = 80.;
 /// Why CPU and memory show a dash before a usage read arrives.
 pub const UNKNOWN_USAGE: &str = "Not read yet";
 /// The tooltip of the `emulated` pill.
 pub const EMULATED_NOTE: &str = "The image architecture differs from the engine's: this service runs under emulation, which is slower. Doctor names the fix.";
-const COL_NUM: f32 = 64.;
 
 /// Services table: Service, State, CPU, Memory, Route. Hairline row
 /// separators, no outer box, numbers right-aligned.
 pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
+    services_table_with_rows(rows, ui, |row, _| row)
+}
+
+/// The project window supplies navigation while the gallery keeps static rows.
+pub fn services_table_with_rows(
+    rows: &[ServiceRow],
+    ui: &Ui,
+    mut decorate: impl FnMut(Stateful<Div>, &ServiceRow) -> Stateful<Div>,
+) -> Div {
     let p = ui.p;
-    let num =
-        |id: (&'static str, usize), v: Option<String>, note: SharedString, width: f32, ui: &Ui| {
-            div()
-                .id(id)
-                .w(px(width))
-                .flex_none()
-                .flex()
-                .justify_end()
-                .pr(space::S6)
-                .text_color(if v.is_some() {
-                    ui.p.text_primary
-                } else {
-                    ui.p.text_muted
+    let column = relative(size::SERVICE_COL_FRACTION);
+    let num = |id: (&'static str, usize),
+               v: Option<String>,
+               note: SharedString,
+               width: gpui_kit::Pixels,
+               ui: &Ui| {
+        div()
+            .id(id)
+            .w(width)
+            .flex_none()
+            .flex()
+            .justify_end()
+            .pr(space::S6)
+            .text_color(if v.is_some() {
+                ui.p.text_primary
+            } else {
+                ui.p.text_muted
+            })
+            .child(v.unwrap_or_else(|| "—".into()))
+            .when(!note.is_empty(), |d| {
+                d.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(note.clone()).build(window, cx)
                 })
-                .child(v.unwrap_or_else(|| "—".into()))
-                .when(!note.is_empty(), |d| {
-                    d.tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(note.clone()).build(window, cx)
-                    })
-                })
-        };
+            })
+    };
     let header = div()
         .h(px(26.))
         .flex()
         .items_center()
         .type_step(text::SMALL)
         .text_color(p.text_muted)
-        .child(div().flex_1().min_w_0().child("Service"))
-        .child(div().w(px(COL_STATE)).flex_none().child("State"))
+        .child(div().w(column).flex_none().child("SERVICE"))
+        .child(div().w(column).flex_none().child("STATE"))
         .child(
             div()
-                .w(px(COL_NUM))
+                .w(size::CPU_COL)
                 .flex_none()
                 .flex()
                 .justify_end()
@@ -551,14 +561,14 @@ pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
         )
         .child(
             div()
-                .w(px(COL_MEM))
+                .w(size::MEMORY_COL)
                 .flex_none()
                 .flex()
                 .justify_end()
                 .pr(space::S6)
-                .child("Memory"),
+                .child("MEMORY"),
         )
-        .child(div().flex_1().min_w_0().pl(space::S4).child("Route"));
+        .child(div().flex_1().min_w_0().pl(space::S4).child("ROUTE"));
     let mut table = div().flex().flex_col().child(header);
     for (i, r) in rows.iter().enumerate() {
         let state_color = match r.status {
@@ -575,81 +585,77 @@ pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
                 .child(route.clone()),
             Err(note) => div().text_color(p.text_muted).child(note.clone()),
         };
-        table = table.child(
-            div()
-                .id(("svc", i))
-                .h(size::TABLE_ROW)
-                .flex_none()
-                .flex()
-                .items_center()
-                .hairline_t(p.border)
-                .type_step(text::BODY)
-                .text_color(p.text_primary)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(space::S4)
-                        .child(dot(r.status, ui))
-                        .child(div().truncate().child(r.name.clone()))
-                        .when(r.emulated, |d| {
-                            d.child(
-                                div()
-                                    .id(("emulated", i))
-                                    .flex_none()
-                                    .child(pill(
-                                        "emulated",
-                                        p.states.degraded.bg,
-                                        p.states.degraded.fg,
-                                    ))
-                                    .tooltip(|window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(EMULATED_NOTE)
-                                            .build(window, cx)
-                                    }),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .w(px(COL_STATE))
-                        .flex_none()
-                        .truncate()
-                        .text_color(state_color)
-                        .child(r.state.clone()),
-                )
-                .child(num(
-                    ("cpu", i),
-                    r.cpu.clone(),
-                    if r.cpu.is_some() {
-                        SharedString::default()
-                    } else {
-                        r.usage_note.into()
-                    },
-                    COL_NUM,
-                    ui,
-                ))
-                .child(num(
-                    ("mem", i),
-                    r.memory.clone(),
-                    match (&r.memory, &r.memory_note) {
-                        (Some(_), Some(n)) => n.clone().into(),
-                        (Some(_), None) => SharedString::default(),
-                        (None, _) => r.usage_note.into(),
-                    },
-                    COL_MEM,
-                    ui,
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pl(space::S4)
-                        .truncate()
-                        .child(route),
-                ),
-        );
+        let row = div()
+            .id(("svc", i))
+            .h(size::TABLE_ROW)
+            .flex_none()
+            .flex()
+            .items_center()
+            .hairline_t(p.border)
+            .type_step(text::BODY)
+            .text_color(p.text_primary)
+            .child(
+                div()
+                    .w(column)
+                    .flex_none()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(space::S4)
+                    .child(dot(r.status, ui))
+                    .child(div().truncate().child(r.name.clone()))
+                    .when(r.emulated, |d| {
+                        d.child(
+                            div()
+                                .id(("emulated", i))
+                                .flex_none()
+                                .child(pill("emulated", p.states.degraded.bg, p.states.degraded.fg))
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(EMULATED_NOTE)
+                                        .build(window, cx)
+                                }),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .w(column)
+                    .flex_none()
+                    .truncate()
+                    .text_color(state_color)
+                    .child(r.state.clone()),
+            )
+            .child(num(
+                ("cpu", i),
+                r.cpu.clone(),
+                if r.cpu.is_some() {
+                    SharedString::default()
+                } else {
+                    r.usage_note.into()
+                },
+                size::CPU_COL,
+                ui,
+            ))
+            .child(num(
+                ("mem", i),
+                r.memory.clone(),
+                match (&r.memory, &r.memory_note) {
+                    (Some(_), Some(n)) => n.clone().into(),
+                    (Some(_), None) => SharedString::default(),
+                    (None, _) => r.usage_note.into(),
+                },
+                size::MEMORY_COL,
+                ui,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl(space::S4)
+                    .truncate()
+                    .child(route),
+            );
+        table = table.child(decorate(row, r));
     }
     table
 }

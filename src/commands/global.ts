@@ -134,6 +134,7 @@ import {
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import {
+  canPrompt,
   confirmSafe,
   isExplicitlyNonInteractive,
 } from "../lib/interactivity.ts";
@@ -382,12 +383,19 @@ const optAdminPlan = defineOption({
     "Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json)",
 } as const);
 
+const optInstallBrewDeps = defineOption({
+  name: "installBrewDeps",
+  type: "boolean",
+  long: "--install-brew-deps",
+  description: "Allow installation of missing macOS Homebrew dependencies",
+} as const);
+
 const globalInstallSpec = defineCommand({
   name: "install",
   summary:
     "Bootstrap ~/.hack and start Caddy and CoreDNS (Grafana/Loki/Alloy only when logging is on)",
   group: "Global",
-  options: [optJson, optAdminPlan] as const,
+  options: [optJson, optAdminPlan, optInstallBrewDeps] as const,
   positionals: [],
   subcommands: [],
 } as const);
@@ -601,7 +609,7 @@ export const globalCommand = defineCommand({
           build: buildGlobalInstallPlan,
         });
       }
-      return await globalInstall();
+      return await globalInstall(args.options.installBrewDeps === true);
     }),
     globalDnsSpec,
     withHandler(globalUpSpec, async ({ args }) => {
@@ -1150,7 +1158,7 @@ function networkHasSubnet(raw: string, subnet: string): boolean {
   return false;
 }
 
-async function globalInstall(): Promise<number> {
+async function globalInstall(installBrewDeps: boolean): Promise<number> {
   if (resolveNativeRuntimeSelection()) {
     logger.error({
       message:
@@ -1167,10 +1175,11 @@ async function globalInstall(): Promise<number> {
     return slimExit;
   }
 
+  await requireGlobalBrewInstallConsent(installBrewDeps);
   await preflightCustomDomainDnsClaim();
 
   const s = spinner();
-  await ensureOptionalInstallDependencies({ spinner: s });
+  await ensureOptionalInstallDependencies({ spinner: s, installBrewDeps });
   await warnIfSessionsMuxUnavailable();
   const useStaticIps = await ensureGlobalDockerNetworks({ spinner: s });
   const paths = getGlobalPaths();
@@ -1196,6 +1205,7 @@ async function globalInstall(): Promise<number> {
   }
   const hostBootstrapOk = await completeGlobalInstallHostBootstrap({
     useStaticIps,
+    installBrewDeps,
   });
   if (up.failedStage === "logging") {
     // Routing works, so DNS and trust were set up; the logs URL would not.
@@ -1220,11 +1230,12 @@ async function globalInstall(): Promise<number> {
 }
 
 async function ensureOptionalInstallDependencies(opts: {
+  readonly installBrewDeps: boolean;
   readonly spinner: ReturnType<typeof spinner>;
 }): Promise<void> {
   await ensureManagedGum({ spinner: opts.spinner });
   await ensureManagedMutagen({ spinner: opts.spinner });
-  await ensureMacInstallDependencies();
+  await ensureMacInstallDependencies(opts.installBrewDeps);
 }
 
 async function ensureManagedGum(opts: {
@@ -1280,10 +1291,54 @@ async function ensureManagedMutagen(opts: {
   }
 }
 
-async function ensureMacInstallDependencies(): Promise<void> {
+function brewInstallConsentError(): HackCliError {
+  return new HackCliError({
+    code: "E_INTERACTIVE_REQUIRED",
+    message: "Homebrew install requires consent. Run: brew install dnsmasq",
+  });
+}
+
+async function needsMacHostDns(domains: readonly string[]): Promise<boolean> {
+  const existing = await Promise.all(
+    domains.map((domain) => pathExists(`/etc/resolver/${domain}`))
+  );
+  return existing.includes(false);
+}
+
+async function requireGlobalBrewInstallConsent(
+  allowed: boolean
+): Promise<void> {
+  if (allowed || !isMac() || canPrompt() || !(await resolveBrewPath())) {
+    return;
+  }
+  if (
+    !(await isBrewFormulaInstalled({ formula: "dnsmasq" })) &&
+    (await needsMacHostDns(managedLocalDomains(await resolveDefaultDomain())))
+  ) {
+    throw brewInstallConsentError();
+  }
+}
+
+async function confirmGlobalBrewInstall(opts: {
+  readonly allowed?: boolean;
+  readonly message: string;
+  readonly initialValue: boolean;
+}): Promise<boolean> {
+  return (
+    opts.allowed === true ||
+    (await confirmSafe({
+      ...opts,
+      nonInteractive: "decline",
+    }))
+  );
+}
+
+async function ensureMacInstallDependencies(
+  installBrewDeps: boolean
+): Promise<void> {
   if (isMac()) {
-    await ensureMacChafa();
-    await ensureMacMkcert();
+    await ensureMacChafa(installBrewDeps);
+    await ensureMacMkcert(installBrewDeps);
     return;
   }
 
@@ -1570,10 +1625,11 @@ async function writeGlobalLoggingAssets(opts: {
 
 /** Returns `false` only when a confirmed host step failed (exit non-zero). */
 async function completeGlobalInstallHostBootstrap(opts: {
+  readonly installBrewDeps: boolean;
   readonly useStaticIps: boolean;
 }): Promise<boolean> {
   if (isMac()) {
-    await bootstrapMacGlobalInstall();
+    await bootstrapMacGlobalInstall(opts.installBrewDeps);
     return true;
   }
   if (isLinux()) {
@@ -1597,9 +1653,11 @@ async function completeGlobalInstallHostBootstrap(opts: {
   return true;
 }
 
-async function bootstrapMacGlobalInstall(): Promise<void> {
+async function bootstrapMacGlobalInstall(
+  installBrewDeps: boolean
+): Promise<void> {
   const hostDnsTarget = await resolvePreferredMacHostDnsTarget();
-  await ensureMacHackDns({ targetIp: hostDnsTarget });
+  await ensureMacHackDns({ targetIp: hostDnsTarget, installBrewDeps });
   const certPath = await exportCaddyLocalCaCert();
   if (certPath) {
     const trustReady = await ensureMacTrustCaddyLocalCa({ certPath });
@@ -4982,6 +5040,7 @@ async function hasMkcertLocalCa({
 }
 
 async function ensureMacHackDns(opts: {
+  readonly installBrewDeps: boolean;
   readonly targetIp: string;
 }): Promise<void> {
   const domains = managedLocalDomains(await resolveDefaultDomain());
@@ -4994,7 +5053,7 @@ async function ensureMacHackDns(opts: {
     return;
   }
 
-  const dnsmasqOk = await ensureDnsmasqInstalled();
+  const dnsmasqOk = await ensureDnsmasqInstalled(opts.installBrewDeps, domains);
   if (!dnsmasqOk) {
     return;
   }
@@ -5065,16 +5124,26 @@ async function ensureBrewForDnsmasq(): Promise<boolean> {
   return true;
 }
 
-async function ensureDnsmasqInstalled(): Promise<boolean> {
+async function ensureDnsmasqInstalled(
+  installBrewDeps: boolean,
+  domains: readonly string[]
+): Promise<boolean> {
   const hasDnsmasq = await isBrewFormulaInstalled({ formula: "dnsmasq" });
   if (hasDnsmasq) {
     return true;
   }
 
-  const ok = await confirmSafe({
+  if (!(installBrewDeps || canPrompt())) {
+    if (await needsMacHostDns(domains)) {
+      throw brewInstallConsentError();
+    }
+    return false;
+  }
+
+  const ok = await confirmGlobalBrewInstall({
+    allowed: installBrewDeps,
     message: "Install dnsmasq via Homebrew? (required for *.hack DNS)",
     initialValue: true,
-    nonInteractive: "accept-default",
   });
   if (!ok) {
     logger.warn({
@@ -5394,7 +5463,7 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
   }
 }
 
-async function ensureMacChafa(): Promise<void> {
+async function ensureMacChafa(installBrewDeps: boolean): Promise<void> {
   const brew = await findExecutableInPath("brew");
   if (!brew) {
     logger.warn({ message: "Homebrew not found; skipping chafa install." });
@@ -5407,15 +5476,14 @@ async function ensureMacChafa(): Promise<void> {
     return;
   }
 
-  const ok = await confirmSafe({
+  const ok = await confirmGlobalBrewInstall({
+    allowed: installBrewDeps,
     message: "Install chafa via Homebrew? (used for hack the planet)",
     initialValue: true,
-    nonInteractive: "accept-default",
   });
   if (!ok) {
     logger.warn({
-      message:
-        "Skipping chafa install; hack the planet will use the fallback renderer.",
+      message: "Skipping chafa install. Run: brew install chafa",
     });
     return;
   }
@@ -5429,7 +5497,7 @@ async function ensureMacChafa(): Promise<void> {
   }
 }
 
-async function ensureMacMkcert(): Promise<void> {
+async function ensureMacMkcert(installBrewDeps?: boolean): Promise<void> {
   const brew = await findExecutableInPath("brew");
   if (!brew) {
     logger.warn({ message: "Homebrew not found; skipping mkcert install." });
@@ -5443,14 +5511,14 @@ async function ensureMacMkcert(): Promise<void> {
     return;
   }
 
-  const ok = await confirmSafe({
+  const ok = await confirmGlobalBrewInstall({
+    allowed: installBrewDeps,
     message: "Install mkcert via Homebrew? (used for hack global cert)",
     initialValue: false,
-    nonInteractive: "accept-default",
   });
   if (!ok) {
     logger.warn({
-      message: "Skipping mkcert install; hack global cert will be unavailable.",
+      message: "Skipping mkcert install. Run: brew install mkcert",
     });
     return;
   }

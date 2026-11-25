@@ -174,6 +174,7 @@ fn job_resource(parent: &Resource, service: &str, name: String) -> Resource {
     resource.key = service.into();
     resource.name = name;
     resource.id = None;
+    resource.cleanup_observed_create = false;
     resource.phase = "reserved".into();
     resource.routing = None;
     resource.loopback_ports = Vec::new();
@@ -236,7 +237,7 @@ pub(super) fn recovery_selection(
         startup.services.remove(&service);
     }
     parent.environment_attached = intent.original_environment_attached;
-    parent.phase = "ready-observed".into();
+    parent.set_phase("ready-observed");
     if service_exec_generation(&parent)? != intent.generation
         || !parent
             .resources
@@ -297,6 +298,35 @@ pub(super) fn record_effect(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    #[test]
+    fn a_one_off_job_still_needs_a_ready_graph_while_it_warms() {
+        let fixture = super::super::tests::Fixture::new();
+        state::private_directory(&fixture.0).unwrap();
+        let mut receipt: Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"preparing","readiness":{},"resources":{"container:task":{"kind":"container","key":"task","name":"owned-task","id":"e".repeat(64),"phase":"started","image":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}}})).unwrap();
+        super::super::mark_started(&mut receipt).unwrap();
+        let selection = ServiceSelection {
+            run: receipt.run.clone(),
+            owner: receipt.owner.clone(),
+            namespace: receipt.namespace.clone(),
+            plan: receipt.plan_id.clone(),
+            service: "task".into(),
+            container: "e".repeat(64),
+            boot: "boot".into(),
+            generation: service_exec_generation(&receipt).unwrap(),
+        };
+        assert!(
+            JobIntent::reserve(
+                &fixture.0,
+                &receipt,
+                &selection,
+                &"f".repeat(32),
+                &format!("hkg-{}-container-31", receipt.run),
+                &json!({"Cmd":["true"]}),
+            )
+            .is_err()
+        );
+        assert!(!fixture.0.join(FILE).exists());
+    }
     fn admitted() -> (super::super::tests::Fixture, JobIntent) {
         let fixture = super::super::tests::Fixture::new();
         state::private_directory(&fixture.0).unwrap();

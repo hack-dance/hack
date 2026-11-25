@@ -11,15 +11,219 @@ use crate::{Candidate, CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 /// Content-addressed archives one candidate's cache may hold.
 const MAX_ARCHIVES: usize = 64;
 /// A new slot needs at least this much remaining cache budget.
 const MIN_SLOT: u64 = 1024 * 1024;
+const IMAGE_WORKERS: usize = 3;
+
+#[derive(Default)]
+struct CacheState {
+    lease: Option<state::Lock>,
+    users: usize,
+    reservations: BTreeMap<String, u64>,
+    disk_reserved: u64,
+}
+
+#[derive(Default)]
+struct ImageCache {
+    state: Mutex<CacheState>,
+    changed: Condvar,
+    importer: Mutex<()>,
+    pins: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+}
+
+impl ImageCache {
+    fn reserve_disk(
+        &self,
+        needed: u64,
+        available: impl Fn() -> Result<u64, CandidateError>,
+    ) -> Result<DiskReservation<'_>, CandidateError> {
+        let mut cache = self.state.lock().unwrap();
+        loop {
+            if available()?.saturating_sub(cache.disk_reserved) >= needed {
+                cache.disk_reserved += needed;
+                return Ok(DiskReservation {
+                    cache: self,
+                    bytes: needed,
+                });
+            }
+            if cache.disk_reserved == 0 {
+                return Err(CandidateError::new(
+                    "image_disk_space",
+                    "The image archive and its temporary layer exceed available disk space.",
+                ));
+            }
+            cache = self.changed.wait(cache).unwrap();
+        }
+    }
+
+    fn enter(&self, root: &Path, policy: &ImagePolicy) -> Result<CacheLease<'_>, CandidateError> {
+        let mut cache = self.state.lock().unwrap();
+        if let Some(lease) = &cache.lease {
+            lease.verify_path(root)?;
+        } else {
+            let lease = if policy.retention_root.is_some() {
+                state::Lock::acquire(root)?
+            } else {
+                state::wait_for_image_lock(
+                    policy.image_wait(std::time::Duration::from_secs(590))?,
+                    "image-cache",
+                    || state::Lock::acquire(root),
+                )?
+            };
+            let staging = root.with_file_name("image-staging");
+            if staging.try_exists().map_err(state::io)? {
+                clean_staging(&staging, 0)?;
+            }
+            lease.verify_path(root)?;
+            cache.lease = Some(lease);
+        }
+        cache.users += 1;
+        Ok(CacheLease(self))
+    }
+}
+
+/// Only workers using the cache hold this lease. Workers still resolving tags
+/// can never keep it alive while another command needs it to confirm a tag.
+struct CacheLease<'a>(&'a ImageCache);
+
+impl CacheLease<'_> {
+    fn lock(&self, root: &Path) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
+        let cache = self.0.state.lock().unwrap();
+        cache.lease.as_ref().unwrap().verify_path(root)?;
+        Ok(cache)
+    }
+}
+
+impl Drop for CacheLease<'_> {
+    fn drop(&mut self) {
+        let mut cache = self.0.state.lock().unwrap();
+        cache.users -= 1;
+        if cache.users == 0 {
+            cache.lease = None;
+        }
+    }
+}
+
+struct DiskReservation<'a> {
+    cache: &'a ImageCache,
+    bytes: u64,
+}
+impl Drop for DiskReservation<'_> {
+    fn drop(&mut self) {
+        self.cache.state.lock().unwrap().disk_reserved -= self.bytes;
+        self.cache.changed.notify_all();
+    }
+}
+
+fn disk_available(path: &Path) -> Result<u64, CandidateError> {
+    const RESERVE: u64 = 512 * 1024 * 1024;
+    let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| refused("Invalid image staging path."))?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: The path is terminated and stat points to writable storage.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(state::io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: statvfs initialized the buffer on success.
+    let stat = unsafe { stat.assume_init() };
+    let bytes = u64::try_from((stat.f_bavail as u128) * (stat.f_frsize as u128))
+        .map_err(|_| refused("Invalid image disk headroom."))?;
+    Ok(bytes.saturating_sub(RESERVE))
+}
+
+fn generated_sequence(name: &str) -> bool {
+    name.split_once('-').is_some_and(|(pid, sequence)| {
+        pid.parse::<u32>()
+            .is_ok_and(|value| value > 0 && value.to_string() == pid)
+            && sequence
+                .parse::<u64>()
+                .is_ok_and(|value| value.to_string() == sequence)
+    })
+}
+
+fn clean_staging(path: &Path, level: u8) -> Result<(), CandidateError> {
+    if !path.try_exists().map_err(state::io)? {
+        return Ok(());
+    }
+    state::check_private_directory(path)?;
+    for entry in fs::read_dir(path).map_err(state::io)? {
+        let entry = entry.map_err(state::io)?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let metadata = fs::symlink_metadata(entry.path()).map_err(state::io)?;
+        if metadata.uid() != current_uid() {
+            continue;
+        }
+        let generated_dir = (level == 0 && hex(&name))
+            || (level == 1
+                && name
+                    .strip_prefix("attempt-")
+                    .is_some_and(generated_sequence));
+        if generated_dir && metadata.is_dir() && metadata.mode() & 0o077 == 0 {
+            clean_staging(&entry.path(), level + 1)?;
+        }
+        let generated_file = matches!(&*name, "image.tar" | "receipt.json" | "receipt.pending")
+            || [".hack-image-", ".hack-layer-"].iter().any(|prefix| {
+                name.strip_prefix(prefix)
+                    .and_then(|tail| tail.strip_suffix(".tmp"))
+                    .is_some_and(generated_sequence)
+            });
+        if level > 0 && generated_file && metadata.is_file() {
+            fs::remove_file(entry.path()).map_err(state::io)?;
+        }
+    }
+    match fs::remove_dir(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
+        result => result.map_err(state::io),
+    }
+}
+
+fn create_staging(root: &Path, reference: &str) -> Result<PathBuf, CandidateError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let key_dir = root.with_file_name("image-staging").join(key(reference));
+    state::private_directory(&key_dir)?;
+    loop {
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let attempt = key_dir.join(format!("attempt-{}-{sequence}", std::process::id()));
+        match fs::DirBuilder::new().mode(0o700).create(&attempt) {
+            Ok(()) => return Ok(attempt),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(state::io(error)),
+        }
+    }
+}
+
+struct Reservation<'a> {
+    cache: &'a ImageCache,
+    key: String,
+    path: PathBuf,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let _ = clean_staging(&self.path, 2);
+        if let Some(key_dir) = self.path.parent() {
+            let _ = fs::remove_dir(key_dir);
+        }
+        self.cache
+            .state
+            .lock()
+            .unwrap()
+            .reservations
+            .remove(&self.key);
+        self.cache.changed.notify_all();
+    }
+}
 fn refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("image_cache", message)
 }
@@ -82,7 +286,7 @@ impl CacheReceipt {
         Ok(())
     }
 }
-fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
+fn open_receipt(path: &Path) -> Result<fs::File, CandidateError> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -97,6 +301,11 @@ fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
     {
         return Err(refused("Unsafe image cache receipt."));
     }
+    Ok(file)
+}
+
+fn read_receipt(path: &Path) -> Result<CacheReceipt, CandidateError> {
+    let file = open_receipt(path)?;
     let mut bytes = Vec::new();
     file.take(4097).read_to_end(&mut bytes).map_err(state::io)?;
     if bytes.len() > 4096 {
@@ -196,6 +405,102 @@ fn usage(candidate: &Candidate, root: &Path) -> Result<(usize, u64), CandidateEr
     }
     Ok((count, bytes))
 }
+/// Evict one verified cache entry at the slot limit, under both the cache lease
+/// and the graph inventory lease. The rename leaves a complete active inventory
+/// even if the process stops before unlinking the retired archive.
+fn free_archive_slot(
+    candidate: &Candidate,
+    root: &Path,
+    coordinator: &ImageCache,
+) -> Result<u64, CandidateError> {
+    let _graph_lease = lifecycle::graph_inventory_lease(candidate)?;
+    let referenced = super::image_build::reclaim::referenced_images(candidate)?;
+    let pins = coordinator.pins.lock().unwrap();
+    let mut oldest = None;
+    for entry in fs::read_dir(root).map_err(state::io)? {
+        let entry = entry.map_err(state::io)?;
+        if entry.file_name() == "operation.lock" {
+            continue;
+        }
+        let dir = entry.path();
+        let receipt_path = dir.join("receipt.json");
+        let receipt = read_receipt(&receipt_path)?;
+        let (_, pin) = registry_image::pinned_syntax(&receipt.reference)?;
+        // A worker can validate or import with the coordinator state unlocked.
+        // A new worker cannot enter that state until this eviction finishes.
+        if referenced.contains(&receipt.image_id)
+            || referenced.contains(pin.as_str())
+            || pins
+                .get(&receipt.reference)
+                .is_some_and(|held| held.try_lock().is_err())
+        {
+            continue;
+        }
+        let modified = fs::metadata(&receipt_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(state::io)?;
+        let key = (modified, dir, receipt.archive_bytes);
+        if oldest.as_ref().is_none_or(|prior| &key < prior) {
+            oldest = Some(key);
+        }
+    }
+    let (_, victim, bytes) = oldest.ok_or_else(|| {
+        refused(
+            "Image cache has 64 archives and every archive is referenced by retained graph state or in use.",
+        )
+    })?;
+    let parent = root
+        .parent()
+        .ok_or_else(|| refused("Archive cache parent is missing."))?;
+    let retired = parent.join(".image-archive-retired");
+    remove_retired_archive(&retired)?;
+    fs::rename(victim, &retired).map_err(state::io)?;
+    sync_directory(root)?;
+    sync_directory(parent)?;
+    remove_retired_archive(&retired)?;
+    sync_directory(parent)?;
+    Ok(bytes)
+}
+
+fn sync_directory(path: &Path) -> Result<(), CandidateError> {
+    fs::File::open(path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(state::io)
+}
+
+fn remove_retired_archive(path: &Path) -> Result<(), CandidateError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(state::io(error)),
+        Ok(_) => state::check_private_directory(path)?,
+    }
+    // With the cache lease held a prior unlink may already have removed either
+    // of these files. Check both before removing either, and preserve unknown files.
+    let mut files = Vec::new();
+    for entry in fs::read_dir(path).map_err(state::io)?.take(3) {
+        let entry = entry.map_err(state::io)?;
+        let file = entry.path();
+        match entry.file_name().to_str() {
+            Some("image.tar") => {
+                archive_size(&file)?;
+            }
+            Some("receipt.json") => {
+                read_receipt(&file)?;
+            }
+            _ => {
+                return Err(refused(
+                    "Unknown retired archive cache files; no files were removed.",
+                ));
+            }
+        }
+        files.push(file);
+    }
+    for file in files {
+        fs::remove_file(file).map_err(state::io)?;
+    }
+    fs::remove_dir(path).map_err(state::io)
+}
+
 #[derive(Debug, Serialize)]
 pub struct EnsuredTag {
     pub reference: String,
@@ -252,14 +557,37 @@ pub(super) fn publish_proof(
     proof: &registry_image::ManifestProof,
 ) -> Result<(), CandidateError> {
     let path = manifest_path(candidate, pin, platform);
-    state::private_directory(
-        path.parent()
-            .ok_or_else(|| refused("Image proof parent is missing."))?,
-    )?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| refused("Image proof parent is missing."))?;
+    let lock = lifecycle::startup_lease(parent, lifecycle::STARTUP_LEASE_WAIT)?;
+    let pending = path.with_extension("pending");
+    match fs::symlink_metadata(&pending) {
+        Ok(metadata)
+            if metadata.is_file()
+                && metadata.uid() == current_uid()
+                && metadata.nlink() == 1
+                && metadata.mode() & 0o077 == 0 =>
+        {
+            lock.verify_path(parent)?;
+            fs::remove_file(pending).map_err(state::io)?;
+        }
+        Ok(_) => {
+            let name = pending.file_name().unwrap().to_string_lossy();
+            let location = format!("artifacts/image-proofs/{name}");
+            return Err(CandidateError::new(
+                "image_proof_pending",
+                format!("Unsafe pending image proof at {location} was left in place."),
+            )
+            .with_state_component(&location));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(state::io(error)),
+    }
     if path.try_exists().map_err(state::io)? {
         return Ok(());
     }
-    state::write(&path, proof)
+    state::write_before_rename(&path, proof, &|| lock.verify_path(parent))
 }
 
 fn check_registry_config(
@@ -280,8 +608,8 @@ fn check_registry_config(
 /// and validate/import via the owned guest's existing loader. The engine must already
 /// be running before acquisition. A cache miss acquires at most the policy's per-image
 /// budget and the cache's remaining budget (at most 64 archives); an image whose
-/// manifest exceeds that refuses before any layer transfer. This operation never prunes
-/// or adopts conflicting files. Runtime ownership is checked again by the loader after
+/// manifest exceeds that refuses before any layer transfer. At 64 archives, an
+/// online miss can retire the oldest archive unreferenced by retained graph state. Runtime ownership is checked again by the loader after
 /// network work.
 pub fn ensure(
     candidate: &Candidate,
@@ -300,6 +628,7 @@ pub fn ensure_with(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
 ) -> Result<EnsuredImage, CandidateError> {
+    let _fence = super::image_build::wait_for_image_fence(candidate, policy)?;
     timed_acquire(
         Step::ImageEnsure,
         candidate,
@@ -307,7 +636,58 @@ pub fn ensure_with(
         policy,
         platform,
         true,
+        (&ImageCache::default(), None),
     )
+}
+
+type ImageBatchEntry = (usize, Result<EnsuredImage, CandidateError>, u64);
+
+/// Distinct references can prepare archives together. Only the existing loader imports.
+pub fn ensure_batch(
+    candidate: &Candidate,
+    jobs: &[(String, PlatformPolicy)],
+    policy: &ImagePolicy,
+) -> Result<Vec<ImageBatchEntry>, CandidateError> {
+    let _fence = super::image_build::wait_for_image_fence(candidate, policy)?;
+    let cache = ImageCache::default();
+    let queue = std::sync::atomic::AtomicUsize::new(0);
+    let finished = Mutex::new(Vec::with_capacity(jobs.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..IMAGE_WORKERS.min(jobs.len()) {
+            scope.spawn(|| {
+                loop {
+                    let index = queue.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((reference, platform)) = jobs.get(index) else {
+                        break;
+                    };
+                    let report =
+                        std::env::var("HACK_INTERNAL_REPORT_IMAGE_WAIT").as_deref() == Ok("batch");
+                    if report {
+                        eprintln!("hack.image-wait:working {index}");
+                    }
+                    let started = std::time::Instant::now();
+                    let result = timed_acquire(
+                        Step::ImageEnsure,
+                        candidate,
+                        reference,
+                        policy,
+                        *platform,
+                        true,
+                        (&cache, Some(index)),
+                    );
+                    if report {
+                        eprintln!("hack.image-wait:finished {index}");
+                    }
+                    finished.lock().unwrap().push((
+                        index,
+                        result,
+                        started.elapsed().as_millis() as u64,
+                    ));
+                }
+            });
+        }
+    });
+    Ok(finished.into_inner().unwrap())
 }
 
 pub use super::image_tag_store::{present as present_tags, status as tag_status};
@@ -326,6 +706,7 @@ pub fn cache(
         policy,
         platform,
         false,
+        (&ImageCache::default(), None),
     )
 }
 
@@ -336,13 +717,22 @@ fn timed_acquire(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
     import: bool,
+    (cache, index): (&ImageCache, Option<usize>),
 ) -> Result<EnsuredImage, CandidateError> {
     measure_attributed(step, None, |_, attrs| {
         let (result, count) = registry_image::count_requests(|| {
-            acquire_for_use(candidate, reference, policy, platform, import)
+            acquire_for_use(candidate, reference, policy, platform, import, cache)
         });
         attrs.registry_requests = Some(count);
-        result
+        attrs.image_index = index.map(|index| index as u64);
+        let image = result?;
+        if import
+            && policy.build_deadline.is_none()
+            && (reference.contains('@') || reference.starts_with("sha256:"))
+        {
+            image_tag_store::protect_service_image(candidate, &image.image_id)?;
+        }
+        Ok(image)
     })
 }
 
@@ -352,6 +742,7 @@ fn acquire_for_use(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
     import: bool,
+    cache: &ImageCache,
 ) -> Result<EnsuredImage, CandidateError> {
     let content_id = reference.strip_prefix("sha256:").is_some_and(hex);
     if content_id && !import {
@@ -417,8 +808,8 @@ fn acquire_for_use(
         reference,
         policy,
         platform,
-        import,
         observer.as_ref(),
+        cache,
         tag,
     );
     match (result, previous) {
@@ -429,8 +820,8 @@ fn acquire_for_use(
                 reference,
                 policy,
                 platform,
-                import,
                 observer.as_ref(),
+                cache,
                 Some(*previous),
             )
         }
@@ -443,13 +834,21 @@ fn acquire_selection(
     reference: &str,
     policy: &ImagePolicy,
     platform: PlatformPolicy,
-    import: bool,
     observer: Option<&engine::Observer<'_>>,
+    cache: &ImageCache,
     mut tag: Option<image_tag_store::TagResolution>,
 ) -> Result<EnsuredImage, CandidateError> {
     let mut ensured = match tag.as_mut() {
-        Some(tag) if import => tag.confirm(|tag| {
-            confirm_selection(candidate, reference, policy, platform, observer, Some(tag))
+        Some(tag) if observer.is_some() => tag.confirm(|tag| {
+            confirm_selection(
+                candidate,
+                reference,
+                policy,
+                platform,
+                observer,
+                (cache, None),
+                Some(tag),
+            )
         })?,
         _ => confirm_selection(
             candidate,
@@ -457,10 +856,11 @@ fn acquire_selection(
             policy,
             platform,
             observer,
+            (cache, None),
             tag.as_ref(),
         )?,
     };
-    if !import {
+    if observer.is_none() {
         ensured.phase = "archive-verified";
     }
     ensured.tag_resolution = tag.map(|tag| EnsuredTag {
@@ -474,12 +874,32 @@ fn acquire_selection(
     Ok(ensured)
 }
 
+/// Retain an immutable build input under an already-held idle provider lease.
+pub(super) fn retain_build_image(
+    candidate: &Candidate,
+    pin: &str,
+    policy: &ImagePolicy,
+    engine: &engine::Engine<'_>,
+) -> Result<EnsuredImage, CandidateError> {
+    let observer = engine::Observer::connect(candidate)?;
+    confirm_selection(
+        candidate,
+        pin,
+        policy,
+        PlatformPolicy::Native,
+        Some(&observer),
+        (&ImageCache::default(), Some(engine)),
+        None,
+    )
+}
+
 fn confirm_selection(
     candidate: &Candidate,
     reference: &str,
     policy: &ImagePolicy,
     platform: PlatformPolicy,
     observer: Option<&engine::Observer<'_>>,
+    (cache, existing_engine): (&ImageCache, Option<&engine::Engine<'_>>),
     tag: Option<&image_tag_store::TagResolution>,
 ) -> Result<EnsuredImage, CandidateError> {
     let requested_platform = platform;
@@ -561,23 +981,29 @@ fn confirm_selection(
         if offline && observer.is_some() {
             return Err(no_archive());
         }
-        ensure_pinned_resolving(
-            candidate,
+        ensure_pinned_coordinated(
+            (candidate, cache),
             &pinned,
             policy,
             platform,
             |reference, platform| {
-                if offline {
+                if offline || existing_engine.is_some() {
                     return Err(no_archive());
                 }
                 registry_image::pinned_platform(reference, policy, platform)
             },
             |reference, path, platform, limit| {
-                if offline {
+                if offline || existing_engine.is_some() {
                     return Err(no_archive());
                 }
-                let mut acquired =
-                    registry_image::acquire_with(reference, path, policy, limit, platform)?;
+                let mut acquired = registry_image::acquire_with_disk_admission(
+                    reference,
+                    path,
+                    policy,
+                    limit,
+                    platform,
+                    |needed| cache.reserve_disk(needed, || disk_available(path.parent().unwrap())),
+                )?;
                 *acquired_proof.borrow_mut() = acquired.proof.take();
                 Ok(acquired)
             },
@@ -587,7 +1013,7 @@ fn confirm_selection(
                         check_registry_config(receipt, *selected, config)?;
                         return Ok(config.clone());
                     }
-                    if offline {
+                    if offline || existing_engine.is_some() {
                         return Err(no_archive());
                     }
                     let proof = match acquired_proof.borrow_mut().take() {
@@ -628,13 +1054,20 @@ fn confirm_selection(
                     recorded_config: selection.as_ref().map(|(_, config)| config.as_str()),
                     require_present: offline,
                 };
-                image_load::load_cached(candidate, &archive, policy, observer, config).map(|_| ())
+                image_load::load_cached(
+                    candidate,
+                    &archive,
+                    policy,
+                    (observer, existing_engine),
+                    config,
+                )
+                .map(|_| ())
             },
         )?
     };
     Ok(ensured)
 }
-/// [`ensure_pinned_resolving`] for a cache that must never need to resolve the published
+/// [`ensure_pinned_coordinated`] for a cache that must never need to resolve the published
 /// platform: every case it covers has its preferred entry cached, or none.
 #[cfg(test)]
 fn ensure_pinned(
@@ -650,8 +1083,8 @@ fn ensure_pinned(
     ) -> Result<registry_image::AcquiredImage, CandidateError>,
     load: impl FnOnce(&Candidate, &Path, &str, &str, ImagePlatform) -> Result<(), CandidateError>,
 ) -> Result<EnsuredImage, CandidateError> {
-    ensure_pinned_resolving(
-        candidate,
+    ensure_pinned_coordinated(
+        (candidate, &ImageCache::default()),
         reference,
         policy,
         platform,
@@ -671,8 +1104,8 @@ fn ensure_pinned(
 /// Ensure one pinned reference under `platform`. `resolve` names the platform the pinned
 /// image itself selects under a policy; it is consulted only when the cache holds a later
 /// preference but not an earlier one.
-fn ensure_pinned_resolving(
-    candidate: &Candidate,
+fn ensure_pinned_coordinated(
+    (candidate, coordinator): (&Candidate, &ImageCache),
     reference: &str,
     policy: &ImagePolicy,
     platform: PlatformPolicy,
@@ -687,8 +1120,18 @@ fn ensure_pinned_resolving(
 ) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
     let root = candidate.state_root.join("artifacts/images");
-    let _lock = lifecycle::startup_lease(&root, lifecycle::STARTUP_LEASE_WAIT)?;
-    let (count, bytes) = measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root))?;
+    let pin = coordinator
+        .pins
+        .lock()
+        .unwrap()
+        .entry(reference.clone())
+        .or_default()
+        .clone();
+    let _pin = pin.lock().unwrap();
+    let lease = coordinator.enter(&root, policy)?;
+    let mut state = lease.lock(&root)?;
+    let inventory = || measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root));
+    let mut occupied = inventory()?;
     // A cached entry is reused only for the platform the pinned image itself selects under
     // the policy. The first preference is published whenever its entry exists. A later
     // preference's entry (amd64 under `PreferNative`, perhaps left by an explicit `Amd64`
@@ -719,28 +1162,45 @@ fn ensure_pinned_resolving(
     let reused = existing.is_some();
     let (dir, receipt) = if let Some((dir, entry_platform)) = existing {
         let receipt = inspect_entry(candidate, &dir, &reference, entry_platform)?;
+        drop(state);
         (dir, receipt)
     } else {
-        let limit = policy
-            .archive_limit
-            .min(policy.cache_limit.saturating_sub(bytes));
-        if count >= MAX_ARCHIVES || limit < MIN_SLOT {
-            return Err(refused(
-                "Image cache admission requires a free slot within 64 archives and the configured cache budget; no automatic deletion.",
-            ));
-        }
-        // Acquire into the first candidate's slot; a different confirmed platform moves the
-        // complete entry to its own address below, still under the cache lock.
-        let first = platform.candidates()[0];
-        let mut dir = root.join(entry_key(&reference, first));
-        state::private_directory(&dir)?;
-        let acquired = match acquire(&reference, &dir.join("image.tar"), platform, limit) {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = fs::remove_dir(&dir);
-                return Err(error);
+        let limit = loop {
+            let (mut count, mut bytes) = occupied;
+            let remaining = policy.cache_limit.saturating_sub(bytes);
+            if remaining.min(policy.archive_limit) < MIN_SLOT
+                || (count == MAX_ARCHIVES && policy.tag_mode == ImageTagMode::Offline)
+            {
+                return Err(refused(
+                    "Image cache admission requires a free slot within 64 archives and the configured cache budget.",
+                ));
             }
+            if count == MAX_ARCHIVES {
+                bytes -= free_archive_slot(candidate, &root, coordinator)?;
+                count -= 1;
+            }
+            let limit = policy
+                .archive_limit
+                .min(policy.cache_limit.saturating_sub(bytes));
+            let reserved: u64 = state.reservations.values().sum();
+            if count + state.reservations.len() < MAX_ARCHIVES
+                && policy.cache_limit.saturating_sub(bytes + reserved) >= limit
+            {
+                break limit;
+            }
+            state = coordinator.changed.wait(state).unwrap();
+            occupied = inventory()?;
         };
+        let staging = create_staging(&root, &reference)?;
+        state.reservations.insert(reference.clone(), limit);
+        let reservation = Reservation {
+            cache: coordinator,
+            key: reference.clone(),
+            path: staging,
+        };
+        drop(state);
+        let dir = &reservation.path;
+        let acquired = acquire(&reference, &dir.join("image.tar"), platform, limit)?;
         if !platform.candidates().contains(&acquired.platform) {
             return Err(refused(
                 "Acquired image platform is outside the requested platform policy.",
@@ -766,20 +1226,31 @@ fn ensure_pinned_resolving(
             return Err(refused("New archive differs from its acquisition receipt."));
         }
         state::write(&dir.join("receipt.json"), &receipt)?;
-        if acquired.platform != first {
-            let target = root.join(entry_key(&reference, acquired.platform));
-            if target.try_exists().map_err(state::io)? {
-                return Err(refused(
-                    "Conflicting image cache entry; no entry was adopted or removed.",
-                ));
-            }
-            fs::rename(&dir, &target).map_err(state::io)?;
-            dir = target;
+        inspect_entry(candidate, dir, &reference, acquired.platform)?;
+        let state = lease.lock(&root)?;
+        let target = root.join(entry_key(&reference, acquired.platform));
+        if target.try_exists().map_err(state::io)? {
+            return Err(refused(
+                "Conflicting image cache entry; no entry was adopted or removed.",
+            ));
         }
-        (dir, receipt)
+        fs::rename(dir, &target).map_err(state::io)?;
+        fs::File::open(&root)
+            .and_then(|dir| dir.sync_all())
+            .map_err(state::io)?;
+        drop(state);
+        drop(reservation);
+        (target, receipt)
     };
-    // The loader checks the owned guest even when the acquisition receipt is reusable.
+    drop(lease);
+    // Keep the import lease and the loader’s own live recheck unchanged.
+    let _import = coordinator.importer.lock().unwrap();
     load(candidate, &dir.join("image.tar"), &receipt, reused)?;
+    // The reference pin and cache lease still protect this receipt.
+    // Recency is advisory once the requested archive has been verified.
+    if reused && let Ok(file) = open_receipt(&dir.join("receipt.json")) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
     Ok(EnsuredImage {
         pinned_reference: reference,
         image_id: receipt.image_id,
@@ -839,6 +1310,269 @@ mod tests {
             platform: platform.candidates()[0],
         })
     }
+    #[test]
+    fn ensure_waits_out_reclaim_without_taking_the_provider_lease() {
+        let f = Fixture::new();
+        let candidate = &f.1;
+        let exclusive = super::super::image_build::image_fence(candidate, libc::LOCK_EX).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let result = ensure(candidate, "invalid reference", &ImagePolicy::default());
+                send.send(result.unwrap_err().code).unwrap();
+            });
+            assert!(matches!(
+                receive.recv_timeout(std::time::Duration::from_millis(150)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            let provider = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+            drop(exclusive);
+            assert_eq!(
+                receive
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+                "registry_image"
+            );
+            drop(provider);
+        });
+    }
+
+    #[test]
+    fn disk_budget_waits_for_the_current_fetch_and_refuses_an_oversized_archive() {
+        let cache = ImageCache::default();
+        let first = cache.reserve_disk(7, || Ok(10)).unwrap();
+        std::thread::scope(|scope| {
+            let (started, waiting) = std::sync::mpsc::channel();
+            let cache = &cache;
+            let second = scope.spawn(move || {
+                cache
+                    .reserve_disk(7, || {
+                        let _ = started.send(());
+                        Ok(10)
+                    })
+                    .unwrap()
+            });
+            waiting
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            assert!(!second.is_finished());
+            drop(first);
+            drop(second.join().unwrap());
+        });
+        let error = cache.reserve_disk(11, || Ok(10)).err().unwrap();
+        assert_eq!(error.code, "image_disk_space");
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture"]
+    fn stopped_proof_writer() {
+        let file = PathBuf::from(std::env::var_os("HACK_TEST_PENDING_IMAGE_PROOF").unwrap());
+        let _lock = state::Lock::acquire(file.parent().unwrap()).unwrap();
+        let proof = registry_image::test_manifest_resolution().proof;
+        state::write_before_rename(&file, &proof, &|| {
+            fs::write(file.with_extension("synced"), b"ready").unwrap();
+            loop {
+                std::thread::park();
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn killed_proof_writer_can_be_replaced_after_pending_sync() {
+        let f = Fixture::new();
+        let path = manifest_path(&f.1, &pin(1), PlatformPolicy::Native);
+        let mut child = super::super::process::spawn_child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "provider::image_ensure::tests::stopped_proof_writer",
+                ])
+                .env("HACK_TEST_PENDING_IMAGE_PROOF", &path)
+                .stdout(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !path.with_extension("synced").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(path.with_extension("synced").exists());
+        assert!(path.with_extension("pending").exists());
+        assert!(!path.exists());
+        publish_proof(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::Native,
+            &registry_image::test_manifest_resolution().proof,
+        )
+        .unwrap();
+        assert!(
+            recorded_proof(&f.1, &pin(1), PlatformPolicy::Native)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!path.with_extension("pending").exists());
+    }
+
+    #[test]
+    fn a_batch_reuses_staging_without_moving_or_deleting_stray_entries() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        let staging = root.with_file_name("image-staging");
+        let key_dir = staging.join(key(&pin(1)));
+        let foreign = key_dir.join("foreign");
+        state::private_directory(&foreign).unwrap();
+        for path in [
+            staging.join(".DS_Store"),
+            key_dir.join(".DS_Store"),
+            foreign.join(".hack-image-1-0.tmp"),
+        ] {
+            fs::write(path, b"stray").unwrap();
+        }
+        let leftover = key_dir.join(".hack-image-1-0.tmp");
+        fs::write(&leftover, b"partial").unwrap();
+        let attempt = key_dir.join("attempt-1-0");
+        state::private_directory(&attempt).unwrap();
+        fs::write(attempt.join(".hack-layer-1-0.tmp"), b"partial").unwrap();
+
+        let cache = ImageCache::default();
+        for id in [1, 2] {
+            ensure_pinned_coordinated(
+                (&f.1, &cache),
+                &pin(id),
+                &ImagePolicy::default(),
+                PlatformPolicy::Native,
+                |_, _| panic!("no platform lookup"),
+                acquire,
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap();
+        }
+        assert_eq!(usage(&f.1, &root).unwrap(), (2, 14));
+        for path in [
+            staging.join(".DS_Store"),
+            key_dir.join(".DS_Store"),
+            foreign.join(".hack-image-1-0.tmp"),
+        ] {
+            assert_eq!(fs::read(path).unwrap(), b"stray");
+        }
+        assert!(!leftover.exists());
+        assert!(!attempt.exists());
+    }
+
+    #[test]
+    fn an_unsafe_pending_proof_names_the_preserved_entry() {
+        let f = Fixture::new();
+        let pending =
+            manifest_path(&f.1, &pin(1), PlatformPolicy::Native).with_extension("pending");
+        state::private_directory(&pending).unwrap();
+        let failure = publish_proof(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::Native,
+            &registry_image::test_manifest_resolution().proof,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "image_proof_pending");
+        assert!(
+            failure
+                .message
+                .contains(pending.file_name().unwrap().to_str().unwrap())
+        );
+        assert!(pending.is_dir());
+    }
+
+    #[test]
+    fn next_cache_writer_recovers_staging_left_by_interrupt() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        let staged = root.with_file_name("image-staging").join(key(&pin(1)));
+        state::private_directory(&staged).unwrap();
+        fs::write(staged.join(".hack-image-1-0.tmp"), b"fixture").unwrap();
+        let coordinator = ImageCache::default();
+        let _cache = coordinator.enter(&root, &ImagePolicy::default()).unwrap();
+        assert!(!staged.exists());
+        assert_eq!(usage(&f.1, &root).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn batch_releases_the_cache_lease_when_its_last_cache_worker_finishes() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        let cache = ImageCache::default();
+        let policy = ImagePolicy::default();
+        let first = cache.enter(&root, &policy).unwrap();
+        let second = cache.enter(&root, &policy).unwrap();
+        drop(first);
+        assert_eq!(
+            state::Lock::acquire(&root).err().unwrap().code,
+            "provider_busy"
+        );
+        drop(second);
+        // The batch can still be waiting on another tag at this point. That
+        // tag's owner is now free to enter the cache from another command.
+        assert!(state::Lock::acquire(&root).is_ok());
+    }
+
+    #[test]
+    fn a_failed_fetch_can_settle_while_another_verified_archive_imports() {
+        let f = Fixture::new();
+        let cache = ImageCache::default();
+        let policy = ImagePolicy::default();
+        let (fetching, started) = std::sync::mpsc::channel();
+        let (importing, import_started) = std::sync::mpsc::channel();
+        let timeout = std::time::Duration::from_secs(5);
+        std::thread::scope(|scope| {
+            let candidate = &f.1;
+            let cache = &cache;
+            let policy = &policy;
+            let first = scope.spawn(move || {
+                ensure_pinned_coordinated(
+                    (candidate, cache),
+                    &pin(1),
+                    policy,
+                    PlatformPolicy::Native,
+                    |_, _| panic!("no platform lookup"),
+                    |reference, path, platform, limit| {
+                        started.recv_timeout(timeout).unwrap();
+                        acquire(reference, path, platform, limit)
+                    },
+                    |_, _, _, _| {
+                        importing.send(()).unwrap();
+                        Ok(())
+                    },
+                )
+            });
+            let second = scope.spawn(move || {
+                ensure_pinned_coordinated(
+                    (candidate, cache),
+                    &pin(2),
+                    policy,
+                    PlatformPolicy::Native,
+                    |_, _| panic!("no platform lookup"),
+                    |_, path, _, _| {
+                        fetching.send(()).unwrap();
+                        import_started.recv_timeout(timeout).unwrap();
+                        fs::write(path, "partial").unwrap();
+                        Err(refused("fixture acquisition failed"))
+                    },
+                    |_, _, _, _| panic!("a failed acquisition cannot import"),
+                )
+            });
+            assert!(first.join().unwrap().is_ok());
+            assert_eq!(
+                second.join().unwrap().unwrap_err().message,
+                "fixture acquisition failed"
+            );
+        });
+        let root = f.1.state_root.join("artifacts");
+        assert_eq!(fs::read_dir(root.join("image-staging")).unwrap().count(), 0);
+        assert_eq!(usage(&f.1, &root.join("images")).unwrap(), (1, 7));
+    }
+
     #[test]
     fn warm_pin_reuses_archive_but_always_invokes_existing_loader() {
         let f = Fixture::new();
@@ -923,33 +1657,61 @@ mod tests {
     }
 
     #[test]
-    fn cache_count_budget_refuses_without_deleting_existing_archives() {
+    fn cache_count_retires_least_recently_used_unreferenced_archive_at_64() {
         let f = Fixture::new();
-        for n in 0..MAX_ARCHIVES {
-            ensure_pinned(
-                &f.1,
-                &pin(n),
+        let root = f.1.state_root.join("artifacts/images");
+        let slot = |n| root.join(entry_key(&pin(n), ImagePlatform::LinuxArm64));
+        let coordinator = ImageCache::default();
+        let cache = |reference| {
+            ensure_pinned_coordinated(
+                (&f.1, &coordinator),
+                &pin(reference),
                 &ImagePolicy::default(),
                 PlatformPolicy::Native,
+                |_, _| unreachable!(),
                 acquire,
-                |_, _, _, _, _| Ok(()),
+                |_, _, _, _| Ok(()),
             )
-            .unwrap();
+        };
+        for n in 0..MAX_ARCHIVES {
+            cache(n).unwrap();
+            fs::File::open(slot(n).join("receipt.json"))
+                .unwrap()
+                .set_modified(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000 + n as u64),
+                )
+                .unwrap();
         }
-        let error = ensure_pinned(
-            &f.1,
-            &pin(99),
-            &ImagePolicy::default(),
-            PlatformPolicy::Native,
-            |_, _, _, _| panic!("must not acquire"),
-            |_, _, _, _, _| panic!("must not load"),
-        )
-        .unwrap_err();
-        assert!(error.message.contains("64 archives"));
-        assert_eq!(
-            usage(&f.1, &f.1.state_root.join("artifacts/images")).unwrap(),
-            (64, 448)
+
+        let archived = f.1.state_root.join("run/native-graph-archive/fixture");
+        state::private_directory(&archived).unwrap();
+        let receipt = archived.join("state.json");
+        fs::write(&receipt, pin(0)).unwrap();
+        assert!(cache(2).unwrap().archive_reused);
+        let importing = coordinator.pins.lock().unwrap()[&pin(1)].clone();
+        let active_import = importing.lock().unwrap();
+        cache(99).unwrap();
+        assert!(slot(0).exists());
+        assert!(slot(1).exists());
+        assert!(slot(2).exists());
+        assert!(!slot(3).exists());
+        drop(active_import);
+        assert!(slot(99).exists());
+        assert_eq!(usage(&f.1, &root).unwrap(), (64, 448));
+
+        // All fixture archives use the same content ID, so this protects every slot.
+        let id = read_receipt(&slot(0).join("receipt.json"))
+            .unwrap()
+            .image_id;
+        fs::write(&receipt, id).unwrap();
+        assert!(
+            cache(100)
+                .unwrap_err()
+                .message
+                .contains("every archive is referenced")
         );
+        assert!(!slot(100).exists());
+        assert_eq!(usage(&f.1, &root).unwrap(), (64, 448));
     }
     #[test]
     fn aggregate_byte_budget_bounds_each_acquisition_and_refuses_a_full_cache_without_pruning() {
@@ -1228,8 +1990,8 @@ mod tests {
         // natively instead of reusing the emulated entry.
         let resolved = Cell::new(0);
         let asked = Cell::new(None);
-        let preferred = ensure_pinned_resolving(
-            &f.1,
+        let preferred = ensure_pinned_coordinated(
+            (&f.1, &ImageCache::default()),
             &pin(1),
             &ImagePolicy::default(),
             PlatformPolicy::PreferNative,
@@ -1277,8 +2039,8 @@ mod tests {
             |_, _, _, _, _| Ok(()),
         )
         .unwrap();
-        let reused = ensure_pinned_resolving(
-            &f.1,
+        let reused = ensure_pinned_coordinated(
+            (&f.1, &ImageCache::default()),
             &pin(2),
             &ImagePolicy::default(),
             PlatformPolicy::PreferNative,
@@ -1294,8 +2056,8 @@ mod tests {
         assert_eq!(reused.platform, ImagePlatform::LinuxAmd64);
         // A failed resolution refuses before any acquisition or load.
         assert!(
-            ensure_pinned_resolving(
-                &f.1,
+            ensure_pinned_coordinated(
+                (&f.1, &ImageCache::default()),
                 &pin(2),
                 &ImagePolicy::default(),
                 PlatformPolicy::PreferNative,

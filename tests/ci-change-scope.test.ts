@@ -14,6 +14,7 @@ import {
   touchesDocsSite,
 } from "../scripts/ci-change-scope.ts";
 import { fullPushPlan } from "../scripts/ci-pr-plan.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
@@ -37,6 +38,8 @@ type Workflow = {
         readonly matrix?: { readonly include?: unknown; readonly os?: unknown };
       };
       readonly steps?: readonly {
+        readonly id?: string;
+        readonly "continue-on-error"?: boolean;
         readonly name?: string;
         readonly if?: string;
         readonly run?: string;
@@ -67,6 +70,9 @@ describe("change scope classification", () => {
       ["LICENSE", "docs"],
       ["packages/runtime-core/src/main.rs", "runtime-core"],
       ["packages/relay-guest/src/main.zig", "runtime-core"],
+      ["packages/hack-vm-protocol/src/lib.rs", "runtime-core"],
+      ["packages/hack-vm-agent/src/main.rs", "runtime-core"],
+      ["tests/models/tla/guest-execution/positive.cfg", "runtime-core"],
       ["scripts/build-hack-local.sh", "runtime-core"],
       // The checkout launcher: local_contract.rs copies it, CI runs it.
       ["hack-local", "runtime-core"],
@@ -210,6 +216,7 @@ describe("pull request diff", () => {
       cwd,
       env: fixtureGitEnv(),
       stdin: "ignore",
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -268,6 +275,7 @@ describe("pull request diff", () => {
           PR_DRAFT: "false",
           PR_FULL: "false",
         },
+        timeout: 15_000,
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -292,6 +300,7 @@ describe("pull request diff", () => {
           PR_DRAFT: "false",
           PR_FULL: "false",
         },
+        timeout: 15_000,
         stdout: "pipe",
         stderr: "pipe",
       }
@@ -305,6 +314,7 @@ describe("pull request diff", () => {
     const missing = Bun.spawnSync([process.execPath, script], {
       cwd: repoRoot,
       env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -312,6 +322,7 @@ describe("pull request diff", () => {
     const push = Bun.spawnSync([process.execPath, script, "--event=push"], {
       cwd: repoRoot,
       env: { ...process.env, GITHUB_OUTPUT: "", GITHUB_STEP_SUMMARY: "" },
+      timeout: 15_000,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -322,10 +333,19 @@ describe("pull request diff", () => {
 });
 
 describe("CI workflow wiring", () => {
+  test("only dispatches enable the Compose upgrade trial", async () => {
+    const { jobs } = await ciWorkflow();
+    expect(jobs["compose-upgrade-trial"]?.if).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.compose_upgrade_trial }}"
+    );
+  });
+
   test("the changes job exposes every scope output and checks out the merge parent", async () => {
     const changes = (await ciWorkflow()).jobs.changes;
     const keys = [...Object.keys(fullPushPlan()), "ci_evidence"].sort();
-    expect(Object.keys(changes?.outputs ?? {}).sort()).toEqual(keys);
+    expect(Object.keys(changes?.outputs ?? {}).sort()).toEqual(
+      [...keys, "guest_hosts"].sort()
+    );
     for (const key of keys) {
       expect(changes?.outputs?.[key]).toBe(
         `\${{ steps.scope.outputs.${key} }}`
@@ -340,6 +360,59 @@ describe("CI workflow wiring", () => {
     expect(changes?.steps?.at(-1)?.run).toContain('git archive "$base"');
     expect(changes?.steps?.at(-1)?.run).toContain(
       '--repo-root="$GITHUB_WORKSPACE"'
+    );
+  });
+
+  test("Candidate core reports later independent checks without masking failures", async () => {
+    const steps = (await ciWorkflow()).jobs["runtime-core"]?.steps ?? [];
+    for (const id of [
+      "bundle-guest",
+      "linux-pty",
+      "format",
+      "lint-default",
+      "test-default",
+      "lint-all-features",
+      "test-all-features",
+      "rust-results",
+      "release-build",
+    ]) {
+      const step = steps.find((entry) => entry.id === id);
+      expect(step?.if, id).toStartWith("${{ !cancelled()");
+      expect(step?.if, id).not.toMatch(
+        /steps\.(format|lint-|test-|bundle-guest)/
+      );
+      expect(step?.["continue-on-error"], id).toBeUndefined();
+    }
+    for (const id of ["lint-default", "test-default"]) {
+      expect(steps.find((step) => step.id === id)?.if).not.toContain(
+        "steps.zig"
+      );
+    }
+    expect(steps.find((step) => step.id === "kill-harness")?.if).toContain(
+      "steps.test-all-features.outcome == 'success' && steps.release-build.outcome == 'success'"
+    );
+
+    const summary = steps.at(-1);
+    expect(summary?.if).toBe("${{ !cancelled() }}");
+    const root = await mkdtemp(join(tmpdir(), "candidate-summary-"));
+    owned.push(root);
+    const path = join(root, "summary.md");
+    const result = spawnSyncBounded(["bash", "-e", "-c", summary?.run ?? ""], {
+      timeout: 5000,
+      env: {
+        ...process.env,
+        GITHUB_STEP_SUMMARY: path,
+        STEP_RESULTS: JSON.stringify({
+          format: { outcome: "failure" },
+          "test-default": { outcome: "failure" },
+          "test-all-features": { outcome: "success" },
+          "kill-harness": { outcome: "skipped" },
+        }),
+      },
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(await Bun.file(path).text()).toBe(
+      "### Candidate core failed steps\n- `format`\n- `test-default`\n"
     );
   });
 
@@ -362,6 +435,17 @@ describe("CI workflow wiring", () => {
     expect(jobs["runtime-core"]?.strategy?.matrix?.os).toBe(
       "${{ fromJSON(needs.changes.outputs.defer_macos == 'true' && '[\"ubuntu-latest\"]' || '[\"ubuntu-latest\",\"macos-latest\"]') }}"
     );
+    const guest = jobs["guest-protocol"];
+    expect(guest?.if).toBe(jobs["runtime-core"]?.if);
+    expect(guest?.strategy?.matrix).toEqual({
+      include: "${{ fromJSON(needs.changes.outputs.guest_hosts) }}",
+    });
+    expect(jobs.changes?.outputs?.guest_hosts).toBe(
+      '${{ steps.scope.outputs.defer_macos == \'true\' && \'[{"os":"ubuntu-latest"}]\' || \'[{"os":"ubuntu-latest"},{"os":"macos-latest"}]\' }}'
+    );
+    expect(
+      guest?.steps?.some((step) => step.name === "Test bounded guest protocol")
+    ).toBe(true);
     for (const name of [
       "runtime-images",
       "docker-e2e-shard",
@@ -372,6 +456,10 @@ describe("CI workflow wiring", () => {
         "${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}"
       );
     }
+    expect(jobs["resource-e2e"]?.needs).toBe("changes");
+    expect(jobs["resource-e2e"]?.if).toBe(
+      "${{ needs.changes.outputs.resource_e2e == 'true' }}"
+    );
     // `docs site` is a required check: the job always runs, and every step
     // after the scope report is gated, so it passes as a no-op when unneeded.
     expect(jobs["docs-site"]?.needs).toBe("changes");

@@ -1,0 +1,18 @@
+{
+  "envKey": ".hack.secret.key",
+  "hackDirIgnore": [
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "!.env.sample",
+    "!.env.template",
+    "!.env.dist",
+    ".env.state.json",
+    "hack.env.local.yaml",
+    "hack.env.*.local.yaml",
+    ".hack.env*.tmp",
+    "tickets/"
+  ],
+  "generatedStateDirs": [".internal", ".branch"],
+  "privateStagingDir": ".hack-staging"
+}

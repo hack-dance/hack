@@ -60,6 +60,23 @@ they check, so a weakened guard cannot also weaken its own judgment.
 | `Start`, `Ready` | `project::execution` evaluator; readiness from the list or probe sample | today's serial evaluator only |
 | `Snap`, `Publish` | the publication batch fence | publication batch, outside this model |
 | `Crash`, `Reboot` | owner death; a new guest incarnation (`load_at` refuses another incarnation) | today's cleanup paths |
+| `Return` | the foreground owner's `graph_foreground_started` line, printed after the receipt is saved in `started-observed` (`execution::Event::AllStarted`, `graph::Session::record`), only with `graph serve --report-started` | implemented in the runtime; the CLI does not pass the flag yet and still returns at `Done` |
+| `Done` | the `graph_foreground_ready` line after the receipt is saved in `ready-observed` (`Event::Ready`) and publishers have started | implemented |
+
+In the runtime, "started" is Compose's rule: every service has been started and its
+latest observation is running or exited 0, after each dependency edge's own condition
+held (a `service_healthy` or `service_completed_successfully` edge still holds its
+dependent back). Health and route goals are not part of it. The model's `Return`
+guard is stronger: it also asks for the current spec and this boot's attachments,
+which the start loop guarantees by construction today (it creates every container
+fresh), not by a check at `Return`.
+
+`DepsReady` is decided on a fresh observation. Within one evaluation pass the
+evaluator keeps each observation: an edge whose dependency was already seen this
+pass not meeting its condition waits for the next pass without asking the engine
+again, while an edge that would allow a start observes the dependency afresh right
+before it (`execution::run_with_clock`). The model has no passes; a reused
+"not yet" only defers a start by one pass, which it does not distinguish.
 
 ## Not covered
 

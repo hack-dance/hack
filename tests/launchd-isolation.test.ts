@@ -31,6 +31,10 @@ import {
   renderLaunchdPlist,
   resolveLaunchdAccess,
 } from "../src/daemon/launchd.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /*
@@ -90,14 +94,14 @@ async function makeFixture(): Promise<Fixture> {
   const home = join(root, "user-home");
   const isolatedHackHome = join(root, "isolated-hack-home");
   const launchAgents = join(home, "Library", "LaunchAgents");
-  await mkdir(launchAgents, { recursive: true });
+  await mkdirOwnedFixture(launchAgents, true);
   await mkdir(isolatedHackHome, { recursive: true });
   const plistPath = join(launchAgents, DAEMON_LAUNCHD_PLIST_FILENAME);
-  await writeFile(plistPath, SEEDED_PLIST);
+  await writeOwnedFixture(plistPath, SEEDED_PLIST);
   await utimes(plistPath, SEEDED_MTIME, SEEDED_MTIME);
 
   const tools = join(root, "tools");
-  await mkdir(tools);
+  await mkdirOwnedFixture(tools);
   const launchctlLog = join(root, "launchctl.log");
   const hackLog = join(root, "hack.log");
   // When HACK_TEST_STUB_SOCKET is set, a "started" daemon is a plain file at
@@ -143,7 +147,7 @@ async function makeFixture(): Promise<Fixture> {
   await writeStub(join(tools, "security"), "exit 0");
   // Stands for the system directories of the launchd PATH (HACK-2142).
   const sysbin = join(root, "sysbin");
-  await mkdir(sysbin);
+  await mkdirOwnedFixture(sysbin);
   await chmod(sysbin, 0o755);
 
   return {

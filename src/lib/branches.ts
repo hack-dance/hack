@@ -149,17 +149,11 @@ export async function resolveEffectiveBranch(opts: {
     };
   }
 
-  const slug = sanitizeBranchSlug(gitBranch);
-  if (slug.length === 0) {
-    return { branch: null, source: "none", gitBranch };
-  }
-
-  const branch = await resolveCollisionFreeBranchSlug({
-    slug,
+  const branch = autoWorktreeBranch(
     gitBranch,
-    projectRoot: opts.projectRoot,
-  });
-  return { branch, source: "worktree", gitBranch };
+    await listGitWorktrees({ repoRoot: opts.projectRoot })
+  );
+  return { branch, source: branch ? "worktree" : "none", gitBranch };
 }
 
 /**
@@ -171,29 +165,28 @@ export async function resolveEffectiveBranch(opts: {
  * deterministically get a short raw-name hash suffix, keeping every
  * worktree's derived instance distinct and stable across invocations.
  */
-async function resolveCollisionFreeBranchSlug(opts: {
-  readonly slug: string;
-  readonly gitBranch: string;
-  readonly projectRoot: string;
-}): Promise<string> {
-  const worktrees = await listGitWorktrees({ repoRoot: opts.projectRoot });
-  if (worktrees === null) {
-    return opts.slug;
+export function autoWorktreeBranch(
+  gitBranch: string,
+  worktrees: readonly { readonly branch: string | null }[] | null
+): string | null {
+  const slug = sanitizeBranchSlug(gitBranch);
+  if (!(slug && worktrees)) {
+    return slug || null;
   }
   const colliding = worktrees.some(
     (entry) =>
       entry.branch !== null &&
-      entry.branch !== opts.gitBranch &&
-      sanitizeBranchSlug(entry.branch) === opts.slug
+      entry.branch !== gitBranch &&
+      sanitizeBranchSlug(entry.branch) === slug
   );
   if (!colliding) {
-    return opts.slug;
+    return slug;
   }
   const hash = new Bun.CryptoHasher("sha1")
-    .update(opts.gitBranch)
+    .update(gitBranch)
     .digest("hex")
     .slice(0, 4);
-  return `${opts.slug}-${hash}`;
+  return `${slug}-${hash}`;
 }
 
 function defaultBranchesFile(): BranchesFile {

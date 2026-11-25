@@ -3,7 +3,7 @@ mod adapter;
 pub mod capabilities;
 pub use adapter::{NormalizedComposeOptions, plan_normalized};
 mod compose;
-pub(crate) use compose::inert_metadata_label;
+pub(crate) use compose::{ANONYMOUS_PREFIX, inert_metadata_label};
 mod enrollment;
 pub mod execution;
 mod generated;
@@ -12,6 +12,7 @@ pub mod inputs;
 pub mod live_source;
 #[cfg(feature = "native-config-plan")]
 pub mod native;
+pub(crate) mod private_files;
 pub mod registry;
 pub mod snapshot;
 mod source;

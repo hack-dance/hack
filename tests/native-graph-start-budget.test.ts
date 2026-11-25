@@ -5,6 +5,7 @@ import {
   nativeGraphTimeoutDetail,
   nativeReadinessGoals,
   resolveNativeStartTimeoutSeconds,
+  watchNativeStartupStatus,
 } from "../src/backends/native-graph-start-budget.ts";
 import { parseProjectConfigRecord } from "../src/lib/project.ts";
 
@@ -170,4 +171,39 @@ test("the detail says how old the graph status it describes was", () => {
   ).toContain(
     "graph start budget (graph status 4 s before the deadline): web (wanted started; not created)"
   );
+});
+
+test("the status watcher keeps a snapshot taken after every service started", async () => {
+  // The usual timeout: every container started, one goal unmet. The receipt is
+  // then `started-observed`, and that snapshot must still describe the deadline.
+  const phases = [
+    "preparing",
+    "started-observed",
+    "cleanup-intent",
+    "ready-observed",
+  ];
+  let read = 0;
+  const watcher = watchNativeStartupStatus({
+    runtime: {} as never,
+    projectRoot: "/unused",
+    run: "r",
+    intervalMs: 5,
+    invoke: async () => {
+      const phase = phases[Math.min(read, phases.length - 1)];
+      read += 1;
+      return { receipt: { phase }, observations: { web: { phase } } };
+    },
+  });
+  try {
+    for (let wait = 0; read < phases.length + 1 && wait < 200; wait += 1) {
+      await Bun.sleep(5);
+    }
+  } finally {
+    await watcher.stop();
+  }
+  // Cleanup and ready snapshots never replace the started one.
+  expect(watcher.latest()?.snapshot).toEqual({
+    receipt: { phase: "started-observed" },
+    observations: { web: { phase: "started-observed" } },
+  });
 });

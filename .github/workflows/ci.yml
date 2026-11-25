@@ -18,6 +18,10 @@ on:
         type: boolean
         required: true
         default: true
+      compose_upgrade_trial:
+        description: Add one Compose signal and MCP SDK release trial
+        type: boolean
+        default: false
       rust_repetitions:
         description: Consecutive macOS Rust qualification passes (stops on first failure)
         type: choice
@@ -61,6 +65,8 @@ jobs:
       selection_mode: ${{ steps.scope.outputs.selection_mode }}
       ci_evidence: ${{ steps.scope.outputs.ci_evidence }}
       docker_suite: ${{ steps.scope.outputs.docker_suite }}
+      resource_e2e: ${{ steps.scope.outputs.resource_e2e }}
+      guest_hosts: ${{ steps.scope.outputs.defer_macos == 'true' && '[{"os":"ubuntu-latest"}]' || '[{"os":"ubuntu-latest"},{"os":"macos-latest"}]' }}
       defer_macos: ${{ steps.scope.outputs.defer_macos }}
       build_smoke: ${{ steps.scope.outputs.build_smoke }}
     steps:
@@ -96,6 +102,7 @@ jobs:
           docker_exempt=false
           linux_rust=false
           relocated_cli=false
+          resource_e2e=false
           base=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             parents=$(git rev-list --parents -n 1 HEAD) || parents=""
@@ -129,12 +136,16 @@ jobs:
                   *) docker_exempt=false ;;
                 esac
                 case "$path" in
+                  src/lib/resource*|src/commands/resources.ts|apps/desktop/*/src/resource*|apps/desktop/core/tests/resource_inventory_cli.rs|apps/desktop/screenshots/resources-inventory-*|tests/e2e/resource-inventory.test.ts)
+                    resource_e2e=true ;;
+                esac
+                case "$path" in
                   src/*|index.ts|packages/cli/*|scripts/check-*-cli.ts|scripts/check-native-plan-clis.ts)
                     relocated_cli=true ;;
                 esac
                 case "$path" in
-                  packages/runtime-core/*.md|packages/config-compiler/*.md) ;;
-                  packages/runtime-core/*|packages/config-compiler/*|packages/relay-guest/*)
+                  packages/runtime-core/*.md|packages/config-compiler/*.md|packages/hack-vm-agent/*.md|packages/hack-vm-protocol/*.md) ;;
+                  packages/runtime-core/*|packages/config-compiler/*|packages/relay-guest/*|packages/hack-vm-agent/*|packages/hack-vm-protocol/*|tests/models/tla/guest-execution/*)
                     linux_rust=true ;;
                 esac
                 case "$path" in
@@ -210,6 +221,8 @@ jobs:
             bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base"
             echo 'ci_evidence=scoped' >> "$GITHUB_OUTPUT"
           fi
+          if [ "$full" = "true" ]; then resource_e2e=true; fi
+          echo "resource_e2e=$resource_e2e" >> "$GITHUB_OUTPUT"
           # Protected inputs retain full Linux/Docker/build coverage. Ready PRs
           # defer macOS unless targeting main or explicitly labeled. Drafts stay light.
           if [ "$EVENT_NAME" = "pull_request" ]; then
@@ -424,32 +437,42 @@ jobs:
     # defer both hosts; Rust light PRs keep Linux, heavy tiers allow both hosts.
     if: ${{ needs.changes.outputs.runtime_core == 'true' }}
     strategy:
+      fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.changes.outputs.defer_macos == 'true' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_repetitions == '20' && 300 || 45 }}
     env:
       HACK_RUST_TEST_RUNNER: nextest
+      HACK_RUST_TEST_KEEP_GOING: "1"
       HACK_RUST_TEST_REPETITIONS: ${{ matrix.os == 'macos-latest' && github.event_name == 'workflow_dispatch' && inputs.rust_repetitions || '1' }}
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - id: checkout
+        uses: actions/checkout@v4
+      - id: rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        if: ${{ !cancelled() }}
         with:
           components: rustfmt, clippy
-      - uses: ./.github/actions/ci-dependency-cache
+      - id: dependency-cache
+        uses: ./.github/actions/ci-dependency-cache
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' }}
         with:
           mode: rust
           kind: candidate
           target: .hack-local/target
       - name: Cache pinned Zig toolchain
         id: zig-cache
+        if: ${{ !cancelled() }}
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/candidate-zig
           key: ci-zig-0.15.2-${{ runner.os }}-${{ runner.arch }}
       - name: Install pinned Zig for guest helpers
+        id: zig
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -480,11 +503,14 @@ jobs:
           tar -xf "$destination/$archive" -C "$destination"
           echo "$destination/zig-${platform}-0.15.2" >> "$GITHUB_PATH"
       - name: Build and verify bundle guest
+        id: bundle-guest
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' }}
         run: |
           rustup target add aarch64-unknown-linux-musl
           sh scripts/check-native-guest.sh
       - name: Test interactive guest launcher on a real Linux PTY
-        if: runner.os == 'Linux'
+        id: linux-pty
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.checkout.outcome == 'success' && steps.zig.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -494,36 +520,53 @@ jobs:
           zig build-exe packages/runtime-core/guest/environment-launcher.zig -target x86_64-linux-musl -O ReleaseSmall -femit-bin="$RUNNER_TEMP/interactive-environment-launcher"
           python3 tests/fixtures/environment-launcher-tty.py "$RUNNER_TEMP/interactive-environment-launcher"
       - name: Check candidate formatting
+        id: format
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' }}
         run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
       - name: Install pinned process-per-test runner
+        id: nextest
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         shell: bash
         run: |
           bash scripts/install-cargo-nextest.sh "$RUNNER_TEMP/candidate-nextest"
           echo "$RUNNER_TEMP/candidate-nextest" >> "$GITHUB_PATH"
       - name: Lint candidate core
+        id: lint-default
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' }}
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings
       - name: Test candidate isolation contracts
+        id: test-default
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.nextest.outcome == 'success' }}
         env:
           HACK_RUST_TEST_REPORT_DIR: ${{ runner.temp }}/candidate-rust-results
         run: bash scripts/test-runtime-core.sh
       - name: Lint candidate optional features
+        id: lint-all-features
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' }}
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
       - name: Test candidate optional feature contracts
+        id: test-all-features
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' && steps.nextest.outcome == 'success' }}
         env:
           HACK_RUST_TEST_REPORT_DIR: ${{ runner.temp }}/candidate-rust-results
         run: bash scripts/test-runtime-core.sh --all-features
       - name: Preserve per-pass Rust counts and timings
-        if: always()
+        id: rust-results
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: candidate-rust-results-${{ matrix.os }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/candidate-rust-results/
           if-no-files-found: ignore
       - name: Build and inspect local candidate
+        id: release-build
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' }}
         run: |
           ./scripts/build-hack-local.sh
           ./hack-local info --json
       - name: Check release candidate carries no kill harness
+        id: kill-harness
+        if: ${{ !cancelled() && steps.test-all-features.outcome == 'success' && steps.release-build.outcome == 'success' }}
         # The all-features test step built the debug candidate with node-kill-harness,
         # so its marker proves this grep can see the harness when it is compiled in.
         run: |
@@ -533,6 +576,25 @@ jobs:
             echo "release hack-runtime-candidate contains the test-only kill harness" >&2
             exit 1
           fi
+      - name: Summarize Candidate core failures
+        if: ${{ !cancelled() }}
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          python3 - <<'PYTHON' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+
+          failed = [
+              name for name, result in json.loads(os.environ["STEP_RESULTS"]).items()
+              if result["outcome"] == "failure"
+          ]
+          print("### Candidate core failed steps")
+          for name in failed:
+              print(f"- `{name}`")
+          if not failed:
+              print("None.")
+          PYTHON
 
   docs-site:
     # The documentation corpus checks, the site build Vercel runs, and an HTTP
@@ -674,6 +736,55 @@ jobs:
           docker run --rm --entrypoint sh hack-runtime-ci:slim -lc 'command -v bun >/dev/null && command -v hack >/dev/null && test -x /usr/local/bin/hack-lifecycle-supervisor && test "${HACK_EXECUTION_MODE}" = "codex" && test "${HACK_DAEMON_DISABLE_DOCKER_EVENTS}" = "1" && hack --help >/tmp/hack-help.txt && grep -q "Usage:" /tmp/hack-help.txt'
       - name: Smoke slim runtime mounted-project env flow
         run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
+
+  compose-upgrade-trial:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.compose_upgrade_trial }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Prepare Compose fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
+          docker pull alpine:3.20
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bun run build:config-compiler
+      - run: bash scripts/check-compose-upgrade-sweep.sh --trial
+
+  resource-e2e:
+    name: Docker resource cleanup and desktop contract
+    needs: changes
+    if: ${{ needs.changes.outputs.resource_e2e == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Verify Docker resource cleanup and desktop contract
+        shell: bash
+        run: |
+          docker info --format '{{.ID}}' >/dev/null
+          docker pull redis:7-alpine
+          export HACK_RESOURCE_CLI_OUTPUT="$RUNNER_TEMP/hack-resource-inventory.json"
+          export HACK_E2E_CLI_BIN="$PWD/dist/hack"
+          bun test tests/e2e/resource-inventory.test.ts
+          test -s "$HACK_RESOURCE_CLI_OUTPUT"
+          cargo +1.98.1 test --locked --manifest-path apps/desktop/Cargo.toml -p hack-desktop-core --test resource_inventory_cli
 
   docker-e2e-shard:
     # One deterministic slice of the default e2e set per runner (tests/e2e/shard.ts).
@@ -909,7 +1020,13 @@ jobs:
           HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
           HACK_TEST_DRAFT: ${{ needs.changes.outputs.draft }}
           HACK_TEST_DEFER_MACOS: ${{ needs.changes.outputs.defer_macos }}
-        run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+        # Only a scheduled Linux shard 8 can take over this fixed list. Its
+        # result is required by the test fan-in as part of the shard matrix.
+        run: >-
+          bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD"
+          --layout="$HACK_TEST_LAYOUT"
+          --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+          ${{ runner.os == 'Linux' && contains(fromJSON(needs.changes.outputs.test_shards), 8) && '--route-symlink-temp=true' || '' }}
       - name: Tests (symlinked TMPDIR)
         if: matrix.shard == 8 && runner.os == 'Linux'
         shell: bash
@@ -942,7 +1059,7 @@ jobs:
 
   test-focus:
     # Retain this exact-head required job while PR subsets move to test-shard.
-    # It passes as a no-op when no legacy focus is requested. The prerelease
+    # The Doctor classification contract also runs here on every PR. The prerelease
     # gate requires every push job to succeed without skips.
     name: test focus
     needs: changes
@@ -958,13 +1075,13 @@ jobs:
         run: |
           echo "scope ${SCOPE}; focused tests: ${TEST_FOCUS:-none, the bun shards run}"
       - name: Checkout
-        if: ${{ needs.changes.outputs.test_focus != '' }}
         uses: actions/checkout@v4
       - name: Setup Bun
-        if: ${{ needs.changes.outputs.test_focus != '' }}
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.4.4"
+      - name: Check Desktop Doctor classifications
+        run: bun test --config /dev/null tests/doctor-desktop-check-ids.test.ts
       - name: Install dependencies
         if: ${{ needs.changes.outputs.test_focus != '' }}
         run: bun install --frozen-lockfile
@@ -982,13 +1099,57 @@ jobs:
           TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
         run: bun scripts/test-shard.ts run --focus="$TEST_FOCUS"
 
+  guest-protocol:
+    needs: changes
+    if: ${{ needs.changes.outputs.runtime_core == 'true' }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.guest_hosts) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Model execution recovery
+        if: runner.os == 'Linux'
+        working-directory: tests/models/tla/guest-execution
+        run: |
+          curl --fail --location --retry 2 --max-time 60 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o "$RUNNER_TEMP/tlc.jar"
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tlc.jar" | sha256sum --check
+          java -cp "$RUNNER_TEMP/tlc.jar" tlc2.TLC -workers 1 -config positive.cfg GuestAgent
+      - name: Test bounded guest protocol
+        run: |
+          cargo fmt --check --manifest-path packages/hack-vm-protocol/Cargo.toml
+          cargo clippy --locked --all-targets --manifest-path packages/hack-vm-protocol/Cargo.toml -- -D warnings
+          cargo test --locked --manifest-path packages/hack-vm-protocol/Cargo.toml
+
+      - name: Check guest agent and replay job recovery
+        if: runner.os == 'Linux'
+        working-directory: packages/hack-vm-agent
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+            cargo build --locked --release --target aarch64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          cargo test --locked --target x86_64-unknown-linux-musl
+
   test:
     # The required `test` check (repository ruleset) for `next` and `main`. It
     # always runs. When the change scope runs the suite, every bun shard must
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler]
+    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler, guest-protocol, resource-e2e]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1003,10 +1164,14 @@ jobs:
           TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
           SHARD_RESULT: ${{ needs.test-shard.result }}
           FOCUS_RESULT: ${{ needs.test-focus.result }}
+          GUEST_ENABLED: ${{ needs.changes.outputs.runtime_core }}
+          GUEST_RESULT: ${{ needs.guest-protocol.result }}
           COMPILER_ENABLED: ${{ needs.changes.outputs.compiler_hosts != '[]' }}
           COMPILER_RESULT: ${{ needs.config-compiler.result }}
           LIFETIME_ENABLED: ${{ needs.changes.outputs.docker_suite }}
           LIFETIME_RESULT: ${{ needs.linux-process-lifetime.result }}
+          RESOURCE_ENABLED: ${{ needs.changes.outputs.resource_e2e }}
+          RESOURCE_RESULT: ${{ needs.resource-e2e.result }}
         run: |
           if [ "$PR_DRAFT" = "true" ]; then
             echo "skipped: draft — full pull-request evidence is required before merge"
@@ -1020,6 +1185,10 @@ jobs:
             echo "change scope did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
+          case "$GUEST_ENABLED:$GUEST_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Guest protocol evidence missing or failed"; exit 1 ;;
+          esac
           case "$COMPILER_ENABLED:$COMPILER_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Compiler acceptance evidence did not match its plan (enabled: $COMPILER_ENABLED, result: $COMPILER_RESULT)" >&2; exit 1 ;;
@@ -1028,6 +1197,10 @@ jobs:
             echo "test focus did not succeed (result: $FOCUS_RESULT)"
             exit 1
           fi
+          case "$RESOURCE_ENABLED:$RESOURCE_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Resource cleanup evidence did not match its plan"; exit 1 ;;
+          esac
           case "$LIFETIME_ENABLED:$LIFETIME_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Linux process lifetime evidence did not match its plan (enabled: $LIFETIME_ENABLED, result: $LIFETIME_RESULT)" >&2; exit 1 ;;

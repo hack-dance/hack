@@ -61,6 +61,8 @@ const DOCS_FILES = new Set([
  * Nothing else outside packages/runtime-core is read by its job.
  */
 const RUNTIME_CORE_PATHS = [
+  /^packages\/hack-vm-(?:agent|protocol)\//,
+  /^tests\/models\/tla\/guest-execution\//,
   /^packages\/runtime-core\//,
   /^packages\/relay-guest\//,
   /^scripts\/build-hack-local\.sh$/,

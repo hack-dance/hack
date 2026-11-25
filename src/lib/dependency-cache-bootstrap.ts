@@ -12,13 +12,16 @@ export async function bootstrapDependencyCaches(
   opts: RuntimeBaseOptions & {
     readonly services: readonly string[];
     readonly timeoutMs?: number;
+    readonly beforeService?: () => Promise<void>;
   }
 ): Promise<number> {
-  assertAutostartHostCommandsAllowed({ hasCommands: opts.services.length > 0 });
-  for (const service of opts.services) {
+  const { services, beforeService, ...runtime } = opts;
+  assertAutostartHostCommandsAllowed({ hasCommands: services.length > 0 });
+  for (const service of services) {
     process.stderr.write(`Initializing dependency cache with ${service}\n`);
+    await beforeService?.();
     const code = await composeRuntimeBackend.run({
-      ...opts,
+      ...runtime,
       service,
       noDeps: true,
       cmdArgs: [],

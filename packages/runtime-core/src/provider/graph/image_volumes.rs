@@ -21,7 +21,7 @@ use std::{collections::BTreeMap, path::Path};
 pub(super) const UNCOVERED: &str = "graph_image_volume_uncovered";
 
 /// Same lexical form the Compose review gives mount targets (`fields::safe_absolute`).
-fn normalized(target: &str) -> String {
+pub(super) fn normalized(target: &str) -> String {
     Path::new(target)
         .components()
         .collect::<std::path::PathBuf>()

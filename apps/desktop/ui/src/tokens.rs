@@ -71,14 +71,17 @@ pub mod size {
     use gpui_kit::{Pixels, px};
     pub const TITLE_BAR: Pixels = px(38.);
     pub const STATUS_BAR: Pixels = px(26.);
-    pub const SIDEBAR: Pixels = px(208.);
+    pub const SIDEBAR: Pixels = px(272.);
     pub const ROW: Pixels = px(28.);
     pub const TABLE_ROW: Pixels = px(32.);
+    pub const SERVICE_COL_FRACTION: f32 = 0.2;
+    pub const CPU_COL: Pixels = px(64.);
+    pub const MEMORY_COL: Pixels = px(80.);
     pub const CONTROL: Pixels = px(26.);
     pub const DOT: Pixels = px(8.);
     pub const ICON: Pixels = px(14.);
     pub const ICON_ROW: Pixels = px(15.);
-    pub const SEARCH_W: Pixels = px(240.);
+    pub const SEARCH_W: Pixels = px(280.);
     /// Leaves room for the macOS traffic lights in the title bar.
     pub const TRAFFIC_LIGHTS: Pixels = px(76.);
 }
@@ -103,10 +106,14 @@ pub struct Palette {
     pub surface: Hsla,
     /// Sidebar, title bar and status bar.
     pub chrome: Hsla,
-    /// Hover, selected row, selected tab, log block, neutral pills.
+    /// Hover, log block, neutral pills.
     pub surface_1: Hsla,
-    /// Pressed or selected-and-hovered.
+    /// Pressed.
     pub surface_2: Hsla,
+    /// Selected navigation and file rows.
+    pub selection: Hsla,
+    /// Read-only file preview body.
+    pub preview_surface: Hsla,
     pub border: Hsla,
     pub border_strong: Hsla,
     pub text_primary: Hsla,
@@ -147,6 +154,45 @@ impl Palette {
         }
     }
 
+    /// Builtin Light and Merino Dark for the project tree and copy pane.
+    #[must_use]
+    pub fn projects(mode: Mode) -> Self {
+        let mut palette = Self::for_mode(mode);
+        let [
+            chrome,
+            surface,
+            hover,
+            selection,
+            border,
+            ink,
+            secondary,
+            muted,
+            running,
+            failed,
+        ] = match mode {
+            Mode::Light => [
+                0xF2F2F2, 0xFFFFFF, 0xF0F0F0, 0xE1E1E1, 0xE0E0E0, 0x000000, 0x2E2E2E, 0x616161,
+                0x008300, 0xBB0000,
+            ],
+            Mode::Dark => [
+                0x0B0E12, 0x0D1117, 0x1A1E24, 0x24272B, 0x2B3036, 0xE6EDF3, 0xBFC5CB, 0x8B9197,
+                0x3FB950, 0xFF7B72,
+            ],
+        };
+        palette.chrome = c(rgb(chrome));
+        palette.surface = c(rgb(surface));
+        palette.surface_1 = c(rgb(hover));
+        palette.surface_2 = c(rgb(selection));
+        palette.border = c(rgb(border));
+        palette.text_primary = c(rgb(ink));
+        palette.text_secondary = c(rgb(secondary));
+        palette.text_muted = c(rgb(muted));
+        palette.accent = palette.text_primary;
+        palette.states.running.dot = c(rgb(running));
+        palette.states.failed.dot = c(rgb(failed));
+        palette
+    }
+
     #[must_use]
     pub fn light() -> Self {
         Self {
@@ -155,6 +201,8 @@ impl Palette {
             chrome: c(rgb(0xF7F7F5)),
             surface_1: c(rgb(0xEFEFEC)),
             surface_2: c(rgb(0xE6E6E2)),
+            selection: c(rgb(0xEFEFEC)),
+            preview_surface: c(rgb(0xEFEFEC)),
             border: c(rgba(0x0000_0017)),
             border_strong: c(rgba(0x0000_002E)),
             text_primary: c(rgb(0x1C1C1A)),
@@ -198,48 +246,55 @@ impl Palette {
 
     #[must_use]
     pub fn dark() -> Self {
+        // Merino Dark, from the HACK-2595 desktop frames.
+        let surface_1 = c(rgb(0x1A1E24));
+        let selection = c(rgb(0x24272B));
+        let text_primary = c(rgb(0xE6EDF3));
+        let text_muted = c(rgb(0x8B9197));
         Self {
             mode: Mode::Dark,
-            surface: c(rgb(0x1B1B1A)),
-            chrome: c(rgb(0x161615)),
-            surface_1: c(rgb(0x272725)),
-            surface_2: c(rgb(0x31312E)),
-            border: c(rgba(0xFFFF_FF14)),
-            border_strong: c(rgba(0xFFFF_FF26)),
-            text_primary: c(rgb(0xEDEDEA)),
-            text_secondary: c(rgb(0xA9A8A2)),
-            text_muted: c(rgb(0x7B7A75)),
-            accent: c(rgb(0x6EA2F5)),
+            surface: c(rgb(0x0D1117)),
+            chrome: c(rgb(0x090C10)),
+            surface_1,
+            surface_2: c(rgb(0x1C2026)),
+            selection,
+            preview_surface: c(rgb(0x1E2329)),
+            border: c(rgb(0x2B3036)),
+            border_strong: c(rgb(0x2B3036)),
+            text_primary,
+            text_secondary: c(rgb(0xBFC5CB)),
+            text_muted,
+            accent: text_primary,
             states: States {
                 running: StateColors {
-                    dot: c(rgb(0x2DB386)),
-                    bg: c(rgba(0x1D9E_7530)),
-                    fg: c(rgb(0x6FD3AE)),
+                    dot: c(rgb(0x3FB950)),
+                    bg: c(rgb(0x152C20)),
+                    fg: c(rgb(0x3FB950)),
                 },
                 busy: StateColors {
-                    dot: c(rgb(0x4C98E6)),
-                    bg: c(rgba(0x378A_DD30)),
-                    fg: c(rgb(0x8DBDF0)),
+                    dot: c(rgb(0xBFC5CB)),
+                    bg: c(rgb(0x1C2026)),
+                    fg: c(rgb(0xBFC5CB)),
                 },
                 degraded: StateColors {
-                    dot: c(rgb(0xF0A83C)),
-                    bg: c(rgba(0xEF9F_272E)),
-                    fg: c(rgb(0xF3C27A)),
+                    dot: c(rgb(0xD29922)),
+                    bg: c(rgb(0x211F18)),
+                    fg: c(rgb(0xD29922)),
                 },
                 failed: StateColors {
-                    dot: c(rgb(0xEC5D5C)),
-                    bg: c(rgba(0xE24B_4A30)),
-                    fg: c(rgb(0xF29A99)),
+                    dot: c(rgb(0xFF7B72)),
+                    bg: c(rgb(0x2F2024)),
+                    fg: c(rgb(0xFF7B72)),
                 },
                 stopped: StateColors {
-                    dot: c(rgb(0x5E5D59)),
-                    bg: c(rgb(0x272725)),
-                    fg: c(rgb(0xA9A8A2)),
+                    dot: c(rgb(0x686D73)),
+                    bg: c(rgb(0x1A1E24)),
+                    fg: c(rgb(0xBFC5CB)),
                 },
                 unknown: StateColors {
-                    dot: c(rgb(0x7B7A75)),
-                    bg: c(rgb(0x272725)),
-                    fg: c(rgb(0xA9A8A2)),
+                    dot: c(rgb(0x8B9197)),
+                    bg: c(rgb(0x1A1E24)),
+                    fg: c(rgb(0xBFC5CB)),
                 },
             },
         }

@@ -1,15 +1,16 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { noteActivityFailedServices } from "../lib/activity-log.ts";
 import type { BranchDroppedSites } from "../lib/branch-hosts.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
+import { beginUpTiming } from "../lib/command-timings.ts";
 import {
   type ComposeEnvFingerprintRecord,
   withComposeServiceEnvFingerprints,
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
+import { appendLifecycleLogRecord } from "../lib/lifecycle-runtime.ts";
 import {
   isNativeDetachedOwnerProcess,
   nativeDetachedUpBranchDropped,
@@ -19,17 +20,24 @@ import {
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
   reportNativeImageDownloadWait,
-  reportNativeImageTagOffline,
+  reportNativeImageNotice,
+  reportNativeImageWork,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
   type NativeProcessRefusal,
   requireWrappableNativeProcesses,
 } from "../lib/native-process-wrappers.ts";
+import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { emptyNativeDependencyPlanId } from "./native-dependency-plan.ts";
+import {
+  awaitNativeEndedBootOwner,
+  NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
+  nativePoolBootProvenEnded,
+} from "./native-ended-boot-owner.ts";
 import {
   adaptNativeGcloudEnvironment,
   hasNativeGcloudCredentialMount,
@@ -60,7 +68,9 @@ import {
 } from "./native-https-owner.ts";
 import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-notices.ts";
 import {
+  batchImageFailure,
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  NativeImageBatchError,
   nativeImagePolicyArgs,
   nativeImageRegistryReason,
 } from "./native-image-policy.ts";
@@ -83,7 +93,9 @@ import {
   admitNativeProjectBuilds,
   buildNativeProjectImages,
   invokeNativeBuild,
+  NativeBuildRegistryError,
   type NativeBuildRequest,
+  type NativeBuildSettlement,
   type NativeVerifiedBuild,
   nativeBuildsEnabled,
   nativeRebuildRequested,
@@ -132,7 +144,10 @@ import {
   requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
-import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
+import {
+  inspectNativeProjectGraph,
+  observeStartingNativeProjectGraph,
+} from "./native-project-inspect.ts";
 import {
   applyNativeInternalHostAliases,
   type NativeHostAliasSource,
@@ -212,6 +227,7 @@ import {
 } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_BUILD_RETENTION_TIMEOUT_MS,
   NATIVE_IDLE_POOL_NOTE,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
@@ -222,11 +238,15 @@ import {
   type NativeRuntimeMetadataSelection,
   verifyNativeRuntimeMetadataRoutes,
 } from "./native-runtime-metadata.ts";
+import { recoverExitedNativeRuntime } from "./native-runtime-preflight.ts";
 import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
-import { watchNativeStartPool } from "./native-start-pool-watch.ts";
+import {
+  NATIVE_START_POOL_GRACE_MS,
+  watchNativeStartPool,
+} from "./native-start-pool-watch.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
@@ -296,6 +316,8 @@ async function acquireReadyHttps(opts: {
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
   readonly acquire: typeof acquireNativeHttpsLease;
+  /** The frontend lifetime's attempt, so the lease is recorded on that lifetime. */
+  readonly attempt?: string;
   readonly onIntent: (identity: NativeHttpsLeaseIdentity) => Promise<void>;
 }): Promise<Awaited<ReturnType<typeof acquireNativeHttpsLease>>> {
   const pool = await opts.invoke({
@@ -325,7 +347,7 @@ async function acquireReadyHttps(opts: {
     pool: { owner: opts.run.owner, bootId: pool.guest_boot_id },
     lease: {
       run: opts.run.run,
-      attempt: randomBytes(16).toString("hex"),
+      attempt: opts.attempt ?? randomBytes(16).toString("hex"),
       namespace: opts.run.namespace,
       planId: opts.run.planId,
     },
@@ -461,6 +483,10 @@ type Dependencies = {
   exitMonitorIntervalMs: number;
   /** How often a waiting start reads its graph status (HACK-2351). */
   startupStatusIntervalMs: number;
+  /** Whether the pool record proves the run's owner's boot ended (HACK-2572). */
+  poolBootEnded: (home: string) => Promise<boolean>;
+  /** How long a start waits for such an owner to go (HACK-2572). */
+  endedBootOwnerWaitMs: number;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -495,6 +521,8 @@ const DEFAULTS: Dependencies = {
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
   startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
+  poolBootEnded: nativePoolBootProvenEnded,
+  endedBootOwnerWaitMs: NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
 };
 /**
  * Reports forwarded source names and unset-reference notices for active services.
@@ -775,9 +803,14 @@ async function resolveNativeBuildImages(opts: {
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
+  readonly imageTagMode?: "refresh" | "offline";
   readonly signal: AbortSignal;
+  readonly guestCpus?: number;
+  readonly onBuildSettled?: (settlement: NativeBuildSettlement) => void;
   readonly invoke: typeof invokeNativeBuild | undefined;
   readonly onBuilt: () => void;
+  readonly onImageWait: (reference: string | null) => void;
+  readonly onNotice: (line: string) => void;
 }): Promise<ReadonlySet<string>> {
   const remaining = pinVerifiedNativeBuilds(opts);
   const built = await buildNativeProjectImages({
@@ -800,6 +833,7 @@ async function ensureNativeProjectImage(opts: {
   readonly affectedServices: () => readonly string[];
   readonly commandPin?: string;
   readonly waitReference: string;
+  readonly signal: AbortSignal;
   readonly policy: NativeEmulationPolicy | undefined;
   readonly invoke: typeof invokeNativeRuntime;
 }) {
@@ -814,8 +848,11 @@ async function ensureNativeProjectImage(opts: {
         ...(opts.imageTagMode ? ["--image-tag-mode", opts.imageTagMode] : []),
       ],
       timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-      onImageWait: (waiting) =>
-        reportNativeImageDownloadWait(waiting ? opts.waitReference : null),
+      signal: opts.signal,
+      onImageWait: (waiting, subject) =>
+        reportNativeImageDownloadWait(
+          waiting ? (subject ?? opts.waitReference) : null
+        ),
     })
     .catch((error: unknown) => {
       if (
@@ -849,6 +886,180 @@ async function ensureNativeProjectImage(opts: {
     offline: offlineTagNotice(ensured),
   };
 }
+/** Feed independent references to the runtime cache coordinator. */
+async function pinNativeImageBatch(
+  opts: Parameters<typeof pinNativeProjectImages>[0]
+): Promise<void> {
+  const report = (line: string) => {
+    if (!reportNativeImageNotice(line)) {
+      opts.warn(line);
+    }
+  };
+  const jobs = new Map<
+    string,
+    {
+      reference: string;
+      input: string;
+      names: string[];
+      policy: NativeEmulationPolicy | undefined;
+      specs: Record<string, unknown>[];
+    }
+  >();
+  for (const [name, spec] of Object.entries(opts.specs)) {
+    if (!nativeServiceActive(spec, opts.profiles)) {
+      continue;
+    }
+    if (
+      typeof spec.image !== "string" ||
+      IMAGE.test(spec.image) ||
+      spec.build !== undefined
+    ) {
+      continue;
+    }
+    const reference = opts.canonicalImages.get(spec.image) ?? spec.image;
+    const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
+    const job = jobs.get(reference);
+    if (job && job.policy !== policy) {
+      // The existing path binds both platform policies to one command pin.
+      return;
+    }
+    if (job) {
+      job.specs.push(spec);
+      job.names.push(name);
+    } else {
+      jobs.set(reference, {
+        reference,
+        input: spec.image,
+        policy,
+        specs: [spec],
+        names: [name],
+      });
+    }
+  }
+  if (jobs.size < 2 || opts.imageTagMode) {
+    return;
+  }
+  const pending = [...jobs.values()];
+  for (let offset = 0; offset < pending.length; offset += 3) {
+    const wave = pending.slice(offset, offset + 3);
+    const waiting = new Set<string>();
+    const working = new Set<string>();
+    const reply = await opts
+      .invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: [
+          "runtime",
+          "ensure-images",
+          "--json",
+          ...nativeImagePolicyArgs(),
+        ],
+        privateInput: new TextEncoder().encode(
+          JSON.stringify(wave.map((job) => [job.input, job.policy ?? "native"]))
+        ),
+        signal: opts.signal,
+        onImageWait: (active, reference, work) => {
+          if (work) {
+            const image = wave[Number(reference)]?.reference;
+            if (image) {
+              if (active) {
+                working.add(image);
+              } else {
+                working.delete(image);
+              }
+              reportNativeImageWork([...working]);
+            }
+            return;
+          }
+          if (
+            !(
+              reference &&
+              (reference === "image-cache" ||
+                reference === "image-reclaim" ||
+                wave.some((job) => job.reference === reference))
+            )
+          ) {
+            return;
+          }
+          if (active) {
+            waiting.add(reference);
+          } else {
+            waiting.delete(reference);
+          }
+          reportNativeImageDownloadWait(waiting.values().next().value ?? null);
+        },
+        timeoutMs: Math.min(
+          3_600_000,
+          wave.length * NATIVE_IMAGE_ENSURE_TIMEOUT_MS
+        ),
+      })
+      .catch((error: unknown) => {
+        // Older bundled runtimes reject the command before doing any work.
+        if (
+          error instanceof NativeRuntimeRequestError &&
+          error.nativeCode === "unsupported_command"
+        ) {
+          return null;
+        }
+        throw error;
+      });
+    if (reply === null) {
+      return;
+    }
+
+    if (!Array.isArray(reply) || reply.length !== wave.length) {
+      throw unconfirmed("the runtime image batch");
+    }
+    const failures: ReturnType<typeof batchImageFailure>[] = [];
+    const seen = new Set<number>();
+    for (const pair of reply) {
+      if (
+        !(Array.isArray(pair) && Number.isInteger(pair[0])) ||
+        seen.has(pair[0])
+      ) {
+        throw unconfirmed("the runtime image batch");
+      }
+      const [index, result, elapsed] = pair;
+      const job = wave[index];
+      if (
+        !(
+          job &&
+          isRecord(result) &&
+          Number.isSafeInteger(elapsed) &&
+          elapsed >= 0
+        )
+      ) {
+        throw unconfirmed("the runtime image batch");
+      }
+      seen.add(index);
+      const image = result.Ok;
+      if (
+        !(
+          isRecord(image) &&
+          typeof image.image_id === "string" &&
+          IMAGE.test(image.image_id) &&
+          ensuredPlatformAccepted(image.platform, job.policy)
+        )
+      ) {
+        report(`${job.reference} · image preparation failed · ${elapsed} ms`);
+        failures.push(batchImageFailure(job.reference, result.Err, job.names));
+        continue;
+      }
+      report(`${job.reference} · image verified in guest · ${elapsed} ms`);
+      const notice = offlineTagNotice(image);
+      if (notice && !reportNativeImageNotice(notice)) {
+        report(notice);
+      }
+      for (const spec of job.specs) {
+        spec.image = image.image_id;
+      }
+    }
+    if (failures.length) {
+      throw new NativeImageBatchError(failures);
+    }
+  }
+}
+
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -865,6 +1076,7 @@ async function pinNativeProjectImages(opts: {
   readonly warn: (line: string) => void;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
+  await pinNativeImageBatch(opts);
   const reportedOffline = new Set<string>();
   const confirmed = new Set<string>();
   const references = [...new Set(opts.canonicalImages.values())];
@@ -913,6 +1125,7 @@ async function pinNativeProjectImages(opts: {
       projectRoot: opts.projectRoot,
       reference: image,
       waitReference: reference,
+      signal: opts.signal,
       commandPin: reference.includes("@") ? undefined : immutableReference,
       affectedServices: () =>
         Object.entries(opts.specs)
@@ -963,7 +1176,7 @@ async function pinNativeProjectImages(opts: {
     }
     const noticeKey = `${reference}\n${ensured.imageId}`;
     if (ensured.offline && !reportedOffline.has(noticeKey)) {
-      if (!reportNativeImageTagOffline(ensured.offline)) {
+      if (!reportNativeImageNotice(ensured.offline)) {
         opts.warn(ensured.offline);
       }
       reportedOffline.add(noticeKey);
@@ -1517,7 +1730,7 @@ function readyProgress(opts: {
   readonly plan: unknown;
   readonly routed: ReadonlySet<string>;
   readonly httpsPort: number | null;
-}): NativeStartupProgress {
+}): Extract<NativeStartupProgress, { readonly phase: "ready" | "started" }> {
   return {
     phase: "ready",
     services: opts.services,
@@ -1526,6 +1739,60 @@ function readyProgress(opts: {
   };
 }
 
+/**
+ * The started envelope, from what each container is observed doing (not from its
+ * configured goal): a completion job counts as completed only once it exited 0, a
+ * health goal only once healthy; anything not there yet is warming.
+ */
+export function startedServiceSummary(
+  readinessArgs: readonly string[],
+  inspected: unknown
+): {
+  readonly started: readonly string[];
+  readonly completed: readonly string[];
+  readonly warming: readonly string[];
+} {
+  const observations =
+    isRecord(inspected) && isRecord(inspected.observations)
+      ? inspected.observations
+      : {};
+  const by = {
+    started: [] as string[],
+    completed: [] as string[],
+    warming: [] as string[],
+  };
+  for (const [service, goal] of Object.entries(
+    nativeReadinessGoals(readinessArgs)
+  )) {
+    const seen = observations[`container:${service}`];
+    const state = isRecord(seen) ? seen.state : undefined;
+    const done = isRecord(seen) && state === "exited" && seen.code === 0;
+    if (goal === "completed") {
+      (done ? by.completed : by.warming).push(service);
+    } else if (goal === "healthy") {
+      (isRecord(seen) && state === "running" && seen.health === "healthy"
+        ? by.started
+        : by.warming
+      ).push(service);
+    } else {
+      by.started.push(service);
+    }
+  }
+  return by;
+}
+/** Started summary plus routes not verified yet; `warming` until every goal is met. */
+function startedEnvelope(
+  summary: ReturnType<typeof startedServiceSummary>,
+  routed: ReadonlySet<string>
+) {
+  const warming = [...new Set([...summary.warming, ...routed])].sort();
+  return {
+    started: summary.started.filter((service) => !warming.includes(service)),
+    completed: summary.completed,
+    readiness: "warming" as const,
+    warming,
+  };
+}
 /** Ready completion goals have succeeded; keep jobs separate in lifecycle JSON. */
 function readyServiceSummary(readinessArgs: readonly string[]): {
   readonly started: readonly string[];
@@ -1873,21 +2140,83 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   readonly recover: (() => Promise<void>) | undefined;
   readonly warn: (line: string) => void;
   readonly signal?: AbortSignal;
+  /** Set on the one retry after an exited provider was recovered (HACK-2579). */
+  readonly exitedProviderRecovered?: true;
+  readonly poolBootEnded: (home: string) => Promise<boolean>;
+  readonly endedBootOwnerWaitMs: number;
 }): ReturnType<typeof selectNativeStartup> {
+  let failure: unknown;
   try {
     return await opts.select();
   } catch (error) {
+    // HACK-2579: the pool's provider exited while its record still says running.
+    // The retained preflight then sees a live owner that has not noticed yet, or a
+    // running record with a dead provider. `runtime recover` records the pool
+    // stopped (under the lease, identity checked), then selection runs once more.
     if (
-      !(
-        opts.recover &&
-        error instanceof NativeRuntimeRequestError &&
-        error.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
-        !opts.signal?.aborted &&
-        (await nativeRuntimePoolStopped(opts))
-      )
+      error instanceof NativeRuntimeRequestError &&
+      EXITED_PROVIDER_REFUSALS.has(error.nativeCode ?? "") &&
+      !opts.exitedProviderRecovered &&
+      !opts.signal?.aborted &&
+      (await recoverExitedNativeRuntime({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        invoke: opts.invoke,
+        signal: opts.signal,
+        notice: (line) => {
+          if (!reportNativeImageNotice(line)) {
+            opts.warn(line);
+          }
+        },
+      }))
     ) {
-      throw error;
+      return await selectNativeStartupRecoveringStoppedPool({
+        ...opts,
+        exitedProviderRecovered: true,
+      });
     }
+    failure = error;
+  }
+  // HACK-2572: the owner of a pool boot that has ended is still exiting. Wait,
+  // bounded, for its refusal to change, then decide as before. A live owner on a
+  // running pool never satisfies the proof and keeps its refusal at once.
+  if (
+    isForegroundOwnerRunning(failure) &&
+    !opts.signal?.aborted &&
+    (await opts.poolBootEnded(opts.runtime.home))
+  ) {
+    let selected: Awaited<ReturnType<typeof selectNativeStartup>> | undefined;
+    await awaitNativeEndedBootOwner({
+      home: opts.runtime.home,
+      notice: opts.warn,
+      signal: opts.signal,
+      waitMs: opts.endedBootOwnerWaitMs,
+      read: async (home) =>
+        (await opts.poolBootEnded(home)) ? ENDED_RECORD : undefined,
+      ownerRunning: async () => {
+        try {
+          selected = await opts.select();
+          return false;
+        } catch (error) {
+          failure = error;
+          return isForegroundOwnerRunning(error);
+        }
+      },
+    });
+    if (selected) {
+      return selected;
+    }
+  }
+  if (
+    !(
+      opts.recover &&
+      failure instanceof NativeRuntimeRequestError &&
+      failure.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
+      !opts.signal?.aborted &&
+      (await nativeRuntimePoolStopped(opts))
+    )
+  ) {
+    throw failure;
   }
   await opts.recover();
   requireActiveStartup(opts.signal);
@@ -1897,6 +2226,26 @@ async function selectNativeStartupRecoveringStoppedPool(opts: {
   return await opts.select();
 }
 const NATIVE_FOREGROUND_OWNER_EXITED = "graph_foreground_owner_exited";
+/** Retained-preflight refusals a pool with an exited provider can give (HACK-2579). */
+const EXITED_PROVIDER_REFUSALS = new Set([
+  "graph_foreground_owner_running",
+  "graph_foreground_owner_uncertain",
+  "graph_retained_startup",
+  "process_identity_unavailable",
+]);
+/** A pool record that proves an ended boot, for the wait's own recheck. */
+const ENDED_RECORD = { token: "", phase: "stopped" };
+/**
+ * Refusals of an owner that may still be alive: running, or ending (its process
+ * exited but not yet reaped, or its publication read mid-change; HACK-2572).
+ */
+function isForegroundOwnerRunning(error: unknown): boolean {
+  return (
+    error instanceof NativeRuntimeRequestError &&
+    (error.nativeCode === "graph_foreground_owner_running" ||
+      error.nativeCode === "graph_foreground_owner_uncertain")
+  );
+}
 /**
  * Before any hook, refuse a retained run whose recorded env selection changed: its
  * env must resolve the same, and it keeps the managed env files it started with. Only
@@ -2100,14 +2449,26 @@ export type NativeStartupProgress =
     }
   | ({ readonly phase: "dependency-wait" } & NativeDependencyWaitProgress)
   | {
-      readonly phase: "ready";
+      /** Every goal met and every route answering, after a started return. */
+      readonly phase: "all-ready";
+      readonly elapsedMs: number;
+    }
+  | {
+      /** The owner reported ready, but a route check failed; the run keeps running. */
+      readonly phase: "routes-not-answering";
+      readonly detail: string;
+    }
+  | {
+      /** `ready` (with `--wait`), or `started`: every container started. */
+      readonly phase: "ready" | "started";
       readonly services: readonly string[];
       /** The run id, or `unknown` when it fails the run-id pattern. */
       readonly run: string;
       /** Indented route, unserved-route and published-port lines. */
       readonly endpoints: readonly string[];
     }
-  | ({ readonly phase: "service-exited" } & NativeServiceExit);
+  | ({ readonly phase: "service-exited" } & NativeServiceExit)
+  | ({ readonly phase: "build-settled" } & NativeBuildSettlement);
 
 function progressReporter(
   observe: ((event: NativeStartupProgress) => void) | undefined
@@ -2199,6 +2560,13 @@ type NativeProjectStartOptions = {
     services: {
       readonly started: readonly string[];
       readonly completed: readonly string[];
+      /**
+       * `warming` after a started return (the owner has not reported every goal
+       * met yet), `ready` with `--wait`. One field a script can read.
+       */
+      readonly readiness: "warming" | "ready";
+      /** Routed services whose routes are not checked yet; empty when ready. */
+      readonly warming: readonly string[];
     },
     addresses: readonly string[]
   ) => void | Promise<void>;
@@ -2269,6 +2637,13 @@ type NativeProjectStartOptions = {
    * 300 when omitted.
    */
   readonly startTimeoutSeconds?: number;
+  /**
+   * `hack up --wait` (see `native-up-wait.ts`): return once every goal is met and
+   * every route answers, as before. Otherwise the start returns once every
+   * service has started: the mapping, hooks, down-hook debt and the detached
+   * release happen then, and route checks follow when the owner reports ready.
+   */
+  readonly waitForReady?: boolean;
   readonly dependencies?: Partial<Dependencies>;
   /**
    * Recovers this instance's run when the pool stopped under it (HACK-2456):
@@ -2331,6 +2706,19 @@ function emitNativeLeftOutNotice(opts: {
     },
     opts.warn
   );
+}
+
+/** Guest CPU allocation is fixed by the runtime profile (provider/profile.rs). */
+function nativePoolBuildCpus(pool: unknown): number {
+  if (isRecord(pool)) {
+    if (pool.profile === "development") {
+      return 4;
+    }
+    if (pool.profile === "research") {
+      return 2;
+    }
+  }
+  return 1;
 }
 
 /**
@@ -2451,7 +2839,7 @@ function emitNativeBranchDroppedNotice(
 
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
-  observeStartup: () => Promise<void>
+  observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>
 ): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -2465,6 +2853,7 @@ async function startNativeProjectAttempt(
     });
   }
   const deps = { ...DEFAULTS, ...opts.dependencies };
+  const overlayTiming = beginUpTiming("cli.env.overlay");
   await refusePendingFreshStart(opts.restore, opts.scope, deps.loadRestart);
   const select = () =>
     selectNativeStartup({
@@ -2490,6 +2879,8 @@ async function startNativeProjectAttempt(
       recover: opts.recoverStoppedPool,
       warn: deps.warn,
       signal: opts.signal,
+      poolBootEnded: deps.poolBootEnded,
+      endedBootOwnerWaitMs: deps.endedBootOwnerWaitMs,
     });
   requireActiveStartup(opts.signal);
   const runtimeMetadata = nativeRuntimeMetadataSelected({
@@ -2523,7 +2914,7 @@ async function startNativeProjectAttempt(
   progress({ phase: "input" });
   // Keep ps aware of this frontend while input is read. This advisory marker
   // carries no values and is retired even if admission refuses the input.
-  await observeStartup();
+  const startupObservation = await observeStartup();
   // Read and admit private project inputs before any pool-share or storage
   // mutation. An unsafe env file or public interpolation must have no effects.
   let input = await deps.prepare({
@@ -2591,6 +2982,8 @@ async function startNativeProjectAttempt(
         emitNativeBranchDroppedNotice(notice, details, deps.warn),
     })
   ).input;
+  overlayTiming?.();
+  const preflightTiming = beginUpTiming("cli.graph.preflight");
   // Pure build admission before hooks, VM or provider start; refuses when disabled.
   const builds = admitStartBuilds(input, opts);
   const buildServices = new Set(builds.keys());
@@ -2625,6 +3018,12 @@ async function startNativeProjectAttempt(
     projectRoot: opts.scope.projectRoot,
     signal: opts.signal,
     invoke: deps.invoke,
+    // A detached owner hands the line to the launcher, as image notices do.
+    notice: (line) => {
+      if (!reportNativeImageNotice(line)) {
+        deps.warn(line);
+      }
+    },
   });
   await deps.prepareStorage(opts.scope);
   // A graph that captures source (bind mounts or a dependency cache) measures it
@@ -2666,6 +3065,7 @@ async function startNativeProjectAttempt(
   const artifactHash = createHash("sha256")
     .update(new Uint8Array(await artifactFile.arrayBuffer()))
     .digest("hex");
+  preflightTiming?.();
   const stopSignals = nativeForegroundStopSignals(opts);
   opts.onStopSignals?.();
   const controller = stopSignals.controller;
@@ -2689,6 +3089,7 @@ async function startNativeProjectAttempt(
   try {
     stopSignals.admitPending();
     requireActiveStartup(controller.signal);
+    const inputTiming = beginUpTiming("cli.start.inputs");
     hooks = await opts.before(input, controller.signal);
     requireActiveStartup(controller.signal);
     const credentials = await adaptNativeCredentials({
@@ -2795,6 +3196,7 @@ async function startNativeProjectAttempt(
       deps,
       signal: controller.signal,
     });
+    inputTiming?.();
     progress({ phase: "runtime" });
     const pool = await deps.invoke({
       runtime: opts.runtime,
@@ -2824,6 +3226,7 @@ async function startNativeProjectAttempt(
     });
     emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
+    const resolveTiming = beginUpTiming("cli.graph.resolve");
     const resumed = await verifyNativeResumedRetainedGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
@@ -2873,6 +3276,7 @@ async function startNativeProjectAttempt(
       invoke: deps.invoke,
       observed: resumed,
     });
+    resolveTiming?.();
     progress({ phase: "images" });
     // A restore asks the runtime too: its image is reused only under an unchanged
     // build key, so a Dockerfile edited after `down` is built (HACK-2533).
@@ -2885,11 +3289,42 @@ async function startNativeProjectAttempt(
       builds,
       specs,
       verified: opts.verifiedBuildImages,
+      imageTagMode: opts.imageTagMode,
+      guestCpus: nativePoolBuildCpus(pool),
+      onBuildSettled: (settled) =>
+        progress({ phase: "build-settled", ...settled }),
       signal: controller.signal,
       invoke: deps.build,
       onBuilt: () => {
         rebuilt = true;
       },
+      onImageWait: reportNativeImageDownloadWait,
+      onNotice: (line) => {
+        if (!reportNativeImageNotice(line)) {
+          process.stderr.write(`${line}\n`);
+        }
+      },
+    }).catch(async (error: unknown) => {
+      if (!(error instanceof NativeBuildRegistryError)) {
+        throw error;
+      }
+      const references = Object.entries(specs).flatMap(([name, spec]) =>
+        nativeServiceActive(spec, profiles) &&
+        !builds.has(name) &&
+        typeof spec.image === "string"
+          ? [spec.image]
+          : []
+      );
+      throw await nativeImageBlocker({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        missing: error.reference,
+        buildBase: true,
+        reason: error.nativeCauseCode,
+        references: [...new Set([error.reference, ...references])],
+        confirmed: new Set(),
+        invoke: deps.invoke,
+      });
     });
     await pinNativeProjectImages({
       runtime: opts.runtime,
@@ -2905,10 +3340,14 @@ async function startNativeProjectAttempt(
       imageTagMode: opts.imageTagMode,
       warn: deps.warn,
       invoke: deps.invoke,
+    }).catch((error: unknown) => {
+      requireActiveStartup(controller.signal);
+      throw error;
     });
     requireActiveStartup(controller.signal);
     // Image work is done: what follows counts against a detached start's
     // budget again (HACK-2351).
+    const reviewTiming = beginUpTiming("cli.graph.prepare");
     progress({ phase: "plan" });
     const compose = JSON.parse(input.normalizedComposeJson);
     compose.services = specs;
@@ -2973,7 +3412,8 @@ async function startNativeProjectAttempt(
           restoreRevision: runSelection.sourceRevision,
           invoke: deps.invoke,
         });
-        const directory = await mkdtemp(join(tmpdir(), "hack-native-start-"));
+        const directory =
+          await nativeRuntimeTempDirectory("hack-native-start-");
         const run = runSelection.run;
         const stop = hooks?.stop
           ? createNativeForegroundStop({
@@ -3055,6 +3495,34 @@ async function startNativeProjectAttempt(
           });
           let code = 1;
           let serveFailure: unknown;
+          let retentionTimer: ReturnType<typeof setTimeout> | undefined;
+          const retention = new AbortController();
+          const scheduleRetention = (attempt: number) => {
+            if (retention.signal.aborted || controller.signal.aborted) {
+              return;
+            }
+            retentionTimer = setTimeout(
+              () => {
+                if (!controller.signal.aborted) {
+                  void retainReadyBuildBases({
+                    scope: opts.scope,
+                    run,
+                    runtime: opts.runtime,
+                    invoke: deps.invoke,
+                    signal: AbortSignal.any([
+                      controller.signal,
+                      retention.signal,
+                    ]),
+                  }).then((deferred) => {
+                    if (deferred && attempt < 3) {
+                      scheduleRetention(attempt + 1);
+                    }
+                  });
+                }
+              },
+              attempt === 0 ? 2000 : 5000
+            ).unref();
+          };
           let nativeExitCode: string | undefined;
           let nativeProcessRefusals:
             | readonly NativeProcessRefusal[]
@@ -3076,6 +3544,179 @@ async function startNativeProjectAttempt(
           );
           const servicesRequestedAt = performance.now();
           let stopWatching: (() => Promise<void>) | undefined;
+          // `hack up` returns at started unless `--wait`; see `waitForReady`.
+          const returnAtStarted = opts.waitForReady !== true;
+          // The run mapping is saved once every service has started, in both
+          // modes and before the HTTPS lease or anything else acts on the
+          // owner's line, so `down` and recovery find a run killed in the
+          // window. It is an ownership mapping, not a readiness signal.
+          let mapped:
+            | {
+                readonly readyMapping: NativeProjectRun;
+                readonly persistedMapping: NativeProjectRun;
+                readonly inspected: unknown;
+              }
+            | undefined;
+          const ensureMapping = async () => {
+            if (mapped) {
+              return mapped;
+            }
+            // The owner holds the provider lease until its ready line, so the
+            // mapping is read lease-free; `graph inspect` would be refused.
+            const inspected = await observeStartingNativeProjectGraph({
+              runtime: opts.runtime,
+              projectRoot: opts.scope.projectRoot,
+              run,
+              invoke: deps.invoke,
+              signal: controller.signal,
+            });
+            const readyMapping = authoritative(
+              inspected,
+              run,
+              review.namespace,
+              restore?.planId ?? review.planId
+            );
+            if (controller.signal.aborted) {
+              throw new ClosedCliError(
+                "Native startup canceled before mapping publication."
+              );
+            }
+            const persistedMapping = selectedMapping({
+              ready: readyMapping,
+              effectiveEnvName: input.effectiveEnvName,
+              profiles,
+              aws: selection.aws,
+              gcloud: selection.gcloud,
+              runtimeMetadata: metadata !== undefined,
+              environmentMarkers,
+            });
+            // This frontend's lifetime is registered before the mapping becomes
+            // selectable, so `down` and recovery always find both. An HTTPS lease
+            // is added to the same lifetime (same attempt) when its intent lands.
+            finalization ??= await deps.finalization({
+              scope: opts.scope,
+              run: persistedMapping,
+              httpsPort: null,
+            });
+            mappingAttempted = true;
+            await deps.save({
+              ...opts.scope,
+              run: persistedMapping,
+              expected: expectedMapping,
+            });
+            mapping = persistedMapping;
+            mapped = { readyMapping, persistedMapping, inspected };
+            return mapped;
+          };
+          // Takes the HTTPS lease on the lifetime registered before the mapping.
+          const acquireHttps = async (
+            readyMapping: NativeProjectRun,
+            persistedMapping: NativeProjectRun
+          ) => {
+            // Enrollment must exist before taking a shared lease: release
+            // requires independent proof of this exact graph's cleanup.
+            if (opts.https && routes.services.size > 0) {
+              https = await acquireReadyHttps({
+                runtime: opts.runtime,
+                selection: opts.https,
+                run: readyMapping,
+                signal: controller.signal,
+                invoke: deps.invoke,
+                acquire: deps.https,
+                attempt: finalization?.token.attempt,
+                onIntent: async (identity) => {
+                  finalization = await deps.finalization({
+                    scope: opts.scope,
+                    run: persistedMapping,
+                    httpsPort: opts.https?.httpsPort ?? null,
+                    httpsLease: identity,
+                  });
+                  httpsIntent = identity;
+                },
+              }).catch((error: unknown) => {
+                httpsAcquisitionFailure = error;
+                throw error;
+              });
+              void https.exited.then(() => {
+                if (!httpsClosing) {
+                  httpsFailure = new ClosedCliError(
+                    "Native HTTPS owner exited unexpectedly; graph shutdown requested."
+                  );
+                  controller.abort();
+                }
+              });
+            }
+            // Injectable frontends may return a lease without publishing intent;
+            // production publishes this marker before sending its acquire frame.
+            // Either way the lifetime registered before the mapping carries the
+            // lease from here on (same attempt).
+            if (https && finalization?.token.version !== 3) {
+              finalization = await deps.finalization({
+                scope: opts.scope,
+                run: persistedMapping,
+                httpsPort: opts.https?.httpsPort,
+                httpsLease: https.identity,
+              });
+            }
+          };
+          const reclaim = () => {
+            // Ready build bases are retained, and superseded build images go,
+            // once the new ones run; neither fails or delays the start
+            // (HACK-2533). Both need the provider lease, so a started return
+            // runs them at the owner's ready line.
+            if (
+              built.size > 0 &&
+              opts.imageTagMode !== "offline" &&
+              process.env.HACK_NATIVE_BUILD_RETENTION !== "0"
+            ) {
+              scheduleRetention(0);
+            }
+            void reclaimNativeBuildImagesAfterRebuild({
+              rebuilt,
+              runtime: opts.runtime,
+              projectRoot: opts.scope.projectRoot,
+              invoke: deps.invoke,
+            });
+          };
+          // After a started return: the owner reported every goal met and
+          // released the provider lease, so HTTPS is taken now, the routes are
+          // checked and the run is reported ready.
+          const allReady = async () => {
+            if (mapped) {
+              try {
+                await acquireHttps(
+                  mapped.readyMapping,
+                  mapped.persistedMapping
+                );
+              } catch (error) {
+                httpsFailure =
+                  error instanceof Error
+                    ? error
+                    : new ClosedCliError(
+                        "Native HTTPS lease acquisition failed."
+                      );
+                controller.abort();
+                return;
+              }
+            }
+            reclaim();
+            try {
+              await verifyHttpsRoutes(
+                https,
+                review.report.plan,
+                routes.services
+              );
+              progress({
+                phase: "all-ready",
+                elapsedMs: performance.now() - servicesRequestedAt,
+              });
+            } catch (error) {
+              progress({
+                phase: "routes-not-answering",
+                detail: error instanceof Error ? error.message : String(error),
+              });
+            }
+          };
           // The runtime removes a failed start's containers before it returns:
           // keep the graph's status as it stands while the start waits.
           const startupStatus = watchNativeStartupStatus({
@@ -3086,7 +3727,13 @@ async function startNativeProjectAttempt(
             invoke: deps.invoke,
           });
           try {
+            await startupObservation.select({
+              run,
+              namespace: review.namespace,
+              planId: restore?.planId ?? review.planId,
+            });
             servicesRequested = true;
+            reviewTiming?.();
             code = await deps.serve({
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
@@ -3113,6 +3760,11 @@ async function startNativeProjectAttempt(
               privateInput: delivery.payload,
               startupTimeoutMs:
                 budgetSeconds * 1000 + NATIVE_START_FRONTEND_SLACK_MS,
+              returnAtStarted,
+              // The owner's ready line after a started return: routes answer now.
+              onAllReady: () => {
+                void allReady();
+              },
               signal: controller.signal,
               // Down hooks run on the first stop request of a ready graph.
               ...stop?.serve,
@@ -3131,97 +3783,33 @@ async function startNativeProjectAttempt(
                   managedFiles: input.managedFiles,
                 });
               },
+              // Under --wait: every service started, so the mapping is saved now.
+              onStarted: async () => {
+                await ensureMapping();
+              },
               onReady: async () => {
+                const finalizeTiming = beginUpTiming("cli.readiness.finalize");
                 // Ready: the startup view is no longer needed.
                 void startupStatus.stop();
-                const readyMapping = authoritative(
-                  await invokeInspect(),
-                  run,
-                  review.namespace,
-                  restore?.planId ?? review.planId
-                );
-                if (controller.signal.aborted) {
-                  throw new ClosedCliError(
-                    "Native startup canceled before mapping publication."
-                  );
+                const { readyMapping, persistedMapping } =
+                  await ensureMapping();
+                // The HTTPS owner admits a lease only under the provider lease, for a
+                // ready graph: a started return takes it at the owner's ready line.
+                if (!returnAtStarted) {
+                  await acquireHttps(readyMapping, persistedMapping);
                 }
-                const persistedMapping = selectedMapping({
-                  ready: readyMapping,
-                  effectiveEnvName: input.effectiveEnvName,
-                  profiles,
-                  aws: selection.aws,
-                  gcloud: selection.gcloud,
-                  runtimeMetadata: metadata !== undefined,
-                  environmentMarkers,
-                });
-                // Enrollment must exist before taking a shared lease: release
-                // requires independent proof of this exact graph's cleanup.
-                if (opts.https && routes.services.size > 0) {
-                  https = await acquireReadyHttps({
-                    runtime: opts.runtime,
-                    selection: opts.https,
-                    run: readyMapping,
-                    signal: controller.signal,
-                    invoke: deps.invoke,
-                    acquire: deps.https,
-                    onIntent: async (identity) => {
-                      finalization = await deps.finalization({
-                        scope: opts.scope,
-                        run: persistedMapping,
-                        httpsPort: opts.https?.httpsPort ?? null,
-                        httpsLease: identity,
-                      });
-                      httpsIntent = identity;
-                      // This is an ownership mapping, not a readiness signal.
-                      // Recovery must be able to select the run after a lost reply.
-                      mappingAttempted = true;
-                      await deps.save({
-                        ...opts.scope,
-                        run: persistedMapping,
-                        expected: expectedMapping,
-                      });
-                      mapping = persistedMapping;
-                    },
-                  }).catch((error: unknown) => {
-                    httpsAcquisitionFailure = error;
-                    throw error;
-                  });
-                  void https.exited.then(() => {
-                    if (!httpsClosing) {
-                      httpsFailure = new ClosedCliError(
-                        "Native HTTPS owner exited unexpectedly; graph shutdown requested."
-                      );
-                      controller.abort();
-                    }
-                  });
-                }
-                // Injectable frontends may return a lease without publishing intent;
-                // production publishes this marker before sending its acquire frame.
-                finalization ??= await deps.finalization({
-                  scope: opts.scope,
-                  run: persistedMapping,
-                  httpsPort: https ? opts.https?.httpsPort : null,
-                  httpsLease: https?.identity,
-                });
                 // The registered lifetime now describes this startup.
                 await admission?.retire();
                 requireActiveStartup(controller.signal);
-                await verifyHttpsRoutes(
-                  https,
-                  review.report.plan,
-                  routes.services
-                );
+                if (!returnAtStarted) {
+                  await verifyHttpsRoutes(
+                    https,
+                    review.report.plan,
+                    routes.services
+                  );
+                }
                 if (httpsFailure) {
                   throw httpsFailure;
-                }
-                if (!mapping) {
-                  mappingAttempted = true;
-                  await deps.save({
-                    ...opts.scope,
-                    run: persistedMapping,
-                    expected: expectedMapping,
-                  });
-                  mapping = persistedMapping;
                 }
                 if (selectedEnvironment) {
                   await opts
@@ -3233,6 +3821,7 @@ async function startNativeProjectAttempt(
                 }
                 await hooks?.ready?.(controller.signal);
                 requireActiveStartup(controller.signal);
+                await startupObservation();
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -3250,8 +3839,18 @@ async function startNativeProjectAttempt(
                 await stop?.owe(() => controller.signal.aborted);
                 requireActiveStartup(controller.signal);
                 const httpsPort = servedHttpsPort(https, opts.https);
+                finalizeTiming?.();
                 await opts.onReady?.(
-                  readyServiceSummary(readinessArgs),
+                  returnAtStarted
+                    ? startedEnvelope(
+                        startedServiceSummary(readinessArgs, mapped?.inspected),
+                        routes.services
+                      )
+                    : {
+                        ...readyServiceSummary(readinessArgs),
+                        readiness: "ready",
+                        warming: [],
+                      },
                   httpsPort === null
                     ? []
                     : nativeReadyRouteHosts({
@@ -3261,28 +3860,38 @@ async function startNativeProjectAttempt(
                         nativeReadyRouteUrls(hosts, httpsPort)
                       )
                 );
-                progress(
-                  readyProgress({
+                progress({
+                  ...readyProgress({
                     services,
                     run,
                     plan: review.report.plan,
                     routed: routes.services,
                     httpsPort,
-                  })
-                );
-                // Superseded build images go once the new ones run; this never
-                // fails or delays the start (HACK-2533).
-                void reclaimNativeBuildImagesAfterRebuild({
-                  rebuilt,
-                  runtime: opts.runtime,
-                  projectRoot: opts.scope.projectRoot,
-                  invoke: deps.invoke,
+                  }),
+                  ...(returnAtStarted ? { phase: "started" as const } : {}),
                 });
+                if (!returnAtStarted) {
+                  reclaim();
+                }
               },
             });
+            // A failure after a started return ends the foreground as a start
+            // failure does: its log tails and a nonzero exit, not a quiet stop.
+            if (
+              returnAtStarted &&
+              !controller.signal.aborted &&
+              (code !== 0 || nativeExitCode !== undefined)
+            ) {
+              serveFailure = new NativeRuntimeRequestError({
+                message: `Native graph startup failed (${nativeExitCode ?? "graph_failed_after_started"}); inspect owned state before retrying.`,
+                nativeCode: nativeExitCode,
+              });
+            }
           } catch (error) {
             serveFailure = error;
           } finally {
+            retention.abort();
+            clearTimeout(retentionTimer);
             await startupStatus.stop();
             delivery.payload?.fill(0);
             await stopWatching?.();
@@ -3440,6 +4049,53 @@ async function startNativeProjectAttempt(
     }
   }
 }
+async function retainReadyBuildBases(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly run: string;
+  readonly signal: AbortSignal;
+  readonly runtime: NativeRuntimeSelection;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<boolean> {
+  try {
+    const result = await opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.scope.projectRoot,
+      args: [
+        "runtime",
+        "retain-build-bases",
+        "--json",
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: NATIVE_BUILD_RETENTION_TIMEOUT_MS,
+      signal: opts.signal,
+    });
+    if (
+      isRecord(result) &&
+      Array.isArray(result.failures) &&
+      result.failures.length === 0
+    ) {
+      return result.deferred === true;
+    }
+  } catch {
+    // Maintenance failures are private lifecycle notes.
+  }
+  if (opts.signal.aborted) {
+    return false;
+  }
+  await appendLifecycleLogRecord({
+    projectDir: opts.scope.projectDir,
+    composeProject: opts.run,
+    record: {
+      timestamp: new Date().toISOString(),
+      service: "build-base-retention",
+      stream: "meta",
+      message:
+        "Background build base retention failed. The startup result is unaffected.",
+    },
+  }).catch(() => undefined);
+  return false;
+}
+
 /** A failed stop hook replaces the interrupted status, never a startup error. */
 function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   if (failure !== undefined && !failed) {
@@ -3472,13 +4128,17 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
+  // Ready and not stopping: the start has nothing left to finish on its own.
+  let serving = false;
   // A detached start whose pool boot has ended releases its marker and exits,
   // as a crash would, so the next up or down --recover need not wait for it
-  // (HACK-2550). A foreground start stays with the user's terminal.
+  // (HACK-2550). A ready one exits at once, a start still in progress after the
+  // grace. A foreground start stays with the user's terminal.
   const stopPoolWatch =
     (opts.watchPool ?? isNativeDetachedOwnerProcess())
       ? watchNativeStartPool({
           home: opts.runtime.home,
+          graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
           onEnded: async () => {
             await finish?.();
             (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
@@ -3486,9 +4146,28 @@ export async function startNativeProject(
         })
       : undefined;
   try {
-    return await startNativeProjectAttempt(opts, async () => {
-      finish = await beginNativeProjectStartupObservation(opts.scope);
-    });
+    return await startNativeProjectAttempt(
+      {
+        ...opts,
+        onProgress: (event) => {
+          // A started return has released its launcher and saved its mapping:
+          // like a ready one, it has nothing left to finish on its own.
+          if (event.phase === "ready" || event.phase === "started") {
+            serving = true;
+          } else if (event.phase === "stopping" || event.phase === "stopped") {
+            serving = false;
+          }
+          opts.onProgress?.(event);
+        },
+      },
+      async () => {
+        const observation = await beginNativeProjectStartupObservation(
+          opts.scope
+        );
+        finish = observation;
+        return observation;
+      }
+    );
   } catch (error) {
     throw withStartupLockBlocker(error);
   } finally {

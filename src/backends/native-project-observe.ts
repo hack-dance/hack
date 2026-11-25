@@ -21,8 +21,10 @@ import {
 import {
   loadNativeProjectRun,
   loadNativeRestartIntent,
+  loadNativeStartupRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  type NativeStartupRun,
   nativeProjectStartupPending,
 } from "./native-project-run.ts";
 import {
@@ -45,6 +47,7 @@ type Item = {
   readiness?: "started" | "healthy" | "completed";
 };
 type Options = {
+  readonly signal?: AbortSignal;
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly invoke?: typeof invokeNativeRuntime;
@@ -86,18 +89,26 @@ export type NativeProjectPsResult = {
   readonly status: NativeProjectPsStatus;
   readonly run: string | null;
   readonly phase: string | null;
+  /**
+   * A live run in one field: `warming` (every container started, the owner has
+   * not reported every goal met yet) or `ready`. Absent when there is no live run.
+   */
+  readonly readiness?: "warming" | "ready";
   readonly items: Item[];
   readonly ports?: NativePublishedPort[];
+  /** The last start failed after `up` returned; see {@link NativeFailureAfterStarted}. */
+  readonly failure?: NativeFailureAfterStarted;
 };
 function inspected(
   value: unknown,
-  expected: NativeProjectRun,
+  expected: NativeStartupRun & { readonly owner?: string },
   includeReadiness = false
 ): {
   items: Item[];
   phase: string;
   foreground: boolean;
   ports: NativePublishedPort[];
+  failure?: NativeFailureAfterStarted;
 } {
   if (
     !(
@@ -112,7 +123,7 @@ function inspected(
   const receipt = value.receipt;
   if (
     receipt.run !== expected.run ||
-    receipt.owner !== expected.owner ||
+    (expected.owner !== undefined && receipt.owner !== expected.owner) ||
     receipt.namespace !== expected.namespace ||
     receipt.plan_id !== expected.planId ||
     typeof receipt.phase !== "string" ||
@@ -145,12 +156,61 @@ function inspected(
   if (items.length > 32) {
     throw refused();
   }
+  const observedPorts = Array.isArray(value.startup_observed_ports)
+    ? new Set(value.startup_observed_ports)
+    : new Set();
   return {
     items,
-    ports: nativeDeclaredPorts(receipt.resources),
+    ports: nativeDeclaredPorts(receipt.resources).map((port) =>
+      observedPorts.has(port.port) &&
+      items.some(
+        (item) => item.service === port.service && item.state === "running"
+      )
+        ? { ...port, state: "observed" }
+        : port
+    ),
     phase: receipt.phase,
     foreground:
       receipt.relay_startup !== null && receipt.relay_startup !== undefined,
+    // Its own file next to the receipt, reported beside it by `graph status`.
+    ...failureAfterStarted(value.failed_after_started),
+  };
+}
+
+/**
+ * A run that failed after `up` returned at started (value-free: a closed code,
+ * the service when known, and when). Kept in its own file next to the receipt,
+ * outside the strict receipt, until `hack down` or the next start.
+ */
+export type NativeFailureAfterStarted = {
+  readonly code: string;
+  readonly service?: string;
+  /** Unix seconds. */
+  readonly at: number;
+};
+const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+function failureAfterStarted(
+  value: unknown
+): { failure: NativeFailureAfterStarted } | Record<string, never> {
+  if (
+    !(
+      isRecord(value) &&
+      typeof value.code === "string" &&
+      FAILURE_CODE.test(value.code) &&
+      Number.isSafeInteger(value.at) &&
+      (value.service === undefined ||
+        value.service === null ||
+        (typeof value.service === "string" && SERVICE.test(value.service)))
+    )
+  ) {
+    return {};
+  }
+  return {
+    failure: {
+      code: value.code,
+      ...(typeof value.service === "string" ? { service: value.service } : {}),
+      at: value.at as number,
+    },
   };
 }
 function containerItem(
@@ -182,7 +242,7 @@ function containerItem(
 /** Presentation is lease-free; finite log inspection keeps its bounded lease retry. */
 async function inspect(
   opts: Options,
-  run: NativeProjectRun,
+  run: NativeStartupRun & { readonly owner?: string },
   statusOnly = false
 ) {
   return inspected(
@@ -192,6 +252,7 @@ async function inspect(
           cwd: opts.scope.projectRoot,
           args: ["graph", "status", "--run-id", run.run, "--json"],
           timeoutMs: 30_000,
+          signal: opts.signal,
         })
       : await inspectNativeProjectGraph({
           runtime: opts.runtime,
@@ -297,6 +358,10 @@ function ownerJournalChanged(owner: unknown): boolean {
 export async function nativeProjectPs(
   opts: Options
 ): Promise<NativeProjectPsResult> {
+  const early = await nativeStartupProjectPs(opts);
+  if (early) {
+    return early;
+  }
   const run = await loadNativeProjectRun(opts.scope);
   if (!run) {
     return {
@@ -318,6 +383,8 @@ export async function nativeProjectPs(
   let status: "observed" | "owner_unconfirmed" | "runtime_degraded" =
     "observed";
   let ports = snapshot.ports;
+  // Only a ready run is cross-checked with its owner. A warming run
+  // (`started-observed`) is never asked: its owner is still in its start loop.
   if (snapshot.foreground && snapshot.phase === "ready-observed") {
     try {
       const owner = await (opts.invoke ?? invokeNativeRuntime)({
@@ -325,6 +392,7 @@ export async function nativeProjectPs(
         cwd: opts.scope.projectRoot,
         args: ["graph", "owner-status", "--run-id", run.run, "--json"],
         timeoutMs: 15_000,
+        signal: opts.signal,
       });
       if (ownerJournalChanged(owner)) {
         return {
@@ -356,14 +424,55 @@ export async function nativeProjectPs(
       status = "owner_unconfirmed";
     }
   }
+  const readiness = liveReadiness(snapshot.phase);
   return {
     backend: "native",
     status,
     run: run.run,
     items: snapshot.items,
     phase: snapshot.phase,
+    ...(readiness ? { readiness } : {}),
+    ...(snapshot.failure ? { failure: snapshot.failure } : {}),
     ...(ports.length ? { ports } : {}),
   };
+}
+
+function liveReadiness(phase: string): "warming" | "ready" | undefined {
+  if (phase === "started-observed") {
+    return "warming";
+  }
+  return phase === "ready-observed" ? "ready" : undefined;
+}
+
+export async function nativeStartupProjectPs(
+  opts: Options
+): Promise<NativeProjectPsResult | null> {
+  const startup = await loadNativeStartupRun(opts.scope);
+  if (!startup) {
+    return null;
+  }
+  try {
+    const snapshot = await inspect(opts, startup, true);
+    if (
+      !(
+        snapshot.foreground &&
+        ["preparing", "restoring", "started-observed"].includes(snapshot.phase)
+      )
+    ) {
+      return null;
+    }
+    return {
+      backend: "native",
+      status: "observed",
+      run: startup.run,
+      phase: snapshot.phase,
+      items: snapshot.items,
+      ports: snapshot.ports.filter((port) => port.state === "observed"),
+    };
+  } catch {
+    // An advisory marker can predate native enrollment or race with teardown.
+    return null;
+  }
 }
 /** Read only the saved mapping, then let the lease-free runtime select its exact container. */
 export async function followNativeProjectLogs(
@@ -445,7 +554,7 @@ export async function nativeProjectLogs(
     opts.service,
     service.container
   );
-  const after = await inspect(opts, run);
+  const after = await inspect(opts, run, true);
   if (
     after.items.find((item) => item.service === opts.service)?.container !==
     service.container
@@ -490,7 +599,7 @@ export async function nativeProjectAllLogs(
       ...(await readServiceLogs(opts, run, item.service, item.container)),
     });
   }
-  const after = await inspect(opts, run);
+  const after = await inspect(opts, run, true);
   for (const entry of services) {
     if (
       after.items.find((item) => item.service === entry.service)?.container !==
@@ -550,7 +659,8 @@ async function requireLogRun(opts: Options): Promise<NativeProjectRun> {
 
 async function inspectForLogs(opts: Options, run: NativeProjectRun) {
   try {
-    return await inspect(opts, run);
+    // Lease-free: a warming run's owner holds the lease until ready.
+    return await inspect(opts, run, true);
   } catch (error: unknown) {
     throw isNativeRuntimeNotRunning(error) ? runtimeNotRunning() : error;
   }

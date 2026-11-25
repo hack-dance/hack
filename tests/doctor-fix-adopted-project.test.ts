@@ -11,6 +11,7 @@ import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { ownedFixtureCommand } from "./helpers/owned-fixture.ts";
 import {
   leaveRetainedSourceBindOperationPending,
   retainedSourceBindFixture,
@@ -172,9 +173,12 @@ afterAll(() => {
 });
 
 function git(args: readonly string[]): string {
-  const result = Bun.spawnSync(["/usr/bin/git", "-C", h.root, ...args], {
-    env: gitEnv(),
-  });
+  const result = Bun.spawnSync(
+    ownedFixtureCommand(["/usr/bin/git", "-C", h.root, ...args]),
+    {
+      env: gitEnv(),
+    }
+  );
   if (result.exitCode !== 0) {
     throw new Error(`git ${args[0]} failed in the fixture; output omitted.`);
   }

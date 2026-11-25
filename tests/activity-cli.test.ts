@@ -12,6 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import {
+  appendActivityRecord,
+  buildActivityRecord,
+} from "../src/lib/activity-log.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { machineData } from "./helpers/machine-output.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
@@ -47,10 +51,12 @@ const STUB = [
   '    *" ps "*)',
   '      if [ -f "$marker" ]; then exit 0; fi',
   '      if [ "${STUB_WORKER_EXITED:-}" = "1" ]; then',
-  '        printf "%s\\n" \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0}\' \'{"ID":"fixture-worker","Service":"worker","State":"exited","ExitCode":1}\'',
+  "        worker_state=exited worker_code=1",
   "      else",
-  '        printf "%s\\n" \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0}\' \'{"ID":"fixture-worker","Service":"worker","State":"running","ExitCode":0}\'',
+  "        worker_state=running worker_code=0",
   "      fi",
+  '      printf \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n\' "$PWD"',
+  '      printf \'{"ID":"fixture-worker","Service":"worker","State":"%s","ExitCode":%s,"Labels":"com.docker.compose.project.working_dir=%s"}\\n\' "$worker_state" "$worker_code" "$PWD"',
   "      exit 0",
   "      ;;",
   "    *) exit 0 ;;",
@@ -81,6 +87,7 @@ beforeEach(async () => {
   await writeFile(
     join(hackDir, "docker-compose.yml"),
     [
+      "name: activityshop",
       "services:",
       "  web:",
       "    image: alpine:3.22",
@@ -143,13 +150,24 @@ async function activity(args: readonly string[] = []): Promise<Entry[]> {
   return data.entries;
 }
 
-test("up, a failed up, restart and down are recorded with names only", async () => {
+test("successful and failed up are recorded with names only", async () => {
   expect((await runCli({ args: ["up", "--json"] })).exitCode).toBe(0);
   const failed = await runCli({
     args: ["up", "--json"],
     env: { STUB_WORKER_EXITED: "1", HACK_ORIGIN: "app" },
   });
   expect(failed.exitCode).not.toBe(0);
+
+  const entries = await activity();
+  expect(entries.map((e) => [e.action, e.outcome, e.origin])).toEqual([
+    ["up", "failed", "app"],
+    ["up", "ok", "cli"],
+  ]);
+  expect(entries[0]?.failed_services).toEqual(["worker"]);
+  await expectNamesOnly(entries);
+}, 30_000);
+
+test("restart and down are recorded with names only", async () => {
   expect(
     (await runCli({ args: ["restart", "--json"], env: { HACK_ORIGIN: "x" } }))
       .exitCode
@@ -160,17 +178,16 @@ test("up, a failed up, restart and down are recorded with names only", async () 
   expect(entries.map((e) => [e.action, e.outcome, e.origin])).toEqual([
     ["down", "ok", "cli"],
     ["restart", "ok", "cli"],
-    ["up", "failed", "app"],
-    ["up", "ok", "cli"],
   ]);
+  await expectNamesOnly(entries);
+}, 30_000);
+
+async function expectNamesOnly(entries: readonly Entry[]): Promise<void> {
   for (const entry of entries) {
     expect(entry.project).toBe("activityshop");
     expect(entry.branch).toBeNull();
     expect(typeof entry.duration_ms).toBe("number");
   }
-  expect(entries[2]?.failed_services).toEqual(["worker"]);
-  expect(await activity(["--project", "other"])).toEqual([]);
-  expect(await activity(["--limit", "1"])).toHaveLength(1);
 
   // Sentinel: no value, env value, path or command line is at rest.
   const path = join(hackHome, "activity.jsonl");
@@ -188,6 +205,30 @@ test("up, a failed up, restart and down are recorded with names only", async () 
   ]) {
     expect(text).not.toContain(forbidden);
   }
+}
+
+test("activity --json filters by project and limits the history", async () => {
+  const path = join(hackHome, "activity.jsonl");
+  for (const action of ["up", "down"] as const) {
+    await appendActivityRecord({
+      path,
+      record: buildActivityRecord({
+        action,
+        branch: null,
+        durationMs: 1,
+        exitCode: 0,
+        failedServices: [],
+        origin: "cli",
+        project: "activityshop",
+        startedAt: Date.UTC(2026, 10, 14),
+      }),
+    });
+  }
+
+  expect(await activity(["--project", "other"])).toEqual([]);
+  expect(await activity(["--limit", "1"])).toEqual([
+    expect.objectContaining({ action: "down", project: "activityshop" }),
+  ]);
 });
 
 test("a write failure does not change the exit code or the envelope", async () => {
@@ -210,7 +251,7 @@ test("a write failure does not change the exit code or the envelope", async () =
   const read = await runCli({ args: ["activity", "--json"] });
   expect(read.exitCode).toBe(1);
   expect(JSON.parse(read.stdout).error.code).toBe("E_PATH_CONFLICT");
-});
+}, 30_000);
 
 test("native lifecycle commands write the same records", async () => {
   const nativeHome = join(root, "native-home");

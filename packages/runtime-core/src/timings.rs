@@ -22,10 +22,18 @@ steps! {
     ProcessStartup => "process.startup",
     ProjectStatus => "project.status", PlanCompile => "plan.compile",
     RuntimeRequest => "runtime.request", RuntimeDispatch => "runtime.dispatch",
+    VmAdmissionWait => "vm.admission.wait", VmStartupLease => "vm.startup.lease",
+    VmReleaseVerify => "vm.release.verify",
     VmEnsure => "vm.ensure", VmReattach => "vm.reattach", VmBoot => "vm.boot", VmStop => "vm.stop",
     StartObserve => "start.observe", StartDecide => "start.decide", StartWaveRecord => "start.wave.record",
     ContainerCreate => "container.create", ContainerRemove => "container.remove",
     ContainerReady => "container.ready", ContainerPublish => "container.publish", SpecDigest => "spec.digest",
+    GraphOwnerInput => "graph.owner.input", GraphOwnerConfigure => "graph.owner.configure",
+    GraphOwnerStartup => "graph.owner.startup", GraphReadyCommit => "graph.ready.commit",
+    GraphPublishSeed => "graph.publish.seed", GraphPublishReserve => "graph.publish.reserve",
+    GraphPublishRelays => "graph.publish.relays", GraphPublishAwait => "graph.publish.await",
+    ContainersStarted => "containers.started", ServicesReady => "services.ready",
+    EnvStage => "env.stage",
     ContainerStart => "container.start", ContainerStop => "container.stop",
     ContainerExec => "container.exec", ContainerRun => "container.run", ContainerInspect => "container.inspect",
     ImageEnsure => "image.ensure", ImageCache => "image.cache", ImageTagRecord => "image.tag.record",
@@ -111,7 +119,7 @@ macro_rules! attributes {
     };
 }
 attributes! {
-    service_index:u64, attempt:u64, registry_requests:u64, engine_requests:u64, dropped:u64,
+    service_index:u64, image_index:u64, attempt:u64, registry_requests:u64, engine_requests:u64, dropped:u64,
     services:u64, wave:u64, syncs:u64, waited_on_index:u64, generation:u64,
     waited_on_cap:bool, blocked:bool, service_index_stable:bool, anchor_fresh:bool,
     admission_reused:bool,

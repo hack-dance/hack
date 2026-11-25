@@ -1,5 +1,11 @@
 # Desktop process tests
 
+Build the Ghostty drawer and capture its command states in both appearances
+with `bash scripts/build.sh --features screenshots` and
+`target/debug/hack-desktop --command-screenshots <directory>`. The captures
+run harmless fixture processes through real PTYs, including an echo-disabled
+password prompt. They never run the production commands shown in their labels.
+
 Run `bash scripts/test.sh` from `apps/desktop`. It checks the exact nextest pin
 from the repository installer, runs the workspace tests in separate processes
 with zero retries, then runs doctests. Each invocation creates and removes its
@@ -7,6 +13,14 @@ own HOME/HACK_HOME. Both desktop CI jobs use this command. To qualify a native
 Mac, run `HACK_DESKTOP_TEST_REPETITIONS=200 bash scripts/test.sh`; preserve the
 complete output and exact commit. Three consecutive green hosted macOS desktop
 jobs are a separate acceptance gate.
+
+## Service Stats screenshots
+
+From `apps/desktop`, run `bash scripts/build.sh --features screenshots`, then
+`target/debug/hack-desktop --fixtures usage --screenshots <directory>`. The
+`usage-*.png` frames show the Services table. The `service-stats-*.png` frames
+show the Stats body with ten minutes of fixture samples fed through the same
+history as live data. The command renders each in light and dark.
 
 The default threaded libtest runner is not the qualification route. Tests can
 write executables and create descriptors concurrently within a single process;
@@ -76,3 +90,8 @@ overall deadline remains; nextest still performs zero retries. The regression
 now uses a nonblocking listener, forces the accepted nonblocking mode on Linux
 too, sends a delayed split request, and checks that the accepted stream was
 normalized back to blocking mode.
+
+The CLI test `bun test --config /dev/null tests/doctor-desktop-check-ids.test.ts`
+checks Doctor IDs on every PR, including CLI-only changes. Classify a new ID in
+`apps/desktop/core/src/doctor.rs` when adding its CLI check metadata. The Rust
+core tests cover the area and scope used to display the resulting findings.

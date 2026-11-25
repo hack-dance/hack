@@ -65,8 +65,21 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
     kind: "envelope",
     argv: ["usage", "--by-service", "-p", "DIR", "--json"],
   },
+  use: { kind: "line", argv: ["use", "-p", "DIR"] },
   run: { kind: "line", argv: ["run", "-p", "DIR", "web", "true"] },
   exec: { kind: "line", argv: ["exec", "-p", "DIR", "web", "true"] },
+  "files ls": {
+    kind: "envelope",
+    argv: ["files", "ls", "-p", "DIR", "--json", "web", "."],
+  },
+  "files cat": {
+    kind: "envelope",
+    argv: ["files", "cat", "-p", "DIR", "--json", "web", "/app/example.txt"],
+  },
+  "service add": {
+    kind: "envelope",
+    argv: ["service", "add", "redis", "--path", "DIR", "--json"],
+  },
   "commands read": {
     kind: "envelope",
     argv: [

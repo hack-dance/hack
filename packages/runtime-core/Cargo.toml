@@ -7,6 +7,7 @@ publish = false
 description = "Private Hack v5 candidate runtime contracts and local planning"
 
 [features]
+guest-agent-client = ["dep:hack-vm-protocol"]
 native-config-plan = ["dep:hack-config-compiler"]
 installed-candidate = []
 environment-launcher = []
@@ -96,3 +97,7 @@ required-features = ["shared-mcp"]
 name = "hack-storage-root-witness"
 path = "src/bin/hack-storage-root-witness.rs"
 required-features = ["storage-root-witness-tool"]
+
+[dependencies.hack-vm-protocol]
+path = "../hack-vm-protocol"
+optional = true

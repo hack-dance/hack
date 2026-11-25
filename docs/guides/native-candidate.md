@@ -126,16 +126,22 @@ the installed stable executable.
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
 worktree when its exact source root can be shared with a fresh or matching pool.
 The runtime checks source compatibility before startup hooks; `restart` repeats
-this check before stopping the existing graph. A root that a running pool does not
-already share is refused, because a running VM's mounts never change. Stop the pool
-and run `up` again: the root joins at the next boot. Projects and worktrees the pool was started with can run together; see
+this check before stopping the existing graph. A running VM's mounts never change, so
+a root that a running pool does not already share needs a restart of the pool. When
+nothing uses the pool live, `up` restarts it for the root and prints one line saying
+so. Otherwise it refuses: stop the projects that use the pool (`down` in
+each) and run `up` again. Projects and worktrees the pool was started with can run together; see
 [one pool, several project roots](#explicit-writable-development-source).
 
 Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
 An exact repository at `$HOME/.codex/worktrees/<id>/<repo>` is allowed only when
 bounded Git registration metadata verifies its worktree root, common directory and
 backlink. The enclosing Codex directories are never exported. Sensitive ancestors,
-aliases and unsafe ownership or permissions remain refused.
+aliases and unsafe ownership or permissions remain refused. Git can create
+group-writable worktree directories and registration files under umask `002`.
+Create a worktree intended for sharing with umask `022` or stricter, and ensure
+its existing registration directories and metadata are also free of group and
+other write permissions.
 
 The internal planning path accepts a canonical lowercase DNS-label `--branch`.
 It gives each checkout/branch pair a separate enrollment and source namespace;
@@ -503,11 +509,14 @@ With it:
   an unchanged context is not read again. The cache misses only a change that keeps the
   size, inode, modification time and change time identical, which needs a deliberate
   clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
-- Only those inputs count. A changed network response (a download in a `RUN` step),
-  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
-  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
-  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
-  `hack restart` to build every image again; base-image tags then resolve again too.
+- A changed network response in a `RUN` step or changed cache mount contents do
+  not trigger a rebuild. Native checks base-image tags according to the image tag
+  policy and rebuilds when the selected base digest changes. `hack up --offline`
+  uses locally recorded selections even after they expire. `hack up --refresh-images`
+  checks the registry for current tags. Ordinary expiry is checked after readiness.
+  `HACK_NATIVE_REBUILD=1` forces BuildKit to run with the recorded selection.
+  Cold solves let BuildKit fetch missing bases by digest. Background retention
+  tags a verified local base or downloads and loads it after readiness.
 - When an image is actually built, BuildKit reads a private copy of the included
   context, made and checked against the build key right before it runs, so edits during
   a build never reach the image. The copy keeps hard links as links and gives every
@@ -664,9 +673,51 @@ commands and pipelines. The command keeps the pane's terminal stdin. Failed send
 remove their staged payload; if the pane never executes a successfully sent command,
 the private payload remains until it is consumed or explicitly cleaned up.
 
+### Started and ready
+
+Native `hack up` and `hack restart` return once every container has started,
+by Compose's rule: running, or exited `0` for a job another service waits on, in
+dependency order; `service_healthy` and `service_completed_successfully` edges
+still hold their dependents back. Health checks and route probes keep running
+after that: the run is **warming** until every goal is met and every route
+answers, then **ready**. `--wait` returns at ready, exactly as before, with the
+same lines, exit codes and timeout text.
+
+- **At started:** the run mapping is saved first, then `up.after`, the exit
+  watcher and the down-hook debt; then `up` returns. The HTTPS routes and the
+  removal of superseded build images wait for ready, because the runtime is
+  still busy with the start until then. The closing line
+  counts the routes still warming: `https://web.app.hack  up in 4.6s · native ·
+  2 routes warming`. With `--json`, the result has `readiness: "warming"` (or
+  `"ready"`) and `services.warming`.
+- **`up.after` runs at started,** as with Compose `up -d`. A hook that calls one of
+  the project's URLs needs `hack up --wait`.
+- **While warming:**
+  - `hack ps` shows a service still waiting on its health check as `warming`;
+    `ps --json` has `readiness: "warming"`;
+  - `hack open` opens the route at once, as before; it may not answer until the
+    run is ready;
+  - `hack exec` and one-off `hack run` wait for the whole project to be ready
+    (one line on stderr), then run, so `hack up -d && hack exec api ...` keeps
+    working;
+  - `hack logs SERVICE` without `-f` prints what exists so far, in the same
+    format as for a ready run;
+  - `hack down` stops the run with data retained; the owner accepts the stop
+    between start passes, after any publication in progress has committed or
+    been withdrawn. `hack down --remove-data` waits for ready: stop first, then
+    remove;
+  - `hack restart` stops and starts again; a second `hack up` says the project is
+    already running and names the services still warming.
+- **Scripts:** whether `--json` and `--no-interactive` imply `--wait` is one
+  setting, currently off. Pass `--wait` when a script needs live endpoints.
+- **On the Compose backend,** `hack up -d --wait` passes `--wait` to
+  `docker compose up -d`, which waits for running and healthy services.
+  `--wait` needs `-d` (or `--json`) there, and `hack restart --wait` is native-only.
+
 Native `hack up -d` (also `--detach`, `--json`, or both) starts the existing
-frontend and Rust foreground owners in a background session, returning after
-readiness and up-after hooks. The frontend keeps host lifecycle processes and
+frontend and Rust foreground owners in a background session, returning once
+every container has started and up-after hooks ran (see "Started and ready"
+below); `--wait` returns once every service is ready instead. The frontend keeps host lifecycle processes and
 down hooks alive. From any terminal, use `hack ps`, `hack logs`, `hack exec`,
 `hack restart` or `hack down` through the existing authenticated controls.
 When the project is already up, `hack up -d` starts nothing and succeeds: it
@@ -716,8 +767,10 @@ same incarnation checks and retained-uncertainty limits. No daemon adoption,
 automatic replay, or separate graph supervision tick is introduced.
 
 Foreground image-project `up` prints each startup step (input, runtime, images,
-services) and one ready line, `Project is ready (SERVICES; run RUN)`, after the
-graph is ready and its run mapping is published. Under it, `up` lists each routed
+services) and one started line, `Project started (SERVICES; run RUN)`, once every
+container has started and its run mapping is published, then `All services ready`
+once every goal is met and every route answers. With `--wait` it prints one ready
+line, `Project is ready (SERVICES; run RUN)`, at that point instead. Under it, `up` lists each routed
 service's reviewed hostnames as HTTPS URLs (with the `HACK_NATIVE_HTTPS_PORT`
 port unless it is 443) and the published loopback ports. Without the native
 HTTPS frontend it says that routes are not served on this host. Ctrl-C prints the
@@ -1152,10 +1205,25 @@ that names the owning home and what to do. The refusal has its own code,
 - **Live.** The owning frontend's PID still exists. The refusal names the home and
   PID. Stop it with Ctrl-C in that `hack up`, or run `hack down` with the version
   that owns that home, then retry. Release refuses.
+- **Gone (HACK-2524).** The recorded path no longer holds that home: it is absent,
+  not a directory, or another directory, so its records cannot be read there. An
+  absent path may be a disk that is not mounted: when the missing directory sits
+  directly under `/Volumes`, `/mnt`, `/media` or `/run/media/<user>`, inspection adds
+  `missingVolume` and the refusal says so. Mount it and stop the run there instead;
+  its data is still on that disk.
+  Inspection reports `owner: "gone"` with a `selectionSha256`, and the refusal names
+  the same release command. The release first lists this user's processes. It
+  refuses, naming each PID, while any process names the old home's path in its
+  command line or works inside it. Otherwise it keeps the mapping, its restart intent
+  and its down-hook journal in an audit file (`<scope>.gone-home-release-<sha>.json`;
+  owed hooks are skipped, because their services went with the home) and removes
+  them. A home that was moved rather than deleted, and started again from its new
+  path, has processes that name only the new path, so this check cannot see it;
+  release again from the moved home afterwards.
 - **Interrupted or unproven.** The frontend exited without acknowledging cleanup, or
-  the home has no readable record for the run (for example a legacy mapping, or a
-  home that was moved or replaced). Use the owning version's
-  `hack doctor --native-cleanup inspect` and `hack down`. Release refuses.
+  the home has no readable record for the run (for example a legacy mapping). Use
+  the owning version's `hack doctor --native-cleanup inspect` and `hack down`.
+  Release refuses.
 
 Release proves ownership; it never just overwrites. The stored scope must differ
 from this checkout in its native home only, that home must still be the recorded
@@ -1231,8 +1299,12 @@ Downloads never pass through a shell, proxy configuration, keychain or admin pro
 Networks that require an HTTP proxy must use the offline form below; setup ignores
 proxy environment variables.
 
-Private partial files and verified archives stay under
-`<candidate-home>/.hack-local/setup/downloads`. A rerun resumes a partial download
+Private partial files and verified archives are downloaded under
+`<candidate-home>/.hack-local/setup/downloads`. After durable provider publication,
+online setup removes its two recorded provider downloads, and a later setup retries
+interrupted cleanup. Older or replaced files without matching ownership evidence are
+reported and kept. Offline inputs and provider repair archives are kept.
+A rerun resumes a partial download
 when the server supports ranges, otherwise restarts it. Every complete file is
 hashed before any extraction; a mismatch reports `setup_hash_mismatch` with the
 filename and publishes no provider. A corrupt complete cache file is preserved
@@ -1407,8 +1479,9 @@ tree, stop the runtime and run:
 
 The repair holds the provider lock and requires a stopped (or uninitialized) runtime.
 It requires the preparation record to match this executor's pins and the kept archive
-to be an owned regular file with the pinned SHA-256. It then copies and hashes the
-archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
+to be an owned regular file with the pinned SHA-256. Group- or other-writable
+archives and staging directories are refused. New preparations create both with
+owner-only permissions. The repair then copies and hashes the archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
 tree to match the digest recorded at preparation. Only then does it rename the changed
 tree aside as `providers/<tree>-changed-<id>` and put the fresh tree in its place. It
 keeps the changed tree for inspection and never deletes it; remove it yourself once
@@ -1446,6 +1519,12 @@ and leaves it in place when it is anything else, such as a symlink or a director
 If the prepared tree changes, `runtime probe` and every build
 refuse with `artifact_digest_mismatch`. `runtime probe` reports `builder_prepared`:
 `true` when the client is present and unchanged, `false` for a home without it.
+
+A native start can build distinct images together, including a retained start after edits. The
+four-CPU development pool runs at most three builds at once. Identical build
+requests still share one build. A failure or Ctrl-C requests cancellation of
+the other builds, and the CLI waits for all started builds to settle before
+returning. The foreground labels output by build and reports its elapsed time.
 
 A home without the image builder refuses a build with `builder_not_prepared`:
 "The image builder is not installed in this native home", with the setup command
@@ -1495,11 +1574,14 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the resolved base references that the receipt and the result report. Never pass a
   secret as a build argument. BuildKit build secrets are the right mechanism for
   secrets; native builds do not support them yet.
-- Every build runs under a BuildKit source policy: only the pinned base images
-  resolve as images, and network sources (`ADD` of an `http`, `https` or git URL, and
-  image blob sources) are denied. The engine would otherwise fetch those from outside
-  the isolated build network. The policy also covers sources that a base image's
-  stored `ONBUILD` triggers add; such bases refuse before the build anyway.
+- A fresh recorded base resolution whose verified image is in the guest makes
+  no registry request. An expired resolution checks the registry and can use the
+  proven loaded base if the registry is unavailable. `hack pull` refreshes build
+  bases as well as service images. The build key includes each base digest.
+- BuildKit receives only attempt-owned local references to the verified bases.
+  The source policy denies other image sources and remote `ADD`, git and image
+  blob sources. A private cache tag keeps the base while attempt aliases are
+  removed, including on recovery after an interrupted build.
 - Argument values reach the client only through a private definition file (mode
   `0600`, removed after the build), never its command line or its environment; the
   client's environment is a fixed list of its own settings. Names must be plain
@@ -1525,7 +1607,7 @@ JSON file (a singly linked, mode-`0600` file owned by you):
 - A cold build needs at least 6 GiB free on the runtime's storage disk, or twice the
   last image of the same build if that is larger; otherwise it refuses with
   `native_build_storage` and deletes nothing. After each successful build, BuildKit's
-  cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
+  cache is pruned to 4 GiB. The cache holds only build steps; pruning never removes
   images, containers or volumes.
 
 `runtime reclaim-build-images --json` removes build images that newer builds
@@ -1540,6 +1622,13 @@ it with `--best-effort` once the project is ready: that form never fails, report
 refusal as `skipped`, and never delays or fails the start. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
+
+When explicit reclaim frees at least 256 MiB on the guest storage filesystem,
+it also attempts a discard on `/storage` while holding the same pool lease.
+A confirmed trim adds `trim.guest_bytes_freed` and `trim.seconds` to the JSON.
+The byte count measures guest free space gained during reclaim. Host allocation
+can fall by a different amount. A failed or interrupted trim does not undo
+reclaim. The automatic `--best-effort` path does not trim.
 
 ### Network tool packages
 
@@ -1784,7 +1873,14 @@ once instead of reusing the shared one. Any other edit to another service, such 
 environment value on the app, keeps the cache. An edit to one of those inputs,
 including a lockfile, selects the cache for the new identity as a fresh `up` would, so the initializer installs into it; the old cache
 is shared and is only released by this run. Each such `up` publishes the current
-source snapshot. A retained named volume is never reused as a dependency cache:
+source snapshot. A pool keeps at most 64 dependency cache volumes. When a new one is
+needed at that bound, cache volumes that nothing refers to are deleted, oldest
+created first, to make room (HACK-2576): no graph receipt that is not removed, no native-authored
+receipt and no cache quarantine record names them, and the engine refuses to delete
+one a container still uses. A retained run always finds every cache it recorded.
+Only when every cache is still referred to does `hack up` refuse with
+`graph_cache_capacity`, and it says to remove the data of a project you no longer
+use. A retained named volume is never reused as a dependency cache:
 declaring one refuses and names the service and the `hack.dependencies.cache-volume`
 field. Caches recorded by earlier builds, whose identity also covered the whole
 Compose file, are kept while that file is unchanged and replaced once on the first
@@ -1795,6 +1891,30 @@ hostname change mixed with other edits refuses with `graph_hostname_change` and 
 service name. Every refusal says to revert the edit, or to run
 `hack down --remove-data` and then `hack up`. `hack restart` of a stopped graph
 refuses and points to `hack up`.
+The home's active graph inventory (`run/graphs`) holds at most 64 runs. Removed
+runs used to stay in it until an explicit `graph archive`, which no `hack` command
+ran, so every `down --remove-data` and every failed fresh start used a place for
+good, and the 65th fresh start refused for ever (HACK-2576). Now a start (or a source
+job) that needs a new run and finds the inventory full archives removed runs itself, oldest first, under the
+provider lease it already holds and with the same proof `graph archive` uses (every
+owned resource absent, no pending journal). Runs that keep data are never archived;
+when they alone fill the inventory, `hack up` refuses with `graph_retention_budget`
+and says to remove the data of a project you no longer use. The archive keeps up to
+256 runs; at that bound the oldest archived removed runs are exported (as
+`graph export` does, into the home's `exports/graphs`) and pruned (as `graph prune`
+does), and each keeps a consumed-ID tombstone so its run ID cannot start a fresh run
+again. The store keeps 4096 tombstones; at that bound the oldest tombstones of fully
+pruned runs go. That is safe because a tombstone only refuses a fresh start with
+that ID, the CLI makes every fresh run ID from 128 random bits at the start, and a
+restore needs the run's receipt, which pruning already removed. The export of a
+fully pruned run is diagnostics: it is kept seven days, and at most 256 of them,
+oldest first. An interrupted export or prune is resumed the next time. A removed run
+archived under an earlier guest incarnation is pruned the same way: it holds nothing,
+and its export, which proves every owned resource absent, is the evidence. Only runs
+that cannot be proven removed keep their place; if 256 of those fill the archive,
+`graph_archive_budget` refuses and says to inspect them. A project whose removed
+run was archived this way before its `hack down --remove-data` confirmed the removal
+still confirms it: inspection reads a removed run from the archive.
 For a shared-source graph that reconciliation does not select (live source, a
 carried cache scope, a pending source-device rebind or initializer cache release)
 and that was admitted with a retained compatibility contract, ordinary
@@ -2320,9 +2440,27 @@ pool's primary share. Native `up` in another root adds that root itself when the
 pool is **stopped**, before any lifecycle hook runs, with the same unfiltered-source
 consent the first root gave; the share is mounted at the next boot. The explicit
 form is `runtime project-share add --project-share /absolute/other-project --unfiltered-source --json`.
-A running pool's mounts never change: `up` in a root outside the set refuses before
-hooks and says to stop the projects using the pool (`down` in each), stop the pool
-(`runtime down --json` on the native home), and run `up` again. Remove an additional root (for
+A running pool's mounts never change. When it is **running but idle**, `up` in a root
+outside the set stops it, adds the root as above and boots it again, before any hook
+runs, printing `Restarting the native runtime to add this project's folder.`
+(HACK-2535; `runtime project-share add … --stop-idle-pool --json`). Idle means no
+project run whose receipt is live (running, starting, restoring, stopping, or a failed
+start that kept its services), no pending dead-owner recovery, no open interactive
+session and no image build. The runtime checks this under its provider lease before
+any effect and again right before the guest stops, and holds that lease in between,
+so a start that begins meanwhile waits for the lease (up to 5 s) and then finds the
+pool stopped; it is never stopped itself. A pool found in use refuses with
+`project_share_pool_in_use`. The host-side
+releases of a stop (the managed hostname authority and the pool's publishers) follow
+that second check, so either refusal changes nothing. The same rule applies to a
+pool started by hand with `runtime up`. A pool in use, or one still starting or
+stopping, refuses before hooks and says to stop the projects using the pool (`down` in
+each), then run `up` again. It names up to three of them, from the live run ids that
+`runtime status` reports (`live_runs`) and the run mappings of registered projects and
+their worktrees, then "and N more"; when no registered checkout maps a live run, it
+says so. A full or conflicting share set refuses with
+`project_share_limit` before anything stops. See the [idle restart chart](../diagrams/native-idle-pool-restart.svg)
+([source](../diagrams/native-idle-pool-restart.mmd)). Remove an additional root (for
 example a deleted worktree) from a stopped pool with
 `runtime project-share remove --project-share /absolute/old-worktree --json`; removal
 refuses with `project_share_in_use` while any retained graph still names that
@@ -2482,9 +2620,33 @@ that is still retiring. If a recovery stopped the run but could not finish that 
 starts a stopped pool to finish it, with data kept.
 
 A detached start (`hack up -d`) whose pool stopped or booted again ends on its
-own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
---recover` recovers its run. A command that finds an earlier start of the instance
+own, as a crash would: within about a second once it is ready (its services went
+with the guest), or about 11 seconds later while it is still starting, so it can
+finish or unwind first. The next `hack up` or `hack down --recover` waits for that
+process to be gone, then recovers its run. A `hack up`, `hack restart` or `hack down
+--recover` that meets that start still exiting (the pool record shows the pool
+stopped) says so in one line and waits up to 15 seconds for it before it decides as
+for an exited owner; a live foreground owner on a running pool still refuses at once.
+An owner that is ending can read for a moment as neither running nor exited (its
+process exited but is not yet reaped, or its publication is read mid-change); the
+runtime reports that as `graph_foreground_owner_uncertain`, and the same wait covers it. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
+A provider that dies while the pool record still says `running` (killed, crashed, or
+lost across a sleep) leaves the pool `process-exited` in `runtime status`, and
+`runtime down` refuses it (`process_identity_unavailable`). The run's detached start
+notices that its provider's process is gone and ends as for an ended boot, and
+`hack up` and `hack down` run `runtime recover` first (under the provider lease,
+with the recorded provider proven gone by its identity), say so in one line, and
+continue as after any pool stop (HACK-2579).
+
+Each such recovery moves the run's earlier completed recovery record aside as history
+(`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
+`interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the
+eight newest records of each kind: the next one removes the oldest record that is
+proven finished, under the recovery's own locks (HACK-2576). A file there that cannot
+be proven finished is never removed and does not count. Earlier versions refused the
+ninth recovery instead, and every later `up`, `down` and pool stop refused with the
+data intact; a home left that way recovers with a plain `hack up` on this version.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,
@@ -3513,6 +3675,12 @@ Failures inside the startup period don't count toward `retries`, as the engine
 defines it. Declared values are kept, and a disabled check gets neither. Authored
 native readiness (`readiness.exec`) gets the same cadence. A container started by an
 earlier build, without these fields, is still accepted as the same container.
+
+For a Compose service that mounts a data volume created during this start, native
+uses the authored timing when `start_interval` is omitted. Restoring with the
+retained volume uses the fast defaults again. For Postgres, use
+`pg_isready -h 127.0.0.1` so a temporary socket-only server during initialization
+cannot release dependents before the final server starts.
 
 The 250 ms cadence applies only inside the startup period that follows a container
 start. After a pause and resume the container's startup period is not restarted, so

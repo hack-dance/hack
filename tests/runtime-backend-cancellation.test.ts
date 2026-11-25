@@ -2,12 +2,74 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { composeRuntimeBackend } from "../src/backends/runtime-backend.ts";
 import { withAutostartProjectLock } from "../src/lib/autostart-project-lock.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 const drivers: ReturnType<typeof Bun.spawn>[] = [];
 const ownedPhases: { readonly pid: number; readonly identity: string }[] = [];
+
+test("detached Compose checks ownership before attempting to recreate containers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-compose-ownership-"));
+  roots.push(root);
+  const docker = join(root, "docker");
+  const invoked = join(root, "invoked");
+  await writeFile(docker, '#!/bin/sh\n: > "$CREATE_MARKER"\n', { mode: 0o755 });
+  await expect(
+    composeRuntimeBackend.up({
+      composeFiles: [join(root, "docker-compose.yml")],
+      composeProject: "fixture",
+      cwd: root,
+      env: { PATH: root, CREATE_MARKER: invoked },
+      detach: true,
+      forceRecreate: true,
+      beforeCreate: () => Promise.reject(new Error("fixture: foreign owner")),
+    })
+  ).rejects.toThrow("fixture: foreign owner");
+  expect(await Bun.file(invoked).exists()).toBe(false);
+});
+
+test("cancellation during a pending pre-create check prevents the Compose spawn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-compose-cancel-check-"));
+  roots.push(root);
+  const invoked = join(root, "invoked");
+  await writeFile(join(root, "docker"), '#!/bin/sh\n: > "$CREATE_MARKER"\n', {
+    mode: 0o755,
+  });
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const cancel = new AbortController();
+  let dispatched = false;
+  const starting = composeRuntimeBackend.up({
+    composeFiles: [join(root, "docker-compose.yml")],
+    composeProject: "fixture",
+    cwd: root,
+    env: { PATH: root, CREATE_MARKER: invoked },
+    detach: true,
+    forceRecreate: true,
+    signal: cancel.signal,
+    onCreateDispatched: () => {
+      dispatched = true;
+    },
+    beforeCreate: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  const outcome = starting.catch((error: unknown) => error);
+  try {
+    await Promise.race([entered.promise, starting]);
+    cancel.abort();
+    release.resolve();
+    expect(await outcome).toMatchObject({ name: "AbortError" });
+    expect(dispatched).toBe(false);
+    expect(await Bun.file(invoked).exists()).toBe(false);
+  } finally {
+    release.resolve();
+    await outcome;
+  }
+});
 async function identity(pid: number): Promise<string | null> {
   const child = Bun.spawn(
     ["/bin/ps", "-o", "pgid=,lstart=", "-p", String(pid)],

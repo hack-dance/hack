@@ -201,6 +201,7 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
     defer_macos: "true",
     docker_suite: "false",
     build_smoke: "false",
+    resource_e2e: "false",
   });
 });
 for (const path of [
@@ -273,6 +274,19 @@ test.each([
     )
   );
 });
+test.each([
+  "src/lib/resource-detachment.ts",
+  "src/commands/resources.ts",
+  "apps/desktop/app/src/resource_inventory_view.rs",
+  "apps/desktop/core/tests/resource_inventory_cli.rs",
+  "tests/e2e/resource-inventory.test.ts",
+])("resource inventory change selects the required Docker job for %s", async (path) => {
+  expect(await scope({ path })).toMatchObject({
+    resource_e2e: "true",
+    docker_suite: "false",
+  });
+});
+
 test("protected next push retains the pooled macOS and Linux integration layout", async () => {
   expect(
     await scope({
@@ -308,10 +322,14 @@ test("protected PR deferral passes the required fan-in only with successful sele
         TEST_FOCUS: outputs.test_focus,
         SHARD_RESULT: result,
         FOCUS_RESULT: "success",
+        GUEST_ENABLED: outputs.runtime_core,
+        GUEST_RESULT: "success",
         COMPILER_ENABLED: String(outputs.compiler_hosts !== "[]"),
         COMPILER_RESULT: "success",
         LIFETIME_ENABLED: outputs.docker_suite,
         LIFETIME_RESULT: "success",
+        RESOURCE_ENABLED: outputs.resource_e2e,
+        RESOURCE_RESULT: "success",
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -482,6 +500,7 @@ test("next push runs trusted before policy only after a successful predecessor",
     ci_evidence: "scoped",
     defer_macos: "false",
     build_smoke: "true",
+    resource_e2e: "false",
   });
 });
 

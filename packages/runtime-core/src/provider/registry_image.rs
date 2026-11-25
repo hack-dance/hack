@@ -863,6 +863,7 @@ struct Fetch<'a> {
     stage: Stage,
     deadline: Instant,
     request_timeout: Duration,
+    next_idle_check: Instant,
 }
 
 impl<'a> Fetch<'a> {
@@ -891,6 +892,12 @@ impl<'a> Fetch<'a> {
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| error("Cannot initialize registry TLS client."))?;
+        let wait = policy.image_wait(ACQUISITION_DEADLINE)?;
+        let wait = if policy.short_tag_refresh {
+            wait.min(Duration::from_secs(3))
+        } else {
+            wait
+        };
         Ok(Self {
             client,
             registry: registry.clone(),
@@ -898,14 +905,20 @@ impl<'a> Fetch<'a> {
             policy,
             authorization: None,
             stage: Stage::Anonymous,
-            deadline: Instant::now()
-                + if policy.short_tag_refresh {
-                    Duration::from_secs(3)
-                } else {
-                    ACQUISITION_DEADLINE
-                },
+            deadline: Instant::now() + wait,
             request_timeout: REQUEST_TIMEOUT,
+            next_idle_check: Instant::now(),
         })
+    }
+
+    fn check_retention_idle(&mut self) -> Result<(), CandidateError> {
+        if let Some(root) = &self.policy.retention_root
+            && Instant::now() >= self.next_idle_check
+        {
+            super::image_build::check_retention_idle(root)?;
+            self.next_idle_check = Instant::now() + Duration::from_millis(250);
+        }
+        Ok(())
     }
 
     fn remaining(&self) -> Result<Duration, CandidateError> {
@@ -1093,6 +1106,7 @@ impl<'a> Fetch<'a> {
         timeout: Duration,
         retry: bool,
     ) -> Result<Response, CandidateError> {
+        self.check_retention_idle()?;
         loop {
             let response = self.send(url.clone(), timeout, retry)?;
             let status = response.status();
@@ -1319,8 +1333,8 @@ impl<'a> Fetch<'a> {
     /// A layer body can fail after its response headers, while it streams: a timeout,
     /// a connection that ends early, or bytes that do not match. Each such attempt is
     /// retried up to [`ATTEMPTS`] times, because the blob is content-addressed and the
-    /// request an idempotent GET. Every attempt's time limit is the layer's size-scaled
-    /// timeout, cut to what remains of the acquisition deadline, which is never
+    /// request an idempotent GET. A build uses its remaining acquisition budget.
+    /// Other callers use the size-scaled timeout, cut to the acquisition deadline, never
     /// extended; an attempt that would start after it, or a backoff that would outlast
     /// it, stops with [`NetworkFailureReason::Deadline`]. A failure names the host that
     /// served the body (after redirects), the attempts made and the last reason. Each
@@ -1328,8 +1342,9 @@ impl<'a> Fetch<'a> {
     /// removed when it is dropped.
     fn layer(&mut self, d: &Descriptor, directory: &Path) -> Result<LayerFile, CandidateError> {
         let url = self.url("blobs", &d.digest)?;
-        let timeout =
-            self.request_timeout + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND);
+        let timeout = self.policy.image_wait(
+            self.request_timeout + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND),
+        )?;
         let mut host = url.host_str().unwrap_or("unknown").to_owned();
         for attempt in 1..=ATTEMPTS {
             if self.remaining().is_err() {
@@ -1422,6 +1437,7 @@ impl<'a> Fetch<'a> {
         let mut total = 0_u64;
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
+            self.check_retention_idle().map_err(LayerAttempt::Refused)?;
             let n = match response.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => n,
@@ -1516,7 +1532,7 @@ fn layer_failure(
             "the registry answered an error status".to_owned()
         }
         (NetworkFailureReason::Deadline, _) => {
-            "the 360-second image deadline was reached".to_owned()
+            "the image acquisition deadline was reached".to_owned()
         }
     };
     let failure = error(format!(
@@ -1767,6 +1783,36 @@ impl ManifestProof {
         pin: &str,
         policy: PlatformPolicy,
     ) -> Result<(ImagePlatform, String), CandidateError> {
+        let (manifest, selected) = self.verified_manifest(pin, policy)?;
+        Ok((selected, manifest.config.expect("checked manifest").digest))
+    }
+
+    pub(super) fn verified_build_base(
+        &self,
+        pin: &str,
+        archive_limit: u64,
+    ) -> Result<BuildBase, CandidateError> {
+        let (_, source_digest) = pinned_syntax(pin)?;
+        let (manifest, _) = self.verified_manifest(pin, PlatformPolicy::Native)?;
+        bounded_build_base(&manifest, pin, archive_limit)?;
+        if declares_onbuild(self.config.as_bytes())? {
+            return Err(CandidateError::new(
+                "native_build_base_image",
+                "A build base image declares ONBUILD triggers; native builds refuse stored triggers.",
+            ));
+        }
+        Ok(BuildBase {
+            pinned_reference: pin.into(),
+            source_digest,
+            image_id: manifest.config.expect("checked manifest").digest,
+        })
+    }
+
+    fn verified_manifest(
+        &self,
+        pin: &str,
+        policy: PlatformPolicy,
+    ) -> Result<(Manifest, ImagePlatform), CandidateError> {
         let (_, expected) = pinned_syntax(pin)?;
         let initial = parse_manifest(self.initial.as_bytes(), &expected)?;
         let (manifest, indexed) = if initial.manifests.is_empty() {
@@ -1792,11 +1838,12 @@ impl ManifestProof {
         check_selected_manifest(&manifest)?;
         let config = manifest
             .config
+            .as_ref()
             .ok_or_else(|| error("Image config descriptor is missing."))?;
-        Fetch::checked(&config, MAX_METADATA as u64)?;
-        verify_object(&config, self.config.as_bytes())?;
+        Fetch::checked(config, MAX_METADATA as u64)?;
+        verify_object(config, self.config.as_bytes())?;
         let selected = config_platform(self.config.as_bytes(), policy, indexed)?;
-        Ok((selected, config.digest))
+        Ok((manifest, selected))
     }
 }
 
@@ -2009,62 +2056,6 @@ pub struct BuildBase {
     pub image_id: String,
 }
 
-/// Resolve one normalized base-image reference for a native build, through the same
-/// guarded, origin-bound client and address policy as acquisition. A tag resolves once
-/// to its current manifest; a digest-pinned reference must resolve to exactly that pin.
-/// Builds stay Docker Hub and Linux ARM64 only (the Dockerfile scan and the build source
-/// policy admit nothing else), and the configuration must declare no `ONBUILD`
-/// triggers: a stored trigger could pull images the Dockerfile scan never saw. Only
-/// bounded metadata is fetched. `deadline` bounds the whole resolution, never beyond
-/// the acquisition deadline.
-pub fn resolve_build_base(
-    named: &NamedReference,
-    deadline: Instant,
-) -> Result<BuildBase, CandidateError> {
-    if named.docker_hub_repository().is_none() {
-        return Err(error(
-            "Only public Docker Hub [namespace/]repository[:tag][@sha256] references are supported.",
-        ));
-    }
-    let policy = ImagePolicy::default();
-    let registry = registry(named, &policy)?;
-    let mut fetch = Fetch::new(&registry, &named.path, &policy)?;
-    fetch.deadline = fetch.deadline.min(deadline);
-    let (reference, expected) = match (&named.digest, &named.tag) {
-        (Some(pin), _) => (pin.as_str(), Some(pin.as_str())),
-        (None, Some(tag)) => (tag.as_str(), None),
-        (None, None) => ("latest", None),
-    };
-    let initial = fetch.manifest(reference)?;
-    let source_digest = digest(&initial);
-    if expected.is_some_and(|expected| expected != source_digest) {
-        return Err(error("Registry manifest digest or size mismatch.")
-            .with_cause_code("registry_digest_mismatch".into()));
-    }
-    let (manifest, _, indexed, _) =
-        select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;
-    let pinned_reference = format!("{}/{}@{source_digest}", registry.domain, named.path);
-    // BuildKit pulls the base itself, outside acquisition's archive budget, so the sizes
-    // the manifest declares are bounded here before any build runs.
-    bounded_build_base(&manifest, &pinned_reference, policy.archive_limit)?;
-    let config = manifest
-        .config
-        .ok_or_else(|| error("Image config descriptor is missing."))?;
-    let config_bytes = fetch.object("blobs", &config)?;
-    config_platform(&config_bytes, PlatformPolicy::Native, indexed)?;
-    if declares_onbuild(&config_bytes)? {
-        return Err(CandidateError::new(
-            "native_build_base_image",
-            "A build base image declares ONBUILD triggers; native builds refuse stored triggers.",
-        ));
-    }
-    Ok(BuildBase {
-        pinned_reference,
-        source_digest,
-        image_id: config.digest,
-    })
-}
-
 /// Refuse a build base whose manifest declares more than `limit` compressed bytes of
 /// config and layers (the per-image archive budget acquisition applies), or no layers
 /// or more than the layer limit. Every descriptor's `size` is a required unsigned
@@ -2088,9 +2079,6 @@ fn bounded_build_base(
         .config
         .as_ref()
         .ok_or_else(|| error("Image config descriptor is missing."))?;
-    // The same descriptor checks direct acquisition applies: BuildKit fetches these
-    // itself, and a foreign-layer `urls` entry or a non-distributable layer would be
-    // fetched from the guest's own namespace, outside the build network's isolation.
     let refused = |what: &str, reason: CandidateError| {
         CandidateError::new(
             "native_build_base_image",
@@ -2226,6 +2214,17 @@ pub fn acquire_with(
     limit: u64,
     platform: PlatformPolicy,
 ) -> Result<AcquiredImage, CandidateError> {
+    acquire_with_disk_admission(reference_text, output, policy, limit, platform, |_| Ok(()))
+}
+
+pub(super) fn acquire_with_disk_admission<T>(
+    reference_text: &str,
+    output: &Path,
+    policy: &ImagePolicy,
+    limit: u64,
+    platform: PlatformPolicy,
+    reserve: impl FnOnce(u64) -> Result<T, CandidateError>,
+) -> Result<AcquiredImage, CandidateError> {
     let pinned = pinned(reference_text, policy)?;
     let limit = limit.min(policy.archive_limit);
     if output.exists() {
@@ -2255,6 +2254,14 @@ pub fn acquire_with(
             "The image exceeds the configured image budget or the remaining image cache budget.",
         ));
     }
+    // The current layer coexists with the growing archive until it is appended.
+    let largest_layer = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.size)
+        .max()
+        .unwrap_or(0);
+    let _disk = reserve(planned.saturating_add(largest_layer))?;
     let config_name = format!("{}.json", config.digest.trim_start_matches("sha256:"));
     let deadline = fetch.deadline;
     let manifest_bytes = serde_json::to_vec(

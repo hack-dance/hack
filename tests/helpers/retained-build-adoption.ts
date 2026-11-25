@@ -1,6 +1,5 @@
 import {
   chmod,
-  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -15,6 +14,7 @@ import { openLegacyComposeAdoptedGenerationStore } from "../../src/lib/native-co
 import { parseLegacyComposeAdoptionReceipt } from "../../src/lib/native-compose-adoption-receipt.ts";
 import { restoreEnv } from "./env.ts";
 import { managedEnvCompilerFixture } from "./managed-env-compiler.ts";
+import { mkdirOwnedFixture, writeOwnedFixture } from "./owned-fixture.ts";
 
 export const BUILD_CANARY = "synthetic-private-retained-build";
 const CREATED = "2026-01-01T01:02:03Z";
@@ -42,20 +42,26 @@ export async function retainedBuildFixture() {
     await mkdtemp(join(tmpdir(), "retained-build-owner-"))
   );
   const root = join(outer, "checkout");
-  await mkdir(join(root, ".hack"), { recursive: true });
-  await mkdir(join(root, ".git"));
-  await mkdir(join(root, "src"));
-  await writeFile(join(root, "src/marker"), BUILD_CANARY);
-  await writeFile(join(root, "Dockerfile"), "FROM scratch\nCOPY src /source\n");
-  await writeFile(join(root, ".dockerignore"), "**\n!Dockerfile\n!src\n");
+  await mkdirOwnedFixture(join(root, ".hack"), true);
+  await mkdirOwnedFixture(join(root, ".git"));
+  await mkdirOwnedFixture(join(root, "src"));
+  await writeOwnedFixture(join(root, "src/marker"), BUILD_CANARY);
+  await writeOwnedFixture(
+    join(root, "Dockerfile"),
+    "FROM scratch\nCOPY src /source\n"
+  );
+  await writeOwnedFixture(
+    join(root, ".dockerignore"),
+    "**\n!Dockerfile\n!src\n"
+  );
   const config = '{"name":"fixture"}';
   const compose = JSON.stringify({
     name: "fixture",
     services: { db: { build: "..", volumes: ["data:/data"] } },
     volumes: { data: { name: "fixture_original_data" } },
   });
-  await writeFile(join(root, ".hack/hack.config.json"), config);
-  await writeFile(join(root, ".hack/docker-compose.yml"), compose);
+  await writeOwnedFixture(join(root, ".hack/hack.config.json"), config);
+  await writeOwnedFixture(join(root, ".hack/docker-compose.yml"), compose);
   await writeFile(join(outer, "accepted-compose"), compose);
   const model = {
     running: false,

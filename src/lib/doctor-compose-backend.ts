@@ -48,7 +48,7 @@ export function composeBackendCheckResult(
     readonly projectRoot?: string;
   } & ComposeBackendFeatureOptions
 ): {
-  readonly name: string;
+  readonly name: typeof COMPOSE_BACKEND_CHECK;
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly composeBackend: ComposeBackendReport;

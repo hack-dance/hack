@@ -570,6 +570,11 @@ If the operation later fails in Compose or `up.after`, Hack removes only the lif
 by that operation. The same exact-token cleanup runs for supported `SIGINT` and `SIGTERM` paths, including
 signals received while the mux session is still being initialized.
 
+After an interrupted Compose launch, Hack retains its launch name and environment
+selection while the stack still has containers or networks, including stopped
+containers left by foreground Ctrl-C. Use `hack down` to remove the stack and clear
+its saved launch.
+
 ### `hack down`
 
 1. Run `lifecycle.down.before` hooks.
@@ -640,9 +645,10 @@ Config:
 - Project: `.hack/hack.config.json` → `sessions.mux = auto|tmux|none` (`auto` detects tmux only)
 - Env override: `HACK_SESSIONS_MUX=auto|tmux|none`
 
-Lifecycle session name:
-- No branch: `<project>--lifecycle`
-- With `--branch <name>`: `<project>--lifecycle-<branch>`
+New mux sessions append `--lifecycle` to the exact Compose project name. A
+branch instance named `<project>--<branch>` uses
+`<project>--<branch>--lifecycle`. Hack can still reuse or stop verified sessions
+recorded under the earlier name.
 
 Lifecycle hooks and processes run on the host. They receive the selected overlay's `global` values
 plus `host` overrides, with `host` taking precedence. Service-scoped values remain container-specific

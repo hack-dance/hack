@@ -8,7 +8,6 @@ import {
 import { createHash } from "node:crypto";
 import {
   chmod,
-  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -23,6 +22,7 @@ import { acquireLegacyComposeAdoptionBinding } from "../src/lib/native-compose-a
 import { openLegacyComposeAdoptedGenerationStore } from "../src/lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { assertInvalidRetainedMutationDeadlines } from "./helpers/retained-mutation-deadline.ts";
 import { retainedRoutingFixtureLifetime } from "./helpers/retained-routing-adoption.ts";
 
@@ -98,9 +98,9 @@ beforeEach(async () => {
     await mkdtemp(join(tmpdir(), "retained-file-generation-"))
   );
   projectRoot = join(root, "checkout");
-  await mkdir(join(projectRoot, ".hack"), { recursive: true });
-  await mkdir(join(projectRoot, ".git"));
-  await mkdir(join(projectRoot, "material"));
+  await mkdirOwnedFixture(join(projectRoot, ".hack"), true);
+  await mkdirOwnedFixture(join(projectRoot, ".git"));
+  await mkdirOwnedFixture(join(projectRoot, "material"));
   await writeFile(join(projectRoot, "material/config"), CANARY, {
     mode: 0o444,
   });

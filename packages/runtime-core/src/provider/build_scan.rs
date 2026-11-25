@@ -143,6 +143,13 @@ fn refusal(line: Option<usize>, message: &str) -> CandidateError {
 
 /// Scan a Dockerfile for the images a native build of `request.target` can pull.
 pub fn scan(request: &ScanRequest<'_>) -> Result<DockerfileScan, CandidateError> {
+    scan_with_context(request, &|_| Ok(false))
+}
+
+pub(super) fn scan_with_context(
+    request: &ScanRequest<'_>,
+    private: &dyn Fn(&str) -> Result<bool, CandidateError>,
+) -> Result<DockerfileScan, CandidateError> {
     validate_arguments(request.args)?;
     if request.dockerfile.len() > MAX_DOCKERFILE_BYTES {
         return Err(refusal(None, "exceeds the 1 MiB scan limit."));
@@ -152,7 +159,7 @@ pub fn scan(request: &ScanRequest<'_>) -> Result<DockerfileScan, CandidateError>
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     refuse_frontend_selection(text)?;
     let parsed = parse(text)?;
-    resolve(&parsed, request)
+    resolve(&parsed, request, private)
 }
 
 fn validate_arguments(args: &BTreeMap<String, String>) -> Result<(), CandidateError> {
@@ -219,6 +226,8 @@ struct RawStage {
     name: Option<String>,
     uses: Vec<Use>,
     onbuild: Vec<Use>,
+    copies: Vec<String>,
+    onbuild_copies: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -884,6 +893,8 @@ fn dispatch(
                 name,
                 uses: Vec::new(),
                 onbuild: Vec::new(),
+                copies: Vec::new(),
+                onbuild_copies: Vec::new(),
             });
         }
         "arg" => {
@@ -925,13 +936,61 @@ fn dispatch(
             let uses = instruction_uses(&inner, escape, line)?;
             if let Some(stage) = parsed.stages.last_mut() {
                 stage.onbuild.extend(uses);
+                record_local_copies(&inner, escape, line, &mut stage.onbuild_copies)?;
             }
         }
         _ => {
             let uses = instruction_uses(&instruction, escape, line)?;
             if let Some(stage) = parsed.stages.last_mut() {
                 stage.uses.extend(uses);
+                record_local_copies(&instruction, escape, line, &mut stage.copies)?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Keep literal local sources for the context policy. Dynamic expansions and
+/// globs still see only the filtered snapshot.
+fn record_local_copies(
+    instruction: &Instruction,
+    escape: char,
+    line: usize,
+    copies: &mut Vec<String>,
+) -> Result<(), CandidateError> {
+    if instruction.command != "copy" {
+        return Ok(());
+    }
+    if parse_flags(&instruction.flags, &COPY_FLAGS, line)?.contains_key("from") {
+        return Ok(());
+    }
+    let (words, json) = match json_words(&instruction.args, line)? {
+        Some(words) => (words, true),
+        None => (argument_words(&instruction.args, escape), false),
+    };
+    for word in words.iter().take(words.len().saturating_sub(1)) {
+        let value = if json && !word.contains('$') {
+            Some(word.clone())
+        } else {
+            argument_value(word, &Env::new(), MAX_DOCKERFILE_BYTES)
+        };
+        if let Some(value) = value {
+            copies.push(value);
+        }
+    }
+    Ok(())
+}
+
+fn check_local_copies(
+    copies: &[String],
+    private: &dyn Fn(&str) -> Result<bool, CandidateError>,
+) -> Result<(), CandidateError> {
+    for source in copies {
+        if !source.starts_with("<<") && private(source)? {
+            return Err(CandidateError::new(
+                "native_build_copy_private",
+                "COPY names Hack's own machine-local file or directory, which is never sent to a build.",
+            ));
         }
     }
     Ok(())
@@ -1197,7 +1256,11 @@ fn base_image(name: &str, line: usize) -> Result<BaseImage, CandidateError> {
     }
 }
 
-fn resolve(parsed: &Parsed, request: &ScanRequest<'_>) -> Result<DockerfileScan, CandidateError> {
+fn resolve(
+    parsed: &Parsed,
+    request: &ScanRequest<'_>,
+    private: &dyn Fn(&str) -> Result<bool, CandidateError>,
+) -> Result<DockerfileScan, CandidateError> {
     let env = global_env(parsed, request.args);
     // Each stage's base as the frontend registers it: an earlier stage of that name,
     // `scratch`, or an image. `None` marks a name the scanner cannot expand. Stage
@@ -1238,6 +1301,7 @@ fn resolve(parsed: &Parsed, request: &ScanRequest<'_>) -> Result<DockerfileScan,
             continue;
         }
         let stage = &parsed.stages[index];
+        check_local_copies(&stage.copies, private)?;
         if let Some(platform) = &stage.platform {
             if !platform_supported(platform, &env, parsed) {
                 return Err(refusal(
@@ -1263,6 +1327,7 @@ fn resolve(parsed: &Parsed, request: &ScanRequest<'_>) -> Result<DockerfileScan,
         // frontend's inheritance, so no trigger image is missed).
         let mut ancestor = &bases[index];
         while let Some(Source::Stage(parent)) = ancestor {
+            check_local_copies(&parsed.stages[*parent].onbuild_copies, private)?;
             for used in &parsed.stages[*parent].onbuild {
                 sources.push((use_source(parsed, used)?, used.line));
             }

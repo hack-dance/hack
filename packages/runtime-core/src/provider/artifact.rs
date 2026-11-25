@@ -138,13 +138,13 @@ pub fn prepare(candidate: &Candidate, archive: &Path) -> Result<Artifact, Candid
         return verify(candidate);
     }
     let staging = providers.join("smolvm-installing");
-    fs::create_dir(&staging).map_err(io)?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&staging)
+        .map_err(io)?;
     // Copy to exclusively owned staging and rehash to close source replacement between check/extract.
     let owned_archive = staging.join("release.tar.gz");
-    let mut source = File::open(archive).map_err(io)?;
-    let mut destination = File::create(&owned_archive).map_err(io)?;
-    std::io::copy(&mut source, &mut destination).map_err(io)?;
-    destination.sync_all().map_err(io)?;
+    copy_retained_archive(archive, &owned_archive)?;
     if digest(&owned_archive)? != ARCHIVE_SHA256 {
         return Err(CandidateError::new(
             "artifact_digest_mismatch",
@@ -325,14 +325,7 @@ pub fn prepare_engine(candidate: &Candidate, archive: &Path) -> Result<Artifact,
     let staging = providers.join("docker-installing");
     state::private_directory(&staging)?;
     let owned_archive = staging.join("release.tgz");
-    let mut source = File::open(archive).map_err(io)?;
-    let mut destination = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&owned_archive)
-        .map_err(io)?;
-    std::io::copy(&mut source, &mut destination).map_err(io)?;
-    destination.sync_all().map_err(io)?;
+    copy_retained_archive(archive, &owned_archive)?;
     if digest(&owned_archive)? != ENGINE_SHA256 {
         return Err(CandidateError::new(
             "artifact_digest_mismatch",
@@ -429,6 +422,19 @@ pub struct TreeRepair {
 
 fn repair_refused(code: &'static str, message: &'static str) -> CandidateError {
     CandidateError::new(code, message)
+}
+
+/// Keep newly retained archives acceptable to repair regardless of a permissive umask.
+fn copy_retained_archive(source: &Path, destination: &Path) -> Result<(), CandidateError> {
+    let mut source = File::open(source).map_err(io)?;
+    let mut destination = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(destination)
+        .map_err(io)?;
+    std::io::copy(&mut source, &mut destination).map_err(io)?;
+    destination.sync_all().map_err(io)
 }
 
 /// The archive preparation retained, when it is still an owned regular file in an
@@ -1086,9 +1092,9 @@ pub(super) mod tree_fixture {
         let providers = candidate.state_root.join("providers");
         state::private_directory(&providers).unwrap();
         let staging = providers.join(pin.staging);
-        fs::create_dir(&staging).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&staging).unwrap();
         let retained = staging.join(pin.archive);
-        fs::copy(&archive, &retained).unwrap();
+        copy_retained_archive(&archive, &retained).unwrap();
         tar(&[
             "-xzf".as_ref(),
             retained.as_os_str(),
@@ -1348,7 +1354,7 @@ mod tests {
             "foreign_state"
         );
         fs::remove_file(&retained).unwrap();
-        fs::copy(root.join("fixture-release.tar.gz"), &retained).unwrap();
+        copy_retained_archive(&root.join("fixture-release.tar.gz"), &retained).unwrap();
         assert!(repair_staging(&candidate).is_empty());
 
         // A record no extraction can match keeps the changed tree and the repair staging.

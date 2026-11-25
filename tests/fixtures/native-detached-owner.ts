@@ -1,7 +1,12 @@
 import { ChildProcess, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  batchImageFailure,
+  NativeImageBatchError,
+  NativeImageBlocker,
+} from "../../src/backends/native-image-policy.ts";
 import {
   NativeRuntimeRequestError,
   retainNativeRuntimeFailure,
@@ -9,7 +14,13 @@ import {
 import { handleRunCliError } from "../../src/cli/run.ts";
 import { ClosedCliError, HackCliError } from "../../src/lib/cli-result.ts";
 import {
+  startupTimingSpawn,
+  withCommandTimings,
+} from "../../src/lib/command-timings.ts";
+import type { NativeDetachedStartPhase } from "../../src/lib/native-detached-start-deadline.ts";
+import {
   nativeDetachedUpBranchDropped,
+  nativeDetachedUpBuildProgress,
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
   nativeDetachedUpHookFailed,
@@ -20,10 +31,13 @@ import {
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
   reportNativeImageDownloadWait,
+  reportNativeImageWork,
   runNativeDetachedOwner,
   setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
+
+import { NativeAuthoredAttemptLimitError } from "../../src/lib/native-up-refusals.ts";
 
 /**
  * Publish a marker file atomically. Tests poll these files, and a plain
@@ -58,6 +72,55 @@ function publishFixtureBranchDropped(fixtureMode: string): void {
   }
 }
 
+/**
+ * HACK-2535: the detached owner runs the source preflight; restarting an idle pool
+ * for a new root reaches the launcher as one validated notice line.
+ */
+async function publishFixturePoolRestart(fixtureMode: string): Promise<void> {
+  if (fixtureMode !== "pool-restart-notice") {
+    return;
+  }
+  // This preflight is specific to the idle-pool fixture. Loading it eagerly
+  // makes every owner, including the deadline probes, pay for its imports.
+  const {
+    NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
+    preflightNativeProjectSource,
+  } = await import("../../src/backends/native-project-source-preflight.ts");
+  let shared = false;
+  await preflightNativeProjectSource({
+    runtime: { binary: "/fixture/hack-native", home: "/fixture/home" },
+    projectRoot: "/fixture/second-app",
+    invoke: (request) => {
+      if (request.args[1] === "check-project-share") {
+        if (!shared) {
+          return Promise.reject(
+            new NativeRuntimeRequestError({
+              message:
+                "Native runtime request failed (project_share_extension_required).",
+              nativeCode: NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED,
+            })
+          );
+        }
+        return Promise.resolve({
+          source_admitted: true,
+          pool_initialized: true,
+        });
+      }
+      if (request.args[1] === "status") {
+        return Promise.resolve({ phase: "running", process_alive: true });
+      }
+      shared = true;
+      return Promise.resolve({
+        kind: "project_share_added",
+        project: "/fixture/second-app",
+        restarted: false,
+        disks_preserved: true,
+        stopped_idle_pool: true,
+      });
+    },
+  });
+}
+
 /** HACK-2409: a detached owner hands the pool's hot-reload notice to the launcher. */
 function publishFixtureHotReload(fixtureMode: string): void {
   if (fixtureMode === "hot-reload-off") {
@@ -85,6 +148,40 @@ const DEADLINE_MODES = [
   "images-wait-ceiling",
 ];
 
+const IMAGE_WORK_FINISHED = "image-work-finished";
+const IMAGE_WORK_MS = 2500;
+
+/** Advance synthetic time on IPC progress, independent of host scheduling. */
+function fixtureDeadlineClock(fixtureMode: string, fixtureRoot: string) {
+  if (!DEADLINE_MODES.includes(fixtureMode)) {
+    return;
+  }
+  const { budgetMs, ceilingMs } = fixtureLimits(fixtureMode);
+  const imageLimit = fixtureMode === "slow-images" ? IMAGE_WORK_MS : ceilingMs;
+  let elapsed = 0;
+  let lastPhase: NativeDetachedStartPhase | undefined;
+  let released = false;
+  return (phase?: NativeDetachedStartPhase): number => {
+    if (phase) {
+      if (phase === "images" && lastPhase === "images") {
+        elapsed = Math.min(imageLimit, elapsed + 100);
+      }
+      lastPhase = phase;
+    } else if (fixtureMode === "slow-runtime" && lastPhase === "runtime") {
+      elapsed = budgetMs;
+    } else if (
+      fixtureMode === "slow-images" &&
+      elapsed >= IMAGE_WORK_MS &&
+      !released
+    ) {
+      // The launcher's timer now checks the budget before it can handle ready.
+      writeFileSync(join(fixtureRoot, IMAGE_WORK_FINISHED), "");
+      released = true;
+    }
+    return elapsed;
+  };
+}
+
 /** The launcher's limits for a fixture mode. */
 function fixtureLimits(fixtureMode: string) {
   if (
@@ -110,22 +207,38 @@ function fixtureLimits(fixtureMode: string) {
  * for longer than the launcher's budget with heartbeats, then continues;
  * `slow-runtime` stalls before image work; `images-ceiling` builds forever.
  */
-async function reportFixturePhases(fixtureMode: string): Promise<void> {
+async function reportFixturePhases(
+  fixtureMode: string,
+  fixtureRoot: string,
+  hasStopped: () => boolean
+): Promise<void> {
   if (!DEADLINE_MODES.includes(fixtureMode)) {
     return;
   }
-  setNativeDetachedHeartbeatIntervalForTests(100);
+  if (fixtureMode === "slow-runtime") {
+    // Model the loaded Mac: the first phase arrives after the full runtime
+    // budget would have expired if the fixture clock still counted startup.
+    await Bun.sleep(fixtureLimits(fixtureMode).budgetMs + 250);
+  }
+  setNativeDetachedHeartbeatIntervalForTests(10);
   nativeDetachedUpProgress("input");
   nativeDetachedUpProgress("runtime");
   if (fixtureMode === "slow-runtime") {
     return;
+  }
+  if (fixtureMode !== "images-wait-ceiling") {
+    reportNativeImageWork(["docker.io/fixture/image:stable"]);
   }
   nativeDetachedUpProgress("images");
   if (fixtureMode === "images-wait-ceiling") {
     reportNativeImageDownloadWait("docker.io/fixture/image:stable");
   }
   if (fixtureMode === "slow-images") {
-    await Bun.sleep(2500);
+    const finished = join(fixtureRoot, IMAGE_WORK_FINISHED);
+    while (!(hasStopped() || existsSync(finished))) {
+      await Bun.sleep(10);
+    }
+    reportNativeImageWork([]);
     nativeDetachedUpProgress("services");
   }
 }
@@ -389,32 +502,47 @@ if (role === "channel-holder") {
         ? deliverExitBeforeMessages()
         : undefined;
   try {
-    process.exitCode = await startNativeDetachedUp({
-      cwd: root,
-      args: [],
-      json: !process.env.FIXTURE_TEXT_OUTPUT,
-      ...(mode === "restart-action" ? { action: "restart" as const } : {}),
-      invocation: [
-        process.execPath,
-        ...(Bun.main.startsWith("/$bunfs/") ? [] : [import.meta.filename]),
-        "owner",
-        root,
-        mode,
-      ],
-      limits: fixtureLimits(mode),
-      heartbeatStaleMs: 400,
-      unwindMs: 3000,
-    });
+    const launch = () =>
+      startNativeDetachedUp({
+        cwd: root,
+        args: [],
+        json: !process.env.FIXTURE_TEXT_OUTPUT,
+        ...(mode === "restart-action" ? { action: "restart" as const } : {}),
+        invocation: [
+          process.execPath,
+          ...(Bun.main.startsWith("/$bunfs/") ? [] : [import.meta.filename]),
+          "owner",
+          root,
+          mode,
+        ],
+        limits: fixtureLimits(mode),
+        heartbeatStaleMs: 400,
+        deadlineNow: fixtureDeadlineClock(mode, root),
+        unwindMs: 3000,
+      });
+    process.exitCode =
+      mode === "timings"
+        ? await withCommandTimings(join(root, "timings.jsonl"), launch)
+        : await launch();
   } catch (error) {
+    if (mode === "build-progress" && process.env.FIXTURE_TEXT_OUTPUT) {
+      process.stderr.write(`${String(error)}\n`);
+    }
     process.exitCode = [
+      ...(mode === "build-progress" && !process.env.FIXTURE_TEXT_OUTPUT
+        ? ["build-progress"]
+        : []),
+      "authored-attempt-limit",
       "wrapped-failure",
       "wrapped-static-failure",
       "builder-missing",
+      "build-registry-limit",
       "provider-pin",
       "wrapped-provider-pin",
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
+      "image-batch-errors",
       "prestart-refusal",
       "prestart-after-runtime",
       "prestart-plain-error",
@@ -432,10 +560,14 @@ if (role === "channel-holder") {
   }
 } else if (role === "owner") {
   process.exitCode = await runNativeDetachedOwner({
-    args: [],
+    args: Bun.argv.slice(5),
     run: async () => {
       const done = Promise.withResolvers<number>();
-      const stop = () => done.resolve(0);
+      let stopped = false;
+      const stop = () => {
+        stopped = true;
+        done.resolve(0);
+      };
       let stopSignals = 0;
       const terminate = () => {
         stopSignals += 1;
@@ -480,6 +612,16 @@ if (role === "channel-holder") {
         nativeDetachedUpShellVariables([], true);
         nativeDetachedUpShellVariables([], true);
       }
+      if (mode === "build-registry-limit") {
+        await nativeDetachedUpFailure(
+          new NativeImageBlocker({
+            missing: "docker.io/library/python:3.12-alpine",
+            buildBase: true,
+            reason: "registry_http_429",
+            present: ["docker.io/library/alpine:3.22"],
+          })
+        );
+      }
       if (mode === "builder-missing") {
         await nativeDetachedUpFailure(
           new NativeRuntimeRequestError({
@@ -503,12 +645,19 @@ if (role === "channel-holder") {
             : failure
         );
       }
+      if (mode === "authored-attempt-limit") {
+        await nativeDetachedUpFailure(new NativeAuthoredAttemptLimitError());
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
+      }
       await publishFixturePrestartFailure(mode, root);
       if (
         [
           ...PRESTART_MODES,
           "fail",
           "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)
@@ -546,6 +695,19 @@ if (role === "channel-holder") {
         if (["immediate-failure", "exit-first-failure"].includes(mode)) {
           process.exit(1);
         }
+        return 1;
+      }
+      if (mode === "image-batch-errors") {
+        await nativeDetachedUpFailure(
+          new NativeImageBatchError([
+            batchImageFailure("fixture/image:a", { code: "provider_busy" }, [
+              "web",
+            ]),
+            batchImageFailure("fixture/image:b", { code: "image_disk_space" }, [
+              "db",
+            ]),
+          ])
+        );
         return 1;
       }
       if (mode === "failed-services") {
@@ -613,6 +775,18 @@ if (role === "channel-holder") {
         }
         await nativeDetachedUpFailure(new Error("synthetic-private-value"));
       }
+      if (mode === "timings") {
+        const runtime = startupTimingSpawn([join(root, "runtime")], {
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if ((await runtime.exited) !== 0) {
+          throw new Error(
+            "Synthetic runtime failed to deliver timing records."
+          );
+        }
+      }
       const notifyReady = () =>
         nativeDetachedUpReady({
           project: "fixture",
@@ -632,15 +806,45 @@ if (role === "channel-holder") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
-      await reportFixturePhases(mode);
+      if (mode === "build-progress") {
+        process.send?.({
+          kind: "build-settled",
+          outcome: "failed",
+          durationMs: 500,
+          services: ["private-build-line"],
+          extra: "this field is forbidden",
+        });
+        nativeDetachedUpBuildProgress({
+          services: ["worker"],
+          outcome: "failed",
+          durationMs: 1500,
+        });
+        nativeDetachedUpBuildProgress({
+          services: ["web"],
+          outcome: "cancelled",
+          durationMs: 2000,
+        });
+        await nativeDetachedUpFailure(
+          new NativeRuntimeRequestError({
+            message: "fixture failure",
+            nativeCode: "native_build_failed",
+          })
+        );
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
+      }
+      await reportFixturePhases(mode, root, () => stopped);
       publishFixtureProfileNotice(mode);
       publishFixtureBranchDropped(mode);
       publishFixtureHotReload(mode);
+      await publishFixturePoolRestart(mode);
       sendUnsafePrestartRefusals(mode);
       if (
         [
           "ready",
           "profile-notice",
+          "pool-restart-notice",
           "branch-dropped",
           "hot-reload-off",
           "hot-reload-unsafe",
@@ -652,6 +856,7 @@ if (role === "channel-holder") {
           "unsafe-failure",
           "unsafe-prestart-refusal",
           "slow-images",
+          "timings",
         ].includes(mode)
       ) {
         notifyReady();

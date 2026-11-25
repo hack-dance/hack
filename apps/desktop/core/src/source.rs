@@ -3,11 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::daemon::DaemonClient;
 use crate::doctor::DoctorRun;
 use crate::fixtures::{self, Fixture};
 use crate::models::{
     DaemonApiStatus, DoctorReport, LifecycleResult, LogEntry, OpenResult, ProjectsPayload,
+    StoppedContainerExecution,
 };
 use crate::runner::{CliRunner, RunError};
 use crate::state::Action;
@@ -257,6 +260,45 @@ pub enum ActionOutcome {
     Opened(OpenResult),
 }
 
+/// A service action can fail after Docker confirms a subset of its stops.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceActionError {
+    pub source: Box<SourceError>,
+    pub(crate) stopped: Option<ServiceStopReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServiceStopReceipt {
+    pub stopped_containers: Vec<StoppedContainerExecution>,
+    pub stopped_at: String,
+}
+
+impl From<SourceError> for ServiceActionError {
+    fn from(source: SourceError) -> Self {
+        Self {
+            source: Box::new(source),
+            stopped: None,
+        }
+    }
+}
+
+impl From<RunError> for ServiceActionError {
+    fn from(error: RunError) -> Self {
+        let stopped = match &error {
+            RunError::Cli(error) if error.code == "E_COMPOSE_FAILED" => error
+                .detail
+                .as_ref()
+                .and_then(|detail| ServiceStopReceipt::deserialize(detail).ok()),
+            _ => None,
+        };
+        Self {
+            source: Box::new(error.into()),
+            stopped,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonRecovery {
     Start,
@@ -311,7 +353,128 @@ impl LogFeed for FixtureFeed {
     }
 }
 
+/// Names and observed state from `hack ps --copies --json`.
+#[derive(Debug, serde::Deserialize)]
+pub struct CopiesReport {
+    pub copies: Vec<ProjectCopy>,
+    pub observation: CopiesObservation,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProjectCopy {
+    pub branch: Option<String>,
+    pub checkout: CopyCheckout,
+    pub instance: Option<String>,
+    pub backend: String,
+    pub state: String,
+    pub address: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CopyCheckout {
+    pub name: String,
+    pub root: String,
+    pub kind: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CopiesObservation {
+    pub ok: bool,
+    pub code: Option<String>,
+}
+
+/// A short reason and next step for a failed copies observation.
+#[derive(Debug)]
+pub struct CopiesError {
+    pub reason: String,
+    pub hint: String,
+}
+
+impl From<RunError> for CopiesError {
+    fn from(error: RunError) -> Self {
+        let (reason, hint): (String, String) = match error {
+            RunError::Cli(error) => {
+                let fallback = match error.code.as_str() {
+                    "E_USAGE" => "Select a Hack CLI that supports ps --copies.",
+                    "E_PROJECT_NOT_FOUND" => "Check the project checkout and try again.",
+                    "E_DOCKER_UNAVAILABLE" => "Start the container engine and check again.",
+                    _ => "Run hack ps --copies from the checkout for more detail.",
+                };
+                let hint = error
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.get("hint"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(fallback)
+                    .to_owned();
+                (format!("{}: {}", error.code, error.message), hint)
+            }
+            RunError::NotFound => (
+                "Hack CLI unavailable.".into(),
+                "Select an installed Hack CLI.".into(),
+            ),
+            RunError::Timeout { after } => (
+                format!("E_TIMEOUT: Hack did not answer within {after:?}."),
+                "Check again.".into(),
+            ),
+            // Don't display unsolicited subprocess output, including stdout from
+            // a CLI that doesn't implement the JSON contract.
+            _ => (
+                "Hack did not return a project copies report.".into(),
+                "Run hack ps --copies from the checkout for more detail.".into(),
+            ),
+        };
+        Self { reason, hint }
+    }
+}
+
 pub trait Source: Send + Sync {
+    fn resource_inventory(&self) -> Result<crate::resource_inventory::InventoryReport, String> {
+        Err("Resource inventory is unavailable for this source.".into())
+    }
+
+    fn resource_removal(
+        &self,
+        _id: &str,
+        _confirmation: Option<&str>,
+    ) -> Result<crate::resource_inventory::RemovalPlan, String> {
+        Err("Resource removal is unavailable for this source.".into())
+    }
+
+    /// Preview a catalog edit, or save the exact revision previously previewed.
+    ///
+    /// # Errors
+    /// The Compose file or CLI cannot perform the requested edit.
+    fn catalog_edit(
+        &self,
+        _root: &Path,
+        _id: &str,
+        _revision: Option<&str>,
+    ) -> Result<crate::service_catalog::CatalogEdit, String> {
+        Err("Service editing is unavailable for this source".into())
+    }
+
+    /// Observe the project family in the selected checkout.
+    fn copies(&self, _root: &Path, _native: bool) -> Result<CopiesReport, CopiesError> {
+        Err(RunError::NotFound.into())
+    }
+
+    fn config_read(
+        &self,
+        _root: Option<&Path>,
+        _field: crate::config_form::Field,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        Err("Configuration is unavailable")
+    }
+    fn config_write(
+        &self,
+        _report: &crate::config_form::Report,
+        _field: crate::config_form::Field,
+        _input: &str,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        Err("Configuration is unavailable")
+    }
+
     /// Read names-only env metadata; diagnostics must never contain CLI output.
     fn env(&self, _root: &Path, _native: bool) -> crate::env::EnvView {
         crate::env::EnvView::Unreadable
@@ -412,6 +575,19 @@ pub trait Source: Send + Sync {
         Err("Upgrade restore is unavailable for this source".into())
     }
 
+    /// Read files in one running Compose service.
+    ///
+    /// # Errors
+    /// The CLI or the selected service could not complete the read.
+    fn service_files(
+        &self,
+        _target: &crate::files::Target,
+        _op: crate::files::Read,
+        _path: &str,
+    ) -> Result<crate::files::Report, String> {
+        Err("Files are unavailable for this source.".into())
+    }
+
     /// CPU and memory per service of a Compose project and its branch
     /// instances (`hack usage --json --by-service --path <root>`).
     ///
@@ -419,6 +595,14 @@ pub trait Source: Send + Sync {
     /// The CLI could not read it (Docker unavailable, say) or printed no
     /// report this app reads.
     fn service_usage(&self, _root: &Path) -> Result<crate::usage::UsageReport, String> {
+        Err("Usage is unavailable for this source".into())
+    }
+
+    /// One machine-wide, Compose-only sample, with per-container counters.
+    ///
+    /// # Errors
+    /// The CLI could not read usage or its output could not be parsed.
+    fn stats_sample(&self) -> Result<crate::stats::StatsReport, String> {
         Err("Usage is unavailable for this source".into())
     }
 
@@ -506,6 +690,35 @@ pub trait Source: Send + Sync {
         branch: Option<&str>,
         action: Action,
     ) -> Result<ActionOutcome, SourceError>;
+
+    /// Run a copy action bound to the Compose identity the app displayed.
+    fn act_on_copy(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        _compose_project: Option<&str>,
+        action: Action,
+    ) -> Result<ActionOutcome, SourceError> {
+        self.act(repo_root, native, branch, action)
+    }
+
+    /// Run a service-scoped lifecycle action on a Compose instance.
+    fn act_on_service(
+        &self,
+        _repo_root: &Path,
+        _branch: Option<&str>,
+        _compose_project: Option<&str>,
+        _service: &str,
+        _action: Action,
+    ) -> Result<LifecycleResult, ServiceActionError> {
+        Err(SourceError::Cli {
+            code: "E_APP_SERVICE_ACTION".into(),
+            message: "Service actions are unavailable for this source.".into(),
+            failed: vec![],
+        }
+        .into())
+    }
 
     /// Last log lines for a project or one of its branch instances (no follow).
     ///
@@ -724,8 +937,17 @@ pub(crate) fn read_daemon_status(
 }
 
 pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
+    trusted_tool_path_with(path, uid, directory, |_, _| false)
+}
+
+fn trusted_tool_path_with(
+    path: &Path,
+    uid: u32,
+    directory: bool,
+    writable_dir: fn(&Path, &std::fs::Metadata) -> bool,
+) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
-    if !crate::doctor_plugins::guarded_names(path, uid, &mut 64, false) {
+    if !crate::doctor_plugins::guarded_names_with(path, uid, &mut 64, false, writable_dir) {
         return None;
     }
     let real = std::fs::canonicalize(path).ok()?;
@@ -736,7 +958,9 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
             || (index > 0 || directory) && !meta.is_dir()
             || (index == 0 && !directory && (!meta.is_file() || meta.mode() & 0o111 == 0))
             || (meta.uid() != uid && meta.uid() != 0)
-            || (meta.mode() & 0o022 != 0 && !sticky_root)
+            || (meta.mode() & 0o022 != 0
+                && !sticky_root
+                && !(index > 0 && writable_dir(component, &meta)))
         {
             return None;
         }
@@ -1004,9 +1228,11 @@ fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
     }
     let mut coverage = DoctorRun::machine(Ok(crate::models::DoctorReport {
         checks: vec![crate::models::DoctorCheck {
+            native_pool: None,
             id: "desktop tool coverage".into(),
             status: "unknown".into(),
             detail: note,
+            fix: None,
         }],
         summary: vec![],
     }));
@@ -1147,9 +1373,11 @@ impl LiveSource {
                 let why = format!("Could not check Doctor executable discovery: {reason}");
                 let report = crate::models::DoctorReport {
                     checks: vec![crate::models::DoctorCheck {
+                        native_pool: None,
                         id: "desktop preflight".into(),
                         status: "unknown".into(),
                         detail: why.clone(),
+                        fix: None,
                     }],
                     summary: vec![],
                 };
@@ -1741,6 +1969,77 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn resource_inventory(&self) -> Result<crate::resource_inventory::InventoryReport, String> {
+        self.runner
+            .run_schema_json(&["resources", "list", "--json"], None, Duration::from_secs(60), "hack.resources.v1")
+            .map_err(|_| "Resource inventory unavailable. Check that the selected CLI supports hack resources.".into())
+    }
+
+    fn resource_removal(
+        &self,
+        id: &str,
+        confirmation: Option<&str>,
+    ) -> Result<crate::resource_inventory::RemovalPlan, String> {
+        let mut args = vec!["resources", "remove", id, "--json"];
+        if let Some(token) = confirmation {
+            args.extend(["--confirm", token]);
+        } else {
+            args.push("--dry-run");
+        }
+        self.runner
+            .run_schema_json(
+                &args,
+                None,
+                Duration::from_secs(30),
+                "hack.resource-remove.v1",
+            )
+            .map_err(|error| match error {
+                RunError::Cli(error) => error.message,
+                _ => "Resource removal could not be confirmed. Refresh the inventory.".into(),
+            })
+    }
+
+    fn config_read(
+        &self,
+        root: Option<&Path>,
+        field: crate::config_form::Field,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        let root = root
+            .map(|path| trusted_root(path).map_err(|_| "Checkout unavailable"))
+            .transpose()?;
+        let runner = self.runner.fixed();
+        let mut report = crate::config_form::read(&runner, root, field)?;
+        if field.kind == crate::config_form::Kind::Overlay
+            && let Some(root) = report.root.as_deref()
+            && let crate::env::EnvView::Report(env) = self.env(root, false)
+        {
+            report.names = env
+                .overlays
+                .iter()
+                .map(|overlay| overlay.name.clone())
+                .collect();
+        }
+        Ok(report)
+    }
+
+    fn config_write(
+        &self,
+        report: &crate::config_form::Report,
+        field: crate::config_form::Field,
+        input: &str,
+    ) -> Result<crate::config_form::Report, &'static str> {
+        let runner = self.runner.fixed();
+        if runner.resolve_program().ok().as_ref() != Some(&report.executable) {
+            return Err("The selected CLI changed. Check again.");
+        }
+        if let Some(root) = &report.root
+            && trusted_root(root).ok().as_ref() != Some(root)
+        {
+            return Err("The checkout changed. Check again.");
+        }
+        crate::config_form::write(&runner, report, field, input)
+    }
+
     fn open_logs(
         &self,
         repo_root: &Path,
@@ -1756,7 +2055,7 @@ impl Source for LiveSource {
             .transpose()
             .map_err(|e| describe_error(&e))?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.runner
+        self.runner_for(false)
             .stream_logs(&with_branch(&args, branch), Some(repo_root))
             .map(|s| Box::new(s) as Box<dyn LogFeed>)
             .map_err(|e| e.to_string())
@@ -1870,6 +2169,15 @@ impl Source for LiveSource {
         serde_json::from_str(&out).ok()
     }
 
+    fn service_files(
+        &self,
+        target: &crate::files::Target,
+        op: crate::files::Read,
+        path: &str,
+    ) -> Result<crate::files::Report, String> {
+        crate::files::read(&self.runner_for(false).fixed(), target, op, path)
+    }
+
     fn service_usage(&self, root: &Path) -> Result<crate::usage::UsageReport, String> {
         // Compose only: an inherited HACK_RUNTIME_BACKEND=native must not
         // change these reads.
@@ -1883,6 +2191,25 @@ impl Source for LiveSource {
             )
             .map_err(|e| e.to_string())?;
         crate::usage::UsageReport::from_value(v)
+    }
+
+    fn stats_sample(&self) -> Result<crate::stats::StatsReport, String> {
+        let value: serde_json::Value = self
+            .runner_for(false)
+            .fixed()
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_json(
+                &["usage", "--json", "--details", "--no-host"],
+                None,
+                Self::USAGE,
+            )
+            .map_err(|e| e.to_string())?;
+        if value.get("runtime_ok").and_then(serde_json::Value::as_bool) != Some(true)
+            || value.get("error").is_some()
+        {
+            return Err("Container usage is unavailable".into());
+        }
+        serde_json::from_value(value).map_err(|e| e.to_string())
     }
 
     fn emulated_services(
@@ -2023,11 +2350,36 @@ impl Source for LiveSource {
         Self::read_native_ps(&Self::native_runner(&self.runner.fixed()), repo_root)
     }
 
+    fn copies(&self, root: &Path, native: bool) -> Result<CopiesReport, CopiesError> {
+        let root = trusted_root(root).map_err(|error| CopiesError {
+            reason: describe_error(&error),
+            hint: "Check the project checkout and try again.".into(),
+        })?;
+        // The CLI gives its parallel observation jobs 45 s. Leave time for
+        // project discovery and address resolution before the runner retires it.
+        Ok(self.runner_for(native).run_json(
+            &["ps", "--copies", "--json"],
+            Some(&root),
+            Duration::from_secs(60),
+        )?)
+    }
+
     fn act(
         &self,
         repo_root: &Path,
         native: bool,
         branch: Option<&str>,
+        action: Action,
+    ) -> Result<ActionOutcome, SourceError> {
+        self.act_on_copy(repo_root, native, branch, None, action)
+    }
+
+    fn act_on_copy(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        compose_project: Option<&str>,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
         let branch = branch.map(validate_branch).transpose()?;
@@ -2036,7 +2388,13 @@ impl Source for LiveSource {
         let real = trusted_root(repo_root)?;
         let repo_root = real.as_path();
 
-        let args = with_branch(action.cli_args(), branch);
+        let mut args = with_branch(action.cli_args(), branch);
+        let expected = compose_project
+            .filter(|_| !native && action != Action::Open)
+            .map(|name| format!("--expect-compose-project={name}"));
+        if let Some(expected) = &expected {
+            args.extend(["--target", "local", expected.as_str()]);
+        }
         let runner = self.runner_for(native);
         Ok(match action {
             Action::Open => {
@@ -2045,6 +2403,82 @@ impl Source for LiveSource {
             // No app deadline: busy until the CLI exits (see LIFECYCLE_WARN_AFTER).
             _ => ActionOutcome::Lifecycle(runner.run_json_to_completion(&args, Some(repo_root))?),
         })
+    }
+
+    fn catalog_edit(
+        &self,
+        root: &Path,
+        id: &str,
+        revision: Option<&str>,
+    ) -> Result<crate::service_catalog::CatalogEdit, String> {
+        let root = trusted_root(root)
+            .map_err(|_| "Can’t edit this checkout. Verify ownership and write permissions.")?;
+        let mut args = vec!["service", "add", id, "--json"];
+        if let Some(revision) = revision {
+            args.extend(["--expect-revision", revision]);
+        } else {
+            args.push("--dry-run");
+        }
+        self.runner
+            .run_schema_json(&args, Some(&root), Self::READ, "hack.service-add.v1")
+            .map_err(|error| match error {
+                RunError::Cli(error) => format!("{} ({})", error.message, error.code),
+                _ => "Could not run hack service add. Check that the selected CLI supports it."
+                    .into(),
+            })
+    }
+
+    fn act_on_service(
+        &self,
+        repo_root: &Path,
+        branch: Option<&str>,
+        compose_project: Option<&str>,
+        service: &str,
+        action: Action,
+    ) -> Result<LifecycleResult, ServiceActionError> {
+        let branch = branch.map(validate_branch).transpose()?;
+        let root = trusted_root(repo_root)?;
+        // `--service=<name>` always stays the value of the service selector.
+        let stop_option = format!("--service={service}");
+        let mut args = match action {
+            Action::Stop => vec![
+                "down",
+                "--json",
+                "--no-interactive",
+                "--target",
+                "local",
+                &stop_option,
+            ],
+            Action::Start if !service.is_empty() && !service.starts_with('-') => {
+                let mut args = Action::Start.cli_args().to_vec();
+                args.extend(["--target", "local", service]);
+                args
+            }
+            Action::Restart if !service.is_empty() && !service.starts_with('-') => {
+                vec![
+                    "restart",
+                    "--json",
+                    "--no-interactive",
+                    "--target",
+                    "local",
+                    service,
+                ]
+            }
+            _ => {
+                return Err(SourceError::Cli {
+                    code: "E_APP_SERVICE_ACTION".into(),
+                    message: "Invalid service action or service name.".into(),
+                    failed: vec![],
+                }
+                .into());
+            }
+        };
+        let expected = compose_project.map(|name| format!("--expect-compose-project={name}"));
+        if let Some(expected) = &expected {
+            args.push(expected);
+        }
+        let runner = self.runner_for(false);
+        Ok(runner.run_json_to_completion(&with_branch(&args, branch), Some(&root))?)
     }
 
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {
@@ -3717,9 +4151,9 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(tools.unchecked.contains("docker"));
         for native in [false, true] {
             let checks = vec![
-                crate::models::DoctorCheck { id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()) },
-                crate::models::DoctorCheck { id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into() },
-                crate::models::DoctorCheck { id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into() },
+                crate::models::DoctorCheck { native_pool: None, id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into(), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into(), fix: None },
             ];
             let mut run = DoctorRun::project(
                 "fixture",
@@ -3766,9 +4200,11 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(!tools.unchecked.contains("docker"));
         let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
             checks: vec![crate::models::DoctorCheck {
+                native_pool: None,
                 id: "docker daemon".into(),
                 status: "error".into(),
                 detail: "validated Docker reported an engine error".into(),
+                fix: None,
             }],
             summary: vec![],
         }))];
@@ -3812,9 +4248,11 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             ("host tls trust", "missing host trust bundle"),
         ]
         .map(|(id, detail)| crate::models::DoctorCheck {
+            native_pool: None,
             id: id.into(),
             status: "error".into(),
             detail: detail.into(),
+            fix: None,
         })
         .to_vec();
         let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
@@ -3964,9 +4402,11 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                 "project",
             ]
             .map(|id| crate::models::DoctorCheck {
+                native_pool: None,
                 id: id.into(),
                 status: "ok".into(),
                 detail: "independently observed".into(),
+                fix: None,
             })
             .to_vec();
             let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
@@ -4625,6 +5065,56 @@ esac
 
     fn untrusted(r: Result<PathBuf, SourceError>) -> bool {
         matches!(r, Err(SourceError::Cli { ref code, .. }) if code == "E_APP_UNTRUSTED_ROOT")
+    }
+
+    #[test]
+    fn copies_error_keeps_the_cli_hint_and_ignores_unstructured_output() {
+        let error = CopiesError::from(RunError::Cli(crate::models::CliError {
+            code: "E_NATIVE_SETUP_REQUIRED".into(),
+            message: "Native runtime unavailable.".into(),
+            detail: Some(serde_json::json!({"hint": "Run hack native setup."})),
+        }));
+        assert_eq!(
+            error.reason,
+            "E_NATIVE_SETUP_REQUIRED: Native runtime unavailable."
+        );
+        assert_eq!(error.hint, "Run hack native setup.");
+
+        let error = CopiesError::from(RunError::Exit {
+            code: Some(1),
+            stderr: "fixture output".into(),
+        });
+        assert!(!error.reason.contains("fixture output"));
+    }
+
+    #[test]
+    fn copies_reads_the_selected_checkout_and_keeps_partial_observations() {
+        let dir = base("copies");
+        let root = dir.join("worktree");
+        make_project(&root, ".hack", "docker-compose.yml");
+        let binary = dir.join("hack");
+        crate::test_support::script(
+            &binary,
+            r#"#!/bin/sh
+[ "$#" -eq 5 ] && [ "$1 $2 $3 $4" = 'ps --copies --json --path' ] || exit 2
+[ "${5##*/}" = worktree ] || exit 3
+[ "$HACK_RUNTIME_BACKEND" = native ] || exit 4
+echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop","kind":"worktree"},"branch":"feature/search","instance":"feature-search","backend":"native","state":"unknown","address":null}],"observation":{"ok":false,"code":"E_TIMEOUT"}}}'
+"#,
+        );
+        let source = LiveSource {
+            cache: Default::default(),
+            runner: fixture_runner(&binary),
+            daemon: None,
+        };
+        let report = source.copies(&root, true);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let report = report.expect("partial report");
+        assert!(!report.observation.ok);
+        assert_eq!(report.observation.code.as_deref(), Some("E_TIMEOUT"));
+        assert_eq!(report.copies[0].instance.as_deref(), Some("feature-search"));
+        assert_eq!(report.copies[0].checkout.kind, "worktree");
+        assert_eq!(report.copies[0].state, "unknown");
     }
 
     #[test]
@@ -5418,7 +5908,13 @@ esac
             r#"#!/bin/sh
 printf '%s %s\n' "$HACK_RUNTIME_BACKEND" "$*" >> "$HACK_HOME/calls"
 case "$1" in
-  usage) echo '{"ok":true,"data":{"schema":"hack.usage.by-service.v1","project":"shop","services":[{"composeProject":"shop","service":"api","containers":1,"cpuPercent":1.5,"memUsedBytes":1048576,"memLimitBytes":null}]}}' ;;
+  usage)
+    if [ "$3" = "--details" ]; then
+      echo '{"runtime_ok":true,"containers":[{"containerId":"aaaaaaaaaaaa","project":"shop","service":"api","netInputBytes":1000,"configuredMemoryLimitBytes":67108864}]}'
+    else
+      echo '{"ok":true,"data":{"schema":"hack.usage.by-service.v1","project":"shop","services":[{"composeProject":"shop","service":"api","containers":1,"cpuPercent":1.5,"memUsedBytes":1048576,"memLimitBytes":null}]}}'
+    fi
+    ;;
   ps) echo '{"ok":true,"data":{"items":[{"Service":"api","emulated":true},{"Service":"db"}]}}' ;;
 esac
 "#,
@@ -5436,6 +5932,12 @@ esac
         let root = Path::new("/work/shop");
         let report = src.service_usage(root).unwrap();
         assert_eq!(report.for_instance("shop")["api"].cpu_percent, Some(1.5));
+        let stats = src.stats_sample().unwrap();
+        assert_eq!(stats.containers[0].net_input_bytes, Some(1000));
+        assert_eq!(
+            stats.containers[0].configured_memory_limit_bytes,
+            Some(67_108_864)
+        );
         let base = src.emulated_services(root, None).unwrap();
         assert_eq!(base, std::collections::BTreeSet::from(["api".to_owned()]));
         src.emulated_services(root, Some("preview")).unwrap();
@@ -5449,6 +5951,7 @@ esac
             calls.lines().collect::<Vec<_>>(),
             vec![
                 "compose usage --json --by-service --path /work/shop",
+                "compose usage --json --details --no-host",
                 "compose ps --json --path /work/shop",
                 "compose ps --json --branch preview --path /work/shop",
             ]

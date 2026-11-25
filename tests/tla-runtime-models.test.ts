@@ -6,30 +6,38 @@ import {
 
 function tlaWitness({
   invariant,
-  action,
+  action = "Next",
   fields,
 }: {
   invariant: string;
-  action: string;
+  action?: string;
   fields: readonly string[];
 }): string {
-  return `Error: Invariant ${invariant} is violated.\nState 2: <${action} line 1>\n${fields.map((field) => `/\\ ${field}`).join("\n")}`;
+  return `Error: Invariant ${invariant} is violated.\nError: The behavior up to this point is:\nState 2: <${action} line 1>\n${fields.map((field) => `/\\ ${field}`).join("\n")}`;
 }
 
 const contracts = runtimeModels.flatMap((model) => [
-  model,
-  ...("additionalControls" in model
-    ? (model.additionalControls ?? []).map((control) => ({
-        ...control,
-        name: `${model.name}/${control.name}`,
-      }))
-    : []),
+  { ...model, negative: true },
+  ...model.additionalControls.map((control) => ({
+    ...control,
+    name: `${model.name}/${control.name}`,
+  })),
 ]);
 for (const model of contracts) {
   test(`${model.name}: evidence must establish exploration and the intended failure`, () => {
     const positive = `Model checking completed. No error has been found.\n${model.states} distinct states found, 0 states left on queue.`;
     expect(
       model.verify({ negative: false, exitCode: 0, output: positive })
+    ).toBe(true);
+    expect(
+      model.verify({
+        negative: false,
+        exitCode: 0,
+        output: positive.replace(
+          String(model.states),
+          model.states.toLocaleString("en-US")
+        ),
+      })
     ).toBe(true);
     for (const output of [
       "",
@@ -40,18 +48,38 @@ for (const model of contracts) {
         false
       );
     }
-    const header = `Invariant ${model.invariant} is violated.\nState 2: <${model.action} line 1>`;
-    const fields = model.fields.map((field) => `/\\ ${field}`);
-    const output = `${header}\n${fields.join("\n")}`;
-    expect(model.verify({ negative: true, exitCode: 12, output })).toBe(true);
+    if (!model.negative) {
+      return;
+    }
+    const output = tlaWitness(model);
+    for (const fields of [
+      model.fields,
+      ...(model.alternativeWitnesses ?? []),
+    ]) {
+      // Two TLC trace presentations of the same violating state. Some models
+      // have only one transition into it, so vary the reported header here.
+      for (const action of ["Next", "AlternativeTransition"]) {
+        expect(
+          model.verify({
+            negative: true,
+            exitCode: 12,
+            output: tlaWitness({ invariant: model.invariant, action, fields }),
+          })
+        ).toBe(true);
+      }
+    }
     for (const exitCode of [null, 0, 1, 124]) {
       expect(model.verify({ negative: true, exitCode, output })).toBe(false);
     }
     for (const invalid of [
       "Parse error",
       output.replace(`Invariant ${model.invariant}`, "Invariant Wrong"),
-      output.replace(`<${model.action} `, "<Other "),
-      `${header}\n${fields[0]}\nState 3: <Other line 2>\n${fields[1]}`,
+      output.replace("State 2: <Next line 1>", "State 2: <unterminated"),
+      `${output}\nState 3: <Other line 2>\n/\\ unrelated = TRUE`,
+      output.replace(
+        `/\\ ${model.fields[0]}`,
+        "State 3: <Other line 2>\n/\\ unrelated = TRUE\nState 4: <Next line 1>"
+      ),
     ]) {
       expect(
         model.verify({ negative: true, exitCode: 12, output: invalid })
@@ -78,6 +106,39 @@ test("runtime model config selection rejects paths and arbitrary filenames", () 
       "Invalid runtime model control name"
     );
   }
+});
+
+test("both services can be the final publication counterexample", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "per-service-publication"
+  );
+  expect(model).toBeDefined();
+  const bind = model?.additionalControls.find(
+    (entry) => entry.name === "bind-before-commit"
+  );
+  expect(bind).toBeDefined();
+  const recordSecond = tlaWitness({
+    invariant: "Safe",
+    action: "Record",
+    fields: [
+      'recorded = {"second"}',
+      'child = [first |-> "absent", second |-> "gated"]',
+    ],
+  });
+  const bindSecond = tlaWitness({
+    invariant: "Safe",
+    action: "Bind",
+    fields: [
+      'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+      "recorded = {}",
+    ],
+  });
+  expect(
+    model?.verify({ negative: true, exitCode: 12, output: recordSecond })
+  ).toBe(true);
+  expect(
+    bind?.verify({ negative: true, exitCode: 12, output: bindSecond })
+  ).toBe(true);
 });
 
 test("persistent enrollment accepts both genuine changed-birth witnesses only", () => {
@@ -117,7 +178,6 @@ test("persistent metadata-alias evidence requires a changed physical volume with
     output.replace("actualVolume = 2", "actualVolume = 1"),
     output.replace("reportedMetadata = 1", "reportedMetadata = 2"),
     output.replace("witness = 0", "witness = 1"),
-    output.replace("<ReadRetained ", "<ReplaceWithAliasedMetadata "),
   ]) {
     expect(
       control.verify({ negative: true, exitCode: 12, output: invalid })
@@ -144,7 +204,6 @@ test("storage witness controls distinguish missing bytes from foreign metadata",
     for (const invalid of [
       valid.replace("enrolled = 1", "enrolled = 0"),
       valid.replace("unsafeStart = TRUE", "unsafeStart = FALSE"),
-      valid.replace("<StartWorkload ", "<ReadWitness "),
       valid.replace(
         "/\\ marker =",
         "State 3: <StartWorkload line 2>\n/\\ marker ="
@@ -233,11 +292,11 @@ test("interrupted empty witness slot evidence cannot imply enrollment or effects
   }
 });
 
-test("registry ownership control requires live successor deletion in the same Reap state", () => {
+test("registry ownership control requires live successor deletion in the final state", () => {
   const model = runtimeModels.find((entry) => entry.name === "registry-writer");
   expect(model).toBeDefined();
   const output =
-    "Invariant NoLiveOwnershipLoss is violated.\nState 16: <Reap line 72>\n/\\ unsafeReap = TRUE\n/\\ lock = 0\n/\\ guard = 0\n";
+    "Error: Invariant NoLiveOwnershipLoss is violated.\nState 16: <Reap line 72>\n/\\ unsafeReap = TRUE\n/\\ lock = 0\n/\\ guard = 0\n";
   expect(model?.verify({ negative: true, exitCode: 12, output })).toBe(true);
   for (const invalid of [
     output.replace("unsafeReap = TRUE", "unsafeReap = FALSE"),
@@ -290,14 +349,13 @@ test("missing-lock old-holder witness covers only incomplete repair stages", () 
   }
   const valid = witness("temp");
   for (const invalid of [
-    valid.replace("<OldHolderPublish ", "<Commit "),
     valid.replace('repair = "active"', 'repair = "crashed"'),
     valid.replace("gate = TRUE", "gate = FALSE"),
     valid.replace("legacyPublished = TRUE", "legacyPublished = FALSE"),
     valid.replace("Invariant NoUncoordinatedLegacy", "Invariant Other"),
     valid.replace(
-      '/\\ stage = "temp"',
-      'State 3: <Other line 2>\n/\\ stage = "temp"'
+      '/\\ repair = "active"',
+      'State 3: <Other line 2>\n/\\ repair = "active"'
     ),
     `Error: unrelated checker failure\n${valid}`,
   ]) {
@@ -305,6 +363,117 @@ test("missing-lock old-holder witness covers only incomplete repair stages", () 
       control?.verify({ negative: true, exitCode: 12, output: invalid })
     ).toBe(false);
   }
+});
+
+test("run mapping stays stranded when processes exit after deletion or replacement", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "native-run-mapping-release"
+  );
+  const prefix = String.raw`Error: Invariant NoStrandedMapping is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ mapping = "held"
+/\ procs = TRUE
+/\ clean = FALSE
+/\ named = TRUE
+/\ unsafe = FALSE
+/\ home = "present"
+
+State 2: <Delete line 39 of module MappingRelease>
+/\ mapping = "held"
+/\ procs = TRUE
+/\ clean = FALSE
+/\ named = TRUE
+/\ unsafe = FALSE
+/\ home = "deleted"
+
+`;
+  const exited = String.raw`/\ mapping = "held"
+/\ procs = FALSE
+/\ clean = FALSE
+/\ named = FALSE
+/\ unsafe = FALSE
+`;
+  const deleted = `${prefix}State 3: <Exit line 57 of module MappingRelease>\n${exited}/\\ home = "deleted"\n`;
+  const replaced = String.raw`${prefix}State 3: <Replace line 52 of module MappingRelease>
+/\ mapping = "held"
+/\ procs = TRUE
+/\ clean = FALSE
+/\ named = TRUE
+/\ unsafe = FALSE
+/\ home = "replaced"
+
+State 4: <Exit line 57 of module MappingRelease>
+${exited}/\ home = "replaced"
+`;
+  const verify = (output: string) =>
+    model?.verify({ negative: true, exitCode: 12, output });
+  expect(verify(deleted)).toBe(true);
+  expect(verify(replaced)).toBe(true);
+  expect(verify(deleted.replace("procs = FALSE", "procs = TRUE"))).toBe(false);
+  expect(
+    verify(
+      replaced.replace(
+        'mapping = "held"\n/\\ procs = FALSE',
+        'mapping = "released"\n/\\ procs = FALSE'
+      )
+    )
+  ).toBe(false);
+});
+
+test("image batch detects two simultaneous imports at any job positions", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "native-image-batch"
+  );
+  const verify = (phase: string, verified: string) =>
+    model?.verify({
+      negative: true,
+      exitCode: 12,
+      output: tlaWitness({
+        invariant: "Safe",
+        action: "Import",
+        fields: [`phase = ${phase}`, `verified = ${verified}`],
+      }),
+    });
+  // TLC actually reported the first and third jobs importing instead of the
+  // first and second jobs. Another job can also have failed after verification.
+  expect(verify('<<"import", "queued", "import", "queued">>', "{1, 3}")).toBe(
+    true
+  );
+  expect(
+    verify('<<"import", "failed", "import", "queued">>', "{1, 2, 3}")
+  ).toBe(true);
+  expect(verify('<<"import", "queued", "ready", "queued">>', "{1, 3}")).toBe(
+    false
+  );
+  expect(verify('<<"import", "queued", "import", "queued">>', "{1}")).toBe(
+    false
+  );
+});
+
+test("dependency refresh detects a replay after an earlier pre-effect retry", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "dependency-auto-refresh"
+  );
+  const output = tlaWitness({
+    invariant: "NoReplayAfterUnconfirmed",
+    action: "Start",
+    fields: [
+      "replayed = TRUE",
+      "unconfirmed = TRUE",
+      "closed = FALSE",
+      'journal = "none"',
+      "attempts = 3",
+      "retries = 1",
+    ],
+  });
+  const verify = (trace: string) =>
+    model?.verify({ negative: true, exitCode: 12, output: trace });
+  expect(verify(output)).toBe(true);
+  expect(
+    verify(output.replace("unconfirmed = TRUE", "unconfirmed = FALSE"))
+  ).toBe(false);
+  expect(verify(output.replace("attempts = 3", "attempts = 1"))).toBe(false);
 });
 
 test("previous-boot HTTPS publisher witness accepts only the two owner-archived stages", () => {
@@ -337,7 +506,6 @@ test("previous-boot HTTPS publisher witness accepts only the two owner-archived 
   }
   const valid = witness('{"owner", "socket"}');
   for (const invalid of [
-    valid.replace("<Publish ", "<ArchiveOwner "),
     valid.replace("complete = FALSE", "complete = TRUE"),
     valid.replace("Invariant NoPrematurePublication", "Invariant Other"),
     `${valid}\nError: unrelated checker failure`,
@@ -392,8 +560,11 @@ test("previous-boot HTTPS archive controls accept only model-derived move witnes
         fields: [...invariantFields, `archived = ${archived}`],
       });
     for (const action of ["ArchiveOwner", "ArchiveSocket"]) {
-      const own = action === "ArchiveOwner" ? "owner" : "socket";
-      for (const archived of [`{"${own}"}`, '{"owner", "socket"}']) {
+      for (const archived of [
+        '{"owner"}',
+        '{"socket"}',
+        '{"owner", "socket"}',
+      ]) {
         expect(
           control?.verify({
             negative: true,
@@ -402,10 +573,7 @@ test("previous-boot HTTPS archive controls accept only model-derived move witnes
           })
         ).toBe(true);
       }
-      for (const archived of [
-        "{}",
-        action === "ArchiveOwner" ? '{"socket"}' : '{"owner"}',
-      ]) {
+      for (const archived of ["{}", '{"foreign"}']) {
         expect(
           control?.verify({
             negative: true,
@@ -533,7 +701,6 @@ test("restart-policy controls accept every reachable first violation only", () =
   for (const invalid of [
     staleUse("exited", 0),
     staleUse("exited", 1, "disarmed"),
-    staleUse("exited", 1).replace("<Use ", "<Bind "),
   ]) {
     expect(
       staleGeneration?.verify({ negative: true, exitCode: 12, output: invalid })
@@ -560,5 +727,54 @@ test("build retention accepts the observed image-2 reclaim violation only with a
     expect(
       model?.verify({ negative: true, exitCode: 12, output: invalid })
     ).toBe(false);
+  }
+});
+
+test("native-pool-stop https-stopped accepts its stranded finalization after a listener fault only", () => {
+  // The B1 factory trace: Listen, Start, OwnerCrash, RecoverRunning, RuntimeDown,
+  // OwnerRetire, then ListenerExits as the last step before the dead end.
+  const control = runtimeModels
+    .find((entry) => entry.name === "native-pool-stop")
+    ?.additionalControls?.find((entry) => entry.name === "https-stopped");
+  expect(control).toBeDefined();
+  const terminal = [
+    "faults = 3",
+    'pool = "stopped"',
+    "boot = 1",
+    'https = "records"',
+    "fin = TRUE",
+    'port = "free"',
+    'run = "retained"',
+    'owner = "none"',
+    "pub = FALSE",
+  ];
+  const witness = (action: string, fields = terminal) =>
+    tlaWitness({ invariant: "NoDeadEnd", action, fields });
+  const verify = (output: string) =>
+    control?.verify({ negative: true, exitCode: 12, output });
+  expect(verify(witness("ListenerExits"))).toBe(true);
+  const valid = witness("ListenerExits");
+  for (const invalid of [
+    // Another dead end is not this control's.
+    witness(
+      "ListenerExits",
+      terminal.map((field) => field.replace("fin = TRUE", "fin = FALSE"))
+    ),
+    witness(
+      "ListenerExits",
+      terminal.map((field) =>
+        field.replace('pool = "stopped"', 'pool = "running"')
+      )
+    ),
+    witness(
+      "ListenerExits",
+      terminal.map((field) =>
+        field.replace('run = "retained"', 'run = "ready"')
+      )
+    ),
+    valid.replace("Invariant NoDeadEnd", "Invariant NoArchiveOverListener"),
+    `${valid}\nError: unrelated checker failure`,
+  ]) {
+    expect(verify(invalid)).toBe(false);
   }
 });

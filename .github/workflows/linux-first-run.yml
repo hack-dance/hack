@@ -1,0 +1,82 @@
+name: Linux first-run advisory
+
+on:
+  push:
+    branches: [next]
+  pull_request:
+    paths:
+      - '.github/workflows/linux-first-run.yml'
+      - 'src/commands/global*.ts'
+      - 'src/lib/global-*.ts'
+      - 'src/ui/**'
+      - 'scripts/linux-first-run-check.ts'
+      - 'scripts/build-release.ts'
+      - 'scripts/build-*-candidate.sh'
+      - 'scripts/build-config-compiler.ts'
+      - 'scripts/build-lifecycle-supervisor.ts'
+      - 'scripts/install*'
+      - 'scripts/installer/**'
+      - 'scripts/build-prerelease-manager.ts'
+      - 'src/lib/release-install.ts'
+      - 'scripts/prerelease-*.ts'
+      - 'scripts/hack-v5.sh'
+      - 'install*.sh'
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [next]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run the advisory check
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  first-run:
+    name: Linux first-run check (advisory)
+    # A successful CI dispatch has already required full=true. Keep the
+    # advisory in a separate run so its result cannot affect release evidence.
+    if: >-
+      github.event_name == 'push' || github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.full) ||
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.event == 'workflow_dispatch' &&
+        github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: bun install --frozen-lockfile
+      - name: Build CLI and helpers
+        run: |
+          bun run build
+          bun run build:config-compiler
+      - name: Check hosted Docker
+        run: |
+          docker info
+          docker compose version
+      - name: Run Linux first-run check
+        run: |
+          bun scripts/linux-first-run-check.ts \
+            --hack "$PWD/dist/hack" \
+            --scratch "$RUNNER_TEMP/first-run" \
+            --one-shot-seconds 5
+      - name: Retain first-run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-first-run-report
+          path: ${{ runner.temp }}/first-run/report.md
+          if-no-files-found: ignore

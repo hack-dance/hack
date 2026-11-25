@@ -427,3 +427,31 @@ fn removed_inactive_required_env_file_retains_ownership_while_absent() {
             .contains("INACTIVE_FILE_CANARY")
     );
 }
+
+#[test]
+fn report_started_is_accepted_only_by_foreground_serve() {
+    let fixture = Fixture::new();
+    fs::write(fixture.project.join("compose.yml"), "services: {}\n").unwrap();
+    let (run, plan) = ("a".repeat(32), "b".repeat(64));
+    // Serve and serve-restore get past argument parsing and fail later, on the
+    // changed input, exactly as without the flag; `run` refuses the flag itself.
+    for (action, expected) in [
+        ("serve", "normalized_compose_input"),
+        ("serve-restore", "normalized_compose_input"),
+        ("run", "graph_arguments"),
+    ] {
+        let code = error(fixture.invoke(
+            &["graph", action],
+            &[
+                "--run-id",
+                &run,
+                "--expect-plan",
+                &plan,
+                "--ready",
+                "web=started",
+                "--report-started",
+            ],
+        ));
+        assert_eq!(code, expected, "{action}");
+    }
+}

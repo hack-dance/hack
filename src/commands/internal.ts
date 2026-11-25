@@ -105,7 +105,7 @@ async function writeInternalExtraHosts(
   map: Record<string, string | null>
 ): Promise<void> {
   const text = `${JSON.stringify(map, null, 2)}\n`;
-  await writeTextFileIfChanged(path, text);
+  await writeTextFileIfChanged(path, text, 0o600);
 }
 
 async function handleExtraHostsSet({
@@ -131,7 +131,7 @@ async function handleExtraHostsSet({
   }
 
   const dir = resolve(project.projectDir, ".internal");
-  await ensureDir(dir);
+  await ensureDir(dir, 0o700);
   const path = resolveExtraHostsPath(project.projectDir);
 
   const existing = await readLocalExtraHosts(path);
@@ -176,7 +176,7 @@ async function handleExtraHostsUnset({
   } else {
     delete existing[hostname];
   }
-  await ensureDir(resolve(project.projectDir, ".internal"));
+  await ensureDir(resolve(project.projectDir, ".internal"), 0o700);
   await writeInternalExtraHosts(path, existing);
 
   logger.success({ message: `Removed internal extra_hosts: ${hostname}` });

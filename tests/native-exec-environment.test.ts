@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareNativeExecEnvironment } from "../src/backends/native-exec-environment.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -15,7 +16,7 @@ async function fixture() {
   const projectRoot = await mkdtemp(join(tmpdir(), "native-exec-env-"));
   roots.push(projectRoot);
   const projectDir = join(projectRoot, ".hack");
-  await mkdir(projectDir);
+  await mkdirOwnedFixture(projectDir);
   const composeFile = join(projectDir, "docker-compose.yml");
   await writeFile(
     composeFile,

@@ -320,7 +320,7 @@ Thrown usage errors with an explicit `--json` token become E_USAGE; other thrown
 
 | Command | Output contract | Exit / open shape |
 | --- | --- | --- |
-| up/down/restart, retained Compose owner | shared envelope; data action (up/down/restart), project:string, branch:string/null, composeProject:string, services.{started,completed,stopped,failed}:sorted string arrays, durationMs:number; optional cacheVolumesRemoved:string[] | JSON up implies detach. Structured startup/lifecycle failures use error envelope. |
+| up/down/restart, retained Compose owner | shared envelope; data action (up/down/restart), project:string, branch:string/null, composeProject:string, services.{started,completed,stopped,failed}:sorted string arrays, durationMs:number; optional cacheVolumesRemoved:string[] and cacheVolumesKept:{name:string,reason:string}[] | JSON up implies detach. Structured startup/lifecycle failures use error envelope. |
 | ps, Compose | bare {project,branch,composeProject,items}; branch nullable; items parsed engine records | daemon-assisted JSON may be forwarded; engine rows are open. Compose failure can return child nonzero with stderr and no success object. |
 | open | bare {url:string} | JSON reports URL; does not launch browser |
 | projects/status | bare listing below | runtime_ok false is report data, not necessarily command failure |
@@ -339,6 +339,10 @@ Thrown usage errors with an explicit `--json` token become E_USAGE; other thrown
 | host ps | bare {generatedAt,snapshotAvailable,commands,lifecycle} | timestamp string, availability boolean; nested telemetry remains specialized |
 | session panes/capture/tail | JSON-lines events below | no shared envelope |
 | update | command-owned object with ok:boolean, string error on failure | error is not shared error.{code,message}; success varies by check/install outcome; exit follows ok |
+
+For Compose `down --prune-caches`, detached volumes qualify only with their own
+`hack.cache.disposable=true` label and the exact Compose project and volume
+labels. The `.next` rule requires current mounts from the target checkout.
 
 Config get has no JSON flag: non-string values serialize as JSON, strings print plainly. Daemon metrics prints retained metrics JSON without a JSON flag; nested internal transport data is not a supported general API. MCP serve speaks MCP; log-pipe formats a stream. Other leaves without JSON do not inherit it.
 

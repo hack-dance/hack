@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { nativeComposeStorageDockerFixtureScript } from "./native-compose-storage-docker.ts";
+import { mkdirOwnedFixture, writeOwnedFixture } from "./owned-fixture.ts";
 import { privateCliEnv } from "./private-cli-env.ts";
 
 const roots: string[] = [];
@@ -56,6 +57,8 @@ export async function fixture(
     readonly runtimeMetadata?: boolean;
     /** Stand-in source run on each `plan` request, before it responds. */
     readonly onPlan?: string;
+    /** Stand-in source run before the Docker fixture handles a request. */
+    readonly onDocker?: string;
     readonly cleanupAllowed?: () => boolean;
     readonly storage?: Readonly<
       Record<
@@ -72,10 +75,10 @@ export async function fixture(
   if (opts.cleanupAllowed) {
     cleanupGuards.set(root, opts.cleanupAllowed);
   }
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   // Private HOME for child CLIs; the contributor's home is never selected.
   await mkdir(join(root, "user-home"), { mode: 0o700 });
-  await Bun.write(
+  await writeOwnedFixture(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({
       schema_version: 1,
@@ -129,7 +132,7 @@ export async function fixture(
           }),
     })
   );
-  await Bun.write(
+  await writeOwnedFixture(
     join(root, ".hack/hack.env.default.yaml"),
     JSON.stringify({
       version: 1,
@@ -175,6 +178,7 @@ else {
   const dockerBody = `
 const engine=root+"/engine";
 const volumes=root+"/volumes";
+${opts.onDocker ?? ""}
 ${opts.storage ? nativeComposeStorageDockerFixtureScript(root) : ""}
 const oneoff=${opts.oneoff === true};
 // Replay the ownership fixture's next-query placeholder at a chosen command boundary.

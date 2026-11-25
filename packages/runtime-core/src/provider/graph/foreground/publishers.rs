@@ -3,6 +3,7 @@
 use super::super::owner_loop::PublisherReadiness;
 use super::{Candidate, CandidateError, Receipt, signals};
 use crate::provider::{graph, publication};
+use crate::timings::{self, Step};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -47,11 +48,177 @@ enum Frontend<'a> {
 }
 
 #[derive(Default)]
-pub(super) struct Publishers {
+pub(in crate::provider::graph) struct Publishers {
     children: Vec<Owned>,
     probe_generations: BTreeMap<String, String>,
     owner: String,
     announce: bool,
+}
+
+pub(in crate::provider::graph) struct EarlyPublications {
+    pub(super) publishers: Publishers,
+    slots: BTreeMap<String, graph::RouteSlot>,
+    deadline: Instant,
+    deferred: BTreeMap<String, String>,
+}
+
+impl EarlyPublications {
+    pub(super) fn new(slots: &BTreeMap<String, graph::RouteSlot>, deadline: Instant) -> Self {
+        Self {
+            publishers: Publishers::default(),
+            slots: slots.clone(),
+            deadline,
+            deferred: BTreeMap::new(),
+        }
+    }
+
+    pub(in crate::provider::graph) fn publish(
+        &mut self,
+        engine: &graph::Engine<'_>,
+        receipt: &Receipt,
+        service: &str,
+        container_id: &str,
+    ) -> Result<(), CandidateError> {
+        let resource = receipt
+            .resources
+            .get(&format!("container:{service}"))
+            .ok_or_else(refused)?;
+        if resource.routing.is_none() && resource.loopback_ports.is_empty() {
+            return Ok(());
+        }
+        if resource.routing.is_some() != self.slots.contains_key(service) {
+            return Err(refused());
+        }
+        let candidate = engine.guest().candidate();
+        let run = &receipt.run;
+        let check = || {
+            if signals::startup_pending() || Instant::now() >= self.deadline {
+                Err(refused())
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
+        self.publishers.owner.clone_from(&receipt.owner);
+        let selected = match graph::bridges::admit_ready_service(
+            engine,
+            run,
+            service,
+            container_id,
+            self.slots.get(service).copied(),
+        ) {
+            Ok(selected) => selected,
+            Err(error) if error.code == "bridge_endpoint_pending" => {
+                self.deferred
+                    .insert(service.to_owned(), container_id.to_owned());
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        for (slot, assignment) in selected {
+            let port = assignment.loopback_port.map(|binding| binding.host_port);
+            let hostnames = if port.is_none() {
+                resource
+                    .routing
+                    .as_ref()
+                    .ok_or_else(refused)?
+                    .hostnames
+                    .clone()
+            } else {
+                Vec::new()
+            };
+            let upstream = || {
+                graph::bridges::publication_upstream(
+                    engine,
+                    run,
+                    slot,
+                    &assignment.reservation,
+                    port,
+                    &hostnames,
+                    Some((service, container_id)),
+                )
+            };
+            let endpoint = upstream()?;
+            let child = publication::launch_child(
+                candidate,
+                &publication::Launch {
+                    owner: &receipt.owner,
+                    run,
+                    reservation: &assignment.reservation,
+                    slot,
+                    port,
+                    hostnames: &hostnames,
+                    upstream: &endpoint,
+                },
+                || {
+                    check()?;
+                    if upstream()? != endpoint {
+                        return Err(refused());
+                    }
+                    check()
+                },
+            )?;
+            self.publishers.children.push(Owned {
+                child,
+                run: run.clone(),
+                reservation: assignment.reservation,
+                service: service.to_owned(),
+                hostnames,
+                port,
+                target: assignment.loopback_port.map(|binding| binding.target),
+                exited: None,
+                exit_proof: None,
+                exit_pending: false,
+            });
+            let owned = self.publishers.children.last_mut().ok_or_else(refused)?;
+            let observed = (|| {
+                loop {
+                    check()?;
+                    if publication::child_exit_pending(&owned.child)? {
+                        return Err(refused());
+                    }
+                    if published(candidate, owned).is_ok() {
+                        #[cfg(debug_assertions)]
+                        graph::publisher_recovery_fault(candidate, run, "publisher-bound")?;
+                        return Ok(());
+                    }
+                    std::thread::sleep(PUBLISHED_POLL);
+                }
+            })();
+            if let Err(error) = observed {
+                // The direct child is unreaped, so its PID cannot be reused.
+                // Stop before returning to graph cleanup: an authorized
+                // child might otherwise bind after cleanup observes no socket.
+                if !publication::child_exit_pending(&owned.child)? {
+                    owned.child.kill().map_err(|_| refused())?;
+                }
+                owned.exited = Some(owned.child.wait().map_err(|_| refused())?);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::provider::graph) fn settle(
+        &mut self,
+        engine: &graph::Engine<'_>,
+        receipt: &Receipt,
+        stop: impl Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        while !self.deferred.is_empty() {
+            for (service, id) in std::mem::take(&mut self.deferred) {
+                stop()?;
+                self.publish(engine, receipt, &service, &id)?;
+            }
+            if !self.deferred.is_empty() {
+                std::thread::sleep(
+                    PENDING_ENDPOINT_POLL
+                        .min(self.deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 fn command(
@@ -88,6 +255,39 @@ fn command(
 }
 
 impl Publishers {
+    pub(super) fn finish_early_start(
+        &mut self,
+        candidate: &Candidate,
+        receipt: &Receipt,
+        signals: &signals::Events,
+        deadline: Instant,
+        slots: &BTreeMap<String, graph::RouteSlot>,
+    ) -> Result<(), CandidateError> {
+        let count: usize = receipt
+            .resources
+            .values()
+            .map(|resource| resource.loopback_ports.len() + usize::from(resource.routing.is_some()))
+            .sum();
+        if count != self.children.len() {
+            return Err(refused());
+        }
+        if count == 0 && slots.is_empty() {
+            return Ok(());
+        }
+        for owned in &self.children {
+            signals.watch_child(&owned.child)?;
+        }
+        graph::bridges::supervise_probes(
+            candidate,
+            &receipt.run,
+            &mut self.probe_generations,
+            Some(deadline),
+            &BTreeSet::new(),
+            &|| check_deadline(signals, deadline),
+        )?;
+        self.verify_live(candidate)
+    }
+
     /// Notices may follow only the successfully flushed foreground readiness frame.
     pub(super) fn announce(&mut self) {
         self.announce = true;
@@ -163,25 +363,45 @@ impl Publishers {
         }
         let executable = std::env::current_exe().map_err(|_| refused())?;
         self.probe_generations.clear();
-        graph::bridges::supervise_probes(
-            candidate,
-            &receipt.run,
-            &mut self.probe_generations,
-            true,
-            &BTreeSet::new(),
-            &|| check_deadline(signals, deadline),
-        )?;
+        // Only restart-supervised routes can seed a probe generation. Reserving
+        // publications below still independently checks every selected endpoint.
+        if receipt
+            .resources
+            .values()
+            .any(|resource| resource.routing.is_some() && resource.restart_policy.is_some())
+        {
+            timings::measure(Step::GraphPublishSeed, None, |_| {
+                graph::bridges::supervise_probes(
+                    candidate,
+                    &receipt.run,
+                    &mut self.probe_generations,
+                    Some(deadline),
+                    &BTreeSet::new(),
+                    &|| check_deadline(signals, deadline),
+                )
+            })?;
+        }
         check_deadline(signals, deadline)?;
         // One snapshot and one registry update reserve every route and port.
         // `started` readiness can finish while an image healthcheck is still
         // starting; wait for those endpoints within the same startup deadline.
-        let reserved = retry_pending_endpoint(
-            || super::super::bridges::reserve_publications(candidate, receipt, slots),
-            || {
-                std::thread::sleep(PENDING_ENDPOINT_POLL);
-                check_deadline(signals, deadline)
-            },
-        )?;
+        let reserved = timings::measure(Step::GraphPublishReserve, None, |_| {
+            retry_pending_endpoint(
+                || {
+                    super::super::bridges::reserve_publications(
+                        candidate,
+                        receipt,
+                        slots,
+                        deadline,
+                        &|| check_deadline(signals, deadline),
+                    )
+                },
+                || {
+                    std::thread::sleep(PENDING_ENDPOINT_POLL);
+                    check_deadline(signals, deadline)
+                },
+            )
+        })?;
         let mut launches = Vec::new();
         for (service, route) in &routes {
             let selected = reserved.routes.get(*service).ok_or_else(refused)?;
@@ -202,7 +422,11 @@ impl Publishers {
             .iter()
             .map(|(selected, _)| (selected.slot, selected.assignment.reservation.as_str()))
             .collect::<Vec<_>>();
-        super::super::bridges::start_bridges(candidate, &receipt.run, &batch)?;
+        timings::measure(Step::GraphPublishRelays, None, |_| {
+            super::super::bridges::start_bridges(candidate, &receipt.run, &batch, deadline, &|| {
+                check_deadline(signals, deadline)
+            })
+        })?;
         // Every child is owned (and watched) as soon as it exists; they take the
         // provider lease in turn while this owner observes all of them together.
         let first = self.children.len();
@@ -236,14 +460,16 @@ impl Publishers {
             });
             signals.watch_child(&self.children.last().expect("pushed").child)?;
         }
-        self.await_published(
-            candidate,
-            signals,
-            deadline,
-            first,
-            PublisherReadiness::Startup,
-        )?;
-        self.verify_live(candidate)
+        timings::measure(Step::GraphPublishAwait, None, |_| {
+            self.await_published(
+                candidate,
+                signals,
+                deadline,
+                first,
+                PublisherReadiness::Startup,
+            )?;
+            self.verify_live(candidate)
+        })
     }
 
     /// Waits until every child from `first` on observes its publication. Only
@@ -431,7 +657,7 @@ impl Publishers {
             candidate,
             run,
             &mut self.probe_generations,
-            false,
+            None,
             &excluded,
             &check,
         )?;

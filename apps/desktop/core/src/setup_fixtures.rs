@@ -43,16 +43,21 @@ pub fn load(name: &str) -> Option<Report> {
     let machine = DoctorRun::machine(Ok(DoctorReport {
         checks: vec![
             DoctorCheck {
+                native_pool: None,
                 id: "docker daemon".into(),
                 status: "ok".into(),
                 detail: "Docker is running".into(),
+                fix: None,
             },
             DoctorCheck {
+                native_pool: None,
                 id: "linux dns route".into(),
                 status: "ok".into(),
                 detail: "Host DNS configured".into(),
+                fix: None,
             },
             DoctorCheck {
+                native_pool: None,
                 id: if name == "partial" {
                     "caddy local ca"
                 } else {
@@ -61,6 +66,7 @@ pub fn load(name: &str) -> Option<Report> {
                 .into(),
                 status: "ok".into(),
                 detail: "CA check completed".into(),
+                fix: None,
             },
         ],
         ..Default::default()

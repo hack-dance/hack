@@ -212,7 +212,8 @@ Historical remote guides are excluded from the supported documentation.
 - `--json` on `hack up`/`down`/`restart`/`doctor` emits a `{ok, data | error: {code, message}}`
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
 - A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
-  from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
+  from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `files ls`, `files cat`,
+  `open`, `tui`, `branch ...`,
   `config get`/`set`, `env ...`, `host exec`/`shell`, `usage --by-service` and
   `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
@@ -450,7 +451,12 @@ invocation wins over the project setting:
 
 For Compose `hack down`, `compose.downTimeoutSeconds` (or
 `hack down --timeout <seconds>`, which wins over the project setting) sets the
-per-container stop grace period passed to `docker compose down --timeout`. The
+per-container stop grace period passed to `docker compose down --timeout`.
+
+Use `hack down --service <name>` to stop one local Compose service in the
+selected instance. Use `--branch <name>` to select an explicit branch copy.
+The command keeps the containers, networks, volumes and Always on setting.
+
 `--timeout` flag requires a canonical base-10 integer string from `0` to `600`
 (no whitespace or leading zeros), while `compose.downTimeoutSeconds` is a JSON
 integer from `0` to `600`; invalid values are refused (`E_USAGE` for the flag,
@@ -730,15 +736,19 @@ volumes:
 The label applies to the exact volume, so the same contract works for Rust `target`, Gradle, Go,
 Python, or other generated caches without relying on names or destination guesses.
 
-Hack snapshots mounts before stopping the target and considers a volume removable only when all of
-these are true:
+Hack checks the volume's exact `com.docker.compose.project` label and requires
+a `com.docker.compose.volume` label. The volume's own
+`hack.cache.disposable=true` label permits pruning after a plain `down`.
+Without that label, a volume qualifies only while containers from this instance
+and checkout exist and all observed destinations end in `.next`. For those
+caches, run `down --prune-caches` before stopping, or add the disposable label
+to the volume definition and recreate the cache volume with that label.
 
-- the container belongs to the exact targeted Compose project and checkout;
-- the mount type is a named volume;
-- `docker volume inspect` independently reports both the exact
-  `com.docker.compose.project` label and a `com.docker.compose.volume` label;
-- every observed destination's final path segment is `.next`, or the volume itself has
-  `hack.cache.disposable=true`.
+JSON reports `cacheVolumesRemoved` and `cacheVolumesKept` with a reason for
+each candidate it kept. Hack keeps volumes mounted by another instance or
+checkout and rechecks each selected volume's identity after stopping. Docker
+can refuse an attached volume and has no atomic identity-checked removal API,
+so avoid replacing the named volume concurrently with a prune.
 
 Interactive cleanup shows the exact volumes, services, and destinations and defaults to “no.”
 `--json` and other scripted use must add `--yes`; otherwise the command fails before down with

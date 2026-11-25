@@ -22,6 +22,10 @@ import {
 } from "../src/lib/projects-registry.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+import {
+  mkdirOwnedFixture,
+  writeOwnedFixture,
+} from "./helpers/owned-fixture.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -144,13 +148,13 @@ test("upsertProjectRegistration refuses an unrelated checkout when the old path 
 test("upsertProjectRegistration recovers a confirmed dead registry owner", async () => {
   const project = await createProject({ rootName: "repo-a", name: "alpha" });
   const lockPath = join(tempDir!, ".hack", "projects.json.lock");
-  await mkdir(dirname(lockPath), { recursive: true });
+  await mkdirOwnedFixture(dirname(lockPath), true);
   const child = Bun.spawn([process.execPath, "-e", "process.exit(0)"], {
     stdout: "ignore",
     stderr: "ignore",
   });
   await child.exited;
-  await writeFile(lockPath, `${child.pid}\n`);
+  await writeOwnedFixture(lockPath, `${child.pid}\n`);
   const staleTime = new Date(Date.now() - 60_000);
   await utimes(lockPath, staleTime, staleTime);
 

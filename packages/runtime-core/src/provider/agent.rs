@@ -117,11 +117,19 @@ fn exchange(
 /// silence; any reply byte, even of an unexpected response, is an answer. Only a stop of
 /// a guest that stopped responding relies on this.
 pub(super) fn answers_ping(path: &Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
+    answers_ping_with(|| UnixStream::connect(path), timeout, Instant::now)
+}
+
+pub(super) fn answers_ping_with(
+    connect: impl FnOnce() -> std::io::Result<UnixStream>,
+    timeout: Duration,
+    now: impl Fn() -> Instant,
+) -> bool {
+    let deadline = now() + timeout;
     let Ok(bytes) = encode(&json!({"method":"ping"})) else {
         return false;
     };
-    let Ok(mut stream) = UnixStream::connect(path) else {
+    let Ok(mut stream) = connect() else {
         return false;
     };
     let mut frame = (bytes.len() as u32).to_be_bytes().to_vec();
@@ -132,7 +140,7 @@ pub(super) fn answers_ping(path: &Path, timeout: Duration) -> bool {
     let mut written = 0;
     let mut reply = [0_u8; 1];
     loop {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        let Some(remaining) = deadline.checked_duration_since(now()) else {
             return false;
         };
         if written < frame.len() {

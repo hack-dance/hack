@@ -108,7 +108,7 @@ export async function checkBrowserLocalNetwork(input: {
   readonly observation: BrowserObservation;
   readonly probe?: (url: string) => Promise<HttpsProbe>;
 }): Promise<{
-  readonly name: string;
+  readonly name: "browser local network";
   readonly status: "ok" | "warn";
   readonly message: string;
 }> {

@@ -1,0 +1,24 @@
+---
+title: Bounded image preparation and import
+---
+stateDiagram-v2
+    direction TB
+    [*] --> queued
+    queued --> fetch: Worker available
+    fetch --> ready: Archive verified
+    fetch --> failed: Preparation failed
+    ready --> import: Importer available
+    import --> confirmed: Exact guest readback
+    import --> failed: Import refused
+    fetch --> stopped: Cancel
+    ready --> stopped: Cancel
+    import --> unknown: Cancel
+    confirmed --> [*]
+    failed --> [*]
+    stopped --> [*]
+    unknown --> [*]
+    class queued,ready wait
+    class fetch,import live
+    class confirmed ok
+    class failed,unknown fail
+    class stopped idle

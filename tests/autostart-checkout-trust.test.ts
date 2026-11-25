@@ -17,6 +17,7 @@ import {
   withAutostartProjectLock,
 } from "../src/lib/autostart-project-lock.ts";
 import { quoteShellWord } from "../src/lib/logs.ts";
+import { writeOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let root = "";
@@ -36,11 +37,11 @@ beforeEach(async () => {
   registryPath = join(root, "home", ".hack", "projects.json");
   await mkdir(projectDir, { recursive: true, mode: 0o700 });
   await mkdir(join(root, "home", ".hack"), { recursive: true, mode: 0o700 });
-  await writeFile(
+  await writeOwnedFixture(
     join(projectDir, "hack.config.json"),
     JSON.stringify({ name: "example" })
   );
-  await writeFile(
+  await writeOwnedFixture(
     join(projectDir, "docker-compose.yml"),
     "services:\n  app:\n    image: example.invalid/app\n"
   );
@@ -79,7 +80,7 @@ test("private owned checkout paths remain trusted across owner Git updates", asy
   ).not.toThrow();
   await mkdir(join(repoRoot, ".git"), { mode: 0o700 });
   await writeFile(join(repoRoot, ".git", "HEAD"), "ref: refs/heads/main\n");
-  await writeFile(
+  await writeOwnedFixture(
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "example",
@@ -144,7 +145,7 @@ test("a real checkout replacement beneath a writable parent is refused without c
   await chmod(parent, 0o770);
   await rename(repoRoot, join(parent, "retained-original"));
   await mkdir(projectDir, { recursive: true, mode: 0o700 });
-  await writeFile(
+  await writeOwnedFixture(
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "replacement",
@@ -263,7 +264,7 @@ test.each([
   await writeFile(script, `printf ran > ${quoteShellWord(hook)}\n`, {
     mode: 0o600,
   });
-  await writeFile(
+  await writeOwnedFixture(
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "example",
@@ -278,7 +279,7 @@ test.each([
     { mode: 0o700 }
   );
   if (kind === "bind") {
-    await writeFile(
+    await writeOwnedFixture(
       join(projectDir, "docker-compose.yml"),
       "services:\n  app:\n    image: example.invalid/app\n    volumes:\n      - ../start-hook.sh:/start.sh:ro\n    entrypoint: [sh, /start.sh]\n"
     );

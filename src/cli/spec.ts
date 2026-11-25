@@ -11,6 +11,7 @@ import { dispatchCommand } from "../commands/dispatch.ts";
 import { doctorCommand } from "../commands/doctor.ts";
 import { envCommand, hostCommand } from "../commands/env.ts";
 import { execSessionsCommand } from "../commands/exec-sessions.ts";
+import { filesCommand } from "../commands/files.ts";
 import { gatewayCommand } from "../commands/gateway.ts";
 import { globalCommand } from "../commands/global.ts";
 import { helpCommand } from "../commands/help.ts";
@@ -34,7 +35,9 @@ import {
 import { projectCommand } from "../commands/project-admin.ts";
 import { projectsCommand, statusCommand } from "../commands/projects.ts";
 import { remoteCommand } from "../commands/remote.ts";
+import { resourcesCommand } from "../commands/resources.ts";
 import { secretsCommand } from "../commands/secrets.ts";
+import { serviceCommand } from "../commands/service.ts";
 import { sessionCommand } from "../commands/session.ts";
 import { setupCommand } from "../commands/setup.ts";
 import { sshCommand } from "../commands/ssh.ts";
@@ -43,6 +46,7 @@ import { tuiCommand } from "../commands/tui.ts";
 import { updateCommand } from "../commands/update.ts";
 import { upgradeCommand } from "../commands/upgrade.ts";
 import { usageCommand } from "../commands/usage.ts";
+import { useCommand } from "../commands/use.ts";
 import { versionCommand } from "../commands/version.ts";
 import { xCommand } from "../commands/x.ts";
 import { HACK_VERSION } from "../lib/hack-version.ts";
@@ -72,10 +76,14 @@ export const CLI_SPEC = defineCli({
     downCommand,
     restartCommand,
     psCommand,
+    useCommand,
     pullCommand,
     tuiCommand,
     runCommand,
     execCommand,
+    filesCommand,
+    resourcesCommand,
+    serviceCommand,
     execSessionsCommand,
     commandsCommand,
     logsCommand,

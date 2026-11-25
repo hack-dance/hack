@@ -12,6 +12,7 @@ pub(super) mod routing;
 mod service;
 use fields::*;
 pub(crate) use project_name::VARIABLE as COMPOSE_PROJECT_NAME;
+pub(crate) use service::ANONYMOUS_PREFIX;
 
 /// Explicit names-only image-variable removals, disjoint from every environment
 /// declaration. A missing private binding must never be reinterpreted as unset.

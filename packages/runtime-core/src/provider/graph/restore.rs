@@ -519,6 +519,7 @@ fn restore_inputs(
         &mut prepared.configs,
         &wrapped,
         &file_owners,
+        Some(&mut prepared.default_health_cadence),
     )?;
     super::validate_dependency_processes(&prepared.configs, &dependency_processes)?;
     for resource in receipt.resources.values() {
@@ -637,7 +638,7 @@ fn restore_inputs(
     }
     receipt.startup_failure = None;
     receipt.probes = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
-    receipt.phase = "restoring".into();
+    receipt.set_phase("restoring");
     if !reconciled {
         for (key, resource) in &mut receipt.resources {
             if resource.kind != Kind::Volume {
@@ -651,6 +652,7 @@ fn restore_inputs(
         root,
         receipt,
         configs: prepared.configs,
+        default_health_cadence: prepared.default_health_cadence,
         expected_environment,
         probe_findings: BTreeMap::new(),
         restarting: false,
@@ -690,6 +692,8 @@ fn restore_inputs(
             )?;
             superseded = true;
         }
+        // The restoring receipt is committed: the previous start's record is superseded.
+        super::startup_failure::clear_after_started(&session.root)?;
         // Every prior slot was re-retired under this lease and each prior container is absent:
         // compact that history before the new generation allocates, so restore and the next
         // cleanup scan only active allocations. A refusal retains the records.
@@ -702,9 +706,13 @@ fn restore_inputs(
             );
         }
         session.create_resources(true)?;
-        execution::run(&prepared.graph, &mut session, options.timeout)
+        let changes = session.engine_changes();
+        execution::run_with_wait(&prepared.graph, &mut session, options.timeout, |interval| {
+            changes.wait(interval)
+        })
     })();
     if let Err(failure) = result {
+        super::startup_failure::record_after_started(&session.root, &session.receipt, &failure);
         retain_restore_failure(
             &session.root,
             &mut session.receipt,
@@ -728,7 +736,7 @@ fn retain_restore_failure(
     if fresh && !admitted {
         return Ok(());
     }
-    receipt.phase = "failed-retained".into();
+    receipt.set_phase("failed-retained");
     state::write(&root.join("state.json"), receipt)
 }
 

@@ -770,13 +770,16 @@ fn prior_generation(
         && prior.run == current.run
         && prior.plan == current.plan
         && prior.capacity == current.capacity
-        && !current.selected.is_empty()
-        && current.selected.values().all(|selected| {
-            selected
-                .assignment
-                .relay
-                .as_ref()
-                .is_some_and(|relay| relay.launch_serial > prior.serial)
+        && (if current.selected.is_empty() {
+            never_published(receipt)
+        } else {
+            current.selected.values().all(|selected| {
+                selected
+                    .assignment
+                    .relay
+                    .as_ref()
+                    .is_some_and(|relay| relay.launch_serial > prior.serial)
+            })
         })
         && (prior.selected.is_empty()
             || stopped.is_some_and(|receipt| {
@@ -787,6 +790,18 @@ fn prior_generation(
                         )
                         .unwrap_or(false))
             }))
+}
+
+/// A run whose current generation never published, so no current route can order
+/// it after the prior one: `started-observed` (with `--report-started`) comes before
+/// any publication, because publishers and bridges start only from `ready-observed`
+/// (`foreground/publishers.rs`, `bridges.rs`) and no phase returns from there to
+/// `started-observed`. The prior generation must then still be proven complete on its
+/// own: a routed prior by its stopped receipt in the restore history with its
+/// containers absent and bridges retired (`stopped_prior_bindings`), an empty one by
+/// naming the boot the run died in.
+fn never_published(receipt: &Receipt) -> bool {
+    receipt.phase == super::super::STARTED_OBSERVED
 }
 
 fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &Receipt) -> bool {
@@ -1828,6 +1843,108 @@ mod tests {
         live.boot = new_boot.into();
         state::write(&fixture.0.join("relay-cleanup-bridges.json"), &live).unwrap();
         assert!(capture_prior_generation(&fixture.0, &current, &active).is_err());
+    }
+    #[test]
+    fn a_started_run_that_never_published_proves_its_prior_from_the_stopped_history() {
+        // A run stopped (routed), restored, stranded in `started-observed` before
+        // any publication, then recovered on a later boot: no current slots.
+        let fixture = Fixture::new();
+        let stopped_boot = "00000000-0000-0000-0000-000000000000";
+        let old_boot = "11111111-1111-1111-1111-111111111111";
+        let new_boot = "22222222-2222-2222-2222-222222222222";
+        let mut current = selection(2);
+        current.boot = new_boot.into();
+        current.previous_boot = Some(old_boot.into());
+        current.capacity = 1;
+        assert!(current.selected.is_empty());
+        let assignment = Assignment {
+            loopback_port: None,
+            reservation: "d".repeat(32),
+            run: current.run.clone(),
+            service: "web".into(),
+            generation: "e".repeat(64),
+            container_id: "f".repeat(64),
+            network_id: "1".repeat(64),
+            boot_id: stopped_boot.into(),
+            phase: "running".into(),
+            relay: Some(relay::Relay {
+                transport: relay::Transport::ReservationV1,
+                launch_serial: 1,
+                binary_sha256: "2".repeat(64),
+                target_pid: 10,
+                target_start: 10,
+                port: 8080,
+            }),
+        };
+        let mut prior = selection(1);
+        prior.boot = stopped_boot.into();
+        prior.capacity = 1;
+        prior.selected.insert(
+            0,
+            Selected {
+                assignment: assignment.clone(),
+                helper: Some(
+                    serde_json::from_value(json!({
+                        "pid":10,"start":10,"executable_device":1,"executable_inode":1,
+                        "socket_device":1,"socket_inode":1,"kernel_socket_inode":1
+                    }))
+                    .unwrap(),
+                ),
+            },
+        );
+        let stopped: Receipt = serde_json::from_value(json!({
+            "version":1,"run":current.run,"owner":current.owner,
+            "namespace":"3".repeat(64),"plan_id":current.plan,
+            "phase":"stopped-data-retained","readiness":{},"resources":{
+                "container:web":{"kind":"container","key":"web","name":"old-web",
+                    "id":assignment.container_id,"image":null,"phase":"absent"},
+                "network:default":{"kind":"network","key":"default","name":"old-network",
+                    "id":assignment.network_id,"image":null,"phase":"absent"}
+            },
+            "relay_cleanup":{"version":1,"runtime":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "boot":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "operation":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "effect":vec![1;32],
+                "control_root":"/private/old","phase":"confirmed"}
+        }))
+        .unwrap();
+        let sidecar = fixture.0.join("relay-cleanup-bridges.json");
+        state::write(&sidecar, &prior).unwrap();
+        let mut started = stopped.clone();
+        started.phase = "restoring".into();
+        started.relay_cleanup = None;
+        started.resources.get_mut("container:web").unwrap().id = Some("a".repeat(64));
+        started.resources.get_mut("network:default").unwrap().id = Some("b".repeat(64));
+        super::super::super::mark_started(&mut started).unwrap();
+        // Nothing proves the prior generation stopped without its restore history.
+        assert!(capture_prior_generation(&fixture.0, &current, &started).is_err());
+        super::super::super::restore_history::retain(&fixture.0, &stopped).unwrap();
+        assert!(
+            capture_prior_generation(&fixture.0, &current, &started)
+                .unwrap()
+                .is_some()
+        );
+        // The proof `execute` then requires of a captured prior generation.
+        assert!(
+            super::super::super::restore_history::confirms_prior_generation(&fixture.0, &started)
+                .unwrap()
+        );
+        // A run that may have published still needs current routes to order against.
+        let mut ready = started.clone();
+        ready.set_phase("ready-observed");
+        assert!(capture_prior_generation(&fixture.0, &current, &ready).is_err());
+        // A sidecar from the live boot is never a completed earlier generation.
+        let mut live = prior.clone();
+        live.boot = new_boot.into();
+        state::write(&sidecar, &live).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current, &started).is_err());
+        // A fresh started run has no sidecar: there is nothing to capture.
+        fs::remove_file(&sidecar).unwrap();
+        assert!(
+            capture_prior_generation(&fixture.0, &current, &started)
+                .unwrap()
+                .is_none()
+        );
     }
     #[test]
     fn interrupted_release_reuses_only_the_exact_prior_bridge_selection() {

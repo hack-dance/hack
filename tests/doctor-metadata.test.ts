@@ -56,7 +56,7 @@ test("different browser and hostname targets retain independent project findings
     "browser local network",
     "native host dns",
     "native https route",
-  ]) {
+  ] as const) {
     for (const status of ["ok", "error"] as const) {
       const data = buildDoctorJsonData({
         results: [

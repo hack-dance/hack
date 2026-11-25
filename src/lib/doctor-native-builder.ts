@@ -78,7 +78,7 @@ export function nativeBuilderCheckResult(opts: {
   /** The user's home directory (default: `os.homedir()`). */
   readonly homeDir?: string;
 }): {
-  readonly name: string;
+  readonly name: typeof NATIVE_BUILDER_CHECK;
   readonly status: "ok" | "warn";
   readonly message: string;
   readonly nativeBuilder: NativeBuilderReport;

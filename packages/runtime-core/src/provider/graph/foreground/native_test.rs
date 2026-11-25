@@ -326,6 +326,7 @@ fn private_owner_restore_preserves_data_and_retires_values() {
             "--expect-dependencies",
             dependency_plan["dependency_plan_id"].as_str().unwrap(),
             "--environment-stdin",
+            "--report-started",
             "--json",
         ],
         Some(&private_input(plan, &run, FIRST)),
@@ -341,8 +342,15 @@ fn private_owner_restore_preserves_data_and_retires_values() {
             owner.poll().is_none(),
             "foreground owner exited before readiness"
         );
-        if let Some(end) = owner.out.iter().position(|b| *b == b'\n') {
-            let ready: Value = serde_json::from_slice(&owner.out[..end]).unwrap();
+        // With --report-started the started line comes first, then the ready line.
+        let lines: Vec<&[u8]> = owner.out.split(|b| *b == b'\n').collect();
+        if lines.len() > 2 {
+            let started: Value = serde_json::from_slice(lines[0]).unwrap();
+            assert_eq!(
+                started,
+                json!({"kind": "graph_foreground_started", "run": run, "phase": "started-observed"})
+            );
+            let ready: Value = serde_json::from_slice(lines[1]).unwrap();
             assert_eq!(ready["kind"], "graph_foreground_ready");
             assert_eq!(ready["run"], run);
             break;

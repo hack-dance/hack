@@ -106,6 +106,12 @@ shell applies PR tiers after either policy path, including old base policies.
 On ready PRs its full guard also enables Linux native hosts, Docker, state
 models and build smoke. macOS requires a main base or ci:mac/ci:full label;
 draft fan-ins fail and keep heavy tiers disabled.
+The `resource_e2e` output enables the dedicated Ubuntu Docker resource
+inventory and desktop CLI contract job on full plans and changes to the
+resource implementation, desktop resource files, or Docker inventory test.
+The required `test` fan-in accepts success when enabled and a skip when
+disabled. This job runs independently of the broader Docker suite.
+
 No PR install script executes while computing scope. The base archive supplies
 the working directory, Bun configuration and dependency lockfile for the policy.
 PR metadata edits do not start CI. After retargeting, push a new revision or
@@ -116,9 +122,12 @@ events queue behind it, and GitHub keeps at most one pending run per PR.
 Merge queue requests qualify GitHub’s combined commit with the full Linux
 unit pool, compiler hosts, candidate, Docker, build smoke, models and docs.
 macOS coverage stays with the PR and integration policies. Linux unit shard
-8 runs its normal assignment and then runs the fixed list in
-`scripts/test-shard-symlink-temp-files.json` with a symlinked `TMPDIR`.
-Duration updates affect only the normal assignment.
+8 runs the fixed list in `scripts/test-shard-symlink-temp-files.json` with a
+symlinked `TMPDIR`. When Linux shard 8 is scheduled, Linux unit shards leave
+those files to that step. Otherwise Linux runs its regular assignment.
+macOS keeps its regular assignment in either case. Each shard prints one
+result per executed file, and the required `test` check requires the shard
+matrix to succeed. Duration updates affect only the normal assignment.
 
 Config, lockfiles, manifests, workflows, scripts, fixtures, scenario/model data,
 Rust/guest inputs, unknown paths and deleted modules select the full unit set.

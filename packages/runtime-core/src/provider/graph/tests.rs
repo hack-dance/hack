@@ -78,8 +78,16 @@ fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
     let image = format!("sha256:{}", "a".repeat(64));
     let disabled_check =
         |document: &Value| document["services"]["web"]["healthcheck"]["disable"] == true;
-    let compiled = |healthcheck: Value| {
+    let compiled = |healthcheck: Value, mount: Option<&str>, created: Option<&str>| {
         let mut document = compose(&image, "marker", false);
+        if let Some(mount) = mount {
+            document["services"]["web"]["volumes"] = json!([mount]);
+        } else {
+            document["services"]["web"]
+                .as_object_mut()
+                .unwrap()
+                .remove("volumes");
+        }
         document["services"]["web"]["expose"] = json!(["3000"]);
         document["services"]["web"]["healthcheck"] = healthcheck;
         // A disabled check cannot satisfy `service_healthy`; this test is about the check.
@@ -98,13 +106,32 @@ fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
         if disabled_check(&document) {
             goals.insert("web".into(), Condition::Started);
         }
-        config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None)
-            .unwrap()
-            .configs["web"]["Healthcheck"]
-            .clone()
+        let mut prepared =
+            config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None).unwrap();
+        let created = match created {
+            Some("anonymous") => BTreeSet::from([prepared.configs["web"]["HostConfig"]["Mounts"]
+                [0]["Source"]
+                .as_str()
+                .unwrap()
+                .to_owned()]),
+            Some(key) => BTreeSet::from([prepared.resources[key].name.clone()]),
+            None => BTreeSet::new(),
+        };
+        let config = prepared.configs.get_mut("web").unwrap();
+        if let Some(cadence) = prepared.default_health_cadence.get_mut("web") {
+            let image = if mount == Some("/data") {
+                json!({"/data":{}})
+            } else {
+                Value::Null
+            };
+            cadence.data_volumes = config::data_health_volumes(config, &prepared.resources, &image);
+            cadence.apply(config, &created);
+        }
+        config["Healthcheck"].clone()
     };
     let test = json!(["CMD", "/usr/local/bin/bun", "-e", "process.exit(0)"]);
-    let undeclared = compiled(json!({"test": test, "interval": "30s"}));
+    let health = json!({"test": test, "interval": "30s"});
+    let undeclared = compiled(health.clone(), Some("data:/data"), None);
     assert_eq!(
         undeclared["StartInterval"],
         crate::project::DEFAULT_START_INTERVAL_NANOS
@@ -114,12 +141,83 @@ fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
         crate::project::DEFAULT_START_PERIOD_NANOS
     );
     assert_eq!(undeclared["Interval"], 30_000_000_000u64);
-    let declared = compiled(json!({"test": test, "start_interval": "1s", "start_period": "5s"}));
-    assert_eq!(declared["StartInterval"], 1_000_000_000u64);
+    assert_eq!(
+        compiled(health.clone(), None, Some("volume:data")),
+        undeclared
+    );
+    for (mount, created) in [("data:/data", "volume:data"), ("/data", "anonymous")] {
+        assert_eq!(
+            compiled(health.clone(), Some(mount), Some(created)),
+            json!({"Test": test, "Interval":30_000_000_000u64})
+        );
+        assert_eq!(compiled(health.clone(), Some(mount), None), undeclared);
+    }
+    let period = compiled(
+        json!({"test": test, "start_period": "5s"}),
+        Some("data:/data"),
+        Some("volume:data"),
+    );
+    assert_eq!(
+        period,
+        json!({"Test": test, "StartPeriod":5_000_000_000u64})
+    );
+    let declared = compiled(
+        json!({"test": test, "start_interval": "250ms", "start_period": "5s"}),
+        Some("data:/data"),
+        Some("volume:data"),
+    );
+    assert_eq!(declared["StartInterval"], 250_000_000u64);
     assert_eq!(declared["StartPeriod"], 5_000_000_000u64);
-    let disabled = compiled(json!({"disable": true}));
+    let disabled = compiled(
+        json!({"disable": true}),
+        Some("data:/data"),
+        Some("volume:data"),
+    );
     assert!(disabled.get("StartInterval").is_none(), "{disabled}");
     assert!(disabled.get("StartPeriod").is_none(), "{disabled}");
+}
+
+#[test]
+fn new_cache_volumes_do_not_disable_the_fast_health_check() {
+    let volume = |key: &str| -> Resource {
+        serde_json::from_value(json!({
+            "kind":"volume","key":key,"name":key,"id":null,"image":null,"phase":"created"
+        }))
+        .unwrap()
+    };
+    let mut cache = volume("cache");
+    cache.cache = Some(dependency_cache::CacheBinding {
+        scope: "c".repeat(64),
+        fingerprint: "d".repeat(64),
+        image: format!("sha256:{}", "e".repeat(64)),
+    });
+    let anonymous = format!("{}fixture", crate::project::ANONYMOUS_PREFIX);
+    let resources = BTreeMap::from([
+        ("volume:cache".into(), cache),
+        ("volume:data".into(), volume("data")),
+        (format!("volume:{anonymous}"), volume(&anonymous)),
+    ]);
+    let created = resources.values().map(|r| r.name.clone()).collect();
+    let mut config = json!({
+        "Healthcheck":{"StartInterval":250_000_000},
+        "HostConfig":{"Mounts":[
+            {"Type":"volume", "Source":"cache", "Target":"/packages"},
+            {"Type":"volume", "Source":anonymous, "Target":"/node_modules"},
+            {"Type":"bind", "Source":"data", "Target":"/source"}
+        ]}
+    });
+    let cadence = |config: &Value| config::DefaultHealthCadence {
+        period: false,
+        data_volumes: config::data_health_volumes(config, &resources, &Value::Null),
+    };
+    cadence(&config).apply(&mut config, &created);
+    assert_eq!(config["Healthcheck"]["StartInterval"], 250_000_000);
+    config["HostConfig"]["Mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"Type":"volume", "Source":"data", "Target":"/data"}));
+    cadence(&config).apply(&mut config, &created);
+    assert!(config["Healthcheck"].get("StartInterval").is_none());
 }
 
 /// A container created before HACK-2443 has no startup cadence; it still matches the compiled
@@ -792,6 +890,7 @@ fn receipt_restart_authority_admits_owner_supervised_publication() {
         key: "worker".into(),
         name: "owned-worker".into(),
         id: None,
+        cleanup_observed_create: false,
         image: None,
         phase: "absent".into(),
         amd64_emulation: None,
@@ -866,6 +965,7 @@ fn lock_free_observation_reports_restarting_only_under_an_admitted_policy() {
         key: "worker".into(),
         name: "owned-worker".into(),
         id: Some("a".repeat(64)),
+        cleanup_observed_create: false,
         image: None,
         phase: "started".into(),
         amd64_emulation: None,
@@ -1558,6 +1658,18 @@ fn owned_driver_live() -> Result<(), CandidateError> {
         }
         let before_vm_token = {
             let engine = Engine::connect(&candidate)?;
+            let web = engine.request(
+                Method::GET,
+                &format!(
+                    "/v1.53/containers/{}/json",
+                    first["resources"]["container:web"]["id"]
+                        .as_str()
+                        .expect("web ID")
+                ),
+                None,
+            )?;
+            let interval = &web["Config"]["Healthcheck"]["StartInterval"];
+            assert!(interval.is_null() || interval == 0, "{interval}");
             let (output, _, _) = engine.logs(
                 first["resources"]["container:init"]["id"]
                     .as_str()
@@ -1613,6 +1725,20 @@ fn owned_driver_live() -> Result<(), CandidateError> {
         let restored = launch(&candidate, &fixture, &run, "restore")?;
         {
             let engine = Engine::connect(&candidate)?;
+            let web = engine.request(
+                Method::GET,
+                &format!(
+                    "/v1.53/containers/{}/json",
+                    restored["resources"]["container:web"]["id"]
+                        .as_str()
+                        .expect("web ID")
+                ),
+                None,
+            )?;
+            assert_eq!(
+                web["Config"]["Healthcheck"]["StartInterval"],
+                crate::project::DEFAULT_START_INTERVAL_NANOS
+            );
             let (output, _, _) = engine.logs(
                 restored["resources"]["container:init"]["id"]
                     .as_str()
@@ -3038,6 +3164,7 @@ fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
         key: "default".into(),
         name: "owned-network".into(),
         id: None,
+        cleanup_observed_create: false,
         image: None,
         phase: "reserved".into(),
         amd64_emulation: None,
@@ -3183,6 +3310,7 @@ fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
                 key: key.into(),
                 name: name.into(),
                 id: Some(id.clone()),
+                cleanup_observed_create: false,
                 image: None,
                 phase: "created".into(),
                 amd64_emulation: None,
@@ -3875,6 +4003,7 @@ fn receipt_loopback_intent_is_bounded_unique_and_container_only() {
         key: key.into(),
         name: format!("owned-{key}"),
         id: None,
+        cleanup_observed_create: false,
         image: None,
         phase: "absent".into(),
         amd64_emulation: None,
@@ -3911,4 +4040,279 @@ fn receipt_loopback_intent_is_bounded_unique_and_container_only() {
         "network:net".into(),
         network
     )])));
+}
+
+fn receipt_in(phase: &str, started_from: Option<&str>) -> Receipt {
+    let mut receipt: Receipt = serde_json::from_value(json!({
+        "version": 1,
+        "run": "a".repeat(32),
+        "owner": "b".repeat(32),
+        "namespace": "c".repeat(64),
+        "plan_id": "d".repeat(64),
+        "phase": phase,
+        "readiness": {"web": "started"},
+        "resources": {"container:web": {
+            "key": "web",
+            "kind": "container",
+            "name": format!("hkg-{}-container-0", "a".repeat(32)),
+            "id": "e".repeat(64),
+            "phase": "started",
+            "image": format!("sha256:{}", "f".repeat(64))
+        }}
+    }))
+    .unwrap();
+    receipt.started_from = started_from.map(str::to_owned);
+    receipt
+}
+
+#[test]
+fn every_start_in_progress_moves_to_started_observed_and_remembers_its_start() {
+    for start in START_PHASES {
+        let mut receipt = receipt_in(start, None);
+        mark_started(&mut receipt).unwrap();
+        assert_eq!(receipt.phase, "started-observed");
+        assert_eq!(receipt.started_from.as_deref(), Some(start));
+        // Checks of a start in progress see the start it belongs to.
+        assert_eq!(start_phase(&receipt), start);
+    }
+    for other in [
+        "ready-observed",
+        "failed-retained",
+        "cleanup-intent",
+        "stopped-data-retained",
+        "started-observed",
+    ] {
+        let mut receipt = receipt_in(other, None);
+        assert_eq!(
+            mark_started(&mut receipt).unwrap_err().code,
+            "graph_replay_refused",
+            "{other}"
+        );
+        assert_eq!(receipt.phase, other);
+        assert_eq!(start_phase(&receipt), other);
+    }
+}
+
+#[test]
+fn a_started_observed_receipt_loads_only_with_the_start_it_belongs_to() {
+    let fixture = Fixture::new();
+    let root = fixture.0.join("graph");
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    let load = |receipt: &Receipt| {
+        let _ = fs::remove_file(root.join("state.json"));
+        state::write(&root.join("state.json"), receipt).unwrap();
+        load_at(root.clone(), &"a".repeat(32), &"b".repeat(32)).map(|(receipt, _)| receipt)
+    };
+    for start in START_PHASES {
+        let loaded = load(&receipt_in("started-observed", Some(start))).unwrap();
+        assert_eq!(start_phase(&loaded), start);
+    }
+    assert_eq!(
+        load(&receipt_in("started-observed", None))
+            .unwrap_err()
+            .code,
+        "graph_receipt"
+    );
+    assert_eq!(
+        load(&receipt_in("started-observed", Some("ready-observed")))
+            .unwrap_err()
+            .code,
+        "graph_receipt"
+    );
+    // Only a started graph carries it: a value on any other phase refuses.
+    for phase in [
+        "failed-retained",
+        "cleanup-intent",
+        "ready-observed",
+        "preparing",
+    ] {
+        assert_eq!(
+            load(&receipt_in(phase, Some("preparing")))
+                .unwrap_err()
+                .code,
+            "graph_receipt",
+            "{phase}"
+        );
+    }
+    // Without the field, the receipt is byte-for-byte what it was.
+    let text = serde_json::to_string(&receipt_in("ready-observed", None)).unwrap();
+    assert!(!text.contains("started_from"));
+}
+
+#[test]
+fn a_started_graph_moved_on_by_recovery_drops_its_start() {
+    let mut original = receipt_in("preparing", None);
+    mark_started(&mut original).unwrap();
+    assert!(
+        serde_json::to_string(&original)
+            .unwrap()
+            .contains("started_from")
+    );
+    // Cleanup (`cleanup_owned_fenced`, used by owner recovery) and every other phase
+    // change go through `set_phase`.
+    for phase in [
+        "cleanup-intent",
+        "stopped-data-retained",
+        "removed",
+        "failed-retained",
+        "ready-observed",
+    ] {
+        let mut moved = original.clone();
+        moved.set_phase(phase);
+        let text = serde_json::to_string(&moved).unwrap();
+        assert!(!text.contains("started_from"), "{phase}: {text}");
+        assert_eq!(start_phase(&moved), phase);
+        // Recovery compares receipts with their phase removed; the start goes with it.
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            super::dead_owner_cleanup::immutable(&original).unwrap(),
+            super::dead_owner_cleanup::immutable(&moved).unwrap(),
+            "{phase}"
+        );
+    }
+}
+
+/// A startup driver that only answers whether it reports "started", and records
+/// the phase on disk at the moment it is told.
+struct ReportingDriver {
+    reports: bool,
+    root: PathBuf,
+    told: Vec<String>,
+}
+impl startup::Driver for ReportingDriver {
+    fn validate_inputs(&self, _: &project::inputs::ExecutionInputs) -> Result<(), CandidateError> {
+        unreachable!("not part of AllStarted")
+    }
+    fn verify(&mut self, _: &Engine<'_>, _: &mut Receipt, _: &Path) -> Result<(), CandidateError> {
+        unreachable!("not part of AllStarted")
+    }
+    fn prepare(
+        &mut self,
+        _: &Engine<'_>,
+        _: &mut Receipt,
+        _: &Path,
+        _: &mut BTreeMap<String, Value>,
+    ) -> Result<(), CandidateError> {
+        unreachable!("not part of AllStarted")
+    }
+    fn started(
+        &mut self,
+        _: &Engine<'_>,
+        _: &mut Receipt,
+        _: &Path,
+        _: &Value,
+        _: &str,
+    ) -> Result<(), CandidateError> {
+        unreachable!("not part of AllStarted")
+    }
+    fn reports_started(&self) -> bool {
+        self.reports
+    }
+    fn all_started(&mut self, run: &str) -> Result<(), CandidateError> {
+        let on_disk: Receipt = state::read(&self.root.join("state.json"))?;
+        self.told.push(format!("{run} {}", on_disk.phase));
+        Ok(())
+    }
+}
+
+fn started_root() -> (Fixture, PathBuf) {
+    let fixture = Fixture::new();
+    let root = fixture.0.join("graph");
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    (fixture, root)
+}
+
+#[test]
+fn without_report_started_every_service_started_changes_nothing_on_disk() {
+    let (_fixture, root) = started_root();
+    for start in START_PHASES {
+        let mut receipt = receipt_in(start, None);
+        state::write(&root.join("state.json"), &receipt).unwrap();
+        let before = fs::read(root.join("state.json")).unwrap();
+        let modified = fs::metadata(root.join("state.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let mut driver = ReportingDriver {
+            reports: false,
+            root: root.clone(),
+            told: Vec::new(),
+        };
+        record_all_started(&mut receipt, &root, Some(&mut driver)).unwrap();
+        record_all_started(&mut receipt, &root, None).unwrap();
+        assert_eq!(receipt.phase, start);
+        assert!(receipt.started_from.is_none());
+        assert!(driver.told.is_empty());
+        // No save at all: same bytes, same file, no pending journal.
+        assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
+        assert_eq!(
+            fs::metadata(root.join("state.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+        assert!(!root.join("state.pending").exists());
+    }
+}
+
+#[test]
+fn with_report_started_the_phase_is_saved_before_the_driver_is_told() {
+    let (_fixture, root) = started_root();
+    let mut receipt = receipt_in("restoring", None);
+    state::write(&root.join("state.json"), &receipt).unwrap();
+    let mut driver = ReportingDriver {
+        reports: true,
+        root: root.clone(),
+        told: Vec::new(),
+    };
+    record_all_started(&mut receipt, &root, Some(&mut driver)).unwrap();
+    assert_eq!(
+        driver.told,
+        [format!("{} started-observed", "a".repeat(32))]
+    );
+    let saved: Receipt = state::read(&root.join("state.json")).unwrap();
+    assert_eq!(saved.phase, "started-observed");
+    assert_eq!(saved.started_from.as_deref(), Some("restoring"));
+}
+
+#[test]
+fn a_failed_started_save_fails_the_start_before_anyone_is_told() {
+    let (_fixture, root) = started_root();
+    let mut receipt = receipt_in("preparing", None);
+    state::write(&root.join("state.json"), &receipt).unwrap();
+    let before = fs::read(root.join("state.json")).unwrap();
+    let mut driver = ReportingDriver {
+        reports: true,
+        root: root.clone(),
+        told: Vec::new(),
+    };
+    // The save cannot be written (its directory is gone): the start fails.
+    let missing = root.join("missing");
+    let error = record_all_started(&mut receipt, &missing, Some(&mut driver)).unwrap_err();
+    assert_eq!(error.code, "provider_state");
+    assert!(driver.told.is_empty(), "told before the phase was durable");
+    assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
+    // The start's failure path then retains the attempt, and the start's phase goes.
+    receipt.set_phase("failed-retained");
+    state::write(&root.join("state.json"), &receipt).unwrap();
+    let retained: Receipt = state::read(&root.join("state.json")).unwrap();
+    assert_eq!(retained.phase, "failed-retained");
+    assert!(retained.started_from.is_none());
+}
+
+#[test]
+fn an_explicit_restart_starts_from_a_ready_or_started_graph_only() {
+    let mut receipt = receipt_in("ready-observed", None);
+    assert!(restartable(&receipt));
+    receipt = receipt_in("preparing", None);
+    mark_started(&mut receipt).unwrap();
+    assert!(restartable(&receipt));
+    for phase in START_PHASES.into_iter().chain([
+        "failed-retained",
+        "cleanup-intent",
+        "stopped-data-retained",
+    ]) {
+        assert!(!restartable(&receipt_in(phase, None)), "{phase}");
+    }
 }

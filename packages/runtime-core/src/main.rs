@@ -28,6 +28,7 @@ Usage:
   hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph inspect|status|observe|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
+  hack-local graph clear-failure-after-started --run-id <32-hex> [--json]
   hack-local service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]
       (exit 0 after idle, stop or SIGTERM/SIGINT/SIGHUP; 2 on an error; 3 after a drain that ran out of time)
   hack-local service status|stop
@@ -78,7 +79,7 @@ Usage:
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
   hack-local runtime guest-disk-usage [--json]
-  hack-local runtime disk-usage [--scope all|runtime|build|evidence|artifacts] [--max-entries <1..1000000>] [--json]
+  hack-local runtime disk-usage [--scope all|runtime|build|evidence|artifacts|image-archives] [--max-entries <1..1000000>] [--json]
   hack-local runtime stop-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime serve-hostnames --socket <private-unix-path> (owner pipe on stdin)
   hack-local runtime lookup-hostname --hostname <name> [--json]
@@ -94,6 +95,7 @@ Usage:
   hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
   hack-local graph serve ... [--route-slot <service=index|auto>]...
   hack-local graph serve|serve-restore ... [--auto-dependency-slots]
+  hack-local graph serve|serve-restore ... [--report-started]
   hack-local graph start-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph publish-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> (--port <loopback-port> | --unix [--hostname <name>]...)
   hack-local graph unpublish-bridge --run-id <32-hex> --expect-reservation <32-hex> [--json]
@@ -120,6 +122,7 @@ Usage:
   hack-local runtime admit-image --reference <[registry/]repository[:tag][@sha256:digest]|sha256:image-id> --json [IMAGE-POLICY]
   hack-local runtime build-image --request <private-0600-request.json> --json
   hack-local runtime reclaim-build-images [--best-effort] --json
+  hack-local runtime retain-build-bases --json [IMAGE-POLICY]
   hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest|sha256:image-id> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
   hack-local runtime cache-image --reference REF [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
   hack-local runtime image-tag-status --json [REFERENCE...]
@@ -150,6 +153,18 @@ The installed hack and its state are never used as a fallback.";
 
 fn main() {
     hack_runtime_core::raise_open_file_limit();
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-publication-child"))
+    {
+        hack_runtime_core::timings::exit(
+            if hack_runtime_core::provider::publication::run_publication_child().is_ok() {
+                0
+            } else {
+                1
+            },
+        );
+    }
     if let Some(argument) = std::env::args_os()
         .nth(1)
         .and_then(|value| value.into_string().ok())
@@ -697,6 +712,23 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(project),
                 true,
             )?)?;
+        }
+        [
+            "runtime",
+            "project-share",
+            "add",
+            "--project-share",
+            project,
+            "--unfiltered-source",
+            "--stop-idle-pool",
+            "--json",
+        ] => {
+            print_json(
+                &hack_runtime_core::provider::add_project_share_stopping_idle_pool(
+                    &discover_candidate(&requested)?,
+                    Path::new(project),
+                )?,
+            )?;
         }
         [
             "runtime",
@@ -1261,6 +1293,32 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(archive),
             )?)?;
         }
+        ["runtime", "ensure-images", "--json", flags @ ..] => {
+            use std::io::Read;
+            let mut input = Vec::new();
+            std::io::stdin()
+                .take(65_537)
+                .read_to_end(&mut input)
+                .map_err(|_| {
+                    CandidateError::new("invalid_arguments", "Cannot read the image batch.")
+                })?;
+            let jobs: Vec<(
+                String,
+                hack_runtime_core::provider::image_platform::PlatformPolicy,
+            )> = serde_json::from_slice(&input)
+                .map_err(|_| CandidateError::new("invalid_arguments", "Invalid image batch."))?;
+            if input.len() > 65_536 || jobs.len() > 64 {
+                return Err(CandidateError::new(
+                    "invalid_arguments",
+                    "Image batch exceeds its input bound.",
+                ));
+            }
+            print_json(&hack_runtime_core::provider::image_ensure::ensure_batch(
+                &discover_candidate(&requested)?,
+                &jobs,
+                &image_policy(flags)?,
+            )?)?;
+        }
         [
             "runtime",
             command @ ("ensure-image" | "cache-image"),
@@ -1301,11 +1359,29 @@ fn run() -> Result<(), CandidateError> {
                 references,
             )?)?;
         }
+        [
+            "runtime",
+            "build-image",
+            "--request",
+            request,
+            "--bases",
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::image_build::build_bases(
+                Path::new(request),
+            )?)?;
+        }
         ["runtime", "build-image", "--request", request, "--json"] => {
             // Build output streams to stderr; only the result is printed on stdout.
             print_json(&hack_runtime_core::provider::image_build::build_image(
                 &discover_candidate(&requested)?,
                 Path::new(request),
+            )?)?;
+        }
+        ["runtime", "retain-build-bases", "--json", policy @ ..] => {
+            print_json(&hack_runtime_core::provider::image_build::retain::run(
+                &discover_candidate(&requested)?,
+                image_policy(policy)?,
             )?)?;
         }
         ["runtime", "reclaim-build-images", "--best-effort", "--json"] => {
@@ -2130,4 +2206,14 @@ fn print_json(value: &impl Serialize) -> Result<(), CandidateError> {
             .map_err(|error| { CandidateError::new("serialization_failed", error.to_string()) })?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod usage_tests {
+    #[test]
+    fn the_usage_names_the_report_started_flag() {
+        assert!(
+            super::HELP.contains("hack-local graph serve|serve-restore ... [--report-started]")
+        );
+    }
 }

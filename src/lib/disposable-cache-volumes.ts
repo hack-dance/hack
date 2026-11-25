@@ -17,6 +17,7 @@ export type MountedNamedVolumeCandidate = {
 };
 
 export type DisposableCacheVolumeCandidate = MountedNamedVolumeCandidate & {
+  readonly fingerprint: string;
   readonly reason: "explicit-label" | "next-destination";
 };
 
@@ -80,7 +81,10 @@ function collectProjectCacheVolumes(opts: {
     for (const container of service.containers) {
       if (
         container.labels?.[COMPOSE_PROJECT_LABEL] !== opts.composeProject ||
-        container.labels[COMPOSE_SERVICE_LABEL] !== service.service
+        container.labels[COMPOSE_SERVICE_LABEL] !== service.service ||
+        container.workingDir === null ||
+        canonicalPath(container.workingDir) !==
+          canonicalPath(opts.project.workingDir ?? "")
       ) {
         continue;
       }
@@ -109,34 +113,42 @@ function collectProjectCacheVolumes(opts: {
 export async function verifyDisposableCacheVolumes(opts: {
   readonly composeProject: string;
   readonly candidates: readonly MountedNamedVolumeCandidate[];
+  readonly kept?: CacheVolumeKept[];
 }): Promise<readonly DisposableCacheVolumeCandidate[]> {
   const verified: DisposableCacheVolumeCandidate[] = [];
 
   for (const candidate of opts.candidates) {
-    const result = await exec(["docker", "volume", "inspect", candidate.name], {
-      stdin: "ignore",
-    });
-    if (result.exitCode !== 0) {
+    const proof = await inspectVolume(candidate.name);
+    if (proof === false) {
       continue;
     }
-
-    const labels = parseVolumeLabels(result.stdout);
+    const labels = proof?.labels;
     if (
       labels?.[COMPOSE_PROJECT_LABEL] !== opts.composeProject ||
-      (labels[COMPOSE_VOLUME_LABEL] ?? "").trim().length === 0
+      (getString(labels, COMPOSE_VOLUME_LABEL) ?? "").trim().length === 0 ||
+      !proof?.fingerprint
     ) {
+      opts.kept?.push({ name: candidate.name, reason: "ownership-unverified" });
       continue;
     }
     const explicitlyDisposable =
-      labels[DISPOSABLE_CACHE_LABEL]?.trim().toLowerCase() === "true";
+      getString(labels, DISPOSABLE_CACHE_LABEL)?.trim().toLowerCase() ===
+      "true";
     const nextDestinationOnly =
       candidate.destinations.length > 0 &&
       candidate.destinations.every(isNextCacheDestination);
     if (!(explicitlyDisposable || nextDestinationOnly)) {
+      opts.kept?.push({
+        name: candidate.name,
+        reason: candidate.destinations.length
+          ? "not-disposable"
+          : "no-live-mount",
+      });
       continue;
     }
     verified.push({
       ...candidate,
+      fingerprint: proof.fingerprint,
       reason: explicitlyDisposable ? "explicit-label" : "next-destination",
     });
   }
@@ -147,11 +159,16 @@ export async function verifyDisposableCacheVolumes(opts: {
 /** Remove only the exact verified volume names and report every failure. */
 export async function removeDisposableCacheVolumes(opts: {
   readonly candidates: readonly DisposableCacheVolumeCandidate[];
+  readonly kept: CacheVolumeKept[];
 }): Promise<DisposableCacheVolumeRemoval> {
   const removed: string[] = [];
   const failed: Array<{ readonly name: string; readonly error: string }> = [];
 
   for (const candidate of opts.candidates) {
+    if ((await volumeFingerprint(candidate.name)) !== candidate.fingerprint) {
+      opts.kept.push({ name: candidate.name, reason: "identity-changed" });
+      continue;
+    }
     const result = await exec(["docker", "volume", "rm", candidate.name], {
       stdin: "ignore",
     });
@@ -159,6 +176,7 @@ export async function removeDisposableCacheVolumes(opts: {
       removed.push(candidate.name);
       continue;
     }
+    opts.kept.push({ name: candidate.name, reason: "removal-failed" });
     failed.push({
       name: candidate.name,
       error:
@@ -176,32 +194,116 @@ function isNextCacheDestination(destination: string): boolean {
   return normalized === ".next" || normalized.endsWith("/.next");
 }
 
-function parseVolumeLabels(stdout: string): Record<string, string> | null {
-  let parsed: unknown;
+export type CacheVolumeKept = {
+  readonly name: string;
+  readonly reason:
+    | "ownership-unverified"
+    | "not-disposable"
+    | "mounted-elsewhere"
+    | "no-live-mount"
+    | "identity-changed"
+    | "removal-failed"
+    | "not-confirmed";
+};
+
+const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+const fingerprint = (text: string) =>
+  new Bun.CryptoHasher("sha256").update(text).digest("hex");
+
+async function inspectVolume(name: string) {
+  if (!VOLUME_NAME.test(name)) {
+    return null;
+  }
+  const result = await exec(["docker", "volume", "inspect", name], {
+    stdin: "ignore",
+    timeoutMs: 5000,
+  });
+  if (result.exitCode !== 0) {
+    return result.stderr.includes(`get ${name}: no such volume`) ? false : null;
+  }
   try {
-    parsed = JSON.parse(stdout);
+    const parsed: unknown = JSON.parse(result.stdout);
+    if (
+      !(
+        Array.isArray(parsed) &&
+        parsed.length === 1 &&
+        isRecord(parsed[0]) &&
+        parsed[0].Name === name &&
+        isRecord(parsed[0].Labels)
+      )
+    ) {
+      return null;
+    }
+    return {
+      labels: parsed[0].Labels,
+      fingerprint: getString(parsed[0], "CreatedAt")
+        ? fingerprint(
+            JSON.stringify([
+              parsed[0].Name,
+              parsed[0].CreatedAt,
+              parsed[0].Driver,
+              parsed[0].Labels,
+              parsed[0].Options,
+              parsed[0].Mountpoint,
+              parsed[0].Scope,
+            ])
+          )
+        : undefined,
+    };
   } catch {
     return null;
   }
-  if (!(Array.isArray(parsed) && isRecord(parsed[0]))) {
-    return null;
-  }
-  const labels = parsed[0].Labels;
-  if (!isRecord(labels)) {
-    return null;
-  }
-  const out: Record<string, string> = {};
-  for (const key of [
-    COMPOSE_PROJECT_LABEL,
-    COMPOSE_VOLUME_LABEL,
-    DISPOSABLE_CACHE_LABEL,
-  ]) {
-    const value = getString(labels, key);
-    if (value) {
-      out[key] = value;
-    }
-  }
-  return out;
+}
+
+async function volumeFingerprint(name: string): Promise<string | undefined> {
+  const proof = await inspectVolume(name);
+  return proof ? proof.fingerprint : undefined;
+}
+
+/** Detached volumes have no destination evidence. Only their own label can qualify them. */
+export async function listComposeVolumeNames(composeProject: string) {
+  const result = await exec(
+    [
+      "docker",
+      "volume",
+      "ls",
+      "--filter",
+      `label=${COMPOSE_PROJECT_LABEL}=${composeProject}`,
+      "--format",
+      "{{.Name}}",
+    ],
+    { stdin: "ignore", timeoutMs: 5000 }
+  );
+  return result.exitCode === 0
+    ? result.stdout
+        .split("\n")
+        .map((name) => name.trim())
+        .filter((name) => VOLUME_NAME.test(name))
+    : null;
+}
+
+export function foreignCacheMounts(
+  opts: Parameters<typeof findMountedNamedVolumeCandidates>[0]
+): Set<string> {
+  const checkout = canonicalPath(opts.currentProjectDir);
+  return new Set(
+    opts.runtime.flatMap((project) =>
+      [...project.services.values()].flatMap((service) =>
+        service.containers
+          .filter(
+            (container) =>
+              container.project !== opts.composeProject ||
+              !container.workingDir ||
+              canonicalPath(container.workingDir) !== checkout
+          )
+          .flatMap((container) =>
+            container.mounts
+              .filter((mount) => mount.type.toLowerCase() === "volume")
+              .map((mount) => mount.name?.trim() || mount.source.trim())
+          )
+      )
+    )
+  );
 }
 
 function canonicalPath(path: string): string {

@@ -441,8 +441,10 @@ fn storage_attempt_preflight(
     candidate: &Candidate,
     owner: &str,
     boot: &str,
-) -> Result<(), CandidateError> {
-    for run in storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))? {
+) -> Result<Option<PathBuf>, CandidateError> {
+    let runs = storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?;
+    let archive = archive_at_limit(candidate, owner, &runs)?;
+    for run in runs {
         let (receipt, root) = journal::load_admission(candidate, &run, owner, boot)?;
         persistent_data::tool::require_idle(&root)?;
         if !matches!(receipt.phase, Phase::ReadyObserved | Phase::Removed) {
@@ -452,7 +454,7 @@ fn storage_attempt_preflight(
             require_data_tool(&receipt)?;
         }
     }
-    Ok(())
+    Ok(archive)
 }
 
 pub(super) fn ownership(
@@ -877,7 +879,9 @@ impl<B: Backend> Driver for Session<'_, B> {
                 self.receipt.failed(service, observation);
                 self.save()
             }
-            Event::Observed { .. } | Event::ServiceReady { .. } => Ok(()),
+            // Native-authored graphs keep their own phases; "all started" has no
+            // reader here.
+            Event::Observed { .. } | Event::ServiceReady { .. } | Event::AllStarted => Ok(()),
             Event::Ready => {
                 self.check_cancelled()?;
                 self.receipt.phase = Phase::ReadyObserved;
@@ -1004,6 +1008,10 @@ pub(super) fn run_guarded(
 ) -> Result<Receipt, CandidateError> {
     check_startup(startup_guard)?;
     let (selected, input) = prepared.into_parts(candidate)?;
+    let run = input.review().scope().run;
+    if !journal::directory_absent(candidate, &super::archive::directory(candidate, run)?)? {
+        return Err(refused());
+    }
     // Metadata is not continuity proof. Storage requires an explicitly pinned
     // verifier before provider admission; no discovery or fallback is performed.
     if !input.inputs().storage.is_empty() && storage_tool.is_none() {
@@ -1028,13 +1036,15 @@ pub(super) fn run_guarded(
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
-    if !input.inputs().storage.is_empty() {
+    let storage_archive = if input.inputs().storage.is_empty() {
+        None
+    } else {
         storage_attempt_preflight(
             candidate,
             engine.guest().incarnation(),
             engine.guest().boot_id(),
-        )?;
-    }
+        )?
+    };
     let source = selected
         .project_source
         .as_ref()
@@ -1101,6 +1111,7 @@ pub(super) fn run_guarded(
             &mut config.configs,
             &private,
             &BTreeSet::new(),
+            None,
         )?
     } else {
         for service in config.data_mounts.keys() {
@@ -1119,6 +1130,9 @@ pub(super) fn run_guarded(
         engine.guest().incarnation(),
         engine.guest().boot_id(),
     )?;
+    if let Some(source) = storage_archive {
+        super::archive::make_room(candidate, source)?;
+    }
     let root = journal::reserve(candidate, &receipt)?;
     if let Some(admitted) = admitted {
         admitted.set(true);
@@ -1322,14 +1336,14 @@ fn logs_with<B: Backend>(
 /// keeps the ordinary receipt validation below.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
     #[cfg(target_os = "macos")]
-    if journal::absent(candidate, run)? {
+    if super::archive::inspection_directory(candidate, run)?.is_none() {
         super::foreground::require_unpublished(candidate, run)?;
-        if journal::absent(candidate, run)? {
+        if super::archive::inspection_directory(candidate, run)?.is_none() {
             return Err(journal::unreserved());
         }
     }
     let engine = Engine::connect_cleanup(candidate)?;
-    let (receipt, _) = journal::load(
+    let (receipt, _) = super::archive::load_inspection(
         candidate,
         run,
         engine.guest().incarnation(),
@@ -1948,6 +1962,16 @@ fn reservations_using(
 ) -> Result<(), CandidateError> {
     reservations_using_except(candidate, owner, boot, new_attempt, None, inspect, add)
 }
+fn archive_at_limit(
+    candidate: &Candidate,
+    owner: &str,
+    runs: &[String],
+) -> Result<Option<PathBuf>, CandidateError> {
+    (runs.len() == storage_inventory::RUN_LIMIT)
+        .then(|| super::archive::select(candidate, owner, runs))
+        .transpose()
+}
+
 fn reservations_using_except(
     candidate: &Candidate,
     owner: &str,
@@ -1958,14 +1982,16 @@ fn reservations_using_except(
     mut add: impl FnMut(&Value) -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     let runs = storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?;
-    if new_attempt && runs.len() == 64 {
-        return Err(refused());
-    }
-    for run in runs {
+    let archive = if new_attempt {
+        archive_at_limit(candidate, owner, &runs)?
+    } else {
+        None
+    };
+    for run in &runs {
         if except == Some(run.as_str()) {
             continue;
         }
-        let (receipt, root) = journal::load_admission(candidate, &run, owner, boot)?;
+        let (receipt, root) = journal::load_admission(candidate, run, owner, boot)?;
         persistent_data::tool::require_idle(&root)?;
         if receipt.phase == Phase::Removed {
             continue;
@@ -1994,6 +2020,9 @@ fn reservations_using_except(
             }
             add(&value)?;
         }
+    }
+    if let Some(source) = archive {
+        super::archive::make_room(candidate, source)?;
     }
     Ok(())
 }

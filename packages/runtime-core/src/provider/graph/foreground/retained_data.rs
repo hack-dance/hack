@@ -71,7 +71,12 @@ fn refused() -> CandidateError {
 }
 fn binding(receipt: &Receipt) -> Result<String, CandidateError> {
     let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    value.as_object_mut().ok_or_else(refused)?.remove("phase");
+    {
+        // `started_from` is part of the phase (`Receipt::set_phase`).
+        let value = value.as_object_mut().ok_or_else(refused)?;
+        value.remove("phase");
+        value.remove("started_from");
+    }
     for resource in value["resources"]
         .as_object_mut()
         .ok_or_else(refused)?
@@ -325,6 +330,7 @@ fn remove_guarded(candidate: &Candidate, run: &str, guard: Guard) -> Result<Valu
         verify_guard,
     )?;
     verify_guard()?;
+    graph::explicit_cleanup_done(&root);
     Ok(json!({"ok":true,"run":run,"phase":cleaned.phase,"receipt":cleaned}))
 }
 

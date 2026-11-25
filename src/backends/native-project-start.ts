@@ -4781,6 +4781,23 @@ function withStartupLockBlocker(error: unknown): unknown {
 }
 
 /** Publish advisory startup evidence until this foreground invocation settles. */
+/**
+ * Whether a lost start leaves a pending restart (Codex review on #1253): a
+ * restart's replacement lost before readiness keeps its intent, so the
+ * follow-up is `hack restart`, not `hack up`. Read at loss time, because a
+ * ready restart has already retired it; an unreadable intent falls back to
+ * whether this start is a restart's replacement.
+ */
+async function nativeRestartPendingAtLoss(
+  opts: NativeProjectStartOptions
+): Promise<boolean> {
+  const load = opts.dependencies?.loadRestart ?? DEFAULTS.loadRestart;
+  return await load(opts.scope).then(
+    (intent) => intent !== null,
+    () => opts.restore !== undefined
+  );
+}
+
 export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
@@ -4815,15 +4832,7 @@ export async function startNativeProject(
                 return;
               }
               if (!detached) {
-                // A restart lost before readiness keeps its pending intent, so
-                // the follow-up is hack restart, not hack up. Read at loss time:
-                // a ready restart has already retired it.
-                const restartPending = await (
-                  opts.dependencies?.loadRestart ?? DEFAULTS.loadRestart
-                )(opts.scope).then(
-                  (intent) => intent !== null,
-                  () => opts.restore !== undefined
-                );
+                const restartPending = await nativeRestartPendingAtLoss(opts);
                 if (settled || graphStopped) {
                   return;
                 }

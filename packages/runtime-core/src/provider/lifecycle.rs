@@ -308,6 +308,14 @@ const NOT_RUNNING: &str = "The native runtime is not in its running state, so th
 /// a finite `graph inspect` (presentation `ps` takes no provider lease).
 pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a one-shot service command (`hack exec`, and the dependency refresh that
+/// `hack exec` and `hack run` send first) waits for a provider lease another operation
+/// holds. A ready foreground owner takes the lease briefly and often, for example
+/// once a second to supervise restarts of a routed service, so a nonblocking
+/// acquisition refused such a command at random with `provider_busy` (HACK-2669).
+/// Acquisition admits nothing; on expiry the refusal still names the holder.
+pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
+
 /// Startup's provider lease. Everything `start_pool` does before taking it is read-only
 /// validation, admission sampling and RAII guards, so waiting for a briefly held lease admits
 /// nothing early, and on expiry it refuses `provider_busy` with nothing admitted.
@@ -558,6 +566,16 @@ impl<'a> OwnedGuest<'a> {
 
     pub(super) fn connect(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(candidate, true, None)
+    }
+
+    /// [`Self::connect`] that waits, until `deadline`, only while another operation
+    /// holds the mutation lease. Waiting admits nothing: the pool identity, liveness
+    /// and boot audit all run after acquisition, exactly as without the wait.
+    pub(super) fn connect_until(
+        candidate: &'a Candidate,
+        deadline: Instant,
+    ) -> Result<Self, CandidateError> {
+        Self::connect_mode(candidate, true, Some(deadline))
     }
 
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {

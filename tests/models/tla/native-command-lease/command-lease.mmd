@@ -1,0 +1,18 @@
+---
+title: CommandLease · exec lease
+---
+stateDiagram-v2
+  direction TB
+  [*] --> waiting
+  waiting --> waiting : owner takes, Tick
+  waiting --> admitted : CmdAcquire [free]
+  waiting --> refused : Expire [held at bound]
+  waiting --> refused : CmdBusy [old, held once]
+  admitted --> admitted : OwnerYield [owner skips]
+  admitted --> done : CmdFinish [releases]
+  done --> [*]
+  refused --> [*]
+  class waiting wait
+  class admitted live
+  class done ok
+  class refused fail

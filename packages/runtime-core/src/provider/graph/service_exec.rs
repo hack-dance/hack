@@ -213,7 +213,9 @@ fn service_exec_inner(
     managed: Option<&super::super::managed_environment::Managed>,
 ) -> Result<ServiceExecResult, CandidateError> {
     validate(&options)?;
-    let engine = Engine::connect(candidate)?;
+    // Waits out a brief holder, such as the ready owner's restart supervision,
+    // instead of refusing `provider_busy` at random (HACK-2669).
+    let engine = Engine::connect_command(candidate)?;
     let (receipt, root) = load(candidate, &engine, options.run)?;
     super::startup::require_dependency_rebind_complete(&root, &receipt)?;
     let pending = root.join("state.pending");

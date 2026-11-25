@@ -13,6 +13,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub(in crate::provider) mod changes;
+#[cfg(all(test, target_os = "macos"))]
+mod command_lease_tests;
 #[cfg(any(target_os = "macos", test))]
 mod exec_io;
 #[cfg(all(test, target_os = "macos"))]
@@ -577,13 +579,42 @@ impl<'a> Engine<'a> {
     }
 
     /// One service command keeps its original budget through every engine query.
+    /// Lease contention is waited out within that budget, for at most
+    /// [`COMMAND_LEASE_WAIT`](super::lifecycle::COMMAND_LEASE_WAIT).
     #[cfg(target_os = "macos")]
     pub(in crate::provider) fn connect_command_until(
         candidate: &'a Candidate,
         deadline: Instant,
     ) -> Result<Self, CandidateError> {
         super::managed_environment::remaining_until(deadline)?;
-        Self::from_guest_until(OwnedGuest::connect(candidate)?, false, Some(deadline))
+        let lease = deadline.min(Instant::now() + super::lifecycle::COMMAND_LEASE_WAIT);
+        Self::from_guest_until(
+            OwnedGuest::connect_until(candidate, lease)?,
+            false,
+            Some(deadline),
+        )
+    }
+
+    /// The mutation lease for one service command (exec, or the dependency refresh
+    /// before it). A ready foreground owner holds the lease briefly and often, so
+    /// this waits for a holder to release it, for at most
+    /// [`COMMAND_LEASE_WAIT`](super::lifecycle::COMMAND_LEASE_WAIT), instead of
+    /// refusing at once (HACK-2669). Waiting admits nothing; all identity checks
+    /// run after acquisition, and a command never replaces or cancels the holder.
+    pub(in crate::provider) fn connect_command(
+        candidate: &'a Candidate,
+    ) -> Result<Self, CandidateError> {
+        #[cfg(all(test, target_os = "macos"))]
+        if fixture::active(candidate) {
+            return Self::connect(candidate);
+        }
+        Self::from_guest(
+            OwnedGuest::connect_until(
+                candidate,
+                Instant::now() + super::lifecycle::COMMAND_LEASE_WAIT,
+            )?,
+            false,
+        )
     }
 
     #[cfg(target_os = "macos")]

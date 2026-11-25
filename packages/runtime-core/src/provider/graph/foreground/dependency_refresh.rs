@@ -4,8 +4,11 @@ use super::*;
 use std::os::unix::net::UnixStream;
 use transport::DependencyRefreshRequest;
 
+/// Both the requesting command and the owner read the selection under the
+/// mutation lease. Either waits out a brief holder (the owner itself supervises
+/// restarts under it each second) instead of refusing `provider_busy` (HACK-2669).
 fn selection(candidate: &Candidate, run: &str) -> Result<DependencyRefreshRequest, CandidateError> {
-    let engine = Engine::connect(candidate)?;
+    let engine = Engine::connect_command(candidate)?;
     let (receipt, _) = super::super::load(candidate, &engine, run)?;
     if receipt.phase != "ready-observed" {
         return Err(refused());
@@ -58,6 +61,10 @@ pub(super) fn handle(
     stream: &UnixStream,
     signals: &signals::Events,
 ) -> Result<Value, CandidateError> {
+    // The owner's whole answer, lease wait included, stays inside the 175 s the
+    // requester reads for: a requester that gives up first disconnects, and a
+    // disconnect cancels the rebind.
+    let deadline = Instant::now() + Duration::from_secs(170);
     let current = selection(candidate, run)?;
     if selected.plan != current.plan
         || selected.generation != current.generation
@@ -66,7 +73,6 @@ pub(super) fn handle(
         return Err(refused());
     }
     let watch = transport::ClientWatch::half_closed(stream)?;
-    let deadline = Instant::now() + Duration::from_secs(170);
     runtime.refresh_dependencies(candidate, run, &selected.generation, || {
         signals.pending() || watch.disconnected() || Instant::now() >= deadline
     })

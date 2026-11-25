@@ -1962,6 +1962,32 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2669: a service command (exec, and the dependency refresh before
+    // exec and run) waits out the ready owner's brief lease holds instead of
+    // refusing provider_busy. The negative control is the old nonblocking
+    // acquisition.
+    name: "native-command-lease",
+    module: "CommandLease",
+    states: 40,
+    invariant: "BriefHolderNeverRefuses",
+    fields: ['cmd = "refused"', 'lease = "owner"', "elapsed = 0"],
+    additionalControls: [
+      {
+        // The wait stays bounded: a holder that keeps the lease past it is
+        // still refused, with the holder named.
+        name: "long-holder",
+        negative: true,
+        fields: ['cmd = "refused"', 'lease = "owner"', "elapsed = 4"],
+      },
+      {
+        name: "admitted-after-wait",
+        negative: true,
+        invariant: "NeverAdmittedAfterWait",
+        fields: ['cmd = "admitted"', 'lease = "command"', "elapsed = 1"],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,

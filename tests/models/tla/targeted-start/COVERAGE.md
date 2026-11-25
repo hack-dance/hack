@@ -11,17 +11,21 @@ unselected. The model keeps durable ownership separate from observed compute.
 | `DependencyBeforeCreate`, `PublishAfterStart` | The seeded scheduler dispatches after the dependency condition and publishes the confirmed container ID. The scheduler regression checks the wait and exact selection. |
 | `Capacity`, `SupervisorSeeded` | `bridges::check_extension_capacity` checks the leased pool registry before the receipt write. `EarlyPublications` verifies the added publishers and carries each admitted route generation to the supervisor. The free-count and unseen-probe tests cover refusal and supervisor enrollment. |
 | `OwnedEffects`, `CleanStop`, `Loadable` | `Session::reserve` records names before allocation. Failure keeps the owner and pending marker until scoped rollback succeeds. Explicit recovery retains pending bytes as evidence, reconciles the committed receipt and clears the marker on phase change. The macOS fixture kills the owner during an append, recovers, and reads back the settled receipt. |
+| `ConfirmedCancelHasReply` | Ctrl-C half-closes the appending client's write side. `AppendClientWatch` detects EOF. The native client and detached launcher keep their reply channels open while the owner rolls back. The source CLI regression checks exit 130 on confirmed rollback and exit 1 after a missing confirmation or a racing commit. |
 
-TLC 1.7.4 with Java 17 explores 291 distinct states. `negative.cfg` drops the
+TLC 1.7.4 with Java 17 explores 1281 distinct states. `negative.cfg` drops the
 dependency's intent and fails `OwnedEffects` at `Create`. `replace-existing.cfg`
 admits the running service into the effect selection and fails
-`PreserveExisting` when `Create` acts on it.
+`PreserveExisting` when `Create` acts on it. `unproved-cancellation.cfg`
+fails `ConfirmedCancelHasReply` by treating a deadline as confirmation.
 
 The model assumes serialized owner requests, an exclusive provider lease,
 atomic committed receipt replacement and an engine that honors confirmed
 identities. A crash keeps the committed names even when the latest effect
-reply was lost. `Degraded` is the owner's state until rollback is verified
-or cleanup is requested. The model abstracts Docker retries, private
+reply was lost. `Cancelling` starts when the owner observes request EOF. The
+client can still be waiting when commit wins, rollback is uncertain or the
+owner exits. The model tracks the latest reply and one client wait at a time.
+`Degraded` retains cleanup intent. The model abstracts Docker retries, private
 environment and volume cleanup, probe sampling, signal delivery, filesystem
 durability and live VM routing. The [Pele state chart](../../../../docs/reference/state-charts/targeted-start.svg)
 shows the same transitions.
@@ -37,7 +41,9 @@ exercise a pending receipt before and after enrollment, then restore the
 original selection and its named data. These checks cover the socket lifecycle,
 the interrupted first write and the retained restore layout outside the model.
 The append commit records the new normalized review and the matching shared
-source execution contract together. The model abstracts those fingerprints.
+source execution contract together. The fake-driver `extend::run` regression
+checks every published receipt through that commit. The model abstracts those
+fingerprints.
 The shared-source regression checks that the cold contract rejects the
 expanded plan and that the combined contract admits the same plan after a
 source edit. The VM CLI fixture also checks exec on the running graph and

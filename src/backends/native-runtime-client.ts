@@ -41,6 +41,7 @@ import {
 } from "./native-stop-diagnostics.ts";
 
 export const NATIVE_BUILD_RETENTION_TIMEOUT_MS = 30 * 60_000 + 5000;
+export const NATIVE_APPEND_CANCEL_CONFIRMATION_MS = 5000;
 
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const NATIVE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -851,12 +852,13 @@ export async function invokeNativeRuntime(opts: {
   }
   const runtimeCommand = opts.args[0] === "runtime" ? opts.args[1] : undefined;
   const imageBatch = runtimeCommand === "ensure-images";
+  const append = opts.args[0] === "graph" && opts.args[1] === "extend";
   let maxTimeoutMs = 600_000;
   if (imageBatch) {
     maxTimeoutMs = 3_600_000;
   } else if (runtimeCommand === "retain-build-bases") {
     maxTimeoutMs = NATIVE_BUILD_RETENTION_TIMEOUT_MS;
-  } else if (opts.args[0] === "graph" && opts.args[1] === "extend") {
+  } else if (append) {
     maxTimeoutMs = 615_000;
   }
   if (
@@ -901,14 +903,17 @@ export async function invokeNativeRuntime(opts: {
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      detached: opts.processGroup === "own",
+      // The frontend forwards Ctrl-C after isolating the append client from
+      // terminal signals, so the client can keep draining the owner's reply.
+      detached: append || opts.processGroup === "own",
     }
   );
   // A descendant may inherit a pipe after the owned child exits. The child's
   // exit, not that writer's EOF, bounds draining (see
   // NATIVE_EXIT_DRAIN_BOUND_MS); its own closed code and response are already
   // in the pipes at exit, so EOF normally ends the drain long before the bound.
-  const drain = bound === undefined ? undefined : new AbortController();
+  const drain =
+    bound === undefined && !append ? undefined : new AbortController();
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   if (drain) {
     void child.exited.then(() => {
@@ -924,10 +929,19 @@ export async function invokeNativeRuntime(opts: {
   );
   let timedOut = false;
   let canceled = false;
-  const cancel = () => {
-    canceled = true;
+  let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+  const kill = () => {
     drain?.abort();
     child.kill("SIGKILL");
+  };
+  const cancel = () => {
+    canceled = true;
+    if (append) {
+      child.kill("SIGTERM");
+      cancelTimer = setTimeout(kill, NATIVE_APPEND_CANCEL_CONFIRMATION_MS);
+    } else {
+      kill();
+    }
   };
   opts.signal?.addEventListener("abort", cancel, { once: true });
   if (opts.signal?.aborted) {
@@ -935,8 +949,7 @@ export async function invokeNativeRuntime(opts: {
   }
   const timer = setTimeout(() => {
     timedOut = true;
-    drain?.abort();
-    child.kill("SIGKILL");
+    kill();
   }, timeoutMs);
   try {
     const inputFailure = await writeNativePrivateInput(
@@ -946,7 +959,7 @@ export async function invokeNativeRuntime(opts: {
     const bytes = await readBoundedOutput(child.stdout, drain?.signal);
     const code = await child.exited;
     const failure = await failureDetails;
-    if (canceled) {
+    if (canceled && !append) {
       throw new NativeRuntimeRequestError({
         message:
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
@@ -974,6 +987,7 @@ export async function invokeNativeRuntime(opts: {
   } finally {
     opts.signal?.removeEventListener("abort", cancel);
     clearTimeout(timer);
+    clearTimeout(cancelTimer);
     if (child.exitCode === null) {
       child.kill("SIGKILL");
       await child.exited;

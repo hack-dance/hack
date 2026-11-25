@@ -60,6 +60,11 @@ backends. `services` contains the `started`, `completed`, `stopped`, and
 `failed` arrays. Native returns this result after its selected services meet
 their startup goals.
 
+If Ctrl-C interrupts an append to a running native project, the launcher waits
+briefly for the owner to confirm rollback. Confirmed cancellation exits 130 with
+`E_CANCELLED` in JSON. If the append committed or the confirmation is missing,
+the command exits 1 with `E_NATIVE_START_OUTCOME_UNKNOWN`.
+
 ## Command inventory
 
 This inventory includes every canonical command exposing `--json`, including

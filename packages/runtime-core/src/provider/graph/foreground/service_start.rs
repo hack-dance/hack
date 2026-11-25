@@ -36,7 +36,7 @@ impl CombinedInput {
 use crate::project::{NormalizedComposeOptions, PlanOptions, execution::Condition};
 use crate::provider::managed_environment::{self, Managed};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{net::Shutdown, os::fd::AsFd, path::PathBuf};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,8 +129,16 @@ pub fn request(
     };
     let pin = transport::Pin::load(candidate, run)?;
     let mut stream = pin.connect()?;
+    let signals = signals::Events::new_descriptor(stream.as_fd())?;
+    signals.watch_frontend()?;
     if let Some(managed) = managed {
         managed.remaining()?;
+    }
+    if signals.pending() {
+        return Err(CandidateError::new(
+            "graph_cancelled",
+            "Targeted start was cancelled before dispatch.",
+        ));
     }
     transport::write_extension(
         &stream,
@@ -146,11 +154,23 @@ pub fn request(
         },
         Duration::from_secs(5),
     )?;
+    let deadline = Instant::now() + options.run.timeout + Duration::from_secs(10);
+    if matches!(
+        signals.wait_until(Some(deadline))?,
+        signals::Wake::Signal | signals::Wake::FrontendExit
+    ) {
+        // Request EOF tells the owner to roll back. Keep the read half open
+        // for the reply from this exact append, even if commit won the race.
+        stream.shutdown(Shutdown::Write).map_err(|_| refused())?;
+    }
     let reply: Value = transport::read(
         &mut stream,
-        options.run.timeout + Duration::from_secs(10),
+        deadline.saturating_duration_since(Instant::now()),
         256 * 1024,
     )?;
+    if reply["code"] == "graph_cancelled" && reply["run"] != run {
+        return Err(refused());
+    }
     validate_owner_response(reply.clone(), run).map_err(|mut error| {
         // The pinned same-user owner only emits compile-time fixed messages.
         if error.cause_code.is_some()

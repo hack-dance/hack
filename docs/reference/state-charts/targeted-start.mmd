@@ -8,12 +8,17 @@ stateDiagram-v2
     Ready --> Extending : Reserve [space]
     Extending --> Ready : Commit [probes seeded]
     Extending --> Degraded : Fail or time out
+    Extending --> Cancelling : ObserveCancel [request EOF]
+    Cancelling --> Ready : Rollback [verified]
+    Cancelling --> Degraded : RollbackRefused
     Degraded --> Ready : Rollback [verified]
     Extending --> Interrupted : Crash
+    Cancelling --> Interrupted : Crash
     Degraded --> Interrupted : Crash
     Interrupted --> Reconciled : Reconcile
     Ready --> Cleaning : Down
     Extending --> Cleaning : Down cancels start
+    Cancelling --> Cleaning : Down
     Degraded --> Cleaning : Down
     Reconciled --> Cleaning : Down
     Cleaning --> Stopped : FinishDown
@@ -25,11 +30,16 @@ stateDiagram-v2
       RefuseConcurrent
       Keep cleanup intent
     end note
+    note right of Cancelling
+      Client waits for reply
+      Rollback reply confirms
+      Commit or timeout is unknown
+    end note
     classDef live stroke-width:1.6px
     classDef wait stroke-width:1.6px
     classDef fail stroke-width:1.6px
     classDef ok stroke-width:1.6px
     class Extending,Cleaning live
     class Interrupted,Degraded fail
-    class Reconciled wait
+    class Cancelling,Reconciled wait
     class Stopped ok

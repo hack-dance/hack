@@ -13,6 +13,7 @@ import { isRecord } from "../lib/guards.ts";
 import { appendLifecycleLogRecord } from "../lib/lifecycle-runtime.ts";
 import {
   isNativeDetachedOwnerProcess,
+  nativeDetachedUpAppendCancelled,
   nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpHotReload,
@@ -2604,9 +2605,9 @@ export type NativeStartupProgress =
         | "images"
         /** Image work is done; review and plan work follow (detached clocks only). */
         | "plan"
-        | "all-stopped"
-        | "stopping";
+        | "all-stopped";
     }
+  | { readonly phase: "stopping"; readonly appending?: true }
   | {
       readonly phase: "stopped";
       /** The confirmed-stop retention line when a run mapping was published. */
@@ -3256,6 +3257,7 @@ async function extendNativeProjectGraph({
       timeoutMs: budgetSeconds * 1000 + 15_000,
       signal,
     });
+    requireActiveStartup(signal);
     const selected = authoritative(
       {
         journal_incomplete: false,
@@ -3556,7 +3558,11 @@ async function startNativeProjectAttempt(
   const controller = stopSignals.controller;
   controller.signal.addEventListener(
     "abort",
-    () => progress({ phase: "stopping" }),
+    () =>
+      progress({
+        phase: "stopping",
+        ...(extension ? { appending: true } : {}),
+      }),
     { once: true }
   );
   let hooks: Hooks | undefined;
@@ -4583,6 +4589,15 @@ async function startNativeProjectAttempt(
       (controller.signal.aborted ||
         (error instanceof NativeRuntimeRequestError && error.stopSignal))
     ) {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        (error.nativeCode === "graph_cancelled" ||
+          (error.nativeCode === "graph_owner_recovery" &&
+            error.nativeCauseCode === "graph_cancelled"))
+      ) {
+        await nativeDetachedUpAppendCancelled();
+        throw new NativeStartupCanceledError(stopSignals.interruptedExit());
+      }
       throw nativeStartOutcomeUnknown();
     }
     throw foregroundStartFailure({

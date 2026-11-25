@@ -31,6 +31,25 @@ fn extension_frame_leaves_the_socket_live_until_the_client_disconnects() {
 }
 
 #[test]
+fn extension_write_half_close_requests_cancel_but_keeps_rollback_reply_readable() {
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let budget = Duration::from_secs(1);
+    write_extension(&client, &append_request(2), budget).unwrap();
+    let request = read_request(&server, budget).unwrap();
+    let watch = AppendClientWatch::new(&server).unwrap();
+    assert!(!watch.disconnected());
+
+    client.shutdown(Shutdown::Write).unwrap();
+    assert!(watch.disconnected());
+    let reply = json!({"ok":false,"run":request.run,"code":"graph_cancelled"});
+    write(&mut server, &reply, budget).unwrap();
+    assert_eq!(
+        read::<serde_json::Value>(&mut client, budget, 1024).unwrap(),
+        reply
+    );
+}
+
+#[test]
 fn legacy_append_gets_an_explicit_version_refusal() {
     let (mut client, mut server) = UnixStream::pair().unwrap();
     let budget = Duration::from_secs(1);

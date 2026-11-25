@@ -136,9 +136,10 @@ stopped services to a stopped state with their routes and loopback ports closed.
 A retry can start and publish those services again. If the owner cannot confirm
 rollback, `hack ps` reports a degraded run and shows the service states it can
 verify. Restart supervision continues for services outside the failed start.
-Ctrl-C disconnects the start request. The owner cancels an uncommitted start.
-If the client loses the result, it returns `E_NATIVE_START_OUTCOME_UNKNOWN`
-and asks you to check `hack ps`.
+Ctrl-C asks the owner to cancel the append and waits briefly for its reply.
+If the owner confirms rollback, `up` reports cancellation and exits 130. If the
+append already committed or the result is unavailable, `up` reports
+`E_NATIVE_START_OUTCOME_UNKNOWN` and asks you to check `hack ps`.
 
 `hack down` cancels the start and stops the whole run, including any service
 created midway. The owner can answer after an in-flight image inspection,

@@ -20,6 +20,7 @@ import {
 } from "../backends/native-profile-selection.ts";
 import type { NativeBuildSettlement } from "../backends/native-project-builds.ts";
 import {
+  NATIVE_APPEND_CANCEL_CONFIRMATION_MS,
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
@@ -108,6 +109,7 @@ type StartupFailure = {
   readonly startupPhase?: "static-preflight";
 };
 let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
+let publishAppendCancelled: (() => Promise<void>) | undefined;
 let publishProgress:
   | ((
       phase: Exclude<NativeDetachedStartPhase, "launching">,
@@ -158,6 +160,11 @@ export function nativeDetachedUpProgress(
     );
     progressHeartbeat.unref?.();
   }
+}
+
+/** The exact append owner confirmed no effect or completed scoped rollback. */
+export async function nativeDetachedUpAppendCancelled(): Promise<void> {
+  await publishAppendCancelled?.();
 }
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const FAILURE_MESSAGE = /^[\x20-\x7e]{1,400}$/;
@@ -907,6 +914,7 @@ export async function runNativeDetachedOwner(opts: {
     ready = true;
     send({ kind: "ready", data });
   };
+  publishAppendCancelled = () => send("append-cancelled");
   publishShellVariables = (names, ignoredRootDotenv) => {
     if (!stopping) {
       send({
@@ -992,6 +1000,7 @@ export async function runNativeDetachedOwner(opts: {
     closeUpTimingOwnerRelay();
     workingImages = [];
     publishReady = undefined;
+    publishAppendCancelled = undefined;
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
     publishImageNotice = undefined;
@@ -1228,6 +1237,8 @@ export async function startNativeDetachedUp(opts: {
   const result = Promise.withResolvers<Ready>();
   let failed = false;
   let cancellationCode: number | undefined;
+  let pendingAppendCancel: number | undefined;
+  let appendCancelDeadline: ReturnType<typeof setTimeout> | undefined;
   let appending = false;
   let shellVariablesReported = false;
   let exitGrace: ReturnType<typeof setTimeout> | undefined;
@@ -1235,8 +1246,17 @@ export async function startNativeDetachedUp(opts: {
     child.once("exit", () => resolve());
   });
   let timedOut = false;
+  const rejectCancellation = (code: number, error: HackCliError) => {
+    failed = true;
+    cancellationCode = code;
+    result.reject(error);
+  };
   const fail = () => {
     if (committed || failed) {
+      return;
+    }
+    if (pendingAppendCancel !== undefined) {
+      rejectCancellation(1, nativeStartOutcomeUnknown());
       return;
     }
     failed = true;
@@ -1249,19 +1269,30 @@ export async function startNativeDetachedUp(opts: {
     );
   };
   const cancel = (code: number) => {
-    if (committed || failed) {
+    if (committed || failed || pendingAppendCancel !== undefined) {
       return;
     }
-    failed = true;
-    cancellationCode = appending ? 1 : code;
-    result.reject(
-      appending
-        ? nativeStartOutcomeUnknown()
-        : new HackCliError({
-            code: "E_CANCELLED",
-            message:
-              "Native detached startup interrupted; ordinary owned stop was requested. Inspect hack ps before retrying.",
-          })
+    if (appending) {
+      pendingAppendCancel = code;
+      // Leave IPC open for the frontend's bounded wait on the native owner.
+      appendCancelDeadline = setTimeout(
+        fail,
+        NATIVE_APPEND_CANCEL_CONFIRMATION_MS + 1000
+      );
+      child.send("cancel", (error) => {
+        if (error) {
+          fail();
+        }
+      });
+      return;
+    }
+    rejectCancellation(
+      code,
+      new HackCliError({
+        code: "E_CANCELLED",
+        message:
+          "Native detached startup interrupted; ordinary owned stop was requested. Inspect hack ps before retrying.",
+      })
     );
   };
   const interrupt = () => cancel(130);
@@ -1282,6 +1313,20 @@ export async function startNativeDetachedUp(opts: {
   child.on("disconnect", channelClosed);
   child.on("message", (value: unknown) => {
     if (failed) {
+      return;
+    }
+    if (pendingAppendCancel !== undefined) {
+      if (value === "append-cancelled") {
+        rejectCancellation(
+          pendingAppendCancel,
+          new HackCliError({
+            code: "E_CANCELLED",
+            message: "Native project startup interrupted.",
+          })
+        );
+      } else if (value === "accepted" && ready) {
+        fail();
+      }
       return;
     }
     if (
@@ -1360,7 +1405,7 @@ export async function startNativeDetachedUp(opts: {
     heartbeatStaleMs: opts.heartbeatStaleMs,
     now: opts.deadlineNow ?? (() => performance.now()),
     expire: (error) => {
-      if (!(committed || failed)) {
+      if (!(committed || failed) && pendingAppendCancel === undefined) {
         failed = true;
         timedOut = true;
         result.reject(error);
@@ -1433,12 +1478,13 @@ export async function startNativeDetachedUp(opts: {
   } finally {
     clearInterval(timer);
     clearTimeout(exitGrace);
+    clearTimeout(appendCancelDeadline);
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", terminate);
-    // Before commit this disconnect triggers graceful shutdown in the exact
-    // child. Never kill a retained owner, infer cleanup, or replay startup.
+    // A cancelling append already sent its stop request. Other uncommitted
+    // launches request graceful shutdown before disconnecting.
     if (child.connected) {
-      if (committed) {
+      if (committed || pendingAppendCancel !== undefined) {
         child.disconnect();
       } else {
         // Acceptance may already be queued when the caller cancels. Explicit

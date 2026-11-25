@@ -105,6 +105,23 @@ if [ "$3-$4" = runtime-build-image ] && [ -f '${stub}/runtime-build-image.hold' 
   for i in $(seq 1 400); do sleep 0.05; done
   exit 99
 fi
+if [ "$3-$4" = graph-extend ] && [ -f '${stub}/append-cancel' ]; then
+  outcome=$(cat '${stub}/append-cancel')
+  append_term() {
+    printf %s received > ./interrupt-seen
+    case "$outcome" in
+      rollback)
+        printf %s '{"code":"graph_owner_recovery","cause_code":"graph_cancelled"}' >&2
+        exit 1 ;;
+      committed) cat '${stub}/graph-extend.out'; exit 0 ;;
+      *) exec sleep 20 ;;
+    esac
+  }
+  trap append_term TERM
+  printf '%s' ready > ./interrupt-ready
+  for i in $(seq 1 400); do sleep 0.05; done
+  exit 99
+fi
 if [ -f '${stub}/'"$3-$4"'.hold' ]; then
   printf '%s' ready > './interrupt-ready'
   exec sleep 20
@@ -295,9 +312,15 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
-test.each([false, true])(
-  "Ctrl-C reports an uncertain targeted start and leaves the project mapping (JSON: %s)",
-  async (json) => {
+test.each([
+  { json: false, outcome: "rollback" },
+  { json: true, outcome: "rollback" },
+  { json: false, outcome: "unconfirmed" },
+  { json: true, outcome: "unconfirmed" },
+  { json: true, outcome: "committed" },
+])(
+  "Ctrl-C on targeted up with $outcome (JSON: $json)",
+  async ({ json, outcome }) => {
     const image = `sha256:${"e".repeat(64)}`;
     const f = await fixture(
       JSON.stringify({ services: { web: { image }, slow: { image } } })
@@ -326,7 +349,23 @@ test.each([false, true])(
     });
     await f.reply("runtime status", { phase: "running", process_alive: true });
     await scriptUpThroughReview(f, { services: { slow: { active: true } } });
-    await f.hold("graph extend");
+    if (outcome === "committed") {
+      await f.reply("graph extend", {
+        ok: true,
+        phase: "ready-observed",
+        receipt: {
+          run: run.run,
+          owner: run.owner,
+          namespace: run.namespace,
+          plan_id: run.planId,
+          phase: "ready-observed",
+          readiness: { web: "started", slow: "started" },
+        },
+        started: ["slow"],
+        changed: [],
+      });
+    }
+    await writeFile(join(f.root, "stub", "append-cancel"), outcome);
     const child = Bun.spawn(
       [
         process.execPath,
@@ -355,10 +394,27 @@ test.each([false, true])(
         what: "targeted owner request",
         budgetMs: 10_000,
       });
-      child.kill("SIGINT");
+      process.kill(-child.pid, "SIGINT");
       const code = await child.exited;
-      expect(code, await stderr).toBe(1);
-      if (json) {
+      expect(code, await stderr).toBe(outcome === "rollback" ? 130 : 1);
+      expect(await readFile(join(f.project, "interrupt-seen"), "utf8")).toBe(
+        "received"
+      );
+      if (outcome === "rollback") {
+        if (json) {
+          expect(JSON.parse(await stdout)).toMatchObject({
+            ok: false,
+            error: {
+              code: "E_CANCELLED",
+              message: "Native project startup interrupted.",
+            },
+          });
+        } else {
+          expect(await stderr).toContain("Native project startup interrupted.");
+        }
+        expect(await stderr).not.toContain("The start may have completed");
+        expect(await stdout).not.toContain("E_NATIVE_START_OUTCOME_UNKNOWN");
+      } else if (json) {
         expect(JSON.parse(await stdout)).toMatchObject({
           ok: false,
           error: {

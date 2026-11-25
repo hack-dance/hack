@@ -2001,6 +2001,6 @@ last-tag deletion behavior.
 ## Targeted native Compose start
 
 [TargetedStart](targeted-start/COVERAGE.md) checks appending services and their
-dependencies under the existing owner. TLC checks 52 distinct states and two
-negative controls, for missing create ownership and replacement of a running
-service during reservation.
+dependencies under the existing owner. TLC checks 1,281 distinct states and
+three negative controls. They drop create ownership, replace a running service,
+and report confirmed cancellation without an owner reply.

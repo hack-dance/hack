@@ -6956,7 +6956,9 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
       return;
     case "stopping":
       logger.step({
-        message: "Stopping the native project; waiting for owned cleanup…",
+        message: event.appending
+          ? "Cancelling the native service start and waiting for rollback…"
+          : "Stopping the native project; waiting for owned cleanup…",
       });
       return;
     case "stopped":

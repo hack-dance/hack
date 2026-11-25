@@ -3231,7 +3231,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "targeted-start",
     module: "TargetedStart",
-    states: 291,
+    states: 1281,
     invariant: "OwnedEffects",
     fields: [
       'phase = "Extending"',
@@ -3246,6 +3246,16 @@ const contracts: readonly ModelContract[] = [
         fields: [
           'phase = "Extending"',
           "containers = [web |-> 2, cache |-> 0, redis |-> 0, api |-> 0, unused |-> 0]",
+        ],
+      },
+      {
+        name: "unproved-cancellation",
+        negative: true,
+        invariant: "ConfirmedCancelHasReply",
+        fields: [
+          'phase = "Extending"',
+          'client = "Confirmed"',
+          'reply = "None"',
         ],
       },
     ],

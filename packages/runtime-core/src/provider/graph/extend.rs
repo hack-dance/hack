@@ -529,6 +529,7 @@ pub(super) fn run(
             .as_mut()
             .ok_or_else(|| refused("Targeted start requires the owner's publication set."))?;
         publications.verify_extension(candidate, &receipt)?;
+        startup.check_cancelled()?;
         receipt.normalized_input = Some(combined_identity);
         receipt.input_plan_id = Some(reviewed.plan_id);
         if let Some(contract) = combined_contract {
@@ -563,6 +564,9 @@ pub(super) fn run(
                 if let Some(publications) = &mut startup.early_publications {
                     publications.mark_rolled_back();
                 }
+                // An interrupt may arrive while a failed append is rolling
+                // back. A settled rollback can still confirm cancellation.
+                startup.check_cancelled()?;
                 Err(error)
             } else {
                 Err(super::error(

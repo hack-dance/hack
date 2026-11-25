@@ -242,6 +242,7 @@ import {
 } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeStopError,
   NATIVE_BUILD_RETENTION_TIMEOUT_MS,
   NATIVE_IDLE_POOL_NOTE,
   NativeRuntimeRequestError,
@@ -1658,8 +1659,16 @@ function withGraphTimeoutDetail(opts: {
  * reported as `E_SERVICE_EXITED` with each service and exit code, not as the
  * runtime's code (which may name a later engine call). Only for the startup
  * failure itself, after its cleanup was confirmed and without a stop request:
- * a cleanup or infrastructure failure, or an unconfirmed cleanup, keeps its own
- * error and its retained-state guidance.
+ * a cleanup or infrastructure failure, an unconfirmed cleanup, a stop or a
+ * cancellation keeps its own error, its exit code and its retained-state
+ * guidance.
+ *
+ * Only when the exit is the startup failure: the runtime's tails list the
+ * recorded startup failure first, then other failed services by name. When the
+ * runtime's error names a service, that service must have exited; otherwise the
+ * first tail must have. A service that exited because another service failed
+ * first (for example an API whose database never became healthy) is a
+ * consequence, so the runtime's error stays.
  */
 export function serviceExitedFailure(opts: {
   readonly error: unknown;
@@ -1667,27 +1676,41 @@ export function serviceExitedFailure(opts: {
   readonly cleanupConfirmed: boolean;
   readonly aborted: boolean;
   readonly exited: readonly NativeExitedService[];
+  /** Every failed service's name, in the runtime's tail order. */
   readonly failed: readonly string[];
   readonly nativeCode: string | undefined;
 }): unknown {
+  const runtime =
+    opts.error instanceof NativeRuntimeRequestError ? opts.error : undefined;
   if (
     opts.exited.length === 0 ||
     opts.error !== opts.startupFailure ||
     !opts.cleanupConfirmed ||
-    opts.aborted
+    opts.aborted ||
+    isNativeRuntimeStopError(opts.error) ||
+    opts.nativeCode === "graph_cancelled" ||
+    runtime?.nativeCode === "graph_cancelled"
   ) {
     return opts.error;
   }
-  const nativeCode =
-    opts.nativeCode ??
-    (opts.error instanceof NativeRuntimeRequestError
-      ? opts.error.nativeCode
-      : undefined);
+  const named = runtime?.nativeService;
+  const first = opts.exited[0];
+  let lead: NativeExitedService | undefined;
+  if (named !== undefined) {
+    lead = opts.exited.find((one) => one.service === named);
+  } else if (first?.service === opts.failed[0]) {
+    lead = first;
+  }
+  if (!lead) {
+    return opts.error;
+  }
+  const nativeCode = opts.nativeCode ?? runtime?.nativeCode;
   return new NativeServiceExitedError({
-    exited: opts.exited,
+    exited: [lead, ...opts.exited.filter((one) => one !== lead)],
     alsoFailed: opts.failed,
     ...(nativeCode ? { nativeCode } : {}),
     detached: false,
+    original: opts.error,
   });
 }
 function withStartupLogReport(error: unknown, report: string): unknown {

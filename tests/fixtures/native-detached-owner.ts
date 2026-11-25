@@ -545,6 +545,7 @@ if (role === "channel-holder") {
       "failed-services",
       "exited-service",
       "exited-service-zero",
+      "exited-service-inadmissible",
       "image-batch-errors",
       "prestart-refusal",
       "prestart-after-runtime",
@@ -747,6 +748,25 @@ if (role === "channel-holder") {
         });
         exited.message += "\nsynthetic-private-value";
         await nativeDetachedUpFailure(exited);
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
+      }
+      if (mode === "exited-service-inadmissible") {
+        // A service-exited report that cannot cross IPC (its runtime code
+        // fails the code rule) falls back to the runtime failure it replaced.
+        nativeDetachedUpFailedServices(["web"]);
+        await nativeDetachedUpFailure(
+          new NativeServiceExitedError({
+            exited: [{ service: "web", exitCode: 1 }],
+            nativeCode: "Not A Code",
+            detached: false,
+            original: new NativeRuntimeRequestError({
+              message: "synthetic-private-value",
+              nativeCode: "engine_rejected",
+            }),
+          })
+        );
         server.stop(true);
         process.off("SIGTERM", terminate);
         return 1;

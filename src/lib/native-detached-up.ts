@@ -465,6 +465,7 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
     await publishFailure({ code: NATIVE_AUTHORED_ATTEMPT_LIMIT });
     return;
   }
+  let runtimeError = error;
   if (error instanceof NativeServiceExitedError) {
     const failure: StartupFailure = {
       code: NATIVE_SERVICE_EXITED,
@@ -476,13 +477,16 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
     };
     if (isStartupFailure(failure)) {
       await publishFailure(failure);
+      return;
     }
-    return;
+    // Not admissible over IPC: report the runtime failure it replaced, as
+    // before the service-exited reason existed.
+    runtimeError = error.original;
   }
   const { nativeRuntimeFailure } = await import(
     "../backends/native-runtime-client.ts"
   );
-  const failure = nativeRuntimeFailure(error);
+  const failure = nativeRuntimeFailure(runtimeError);
   if (isStartupFailure(failure)) {
     await publishFailure(
       failedStartupServices.length > 0 && failure.service === undefined
@@ -493,7 +497,7 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   }
   // Before any VM work, a closed refusal is exactly what the foreground would
   // print (HACK-2339); anything else, and anything later, stays unconfirmed.
-  const refusal = prestart ? prestartRefusal(error) : undefined;
+  const refusal = prestart ? prestartRefusal(runtimeError) : undefined;
   if (refusal && isPrestartRefusal(refusal)) {
     await publishPrestartRefusal?.(refusal);
   }
@@ -582,6 +586,8 @@ function serviceExitedError(
     ...(failure.failedServices ? { alsoFailed: failure.failedServices } : {}),
     ...(failure.causeCode ? { nativeCode: failure.causeCode } : {}),
     detached: true,
+    // As every other detached startup failure says: the pool outlives it.
+    note: NATIVE_IDLE_POOL_NOTE,
   });
 }
 

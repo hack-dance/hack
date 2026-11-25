@@ -76,12 +76,14 @@ import {
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
 import { selectNativeServices } from "../src/backends/native-service-selection.ts";
 import { watchNativeStartPool } from "../src/backends/native-start-pool-watch.ts";
+import type { NativeStartupLogTail } from "../src/backends/native-startup-logs.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import { NativeServiceExitedError } from "../src/lib/native-service-exited.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
@@ -2628,20 +2630,18 @@ for (const { exitCode, phrase } of [
   });
 }
 
-test("a failed service without an exit status keeps the runtime's startup failure", async () => {
+/** A fresh start whose serve reports `logs` and fails with `failure`, cleanup confirmed. */
+async function confirmedFailedStart(
+  logs: readonly NativeStartupLogTail[],
+  failure: Error
+): Promise<unknown> {
   const { opts } = await fixture();
   const invoke = opts.dependencies.invoke!;
   let selectedRun = "";
   opts.dependencies.serve = async (request) => {
     selectedRun = request.run;
-    request.onStartupLogs?.([
-      { service: "web", stdout: "", stderr: "killed", truncated: false },
-    ]);
-    throw new NativeRuntimeRequestError({
-      message:
-        "Native graph startup was interrupted or failed (graph_service_failed); inspect owned state before retrying.",
-      nativeCode: "graph_service_failed",
-    });
+    request.onStartupLogs?.(logs);
+    throw failure;
   };
   opts.dependencies.invoke = async (request) =>
     request.args[1] === "inspect"
@@ -2655,12 +2655,90 @@ test("a failed service without an exit status keeps the runtime's startup failur
           aws: null,
         })
       : invoke(request);
-  const failure = await startNativeProject(opts).catch(
-    (error: unknown) => error
+  return await startNativeProject(opts).catch((error: unknown) => error);
+}
+
+test("a failed service without an exit status keeps the runtime's startup failure", async () => {
+  const failure = await confirmedFailedStart(
+    [{ service: "web", stdout: "", stderr: "killed", truncated: false }],
+    new NativeRuntimeRequestError({
+      message:
+        "Native graph startup was interrupted or failed (graph_service_failed); inspect owned state before retrying.",
+      nativeCode: "graph_service_failed",
+    })
   );
   expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
   expect((failure as Error).message).toContain("(graph_service_failed)");
 });
+
+test("a service that exited after the recorded startup failure is not reported as the cause", async () => {
+  // The runtime lists the recorded failure first: db never became healthy,
+  // and api exited because it could not connect to it.
+  const runtime = new NativeRuntimeRequestError({
+    message:
+      "Native graph startup was interrupted or failed (graph_service_failed); inspect owned state before retrying. Runtime: db is unhealthy.",
+    nativeCode: "graph_service_failed",
+    nativeMessage: "db is unhealthy.",
+  });
+  const failure = await confirmedFailedStart(
+    [
+      { service: "db", stdout: "", stderr: "", truncated: false },
+      {
+        service: "api",
+        stdout: "",
+        stderr: "connection refused",
+        truncated: false,
+        exitCode: 1,
+      },
+    ],
+    runtime
+  );
+  expect(failure).toBe(runtime);
+  expect((failure as Error).message).toContain("Runtime: db is unhealthy.");
+  expect((failure as Error).message).toContain("--- api stderr ---");
+  expect((failure as Error).message).not.toContain("E_SERVICE_EXITED");
+});
+
+for (const { name, inspect } of [
+  { name: "the final inspection fails", inspect: "throw" },
+  { name: "cleanup cannot be confirmed", inspect: "running" },
+] as const) {
+  test(`an exited service keeps the retained-state error when ${name}`, async () => {
+    const value = await fixture(false);
+    const { opts } = value;
+    failedStartupFixture(value);
+    const serve = opts.dependencies.serve!;
+    opts.dependencies.serve = async (request) => {
+      request.onStartupLogs?.([
+        {
+          service: "web",
+          stdout: "",
+          stderr: "exited",
+          truncated: false,
+          exitCode: 1,
+        },
+      ]);
+      return await serve(request);
+    };
+    if (inspect === "throw") {
+      const invoke = opts.dependencies.invoke!;
+      opts.dependencies.invoke = async (request) => {
+        if (request.args[1] === "inspect") {
+          throw new Error("synthetic inspection failure");
+        }
+        return await invoke(request);
+      };
+    }
+    const failure = await startNativeProject(opts).catch(
+      (error: unknown) => error
+    );
+    expect(failure).not.toBeInstanceOf(NativeServiceExitedError);
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain("unconfirmed");
+    expect(message).not.toContain("The failed start was stopped");
+  });
+}
 
 test("only a confirmed-cleanup startup failure becomes E_SERVICE_EXITED", () => {
   const startupFailure = new Error("startup");
@@ -2676,16 +2754,61 @@ test("only a confirmed-cleanup startup failure becomes E_SERVICE_EXITED", () => 
   const exited = serviceExitedFailure(base);
   expect(exited).toBeInstanceOf(HackCliError);
   expect((exited as HackCliError).code).toBe("E_SERVICE_EXITED");
-  // Unconfirmed cleanup, a stop request, a later error or no exit: unchanged.
+  expect((exited as NativeServiceExitedError).original).toBe(startupFailure);
+  const stopped = new NativeRuntimeRequestError({
+    message: "Native runtime request was interrupted.",
+    stopSignal: "SIGTERM",
+  });
+  const cancelled = new NativeRuntimeRequestError({
+    message: "Native graph startup was cancelled (graph_cancelled).",
+    nativeCode: "graph_cancelled",
+  });
+  const namedDb = new NativeRuntimeRequestError({
+    message: "Native graph startup failed (graph_service_failed).",
+    nativeCode: "graph_service_failed",
+    nativeService: "db",
+  });
+  // Unconfirmed cleanup, a stop request, a child stopped by a signal, a
+  // cancellation, a later error, no exit, or an exit that is not the startup
+  // failure: unchanged.
   for (const change of [
     { cleanupConfirmed: false },
     { aborted: true },
+    { error: stopped, startupFailure: stopped },
+    { nativeCode: "graph_cancelled" },
+    { error: cancelled, startupFailure: cancelled, nativeCode: undefined },
     { error: new Error("cleanup") },
     { exited: [] },
+    // The recorded failure (first tail) did not exit.
+    { failed: ["db", "web"] },
+    // The runtime names a service that did not exit.
+    { error: namedDb, startupFailure: namedDb, failed: ["web", "db"] },
   ]) {
     const original = change.error ?? startupFailure;
     expect(serviceExitedFailure({ ...base, ...change })).toBe(original);
   }
+  // The service the runtime names leads, even when it is not the first tail.
+  const namedApi = new NativeRuntimeRequestError({
+    message: "Native graph startup failed (engine_rejected).",
+    nativeCode: "engine_rejected",
+    nativeService: "api",
+  });
+  const led = serviceExitedFailure({
+    ...base,
+    error: namedApi,
+    startupFailure: namedApi,
+    exited: [
+      { service: "web", exitCode: 2 },
+      { service: "api", exitCode: 1 },
+    ],
+    failed: ["web", "api"],
+  });
+  expect((led as HackCliError).detail).toMatchObject({
+    services: [
+      { name: "api", exitCode: 1 },
+      { name: "web", exitCode: 2 },
+    ],
+  });
 });
 
 // Built at runtime so the synthetic PEM framing is not a key-shaped literal.

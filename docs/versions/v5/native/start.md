@@ -116,7 +116,11 @@ If a service's own process exits before the start is ready, for example because
 its command names a script that does not exist, `up` stops the failed start and
 fails with `E_SERVICE_EXITED`. The message names each service and its exit code
 ("Service app exited with code 1 during startup"). An exit with code 0 before
-readiness is reported the same way. With `--json`, `error.detail.services` lists
+readiness is reported the same way. This applies only when the exit is the
+start's first failure: if another service failed first (for example a database
+that never became healthy) and a dependent service then exited, `up` reports the
+first failure and still prints each failed service's last lines.
+With `--json`, `error.detail.services` lists
 each service's `name` and `exitCode`, and `error.detail.nativeCode` keeps the
 runtime's own code. A foreground `up` also prints each failed service's last
 output lines with managed values redacted. A detached `up` never carries service

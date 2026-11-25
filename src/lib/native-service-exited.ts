@@ -7,7 +7,9 @@ import { isRecord } from "./guards.ts";
  * (HACK-2194): the most common first failure, such as a missing package script.
  *
  * The runtime reports the exit status beside each failed service's bounded
- * output tail. When at least one failed service exited, `hack up` reports the
+ * output tail. When the startup failure itself is an exit (the service the
+ * runtime's error names, or else the first tail, which is the recorded startup
+ * failure when there is one), `hack up` reports the
  * failure as {@link NATIVE_SERVICE_EXITED} with each service's name and exit
  * code instead of the runtime's own code (which may name a later engine call,
  * such as `engine_rejected`). Only after the failed start's cleanup was
@@ -78,6 +80,11 @@ export class NativeServiceExitedError extends HackCliError {
   readonly exited: readonly NativeExitedService[];
   readonly alsoFailed: readonly string[];
   readonly nativeCode: string | undefined;
+  /**
+   * In process only: the runtime failure this error replaced. A detached owner
+   * reports it instead when this error's fields cannot cross IPC.
+   */
+  readonly original: unknown;
 
   constructor(opts: {
     readonly exited: readonly NativeExitedService[];
@@ -85,6 +92,9 @@ export class NativeServiceExitedError extends HackCliError {
     readonly nativeCode?: string;
     /** A detached start: point at foreground `up` for the output. */
     readonly detached: boolean;
+    /** A detached start's closing note, such as the idle VM pool's. */
+    readonly note?: string;
+    readonly original?: unknown;
   }) {
     const exited = opts.exited.slice(0, NATIVE_EXITED_SERVICES_LIMIT);
     const alsoFailed = [...new Set(opts.alsoFailed ?? [])]
@@ -99,6 +109,7 @@ export class NativeServiceExitedError extends HackCliError {
         exited,
         alsoFailed,
         detached: opts.detached,
+        ...(opts.note ? { note: opts.note } : {}),
       }),
       detail: {
         reason: NATIVE_SERVICE_EXITED,
@@ -113,6 +124,7 @@ export class NativeServiceExitedError extends HackCliError {
     this.exited = exited;
     this.alsoFailed = alsoFailed;
     this.nativeCode = opts.nativeCode;
+    this.original = opts.original;
   }
 }
 
@@ -121,6 +133,7 @@ export function nativeServiceExitedMessage(opts: {
   readonly exited: readonly NativeExitedService[];
   readonly alsoFailed?: readonly string[];
   readonly detached: boolean;
+  readonly note?: string;
 }): string {
   const exits = opts.exited.map(
     (one) =>
@@ -134,5 +147,6 @@ export function nativeServiceExitedMessage(opts: {
   const next = opts.detached
     ? " A detached start does not keep service output; run hack up without -d in a terminal to see the last lines (managed values redacted, not saved)."
     : " Fix the service's command or configuration and run hack up again.";
-  return `${exits.join(" ")}${also} The failed start was stopped.${next}`;
+  const note = opts.note ? ` ${opts.note}` : "";
+  return `${exits.join(" ")}${also} The failed start was stopped.${next}${note}`;
 }

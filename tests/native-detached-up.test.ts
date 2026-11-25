@@ -3,7 +3,10 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
 import { NATIVE_IDLE_POOL_RESTART_NOTICE } from "../src/backends/native-project-source-preflight.ts";
-import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
+import {
+  NATIVE_IDLE_POOL_NOTE,
+  NATIVE_PROVIDER_PIN_MESSAGE,
+} from "../src/backends/native-runtime-client.ts";
 import {
   NATIVE_HOOK_OUTPUT_TERMINAL_ONLY,
   nativeDetachedOwnerArgs,
@@ -511,7 +514,7 @@ for (const { mode, exitCode, phrase } of [
         nativeCode: "engine_rejected",
       });
       expect(error.message).toBe(
-        `Service web ${phrase}. Also failed during startup: api. The failed start was stopped. A detached start does not keep service output; run hack up without -d in a terminal to see the last lines (managed values redacted, not saved).`
+        `Service web ${phrase}. Also failed during startup: api. The failed start was stopped. A detached start does not keep service output; run hack up without -d in a terminal to see the last lines (managed values redacted, not saved). ${NATIVE_IDLE_POOL_NOTE}`
       );
       expect(stdout).not.toContain("retained owners");
       expect(stdout + stderr).not.toContain("synthetic-private-value");
@@ -525,6 +528,49 @@ for (const { mode, exitCode, phrase } of [
     }
   });
 }
+
+test("a service-exited report that cannot cross IPC falls back to the runtime failure it replaced", async () => {
+  const root = await fixtureRoot("native-detached-exited-inadmissible-");
+  const launcher = Bun.spawn(
+    [
+      process.execPath,
+      fixture,
+      "launcher",
+      root,
+      "exited-service-inadmissible",
+    ],
+    {
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+      new Response(launcher.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    const error = JSON.parse(stdout).error;
+    // A validated failure, not an unconfirmed start.
+    expect(error.code).toBe("E_STARTUP_INCOMPLETE");
+    expect(error.message).toContain(
+      "Native detached startup failed (engine_rejected)"
+    );
+    expect(error.message).toContain("Failed during startup: web.");
+    expect(stdout + stderr).not.toContain("synthetic-private-value");
+    expect(stdout + stderr).not.toContain("Not A Code");
+    expect(stderr).toBe("");
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await removeFixture(root);
+  }
+});
 
 test("detached immediate exit drains its fixed failure before reporting an unconfirmed start", async () => {
   const modes = [

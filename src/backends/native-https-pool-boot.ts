@@ -34,15 +34,16 @@ const STOPPED_POOL_PHASES = new Set([
 /** How often a running owner checks its pool boot. */
 export const NATIVE_HTTPS_POOL_BOOT_CHECK_MS = 5000;
 
-/** The rule above, applied to a parsed pool record. */
+/** A detached watch can initially have only its admitted boot ID. A stopped
+ * record can identify that boot even if the next boot failed before getting an ID. */
 export function nativeHttpsPoolBootEnded(
   record: unknown,
-  pool: NativeHttpsOwnerBinding["pool"]
+  pool: { readonly bootId: string; readonly owner?: string }
 ): boolean {
   if (!isRecord(record) || typeof record.token !== "string") {
     return false;
   }
-  if (record.token !== pool.owner) {
+  if (pool.owner !== undefined && record.token !== pool.owner) {
     return true;
   }
   if (
@@ -52,8 +53,14 @@ export function nativeHttpsPoolBootEnded(
   ) {
     return true;
   }
+  const namesBoot =
+    record.guest_boot_id === pool.bootId ||
+    (record.guest_boot_id === null &&
+      record.previous_guest_boot_id === pool.bootId);
   return (
-    typeof record.phase === "string" && STOPPED_POOL_PHASES.has(record.phase)
+    (pool.owner !== undefined || namesBoot) &&
+    typeof record.phase === "string" &&
+    STOPPED_POOL_PHASES.has(record.phase)
   );
 }
 

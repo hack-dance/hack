@@ -8,13 +8,12 @@
  * it recovers the run. The step it waits in has its own bound, or none that a
  * user would accept; this watch does not depend on which step it is.
  *
- * The watch records the pool identity (owner token and guest boot id) the first
- * time it reads the pool record in the running phase. From then on it checks
- * the record every `checkMs`. Once that boot has ended, by the same proof the
- * shared HTTPS owner uses (`nativeHttpsPoolBootEnded`: another owner token, a
- * new boot id, or a stopped phase, written only after the provider is proven
- * gone), it allows `graceMs` for the start to finish on its own, then calls
- * `onEnded`. `graceMs` is read when the ended boot is seen: a start that is
+ * Start watching only after this attempt's runtime up confirms its guest boot.
+ * A preflight read can still name the dead boot the attempt will recover.
+ * Poll the owner record every `checkMs`. A matching boot can also identify the
+ * pool's owner token. A different boot or owner, or a stopped record for this
+ * boot, proves it ended. Allow `graceMs` for the start to finish on its own,
+ * then call `onEnded`. A start that is
  * already ready has nothing left to finish (its services went with the guest),
  * so it passes 0 and ends at once. A later `up` waits for this process to be
  * proven gone before it recovers the run, so ending sooner only shortens that
@@ -23,10 +22,9 @@
  *
  * The provider can also die while the record still says `running` (a crash, a
  * kill, or a provider that does not survive a sleep; HACK-2579): only a later
- * `runtime recover` writes a stopped phase. So the watch also records the
- * provider's pid with the boot, and a pid that no longer exists (`kill 0` answers
- * ESRCH) ends the boot the same way. A reused pid only reads as alive, never the
- * reverse, so it cannot end a start early.
+ * `runtime recover` writes a stopped phase. A pid from the matching boot that
+ * no longer exists (`kill 0` answers ESRCH) ends the boot the same way. A
+ * reused pid reads as alive.
  *
  * Ending is the same as a crash of the start process, which the run's records
  * already tolerate: the receipt, finalization and recovery evidence stay as
@@ -43,6 +41,7 @@ export const NATIVE_START_POOL_GRACE_MS = 10_000;
 
 export function watchNativeStartPool(opts: {
   readonly home: string;
+  readonly bootId: string;
   readonly onEnded: () => void | Promise<void>;
   readonly checkMs?: number;
   /** Read when the ended boot is seen; a ready start passes 0. */
@@ -54,8 +53,7 @@ export function watchNativeStartPool(opts: {
 }): () => void {
   const read = opts.read ?? readNativePoolRecord;
   const gone = opts.gone ?? processGone;
-  let pool: { readonly owner: string; readonly bootId: string } | undefined;
-  let provider: number | undefined;
+  let owner: string | undefined;
   let stopped = false;
   let grace: ReturnType<typeof setTimeout> | undefined;
   const check = async () => {
@@ -63,26 +61,21 @@ export function watchNativeStartPool(opts: {
     if (stopped || grace) {
       return;
     }
-    if (!pool) {
-      if (
-        isRecord(record) &&
-        record.phase === "running" &&
-        typeof record.token === "string" &&
-        typeof record.guest_boot_id === "string" &&
-        record.guest_boot_id !== ""
-      ) {
-        pool = { owner: record.token, bootId: record.guest_boot_id };
+    let provider: number | undefined;
+    if (
+      isRecord(record) &&
+      record.guest_boot_id === opts.bootId &&
+      typeof record.token === "string"
+    ) {
+      owner ??= record.token;
+      if (record.phase === "running") {
         provider = providerPid(record);
       }
-      return;
     }
-    const providerExited =
-      provider !== undefined &&
-      isRecord(record) &&
-      record.phase === "running" &&
-      providerPid(record) === provider &&
-      gone(provider);
-    if (providerExited || nativeHttpsPoolBootEnded(record, pool)) {
+    if (
+      (provider !== undefined && gone(provider)) ||
+      nativeHttpsPoolBootEnded(record, { bootId: opts.bootId, owner })
+    ) {
       const graceMs =
         typeof opts.graceMs === "function"
           ? opts.graceMs()

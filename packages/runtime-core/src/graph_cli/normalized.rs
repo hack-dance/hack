@@ -212,8 +212,11 @@ pub(super) fn command(
                 .copied()
                 .ok_or_else(invalid)?,
             &inputs.executable,
-            options.run.run_id,
-            automatic_dependency_slots,
+            super::relay::RunScope {
+                id: options.run.run_id,
+                automatic_slots: automatic_dependency_slots,
+                expected_boot: singles.get("--expect-boot").copied(),
+            },
         )?;
         runtime.report_started(report_started);
         let deadline = managed.as_ref().map_or_else(

@@ -705,6 +705,40 @@ refused the recovery for ever.
 | `positive` | the oldest proven finished record makes room (`DropOldest`) and files that cannot be proven finished are not counted, over twelve pool stops with a bound of eight | passes: `AlwaysRecoverable`, `Bounded`, `Recovers` |
 | `negative` | today: the archive step refuses at the bound and counts every file with the prefix | `AlwaysRecoverable` fails: the stopped run can no longer be recovered |
 
+## Detached native start after a provider exit
+
+[`DetachedPoolWatch.tla`](detached-pool-watch/DetachedPoolWatch.tla) checks
+whether a detached frontend's expiry can cause cleanup of a running graph in
+a different VM boot. It starts with an exited provider whose record still
+looks running, models one recovering start, and permits two subsequent boots
+and a provider loss after either. The timer may expire before or after the
+graph starts. Frontend exit and Rust owner cleanup are distinct steps.
+
+![Detached pool watch state chart](../../../docs/diagrams/detached-pool-watch.png)
+[SVG](../../../docs/diagrams/detached-pool-watch.svg) ·
+[Source](../../../docs/diagrams/detached-pool-watch.mmd)
+
+| Control | Result |
+| --- | --- |
+| `positive` | `NoStaleCleanup` holds across 53 reachable states and three boot IDs. |
+| `negative` | A premature record read binds the watch to boot 1. Boot 2 serves, then the timer for boot 1 retires its frontend. Cleanup of boot 2 violates `NoStaleCleanup`. |
+| `unfenced-serve` | The watch binds to boot 2, then the pool reboots before graph admission. With the boot comparison removed, the graph serves in boot 3 and the timer for boot 2 stops it. |
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `BootPool`, `Bind` | `startNativeProjectAttempt` recovers the retained run, then binds the detached pool watch to the successful `runtime up` reply. |
+| `Serve`, `Refuse` | The foreground graph receives `--expect-boot`. `HostRelayRuntime::new_scoped` compares the verified boot under the provider lease before creating the relay owner. The relay context also binds subsequent graph admission to that boot. |
+| `ObserveEnded`, `ExpireGrace` | `watchNativeStartPool` reads the pool record and observes a matching provider PID or a replaced boot. The callback exits only its own detached frontend. |
+| `OwnerCleanup` | `Events::watch_frontend` and `OwnerLoop::step` consume the actual parent exit. The owner cleans up its own enrolled graph. |
+| `Finish` | The start's finalizer cancels the watch. User-initiated stop follows the existing owned cleanup path. |
+
+The model assumes unique boot IDs, correct boot observations, and exclusive
+native graph ownership. It models indeterminate observations as stuttering and
+checks safety without fairness. Shared HTTPS archival, OS timing and VM effects
+are outside the model. The TypeScript lifecycle regression exercises both
+routed and unrouted recovery and a second provider exit. The macOS-only Rust
+regression exercises the stale boot refusal with an owned development VM.
+
 ## Native pool stop under a live run
 
 `native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down`)

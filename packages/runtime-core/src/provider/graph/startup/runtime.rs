@@ -474,6 +474,7 @@ impl HostRelayRuntime {
             dependencies,
             None,
             false,
+            None,
         )
     }
     /// Run-scoped foreground owner identity. The selected run is validated before
@@ -485,16 +486,14 @@ impl HostRelayRuntime {
         dependencies: Vec<Dependency>,
         run: &str,
     ) -> Result<Self, CandidateError> {
-        if !hex(run, 32) {
-            return Err(refused());
-        }
-        Self::new_scoped(
+        Self::new_for_run_in_boot(
             candidate,
             artifact,
             expected_sha256,
             dependencies,
-            Some(run),
+            run,
             false,
+            None,
         )
     }
     /// Allocate physical dependency transports pool-wide. Selection slots remain
@@ -506,6 +505,28 @@ impl HostRelayRuntime {
         dependencies: Vec<Dependency>,
         run: &str,
     ) -> Result<Self, CandidateError> {
+        Self::new_for_run_in_boot(
+            candidate,
+            artifact,
+            expected_sha256,
+            dependencies,
+            run,
+            true,
+            None,
+        )
+    }
+    /// A supervised foreground graph can bind admission to the boot selected by
+    /// its frontend. Reject a replacement under the provider lease before making
+    /// a control directory or reserving dependency slots.
+    pub fn new_for_run_in_boot(
+        candidate: &Candidate,
+        artifact: &Path,
+        expected_sha256: &str,
+        dependencies: Vec<Dependency>,
+        run: &str,
+        automatic_slots: bool,
+        expected_boot: Option<&str>,
+    ) -> Result<Self, CandidateError> {
         if !hex(run, 32) {
             return Err(refused());
         }
@@ -515,7 +536,8 @@ impl HostRelayRuntime {
             expected_sha256,
             dependencies,
             Some(run),
-            true,
+            automatic_slots,
+            expected_boot,
         )
     }
     fn new_scoped(
@@ -525,6 +547,7 @@ impl HostRelayRuntime {
         dependencies: Vec<Dependency>,
         selected_run: Option<&str>,
         automatic_slots: bool,
+        expected_boot: Option<&str>,
     ) -> Result<Self, CandidateError> {
         if !hex(expected_sha256, 64)
             || dependencies.len() > crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
@@ -545,6 +568,9 @@ impl HostRelayRuntime {
         require_relay_admission(candidate, selected_run)?;
         let owner = state::Owner::load(candidate)?;
         engine.guest().verify()?;
+        if expected_boot.is_some_and(|boot| boot != engine.guest().boot_id()) {
+            return Err(stage_refused("graph_startup_pool_boot"));
+        }
         let context = host_relay::context(engine.guest().incarnation(), engine.guest().boot_id())?;
         let capacity = if dependencies.is_empty() {
             0

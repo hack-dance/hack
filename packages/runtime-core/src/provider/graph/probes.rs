@@ -927,6 +927,15 @@ impl Session<'_, '_> {
                     "Restart container is not stopped.",
                 ));
             }
+        }
+        self.reset_probe(name, if self.restarting { "reset" } else { "create" })
+    }
+
+    pub(super) fn reset_probe(&mut self, name: &str, action: &str) -> Result<(), CandidateError> {
+        if !self.receipt.probes.contains_key(name) {
+            return Ok(());
+        }
+        if action == "reset" {
             if exec(&self.engine, &self.receipt, name)?.is_some_and(|v| v["Running"] == true) {
                 return Err(error(
                     "graph_probe_running",
@@ -940,12 +949,7 @@ impl Session<'_, '_> {
         }
         self.receipt.probes.get_mut(name).unwrap().phase = "allocation-intent".into();
         self.save()?;
-        execute(
-            &self.engine,
-            &self.receipt,
-            name,
-            if self.restarting { "reset" } else { "create" },
-        )?;
+        execute(&self.engine, &self.receipt, name, action)?;
         #[cfg(test)]
         self.fault_pause("probe-after-allocation")?;
         self.receipt.probes.get_mut(name).unwrap().phase = "allocated".into();

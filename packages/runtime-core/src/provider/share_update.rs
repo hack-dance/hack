@@ -103,7 +103,11 @@ fn plan(
     database_identity: (u64, u64),
 ) -> Result<Journal, CandidateError> {
     let primary = owner.project_share.as_ref().ok_or_else(refused)?;
-    project_share::validate_set(Some(primary), &owner.additional_project_shares)?;
+    project_share::validate_layout(
+        owner.socket_layout,
+        Some(primary),
+        &owner.additional_project_shares,
+    )?;
     share.validate_receipt()?;
     if record_mounts(&record, owner)? != record["mounts"] {
         return Err(refused());
@@ -114,7 +118,7 @@ fn plan(
             if owner
                 .project_shares()
                 .iter()
-                .any(|s| s.project == share.project || s.guest_path == share.guest_path)
+                .any(|s| s.project == share.project)
                 || owner.project_shares().len() >= MAX_PROJECT_SHARES
             {
                 return Err(refused());
@@ -131,7 +135,8 @@ fn plan(
             after.additional_project_shares.remove(index);
         }
     }
-    project_share::validate_set(
+    project_share::validate_layout(
+        after.socket_layout,
         after.project_share.as_ref(),
         &after.additional_project_shares,
     )?;
@@ -321,8 +326,18 @@ fn stop_before_add(
     share: &ProjectShareIntent,
     complete: bool,
 ) -> Result<bool, CandidateError> {
+    if !complete {
+        return Ok(false);
+    }
+    let compact_share;
+    let share = if owner.socket_layout.is_legacy() {
+        share
+    } else {
+        compact_share = share.clone().with_layout(owner.socket_layout)?;
+        &compact_share
+    };
     let shares = owner.project_shares();
-    if !complete || shares.contains(&share) {
+    if shares.contains(&share) {
         return Ok(false);
     }
     if shares.len() >= MAX_PROJECT_SHARES
@@ -422,6 +437,11 @@ fn update(
         Ok(_) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => return Err(refused()),
+    };
+    let share = if operation == Operation::Add && !journal_present {
+        share.with_layout(owner.socket_layout)?
+    } else {
+        share
     };
     if !journal_present {
         let present = owner.project_shares().contains(&&share);

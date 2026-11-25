@@ -270,14 +270,19 @@ pub(super) fn plan(path: &Path) -> Result<Value, CandidateError> {
         json!({"version":1,"plan_id":selection.plan,"dependency_plan_id":digest,"selection":selection}),
     )
 }
+pub(super) struct RunScope<'a> {
+    pub id: &'a str,
+    pub automatic_slots: bool,
+    pub expected_boot: Option<&'a str>,
+}
+
 pub(super) fn runtime(
     candidate: &Candidate,
     path: &Path,
     plan: &str,
     expected: &str,
     inputs: &hack_runtime_core::project::inputs::ExecutionInputs,
-    run: &str,
-    automatic_slots: bool,
+    run: RunScope<'_>,
 ) -> Result<graph::HostRelayRuntime, CandidateError> {
     let selection = Selection::read(path)?;
     if selection.plan != plan || !hex(expected) {
@@ -288,17 +293,14 @@ pub(super) fn runtime(
         return Err(refused());
     }
     graph::HostRelayRuntime::validate_inputs(&dependencies, inputs)?;
-    let create = if automatic_slots {
-        graph::HostRelayRuntime::new_for_run_auto
-    } else {
-        graph::HostRelayRuntime::new_for_run
-    };
-    create(
+    graph::HostRelayRuntime::new_for_run_in_boot(
         candidate,
         &selection.artifact,
         &selection.artifact_sha256,
         dependencies,
-        run,
+        run.id,
+        run.automatic_slots,
+        run.expected_boot,
     )
 }
 #[cfg(test)]

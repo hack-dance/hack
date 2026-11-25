@@ -177,6 +177,13 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "native-pool-layout",
+    module: "PoolLayout",
+    states: 38,
+    invariant: "LayoutPreserved",
+    fields: ['owner = "legacy"', 'initial = "compact"', "refused = TRUE"],
+  },
+  {
     name: "project-remote-selection",
     module: "ProjectRemoteSelection",
     states: 11,
@@ -3164,6 +3171,26 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "detached-pool-watch",
+    module: "DetachedPoolWatch",
+    states: 53,
+    invariant: "NoStaleCleanup",
+    fields: ['phase = "Settled"', "grace = 1", "graph = 2", "stopped = 2"],
+    additionalControls: [
+      {
+        name: "unfenced-serve",
+        negative: true,
+        fields: [
+          'phase = "Settled"',
+          "selected = 2",
+          "grace = 2",
+          "graph = 3",
+          "stopped = 3",
+        ],
+      },
+    ],
+  },
+  {
     // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
     // doubtful reading, and a host-side bound on "starting". Slow, refusing and
     // hanging apps; `legacy` runs the steady cadence before the first success.
@@ -3224,6 +3251,38 @@ const contracts: readonly ModelContract[] = [
           "intent = TRUE",
           "config = FALSE",
           "engine = TRUE",
+        ],
+      },
+    ],
+  },
+  {
+    name: "targeted-start",
+    module: "TargetedStart",
+    states: 1229,
+    invariant: "OwnedEffects",
+    fields: [
+      'phase = "Extending"',
+      'receipt = {"web", "redis"}',
+      "containers = [web |-> 1, cache |-> 2, redis |-> 0, api |-> 0, unused |-> 0]",
+    ],
+    additionalControls: [
+      {
+        name: "replace-existing",
+        negative: true,
+        invariant: "PreserveExisting",
+        fields: [
+          'phase = "Extending"',
+          "containers = [web |-> 2, cache |-> 0, redis |-> 0, api |-> 0, unused |-> 0]",
+        ],
+      },
+      {
+        name: "unproved-cancellation",
+        negative: true,
+        invariant: "ConfirmedCancelHasReply",
+        fields: [
+          'phase = "Extending"',
+          'client = "Confirmed"',
+          'reply = "None"',
         ],
       },
     ],

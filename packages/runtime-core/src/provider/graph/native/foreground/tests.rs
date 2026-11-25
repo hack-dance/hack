@@ -108,6 +108,44 @@ fn status(receipt: Receipt) -> Reply {
 }
 
 #[test]
+fn authored_interactive_exec_half_close_keeps_client_alive_until_reader_closes() {
+    use std::os::unix::net::UnixStream;
+
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    let review = &receipt.review;
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let budget = Duration::from_secs(1);
+    transport::write(
+        &mut client,
+        &Request {
+            version: 2,
+            kind: RequestKind::NativeGraphControl,
+            run: RUN.into(),
+            review: review.review_id().into(),
+            action: Action::InteractiveExec,
+            console_size: Some([24, 80]),
+            session: Some("12345678-abcd-abcd-abcd-123456789abc".into()),
+            logs: None,
+            exec: Some(runtime::ExecSelection {
+                service: "web".into(),
+                argv: vec!["/bin/sh".into()],
+                workdir: None,
+            }),
+            one_off: None,
+        },
+        budget,
+    )
+    .unwrap();
+    let request: Request = transport::read(&mut server, budget, 512 * 1024).unwrap();
+    request.validate(review).unwrap();
+    let watch = transport::ClientWatch::half_closed(&server).unwrap();
+    assert!(!watch.disconnected());
+    drop(client);
+    assert!(watch.disconnected());
+}
+
+#[test]
 fn real_compiler_review_crosses_authenticated_native_socket_without_compose_fields() {
     let fixture = Fixture::new();
     let receipt = fixture.receipt();
@@ -1162,12 +1200,13 @@ fn interactive_handoff_failures_keep_only_the_attempted_session() {
                 .then_some(attached);
                 interactive_handoff::send(&stream, descriptor, deadline).unwrap();
                 if case == "malformed-reply" {
-                    transport::write(
-                        &mut stream,
-                        &json!({"unexpected": true}),
-                        Duration::from_secs(1),
-                    )
-                    .unwrap();
+                    // The client can reject this frame and close before the
+                    // sender half-closes. Assert the frame write and let drop
+                    // end the stream below.
+                    let body = br#"{"unexpected":true}"#;
+                    let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+                    frame.extend_from_slice(body);
+                    stream.write_all(&frame).unwrap();
                 } else if case != "disconnect-after-descriptor" {
                     let result = match case {
                         "wrong-session" => Outcome::InteractiveRefused {
@@ -1197,6 +1236,9 @@ fn interactive_handoff_failures_keep_only_the_attempted_session() {
             }
             drop(stream);
             let error = caller.join().unwrap().err().unwrap();
+            if case == "malformed-reply" {
+                assert_eq!(error.code, "graph_owner_recovery");
+            }
             assert_eq!(
                 error.session(),
                 if case == "pre-intent-refusal" {

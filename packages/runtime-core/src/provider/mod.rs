@@ -3,6 +3,8 @@ pub mod admission;
 mod agent;
 mod artifact;
 mod boot_budget;
+mod pool_layout;
+use pool_layout::PoolLayout;
 mod boot_history;
 mod bridge;
 pub mod build_policy;

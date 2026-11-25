@@ -27,12 +27,16 @@ pub(super) struct WireRequest {
     pub version: u8,
     pub run: String,
     pub remove_data: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_append: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<JobRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_dependencies: Option<DependencyRefreshRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend: Option<super::service_start::ExtendRequest>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,17 +46,23 @@ pub(super) struct DependencyRefreshRequest {
     pub boot: String,
 }
 impl WireRequest {
+    fn keeps_write_open(&self) -> bool {
+        self.version == 2 && self.extend.is_some()
+    }
+
     pub fn exclusive(&self) -> bool {
-        [
-            self.remove_data.is_some(),
-            self.restore.is_some(),
-            self.job.is_some(),
-            self.refresh_dependencies.is_some(),
-        ]
-        .into_iter()
-        .filter(|selected| *selected)
-        .count()
-            <= 1
+        (!self.cancel_append || self.remove_data == Some(false))
+            && [
+                self.remove_data.is_some(),
+                self.restore.is_some(),
+                self.job.is_some(),
+                self.refresh_dependencies.is_some(),
+                self.extend.is_some(),
+            ]
+            .into_iter()
+            .filter(|selected| *selected)
+            .count()
+                <= 1
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -73,8 +83,10 @@ pub(super) struct JobCommand {
     pub environment: PrivateText,
 }
 const PRIVATE_LIMIT: usize = crate::provider::managed_environment::MAX_INPUT_BYTES;
-// JSON string escaping may double the private envelope, plus fixed routing metadata.
-pub(super) const REQUEST_LIMIT: usize = 2 * PRIVATE_LIMIT + 4096;
+// JSON string escaping may double the selected input and private environment.
+pub(super) const REQUEST_LIMIT: usize = 4 * PRIVATE_LIMIT + 32 * 1024;
+// Append may also forward the normalized review for the whole graph.
+const APPEND_REQUEST_LIMIT: usize = REQUEST_LIMIT + 2 * crate::project::yaml::MAX_BYTES;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1155,6 +1167,35 @@ pub(in crate::provider::graph) fn read<T: DeserializeOwned>(
     limit: usize,
 ) -> Result<T, CandidateError> {
     let deadline = Instant::now() + budget;
+    let value = read_frame(stream, deadline, limit)?;
+    if receive(stream, &mut [0], deadline)? != 0 {
+        return Err(refused());
+    }
+    Ok(value)
+}
+
+/// An extension keeps its request stream open after the frame so a peer close
+/// unambiguously cancels that attempt. Other requests still end in EOF.
+pub(super) fn read_request(
+    stream: &UnixStream,
+    budget: Duration,
+) -> Result<WireRequest, CandidateError> {
+    let deadline = Instant::now() + budget;
+    let request: WireRequest = read_frame(stream, deadline, APPEND_REQUEST_LIMIT)?;
+    if request.keeps_write_open() && request.exclusive() {
+        return Ok(request);
+    }
+    if request.version != 1 || receive(stream, &mut [0], deadline)? != 0 {
+        return Err(refused());
+    }
+    Ok(request)
+}
+
+fn read_frame<T: DeserializeOwned>(
+    stream: &UnixStream,
+    deadline: Instant,
+    limit: usize,
+) -> Result<T, CandidateError> {
     let mut prefix = [0; 4];
     read_exact(stream, &mut prefix, deadline)?;
     let length = u32::from_be_bytes(prefix) as usize;
@@ -1163,9 +1204,6 @@ pub(in crate::provider::graph) fn read<T: DeserializeOwned>(
     }
     let mut bytes = Zeroizing::new(vec![0; length]);
     read_exact(stream, &mut bytes, deadline)?;
-    if receive(stream, &mut [0], deadline)? != 0 {
-        return Err(refused());
-    }
     serde_json::from_slice(&bytes).map_err(|_| refused())
 }
 fn read_exact(
@@ -1187,17 +1225,30 @@ pub(in crate::provider::graph) fn write<T: Serialize>(
     value: &T,
     budget: Duration,
 ) -> Result<(), CandidateError> {
-    write_bounded(stream, value, budget, REQUEST_LIMIT)
+    write_bounded(stream, value, budget, REQUEST_LIMIT)?;
+    stream.shutdown(Shutdown::Write).map_err(|_| refused())
+}
+
+pub(super) fn write_extension(
+    stream: &UnixStream,
+    request: &WireRequest,
+    budget: Duration,
+) -> Result<(), CandidateError> {
+    if !request.keeps_write_open() || !request.exclusive() {
+        return Err(refused());
+    }
+    write_bounded(stream, request, budget, APPEND_REQUEST_LIMIT)
 }
 pub(super) fn write_job<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,
     budget: Duration,
 ) -> Result<(), CandidateError> {
-    write_bounded(stream, value, budget, 4 * 1024 * 1024)
+    write_bounded(stream, value, budget, 4 * 1024 * 1024)?;
+    stream.shutdown(Shutdown::Write).map_err(|_| refused())
 }
 fn write_bounded<T: Serialize>(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     value: &T,
     budget: Duration,
     limit: usize,
@@ -1244,7 +1295,7 @@ fn write_bounded<T: Serialize>(
         remaining(deadline)?;
         offset += n as usize;
     }
-    stream.shutdown(Shutdown::Write).map_err(|_| refused())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1529,13 +1580,13 @@ pub(in crate::provider::graph) fn resume_recovered_publisher(
     )
 }
 
-/// The framed client shuts down only its write side. A read-side EOF therefore
-/// cannot prove abandonment; EVFILT_WRITE reports EV_EOF when its read side closes.
+/// Legacy Compose and authored clients half-close as part of framing. Watch the peer's
+/// read side so a request EOF does not cancel an active operation.
 pub(in crate::provider::graph) struct ClientWatch {
     queue: OwnedFd,
 }
 impl ClientWatch {
-    pub fn new(stream: &UnixStream) -> Result<Self, CandidateError> {
+    pub fn half_closed(stream: &UnixStream) -> Result<Self, CandidateError> {
         // SAFETY: kqueue creates a new owned descriptor or reports failure.
         let fd = unsafe { libc::kqueue() };
         if fd < 0 {
@@ -1583,5 +1634,35 @@ impl ClientWatch {
             || (count == 1
                 && (event.filter != libc::EVFILT_WRITE
                     || event.flags & (libc::EV_EOF | libc::EV_ERROR) != 0))
+    }
+}
+
+/// An open extension stream carries exactly one request. EOF or unexpected
+/// additional bytes cancel the effect without touching the rest of the run.
+pub(in crate::provider::graph) struct AppendClientWatch {
+    stream: UnixStream,
+}
+impl AppendClientWatch {
+    pub fn new(stream: &UnixStream) -> Result<Self, CandidateError> {
+        Ok(Self {
+            stream: stream.try_clone().map_err(|_| refused())?,
+        })
+    }
+    pub fn disconnected(&self) -> bool {
+        let mut byte = 0u8;
+        // SAFETY: the descriptor is owned and byte is writable for one byte.
+        let count = unsafe {
+            libc::recv(
+                self.stream.as_raw_fd(),
+                (&mut byte as *mut u8).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        count >= 0
+            || !matches!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            )
     }
 }

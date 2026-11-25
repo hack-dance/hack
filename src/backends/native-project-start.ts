@@ -12,7 +12,12 @@ import {
 import { isRecord } from "../lib/guards.ts";
 import { appendLifecycleLogRecord } from "../lib/lifecycle-runtime.ts";
 import {
+  type NativeAppendRollback,
+  nativeAppendRollback,
+} from "../lib/native-append-cancellation.ts";
+import {
   isNativeDetachedOwnerProcess,
+  nativeDetachedUpAppendCancelled,
   nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpHotReload,
@@ -29,6 +34,7 @@ import {
   requireWrappableNativeProcesses,
 } from "../lib/native-process-wrappers.ts";
 import { nativeRuntimeTempDirectory } from "../lib/native-runtime-temp.ts";
+import { nativeStartOutcomeUnknown } from "../lib/native-up-refusals.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
@@ -113,6 +119,7 @@ import {
   discoverNativeHostDependency,
   discoverNativeOwnedHostDependency,
   type NativeDependencyWaitProgress,
+  type NativeHostDependency,
   nativeDependencyStartupWait,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
@@ -146,6 +153,7 @@ import {
 } from "./native-project-input.ts";
 import {
   inspectNativeProjectGraph,
+  isNativeProviderBusy,
   observeStartingNativeProjectGraph,
 } from "./native-project-inspect.ts";
 import {
@@ -182,6 +190,7 @@ import {
   verifyNativeRetainedMapping,
 } from "./native-project-retained-startup.ts";
 import {
+  type NativeProjectReview,
   prepareNativeReviewBranch,
   selectNativeProjectReviewIdentity,
   withNativeProjectReview,
@@ -309,6 +318,16 @@ export function parseNativeHttpsSelection(
   validateHttpsSelection(selection);
   return selection;
 }
+function runningNativePoolBootId(pool: unknown): string | undefined {
+  return isRecord(pool) &&
+    pool.phase === "running" &&
+    pool.process_alive === true &&
+    typeof pool.guest_boot_id === "string" &&
+    BOOT_ID.test(pool.guest_boot_id)
+    ? pool.guest_boot_id
+    : undefined;
+}
+
 /** Bind shared ingress only after the native graph has an authoritative owner. */
 async function acquireReadyHttps(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -317,6 +336,7 @@ async function acquireReadyHttps(opts: {
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
   readonly acquire: typeof acquireNativeHttpsLease;
+  readonly expectedBoot?: string;
   /** The frontend lifetime's attempt, so the lease is recorded on that lifetime. */
   readonly attempt?: string;
   readonly onIntent: (identity: NativeHttpsLeaseIdentity) => Promise<void>;
@@ -328,14 +348,10 @@ async function acquireReadyHttps(opts: {
     timeoutMs: 5000,
     signal: opts.signal,
   });
+  const bootId = runningNativePoolBootId(pool);
   if (
-    !(
-      isRecord(pool) &&
-      pool.phase === "running" &&
-      pool.process_alive === true &&
-      typeof pool.guest_boot_id === "string" &&
-      BOOT_ID.test(pool.guest_boot_id)
-    )
+    !bootId ||
+    (opts.expectedBoot !== undefined && bootId !== opts.expectedBoot)
   ) {
     throw new ClosedCliError(
       "Native HTTPS requires a verified running pool incarnation."
@@ -345,7 +361,7 @@ async function acquireReadyHttps(opts: {
   return await opts.acquire({
     runtime: opts.runtime,
     ...opts.selection,
-    pool: { owner: opts.run.owner, bootId: pool.guest_boot_id },
+    pool: { owner: opts.run.owner, bootId },
     lease: {
       run: opts.run.run,
       attempt: opts.attempt ?? randomBytes(16).toString("hex"),
@@ -486,6 +502,7 @@ type Dependencies = {
   startupStatusIntervalMs: number;
   /** Whether the pool record proves the run's owner's boot ended (HACK-2572). */
   poolBootEnded: (home: string) => Promise<boolean>;
+  watchPool: typeof watchNativeStartPool;
   /** How long a start waits for such an owner to go (HACK-2572). */
   endedBootOwnerWaitMs: number;
 };
@@ -523,6 +540,7 @@ const DEFAULTS: Dependencies = {
   exitMonitorIntervalMs: 2000,
   startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
   poolBootEnded: nativePoolBootProvenEnded,
+  watchPool: watchNativeStartPool,
   endedBootOwnerWaitMs: NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
 };
 /**
@@ -2059,6 +2077,7 @@ async function selectNativeStartup(opts: {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly requestedProfiles: readonly string[];
+  readonly targets?: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly gcloud?: NativeGcloudSelection;
   readonly gcloudWithheld?: boolean;
@@ -2083,6 +2102,32 @@ async function selectNativeStartup(opts: {
           aws: opts.aws,
           gcloud: opts.gcloud,
         };
+  const extend = async (run: NativeProjectRun) => {
+    const extension = await selectNativeGraphExtension({ ...opts, run });
+    return extension
+      ? {
+          retained: run,
+          restore: undefined,
+          selection,
+          retainedFlags: [],
+          extension,
+        }
+      : undefined;
+  };
+  if (retained && !opts.restore && opts.targets?.length) {
+    const selected = await extend(retained).catch((error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "runtime_not_running"
+      ) {
+        return undefined;
+      }
+      throw error;
+    });
+    if (selected) {
+      return selected;
+    }
+  }
   let retainedFlags: string[] = [];
   if (retained) {
     if (
@@ -2099,7 +2144,27 @@ async function selectNativeStartup(opts: {
       run: retained,
       invoke: opts.invoke,
       signal: opts.signal,
+    }).catch(async (error: unknown) => {
+      if (
+        !(opts.restore || opts.targets?.length) &&
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "graph_foreground_owner_running"
+      ) {
+        const selected = await extend(retained).catch((refusal: unknown) => {
+          if (refusal instanceof HackCliError) {
+            throw refusal;
+          }
+          return undefined;
+        });
+        if (selected) {
+          return selected;
+        }
+      }
+      throw error;
     });
+    if ("extension" in preflight) {
+      return preflight;
+    }
     retainedFlags = preflight.flags;
     const observed =
       preflight.runtimePhase === "running"
@@ -2121,7 +2186,144 @@ async function selectNativeStartup(opts: {
     }
   }
   const restore = opts.restore ?? retained ?? undefined;
-  return { retained, restore, selection, retainedFlags };
+  return { retained, restore, selection, retainedFlags, extension: undefined };
+}
+
+function nativeGraphStillStarting() {
+  return new HackCliError({
+    code: "E_NATIVE_STILL_STARTING",
+    message:
+      "The native project is still starting. Retry after hack ps reports it ready.",
+  });
+}
+
+async function selectNativeGraphExtension(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly signal?: AbortSignal;
+}) {
+  const { run, planId, namespace } = opts.run;
+  const askOwner = (timeoutMs: number) =>
+    opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.scope.projectRoot,
+      args: ["graph", "owner-status", "--run-id", run, "--json"],
+      timeoutMs,
+      signal: opts.signal,
+    });
+  const rejectStarting = (owner: unknown) => {
+    if (
+      isRecord(owner) &&
+      owner.ok === true &&
+      owner.run === run &&
+      owner.plan === planId &&
+      owner.runtime_error === "graph_starting"
+    ) {
+      throw nativeGraphStillStarting();
+    }
+  };
+  const inspect = (busyWaitMs?: number) =>
+    inspectNativeProjectGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run,
+      invoke: opts.invoke,
+      signal: opts.signal,
+      busyWaitMs,
+    });
+  const snapshot = await inspect(0).catch(async (error: unknown) => {
+    if (!isNativeProviderBusy(error)) {
+      throw error;
+    }
+    // The append holds the mutation lease while its owner answers controls.
+    rejectStarting(await askOwner(2000).catch(() => undefined));
+    return await inspect();
+  });
+  const owned = authoritative(snapshot, run, namespace, planId);
+  if (
+    owned.owner !== opts.run.owner ||
+    !isRecord(snapshot) ||
+    !isRecord(snapshot.receipt)
+  ) {
+    throw unconfirmed("the targeted start owner");
+  }
+  if (snapshot.receipt.phase === "stopped-data-retained") {
+    return undefined;
+  }
+  if (
+    snapshot.receipt.phase === "preparing" ||
+    snapshot.receipt.phase === "restoring" ||
+    snapshot.receipt.phase === "restarting" ||
+    snapshot.receipt.phase === "started-observed"
+  ) {
+    throw nativeGraphStillStarting();
+  }
+  if (snapshot.receipt.phase !== "ready-observed") {
+    return undefined;
+  }
+  const owner = await askOwner(15_000);
+  rejectStarting(owner);
+  if (
+    isRecord(owner) &&
+    owner.run === run &&
+    owner.runtime_error === "graph_extend_incomplete"
+  ) {
+    throw new HackCliError({
+      code: "E_RECOVERY_REQUIRED",
+      message:
+        "A previous targeted native start is incomplete. Inspect it with hack ps and run hack down before trying again.",
+    });
+  }
+  if (
+    !(
+      isRecord(owner) &&
+      owner.ok === true &&
+      owner.run === run &&
+      owner.plan === planId &&
+      owner.phase === "ready-observed" &&
+      owner.runtime_verified === true &&
+      typeof owner.generation === "string" &&
+      SHA.test(owner.generation) &&
+      isRecord(owner.service_images)
+    )
+  ) {
+    throw unconfirmed("a ready foreground owner for targeted start");
+  }
+  const images = new Map<string, string>();
+  for (const [name, image] of Object.entries(owner.service_images)) {
+    if (
+      !(
+        PRINTABLE_NAME.test(name) &&
+        typeof image === "string" &&
+        IMAGE.test(image)
+      )
+    ) {
+      throw unconfirmed("the foreground owner's service identities");
+    }
+    images.set(name, image);
+  }
+  const ready = new Set<string>();
+  const observations = isRecord(snapshot.observations)
+    ? snapshot.observations
+    : {};
+  const readiness = isRecord(snapshot.receipt.readiness)
+    ? snapshot.receipt.readiness
+    : {};
+  for (const name of images.keys()) {
+    const observed = observations[`container:${name}`];
+    if (
+      isRecord(observed) &&
+      (observed.state === "running" ||
+        (readiness[name] === "completed" &&
+          observed.state === "exited" &&
+          observed.code === 0))
+    ) {
+      ready.add(name);
+    }
+  }
+  return { run: opts.run, generation: owner.generation, images, ready };
 }
 
 /**
@@ -2436,8 +2638,11 @@ export type NativeStartupProgress =
         | "images"
         /** Image work is done; review and plan work follow (detached clocks only). */
         | "plan"
-        | "all-stopped"
-        | "stopping";
+        | "all-stopped";
+    }
+  | {
+      readonly phase: "stopping";
+      readonly appendRollback?: NativeAppendRollback;
     }
   | {
       readonly phase: "stopped";
@@ -2447,6 +2652,7 @@ export type NativeStartupProgress =
   | {
       readonly phase: "services";
       readonly services: readonly string[];
+      readonly appendRollback?: NativeAppendRollback;
     }
   | ({ readonly phase: "dependency-wait" } & NativeDependencyWaitProgress)
   | {
@@ -2543,6 +2749,7 @@ type NativeProjectStartOptions = {
   readonly exitOnPoolEnd?: () => void;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
+  readonly targets?: readonly string[];
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   /**
@@ -2560,6 +2767,7 @@ type NativeProjectStartOptions = {
   readonly onReady?: (
     services: {
       readonly started: readonly string[];
+      readonly warnings?: readonly string[];
       readonly completed: readonly string[];
       /**
        * `warming` after a started return (the owner has not reported every goal
@@ -2838,9 +3046,326 @@ function emitNativeBranchDroppedNotice(
   }
 }
 
+/** Request the extension from the pinned owner and confirm its combined receipt. */
+function nativeExtensionServiceSet(
+  value: unknown,
+  selected: readonly string[]
+): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.some(
+      (name: unknown) => typeof name !== "string" || !selected.includes(name)
+    ) ||
+    new Set(value).size !== value.length
+  ) {
+    throw unconfirmed("the targeted start service set");
+  }
+  return value;
+}
+
+/** Review the same full normalized model a later plain up will review.
+ * Only pin images already owned or resolved by this attempt. An unrelated,
+ * unsupported or absent service cannot block the requested start.
+ */
+async function nativeCombinedExtensionInput(opts: {
+  readonly start: NativeProjectStartOptions;
+  readonly deps: Pick<
+    Dependencies,
+    "prepare" | "review" | "adaptAws" | "adaptGcloud" | "warn" | "invoke"
+  >;
+  readonly pinned: NativeProjectInput;
+  readonly selection: Awaited<
+    ReturnType<typeof selectNativeStartup>
+  >["selection"];
+  readonly metadata?: NativeRuntimeMetadataSelection;
+  readonly adaptationFile?: string;
+  readonly dependencyFile?: string;
+  readonly profiles: readonly string[];
+  readonly hostDependencies: readonly NativeHostDependency[];
+  readonly currentImages: ReadonlyMap<string, string>;
+  readonly specs: Readonly<Record<string, Record<string, unknown>>>;
+}): Promise<{
+  readonly planId: string;
+  readonly normalized: string;
+  readonly normalizedComposeJson: string;
+} | null> {
+  const { start, deps, selection, profiles } = opts;
+  try {
+    let full = await deps.prepare({
+      ...start.scope,
+      composeFile: start.composeFile,
+      envName: selection.envName,
+      profiles,
+      env: process.env,
+    });
+    if (full.originalSha256 !== opts.pinned.originalSha256) {
+      return null;
+    }
+    full = await prepareNativeProjectAdaptation({
+      input: full,
+      path: opts.adaptationFile,
+    });
+    full = applyNativeInternalHostAliases({
+      input: full,
+      hosts: start.internalExtraHosts,
+      sources: start.internalExtraHostSources,
+      hasDependencySelection: start.dependencyFile !== undefined,
+    });
+    full = (
+      await prepareNativeReviewBranch({
+        runtime: start.runtime,
+        scope: start.scope,
+        composeFile: start.composeFile,
+        input: full,
+      })
+    ).input;
+    const credentials = await adaptNativeCredentials({
+      input: full,
+      selection,
+      deps,
+    });
+    credentials.cancelExpiry?.();
+    full = credentials.input;
+    if (opts.metadata) {
+      full = applyNativeRuntimeMetadata({
+        input: full,
+        selection: opts.metadata,
+        branch: start.scope.branch,
+        httpsPort: start.https?.httpsPort ?? null,
+      }).input;
+    }
+    const compose: unknown = JSON.parse(full.normalizedComposeJson);
+    if (!(isRecord(compose) && isRecord(compose.services))) {
+      return null;
+    }
+    const current = new Set(opts.currentImages.keys());
+    const active = new Set<string>();
+    for (const [name, spec] of Object.entries(compose.services)) {
+      if (!isRecord(spec)) {
+        return null;
+      }
+      if (!nativeServiceActive(spec, profiles)) {
+        continue;
+      }
+      const image = opts.currentImages.get(name) ?? opts.specs[name]?.image;
+      if (typeof image !== "string" || !IMAGE.test(image)) {
+        return null;
+      }
+      current.delete(name);
+      active.add(name);
+      spec.image = image;
+    }
+    // A targeted profile outside plain up, or a service removed from the file,
+    // needs a later reconciliation rather than exact restore.
+    if (
+      current.size > 0 ||
+      Object.keys(opts.specs).some((name) => !active.has(name))
+    ) {
+      return null;
+    }
+    full = { ...full, normalizedComposeJson: JSON.stringify(compose) };
+    const services = prepareNativeProjectServices(
+      full,
+      opts.dependencyFile !== undefined,
+      new Set(
+        Object.entries(compose.services)
+          .filter(([, spec]) => isRecord(spec) && spec.build !== undefined)
+          .map(([name]) => name)
+      )
+    );
+    prepareNativeDependencyServices({
+      dependencies: opts.hostDependencies,
+      services,
+    });
+    const normalizedComposeJson = JSON.stringify({ ...compose, services });
+    const normalized = createHash("sha256")
+      .update(normalizedComposeJson)
+      .digest("hex");
+    return await deps.review({
+      runtime: start.runtime,
+      projectRoot: start.scope.projectRoot,
+      composeFile: start.composeFile,
+      profiles,
+      branch: start.scope.branch,
+      input: { ...full, normalizedComposeJson },
+      invoke: deps.invoke,
+      run: async (review) =>
+        isRecord(review.report.plan) &&
+        review.report.plan.compose_sha256 === normalized
+          ? { planId: review.planId, normalized, normalizedComposeJson }
+          : null,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function extendNativeProjectGraph({
+  opts,
+  deps,
+  extension,
+  input,
+  review,
+  cacheFlags,
+  routeFlags,
+  readinessArgs,
+  combined,
+  budgetSeconds,
+  progress,
+  signal,
+  forceSignal,
+  admitted,
+}: {
+  readonly opts: NativeProjectStartOptions;
+  readonly deps: Pick<Dependencies, "invoke" | "warn">;
+  readonly extension: NonNullable<
+    Awaited<ReturnType<typeof selectNativeGraphExtension>>
+  >;
+  readonly input: NativeProjectInput;
+  readonly review: NativeProjectReview;
+  readonly cacheFlags: readonly string[];
+  readonly routeFlags: readonly string[];
+  readonly readinessArgs: readonly string[];
+  readonly combined: Awaited<ReturnType<typeof nativeCombinedExtensionInput>>;
+  readonly budgetSeconds: number;
+  readonly progress: ReturnType<typeof progressReporter>;
+  readonly signal: AbortSignal;
+  readonly forceSignal: AbortSignal;
+  readonly admitted: (rollback: NativeAppendRollback) => void;
+}): Promise<number> {
+  const run = extension.run.run;
+  const services = [...nativeReviewedActiveServices(review.report.plan)].sort();
+  const appendRollback = nativeAppendRollback({
+    plan: review.report.plan,
+    selected: services,
+    ready: extension.ready,
+    owned: extension.images,
+  });
+  const delivery = nativeEnvironmentDelivery({
+    input: activeNativeDeliveryInput({
+      input,
+      reviewedPlan: review.report.plan,
+    }),
+    planId: review.planId,
+    reviewedPlan: review.report.plan,
+    run,
+  });
+  let combinedDirectory: string | undefined;
+  try {
+    const combinedArgs: string[] = [];
+    if (combined) {
+      combinedDirectory = await nativeRuntimeTempDirectory(
+        "hack-native-combined-"
+      );
+      const path = join(combinedDirectory, "compose.json");
+      await writeFile(path, combined.normalizedComposeJson, {
+        mode: 0o600,
+        flag: "wx",
+      });
+      combinedArgs.push(
+        "--combined-plan",
+        combined.planId,
+        "--combined-normalized-sha256",
+        combined.normalized,
+        "--combined-normalized-file",
+        path
+      );
+    }
+    requireActiveStartup(signal);
+    progress({ phase: "services", services, appendRollback });
+    admitted(appendRollback);
+    const response = await deps.invoke({
+      runtime: opts.runtime,
+      cwd: opts.scope.projectRoot,
+      args: [
+        "graph",
+        "extend",
+        "--run-id",
+        run,
+        ...review.projectArgs,
+        "--expect-plan",
+        review.planId,
+        "--expect-generation",
+        extension.generation,
+        ...combinedArgs,
+        ...nativeSharedSourceFlags(review.report.plan),
+        ...cacheFlags,
+        ...readinessArgs,
+        ...routeFlags,
+        ...delivery.flags,
+        "--timeout-seconds",
+        String(budgetSeconds),
+        "--json",
+      ],
+      privateInput: delivery.payload,
+      timeoutMs: budgetSeconds * 1000 + 15_000,
+      signal,
+      appendCancellation: { waitMs: appendRollback.waitMs, forceSignal },
+    });
+    requireActiveStartup(signal);
+    const selected = authoritative(
+      {
+        journal_incomplete: false,
+        receipt: isRecord(response) ? response.receipt : undefined,
+      },
+      run,
+      extension.run.namespace,
+      extension.run.planId
+    );
+    if (
+      !(
+        selected.owner === extension.run.owner &&
+        isRecord(response) &&
+        response.ok === true &&
+        response.phase === "ready-observed" &&
+        isRecord(response.receipt) &&
+        isRecord(response.receipt.readiness)
+      )
+    ) {
+      throw unconfirmed("the targeted start result");
+    }
+    const readiness = response.receipt.readiness;
+    const started = nativeExtensionServiceSet(response.started, services);
+    const changed = nativeExtensionServiceSet(response.changed, services);
+    const warnings = changed.map(
+      (name) =>
+        `Service ${name} is running with its previous configuration. Use hack restart to apply the change on native; Compose supports hack restart ${name}.`
+    );
+    if (!opts.onReady) {
+      warnings.forEach(deps.warn);
+    }
+    await opts.onReady?.(
+      {
+        started: started.filter((name) => readiness[name] !== "completed"),
+        completed: started.filter((name) => readiness[name] === "completed"),
+        ...(warnings.length ? { warnings } : {}),
+        readiness: "ready",
+        warming: [],
+      },
+      []
+    );
+    progress({ phase: "ready", services, run, endpoints: [] });
+    return 0;
+  } catch (error) {
+    if (
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCauseCode === "graph_starting"
+    ) {
+      throw nativeGraphStillStarting();
+    }
+    throw error;
+  } finally {
+    delivery.payload?.fill(0);
+    if (combinedDirectory) {
+      await rm(combinedDirectory, { recursive: true, force: true });
+    }
+  }
+}
+
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
-  observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>
+  observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>,
+  watchAdmittedBoot: ((bootId: string) => void) | undefined
 ): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -2864,6 +3389,7 @@ async function startNativeProjectAttempt(
       envName: opts.envName,
       profiles: opts.profiles,
       requestedProfiles,
+      targets: opts.targets,
       aws: opts.aws,
       gcloud: opts.gcloud,
       gcloudWithheld: opts.gcloudWithheld,
@@ -2871,7 +3397,7 @@ async function startNativeProjectAttempt(
       invoke: deps.invoke,
       signal: opts.signal,
     });
-  const { retained, restore, selection, retainedFlags } =
+  const { retained, restore, selection, retainedFlags, extension } =
     await selectNativeStartupRecoveringStoppedPool({
       select,
       runtime: opts.runtime,
@@ -2888,7 +3414,7 @@ async function startNativeProjectAttempt(
     selection: opts.runtimeMetadata,
     restore,
   });
-  if (retained) {
+  if (retained && !extension) {
     await requireAcknowledgedRetainedFinalization({
       scope: opts.scope,
       run: retained,
@@ -2915,7 +3441,7 @@ async function startNativeProjectAttempt(
   progress({ phase: "input" });
   // Keep ps aware of this frontend while input is read. This advisory marker
   // carries no values and is retired even if admission refuses the input.
-  const startupObservation = await observeStartup();
+  const startupObservation = extension ? undefined : await observeStartup();
   // Read and admit private project inputs before any pool-share or storage
   // mutation. An unsafe env file or public interpolation must have no effects.
   let input = await deps.prepare({
@@ -2923,11 +3449,15 @@ async function startNativeProjectAttempt(
     composeFile: opts.composeFile,
     envName: selection.envName,
     profiles,
+    targets: opts.targets,
+    existingImages: extension?.images,
     env: process.env,
   });
   // A down hook of an earlier generation with unknown completion blocks this
   // one before any hook runs; any other leftover record is superseded.
-  await deps.admitDownHooks(opts.scope);
+  if (!extension) {
+    await deps.admitDownHooks(opts.scope);
+  }
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady
     ? withComposeServiceEnvFingerprints({
@@ -3026,7 +3556,9 @@ async function startNativeProjectAttempt(
       }
     },
   });
-  await deps.prepareStorage(opts.scope);
+  if (!extension) {
+    await deps.prepareStorage(opts.scope);
+  }
   // A graph that captures source (bind mounts or a dependency cache) measures it
   // before hooks, image work or runtime start, so an oversized project refuses with
   // its size and largest paths. An image-only graph never reads source content.
@@ -3070,9 +3602,14 @@ async function startNativeProjectAttempt(
   const stopSignals = nativeForegroundStopSignals(opts);
   opts.onStopSignals?.();
   const controller = stopSignals.controller;
+  let appendRollback: NativeAppendRollback | undefined;
   controller.signal.addEventListener(
     "abort",
-    () => progress({ phase: "stopping" }),
+    () =>
+      progress({
+        phase: "stopping",
+        ...(appendRollback ? { appendRollback } : {}),
+      }),
     { once: true }
   );
   let hooks: Hooks | undefined;
@@ -3091,7 +3628,7 @@ async function startNativeProjectAttempt(
     stopSignals.admitPending();
     requireActiveStartup(controller.signal);
     const inputTiming = beginUpTiming("cli.start.inputs");
-    hooks = await opts.before(input, controller.signal);
+    hooks = extension ? undefined : await opts.before(input, controller.signal);
     requireActiveStartup(controller.signal);
     const credentials = await adaptNativeCredentials({
       input,
@@ -3127,8 +3664,11 @@ async function startNativeProjectAttempt(
       profiles,
       managedEnvironment: input.managedEnvironment,
     });
+    const scopedWithoutHostAliases =
+      opts.targets &&
+      Object.values(hostAliases).every((aliases) => aliases.length === 0);
     const hostDependencies = await readNativeHostDependencies({
-      path: selectedDependencyFile,
+      path: scopedWithoutHostAliases ? undefined : selectedDependencyFile,
       services: Object.keys(specs),
       hostAliases,
       checkPinned: async ({ hostPid, hostPort }) => {
@@ -3171,7 +3711,7 @@ async function startNativeProjectAttempt(
           invoke: deps.invoke,
           wait: dependencyWait(selection, selection.signal),
         }),
-      listenerHooks: hooks.listenerHooks,
+      listenerHooks: hooks?.listenerHooks,
     });
     requireActiveStartup(controller.signal);
     requireNativeHostAliasBindings({
@@ -3192,46 +3732,62 @@ async function startNativeProjectAttempt(
       dependencyServices: hostDependencies.map((binding) => binding.service),
     });
     const admission = await admitRetainedStartup({
-      retained,
+      retained: extension ? null : retained,
       scope: opts.scope,
       deps,
       signal: controller.signal,
     });
     inputTiming?.();
     progress({ phase: "runtime" });
-    const pool = await deps.invoke({
-      runtime: opts.runtime,
-      cwd: opts.scope.projectRoot,
-      args: [
-        ...nativeProjectRuntimeUpArgs(opts.scope.projectRoot),
-        ...retainedFlags,
-        ...(hostDependencies.length > 0
-          ? [
-              "--minimum-dependency-sockets",
-              String(
-                new Set(hostDependencies.map((binding) => binding.slot)).size
-              ),
-            ]
-          : []),
-        ...(bridgeCapacity > 0
-          ? ["--minimum-bridge-sockets", String(bridgeCapacity)]
-          : []),
-        ...(allowedHosts.length > 0
-          ? allowedHosts.flatMap((host) => ["--allow-host", host])
-          : ["--internet"]),
-        ...preparedBaseArguments(opts.preparedBase),
-        ...nativeAmd64EmulationUpArgs(input.amd64Emulation),
-        "--json",
-      ],
-      signal: controller.signal,
-    });
+    const pool = extension
+      ? await deps.invoke({
+          runtime: opts.runtime,
+          cwd: opts.scope.projectRoot,
+          args: ["runtime", "status", "--json"],
+          signal: controller.signal,
+        })
+      : await deps.invoke({
+          runtime: opts.runtime,
+          cwd: opts.scope.projectRoot,
+          args: [
+            ...nativeProjectRuntimeUpArgs(opts.scope.projectRoot),
+            ...retainedFlags,
+            ...(hostDependencies.length > 0
+              ? [
+                  "--minimum-dependency-sockets",
+                  String(
+                    new Set(hostDependencies.map((binding) => binding.slot))
+                      .size
+                  ),
+                ]
+              : []),
+            ...(bridgeCapacity > 0
+              ? ["--minimum-bridge-sockets", String(bridgeCapacity)]
+              : []),
+            ...(allowedHosts.length > 0
+              ? allowedHosts.flatMap((host) => ["--allow-host", host])
+              : ["--internet"]),
+            ...preparedBaseArguments(opts.preparedBase),
+            ...nativeAmd64EmulationUpArgs(input.amd64Emulation),
+            "--json",
+          ],
+          signal: controller.signal,
+        });
     emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
+    // An append delegates to the existing graph owner and its cancellation protocol.
+    const expectedBoot =
+      !extension && watchAdmittedBoot
+        ? runningNativePoolBootId(pool)
+        : undefined;
+    if (expectedBoot !== undefined) {
+      watchAdmittedBoot?.(expectedBoot);
+    }
     const resolveTiming = beginUpTiming("cli.graph.resolve");
     const resumed = await verifyNativeResumedRetainedGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
-      run: retained,
+      run: extension ? undefined : retained,
       invoke: deps.invoke,
     });
     const reviewedBranch = await prepareNativeReviewBranch({
@@ -3413,6 +3969,50 @@ async function startNativeProjectAttempt(
           restoreRevision: runSelection.sourceRevision,
           invoke: deps.invoke,
         });
+        const readinessArgs = nativeReadinessArgs({
+          specs,
+          plan: review.report.plan,
+          initializers: cache.initializers,
+          routed: routes.services,
+        });
+        const budgetSeconds = nativeStartBudgetSeconds(
+          opts.startTimeoutSeconds
+        );
+        if (extension) {
+          const combined = await nativeCombinedExtensionInput({
+            start: opts,
+            deps,
+            pinned,
+            selection,
+            metadata: runtimeMetadata,
+            adaptationFile: selectedAdaptationFile,
+            dependencyFile: selectedDependencyFile,
+            profiles,
+            hostDependencies,
+            currentImages: extension.images,
+            specs,
+          });
+          requireActiveStartup(controller.signal);
+          return await extendNativeProjectGraph({
+            opts,
+            deps,
+            extension,
+            input,
+            review,
+            cacheFlags: cache.flags,
+            routeFlags: routes.flags,
+            readinessArgs,
+            combined,
+            budgetSeconds,
+            progress,
+            signal: controller.signal,
+            forceSignal: stopSignals.force,
+            admitted: (rollback) => {
+              appendRollback = rollback;
+              servicesRequested = true;
+            },
+          });
+        }
         const directory =
           await nativeRuntimeTempDirectory("hack-native-start-");
         const run = runSelection.run;
@@ -3435,6 +4035,7 @@ async function startNativeProjectAttempt(
         let httpsClosing = false;
         let httpsIntent: NativeHttpsLeaseIdentity | undefined;
         let httpsFailure: Error | undefined;
+        let joinedIngress: Promise<void> | undefined;
         try {
           const dependencyFile = join(directory, "dependencies.json");
           await writeFile(
@@ -3533,16 +4134,7 @@ async function startNativeProjectAttempt(
           const services = [
             ...nativeReviewedActiveServices(review.report.plan),
           ].sort();
-          const readinessArgs = nativeReadinessArgs({
-            specs,
-            plan: review.report.plan,
-            initializers: cache.initializers,
-            routed: routes.services,
-          });
           progress({ phase: "services", services });
-          const budgetSeconds = nativeStartBudgetSeconds(
-            opts.startTimeoutSeconds
-          );
           const servicesRequestedAt = performance.now();
           let stopWatching: (() => Promise<void>) | undefined;
           // `hack up` returns at started unless `--wait`; see `waitForReady`.
@@ -3613,11 +4205,12 @@ async function startNativeProjectAttempt(
           // Takes the HTTPS lease on the lifetime registered before the mapping.
           const acquireHttps = async (
             readyMapping: NativeProjectRun,
-            persistedMapping: NativeProjectRun
+            persistedMapping: NativeProjectRun,
+            afterAppend = false
           ) => {
             // Enrollment must exist before taking a shared lease: release
             // requires independent proof of this exact graph's cleanup.
-            if (opts.https && routes.services.size > 0) {
+            if (opts.https && (afterAppend || routes.services.size > 0)) {
               https = await acquireReadyHttps({
                 runtime: opts.runtime,
                 selection: opts.https,
@@ -3625,6 +4218,7 @@ async function startNativeProjectAttempt(
                 signal: controller.signal,
                 invoke: deps.invoke,
                 acquire: deps.https,
+                expectedBoot,
                 attempt: finalization?.token.attempt,
                 onIntent: async (identity) => {
                   finalization = await deps.finalization({
@@ -3641,6 +4235,13 @@ async function startNativeProjectAttempt(
               });
               void https.exited.then(() => {
                 if (!httpsClosing) {
+                  if (afterAppend) {
+                    progress({
+                      phase: "routes-not-answering",
+                      detail: "The native HTTPS owner exited.",
+                    });
+                    return;
+                  }
                   httpsFailure = new ClosedCliError(
                     "Native HTTPS owner exited unexpectedly; graph shutdown requested."
                   );
@@ -3729,7 +4330,7 @@ async function startNativeProjectAttempt(
             invoke: deps.invoke,
           });
           try {
-            await startupObservation.select({
+            await startupObservation?.select({
               run,
               namespace: review.namespace,
               planId: restore?.planId ?? review.planId,
@@ -3744,6 +4345,9 @@ async function startNativeProjectAttempt(
               args: [
                 ...review.projectArgs,
                 ...runSelection.flags,
+                ...(expectedBoot === undefined
+                  ? []
+                  : ["--expect-boot", expectedBoot]),
                 "--expect-plan",
                 review.planId,
                 ...nativeSharedSourceFlags(review.report.plan),
@@ -3766,6 +4370,28 @@ async function startNativeProjectAttempt(
               // The owner's ready line after a started return: routes answer now.
               onAllReady: () => {
                 void allReady();
+              },
+              onRoutesAdded: () => {
+                if (
+                  !(opts.https && mapped) ||
+                  https ||
+                  joinedIngress ||
+                  httpsClosing ||
+                  routes.services.size > 0
+                ) {
+                  return;
+                }
+                joinedIngress = acquireHttps(
+                  mapped.readyMapping,
+                  mapped.persistedMapping,
+                  true
+                ).catch(() => {
+                  progress({
+                    phase: "routes-not-answering",
+                    detail:
+                      "The newly published routes could not acquire shared native HTTPS.",
+                  });
+                });
               },
               signal: controller.signal,
               // Down hooks run on the first stop request of a ready graph.
@@ -3823,7 +4449,7 @@ async function startNativeProjectAttempt(
                 }
                 await hooks?.ready?.(controller.signal);
                 requireActiveStartup(controller.signal);
-                await startupObservation();
+                await startupObservation?.();
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -4001,6 +4627,7 @@ async function startNativeProjectAttempt(
         } finally {
           httpsClosing = true;
           try {
+            await joinedIngress;
             if (https) {
               await https.releaseAfterCleanup();
             } else if (httpsIntent) {
@@ -4018,6 +4645,23 @@ async function startNativeProjectAttempt(
     });
   } catch (error) {
     failed = true;
+    if (
+      extension &&
+      servicesRequested &&
+      (controller.signal.aborted ||
+        (error instanceof NativeRuntimeRequestError && error.stopSignal))
+    ) {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        (error.nativeCode === "graph_cancelled" ||
+          (error.nativeCode === "graph_owner_recovery" &&
+            error.nativeCauseCode === "graph_cancelled"))
+      ) {
+        await nativeDetachedUpAppendCancelled();
+        throw new NativeStartupCanceledError(stopSignals.interruptedExit());
+      }
+      throw nativeStartOutcomeUnknown();
+    }
     throw foregroundStartFailure({
       error,
       stopRequested: controller.signal.aborted,
@@ -4130,22 +4774,29 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
+  let settled = false;
+  let stopPoolWatch: (() => void) | undefined;
   // Ready and not stopping: the start has nothing left to finish on its own.
   let serving = false;
   // A detached start whose pool boot has ended releases its marker and exits,
   // as a crash would, so the next up or down --recover need not wait for it
   // (HACK-2550). A ready one exits at once, a start still in progress after the
   // grace. A foreground start stays with the user's terminal.
-  const stopPoolWatch =
+  const watchAdmittedBoot =
     (opts.watchPool ?? isNativeDetachedOwnerProcess())
-      ? watchNativeStartPool({
-          home: opts.runtime.home,
-          graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
-          onEnded: async () => {
-            await finish?.();
-            (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
-          },
-        })
+      ? (bootId: string) => {
+          stopPoolWatch = (opts.dependencies?.watchPool ?? DEFAULTS.watchPool)({
+            home: opts.runtime.home,
+            bootId,
+            graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
+            onEnded: async () => {
+              await finish?.();
+              if (!settled) {
+                (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
+              }
+            },
+          });
+        }
       : undefined;
   try {
     return await startNativeProjectAttempt(
@@ -4168,11 +4819,13 @@ export async function startNativeProject(
         );
         finish = observation;
         return observation;
-      }
+      },
+      watchAdmittedBoot
     );
   } catch (error) {
     throw withStartupLockBlocker(error);
   } finally {
+    settled = true;
     stopPoolWatch?.();
     await finish?.();
   }

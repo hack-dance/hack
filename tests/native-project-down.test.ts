@@ -326,18 +326,29 @@ test("down of a run that failed after started clears its failure record", async 
 });
 
 test.each([
-  { recover: false },
-  { recover: true },
-])("down of a warming run while its owner holds the provider lease goes to the owner (recover $recover)", async ({
+  { recover: false, phase: "started-observed", enrolled: false },
+  { recover: true, phase: "started-observed", enrolled: false },
+  { recover: false, phase: "ready-observed", enrolled: true },
+  { recover: false, phase: "ready-observed", enrolled: false },
+])("down reaches a starting owner holding the provider lease ($phase, recover $recover, enrolled $enrolled)", async ({
   recover,
+  phase,
+  enrolled,
 }) => {
   // A start that returned at started: the owner holds the provider lease until
   // its ready line, so every leased command is refused until the stop lands.
   const opts = await fixture();
   let held = true;
   const calls: string[] = [];
-  const warming = snapshot(false);
-  warming.receipt.phase = "started-observed";
+  const initial = snapshot(false);
+  const warming = {
+    ...initial,
+    receipt: {
+      ...initial.receipt,
+      phase,
+      ...(enrolled ? { extending: ["slow"] } : {}),
+    },
+  };
   const started = performance.now();
   const result = await nativeProjectDown({
     ...opts,
@@ -348,7 +359,15 @@ test.each([
       if (command === "status" || command === "foreground-owner") {
         return command === "status"
           ? warming
-          : ownerSelection("running", "started-observed");
+          : ownerSelection("running", phase);
+      }
+      if (command === "owner-status") {
+        return {
+          ok: true,
+          run: run.run,
+          plan: run.planId,
+          runtime_error: "graph_starting",
+        };
       }
       if (command === "cleanup") {
         // The owner's socket takes the stop without the lease; then it lets go.
@@ -373,6 +392,41 @@ test.each([
   expect(result).toMatchObject({ status: "stopped" });
   // No wait for the lease the owner holds: well under the 15 s busy wait.
   expect(performance.now() - started).toBeLessThan(5000);
+});
+
+test("down --recover reaches the dead owner path when the first append write is pending", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let stopped = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "foreground-owner") {
+        return ownerSelection("exited", "ready-observed");
+      }
+      if (command === "recover-live-owner") {
+        stopped = true;
+        return {
+          run: run.run,
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      if (command === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      return { ...snapshot(stopped), journal_incomplete: !stopped };
+    },
+  });
+  expect(result).toMatchObject({ status: "stopped" });
+  expect(
+    calls.filter((command) => command === "recover-live-owner")
+  ).toHaveLength(1);
+  expect(calls).not.toContain("cleanup");
 });
 
 test("already-stopped unacknowledged frontend refuses without replaying compute", async () => {

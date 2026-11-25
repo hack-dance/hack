@@ -178,6 +178,9 @@ test("the released compiled managers are reviewed predecessors", () => {
     "dfba3ea7bfcfbeffd5de38e0d3b0818657912764cd184d949e04deec00edb153", // next.25
     "6219e16a7b2d3eb83eaa440315829c4d77fb20af0f74664d04d8491899ea6404", // next.25 linux-x86_64
     "a07bd7d5cd8cf6c0788c1ab2d9cd29d481850e73065709683d3c2c372182fbc4", // next.25 linux-arm64
+    "8467fe1b4ff48074ab1fd8d1ad96dcbc9f72639de9432dae59b1817fa9f97748", // next.26
+    "03a03c78db05cfe0e60504e6cdbc27816398fdd310a984fa09058f037c966179", // next.26 linux-x86_64
+    "3a4c3eca6e3c6df615342a3e4b39ac2dae2dd74d6b74e001595d87f7d244e4d9", // next.26 linux-arm64
   ]);
 });
 
@@ -292,6 +295,12 @@ test("the gate runs a previous release only from its own reviewed pins", () => {
         "dfba3ea7bfcfbeffd5de38e0d3b0818657912764cd184d949e04deec00edb153",
       archive:
         "01f5a7a469a6087c78a1491a9ac82feffb48018a534fa227a8a636e1b8c3aed1",
+    },
+    "5.0.0-next.26": {
+      manager:
+        "8467fe1b4ff48074ab1fd8d1ad96dcbc9f72639de9432dae59b1817fa9f97748",
+      archive:
+        "3146de32ea692882f9be489ce4f6fc2bc264ea7cdc9905ad1388305281e84718",
     },
   });
   for (const { manager } of Object.values(PUBLISHED_RELEASES)) {

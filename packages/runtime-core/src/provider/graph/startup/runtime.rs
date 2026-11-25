@@ -107,6 +107,8 @@ pub struct HostRelayRuntime {
     #[cfg(target_os = "macos")]
     pub(in crate::provider::graph) early_publications:
         Option<crate::provider::graph::foreground::publishers::EarlyPublications>,
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider::graph) extension_input: Option<super::super::extend::Input>,
     /// Sticky: a dependency rebind wrote its journal and did not complete. Its
     /// effects are unconfirmed, so automatic refresh must never try again.
     rebind_unconfirmed: bool,
@@ -472,6 +474,7 @@ impl HostRelayRuntime {
             dependencies,
             None,
             false,
+            None,
         )
     }
     /// Run-scoped foreground owner identity. The selected run is validated before
@@ -483,16 +486,14 @@ impl HostRelayRuntime {
         dependencies: Vec<Dependency>,
         run: &str,
     ) -> Result<Self, CandidateError> {
-        if !hex(run, 32) {
-            return Err(refused());
-        }
-        Self::new_scoped(
+        Self::new_for_run_in_boot(
             candidate,
             artifact,
             expected_sha256,
             dependencies,
-            Some(run),
+            run,
             false,
+            None,
         )
     }
     /// Allocate physical dependency transports pool-wide. Selection slots remain
@@ -504,6 +505,28 @@ impl HostRelayRuntime {
         dependencies: Vec<Dependency>,
         run: &str,
     ) -> Result<Self, CandidateError> {
+        Self::new_for_run_in_boot(
+            candidate,
+            artifact,
+            expected_sha256,
+            dependencies,
+            run,
+            true,
+            None,
+        )
+    }
+    /// A supervised foreground graph can bind admission to the boot selected by
+    /// its frontend. Reject a replacement under the provider lease before making
+    /// a control directory or reserving dependency slots.
+    pub fn new_for_run_in_boot(
+        candidate: &Candidate,
+        artifact: &Path,
+        expected_sha256: &str,
+        dependencies: Vec<Dependency>,
+        run: &str,
+        automatic_slots: bool,
+        expected_boot: Option<&str>,
+    ) -> Result<Self, CandidateError> {
         if !hex(run, 32) {
             return Err(refused());
         }
@@ -513,7 +536,8 @@ impl HostRelayRuntime {
             expected_sha256,
             dependencies,
             Some(run),
-            true,
+            automatic_slots,
+            expected_boot,
         )
     }
     fn new_scoped(
@@ -523,6 +547,7 @@ impl HostRelayRuntime {
         dependencies: Vec<Dependency>,
         selected_run: Option<&str>,
         automatic_slots: bool,
+        expected_boot: Option<&str>,
     ) -> Result<Self, CandidateError> {
         if !hex(expected_sha256, 64)
             || dependencies.len() > crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
@@ -543,6 +568,9 @@ impl HostRelayRuntime {
         require_relay_admission(candidate, selected_run)?;
         let owner = state::Owner::load(candidate)?;
         engine.guest().verify()?;
+        if expected_boot.is_some_and(|boot| boot != engine.guest().boot_id()) {
+            return Err(stage_refused("graph_startup_pool_boot"));
+        }
         let context = host_relay::context(engine.guest().incarnation(), engine.guest().boot_id())?;
         let capacity = if dependencies.is_empty() {
             0
@@ -672,6 +700,8 @@ impl HostRelayRuntime {
             report_started: false,
             #[cfg(target_os = "macos")]
             early_publications: None,
+            #[cfg(target_os = "macos")]
+            extension_input: None,
             rebind_unconfirmed: false,
             dependency_reservation,
         })
@@ -680,6 +710,14 @@ impl HostRelayRuntime {
     /// phase (`--report-started`), for this owner's first start only.
     pub fn report_started(&mut self, enabled: bool) {
         self.report_started = enabled;
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider::graph) fn remember_extensions(
+        &mut self,
+        configs: BTreeMap<String, Value>,
+    ) {
+        self.templates.extend(configs);
     }
     /// Serve the owner's transport between the start loop's operations (see
     /// [`StartupRequests`]); `None` once the attempt has returned.
@@ -1015,6 +1053,13 @@ fn announce_started(
 
 impl Driver for HostRelayRuntime {
     #[cfg(target_os = "macos")]
+    fn resume_publications(&mut self, receipt: &Receipt, services: &BTreeSet<String>) {
+        if let Some(publications) = &mut self.early_publications {
+            publications.resume(receipt, services);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn service_ready_leased(
         &mut self,
         engine: &Engine<'_>,
@@ -1023,7 +1068,10 @@ impl Driver for HostRelayRuntime {
         container_id: &str,
     ) -> Result<(), CandidateError> {
         if let Some(publications) = &mut self.early_publications {
-            publications.publish(engine, receipt, service, container_id)?;
+            let (check, requests) = (self.startup_cancelled, self.startup_requests.as_ref());
+            publications.publish(engine, receipt, service, container_id, || {
+                startup_cancelled(check, requests)
+            })?;
         }
         Ok(())
     }

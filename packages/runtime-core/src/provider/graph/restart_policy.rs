@@ -196,21 +196,19 @@ fn observed_name(inspected: &Value) -> Result<&str, CandidateError> {
 
 /// Rebinding admits only the exact policy recorded by this owner. A foreign
 /// policy update never creates authority to forward to a later incarnation.
-#[cfg(any(test, target_os = "macos"))]
 pub(super) fn verify_admitted(
     resource: &Resource,
     inspected: &Value,
 ) -> Result<(), CandidateError> {
-    let Some(policy) = resource.restart_policy.as_ref() else {
-        return Err(refused("Restart publication lacks an admitted policy."));
-    };
-    let expected = RestartPolicy::engine(Some(policy));
-    let observed = &inspected["HostConfig"]["RestartPolicy"];
-    if observed["Name"] != expected["Name"]
-        || observed["MaximumRetryCount"] != expected["MaximumRetryCount"]
+    let expected = RestartPolicy::engine(resource.restart_policy.as_ref());
+    let observed = observed_name(inspected)?;
+    if expected["Name"] != observed
+        || (observed != "no"
+            && inspected["HostConfig"]["RestartPolicy"]["MaximumRetryCount"]
+                != expected["MaximumRetryCount"])
     {
         return Err(refused(
-            "Owned restart policy changed; publication was not rebound.",
+            "Owned container restart policy differs from the admitted policy.",
         ));
     }
     Ok(())

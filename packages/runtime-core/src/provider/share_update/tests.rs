@@ -486,6 +486,77 @@ fn replaced_project_selected_before_acquisition_is_refused() {
     assert!(!root(&candidate).join(JOURNAL).exists());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Requires a fresh prepared candidate home under the VM lock"]
+fn compact_add_replays_the_converted_share_after_record_commit() {
+    let f = fixture();
+    let candidate =
+        Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap())).unwrap();
+    assert_eq!(
+        lifecycle::status(&candidate).unwrap().phase,
+        "uninitialized"
+    );
+    lifecycle::up_with_project_share(
+        &candidate,
+        super::super::Profile::Development,
+        None,
+        None,
+        None,
+        f.owner.project_share.clone(),
+    )
+    .unwrap();
+    lifecycle::down(&candidate).unwrap();
+
+    add_project_share(&candidate, &f.second.project, true).unwrap();
+    let owner = Owner::load(&candidate).unwrap();
+    assert_eq!(owner.socket_layout, super::super::PoolLayout::CompactV1);
+    let compact_second = f.second.clone().with_layout(owner.socket_layout).unwrap();
+    assert_eq!(
+        owner.additional_project_shares,
+        std::slice::from_ref(&compact_second)
+    );
+
+    let db = network_update::database(&candidate);
+    let record = config_audit::read_database(&db, &owner.machine).unwrap();
+    let compact_third = f.third.clone().with_layout(owner.socket_layout).unwrap();
+    let j = plan(
+        &owner,
+        record,
+        Operation::Add,
+        &compact_third,
+        network_update::file_identity_with(&db, refused).unwrap(),
+    )
+    .unwrap();
+    let journal = root(&candidate).join(JOURNAL);
+    {
+        let _lock = state::Lock::acquire(&root(&candidate)).unwrap();
+        let _vm_lock = network_update::stopped_with(&candidate, &owner, refused).unwrap();
+        state::write(&journal, &j).unwrap();
+        network_update::apply_record(
+            &db,
+            &owner.machine,
+            j.database_identity,
+            &j.record_before,
+            &j.record_after,
+            refused,
+        )
+        .unwrap();
+    }
+    fs::rename(&f.third.project, f.directory.join("moved-third")).unwrap();
+    add_project_share(&candidate, &f.third.project, true).unwrap();
+    assert!(!journal.exists());
+    let saved = Owner::load(&candidate).unwrap();
+    assert_eq!(
+        saved.additional_project_shares,
+        [compact_second, compact_third]
+    );
+    assert_eq!(
+        config_audit::read_database(&db, &saved.machine).unwrap(),
+        j.record_after
+    );
+}
+
 #[test]
 fn only_a_new_share_on_a_running_pool_with_room_stops_it_first() {
     let f = fixture();
@@ -496,6 +567,12 @@ fn only_a_new_share_on_a_running_pool_with_room_stops_it_first() {
     // A stopped pool, a root already shared, or an unfinished update: no stop.
     assert!(!stop_before_add(&f.owner, &f.second, true).unwrap());
     assert!(!stop_before_add(&running, &primary, true).unwrap());
+    // A freshly approved legacy-form intent can already be in a compact pool.
+    let mut compact = running.clone();
+    compact.socket_layout = super::super::PoolLayout::CompactV1;
+    compact.project_share = Some(primary.clone().with_layout(compact.socket_layout).unwrap());
+    assert!(!stop_before_add(&compact, &primary, true).unwrap());
+    assert!(stop_before_add(&compact, &f.second, true).unwrap());
     assert!(!stop_before_add(&running, &f.second, false).unwrap());
     // A full set refuses before anything stops.
     let mut full = running.clone();

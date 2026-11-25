@@ -32,7 +32,7 @@ fn finish_owner_input(span: Option<hack_runtime_core::timings::Span>) {
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune/clear-failure-after-started require --run-id. Cleanup alone may use --remove-data. foreground-owner --run-id selects a run's receipt digest and publication state read-only. retire-unadmitted-owner --run-id --expect-receipt retires a retained restore whose foreground owner died before admission. Dead-owner recover-cleanup and same-boot recover-live-owner require --expect-receipt; retire-recovered-publisher requires --expect-owner. A missing publisher lock requires inspect-missing-publication-lock --run-id and explicitly selected retire-missing-publication-lock --run-id --expect-selection --accept-quiesced-candidate-home. Foreground serve may opt into --auto-dependency-slots for pool-wide transport allocation; serve and serve-restore accept --report-started to print a graph_foreground_started line once every service has started, before the ready line; dependency-reservations inspects claims and recover-dependency-reservation --run-id --expect-reservation releases a verified dead pre-admission claim. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and exactly one of --executable or --ancestor-pid; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims, and it waits up to 30 s for the provider lease while sibling publishers hold it; unpublish-bridge requires --run-id and --expect-reservation.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune/clear-failure-after-started require --run-id. Cleanup alone may use --remove-data. foreground-owner --run-id selects a run's receipt digest and publication state read-only. retire-unadmitted-owner --run-id --expect-receipt retires a retained restore whose foreground owner died before admission. Dead-owner recover-cleanup and same-boot recover-live-owner require --expect-receipt; retire-recovered-publisher requires --expect-owner. A missing publisher lock requires inspect-missing-publication-lock --run-id and explicitly selected retire-missing-publication-lock --run-id --expect-selection --accept-quiesced-candidate-home. Foreground serve may opt into --auto-dependency-slots for pool-wide transport allocation; serve and serve-restore accept --expect-boot to bind admission to the selected guest boot and --report-started to print a graph_foreground_started line once every service has started, before the ready line; dependency-reservations inspects claims and recover-dependency-reservation --run-id --expect-reservation releases a verified dead pre-admission claim. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and exactly one of --executable or --ancestor-pid; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims, and it waits up to 30 s for the provider lease while sibling publishers hold it; unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -545,9 +545,16 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     }
     let (arguments, normalized_selection) = crate::normalized_cli::extract(
         args,
-        ["run", "serve", "serve-restore", "source-compatibility"].contains(action),
+        [
+            "run",
+            "serve",
+            "serve-restore",
+            "extend",
+            "source-compatibility",
+        ]
+        .contains(action),
     )?;
-    if *action == "source-compatibility" && normalized_selection.is_none() {
+    if ["source-compatibility", "extend"].contains(action) && normalized_selection.is_none() {
         return Err(invalid());
     }
     let args = arguments.as_slice();
@@ -718,6 +725,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "serve",
         "serve-restore",
         "source-compatibility",
+        "extend",
         "restore-selection",
         "retained-preflight",
         "owner-status",
@@ -753,6 +761,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut profiles = Vec::new();
     let mut remove_data = false;
     let mut retained_only = false;
+    let mut cancel_append = false;
     let mut environment_stdin = false;
     let mut automatic_dependency_slots = false;
     let mut report_started = false;
@@ -776,7 +785,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         if key == "--shared-source" {
             if shared_source
                 || live_source
-                || !["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+                || ![
+                    "run",
+                    "serve",
+                    "serve-restore",
+                    "extend",
+                    "restart",
+                    "restore",
+                ]
+                .contains(action)
             {
                 return Err(invalid());
             }
@@ -786,7 +803,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         if key == "--live-source" {
             if live_source
                 || shared_source
-                || !["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+                || ![
+                    "run",
+                    "serve",
+                    "serve-restore",
+                    "extend",
+                    "restart",
+                    "restore",
+                ]
+                .contains(action)
             {
                 return Err(invalid());
             }
@@ -808,7 +833,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             continue;
         }
         if key == "--environment-stdin" {
-            if environment_stdin || !["serve", "serve-restore"].contains(action) {
+            if environment_stdin || !["serve", "serve-restore", "extend"].contains(action) {
                 return Err(invalid());
             }
             environment_stdin = true;
@@ -842,6 +867,13 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             retained_only = true;
             continue;
         }
+        if key == "--cancel-append" {
+            if cancel_append || *action != "cleanup" {
+                return Err(invalid());
+            }
+            cancel_append = true;
+            continue;
+        }
         let value = *args.get(index).ok_or_else(invalid)?;
         index += 1;
         if key == "--release-initializer-cache" && ["run", "serve"].contains(action) {
@@ -855,7 +887,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             {
                 return Err(invalid());
             }
-        } else if key == "--route-slot" && ["serve", "serve-restore"].contains(action) {
+        } else if key == "--route-slot" && ["serve", "serve-restore", "extend"].contains(action) {
             routes::insert(&mut route_slots, value)?;
         } else if key == "--hostname" && *action == "publish-bridge" {
             if hostnames.len() >= 8 {
@@ -866,7 +898,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     .map_err(|_| invalid())?,
             );
         } else if key == "--ready"
-            && ["run", "serve", "serve-restore", "restart", "restore"].contains(action)
+            && [
+                "run",
+                "serve",
+                "serve-restore",
+                "extend",
+                "restart",
+                "restore",
+            ]
+            .contains(action)
         {
             let (service, condition) = value.split_once('=').ok_or_else(invalid)?;
             let condition = match condition {
@@ -884,6 +924,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 "serve",
                 "serve-restore",
                 "source-compatibility",
+                "extend",
                 "restart",
                 "restore",
             ]
@@ -909,8 +950,16 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 && key == "--expect-reservation")
             || (*action == "publish-bridge" && key == "--port")
             || (["serve", "serve-restore"].contains(action)
-                && ["--dependencies", "--expect-dependencies"].contains(&key))
-            || (*action == "serve-restore" && key == "--expect-generation")
+                && ["--dependencies", "--expect-dependencies", "--expect-boot"].contains(&key))
+            || (["serve-restore", "extend"].contains(action) && key == "--expect-generation")
+            || (*action == "extend"
+                && [
+                    "--combined-plan",
+                    "--combined-normalized-sha256",
+                    "--combined-normalized-file",
+                    "--cancel-wait-ms",
+                ]
+                .contains(&key))
             || (*action == "recover-cleanup" && key == "--expect-receipt")
             || (*action == "retire-recovered-publisher" && key == "--expect-owner")
             || key == "--run-id"
@@ -919,6 +968,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 "serve",
                 "serve-restore",
                 "source-compatibility",
+                "extend",
                 "restart",
                 "restore",
             ]
@@ -1135,6 +1185,15 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             }
         }
         "cleanup" => {
+            if cancel_append {
+                if remove_data || retained_only {
+                    return Err(invalid());
+                }
+                #[cfg(target_os = "macos")]
+                return graph::foreground::cancel_append_request(candidate, run);
+                #[cfg(not(target_os = "macos"))]
+                return Err(invalid());
+            }
             // Stopped-only data removal never reaches a live owner, so a graph
             // restored after the caller confirmed it stopped is never stopped by it.
             if retained_only && !remove_data {
@@ -1165,7 +1224,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             let values = BTreeMap::new();
             let options = graph::RunOptions {
                 routing_enrolled: !route_slots.is_empty(),
-                loopback_ports: ["serve", "serve-restore"].contains(action),
+                loopback_ports: ["serve", "serve-restore", "extend"].contains(action),
                 project: PlanOptions {
                     branch: singles.get("--branch").copied(),
                     project: Path::new(project),
@@ -1270,8 +1329,11 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                             .copied()
                             .ok_or_else(invalid)?,
                         &inputs,
-                        run,
-                        automatic_dependency_slots,
+                        relay::RunScope {
+                            id: run,
+                            automatic_slots: automatic_dependency_slots,
+                            expected_boot: singles.get("--expect-boot").copied(),
+                        },
                     )?;
                     runtime.report_started(report_started);
                     finish_owner_input(owner_input);

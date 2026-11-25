@@ -3164,6 +3164,26 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "detached-pool-watch",
+    module: "DetachedPoolWatch",
+    states: 53,
+    invariant: "NoStaleCleanup",
+    fields: ['phase = "Settled"', "grace = 1", "graph = 2", "stopped = 2"],
+    additionalControls: [
+      {
+        name: "unfenced-serve",
+        negative: true,
+        fields: [
+          'phase = "Settled"',
+          "selected = 2",
+          "grace = 2",
+          "graph = 3",
+          "stopped = 3",
+        ],
+      },
+    ],
+  },
+  {
     // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
     // doubtful reading, and a host-side bound on "starting". Slow, refusing and
     // hanging apps; `legacy` runs the steady cadence before the first success.

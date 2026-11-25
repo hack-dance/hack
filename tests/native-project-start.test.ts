@@ -73,6 +73,7 @@ import {
   nativeRuntimeFailure,
 } from "../src/backends/native-runtime-client.ts";
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
+import { watchNativeStartPool } from "../src/backends/native-start-pool-watch.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -3005,7 +3006,12 @@ const httpsSelection = {
 };
 async function httpsFixture() {
   const result = await fixture(false);
-  const { opts } = result;
+  configureHttpsFixture(result.opts);
+  return result;
+}
+function configureHttpsFixture(
+  opts: Awaited<ReturnType<typeof fixture>>["opts"]
+) {
   const prepare = opts.dependencies.prepare!;
   const review = opts.dependencies.review!;
   const probe = {
@@ -3055,7 +3061,6 @@ async function httpsFixture() {
           },
         }),
     });
-  return result;
 }
 test("HTTPS selection requires all explicit canonical fields before effects", async () => {
   expect(parseNativeHttpsSelection({})).toBeUndefined();
@@ -7429,8 +7434,14 @@ function ownerExitedRefusal() {
     message: "The run's foreground owner exited.",
   });
 }
-async function stoppedPoolUnderRunFixture(poolPhase: "stopped" | "running") {
+async function stoppedPoolUnderRunFixture(
+  poolPhase: "stopped" | "running",
+  routed = false
+) {
   const { opts, events } = await retainedFinalizationFixture();
+  if (routed) {
+    configureHttpsFixture(opts);
+  }
   const saved = await opts.dependencies.load!(opts.scope);
   await acknowledgeRetainedFrontend(opts.scope, saved!);
   let recovered = false;
@@ -7523,6 +7534,112 @@ test("up on a pool whose provider exited under a running record recovers it with
   expect(
     notices.filter((line) => line === NATIVE_EXITED_RUNTIME_NOTICE)
   ).toHaveLength(1);
+});
+
+test.each([
+  { routed: true },
+  { routed: false },
+])("detached recovery only retires after its own provider exits (routed: $routed)", async ({
+  routed,
+}) => {
+  const { start } = await stoppedPoolUnderRunFixture("stopped", routed);
+  const previousBoot = "12345678-1234-1234-1234-123456789abc";
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const token = "c".repeat(32);
+  const oldPid = 1234;
+  const newPid = 2345;
+  let pid = oldPid;
+  let newProviderGone = false;
+  let exits = 0;
+  let leases = 0;
+  let serveArgs: readonly string[] | undefined;
+  const ready = Promise.withResolvers<void>();
+  const stopped = Promise.withResolvers<void>();
+  const exit = Promise.withResolvers<void>();
+  start.dependencies.watchPool = (options) =>
+    watchNativeStartPool({
+      ...options,
+      checkMs: 5,
+      graceMs: () =>
+        typeof options.graceMs === "function" && options.graceMs() === 0
+          ? 0
+          : 100,
+      read: async () => ({
+        phase: "running",
+        token,
+        guest_boot_id: pid === oldPid ? previousBoot : boot,
+        process: { pid },
+      }),
+      gone: (candidate) => candidate === oldPid || newProviderGone,
+    });
+  const invoke = start.dependencies.invoke!;
+  start.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      pid = newPid;
+      return { phase: "running", process_alive: true, guest_boot_id: boot };
+    }
+    if (
+      request.args[0] === "runtime" &&
+      request.args[1] === "status" &&
+      pid === newPid
+    ) {
+      return { phase: "running", process_alive: true, guest_boot_id: boot };
+    }
+    return await invoke(request);
+  };
+  start.dependencies.https = async (selection) => {
+    expect(selection.pool.bootId).toBe(boot);
+    leases++;
+    return {
+      identity: leaseIdentity(selection),
+      caPath: "/synthetic/ca",
+      httpsPort: selection.httpsPort,
+      exited: new Promise(() => {}),
+      verifyHostname: async () => ({ statusCode: 200 }),
+      releaseAfterCleanup: async () => {},
+    };
+  };
+  const serve = start.dependencies.serve!;
+  start.dependencies.serve = async (request) => {
+    serveArgs = request.args;
+    return await serve({
+      ...request,
+      onReady: async () => {
+        await request.onReady();
+        ready.resolve();
+        await stopped.promise;
+      },
+    });
+  };
+  const attempt = startNativeProject({
+    ...start,
+    ...(routed ? { https: httpsSelection } : {}),
+    watchPool: true,
+    exitOnPoolEnd: () => {
+      exits++;
+      exit.resolve();
+    },
+    recoverStoppedPool: async () => {
+      // Let an eager watch observe the exited provider before the VM is replaced.
+      await Bun.sleep(25);
+      await start.recoverStoppedPool();
+    },
+  });
+  try {
+    await Promise.race([ready.promise, attempt]);
+    expect(leases).toBe(routed ? 1 : 0);
+    await Bun.sleep(150);
+    expect(exits).toBe(0);
+    const bootArg = serveArgs?.indexOf("--expect-boot") ?? -1;
+    expect(bootArg).toBeGreaterThanOrEqual(0);
+    expect(serveArgs?.[bootArg + 1]).toBe(boot);
+    newProviderGone = true;
+    await Promise.race([exit.promise, Bun.sleep(250)]);
+    expect(exits).toBe(1);
+  } finally {
+    stopped.resolve();
+    await attempt;
+  }
 });
 
 test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {

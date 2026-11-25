@@ -1,0 +1,33 @@
+---
+title: DetachedPoolWatch · recovery
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Selecting
+  Selecting --> Bound : Bind [runtime up]
+  Bound --> Serving : Serve [boot matches]
+  Bound --> Settled : Refuse [boot changed]
+  Bound --> Retiring : ExpireGrace [boot ended]
+  Serving --> Retiring : ExpireGrace [boot ended]
+  Serving --> Settled : Finish [user down]
+  Retiring --> Settled : OwnerCleanup
+  Settled --> [*]
+
+  note right of Selecting
+    Recover the old boot.
+    Bind after admission.
+  end note
+  note right of Retiring
+    INV NoStaleCleanup
+    Stop only the graph
+    of the watched boot.
+  end note
+
+  classDef live stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef ok stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class Selecting idle
+  class Bound,Retiring wait
+  class Serving live
+  class Settled ok

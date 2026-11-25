@@ -309,6 +309,16 @@ export function parseNativeHttpsSelection(
   validateHttpsSelection(selection);
   return selection;
 }
+function runningNativePoolBootId(pool: unknown): string | undefined {
+  return isRecord(pool) &&
+    pool.phase === "running" &&
+    pool.process_alive === true &&
+    typeof pool.guest_boot_id === "string" &&
+    BOOT_ID.test(pool.guest_boot_id)
+    ? pool.guest_boot_id
+    : undefined;
+}
+
 /** Bind shared ingress only after the native graph has an authoritative owner. */
 async function acquireReadyHttps(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -317,6 +327,7 @@ async function acquireReadyHttps(opts: {
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
   readonly acquire: typeof acquireNativeHttpsLease;
+  readonly expectedBoot?: string;
   /** The frontend lifetime's attempt, so the lease is recorded on that lifetime. */
   readonly attempt?: string;
   readonly onIntent: (identity: NativeHttpsLeaseIdentity) => Promise<void>;
@@ -328,14 +339,10 @@ async function acquireReadyHttps(opts: {
     timeoutMs: 5000,
     signal: opts.signal,
   });
+  const bootId = runningNativePoolBootId(pool);
   if (
-    !(
-      isRecord(pool) &&
-      pool.phase === "running" &&
-      pool.process_alive === true &&
-      typeof pool.guest_boot_id === "string" &&
-      BOOT_ID.test(pool.guest_boot_id)
-    )
+    !bootId ||
+    (opts.expectedBoot !== undefined && bootId !== opts.expectedBoot)
   ) {
     throw new ClosedCliError(
       "Native HTTPS requires a verified running pool incarnation."
@@ -345,7 +352,7 @@ async function acquireReadyHttps(opts: {
   return await opts.acquire({
     runtime: opts.runtime,
     ...opts.selection,
-    pool: { owner: opts.run.owner, bootId: pool.guest_boot_id },
+    pool: { owner: opts.run.owner, bootId },
     lease: {
       run: opts.run.run,
       attempt: opts.attempt ?? randomBytes(16).toString("hex"),
@@ -486,6 +493,7 @@ type Dependencies = {
   startupStatusIntervalMs: number;
   /** Whether the pool record proves the run's owner's boot ended (HACK-2572). */
   poolBootEnded: (home: string) => Promise<boolean>;
+  watchPool: typeof watchNativeStartPool;
   /** How long a start waits for such an owner to go (HACK-2572). */
   endedBootOwnerWaitMs: number;
 };
@@ -523,6 +531,7 @@ const DEFAULTS: Dependencies = {
   exitMonitorIntervalMs: 2000,
   startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
   poolBootEnded: nativePoolBootProvenEnded,
+  watchPool: watchNativeStartPool,
   endedBootOwnerWaitMs: NATIVE_ENDED_BOOT_OWNER_WAIT_MS,
 };
 /**
@@ -2840,7 +2849,8 @@ function emitNativeBranchDroppedNotice(
 
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
-  observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>
+  observeStartup: () => ReturnType<typeof beginNativeProjectStartupObservation>,
+  watchAdmittedBoot: ((bootId: string) => void) | undefined
 ): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -3227,6 +3237,12 @@ async function startNativeProjectAttempt(
     });
     emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
+    const expectedBoot = watchAdmittedBoot
+      ? runningNativePoolBootId(pool)
+      : undefined;
+    if (expectedBoot !== undefined) {
+      watchAdmittedBoot?.(expectedBoot);
+    }
     const resolveTiming = beginUpTiming("cli.graph.resolve");
     const resumed = await verifyNativeResumedRetainedGraph({
       runtime: opts.runtime,
@@ -3625,6 +3641,7 @@ async function startNativeProjectAttempt(
                 signal: controller.signal,
                 invoke: deps.invoke,
                 acquire: deps.https,
+                expectedBoot,
                 attempt: finalization?.token.attempt,
                 onIntent: async (identity) => {
                   finalization = await deps.finalization({
@@ -3744,6 +3761,9 @@ async function startNativeProjectAttempt(
               args: [
                 ...review.projectArgs,
                 ...runSelection.flags,
+                ...(expectedBoot === undefined
+                  ? []
+                  : ["--expect-boot", expectedBoot]),
                 "--expect-plan",
                 review.planId,
                 ...nativeSharedSourceFlags(review.report.plan),
@@ -4130,22 +4150,29 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
+  let settled = false;
+  let stopPoolWatch: (() => void) | undefined;
   // Ready and not stopping: the start has nothing left to finish on its own.
   let serving = false;
   // A detached start whose pool boot has ended releases its marker and exits,
   // as a crash would, so the next up or down --recover need not wait for it
   // (HACK-2550). A ready one exits at once, a start still in progress after the
   // grace. A foreground start stays with the user's terminal.
-  const stopPoolWatch =
+  const watchAdmittedBoot =
     (opts.watchPool ?? isNativeDetachedOwnerProcess())
-      ? watchNativeStartPool({
-          home: opts.runtime.home,
-          graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
-          onEnded: async () => {
-            await finish?.();
-            (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
-          },
-        })
+      ? (bootId: string) => {
+          stopPoolWatch = (opts.dependencies?.watchPool ?? DEFAULTS.watchPool)({
+            home: opts.runtime.home,
+            bootId,
+            graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
+            onEnded: async () => {
+              await finish?.();
+              if (!settled) {
+                (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
+              }
+            },
+          });
+        }
       : undefined;
   try {
     return await startNativeProjectAttempt(
@@ -4168,11 +4195,13 @@ export async function startNativeProject(
         );
         finish = observation;
         return observation;
-      }
+      },
+      watchAdmittedBoot
     );
   } catch (error) {
     throw withStartupLockBlocker(error);
   } finally {
+    settled = true;
     stopPoolWatch?.();
     await finish?.();
   }

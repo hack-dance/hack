@@ -302,7 +302,10 @@ pub(super) fn handle(
         reap?;
     }
     let started = result?;
-    Ok(
-        json!({"ok":true,"run":run,"phase":started.receipt.phase,"receipt":started.receipt,"started":started.services,"changed":started.changed}),
-    )
+    let mut reply = json!({"ok":true,"run":run,"phase":started.receipt.phase,"receipt":started.receipt,"started":started.services,"changed":started.changed});
+    // Additive: only a fallback adds the field, so earlier CLIs see the same reply.
+    if let Some(review) = started.combined_review.reply_field() {
+        reply["combined_review"] = json!(review);
+    }
+    Ok(reply)
 }

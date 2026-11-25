@@ -1267,6 +1267,16 @@ function removalRequiresStop(): Error {
   );
 }
 
+/**
+ * The append committed between the confirmation and the guarded stop, so the
+ * project is running with the added services. Nothing was stopped or removed.
+ */
+function removalAppendFinished(): Error {
+  return new ClosedCliError(
+    "The service add finished before the stop reached it, so the project is running with the added services. Nothing was removed. Run `hack down`, then `hack down --remove-data`."
+  );
+}
+
 type RemovalStart = "retained" | "resume" | "removed";
 
 function sameRun(receipt: Record<string, unknown>, run: NativeProjectRun) {
@@ -1351,7 +1361,7 @@ async function stopAppendingNativeGraph(opts: {
       error instanceof NativeRuntimeRequestError &&
       error.nativeCauseCode === "graph_append_not_active"
     ) {
-      throw removalRequiresStop();
+      throw removalAppendFinished();
     }
     throw removalRefused(error);
   }

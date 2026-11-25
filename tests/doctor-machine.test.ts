@@ -35,7 +35,7 @@ async function fixture() {
   ]) {
     await Bun.write(
       join(tools, name),
-      `#!${process.execPath}\nconst args=process.argv.slice(2);\nawait Bun.write(${JSON.stringify(calls)}, (await Bun.file(${JSON.stringify(calls)}).text().catch(()=>""))+${JSON.stringify(name)}+" "+args.join(" ")+"\\n");\nconst allowed=${JSON.stringify(name)} === "docker" && (["info","ps","inspect","version"].includes(args[0]) || args[0] === "network" && args[1] === "inspect");\nconst readOnlyService=${JSON.stringify(name)} === "systemctl" && args.join(" ") === "is-active systemd-resolved";\nconst readOnlyStatus=${JSON.stringify(name)} === "native-runtime" && args.slice(2).join(" ") === "runtime status --json";\nif(!(allowed || readOnlyService || readOnlyStatus)) await Bun.write(${JSON.stringify(forbidden)},"unexpected-effect");\nprocess.exit(1);\n`
+      `#!${process.execPath}\nconst args=process.argv.slice(2);\nawait Bun.write(${JSON.stringify(calls)}, (await Bun.file(${JSON.stringify(calls)}).text().catch(()=>""))+${JSON.stringify(name)}+" "+args.join(" ")+"\\n");\nconst allowed=${JSON.stringify(name)} === "docker" && (["info","ps","inspect","version"].includes(args[0]) || args.slice(0, 2).join(" ") === "compose version" || args[0] === "network" && args[1] === "inspect");\nconst readOnlyService=${JSON.stringify(name)} === "systemctl" && args.join(" ") === "is-active systemd-resolved";\nconst readOnlyStatus=${JSON.stringify(name)} === "native-runtime" && args.slice(2).join(" ") === "runtime status --json";\nif(!(allowed || readOnlyService || readOnlyStatus)) await Bun.write(${JSON.stringify(forbidden)},"unexpected-effect");\nprocess.exit(1);\n`
     );
     await chmod(join(tools, name), 0o700);
   }
@@ -146,6 +146,21 @@ for (const native of [false, true]) {
           checks.find((check) => check.id === "docker daemon")?.status
         ).not.toBe("ok");
         expect(await Bun.file(f.calls).text()).toContain("docker info");
+        // The stub docker rejects `compose`: the check runs the plugin, not
+        // just a PATH lookup, and names it (HACK-2673).
+        expect(await Bun.file(f.calls).text()).toContain(
+          "docker compose version --short"
+        );
+        expect(
+          checks.find((check) => check.id === "docker compose")
+        ).toMatchObject({ status: "error" });
+        expect(
+          (
+            checks.find((check) => check.id === "docker compose") as
+              | { detail?: string }
+              | undefined
+          )?.detail
+        ).toContain("Docker Compose v2 plugin");
       }
       expect(await Bun.file(join(f.root, "state/projects.json")).exists()).toBe(
         false

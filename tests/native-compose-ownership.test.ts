@@ -63,6 +63,8 @@ type Fixture = {
     network?: Record<string, unknown>[];
   };
   mode?: string;
+  /** Real delay before every fake Docker reply: a slow, loaded host. */
+  probeDelayMs?: number;
 };
 let root: string;
 let path: string | undefined;
@@ -84,6 +86,7 @@ if (!["container","volume","network"].includes(kind) || !["ls","inspect"].includ
 }
 // Handshake markers appear atomically: a reader never observes a partial pid.
 const signal = (name, pid) => { writeFileSync(root + "/" + name + ".tmp", String(pid)); renameSync(root + "/" + name + ".tmp", root + "/" + name); };
+if (fixture.probeDelayMs) await Bun.sleep(fixture.probeDelayMs);
 if (fixture.mode === "hang") { signal("started", process.pid); await Bun.sleep(60_000); }
 if (fixture.mode === "descendant") {
  const child = Bun.spawn([process.execPath, "-e", 'await Bun.sleep(60_000)'], {stdout: "inherit", stderr: "inherit"});
@@ -930,6 +933,29 @@ test("restart observation keeps foreign and incomplete endpoint shapes fenced", 
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
 
+/** Virtual readiness budget; each probe's real timeout is capped by what remains. */
+const STARTUP_BUDGET_MS = 30_000;
+type StallingClock = ReturnType<typeof stallingClock>;
+/**
+ * A virtual wall clock that moves only when the wait backs off, and then by
+ * `stallMs` (by default a stall longer than {@link STARTUP_BUDGET_MS}). It starts far
+ * behind `Date.now()`, so a wait that ignored it would see every deadline as passed.
+ */
+function stallingClock(stallMs = STARTUP_BUDGET_MS * 2) {
+  let now = 1_000_000;
+  const backoffs: number[] = [];
+  return {
+    backoffs,
+    clock: {
+      now: () => now,
+      sleep: async (ms: number) => {
+        backoffs.push(ms);
+        now += stallMs;
+      },
+    },
+  };
+}
+
 /** HACK-1279: a restart race may keep startup unready only until the caller's readiness deadline. */
 test("startup wait bounds a missing running member by the readiness deadline", async () => {
   const backoff = owned();
@@ -940,37 +966,54 @@ test("startup wait bounds a missing running member by the readiness deadline", a
   }
   // Inspected `running`, then absent from the bridge: the restart backoff race.
   network.containers = {};
-  const wait = (deadline: number) =>
+  // HACK-2637: the readiness deadline is virtual, so host load cannot reorder it.
+  // Every fake Docker reply is slowed: one query takes longer in real time than the
+  // whole wall-clock budget this test once used. Each backoff stalls past the
+  // deadline, so every wait makes exactly the observations asserted below.
+  backoff.probeDelayMs = 50;
+  const wait = (
+    time: StallingClock,
+    deadline = time.clock.now() + STARTUP_BUDGET_MS
+  ) =>
     waitNativeComposeStartupOwned({
       ownership: options,
       restartingServices: ["web"],
       deadline,
       ready: () => true,
+      clock: time.clock,
     });
   // Permanently missing: unready until the deadline, then the settled check refuses.
   await prepare(backoff);
-  const missing = await wait(Date.now() + 250).catch((error: unknown) => error);
+  const missingTime = stallingClock();
+  const started = performance.now();
+  const missing = await wait(missingTime).catch((error: unknown) => error);
+  expect(performance.now() - started).toBeGreaterThan(250);
   expect(missing).toBeInstanceOf(NativeComposeOwnershipError);
   expect(nativeComposeOwnershipRefusal(missing)).toBe("topology");
   expect(nativeComposeTopologyPredicate(missing)).toBe(
     "live-endpoint-membership"
   );
+  expect(missingTime.backoffs).toEqual([500]);
   // The member rejoins: the next observation is owned and ready before the deadline.
+  // Here the backoff takes only its requested time.
   backoff.mode = "restart-member-transition";
   await prepare(backoff);
   const observed: unknown[] = [];
+  const rejoinTime = stallingClock(500);
   expect(
     (
       await waitNativeComposeStartupOwned({
         ownership: options,
         restartingServices: ["web"],
-        deadline: Date.now() + 30_000,
+        deadline: rejoinTime.clock.now() + STARTUP_BUDGET_MS,
         ready: () => true,
         observed: (state) => observed.push(state),
+        clock: rejoinTime.clock,
       })
     )?.containers[0]
   ).toMatchObject({ id: ID, state: "running" });
   expect(observed).toHaveLength(1);
+  expect(rejoinTime.backoffs).toEqual([500]);
   // A container inspected `restarting` past the deadline times out unready, as before.
   const restarting = owned();
   const restartingContainer = restarting.container?.[0];
@@ -980,13 +1023,18 @@ test("startup wait bounds a missing running member by the readiness deadline", a
   }
   restartingContainer.state = "restarting";
   restartingNetwork.containers = {};
+  restarting.probeDelayMs = backoff.probeDelayMs;
   await prepare(restarting);
-  expect(await wait(Date.now() + 250)).toBeNull();
+  const restartingTime = stallingClock();
+  expect(await wait(restartingTime)).toBeNull();
+  expect(restartingTime.backoffs).toEqual([500]);
   // A deadline that passes before the first observation reads nothing.
   await prepare(backoff);
   const before = await inspectCount();
-  expect(await wait(Date.now() - 1)).toBeNull();
+  const expiredTime = stallingClock();
+  expect(await wait(expiredTime, expiredTime.clock.now() - 1)).toBeNull();
   expect(await inspectCount()).toBe(before);
+  expect(expiredTime.backoffs).toEqual([]);
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
 test("owned resources yield only bounded readiness observations and exact read-only queries", async () => {

@@ -546,6 +546,10 @@ export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
     "historical upgrade must preserve keys and values on Linux and macOS",
   "tests/upgrade-installer.test.ts":
     "download recovery and installation publication must work on both hosts",
+  "tests/upgrade-apply.test.ts":
+    "apply resume and rollback after SIGKILL at every journal boundary must hold on Linux and macOS (HACK-2188)",
+  "tests/upgrade-snapshot.test.ts":
+    "rollback after SIGKILL at every restore boundary relies on rename and hard-link behavior on Linux and macOS (HACK-2188)",
   "tests/daemon-systemd.test.ts":
     "the systemd user service tests run only on Linux (linuxTest)",
   "tests/daemon-systemd-cli.test.ts":

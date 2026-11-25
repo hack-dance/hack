@@ -79,6 +79,7 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import { preflightComposePlugin } from "../lib/compose-engine-preflight.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import {
   resolveGlobalConfigPath,
@@ -154,6 +155,7 @@ import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import {
   isHackRenderedLoggingCompose,
+  proxyStartBindFailure,
   removeUnstartedProxyContainers,
   resolveManagedProxyBind,
   writeManagedProxyCompose,
@@ -1042,6 +1044,22 @@ async function ensureDockerRunning(opts?: {
 
   logger.success({ message: `${backend.name} is running` });
 }
+/**
+ * The Compose plugin check `hack global install` and `hack global up` run
+ * once the engine answers, before they write or start anything with Compose:
+ * without the plugin, `docker compose up` fails before it publishes a port,
+ * and the proxy failure would otherwise read like a port conflict
+ * (HACK-2673). Returns the coded refusal, or null to continue.
+ */
+async function globalComposePluginRefusal(): Promise<HackCliError | null> {
+  return await preflightComposePlugin({
+    deps: {
+      run: async (argv, timeoutMs) =>
+        await exec(argv, { stdin: "ignore", timeoutMs }),
+    },
+  });
+}
+
 async function waitForDocker(opts: {
   readonly timeoutMs: number;
   readonly intervalMs: number;
@@ -1352,6 +1370,11 @@ async function ensureGlobalDockerNetworks(opts: {
 }): Promise<boolean> {
   opts.spinner.start("Checking Docker…");
   await ensureDockerRunning();
+  const composeRefusal = await globalComposePluginRefusal();
+  if (composeRefusal !== null) {
+    opts.spinner.stop("Docker is running, but its Compose plugin is missing");
+    throw composeRefusal;
+  }
   opts.spinner.stop("Docker is running");
 
   opts.spinner.start("Ensuring shared networks…");
@@ -2313,7 +2336,9 @@ async function ensureHackdForGlobalUp(): Promise<void> {
 /**
  * After the proxy's `compose up` failed: a failed start can leave the proxy
  * created but never started, with no network endpoint, so remove it for the
- * next attempt to recreate (HACK-2328), then name the listeners on 80/443.
+ * next attempt to recreate (HACK-2328), then name the listeners on 80/443,
+ * or, when Docker's recorded start error names no port, say so (HACK-2673);
+ * see {@link proxyStartBindFailure}.
  */
 async function reportProxyStartFailure(opts: {
   readonly composeFile: string;
@@ -2327,6 +2352,9 @@ async function reportProxyStartFailure(opts: {
       bindAddress: readProxyBindFromCompose(
         (await readTextFile(opts.composeFile)) ?? ""
       ),
+      // Compose streamed its output to the terminal, so only the start
+      // errors Docker recorded on the proxy containers are read.
+      bindFailure: proxyStartBindFailure({ cleanup }),
     }),
   });
 }
@@ -2791,6 +2819,10 @@ async function runGlobalUpChange(opts: UpOptions): Promise<GlobalUpResult> {
   const logging = await upLoggingChoice({ opts, paths, login });
 
   await ensureDockerRunning({ login });
+  const composeRefusal = await globalComposePluginRefusal();
+  if (composeRefusal !== null) {
+    return { exit: 1, failedStage: "routing", error: composeRefusal };
+  }
   await assertGlobalLoginRoutingImages({
     composeFile: paths.caddyCompose,
     login,

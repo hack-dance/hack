@@ -234,6 +234,9 @@ Compose startup and final route verification each receive their own bounded
 budget. A nonzero hook exits with its status and prevents later hooks. A before
 failure prevents engine startup. An after failure leaves startup pending without
 reporting ready; an owned engine can be stopped with saved `down --recover`.
+Text output for `up` and `restart` prints that command with the selection the user
+typed. It skips authored down hooks (see below), so their cleanup does not run.
+Plain `down` finds no saved generation, and a new `up` refuses the pending one.
 Cancellation and timeout forward signals to the owned process group. Completion
 requires the group to be absent; a hook that leaves descendants is uncertain.
 

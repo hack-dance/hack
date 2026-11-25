@@ -235,7 +235,10 @@ test.each([
     },
   });
   if (committed) {
-    await expectClosedRefusal(removal, "requires a stopped project");
+    await expectClosedRefusal(
+      removal,
+      "The service add is no longer in progress (it finished or was rolled back), so the project is still running. Nothing was removed. Run `hack down`, then `hack down --remove-data`."
+    );
     expect(calls).toEqual(["observed", "confirmed", "guarded stop"]);
     expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
   } else {

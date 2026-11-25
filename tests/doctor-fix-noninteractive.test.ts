@@ -59,6 +59,14 @@ const noteCalls: string[] = [];
 let trackedGeneratedPaths: string[] = [];
 /** Exit code of the mocked `docker info`; 0 (reachable) unless a test sets it. */
 let dockerInfoExitCode = 0;
+/** A test's own `exec` answer, checked first; null falls through. */
+let execOverride:
+  | ((
+      cmd: readonly string[]
+    ) => { exitCode: number; stdout: string; stderr: string } | null)
+  | null = null;
+/** The `timeoutMs` each `docker compose version` run was given. */
+const composeVersionTimeouts: (number | undefined)[] = [];
 
 const dnsMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -95,10 +103,22 @@ const shellMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/lib/shell.ts",
   overrides: {
-    exec: async (cmd: readonly string[]) => {
+    exec: async (
+      cmd: readonly string[],
+      opts?: { readonly timeoutMs?: number }
+    ) => {
       execCalls.push([...cmd]);
+      const custom = execOverride?.(cmd) ?? null;
+      if (custom !== null) {
+        return custom;
+      }
       if (cmd[0] === "docker" && cmd[1] === "info") {
         return { exitCode: dockerInfoExitCode, stdout: "", stderr: "" };
+      }
+      // Doctor runs the Compose plugin, not just a PATH lookup (HACK-2673).
+      if (cmd[0] === "docker" && cmd[1] === "compose" && cmd[2] === "version") {
+        composeVersionTimeouts.push(opts?.timeoutMs);
+        return { exitCode: 0, stdout: "2.40.3\n", stderr: "" };
       }
       if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
         return { exitCode: 0, stdout: "[]", stderr: "" };
@@ -191,6 +211,8 @@ beforeEach(async () => {
   noteCalls.length = 0;
   trackedGeneratedPaths = [];
   dockerInfoExitCode = 0;
+  execOverride = null;
+  composeVersionTimeouts.length = 0;
 });
 
 afterEach(async () => {
@@ -318,6 +340,71 @@ test("doctor --fix never calls the raw clack confirm prompt under HACK_NO_INTERA
   // proves every prompt site in the --fix path routed through confirmSafe's
   // non-interactive branch instead of the raw clack prompt.
   expect(code).toBe(0);
+}, 30_000);
+
+/** Fails the proxy's `docker compose -f <caddy> up` with this stderr. */
+function failCaddyComposeUp(stderr: string): void {
+  execOverride = (cmd) =>
+    cmd[0] === "docker" &&
+    cmd[1] === "compose" &&
+    cmd[2] === "-f" &&
+    cmd.includes("up")
+      ? { exitCode: 1, stdout: "", stderr }
+      : null;
+}
+
+async function runDoctorFix(projectRoot: string): Promise<number> {
+  const { runCli } = await import("../src/cli/run.ts");
+  return await runCli([
+    "doctor",
+    "--fix",
+    "--no-interactive",
+    "--path",
+    projectRoot,
+  ]);
+}
+
+test("doctor --fix keeps the port hint when Compose reports a port Docker could not publish (HACK-2673)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  failCaddyComposeUp(
+    "Error response from daemon: driver failed programming external connectivity on endpoint hack-dev-proxy-caddy-1: Bind for 0.0.0.0:443 failed: port is already allocated\n"
+  );
+
+  await runDoctorFix(projectRoot);
+
+  const notes = noteCalls.join("\n");
+  expect(notes).toContain("port is already allocated");
+  expect(notes).toContain("could not start on ports 80 and 443");
+  expect(notes).toContain("proxy.bind_address");
+  expect(notes).not.toContain("did not report a problem with ports");
+}, 30_000);
+
+test("doctor --fix does not blame ports 80/443 when Compose's error names no port (HACK-2673)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  failCaddyComposeUp(
+    "Error response from daemon: pull access denied for caddy, repository does not exist or may require 'docker login'\n"
+  );
+
+  await runDoctorFix(projectRoot);
+
+  const notes = noteCalls.join("\n");
+  expect(notes).toContain("pull access denied");
+  expect(notes).toContain("did not report a problem with ports 80 or 443");
+  expect(notes).not.toContain("could not start on ports");
+}, 30_000);
+
+test("doctor runs docker compose version within its check deadline (HACK-2673)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+
+  await runDoctorFix(projectRoot);
+
+  // The check's own deadline is 10s: the run inside it must end first, so
+  // a hung plugin reports the coded hung-command result.
+  expect(composeVersionTimeouts.length).toBeGreaterThan(0);
+  for (const timeoutMs of composeVersionTimeouts) {
+    expect(timeoutMs).toBeDefined();
+    expect(timeoutMs ?? Number.POSITIVE_INFINITY).toBeLessThan(10_000);
+  }
 }, 30_000);
 
 test("doctor --fix creates a missing .hack/.gitignore and keeps user lines on a repair (HACK-1278)", async () => {

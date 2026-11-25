@@ -339,7 +339,7 @@ const contracts: readonly ModelContract[] = [
     // interrupted after moving the step's output aside.
     name: "upgrade-restore",
     module: "Restore",
-    states: 104,
+    states: 613,
     invariant: "InterruptedRestoreResumes",
     fields: [
       'target = "none"',
@@ -347,6 +347,23 @@ const contracts: readonly ModelContract[] = [
       'outcome = "conflict"',
       'phase = "idle"',
       "force = FALSE",
+    ],
+    additionalControls: [
+      {
+        // Review of HACK-2188: when a completed restore keeps the step
+        // output keyed, a plain rerun after the user deletes the restored
+        // file adopts it and recreates the path without overwrite.
+        name: "kept-keys",
+        negative: true,
+        invariant: "DeletionKept",
+        fields: [
+          "emptied = TRUE",
+          'outcome = "restored"',
+          "force = FALSE",
+          'aside = <<"S">>',
+          "consumed = 0",
+        ],
+      },
     ],
   },
   {

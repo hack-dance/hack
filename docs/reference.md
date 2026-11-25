@@ -14,7 +14,7 @@
 - [Version identity](./reference/version.md) — `hack version --json` describes the running CLI without starting services
 - [Read-only update check](./reference/update-check.md) — `hack update --check --json --observe`: newer release, install kind and upgrade command, for any install
 - [Machine-readable output](./reference/machine-readable-output.md) — envelope rule, schema identifiers and the complete JSON command inventory
-- [Data backup](./reference/data-backup.md) — `hack data export`: verified tar backups of a stopped project's owned Compose volumes, the manifest format and what it skips
+- [Data backup](./reference/data-backup.md) — `hack data export` and `import`: verified tar backups of a stopped project's owned Compose volumes, the manifest format, and a restore that never overwrites data
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
 - [Admin plans](./reference/global-admin-plan.md) — `hack global install|trust --plan --json`: the ordered root and user steps and exact root argv, without running anything

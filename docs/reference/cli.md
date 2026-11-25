@@ -1293,7 +1293,7 @@ Qualifies a strict static legacy subset with exact existing data volumes. --dry-
 
 ## `hack data`
 
-Back up project volume data
+Back up and restore project volume data
 
 ### Usage
 
@@ -1306,6 +1306,7 @@ hack data <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack data export` | Back up the project's Compose named volumes to verified tar files |
+| `hack data import <backupDir>` | Restore a hack data export backup into the project's Compose volumes |
 | `hack data cleanup` | Remove a helper container a data command could not track |
 
 ### Options
@@ -1326,7 +1327,7 @@ Back up the project's Compose named volumes to verified tar files
 hack data export [options]
 ```
 
-Copies each declared, non-external named volume that Docker labels as this project's into <backup>/<key>.tar, with a manifest of sizes and digests. The project must be stopped; Hack never stops it for you. External and foreign volumes are skipped and reported. Compose backend only. Restore is not available yet.
+Copies each declared, non-external named volume that Docker labels as this project's into <backup>/<key>.tar, with a manifest of sizes and digests. The project must be stopped; Hack never stops it for you. External and foreign volumes are skipped and reported. Compose backend only. Restore with hack data import.
 
 ### Options
 
@@ -1337,6 +1338,38 @@ Copies each declared, non-external named volume that Docker labels as this proje
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--out <dir>` | Parent directory for the backup (default: $HACK_HOME/data-backups/<hack project>[--<branch>]) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack data import <backupDir>`
+
+Restore a hack data export backup into the project's Compose volumes
+
+### Usage
+
+```bash
+hack data import <backupDir> [options]
+```
+
+Verifies the backup (manifest, tar sizes and sha256), then restores each backed-up volume that is still declared here into its Docker volume and checks the restored tree against the recorded digest. Never overwrites data: a target that holds data or belongs to something else refuses. An absent target is created with Compose's labels. The project must be stopped. A rerun after an interruption replaces only this import's own partial copy. Compose backend only.
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `backupDir` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--from-project <hack project>` | Restore a backup taken from another instance or project (a branch instance or a renamed project): the backup's Hack project name |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

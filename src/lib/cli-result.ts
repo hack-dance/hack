@@ -53,6 +53,10 @@ export const HACK_ERROR_CODES = [
   "E_DOWN_INCOMPLETE",
   // A command that needs the project stopped found its containers running.
   "E_PROJECT_RUNNING",
+  // `hack data import`: the backup directory is not a complete, intact export.
+  "E_BACKUP_INVALID",
+  // `hack data import`: a target volume holds data or belongs to something else.
+  "E_DATA_TARGET_CONFLICT",
   "E_RECOVERY_REQUIRED",
   "E_PLAN_REFUSED",
   "E_PLAN_INCOMPLETE",

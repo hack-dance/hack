@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   renderDataExportText,
-  requireComposeBackendForDataExport,
+  requireComposeBackendForData,
 } from "../src/commands/data.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { cleanupRecordedRun } from "../src/lib/data-backup-cleanup.ts";
@@ -144,13 +144,15 @@ describe("planDeclaredVolumes", () => {
       model({
         web: {},
         db: { name: "custom" },
+        nfs: { driver: "local", driver_opts: { type: "nfs" } },
         shared: { external: true, name: "shared-net-data" },
       })
     );
     expect(plan.composeProject).toBe(PROJECT);
     expect(plan.declared).toEqual([
-      { key: "db", name: "custom" },
-      { key: "web", name: "shop_web" },
+      { key: "db", name: "custom", driver: "local", driverOpts: false },
+      { key: "nfs", name: "shop_nfs", driver: "local", driverOpts: true },
+      { key: "web", name: "shop_web", driver: "local", driverOpts: false },
     ]);
     expect(plan.external).toEqual([{ key: "shared", reason: "external" }]);
   });
@@ -1124,11 +1126,19 @@ test("backup timestamps are UTC, second resolution and file-name safe", () => {
 });
 
 test("the native backend is refused; compose and unset are accepted", () => {
-  expect(() => requireComposeBackendForDataExport("native")).toThrow(
-    expect.objectContaining({ code: "E_NATIVE_PROJECT_UNSUPPORTED" })
-  );
-  expect(() => requireComposeBackendForDataExport("compose")).not.toThrow();
-  expect(() => requireComposeBackendForDataExport(undefined)).not.toThrow();
+  for (const command of ["export", "import"] as const) {
+    expect(() =>
+      requireComposeBackendForData({ command, backend: "native" })
+    ).toThrow(
+      expect.objectContaining({ code: "E_NATIVE_PROJECT_UNSUPPORTED" })
+    );
+    expect(() =>
+      requireComposeBackendForData({ command, backend: "compose" })
+    ).not.toThrow();
+    expect(() =>
+      requireComposeBackendForData({ command, backend: undefined })
+    ).not.toThrow();
+  }
 });
 
 /**

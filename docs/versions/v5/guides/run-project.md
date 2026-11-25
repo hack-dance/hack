@@ -51,15 +51,19 @@ Use ordinary shutdown after review. Inspect reported failures rather than issuin
 broad cleanup commands. `hack projects prune --project <name>` scopes stale
 registry and container cleanup to one project family.
 
-## Back up volume data
+## Back up and restore volume data
 
 After `hack down`, `hack data export` copies the project's own Compose named
 volumes into verified tar files under `~/.hack/data-backups/` (or `--out <dir>`).
-It refuses while the project runs and skips external and foreign volumes. It
-works on Compose only and cannot restore yet. If a refusal reports a helper
-container it could not track, run the `hack data cleanup --nonce …` command it
-prints: it reads the run's cleanup record under `~/.hack/data-cleanup/` and
-removes the container only on the same engine the export used; see
+It refuses while the project runs and skips external and foreign volumes.
+`hack data import <backup>` restores one into the project's volumes after
+checking every tar, and verifies the restored files. It never overwrites a
+volume that holds data. Use `--from-project <name>` to restore a backup taken
+from another Compose project, such as a branch instance. If a refusal reports a
+helper container it could not track, run the `hack data cleanup --nonce …`
+command it prints: it reads the run's cleanup record under
+`~/.hack/data-cleanup/` and removes the container only on the same engine the
+export or import used. These commands work on Compose only; see
 [Data backup](https://github.com/hack-dance/hack/blob/next/docs/reference/data-backup.md).
 
 ## Native backend

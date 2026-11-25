@@ -1,15 +1,16 @@
-# Data backup (`hack data export`)
+# Data backup (`hack data export`, `hack data import`)
 
 `hack data export` writes a verified, file-level backup of a project's Compose
-named volumes. It is the first step of moving data between the Compose and
-native backends. It does not move or restore data yet: a later
-`hack data import` will restore these backups, so the format below is fixed
-for that.
+named volumes, and `hack data import` restores one into Compose volumes. They
+are the first steps of moving data between the Compose and native backends;
+both work on Compose only for now.
 
 ```sh
 hack down                      # the project must be stopped
 hack data export               # default location under Hack's home
 hack data export --out ~/backups --json
+hack data import ~/.hack/data-backups/shop/20261123T140501Z
+hack data import <backup> --from-project shop   # into a branch or renamed project
 ```
 
 `--path`, `--project`, `--branch` and `--env` select the project, instance
@@ -510,3 +511,156 @@ names in one second. The claim is the creation of `<name>.partial` itself,
 so two exports at once never share a name, and an existing backup or
 `.partial` is never reused or replaced. With an explicit `--out <dir>`, a
 collision still refuses with `E_PATH_CONFLICT` instead of writing into it.
+
+## Restore (`hack data import`)
+
+`hack data import <backup-dir> [--from-project <name>] [--json]` takes the
+same `--path`, `--project`, `--branch` and `--env` selection, the same Compose
+model as `hack up`, the same managed env and the same deadlines as export,
+the same refusal without `--env` when the selection is no longer recorded and
+the project has overlays, the same redaction of quoted engine lines, and
+refuses the native backend the same way. It never overwrites, deletes or
+relabels data it does not own. Its container creates (the write hold, the
+start and end markers, the target references and the helpers) follow the
+same timed-out-create rule as export (see Deadlines): one not found by its
+nonce and removed stays unknown, and its cleanup record stays until
+`hack data cleanup` finds and removes it.
+
+Before any write it checks, in order:
+
+1. **The backup.** A `.partial` directory, a directory without
+   `manifest.json`, a manifest that is not `hack.data-backup.v1`, or a tar
+   that is missing, is not a regular file, or differs in size or sha256 from
+   the manifest refuses with `E_BACKUP_INVALID`. The backup id is the sha256
+   of `manifest.json`.
+2. **The source project and names.** The backup's `composeProjectSha256`
+   must equal the sha256 of this instance's resolved Compose project name,
+   and each target's Docker name must hash to the backup's `nameSha256`. To
+   restore into a branch instance, a renamed project or under a changed
+   volume name, pass `--from-project <hack project>`: the backup's Hack
+   project name (its manifest `project`), compared as given; a missing or
+   different value refuses with `E_USAGE`. Messages name Hack projects and
+   branches only.
+3. **One import at a time.** The import holds
+   `$HACK_HOME/data-imports/<hack project>[--<branch>]/.lock` for its whole
+   run (Hack's names, never the resolved Compose project). A
+   second import of the same project refuses with `E_LOCKED` after a
+   one-second bound instead of waiting; a lock left by a process that no
+   longer exists is reclaimed.
+4. **Running containers and writers.** As for export: the live event
+   subscription is proven before the first running-container check, and
+   `E_PROJECT_RUNNING` refuses when a container of the instance, or any
+   container mounting a target, runs, or when any container mounts a target
+   during the import (this run's helpers hold targets by bind, which emits
+   no volume `mount` event). As for export, every container that starts in
+   the window and is not one this import created is inspected by ID: a
+   volume mount of a target or a bind of a target's `Mountpoint` (including
+   one the import just created), a path inside it or a directory above it
+   refuses, and a start that cannot be inspected refuses with
+   `detail.reason: unchecked_start` (retry if it was unrelated). Containers
+   are tracked and removed by ID and reported by short ID only. Each
+   refusal leaves the journal unfinished. Both running checks also inspect
+   every running container for a bind of an existing target's
+   `Mountpoint` (a target that does not exist yet is matched by name).
+   As for export, Hack cannot pin a target against removal, so it rechecks
+   each target's identity after every read-only hold (a mismatch refuses
+   as `changed`, before any write), after its restore and digest, and for
+   every target immediately before any journal is marked complete (a
+   mismatch refuses with `volume_changed` and leaves the journal
+   unfinished). Import never creates a volume except an absent target.
+   Volume `destroy` and `create` events of a target's name during the
+   window refuse the same way, whatever the timestamps say; a `create` is
+   import's own only when import's own `docker volume create` of exactly
+   that name succeeded in the window (one event per create). Foreign volume
+   mounts, bind sources and alias devices are judged by their backing
+   storage, proven on the daemon, as for export. Import also holds a Docker
+   reference (a created, never started container) to every existing target
+   from the first running check, and to each target it creates right after
+   creating it, until the window's checks are done, so `docker volume rm` of
+   a target is refused while it is restored. An existing target removed
+   before its reference is refused at the reference (Docker is not allowed
+   to recreate it) as `changed`, and no volume is left behind; journals are marked complete only after every
+   reference is removed.
+5. **Targets.** A backed-up key that is no longer declared here, or is
+   `external` here, is skipped and reported. For each other key the target is
+   its Docker volume (`name:` or `<compose project>_<key>`):
+
+| Target | Result |
+| --- | --- |
+| Absent | Created with `docker volume create` and Compose's labels (`com.docker.compose.project`, `com.docker.compose.volume`, `com.docker.compose.version` from `docker compose version --short`) plus `io.hack.data-backup.source=<backup id>` |
+| Exists, labeled for this project and key, empty | Used as it is (emptiness is checked in a read-only held helper) |
+| Exists, labeled for this project and key, with data | Refused (`not_empty`), unless it is this import's own interrupted copy (below) |
+| Labels name another project or key, or none | Refused (`foreign`); never mounted or changed |
+| Declared with a driver other than `local` or with `driver_opts`, or existing with such a driver or options | Refused (`unsupported_driver`): import restores into plain local volumes only for now, so data never lands in an unintended backing store such as an NFS mount |
+
+Any refusal names every conflicting volume, by key, in one
+`E_DATA_TARGET_CONFLICT` (`error.detail.conflicts`) and writes nothing. Move
+the volume aside, or back it up with `hack data export`, then rerun. Compose
+accepts a volume created by import as its own: it carries the same labels
+Compose writes, and Compose does not require its config-hash label.
+
+Then, per target, through one held helper container as export uses (unique
+`hack-data-import-<random>` name, `--log-driver none`, `--network none`,
+read-only root, `no-new-privileges`, and the target's `Mountpoint`
+bind-mounted read-write at `/v`; an existing target is never mounted by
+name, and only an absent one is created, explicitly, with `docker volume
+create`):
+
+1. An absent target is created. Because `docker volume create` returns an
+   existing volume of that name unchanged, Hack inspects the result and
+   requires this backup's source label, the expected Compose labels and a
+   plain local driver without options.
+2. The helper is created holding the volume, and the volume must still be
+   the one validated or just created (same `CreatedAt`, driver, mountpoint,
+   options and labels) and, unless it is our own interrupted copy, empty.
+   Anything else refuses as `changed` before anything is written.
+3. The journal records `started`; our own interrupted copy is cleared
+   (`find /v -mindepth 1 -delete`); the tar is streamed in through `docker
+   exec` running `tar --numeric-owner -xpf - -C /v`; and the helper computes
+   the same `hack.tree-digest.v1` digest as export.
+4. A digest or entry count that differs from the manifest marks the journal
+   `failed`, leaves the volume as it is and exits 1 (`E_UNEXPECTED`); a step
+   past its deadline refuses with `E_DOCKER_UNAVAILABLE` (`step_timeout`).
+   The helper is removed and its removal confirmed on every path, as for
+   export.
+
+After all targets, the import checks running containers again and closes
+the event fence, as export does; only then are the journals marked
+`complete`.
+
+### Interruption and recovery
+
+The journal is `$HACK_HOME/data-imports/<hack project>[--<branch>]/<key>.json`
+(`hack.data-import-journal.v1`: backup id, backup path, key, the sha256 of
+the target's Docker name, state `started`, `complete` or `failed`), written
+atomically. On a rerun, a non-empty target is treated as this import's own
+partial copy only when all of these hold: its `io.hack.data-backup.source`
+label is the same backup id, the journal names the same backup and target,
+and the journal is not `complete`. That copy is cleared inside the helper and
+restored again.
+
+A target whose journal is `complete` for the same backup and target name was
+restored by an earlier run (this is checked before the emptiness check, so a
+target the user emptied since refuses as `modified` instead of being
+restored over, and a volume that is empty in the backup verifies instead of
+being rewritten), for example one stopped before its other targets
+finished. It is re-verified in a read-only held helper: when its tree digest
+and entry count equal the manifest's it is reported as `verified-complete`
+(`outcome: verified`) and not written, and the import goes on with the other
+targets; when they differ, it changed since and refuses (`modified`). If every
+target already matches, the import exits 0 with "Nothing to restore: all
+volumes already match this backup". Any other non-empty volume, including one
+with a complete journal of a different backup, is refused as above
+(`not_empty`).
+
+An existing empty volume that the import filled has no source label (Docker
+labels cannot be added later), so if that import is interrupted a rerun
+refuses it; the message says to remove that volume after checking it.
+
+`--json` prints the standard envelope with `data.schema` `hack.data-import.v1`:
+`backup`, `backupId`, `sourceProject`, `sourceBranch`, `project`, `branch`
+(Hack names), `volumes[]`
+(`key`, `target` `created`, `empty`, `replaced-partial` or
+`verified-complete`, `outcome` `restored` or `verified`, `entries`,
+`excludedSockets`, `contentDigest`) and `skipped[]` (`key`, `reason`
+`undeclared` or `external`). Docker volume names appear in neither.

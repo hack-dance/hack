@@ -169,6 +169,16 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The command needs the project stopped, and some of its containers (or containers using its volumes) are running; nothing was changed. `error.detail.running` names them. Hack never stops them for you.",
     readFirst: "`hack ps --json`",
   },
+  E_BACKUP_INVALID: {
+    meaning:
+      "The directory given to `hack data import` is not a complete, intact `hack data export` backup: an interrupted `.partial` directory, no or an unreadable manifest, or a tar missing or not matching its recorded size and sha256. Nothing was changed.",
+    readFirst: "`ls -l <backup dir from the message>`",
+  },
+  E_DATA_TARGET_CONFLICT: {
+    meaning:
+      "A volume `hack data import` would restore into already holds data, its labels name another project or key, it is not a plain local volume, or it was replaced while the import created it; Hack never overwrites or touches it, and nothing was written to it. `error.detail.conflicts` names each volume and why.",
+    readFirst: "`docker volume inspect <volume from the message>`",
+  },
   E_RECOVERY_REQUIRED: {
     meaning:
       "The last native run of this instance has no confirmed shutdown (its owner exited before finishing it, or another start replaced it), so `up` started nothing. `hack down --recover` finishes that cleanup with data kept, starting the native runtime if it needs to.",

@@ -20,7 +20,36 @@ const VOLUME_FORMAT =
 const NO_SUCH_VOLUME = /no such volume/i;
 
 /** A declared, non-external volume of the resolved model, not yet inspected. */
-export type DeclaredVolume = { readonly key: string; readonly name: string };
+export type DeclaredVolume = {
+  readonly key: string;
+  readonly name: string;
+  /** The declared driver; `local` when the model names none. */
+  readonly driver: string;
+  /** Whether the model declares `driver_opts` (for example an NFS mount). */
+  readonly driverOpts: boolean;
+};
+
+/** Whether a declared or inspected volume is a plain `local` volume. */
+export function plainLocalVolume(opts: {
+  readonly driver: string;
+  readonly driverOpts: boolean;
+}): boolean {
+  return opts.driver === "local" && !opts.driverOpts;
+}
+
+function hasEntries(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
+function declaredDriver(definition: Record<string, unknown>): {
+  readonly driver: string;
+  readonly driverOpts: boolean;
+} {
+  return {
+    driver: typeof definition.driver === "string" ? definition.driver : "local",
+    driverOpts: hasEntries(definition.driver_opts),
+  };
+}
 
 /** A declared volume whose Docker labels prove this Compose project owns it. */
 export type OwnedVolume = DeclaredVolume & {
@@ -87,7 +116,7 @@ export function planDeclaredVolumes(model: unknown): DeclaredVolumePlan {
     if (name === null) {
       return invalidModel("a volume name is not a plain name");
     }
-    declared.push({ key, name });
+    declared.push({ key, name, ...declaredDriver(definition) });
   }
   return { composeProject, declared, external };
 }
@@ -185,6 +214,8 @@ export type InspectedVolume = {
   readonly mountpoint: string;
   /** Driver options, canonical JSON (`null` when none). */
   readonly options: string;
+  /** Whether the volume was created with driver options. */
+  readonly driverOpts: boolean;
   readonly labels: Readonly<Record<string, unknown>>;
 };
 
@@ -233,6 +264,7 @@ export async function inspectVolume(opts: {
     driver: value.driver,
     mountpoint: value.mountpoint,
     options: canonicalJson(value.options ?? null),
+    driverOpts: hasEntries(value.options),
     labels: isRecord(value.labels) ? value.labels : {},
   };
 }
@@ -274,10 +306,15 @@ export async function requireUnchangedVolume(opts: {
   readonly when: string;
   /** What the refusal leaves behind, as a sentence. */
   readonly consequence: string;
+  /** The caller's own refusal instead of the default `volume_changed`. */
+  readonly refusal?: () => HackCliError;
 }): Promise<void> {
   const now = await inspectVolume({ docker: opts.docker, name: opts.name });
   if (now !== null && sameVolumeIdentity(opts.identity, now)) {
     return;
+  }
+  if (opts.refusal) {
+    throw opts.refusal();
   }
   throw new HackCliError({
     code: "E_PROJECT_RUNNING",
@@ -442,7 +479,11 @@ export async function runningContainers(opts: {
   return [...found].sort();
 }
 
-/** A volume a data command protects: its Docker name and inspected Mountpoint. */
+/**
+ * A volume a data command protects: its Docker name and inspected
+ * Mountpoint. An empty Mountpoint is a target that does not exist yet: it is
+ * matched by name only.
+ */
 export type WatchedVolume = {
   readonly name: string;
   readonly mountpoint: string;
@@ -481,7 +522,11 @@ export function mountsReachingVolumes(opts: {
         reached.add(volume.name);
         continue;
       }
-      if (typeof mount.Source !== "string" || mount.Source === "") {
+      if (
+        volume.mountpoint === "" ||
+        typeof mount.Source !== "string" ||
+        mount.Source === ""
+      ) {
         continue;
       }
       const source = normalizedDaemonPath(mount.Source);

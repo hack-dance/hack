@@ -250,6 +250,10 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
     kind: "envelope",
     argv: ["data", "export", "-p", "DIR", "--json"],
   },
+  "data import": {
+    kind: "envelope",
+    argv: ["data", "import", "DIR", "-p", "DIR", "--json"],
+  },
   "data cleanup": {
     kind: "envelope",
     argv: [

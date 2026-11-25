@@ -132,6 +132,9 @@ fn extend_run_commits_combined_provenance_with_cleared_intent() {
         Some(share),
     )
     .unwrap();
+    let approved_share = owner.project_share.as_ref().unwrap();
+    let guest_mount = approved_share.guest_path.clone();
+    let guest_source = approved_share.bind_path("src").unwrap();
     let _alias = ProviderAlias {
         link: owner.short_home.clone(),
         target: candidate.state_root.join("run/smolvm/home"),
@@ -172,15 +175,19 @@ fn extend_run_commits_combined_provenance_with_cleared_intent() {
             Rc::clone(&web_inspection),
             redis_id.clone(),
         ),
-        |script, args, input| {
+        move |script, args, input| {
             assert!(input.is_none());
             assert_eq!(args.len(), 1);
             if script.contains("startup-absent-v1") {
                 assert!(args[0].starts_with("/storage/hack-graph-startup/"));
                 "startup-absent-v1\n".into()
             } else {
-                assert!(script.contains("realpath") || script.contains("virtiofs"));
-                assert!(args[0].starts_with("/mnt/hack-projects/"));
+                if script.contains("realpath") {
+                    assert_eq!(args[0], guest_source);
+                } else {
+                    assert!(script.contains("virtiofs"));
+                    assert_eq!(args[0], guest_mount);
+                }
                 String::new()
             }
         },

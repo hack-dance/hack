@@ -137,8 +137,9 @@ A retry can start and publish those services again. If the owner cannot confirm
 rollback, `hack ps` reports a degraded run and shows the service states it can
 verify. Restart supervision continues for services outside the failed start.
 Ctrl-C asks the owner to cancel the append. `up` prints the number of services it
-may need to roll back and waits up to the largest selected stop grace period plus
-five seconds. If the owner confirms rollback, `up` reports cancellation and exits
+may need to roll back. Its wait budget covers their stop grace periods in sequence,
+plus time for the owner to notice the cancellation and finish cleanup. If the owner
+confirms rollback, `up` reports cancellation and exits
 130. A second Ctrl-C ends the wait while the owner continues cleanup. If the
 append committed or `up` stops waiting without confirmation, it reports
 `E_NATIVE_START_OUTCOME_UNKNOWN` and asks you to check `hack ps`.

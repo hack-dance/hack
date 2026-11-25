@@ -107,15 +107,23 @@ if [ "$3-$4" = runtime-build-image ] && [ -f '${stub}/runtime-build-image.hold' 
 fi
 if [ "$3-$4" = graph-extend ] && [ -f '${stub}/append-cancel' ]; then
   outcome=$(cat '${stub}/append-cancel')
+  previous=
+  for flag in "$@"; do
+    if [ "$previous" = --cancel-wait-ms ]; then
+      printf %s "$flag" > ./append-cancel-wait
+    fi
+    previous="$flag"
+  done
   append_term() {
     printf %s received > ./interrupt-seen
     case "$outcome" in
-      rollback|slow-rollback)
+      rollback|slow-rollback|serial-rollback)
         if [ "$outcome" = slow-rollback ]; then sleep 8; fi
+        if [ "$outcome" = serial-rollback ]; then sleep 10; sleep 10; fi
         printf %s '{"code":"graph_owner_recovery","cause_code":"graph_cancelled"}' >&2
         exit 1 ;;
       committed) cat '${stub}/graph-extend.out'; exit 0 ;;
-      *) exec sleep 45 ;;
+      *) exec sleep 90 ;;
     esac
   }
   trap append_term TERM
@@ -319,6 +327,7 @@ test.each([
   { json: true, outcome: "rollback" },
   { json: false, outcome: "slow-rollback" },
   { json: true, outcome: "slow-rollback" },
+  { json: true, outcome: "serial-rollback" },
   { json: false, outcome: "force" },
   { json: true, outcome: "force" },
   { json: false, outcome: "unconfirmed" },
@@ -329,6 +338,7 @@ test.each([
   async ({ json, outcome }) => {
     const image = `sha256:${"e".repeat(64)}`;
     const shortGrace = outcome === "unconfirmed";
+    const serial = outcome === "serial-rollback";
     const f = await fixture(
       JSON.stringify({
         services: {
@@ -338,6 +348,7 @@ test.each([
             depends_on: ["web"],
             ...(shortGrace ? { stop_grace_period: "1s" } : {}),
           },
+          ...(serial ? { other: { image } } : {}),
         },
       })
     );
@@ -372,6 +383,7 @@ test.each([
           active: true,
           stop_grace_period_nanos: shortGrace ? 1_000_000_000 : null,
         },
+        ...(serial ? { other: { active: true } } : {}),
       },
     });
     if (outcome === "committed") {
@@ -399,6 +411,7 @@ test.each([
         f.project,
         "up",
         "slow",
+        ...(serial ? ["other"] : []),
         ...(json ? ["--json"] : []),
       ],
       {
@@ -431,9 +444,18 @@ test.each([
         process.kill(-child.pid, "SIGINT");
       }
       const code = await child.exited;
-      const confirmed = outcome === "rollback" || outcome === "slow-rollback";
+      const confirmed =
+        serial || outcome === "rollback" || outcome === "slow-rollback";
       expect(code, await stderr).toBe(confirmed ? 130 : 1);
-      expect(await stderr).toContain("Cancelling, rolling back 1 service");
+      expect(await stderr).toContain(
+        serial
+          ? "Cancelling, rolling back 2 services"
+          : "Cancelling, rolling back 1 service"
+      );
+      const defaultGraceWait = serial ? 65_000 : 55_000;
+      expect(
+        await readFile(join(f.project, "append-cancel-wait"), "utf8")
+      ).toBe(String(shortGrace ? 46_000 : defaultGraceWait));
       expect(await readFile(join(f.project, "interrupt-seen"), "utf8")).toBe(
         "received"
       );
@@ -461,9 +483,9 @@ test.each([
         });
         const elapsed = performance.now() - interruptedAt;
         if (shortGrace) {
-          expect(elapsed).toBeGreaterThanOrEqual(5900);
+          expect(elapsed).toBeGreaterThanOrEqual(45_900);
         }
-        expect(elapsed).toBeLessThan(14_000);
+        expect(elapsed).toBeLessThan(shortGrace ? 54_000 : 14_000);
       }
       if (confirmed) {
         if (json) {

@@ -858,6 +858,8 @@ export async function invokeNativeRuntime(opts: {
   const runtimeCommand = opts.args[0] === "runtime" ? opts.args[1] : undefined;
   const imageBatch = runtimeCommand === "ensure-images";
   const append = opts.args[0] === "graph" && opts.args[1] === "extend";
+  const appendWaitMs =
+    opts.appendCancellation?.waitMs ?? NATIVE_APPEND_DEFAULT_WAIT_MS;
   let maxTimeoutMs = 600_000;
   if (imageBatch) {
     maxTimeoutMs = 3_600_000;
@@ -901,6 +903,7 @@ export async function invokeNativeRuntime(opts: {
       // HACK-2461: the per-user step store, only with HACK_STEP_STORE=on.
       ...stepStoreRuntimeArgs(),
       ...opts.args,
+      ...(append ? ["--cancel-wait-ms", String(appendWaitMs)] : []),
     ],
     {
       cwd: opts.cwd,
@@ -953,10 +956,7 @@ export async function invokeNativeRuntime(opts: {
     if (append) {
       clearTimeout(timer);
       child.kill("SIGTERM");
-      cancelTimer = setTimeout(
-        forceAppend,
-        opts.appendCancellation?.waitMs ?? NATIVE_APPEND_DEFAULT_WAIT_MS
-      );
+      cancelTimer = setTimeout(forceAppend, appendWaitMs);
     } else {
       kill();
     }

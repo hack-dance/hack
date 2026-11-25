@@ -93,6 +93,7 @@ pub fn request(
     combined: Option<CombinedInput>,
     slots: &BTreeMap<String, super::super::RouteSlot>,
     managed: Option<&Managed>,
+    cancel_wait: Duration,
 ) -> Result<Value, CandidateError> {
     if !super::super::hex(generation, 64)
         || combined.as_ref().is_some_and(|input| !input.valid())
@@ -162,9 +163,9 @@ pub fn request(
         // Request EOF tells the owner to roll back. Keep the read half open
         // for the reply from this exact append, even if commit won the race.
         stream.shutdown(Shutdown::Write).map_err(|_| refused())?;
-        // The frontend waits its selected stop grace plus a margin. Allow the
-        // full admitted grace (30 seconds) even at the end of the start budget.
-        deadline = Instant::now() + Duration::from_secs(35);
+        // Cancellation starts a separate budget for serial rollback, including
+        // when the interrupt arrives at the end of the start deadline.
+        deadline = Instant::now() + cancel_wait;
     }
     let reply: Value = transport::read(
         &mut stream,

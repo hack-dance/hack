@@ -957,6 +957,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                     "--combined-plan",
                     "--combined-normalized-sha256",
                     "--combined-normalized-file",
+                    "--cancel-wait-ms",
                 ]
                 .contains(&key))
             || (*action == "recover-cleanup" && key == "--expect-receipt")

@@ -2,10 +2,15 @@ import { isRecord } from "./guards.ts";
 
 // Match the native graph's admitted StopTimeout range and whole-second rounding.
 const NATIVE_APPEND_MAX_STOP_SECONDS = 30;
+const NATIVE_APPEND_MAX_SERVICES = 32;
+// The owner checks for cancellation between provider requests, which can take 40 s.
+const NATIVE_APPEND_NOTICE_MS = 40_000;
 const NATIVE_APPEND_ROLLBACK_MARGIN_MS = 5000;
+const NATIVE_APPEND_WAIT_OVERHEAD_MS =
+  NATIVE_APPEND_NOTICE_MS + NATIVE_APPEND_ROLLBACK_MARGIN_MS;
 const DEFAULT_STOP_SECONDS = 10;
 export const NATIVE_APPEND_DEFAULT_WAIT_MS =
-  DEFAULT_STOP_SECONDS * 1000 + NATIVE_APPEND_ROLLBACK_MARGIN_MS;
+  DEFAULT_STOP_SECONDS * 1000 + NATIVE_APPEND_WAIT_OVERHEAD_MS;
 
 export interface NativeAppendRollback {
   readonly services: number;
@@ -28,8 +33,8 @@ export function nativeAppendRollback(opts: {
     // A resumed container still has its original engine config. The receipt
     // does not carry its StopTimeout, so allow the full admitted grace.
     if (opts.owned.has(name)) {
-      seconds = NATIVE_APPEND_MAX_STOP_SECONDS;
-      break;
+      seconds += NATIVE_APPEND_MAX_STOP_SECONDS;
+      continue;
     }
     const service = plan[name];
     const nanos = isRecord(service) ? service.stop_grace_period_nanos : null;
@@ -40,11 +45,12 @@ export function nativeAppendRollback(opts: {
             Math.ceil(nanos / 1_000_000_000)
           )
         : DEFAULT_STOP_SECONDS;
-    seconds = Math.max(seconds, grace);
+    // Like the engine's stop_budget, allow the guest to serialize every stop.
+    seconds += Math.max(1, grace);
   }
   return {
     services: added.length,
-    waitMs: seconds * 1000 + NATIVE_APPEND_ROLLBACK_MARGIN_MS,
+    waitMs: seconds * 1000 + NATIVE_APPEND_WAIT_OVERHEAD_MS,
   };
 }
 
@@ -59,12 +65,13 @@ export function readNativeAppendRollback(
     typeof services === "number" &&
     Number.isSafeInteger(services) &&
     services >= 0 &&
-    services <= 32 &&
+    services <= NATIVE_APPEND_MAX_SERVICES &&
     typeof waitMs === "number" &&
     Number.isSafeInteger(waitMs) &&
-    waitMs >= NATIVE_APPEND_ROLLBACK_MARGIN_MS &&
+    waitMs >= NATIVE_APPEND_WAIT_OVERHEAD_MS &&
     waitMs <=
-      NATIVE_APPEND_MAX_STOP_SECONDS * 1000 + NATIVE_APPEND_ROLLBACK_MARGIN_MS
+      services * NATIVE_APPEND_MAX_STOP_SECONDS * 1000 +
+        NATIVE_APPEND_WAIT_OVERHEAD_MS
   ) {
     return { services, waitMs };
   }

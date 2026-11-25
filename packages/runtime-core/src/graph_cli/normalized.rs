@@ -3,6 +3,24 @@ use super::{BTreeMap, Candidate, CandidateError, graph};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
+#[cfg(any(test, target_os = "macos"))]
+fn append_cancel_wait(wait_ms: Option<&str>, selected: usize) -> Result<Duration, CandidateError> {
+    const OVERHEAD_MS: u64 = 45_000;
+    const MAX_STOP_MS: u64 = 30_000;
+    const MAX_SERVICES: usize = 32;
+    let max_ms = OVERHEAD_MS + selected.min(MAX_SERVICES) as u64 * MAX_STOP_MS;
+    // Direct runtime callers lack the frontend's observations of running containers.
+    let ms = match wait_ms {
+        None => max_ms,
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|ms| (OVERHEAD_MS..=max_ms).contains(ms))
+            .ok_or_else(super::invalid)?,
+    };
+    Ok(Duration::from_millis(ms))
+}
+
 /// The boolean `serve` / `serve-restore` options.
 pub(super) struct ServeFlags {
     pub environment_stdin: bool,
@@ -147,6 +165,10 @@ pub(super) fn command(
                 .get("--expect-generation")
                 .copied()
                 .ok_or_else(invalid)?;
+            let cancel_wait = append_cancel_wait(
+                singles.get("--cancel-wait-ms").copied(),
+                options.run.readiness.len(),
+            )?;
             let combined = match (
                 singles.get("--combined-plan"),
                 singles.get("--combined-normalized-sha256"),
@@ -168,6 +190,7 @@ pub(super) fn command(
                 combined,
                 route_slots,
                 managed.as_ref(),
+                cancel_wait,
             );
         }
         let empty = BTreeMap::new();
@@ -232,5 +255,37 @@ pub(super) fn command(
             "unsupported_host",
             "Normalized foreground graph requires macOS.",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_reply_uses_the_frontends_serial_stop_budget() {
+        // Two ten-second stops, 40 seconds to notice cancellation, and five for cleanup.
+        assert_eq!(
+            append_cancel_wait(Some("65000"), 2).unwrap(),
+            Duration::from_secs(65)
+        );
+        assert_eq!(
+            append_cancel_wait(Some("47000"), 1).unwrap(),
+            Duration::from_secs(47)
+        );
+        assert_eq!(
+            append_cancel_wait(Some("1005000"), 32).unwrap(),
+            Duration::from_secs(1005)
+        );
+        assert_eq!(
+            append_cancel_wait(None, 2).unwrap(),
+            Duration::from_secs(105)
+        );
+        for invalid in ["0", "44999", "105001", "forever"] {
+            assert_eq!(
+                append_cancel_wait(Some(invalid), 2).unwrap_err().code,
+                "graph_arguments"
+            );
+        }
     }
 }

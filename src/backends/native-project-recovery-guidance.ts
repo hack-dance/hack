@@ -4,8 +4,23 @@ import {
   NativeRuntimeRequestError,
 } from "./native-runtime-client.ts";
 
-const FRESH_NATIVE_HOME_GUIDANCE =
-  "To start independently, use a separate project checkout and keep this home for its data. Follow the fresh native home instructions at https://github.com/hack-dance/hack/blob/next/docs/versions/v5/native/setup.md#manual-homes";
+/**
+ * The explicit cross-pool-stop dead-owner cleanup (`graph recover-cleanup`). Its
+ * `prepare` admits a failed or unfinished fresh start (`failed-retained`,
+ * `preparing`) and an owner that died during its own stop (`cleanup-intent`);
+ * it refuses a restore or restart in progress (`restoring`, `restarting`).
+ */
+export const NATIVE_DEAD_OWNER_CLEANUP_GUIDANCE =
+  "When no other project uses this native home, follow the explicit dead-owner cleanup at https://github.com/hack-dance/hack/blob/next/docs/guides/native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner, which keeps the data in this home.";
+
+/**
+ * The next step after the runtime could not prove a same-boot recovery of an
+ * exited owner (HACK-2097). A lost frontend's owner stops on its own, so the
+ * common case is an owner still finishing that stop: rerunning the same command
+ * then recovers it. Once the owner has exited, this boot cannot recover the run;
+ * the explicit cleanup covers only the phases its `prepare` admits.
+ */
+const LIVE_OWNER_RECOVERY_GUIDANCE = `Data and evidence are kept. Run hack ps --json: while the run's foreground owner is still running or stopping, wait for it to exit, then run hack down --recover again. If it still refuses after the owner exited, the run cannot be recovered in this boot. A start that failed or never finished, or an owner that died during its own stop, is recovered across a pool stop: ${NATIVE_DEAD_OWNER_CLEANUP_GUIDANCE} An owner that died while restoring or restarting a retained run has no supported retirement; keep this home and its receipts.`;
 
 /** Name a usable next command without turning uncertainty into cleanup authority. */
 export function nativeRecoveryGuidance(code: string | undefined): string {
@@ -21,7 +36,7 @@ export function nativeRecoveryGuidance(code: string | undefined): string {
     return "Recovery waits for the process holding the recorded publisher PID to exit when its identity cannot be confirmed. After it exits, rerun hack down --recover.";
   }
   if (code === "graph_live_owner_recovery") {
-    return `Run hack ps --json to inspect the retained state. ${FRESH_NATIVE_HOME_GUIDANCE}`;
+    return LIVE_OWNER_RECOVERY_GUIDANCE;
   }
   if (code === "provider_busy" || code === "native_request_timeout") {
     return "Run hack down --recover to retry this run's cleanup with data retained.";

@@ -218,12 +218,26 @@ Stop with the **same version and native home**:
 "$CANDIDATE" down --path /absolute/project
 ```
 
-If the foreground owner exited during startup, run `"$CANDIDATE" down --recover
---path /absolute/project` while the original pool is still running. Recovery
-retains project data and requires matching records for this run. If those
-records cannot prove ownership, keep the old home and use a separate checkout
-with a [fresh manual native home](setup.md#manual-homes). This starts a separate
-run without transferring the old run’s data.
+If a foreground `up` is lost (its terminal closed or the process was killed)
+while its services run, run `"$CANDIDATE" down --recover --path /absolute/project`,
+then `"$CANDIDATE" up` to start it again. The graph owner notices that its
+frontend went and stops the services on its own, with data retained. `down
+--recover` stops an owner that is still running through its own cleanup,
+waits up to 15 s for one that is finishing its own stop, accepts the stop the
+owner already made, or recovers an owner that died before or after its stop, and
+it finishes the lost frontend's shutdown. If the owner is still exiting when
+that wait ends, run the same command again once it has exited.
+
+If the foreground owner exited during startup, run the same `down --recover`
+while the original pool is still running. Recovery retains project data and
+requires matching records for this run. If it refuses, run `hack ps --json`:
+while the owner is still running or stopping, wait for it to exit and run
+`down --recover` again. If it still refuses after the owner exited, the run
+cannot be recovered in this boot. A start that failed or never finished, or an
+owner that died during its own stop, keeps its data in this home, and the
+[explicit dead-owner cleanup](https://github.com/hack-dance/hack/blob/next/docs/guides/native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner)
+recovers it across a pool stop. That cleanup does not cover an owner that died
+while restoring or restarting a retained run; keep the home and its receipts.
 
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the

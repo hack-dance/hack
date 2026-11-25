@@ -485,7 +485,9 @@ fn private_owner_restore_preserves_data_and_retires_values() {
     transport::write(
         &mut socket,
         &WireRequest {
+            cancel_append: false,
             version: 1,
+            extend: None,
             refresh_dependencies: None,
             run: run.clone(),
             remove_data: None,
@@ -564,3 +566,5 @@ mod retired_recovery_cleanup;
 mod same_boot_absent_relay;
 mod same_boot_recovery;
 mod source_device_rebind;
+
+mod targeted_start;

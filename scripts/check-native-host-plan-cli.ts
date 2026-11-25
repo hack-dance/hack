@@ -291,9 +291,15 @@ try {
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
     HACK_NATIVE_HOME: join(home, "native"),
   });
+  const runtimeResult = record(JSON.parse(runtime.stdout));
+  const setupError = record(runtimeResult.error);
   assert(
-    runtime.exit !== 0 && (runtime.stdout + runtime.stderr).includes("E_USAGE"),
-    "native detached service selection refuses before input or runtime work"
+    runtime.exit === 1 &&
+      runtime.stderr === "" &&
+      runtimeResult.ok === false &&
+      setupError.code === "E_STARTUP_INCOMPLETE" &&
+      record(setupError.detail).runtime_setup === "unavailable",
+    "native detached service selection reaches runtime setup"
   );
   assert(
     !(

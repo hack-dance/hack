@@ -162,7 +162,7 @@ fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     if (!starting
         && !matches!(
             receipt.phase.as_str(),
-            "ready-observed" | STARTED_OBSERVED | "failed-retained"
+            "ready-observed" | STARTED_OBSERVED | "failed-retained" | "reconciled-cleanup-only"
         ))
         || !startup.valid(receipt)
         || startup.services.values().any(|s| {
@@ -358,7 +358,30 @@ pub fn recover_live_owner(
         return Err(refused());
     }
     let engine = Engine::connect_cleanup_wait(candidate)?;
-    let (receipt, root) = load(candidate, &engine, run)?;
+    let (mut receipt, root) = load(candidate, &engine, run)?;
+    let mut dead = None;
+    let reconciled;
+    let expected = if matches!(
+        receipt.phase.as_str(),
+        "ready-observed" | "reconciled-cleanup-only"
+    ) && exists(&root.join("state.pending"))?
+    {
+        if digest(&receipt)? != expected {
+            return Err(refused());
+        }
+        let foreground = foreground::DeadOwner::acquire(candidate, run)?;
+        foreground.verify_retirement_ready()?;
+        settled_startup(&receipt)?;
+        // A crash can leave the *first* admission write pending. In that case
+        // the committed receipt has no extending marker and the new names
+        // were never authorized. In all cases pending bytes are evidence only.
+        receipt = reconcile_receipt(&engine, receipt, &root)?;
+        reconciled = digest(&receipt)?;
+        dead = Some(foreground);
+        reconciled.as_str()
+    } else {
+        expected
+    };
     no_pending(&root, &receipt)?;
     if exists(&root.join(FILE))? {
         let intent: Intent = state::read(&root.join(FILE))?;
@@ -370,7 +393,7 @@ pub fn recover_live_owner(
             );
         }
     }
-    let foreground = foreground::DeadOwner::acquire(candidate, run)?;
+    let foreground = dead.map_or_else(|| foreground::DeadOwner::acquire(candidate, run), Ok)?;
     foreground.verify_retirement_ready()?;
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     let context = host_relay::context(&receipt.owner, engine.guest().boot_id())?;
@@ -550,23 +573,7 @@ fn finish_retirement(
         return Err(refused());
     }
     host_relay::cleanup_preflight(engine, receipt, root, false)?;
-    for resource in receipt.resources.values() {
-        let observed = inspect_resource(engine, receipt, resource)?;
-        if resource.kind == Kind::Volume {
-            if observed.is_none() {
-                return Err(refused());
-            }
-        } else {
-            let mut by_name = resource.clone();
-            by_name.id = None;
-            if resource.phase != "absent"
-                || observed.is_some()
-                || inspect_resource(engine, receipt, &by_name)?.is_some()
-            {
-                return Err(refused());
-            }
-        }
-    }
+    verify_retired_resources(engine, receipt)?;
     startup::verify_cleanup(engine, receipt)?;
     probes::verify_cleanup(engine, receipt)?;
     let publisher = foreground::transport::root(candidate, &receipt.run)?;
@@ -623,6 +630,35 @@ fn finish_retirement(
     verify()?;
     dependency_slots::recover_cleaned(candidate, receipt, None)?;
     verify()
+}
+
+pub(super) fn verify_retired_resources(
+    engine: &impl Inspection,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    for resource in receipt.resources.values() {
+        let observed = inspect_resource(engine, receipt, resource)?;
+        if resource.kind == Kind::Volume {
+            // A reserved content-addressed cache can already exist for
+            // another graph. Inspection still requires matching ownership.
+            let retained = plan_reconcile::retained_volume(resource);
+            if (retained && observed.is_none())
+                || (!retained && resource.cache.is_none() && observed.is_some())
+            {
+                return Err(refused());
+            }
+        } else {
+            let mut by_name = resource.clone();
+            by_name.id = None;
+            if resource.phase != "absent"
+                || observed.is_some()
+                || inspect_resource(engine, receipt, &by_name)?.is_some()
+            {
+                return Err(refused());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Completed cleanup grants archival, not refresh replay. The same exact ready

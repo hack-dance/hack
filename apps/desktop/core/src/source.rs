@@ -703,10 +703,11 @@ pub trait Source: Send + Sync {
         self.act(repo_root, native, branch, action)
     }
 
-    /// Run a service-scoped lifecycle action on a Compose instance.
+    /// Start a selected service on either backend, or stop or restart on Compose.
     fn act_on_service(
         &self,
         _repo_root: &Path,
+        _native: bool,
         _branch: Option<&str>,
         _compose_project: Option<&str>,
         _service: &str,
@@ -2431,6 +2432,7 @@ impl Source for LiveSource {
     fn act_on_service(
         &self,
         repo_root: &Path,
+        native: bool,
         branch: Option<&str>,
         compose_project: Option<&str>,
         service: &str,
@@ -2441,7 +2443,7 @@ impl Source for LiveSource {
         // `--service=<name>` always stays the value of the service selector.
         let stop_option = format!("--service={service}");
         let mut args = match action {
-            Action::Stop => vec![
+            Action::Stop if !native => vec![
                 "down",
                 "--json",
                 "--no-interactive",
@@ -2449,12 +2451,20 @@ impl Source for LiveSource {
                 "local",
                 &stop_option,
             ],
+            Action::Start if native => {
+                validate_branch(service)?;
+                let mut args = with_branch(Action::Start.cli_args(), branch);
+                args.push(service);
+                return Ok(self
+                    .runner_for(true)
+                    .run_json_to_completion(&args, Some(&root))?);
+            }
             Action::Start if !service.is_empty() && !service.starts_with('-') => {
                 let mut args = Action::Start.cli_args().to_vec();
                 args.extend(["--target", "local", service]);
                 args
             }
-            Action::Restart if !service.is_empty() && !service.starts_with('-') => {
+            Action::Restart if !native && !service.is_empty() && !service.starts_with('-') => {
                 vec![
                     "restart",
                     "--json",
@@ -5784,6 +5794,44 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
         let lines: Vec<String> = a.lines().map(str::to_owned).collect();
         let _ = std::fs::remove_file(dir.join("argv"));
         lines
+    }
+
+    #[test]
+    fn catalog_start_uses_native_runner_and_preserves_branch() {
+        let b = std::fs::canonicalize(base("catalog-native-argv")).unwrap();
+        let hack = b.join("hack");
+        crate::test_support::script(
+            &hack,
+            "#!/bin/sh\nprintf '%s\n' \"$HACK_RUNTIME_BACKEND\" \"$@\" > \"$HACK_HOME/argv\"\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
+        );
+        let source = LiveSource::new(fixture_runner(&hack), None);
+        let project = b.join("project");
+        make_project(&project, ".hack", "docker-compose.yml");
+        let result = source.act_on_service(
+            &project,
+            true,
+            Some("test"),
+            Some("copy"),
+            "redis",
+            Action::Start,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let args = argv(&b);
+        assert_eq!(
+            args,
+            [
+                "native",
+                "up",
+                "--branch",
+                "test",
+                "--detach",
+                "--json",
+                "--no-interactive",
+                "redis",
+                "--path",
+                project.to_str().unwrap(),
+            ]
+        );
     }
 
     #[test]

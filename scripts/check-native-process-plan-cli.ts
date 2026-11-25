@@ -272,18 +272,23 @@ try {
   );
   const beforeStartup = await snapshotNativePlanHome(home);
   const runtime = await invoke(
-    ["up", "web", "--detach"],
+    ["up", "web", "--detach", "--json"],
     checkout,
     {
       HACK_RUNTIME_BACKEND: "native",
       HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
       HACK_NATIVE_HOME: join(home, "native"),
     },
-    false
+    true
   );
+  const setupError = record(runtime.value.error);
   assert(
-    runtime.exit !== 0 && (runtime.stdout + runtime.stderr).includes("E_USAGE"),
-    "native detached service selection refuses before input or runtime work"
+    runtime.exit === 1 &&
+      runtime.stderr === "" &&
+      runtime.value.ok === false &&
+      setupError.code === "E_STARTUP_INCOMPLETE" &&
+      record(setupError.detail).runtime_setup === "unavailable",
+    "native detached service selection reaches runtime setup"
   );
   assert(
     !(await Bun.file(marker).exists()),

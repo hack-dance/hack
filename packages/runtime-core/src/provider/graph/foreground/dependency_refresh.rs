@@ -25,12 +25,14 @@ pub fn request(candidate: &Candidate, run: &str) -> Result<Value, CandidateError
     transport::write(
         &mut stream,
         &WireRequest {
+            cancel_append: false,
             version: 1,
             run: run.into(),
             remove_data: None,
             job: None,
             restore: None,
             refresh_dependencies: Some(selected),
+            extend: None,
         },
         Duration::from_secs(5),
     )?;
@@ -63,7 +65,7 @@ pub(super) fn handle(
     {
         return Err(refused());
     }
-    let watch = transport::ClientWatch::new(stream)?;
+    let watch = transport::ClientWatch::half_closed(stream)?;
     let deadline = Instant::now() + Duration::from_secs(170);
     runtime.refresh_dependencies(candidate, run, &selected.generation, || {
         signals.pending() || watch.disconnected() || Instant::now() >= deadline

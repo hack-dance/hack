@@ -10,7 +10,8 @@ const CONFIRM_HINT =
 
 /**
  * `hack down --remove-data` on the native backend: explicit, confirmed
- * deletion of a stopped project's graph-owned data volumes. Asks once unless
+ * deletion of a stopped project's graph-owned data volumes. Can cancel an
+ * in-progress service append and stop the run first. Asks once unless
  * `--yes` is given; `--json` without `--yes` refuses with
  * `E_INTERACTIVE_REQUIRED` before any runtime request. Output names no
  * volume, path or other authored value. SIGINT/SIGTERM cancel the removal:
@@ -43,10 +44,11 @@ export async function runNativeDownRemoveData(opts: {
       ...(opts.yes
         ? {}
         : {
-            confirm: () =>
+            confirm: (appending) =>
               confirmSafe({
-                message:
-                  "Delete this project's stopped native data volumes? This cannot be undone; shared dependency caches are kept.",
+                message: appending
+                  ? "Cancel the service start, stop the project and delete its native data volumes? This cannot be undone; shared dependency caches are kept."
+                  : "Delete this project's stopped native data volumes? This cannot be undone; shared dependency caches are kept.",
                 initialValue: false,
                 nonInteractive: "fail",
                 hint: CONFIRM_HINT,

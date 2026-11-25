@@ -75,8 +75,14 @@ stored metadata it hashes the small manifest, selected child and config. If the
 metadata is missing it includes the registry lookup.
 `image.import.connect` includes provider lease wait and engine authentication.
 `image.inspect` measures exact image readback, including guest ownership checks.
-`image.archive.digest` measures the standalone archive SHA-256 pass and is absent
-when a completed load receipt and live readback satisfy `ensure-image`.
+`image.archive.validate` measures the import's single streaming pass that hashes
+every archive byte against its SHA-256 and checks its structure and layer
+identities before upload.
+`image.archive.digest` measures a standalone archive SHA-256 pass. An explicit
+archive load takes one before the provider lease. A cached archive takes one only
+when a reused load receipt lets the import succeed without validation; otherwise
+its digest is checked inside `image.archive.validate`. Both are absent when a
+completed load receipt and live readback satisfy `ensure-image`.
 
 `image.ensure` and `image.cache` report `attrs.registry_requests`, the count
 of attempted HTTP sends in that runtime command, including registry

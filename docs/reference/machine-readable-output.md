@@ -61,9 +61,10 @@ backends. `services` contains the `started`, `completed`, `stopped`, and
 their startup goals.
 
 If Ctrl-C interrupts an append to a running native project, the launcher waits
-briefly for the owner to confirm rollback. Confirmed cancellation exits 130 with
-`E_CANCELLED` in JSON. If the append committed or the confirmation is missing,
-the command exits 1 with `E_NATIVE_START_OUTCOME_UNKNOWN`.
+for the owner's rollback reply within the selected services' stop budget.
+Confirmed cancellation exits 130 with `E_CANCELLED` in JSON. If the append
+committed, the wait expires, or a second Ctrl-C ends the wait, the command exits
+1 with `E_NATIVE_START_OUTCOME_UNKNOWN`.
 
 ## Command inventory
 

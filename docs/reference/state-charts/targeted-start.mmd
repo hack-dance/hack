@@ -29,11 +29,13 @@ stateDiagram-v2
     note right of Degraded
       RefuseConcurrent
       Keep cleanup intent
+      Reply if cancellation pending
     end note
     note right of Cancelling
-      Client waits for reply
+      Wait to stop grace + margin
       Rollback reply confirms
-      Commit or timeout is unknown
+      Commit, timeout or force
+      leave the outcome unknown
     end note
     classDef live stroke-width:1.6px
     classDef wait stroke-width:1.6px

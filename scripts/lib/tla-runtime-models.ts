@@ -3231,7 +3231,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "targeted-start",
     module: "TargetedStart",
-    states: 1281,
+    states: 1229,
     invariant: "OwnedEffects",
     fields: [
       'phase = "Extending"',

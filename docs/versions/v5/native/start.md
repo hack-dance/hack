@@ -136,9 +136,11 @@ stopped services to a stopped state with their routes and loopback ports closed.
 A retry can start and publish those services again. If the owner cannot confirm
 rollback, `hack ps` reports a degraded run and shows the service states it can
 verify. Restart supervision continues for services outside the failed start.
-Ctrl-C asks the owner to cancel the append and waits briefly for its reply.
-If the owner confirms rollback, `up` reports cancellation and exits 130. If the
-append already committed or the result is unavailable, `up` reports
+Ctrl-C asks the owner to cancel the append. `up` prints the number of services it
+may need to roll back and waits up to the largest selected stop grace period plus
+five seconds. If the owner confirms rollback, `up` reports cancellation and exits
+130. A second Ctrl-C ends the wait while the owner continues cleanup. If the
+append committed or `up` stops waiting without confirmation, it reports
 `E_NATIVE_START_OUTCOME_UNKNOWN` and asks you to check `hack ps`.
 
 `hack down` cancels the start and stops the whole run, including any service

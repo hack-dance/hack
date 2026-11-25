@@ -6,6 +6,7 @@ import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { startupTimingSpawn } from "../lib/command-timings.ts";
 import { isRecord } from "../lib/guards.ts";
 import { normalizeHomeDir, readAbsolutePathOverride } from "../lib/home-dir.ts";
+import { NATIVE_APPEND_DEFAULT_WAIT_MS } from "../lib/native-append-cancellation.ts";
 import {
   type NativeProcessRefusal,
   readNativeProcessRefusals,
@@ -41,7 +42,6 @@ import {
 } from "./native-stop-diagnostics.ts";
 
 export const NATIVE_BUILD_RETENTION_TIMEOUT_MS = 30 * 60_000 + 5000;
-export const NATIVE_APPEND_CANCEL_CONFIRMATION_MS = 5000;
 
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const NATIVE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -790,6 +790,11 @@ export async function invokeNativeRuntime(opts: {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Graph append rollback wait and the second-interrupt cutoff. */
+  readonly appendCancellation?: {
+    readonly waitMs: number;
+    readonly forceSignal: AbortSignal;
+  };
   readonly onImageWait?: (
     waiting: boolean,
     reference?: string,
@@ -929,28 +934,42 @@ export async function invokeNativeRuntime(opts: {
   );
   let timedOut = false;
   let canceled = false;
+  let appendForced = false;
   let cancelTimer: ReturnType<typeof setTimeout> | undefined;
   const kill = () => {
     drain?.abort();
     child.kill("SIGKILL");
   };
-  const cancel = () => {
-    canceled = true;
-    if (append) {
-      child.kill("SIGTERM");
-      cancelTimer = setTimeout(kill, NATIVE_APPEND_CANCEL_CONFIRMATION_MS);
-    } else {
-      kill();
-    }
-  };
-  opts.signal?.addEventListener("abort", cancel, { once: true });
-  if (opts.signal?.aborted) {
-    cancel();
-  }
   const timer = setTimeout(() => {
     timedOut = true;
     kill();
   }, timeoutMs);
+  const forceAppend = () => {
+    appendForced = true;
+    kill();
+  };
+  const cancel = () => {
+    canceled = true;
+    if (append) {
+      clearTimeout(timer);
+      child.kill("SIGTERM");
+      cancelTimer = setTimeout(
+        forceAppend,
+        opts.appendCancellation?.waitMs ?? NATIVE_APPEND_DEFAULT_WAIT_MS
+      );
+    } else {
+      kill();
+    }
+  };
+  const forceSignal = append ? opts.appendCancellation?.forceSignal : undefined;
+  opts.signal?.addEventListener("abort", cancel, { once: true });
+  forceSignal?.addEventListener("abort", forceAppend, { once: true });
+  if (opts.signal?.aborted) {
+    cancel();
+  }
+  if (forceSignal?.aborted) {
+    forceAppend();
+  }
   try {
     const inputFailure = await writeNativePrivateInput(
       child.stdin,
@@ -959,7 +978,7 @@ export async function invokeNativeRuntime(opts: {
     const bytes = await readBoundedOutput(child.stdout, drain?.signal);
     const code = await child.exited;
     const failure = await failureDetails;
-    if (canceled && !append) {
+    if (appendForced || (canceled && !append)) {
       throw new NativeRuntimeRequestError({
         message:
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
@@ -986,6 +1005,7 @@ export async function invokeNativeRuntime(opts: {
     );
   } finally {
     opts.signal?.removeEventListener("abort", cancel);
+    forceSignal?.removeEventListener("abort", forceAppend);
     clearTimeout(timer);
     clearTimeout(cancelTimer);
     if (child.exitCode === null) {

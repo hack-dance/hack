@@ -110,14 +110,16 @@ if [ "$3-$4" = graph-extend ] && [ -f '${stub}/append-cancel' ]; then
   append_term() {
     printf %s received > ./interrupt-seen
     case "$outcome" in
-      rollback)
+      rollback|slow-rollback)
+        if [ "$outcome" = slow-rollback ]; then sleep 8; fi
         printf %s '{"code":"graph_owner_recovery","cause_code":"graph_cancelled"}' >&2
         exit 1 ;;
       committed) cat '${stub}/graph-extend.out'; exit 0 ;;
-      *) exec sleep 20 ;;
+      *) exec sleep 45 ;;
     esac
   }
   trap append_term TERM
+  printf '%s' "$$" > ./interrupt-pid
   printf '%s' ready > ./interrupt-ready
   for i in $(seq 1 400); do sleep 0.05; done
   exit 99
@@ -315,6 +317,10 @@ test(
 test.each([
   { json: false, outcome: "rollback" },
   { json: true, outcome: "rollback" },
+  { json: false, outcome: "slow-rollback" },
+  { json: true, outcome: "slow-rollback" },
+  { json: false, outcome: "force" },
+  { json: true, outcome: "force" },
   { json: false, outcome: "unconfirmed" },
   { json: true, outcome: "unconfirmed" },
   { json: true, outcome: "committed" },
@@ -322,8 +328,18 @@ test.each([
   "Ctrl-C on targeted up with $outcome (JSON: $json)",
   async ({ json, outcome }) => {
     const image = `sha256:${"e".repeat(64)}`;
+    const shortGrace = outcome === "unconfirmed";
     const f = await fixture(
-      JSON.stringify({ services: { web: { image }, slow: { image } } })
+      JSON.stringify({
+        services: {
+          web: { image, stop_grace_period: "30s" },
+          slow: {
+            image,
+            depends_on: ["web"],
+            ...(shortGrace ? { stop_grace_period: "1s" } : {}),
+          },
+        },
+      })
     );
     await saveNativeProjectRun({ ...f.scope, run });
     await f.reply("graph inspect", {
@@ -336,6 +352,7 @@ test.each([
         phase: "ready-observed",
         readiness: { web: "started" },
       },
+      observations: { "container:web": { state: "running", health: "none" } },
     });
     await f.reply("graph owner-status", {
       ok: true,
@@ -348,7 +365,15 @@ test.each([
       service_images: { web: image },
     });
     await f.reply("runtime status", { phase: "running", process_alive: true });
-    await scriptUpThroughReview(f, { services: { slow: { active: true } } });
+    await scriptUpThroughReview(f, {
+      services: {
+        web: { active: true, stop_grace_period_nanos: 30_000_000_000 },
+        slow: {
+          active: true,
+          stop_grace_period_nanos: shortGrace ? 1_000_000_000 : null,
+        },
+      },
+    });
     if (outcome === "committed") {
       await f.reply("graph extend", {
         ok: true,
@@ -394,13 +419,53 @@ test.each([
         what: "targeted owner request",
         budgetMs: 10_000,
       });
+      const interruptedAt = performance.now();
       process.kill(-child.pid, "SIGINT");
+      if (outcome === "force") {
+        await waitForFileContent({
+          path: join(f.project, "interrupt-seen"),
+          complete: (value) => (value === "received" ? value : undefined),
+          what: "append cancellation signal",
+          budgetMs: 4000,
+        });
+        process.kill(-child.pid, "SIGINT");
+      }
       const code = await child.exited;
-      expect(code, await stderr).toBe(outcome === "rollback" ? 130 : 1);
+      const confirmed = outcome === "rollback" || outcome === "slow-rollback";
+      expect(code, await stderr).toBe(confirmed ? 130 : 1);
+      expect(await stderr).toContain("Cancelling, rolling back 1 service");
       expect(await readFile(join(f.project, "interrupt-seen"), "utf8")).toBe(
         "received"
       );
-      if (outcome === "rollback") {
+      if (outcome === "force" || outcome === "unconfirmed") {
+        await waitForFileContent({
+          path: join(f.project, "interrupt-pid"),
+          complete: (value) => {
+            // A positive fixture PID is required before probing liveness.
+            const pid = Number(value);
+            if (!Number.isSafeInteger(pid) || pid < 2) {
+              return undefined;
+            }
+            try {
+              process.kill(pid, 0);
+              return undefined;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+                return pid;
+              }
+              throw error;
+            }
+          },
+          what: "forced native append client exit",
+          budgetMs: 4000,
+        });
+        const elapsed = performance.now() - interruptedAt;
+        if (shortGrace) {
+          expect(elapsed).toBeGreaterThanOrEqual(5900);
+        }
+        expect(elapsed).toBeLessThan(14_000);
+      }
+      if (confirmed) {
         if (json) {
           expect(JSON.parse(await stdout)).toMatchObject({
             ok: false,

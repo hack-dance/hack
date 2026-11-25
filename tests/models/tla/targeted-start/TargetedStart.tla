@@ -89,6 +89,10 @@ CancelDeadline == /\ client = "Waiting"
                   /\ client' = IF ConfirmWithoutReply THEN "Confirmed" ELSE "Unknown"
                   /\ UNCHANGED <<phase, run, receipt, extending, containers, published, started, probes, attempt, free, reply>>
 
+ForceCancel == /\ client = "Waiting"
+               /\ client' = "Unknown"
+               /\ UNCHANGED <<phase, run, receipt, extending, containers, published, started, probes, attempt, free, reply>>
+
 Fail == /\ phase = "Extending" /\ phase' = "Degraded"
         /\ UNCHANGED <<run, receipt, extending, containers, published, started, probes, attempt, free, client, reply>>
 
@@ -97,6 +101,7 @@ RollbackRefused == /\ phase = "Cancelling" /\ phase' = "Degraded"
                    /\ UNCHANGED <<run, receipt, extending, containers, published, started, probes, attempt, free, client>>
 
 Rollback == /\ phase \in {"Degraded", "Cancelling"}
+            /\ reply # "Unconfirmed"
             /\ phase' = "Ready"
             /\ containers' = [s \in Services |-> IF s \in extending THEN 0 ELSE containers[s]]
             /\ receipt' = receipt \ extending
@@ -105,7 +110,8 @@ Rollback == /\ phase \in {"Degraded", "Cancelling"}
             /\ probes' = probes \ extending
             /\ extending' = {}
             /\ attempt' = attempt + 1
-            /\ reply' = IF phase = "Cancelling" THEN "RolledBack" ELSE "None"
+            /\ reply' = IF phase = "Cancelling" \/ client \in {"Waiting", "Unknown"}
+                        THEN "RolledBack" ELSE "None"
             /\ UNCHANGED <<run, free, client>>
 
 Crash == /\ phase \in {"Extending", "Degraded", "Cancelling"} /\ phase' = "Interrupted"
@@ -133,7 +139,7 @@ FinishDown == /\ phase = "Cleaning"
               /\ UNCHANGED <<run, receipt, extending, containers, published, started, probes, attempt, free, client, reply>>
 
 Next == Reserve \/ CapacityRefuse \/ RefuseConcurrent \/ Commit \/ Fail \/ Rollback \/ Crash \/ Reconcile \/ Down \/ FinishDown
-        \/ RequestCancel \/ ObserveCancel \/ ReceiveReply \/ CancelDeadline \/ RollbackRefused
+        \/ RequestCancel \/ ObserveCancel \/ ReceiveReply \/ CancelDeadline \/ ForceCancel \/ RollbackRefused
         \/ (\E s \in Services : Create(s) \/ Start(s) \/ Publish(s) \/ Remove(s))
 
 Spec == Init /\ [][Next]_vars
@@ -151,4 +157,5 @@ DependencyBeforeCreate == phase \notin {"Cleaning", "Stopped"}
                           /\ containers["redis"] # 0 => "cache" \in started
 CleanStop == phase = "Stopped" => \A s \in Services : containers[s] = 0
 ConfirmedCancelHasReply == client = "Confirmed" => reply = "RolledBack"
+WaitingAfterSettlementHasReply == (phase = "Ready" /\ client = "Waiting") => reply \in {"Committed", "RolledBack"}
 ====

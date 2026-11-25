@@ -20,7 +20,6 @@ import {
 } from "../backends/native-profile-selection.ts";
 import type { NativeBuildSettlement } from "../backends/native-project-builds.ts";
 import {
-  NATIVE_APPEND_CANCEL_CONFIRMATION_MS,
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
@@ -50,6 +49,11 @@ import {
   upTimingOwnerRelay,
 } from "./command-timings.ts";
 import { isRecord } from "./guards.ts";
+import {
+  type NativeAppendRollback,
+  nativeAppendRollbackMessage,
+  readNativeAppendRollback,
+} from "./native-append-cancellation.ts";
 import {
   isNativeDetachedStartPhase,
   NATIVE_DETACHED_HEARTBEAT_MS,
@@ -113,7 +117,7 @@ let publishAppendCancelled: (() => Promise<void>) | undefined;
 let publishProgress:
   | ((
       phase: Exclude<NativeDetachedStartPhase, "launching">,
-      appending?: boolean
+      appendRollback?: NativeAppendRollback
     ) => void)
   | undefined;
 type BuildProgress = NativeBuildSettlement & {
@@ -145,13 +149,13 @@ function stopProgressHeartbeat(): void {
  */
 export function nativeDetachedUpProgress(
   phase: string,
-  appending?: boolean
+  appendRollback?: NativeAppendRollback
 ): void {
   if (!(publishProgress && isNativeDetachedStartPhase(phase))) {
     return;
   }
   stopProgressHeartbeat();
-  publishProgress(phase, appending);
+  publishProgress(phase, appendRollback);
   if (phase === "images") {
     const report = publishProgress;
     progressHeartbeat = setInterval(
@@ -871,7 +875,7 @@ export async function runNativeDetachedOwner(opts: {
       | {
           readonly kind: "progress";
           readonly images?: readonly string[];
-          readonly appending?: true;
+          readonly appendRollback?: NativeAppendRollback;
           readonly phase: Exclude<NativeDetachedStartPhase, "launching">;
         }
   ): Promise<void> =>
@@ -897,6 +901,10 @@ export async function runNativeDetachedOwner(opts: {
     if (value === "cancel") {
       handoff.resolve();
       requestStop();
+      return;
+    }
+    if (value === "force-append-cancel" && stopping) {
+      process.kill(process.pid, "SIGINT");
       return;
     }
     if (value !== "accept" || !ready || accepted || stopping) {
@@ -973,7 +981,7 @@ export async function runNativeDetachedOwner(opts: {
       send(event);
     }
   };
-  publishProgress = (phase, appending) => {
+  publishProgress = (phase, appendRollback) => {
     if (ready || stopping) {
       stopProgressHeartbeat();
       return;
@@ -981,7 +989,7 @@ export async function runNativeDetachedOwner(opts: {
     send({
       kind: "progress",
       phase,
-      ...(appending ? { appending: true } : {}),
+      ...(appendRollback ? { appendRollback } : {}),
       ...(phase === "images" && workingImages.length
         ? { images: workingImages }
         : {}),
@@ -1128,7 +1136,8 @@ function watchStartDeadline(opts: {
     if (
       isRecord(value) &&
       (Object.keys(value).length === 2 ||
-        (value.phase === "services" && value.appending === true) ||
+        (value.phase === "services" &&
+          readNativeAppendRollback(value.appendRollback)) ||
         (value.phase === "images" && Array.isArray(value.images))) &&
       value.kind === "progress" &&
       isNativeDetachedStartPhase(value.phase)
@@ -1239,7 +1248,8 @@ export async function startNativeDetachedUp(opts: {
   let cancellationCode: number | undefined;
   let pendingAppendCancel: number | undefined;
   let appendCancelDeadline: ReturnType<typeof setTimeout> | undefined;
-  let appending = false;
+  let appendRollback: NativeAppendRollback | undefined;
+  let forceSent: Promise<void> | undefined;
   let shellVariablesReported = false;
   let exitGrace: ReturnType<typeof setTimeout> | undefined;
   const exited = new Promise<void>((resolve) => {
@@ -1269,16 +1279,23 @@ export async function startNativeDetachedUp(opts: {
     );
   };
   const cancel = (code: number) => {
-    if (committed || failed || pendingAppendCancel !== undefined) {
+    if (committed || failed) {
       return;
     }
-    if (appending) {
+    if (pendingAppendCancel !== undefined) {
+      forceSent = new Promise((resolve) => {
+        child.send("force-append-cancel", () => resolve());
+      });
+      fail();
+      return;
+    }
+    if (appendRollback) {
       pendingAppendCancel = code;
-      // Leave IPC open for the frontend's bounded wait on the native owner.
-      appendCancelDeadline = setTimeout(
-        fail,
-        NATIVE_APPEND_CANCEL_CONFIRMATION_MS + 1000
+      process.stderr.write(
+        `${nativeAppendRollbackMessage(appendRollback.services)}\n`
       );
+      // Leave IPC open for the frontend's bounded wait on the native owner.
+      appendCancelDeadline = setTimeout(fail, appendRollback.waitMs + 1000);
       child.send("cancel", (error) => {
         if (error) {
           fail();
@@ -1332,10 +1349,9 @@ export async function startNativeDetachedUp(opts: {
     if (
       isRecord(value) &&
       value.kind === "progress" &&
-      value.phase === "services" &&
-      value.appending === true
+      value.phase === "services"
     ) {
-      appending = true;
+      appendRollback = readNativeAppendRollback(value.appendRollback);
     }
     let imageBlocked: NativeImageBatchError | NativeImageBlocker | undefined;
     if (!ready && isRecord(value) && value.kind === "image-blocker") {
@@ -1481,6 +1497,9 @@ export async function startNativeDetachedUp(opts: {
     clearTimeout(appendCancelDeadline);
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", terminate);
+    if (forceSent) {
+      await settleWithin(Promise.race([forceSent, exited]), 1000);
+    }
     // A cancelling append already sent its stop request. Other uncommitted
     // launches request graceful shutdown before disconnecting.
     if (child.connected) {

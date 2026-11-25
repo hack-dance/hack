@@ -154,7 +154,7 @@ pub fn request(
         },
         Duration::from_secs(5),
     )?;
-    let deadline = Instant::now() + options.run.timeout + Duration::from_secs(10);
+    let mut deadline = Instant::now() + options.run.timeout + Duration::from_secs(10);
     if matches!(
         signals.wait_until(Some(deadline))?,
         signals::Wake::Signal | signals::Wake::FrontendExit
@@ -162,6 +162,9 @@ pub fn request(
         // Request EOF tells the owner to roll back. Keep the read half open
         // for the reply from this exact append, even if commit won the race.
         stream.shutdown(Shutdown::Write).map_err(|_| refused())?;
+        // The frontend waits its selected stop grace plus a margin. Allow the
+        // full admitted grace (30 seconds) even at the end of the start budget.
+        deadline = Instant::now() + Duration::from_secs(35);
     }
     let reply: Value = transport::read(
         &mut stream,

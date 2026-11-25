@@ -12,6 +12,10 @@ import {
 import { isRecord } from "../lib/guards.ts";
 import { appendLifecycleLogRecord } from "../lib/lifecycle-runtime.ts";
 import {
+  type NativeAppendRollback,
+  nativeAppendRollback,
+} from "../lib/native-append-cancellation.ts";
+import {
   isNativeDetachedOwnerProcess,
   nativeDetachedUpAppendCancelled,
   nativeDetachedUpBranchDropped,
@@ -2290,7 +2294,26 @@ async function selectNativeGraphExtension(opts: {
     }
     images.set(name, image);
   }
-  return { run: opts.run, generation: owner.generation, images };
+  const ready = new Set<string>();
+  const observations = isRecord(snapshot.observations)
+    ? snapshot.observations
+    : {};
+  const readiness = isRecord(snapshot.receipt.readiness)
+    ? snapshot.receipt.readiness
+    : {};
+  for (const name of images.keys()) {
+    const observed = observations[`container:${name}`];
+    if (
+      isRecord(observed) &&
+      (observed.state === "running" ||
+        (readiness[name] === "completed" &&
+          observed.state === "exited" &&
+          observed.code === 0))
+    ) {
+      ready.add(name);
+    }
+  }
+  return { run: opts.run, generation: owner.generation, images, ready };
 }
 
 /**
@@ -2607,7 +2630,10 @@ export type NativeStartupProgress =
         | "plan"
         | "all-stopped";
     }
-  | { readonly phase: "stopping"; readonly appending?: true }
+  | {
+      readonly phase: "stopping";
+      readonly appendRollback?: NativeAppendRollback;
+    }
   | {
       readonly phase: "stopped";
       /** The confirmed-stop retention line when a run mapping was published. */
@@ -2616,7 +2642,7 @@ export type NativeStartupProgress =
   | {
       readonly phase: "services";
       readonly services: readonly string[];
-      readonly appending?: true;
+      readonly appendRollback?: NativeAppendRollback;
     }
   | ({ readonly phase: "dependency-wait" } & NativeDependencyWaitProgress)
   | {
@@ -3177,6 +3203,7 @@ async function extendNativeProjectGraph({
   budgetSeconds,
   progress,
   signal,
+  forceSignal,
   admitted,
 }: {
   readonly opts: NativeProjectStartOptions;
@@ -3193,10 +3220,17 @@ async function extendNativeProjectGraph({
   readonly budgetSeconds: number;
   readonly progress: ReturnType<typeof progressReporter>;
   readonly signal: AbortSignal;
-  readonly admitted: () => void;
+  readonly forceSignal: AbortSignal;
+  readonly admitted: (rollback: NativeAppendRollback) => void;
 }): Promise<number> {
   const run = extension.run.run;
   const services = [...nativeReviewedActiveServices(review.report.plan)].sort();
+  const appendRollback = nativeAppendRollback({
+    plan: review.report.plan,
+    selected: services,
+    ready: extension.ready,
+    owned: extension.images,
+  });
   const delivery = nativeEnvironmentDelivery({
     input: activeNativeDeliveryInput({
       input,
@@ -3228,8 +3262,8 @@ async function extendNativeProjectGraph({
       );
     }
     requireActiveStartup(signal);
-    progress({ phase: "services", services, appending: true });
-    admitted();
+    progress({ phase: "services", services, appendRollback });
+    admitted(appendRollback);
     const response = await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
@@ -3256,6 +3290,7 @@ async function extendNativeProjectGraph({
       privateInput: delivery.payload,
       timeoutMs: budgetSeconds * 1000 + 15_000,
       signal,
+      appendCancellation: { waitMs: appendRollback.waitMs, forceSignal },
     });
     requireActiveStartup(signal);
     const selected = authoritative(
@@ -3556,12 +3591,13 @@ async function startNativeProjectAttempt(
   const stopSignals = nativeForegroundStopSignals(opts);
   opts.onStopSignals?.();
   const controller = stopSignals.controller;
+  let appendRollback: NativeAppendRollback | undefined;
   controller.signal.addEventListener(
     "abort",
     () =>
       progress({
         phase: "stopping",
-        ...(extension ? { appending: true } : {}),
+        ...(appendRollback ? { appendRollback } : {}),
       }),
     { once: true }
   );
@@ -3951,7 +3987,9 @@ async function startNativeProjectAttempt(
             budgetSeconds,
             progress,
             signal: controller.signal,
-            admitted: () => {
+            forceSignal: stopSignals.force,
+            admitted: (rollback) => {
+              appendRollback = rollback;
               servicesRequested = true;
             },
           });

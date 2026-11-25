@@ -469,6 +469,7 @@ import {
   runLokiSnapshotWithFallback,
 } from "../lib/logs.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
+import { nativeAppendRollbackMessage } from "../lib/native-append-cancellation.ts";
 import {
   readNativeComposeDocument,
   refuseNativeComposeBackendFeatures,
@@ -6956,8 +6957,8 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
       return;
     case "stopping":
       logger.step({
-        message: event.appending
-          ? "Cancelling the native service start and waiting for rollback…"
+        message: event.appendRollback
+          ? nativeAppendRollbackMessage(event.appendRollback.services)
           : "Stopping the native project; waiting for owned cleanup…",
       });
       return;
@@ -7314,7 +7315,7 @@ async function handleNativeUp({
       } else {
         nativeDetachedUpProgress(
           event.phase,
-          event.phase === "services" && event.appending
+          event.phase === "services" ? event.appendRollback : undefined
         );
       }
       if (event.phase === "ready" || event.phase === "started") {

@@ -8,7 +8,6 @@ use gpui_kit::{ClipboardItem, Context, Entity, div, prelude::*};
 use hack_desktop_core::{
     models::NATIVE_PROJECT_CODE,
     service_catalog::{CatalogEdit, Recipe, recipes},
-    source::ServiceActionTarget,
     state::Action,
     viewmodel::DetailView,
 };
@@ -73,7 +72,7 @@ impl HackApp {
         };
         let report = CatalogEdit {
             file: ".hack/docker-compose.yml".into(),
-            diff: "--- a/.hack/docker-compose.yml\n+++ b/.hack/docker-compose.yml\n@@ -4,0 +5,2 @@\n+  redis:\n+    image: redis:7-alpine\n".into(),
+            diff: "--- a/.hack/docker-compose.yml\n+++ b/.hack/docker-compose.yml\n@@ -4,0 +5,6 @@\n+  redis:\n+    image: redis:7-alpine\n+    volumes:\n+      - redis-data:/data\n+volumes:\n+  redis-data: {}\n".into(),
             revision: "fixture".into(),
             saved,
         };
@@ -190,7 +189,7 @@ impl HackApp {
                     cx.notify();
                 }))
             }));
-        let snippet = recipe.snippet();
+        let snippet = recipe.compose_snippet();
         let target = self.catalog_target(recipe);
         let edit = self
             .catalog
@@ -240,16 +239,21 @@ impl HackApp {
                     ui,
                 );
                 if can_start {
+                    let key = detail.key.clone();
                     start = start.on_click(cx.listener(move |this, _, _, cx| {
-                        this.run_scoped_action(
-                            Action::Start,
-                            Some(ServiceActionTarget {
-                                name: recipe.name.clone(),
-                                compose_project: None,
-                                containers: Vec::new(),
-                            }),
-                            cx,
-                        );
+                        if this.model.selected_key().as_ref() == Some(&key)
+                            && !this.machine.busy()
+                            && let Some((root, native)) = this.selected_root()
+                        {
+                            this.dispatch_service_action(
+                                key.clone(),
+                                root,
+                                native,
+                                &recipe.name,
+                                Action::Start,
+                                cx,
+                            );
+                        }
                     }));
                 }
                 (
@@ -344,6 +348,15 @@ mod tests {
         {
             yaml.push_str(&recipe.snippet());
             yaml.push('\n');
+        }
+        yaml.push_str("volumes:\n");
+        for recipe in recipes()
+            .iter()
+            .filter(|recipe| !recipe.env_names.is_empty())
+        {
+            for suffix in recipe.volumes.keys() {
+                yaml.push_str(&format!("  {}-{suffix}: {{}}\n", recipe.name));
+            }
         }
         assert_eq!(yaml, include_str!("../fixtures/catalog-credentials.yaml"));
     }

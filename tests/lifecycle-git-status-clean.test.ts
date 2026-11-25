@@ -39,7 +39,7 @@ const STUB = [
   "      ;;",
   '    *" ps "*)',
   '      if [ -f "$marker" ]; then exit 0; fi',
-  '      printf "%s\\n" \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0}\'',
+  '      printf \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0,"Labels":"com.docker.compose.project.working_dir=%s"}\\n\' "$PWD"',
   "      exit 0",
   "      ;;",
   "  esac",

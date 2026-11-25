@@ -915,6 +915,7 @@ mod tests {
                     key: "web".into(),
                     name: format!("hkg-{run}-container-0"),
                     id: None,
+                    cleanup_observed_create: false,
                     image: Some(format!("sha256:{}", "a".repeat(64))),
                     phase: "reserved".into(),
                     routing: None,

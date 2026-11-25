@@ -98,9 +98,8 @@ TLC 1.7.4, Java 17, the runner's settings (two workers, 512 MiB heap). Two input
 | `resolve-per-use` | cas, `MaxBoot = 1` | `OneDigestPerCommand` at `UseTag` |
 
 The positive state counts are pinned in `scripts/lib/tla-runtime-models.ts`. A
-control is checked by its invariant, its action and its `bad` flag, which only
-that action can set; its state count varies with the two-worker search and is not
-pinned.
+control is checked by its invariant and its final state's `bad` flag, which only
+the offending action can set. Its state count varies with the two-worker search.
 
 `NoEpoch` runs together with `NoVerify`: in this model the observation alone keeps
 boot skips sound, and the boot id in the key makes a stale record miss without an

@@ -2,6 +2,7 @@
 //! ready owner (including a journal-bound one-off) from an earlier boot of the same
 //! pool: the one boot its receipt's evidence names (`boot_match`), never the current one.
 //! No endpoint-file deletion is treated as a relay retirement acknowledgement.
+pub(super) use super::cleanup_enrollment::immutable;
 use super::*;
 use crate::provider::{identity, lifecycle, state::Owner};
 use sha2::{Digest, Sha256};
@@ -55,24 +56,6 @@ fn selected(receipt: &Receipt) -> Result<String, CandidateError> {
         &serde_json::to_vec_pretty(receipt).map_err(|_| refused())?,
     ))
 }
-pub(super) fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
-    let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    {
-        // `started_from` is part of the phase (`Receipt::set_phase`).
-        let value = value.as_object_mut().ok_or_else(refused)?;
-        value.remove("phase");
-        value.remove("started_from");
-        value.remove("extending");
-    }
-    for group in ["resources", "probes"] {
-        if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
-            for item in items.values_mut() {
-                item.as_object_mut().ok_or_else(refused)?.remove("phase");
-            }
-        }
-    }
-    Ok(value)
-}
 /// A graph whose start completed: ready, or (with `--report-started`) every service
 /// started. Both are live runs a dead owner may leave behind across a boot.
 fn live(phase: &str) -> bool {
@@ -100,7 +83,7 @@ fn validate(
         || intent.owner_sha256 != owner
         || !hex(owner, 64)
         || intent.old_boot.is_empty()
-        || immutable(&intent.original)? != immutable(receipt)?
+        || !cleanup_enrollment::matches_cleanup_progress(&intent.original, receipt)?
     {
         return Err(refused());
     }
@@ -155,10 +138,11 @@ pub(super) fn recovery_selection(
     }
     if exists(&root.join(FILE))? {
         let intent: Intent = state::read(&root.join(FILE))?;
-        if intent.complete_sha256.is_none() && immutable(&intent.original)? != immutable(receipt)? {
+        let matches = cleanup_enrollment::matches_cleanup_progress(&intent.original, receipt)?;
+        if intent.complete_sha256.is_none() && !matches {
             return Err(refused());
         }
-        if immutable(&intent.original)? == immutable(receipt)?
+        if matches
             && earlier.contains(&intent.old_boot)
             && intent.new_boot.as_ref() == Some(current)
         {
@@ -1481,7 +1465,6 @@ pub(super) fn retained(root: &std::path::Path, receipt: &Receipt) -> Result<bool
     )?;
     if intent.complete_sha256.as_deref() != Some(selected(&original_receipt)?.as_str())
         || receipt.phase != "stopped-data-retained"
-        || immutable(&intent.original)? != immutable(&original_receipt)?
     {
         return Err(refused());
     }
@@ -1656,6 +1639,67 @@ mod tests {
             one_off_sha256: None,
             enrollment: None,
         }
+    }
+    #[test]
+    fn dead_owner_selection_accepts_observed_id_and_refuses_changed_known_id() {
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let root = fixture.graph();
+        let mut owner = Owner::load(&fixture.candidate).unwrap();
+        let mut original = fixture.receipt();
+        original.set_phase("cleanup-intent");
+        let resource = original.resources.get_mut("container:web").unwrap();
+        resource.id = None;
+        resource.phase = "uncertain".into();
+        let mut selection = intent(&original);
+        let old_boot = owner
+            .guest_boot_id
+            .replace("22222222-2222-2222-2222-222222222222".into());
+        owner.previous_guest_boot_id = old_boot.clone();
+        owner.phase = "running".into();
+        selection.old_boot = old_boot.unwrap();
+        selection.new_boot = owner.guest_boot_id.clone();
+        state::write(&root.join(FILE), &selection).unwrap();
+
+        let mut current = original.clone();
+        let resource = current.resources.get_mut("container:web").unwrap();
+        resource.id = Some("a".repeat(64));
+        resource.cleanup_observed_create = true;
+        validate(
+            &selection,
+            &current,
+            &selection.original_sha256,
+            &selection.owner_sha256,
+        )
+        .unwrap();
+        let resume = |receipt: &Receipt| {
+            recovery_selection(&fixture.candidate, &root, receipt, &owner, true)
+        };
+        assert_eq!(
+            resume(&current).unwrap().as_deref(),
+            Some(selection.original_sha256.as_str())
+        );
+
+        let mut pinned = intent(&current);
+        pinned.old_boot = selection.old_boot;
+        pinned.new_boot = selection.new_boot;
+        state::write(&root.join(FILE), &pinned).unwrap();
+        assert_eq!(
+            resume(&current).unwrap().as_deref(),
+            Some(pinned.original_sha256.as_str())
+        );
+        current.resources.get_mut("container:web").unwrap().id = Some("b".repeat(64));
+        assert_eq!(
+            validate(
+                &pinned,
+                &current,
+                &pinned.original_sha256,
+                &pinned.owner_sha256
+            )
+            .unwrap_err()
+            .code,
+            refused().code
+        );
+        assert_eq!(resume(&current).unwrap_err().code, refused().code);
     }
     #[test]
     fn interrupted_bridge_selection_does_not_require_a_restored_generation() {

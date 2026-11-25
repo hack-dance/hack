@@ -271,6 +271,7 @@ pub(super) mod tests {
             key: key.into(),
             name: format!("owned-{key}"),
             id: None,
+            cleanup_observed_create: false,
             image: None,
             phase: "absent".into(),
             amd64_emulation: None,

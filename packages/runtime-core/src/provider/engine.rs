@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+pub(in crate::provider) mod changes;
 #[cfg(any(target_os = "macos", test))]
 mod exec_io;
 pub(in crate::provider) mod inspection;
@@ -287,6 +288,20 @@ pub(super) struct Engine<'a> {
 }
 
 impl<'a> Engine<'a> {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn receipt_only_fixture(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        Ok(Self {
+            guest: OwnedGuest::receipt_only_fixture(candidate)?,
+            transport: Transport::new(
+                &candidate.state_root.join("no-test-engine.sock"),
+                Duration::from_secs(1),
+            )?,
+            cleanup_only: true,
+            #[cfg(feature = "native-config-plan")]
+            tool_lifetime: super::guest_tool::Lifetime::default(),
+        })
+    }
+
     #[cfg(feature = "native-config-plan")]
     pub(in crate::provider) fn tool_lifetime(&self) -> &super::guest_tool::Lifetime {
         &self.tool_lifetime

@@ -3,11 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::daemon::DaemonClient;
 use crate::doctor::DoctorRun;
 use crate::fixtures::{self, Fixture};
 use crate::models::{
     DaemonApiStatus, DoctorReport, LifecycleResult, LogEntry, OpenResult, ProjectsPayload,
+    StoppedContainerExecution,
 };
 use crate::runner::{CliRunner, RunError};
 use crate::state::Action;
@@ -257,12 +260,43 @@ pub enum ActionOutcome {
     Opened(OpenResult),
 }
 
-/// A service and its running containers in one observed Compose instance.
-pub struct ServiceActionTarget {
-    pub name: String,
-    pub compose_project: Option<String>,
-    /// The Docker listing's short or full IDs and exact names.
-    pub containers: Vec<(String, String)>,
+/// A service action can fail after Docker confirms a subset of its stops.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceActionError {
+    pub source: Box<SourceError>,
+    pub(crate) stopped: Option<ServiceStopReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServiceStopReceipt {
+    pub stopped_containers: Vec<StoppedContainerExecution>,
+    pub stopped_at: String,
+}
+
+impl From<SourceError> for ServiceActionError {
+    fn from(source: SourceError) -> Self {
+        Self {
+            source: Box::new(source),
+            stopped: None,
+        }
+    }
+}
+
+impl From<RunError> for ServiceActionError {
+    fn from(error: RunError) -> Self {
+        let stopped = match &error {
+            RunError::Cli(error) if error.code == "E_COMPOSE_FAILED" => error
+                .detail
+                .as_ref()
+                .and_then(|detail| ServiceStopReceipt::deserialize(detail).ok()),
+            _ => None,
+        };
+        Self {
+            source: Box::new(error.into()),
+            stopped,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -536,6 +570,14 @@ pub trait Source: Send + Sync {
         Err("Usage is unavailable for this source".into())
     }
 
+    /// One machine-wide, Compose-only sample, with per-container counters.
+    ///
+    /// # Errors
+    /// The CLI could not read usage or its output could not be parsed.
+    fn stats_sample(&self) -> Result<crate::stats::StatsReport, String> {
+        Err("Usage is unavailable for this source".into())
+    }
+
     /// The services of one instance whose image architecture differs from
     /// the engine's (`hack ps --json --path <root> [--branch <name>]`).
     ///
@@ -621,19 +663,34 @@ pub trait Source: Send + Sync {
         action: Action,
     ) -> Result<ActionOutcome, SourceError>;
 
-    /// Start a selected service on the project backend, restart a Compose
-    /// service, or stop its exact observed containers.
+    /// Run a copy action bound to the Compose identity the app displayed.
+    fn act_on_copy(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        _compose_project: Option<&str>,
+        action: Action,
+    ) -> Result<ActionOutcome, SourceError> {
+        self.act(repo_root, native, branch, action)
+    }
+
+    /// Start a selected service on either backend, or stop or restart on Compose.
     fn act_on_service(
         &self,
-        _root: &Path,
+        _repo_root: &Path,
         _native: bool,
         _branch: Option<&str>,
-        _target: &ServiceActionTarget,
+        _compose_project: Option<&str>,
+        _service: &str,
         _action: Action,
-    ) -> Result<ActionOutcome, SourceError> {
-        Err(service_action_error(
-            "Service actions are unavailable for this source",
-        ))
+    ) -> Result<LifecycleResult, ServiceActionError> {
+        Err(SourceError::Cli {
+            code: "E_APP_SERVICE_ACTION".into(),
+            message: "Service actions are unavailable for this source.".into(),
+            failed: vec![],
+        }
+        .into())
     }
 
     /// Last log lines for a project or one of its branch instances (no follow).
@@ -854,23 +911,6 @@ pub(crate) fn read_daemon_status(
 
 pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
     trusted_tool_path_with(path, uid, directory, |_, _| false)
-}
-
-/// Docker Desktop and OrbStack expose their CLI through an app in the
-/// system Applications directory. The administrator group can manage that
-/// directory. This allowance is for Docker's direct service action only.
-pub(crate) fn trusted_docker_path(path: &Path, uid: u32) -> Option<PathBuf> {
-    trusted_tool_path_with(path, uid, false, system_applications_dir)
-}
-
-fn system_applications_dir(path: &Path, meta: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    cfg!(target_os = "macos")
-        && path == Path::new("/Applications")
-        && meta.is_dir()
-        && meta.uid() == 0
-        && meta.gid() == 80 // macOS's local administrators group
-        && meta.mode() & 0o002 == 0
 }
 
 fn trusted_tool_path_with(
@@ -1161,6 +1201,7 @@ fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
     }
     let mut coverage = DoctorRun::machine(Ok(crate::models::DoctorReport {
         checks: vec![crate::models::DoctorCheck {
+            native_pool: None,
             id: "desktop tool coverage".into(),
             status: "unknown".into(),
             detail: note,
@@ -1305,6 +1346,7 @@ impl LiveSource {
                 let why = format!("Could not check Doctor executable discovery: {reason}");
                 let report = crate::models::DoctorReport {
                     checks: vec![crate::models::DoctorCheck {
+                        native_pool: None,
                         id: "desktop preflight".into(),
                         status: "unknown".into(),
                         detail: why.clone(),
@@ -2053,6 +2095,25 @@ impl Source for LiveSource {
         crate::usage::UsageReport::from_value(v)
     }
 
+    fn stats_sample(&self) -> Result<crate::stats::StatsReport, String> {
+        let value: serde_json::Value = self
+            .runner_for(false)
+            .fixed()
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_json(
+                &["usage", "--json", "--details", "--no-host"],
+                None,
+                Self::USAGE,
+            )
+            .map_err(|e| e.to_string())?;
+        if value.get("runtime_ok").and_then(serde_json::Value::as_bool) != Some(true)
+            || value.get("error").is_some()
+        {
+            return Err("Container usage is unavailable".into());
+        }
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
     fn emulated_services(
         &self,
         root: &Path,
@@ -2212,13 +2273,30 @@ impl Source for LiveSource {
         branch: Option<&str>,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
+        self.act_on_copy(repo_root, native, branch, None, action)
+    }
+
+    fn act_on_copy(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        compose_project: Option<&str>,
+        action: Action,
+    ) -> Result<ActionOutcome, SourceError> {
         let branch = branch.map(validate_branch).transpose()?;
         // Actions run checkout-defined lifecycle commands as the user: run
         // only on a validated root, by its canonical path.
         let real = trusted_root(repo_root)?;
         let repo_root = real.as_path();
 
-        let args = with_branch(action.cli_args(), branch);
+        let mut args = with_branch(action.cli_args(), branch);
+        let expected = compose_project
+            .filter(|_| !native && action != Action::Open)
+            .map(|name| format!("--expect-compose-project={name}"));
+        if let Some(expected) = &expected {
+            args.extend(["--target", "local", expected.as_str()]);
+        }
         let runner = self.runner_for(native);
         Ok(match action {
             Action::Open => {
@@ -2254,61 +2332,64 @@ impl Source for LiveSource {
 
     fn act_on_service(
         &self,
-        root: &Path,
+        repo_root: &Path,
         native: bool,
         branch: Option<&str>,
-        target: &ServiceActionTarget,
+        compose_project: Option<&str>,
+        service: &str,
         action: Action,
-    ) -> Result<ActionOutcome, SourceError> {
-        if native && action != Action::Start {
-            return Err(service_action_error(
-                "Native supports only starting a selected service",
-            ));
-        }
-        validate_branch(&target.name)?;
+    ) -> Result<LifecycleResult, ServiceActionError> {
         let branch = branch.map(validate_branch).transpose()?;
-        let root = trusted_root(root)?;
-        match action {
-            Action::Start | Action::Restart => {
-                let mut args = with_branch(action.cli_args(), branch);
-                args.push(&target.name);
-                let result = self
-                    .runner_for(native)
-                    .run_json_to_completion(&args, Some(&root))?;
-                Ok(ActionOutcome::Lifecycle(result))
+        let root = trusted_root(repo_root)?;
+        // `--service=<name>` always stays the value of the service selector.
+        let stop_option = format!("--service={service}");
+        let mut args = match action {
+            Action::Stop if !native => vec![
+                "down",
+                "--json",
+                "--no-interactive",
+                "--target",
+                "local",
+                &stop_option,
+            ],
+            Action::Start if native => {
+                validate_branch(service)?;
+                let mut args = with_branch(Action::Start.cli_args(), branch);
+                args.extend(["--", service]);
+                return Ok(self
+                    .runner_for(true)
+                    .run_json_to_completion(&args, Some(&root))?);
             }
-            Action::Stop => {
-                // Hack's down applies to a whole instance. Resolve the
-                // observed short IDs to full IDs in the Docker context we
-                // will mutate. Never substitute a different container.
-                let docker = CliRunner::on_path("docker")
-                    .program_path()
-                    .ok_or_else(|| service_action_error("Docker CLI was not found"))?;
-                let runner = CliRunner::verified_docker(docker).with_cwd(root);
-                let inspect = service_inspect_args(target)?;
-                let (out, _, status) = runner
-                    .run_raw(&inspect, None, Self::READ)
-                    .map_err(|err| service_action_error(&err.to_string()))?;
-                if status != Some(0) {
-                    return Err(service_target_changed());
-                }
-                let ids = service_stop_ids(target, &out)?;
-                let args: Vec<_> = ["stop", "--"]
-                    .into_iter()
-                    .chain(ids.iter().map(String::as_str))
-                    .collect();
-                let (_, _, status) = runner
-                    .run_raw(&args, None, Self::OPEN)
-                    .map_err(|err| service_action_error(&err.to_string()))?;
-                if status != Some(0) {
-                    return Err(service_action_error(
-                        "Docker could not stop all selected containers. Check their current state.",
-                    ));
-                }
-                Ok(ActionOutcome::Lifecycle(LifecycleResult::default()))
+            Action::Start if !service.is_empty() && !service.starts_with('-') => {
+                let mut args = Action::Start.cli_args().to_vec();
+                args.extend(["--target", "local", service]);
+                args
             }
-            _ => Err(service_action_error("Unsupported service action")),
+            Action::Restart if !native && !service.is_empty() && !service.starts_with('-') => {
+                vec![
+                    "restart",
+                    "--json",
+                    "--no-interactive",
+                    "--target",
+                    "local",
+                    service,
+                ]
+            }
+            _ => {
+                return Err(SourceError::Cli {
+                    code: "E_APP_SERVICE_ACTION".into(),
+                    message: "Invalid service action or service name.".into(),
+                    failed: vec![],
+                }
+                .into());
+            }
+        };
+        let expected = compose_project.map(|name| format!("--expect-compose-project={name}"));
+        if let Some(expected) = &expected {
+            args.push(expected);
         }
+        let runner = self.runner_for(false);
+        Ok(runner.run_json_to_completion(&with_branch(&args, branch), Some(&root))?)
     }
 
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {
@@ -2341,75 +2422,6 @@ impl Source for LiveSource {
             .map_err(|e| e.to_string())?;
         parse_log_tail(&out, &err, code)
     }
-}
-
-fn service_action_error(message: &str) -> SourceError {
-    SourceError::Cli {
-        code: "E_APP_SERVICE_ACTION".into(),
-        message: message.into(),
-        failed: vec![],
-    }
-}
-
-fn service_target_changed() -> SourceError {
-    service_action_error(
-        "The service containers could not be verified. Refresh the instance and try again.",
-    )
-}
-
-fn valid_container_id(id: &str) -> bool {
-    matches!(id.len(), 12 | 64) && id.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn service_inspect_args(target: &ServiceActionTarget) -> Result<Vec<&str>, SourceError> {
-    const FORMAT: &str = r#"{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}"#;
-    if target.compose_project.is_none()
-        || target.containers.is_empty()
-        || target
-            .containers
-            .iter()
-            .any(|(id, name)| !valid_container_id(id) || name.is_empty())
-    {
-        return Err(service_target_changed());
-    }
-    Ok(["inspect", "--type", "container", "--format", FORMAT, "--"]
-        .into_iter()
-        .chain(target.containers.iter().map(|(id, _)| id.as_str()))
-        .collect())
-}
-
-fn service_stop_ids(target: &ServiceActionTarget, out: &str) -> Result<Vec<String>, SourceError> {
-    #[derive(serde::Deserialize)]
-    struct Observed {
-        id: String,
-        name: String,
-        project: String,
-        service: String,
-    }
-    let observed = out
-        .lines()
-        .map(serde_json::from_str::<Observed>)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| service_target_changed())?;
-    target
-        .containers
-        .iter()
-        .map(|(partial, name)| {
-            let mut found = observed.iter().filter(|row| {
-                row.id.len() == 64
-                    && valid_container_id(&row.id)
-                    && row.id.starts_with(partial)
-                    && row.name.strip_prefix('/') == Some(name.as_str())
-                    && Some(row.project.as_str()) == target.compose_project.as_deref()
-                    && row.service == target.name
-            });
-            let record = found
-                .next()
-                .filter(|_| found.next().is_none())
-                .ok_or_else(service_target_changed)?;
-            Ok(record.id.clone())
-        })
-        .collect()
 }
 
 /// A [`SourceError`] as one line for string-error APIs (logs).
@@ -2866,65 +2878,6 @@ fn env_root(root: &Path) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stopping_a_service_resolves_all_selected_ids_for_the_same_service_and_copy() {
-        let exact = "a".repeat(64);
-        let second = "b".repeat(64);
-        let target = ServiceActionTarget {
-            name: "api".into(),
-            compose_project: Some("storefront--feature-search".into()),
-            containers: vec![
-                (
-                    exact[..12].into(),
-                    "storefront--feature-search-api-1".into(),
-                ),
-                (second.clone(), "storefront--feature-search-api-2".into()),
-            ],
-        };
-        let record = |id: &str, name: &str, project: &str, service: &str| {
-            serde_json::json!({ "id": id, "name": name, "project": project, "service": service })
-                .to_string()
-        };
-        let first = record(
-            &exact,
-            "/storefront--feature-search-api-1",
-            "storefront--feature-search",
-            "api",
-        );
-        let other = record(
-            &second,
-            "/storefront--feature-search-api-2",
-            "storefront--feature-search",
-            "api",
-        );
-        let args = service_inspect_args(&target).expect("safe inspect arguments");
-        assert_eq!(&args[5..], &["--", &exact[..12], &second]);
-        assert_eq!(
-            service_stop_ids(&target, &format!("{other}\n{first}")).unwrap(),
-            [exact.clone(), second.clone()]
-        );
-        assert!(
-            service_stop_ids(&target, &first).is_err(),
-            "a partial result may not stop anything"
-        );
-        assert!(
-            service_stop_ids(&target, &format!("{first}\n{other}\n{first}")).is_err(),
-            "an ambiguous result may not stop anything"
-        );
-        let wrong_copy = other.replace(
-            "\"project\":\"storefront--feature-search\"",
-            "\"project\":\"storefront--fix-login\"",
-        );
-        assert!(service_stop_ids(&target, &format!("{first}\n{wrong_copy}")).is_err());
-        let wrong_service = other.replace("\"service\":\"api\"", "\"service\":\"db\"");
-        assert!(service_stop_ids(&target, &format!("{first}\n{wrong_service}")).is_err());
-        let injected = ServiceActionTarget {
-            containers: vec![("--help".into(), "api".into())],
-            ..target
-        };
-        assert!(service_inspect_args(&injected).is_err());
-    }
 
     #[test]
     fn effective_socket_requires_explicit_absolute_cli_evidence() {
@@ -4109,9 +4062,9 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(tools.unchecked.contains("docker"));
         for native in [false, true] {
             let checks = vec![
-                crate::models::DoctorCheck { id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()), fix: None },
-                crate::models::DoctorCheck { id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into(), fix: None },
-                crate::models::DoctorCheck { id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into(), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into(), fix: None },
+                crate::models::DoctorCheck { native_pool: None, id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into(), fix: None },
             ];
             let mut run = DoctorRun::project(
                 "fixture",
@@ -4158,6 +4111,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(!tools.unchecked.contains("docker"));
         let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
             checks: vec![crate::models::DoctorCheck {
+                native_pool: None,
                 id: "docker daemon".into(),
                 status: "error".into(),
                 detail: "validated Docker reported an engine error".into(),
@@ -4205,6 +4159,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             ("host tls trust", "missing host trust bundle"),
         ]
         .map(|(id, detail)| crate::models::DoctorCheck {
+            native_pool: None,
             id: id.into(),
             status: "error".into(),
             detail: detail.into(),
@@ -4358,6 +4313,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                 "project",
             ]
             .map(|id| crate::models::DoctorCheck {
+                native_pool: None,
                 id: id.into(),
                 status: "ok".into(),
                 detail: "independently observed".into(),
@@ -5742,27 +5698,34 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
     }
 
     #[test]
-    fn catalog_start_uses_the_selected_native_backend_and_branch() {
+    fn catalog_start_uses_native_runner_and_preserves_branch() {
         let b = std::fs::canonicalize(base("catalog-native-argv")).unwrap();
         let hack = b.join("hack");
         crate::test_support::script(
             &hack,
-            "#!/bin/sh\nprintf '%s\\n' \"$HACK_RUNTIME_BACKEND\" \"$@\" > \"$HACK_HOME/argv\"\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
+            "#!/bin/sh\nprintf '%s\n' \"$HACK_RUNTIME_BACKEND\" \"$@\" > \"$HACK_HOME/argv\"\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
         );
         let source = LiveSource::new(fixture_runner(&hack), None);
         let project = b.join("project");
         make_project(&project, ".hack", "docker-compose.yml");
-        let target = ServiceActionTarget {
-            name: "redis".into(),
-            compose_project: None,
-            containers: Vec::new(),
-        };
-        let result = source.act_on_service(&project, true, Some("test"), &target, Action::Start);
+        let result = source.act_on_service(
+            &project,
+            true,
+            Some("test"),
+            Some("copy"),
+            "redis",
+            Action::Start,
+        );
         assert!(result.is_ok(), "{result:?}");
         let args = argv(&b);
         assert_eq!(args[0], "native");
         assert_eq!(&args[1..4], ["up", "--branch", "test"]);
-        assert!(args.iter().any(|arg| arg == "redis"));
+        assert!(args.ends_with(&["--".to_owned(), "redis".to_owned()]));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--target" || arg.starts_with("--expect-compose-project"))
+        );
     }
 
     #[test]
@@ -5887,7 +5850,13 @@ echo '{"ok":true,"data":{"copies":[{"checkout":{"name":"shop","root":"/work/shop
             r#"#!/bin/sh
 printf '%s %s\n' "$HACK_RUNTIME_BACKEND" "$*" >> "$HACK_HOME/calls"
 case "$1" in
-  usage) echo '{"ok":true,"data":{"schema":"hack.usage.by-service.v1","project":"shop","services":[{"composeProject":"shop","service":"api","containers":1,"cpuPercent":1.5,"memUsedBytes":1048576,"memLimitBytes":null}]}}' ;;
+  usage)
+    if [ "$3" = "--details" ]; then
+      echo '{"runtime_ok":true,"containers":[{"containerId":"aaaaaaaaaaaa","project":"shop","service":"api","netInputBytes":1000,"configuredMemoryLimitBytes":67108864}]}'
+    else
+      echo '{"ok":true,"data":{"schema":"hack.usage.by-service.v1","project":"shop","services":[{"composeProject":"shop","service":"api","containers":1,"cpuPercent":1.5,"memUsedBytes":1048576,"memLimitBytes":null}]}}'
+    fi
+    ;;
   ps) echo '{"ok":true,"data":{"items":[{"Service":"api","emulated":true},{"Service":"db"}]}}' ;;
 esac
 "#,
@@ -5905,6 +5874,12 @@ esac
         let root = Path::new("/work/shop");
         let report = src.service_usage(root).unwrap();
         assert_eq!(report.for_instance("shop")["api"].cpu_percent, Some(1.5));
+        let stats = src.stats_sample().unwrap();
+        assert_eq!(stats.containers[0].net_input_bytes, Some(1000));
+        assert_eq!(
+            stats.containers[0].configured_memory_limit_bytes,
+            Some(67_108_864)
+        );
         let base = src.emulated_services(root, None).unwrap();
         assert_eq!(base, std::collections::BTreeSet::from(["api".to_owned()]));
         src.emulated_services(root, Some("preview")).unwrap();
@@ -5918,6 +5893,7 @@ esac
             calls.lines().collect::<Vec<_>>(),
             vec![
                 "compose usage --json --by-service --path /work/shop",
+                "compose usage --json --details --no-host",
                 "compose ps --json --path /work/shop",
                 "compose ps --json --branch preview --path /work/shop",
             ]

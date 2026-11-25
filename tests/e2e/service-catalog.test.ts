@@ -64,7 +64,7 @@ test("service add previews and updates a Compose file on the native backend", as
     const save = await cli(["--expect-revision", data.revision]);
     expect(save.exitCode).toBe(0);
     expect(JSON.parse(save.stdout).data.saved).toBe(true);
-    const saved = `${source}  "cache":\n    image: redis:7-alpine\n`;
+    const saved = `${source}  "cache":\n    image: redis:7-alpine\n    volumes:\n      - cache-data:/data\nvolumes:\n  cache-data: {}\n`;
     expect(await readFile(file, "utf8")).toBe(saved);
 
     const start = await runCli({
@@ -79,11 +79,9 @@ test("service add previews and updates a Compose file on the native backend", as
       hackHome,
     });
     expect(start.exitCode).not.toBe(0);
-    // The selected service proceeds to native setup. This fixture supplies an
-    // unavailable runtime so it can exercise admission without starting a VM.
     expect(JSON.parse(start.stdout).error).toMatchObject({
-      code: "E_STARTUP_INCOMPLETE",
-      detail: { native_code: "native_setup_unavailable" },
+      code: "E_USAGE",
+      message: expect.stringContaining("service selection is not supported"),
     });
 
     const duplicate = await cli([]);

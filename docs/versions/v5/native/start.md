@@ -194,6 +194,13 @@ If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
 [cleanup reference](full-reference.md#manual-candidate-upgrade-and-rollback).
 
+If startup was interrupted just after creating a container, cleanup records
+the container it verified before removing it. Once cleanup finishes with data
+retained, `hack up` can restore the run with its existing named volumes.
+This applies when cleanup records the ID. Runs already stopped with a missing
+container ID still refuse restore. Earlier builds cannot read receipts that
+contain the new cleanup observation field. Native homes are per version.
+
 After installing a newer version, its native home is new, but the project still
 records its last run in the old one. If you did not stop the project with the old
 version first, `hack up`, `hack ps` and `hack down` from the new version refuse with

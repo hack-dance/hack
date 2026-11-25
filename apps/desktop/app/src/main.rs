@@ -35,11 +35,14 @@ mod health_fixtures;
 mod health_model;
 mod logs_view;
 mod machine_view;
+mod resources_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod service_catalog;
 mod service_view;
 mod setup_view;
+mod sidebar_view;
+mod stats_view;
 #[cfg(hack_terminal)]
 mod terminal;
 mod theme;
@@ -298,6 +301,12 @@ fn main() {
                             if !fixtures::opens_doctor(f) {
                                 app.show_project();
                             }
+                        }
+                        if f.name().starts_with("resources-") {
+                            if f.name() == "resources-unavailable" {
+                                app.simulate_daemon_unavailable(false);
+                            }
+                            app.show_resources(cx);
                         }
                         if f.name().starts_with("catalog-") {
                             app.show_catalog_fixture(f.name(), window, cx);

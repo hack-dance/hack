@@ -11,7 +11,8 @@ For a read-only inventory, use `hack projects --json --observe`. It lists
 registered projects even when hackd is off, preserves the registry, and starts
 no services or engine connection. Add `--runtime` only to opt in to Docker
 queries: contacting an on-demand engine can start it. Unknown runtime state stays unknown; native projects use their
-native `ps` observer. See the [listing contract](../cli.md).
+native `ps` observer. Full listings include routes for registered worktrees
+and Hack branches before the copy starts. See the [listing contract](../cli.md).
 
 ```mermaid
 ---
@@ -83,6 +84,9 @@ and the elapsed time. Native stops report when they retain data.
 If `hack up` stops before the project is ready, look for the `!` line. It
 names the blocker and shows the command to run next.
 
+When checking for leftover Compose networks, Hack passes Docker connection
+settings and keeps application values out of the network probe's environment.
+
 `hack ps` lists services with their primary address and current state. An
 address followed by `+1` has one more configured address. Use `hack ps --wide`
 for all addresses, container names, exit codes and port details.
@@ -128,13 +132,14 @@ To add Redis to a Compose project, run `hack service add redis --dry-run` to
 review the diff, then `hack service add redis` to save it and `hack up redis`
 to start the service. In the desktop preview, open **Add service**, search for
 Redis, choose **Add to project** to preview the diff, then **Save to project**
-and **Start redis**. This works on both backends for Compose-file projects.
-For projects authored in `.hack/hack.project.json`, add a workload in that
-file and run `hack config validate`.
+and **Start redis** on either backend for a Compose-file project.
+For projects authored in `.hack/hack.project.json`, add a workload in
+that file and run `hack config validate`.
 
 Review the saved file in **Changes** and commit it when
 you're ready. For PostgreSQL, MySQL, and MinIO, set the listed variables in the
-Env tab under the matching service scope before starting.
+Env tab under the matching service scope before starting. Catalog services
+with image-declared storage use named Compose volumes.
 
 The desktop preview shows those descriptors on the registered project's
 **Services** tab. It shows the environment variable name for an

@@ -43,7 +43,7 @@ pub fn is_health_frame(frame: Fixture) -> bool {
 
 pub fn window_options(frame: Option<Fixture>) -> gpui_kit::WindowOptions {
     let mut options = crate::window_options();
-    if frame.is_some_and(is_health_frame)
+    if frame.is_some_and(|frame| is_health_frame(frame) || frame == Fixture::GroupedSidebar)
         && let Some(gpui_kit::WindowBounds::Windowed(bounds)) = &mut options.window_bounds
     {
         bounds.size = gpui_kit::size(px(1280.), px(800.));
@@ -201,6 +201,7 @@ fn doctor_runs() -> Vec<DoctorRun> {
                         ..passed("project")
                     },
                     DoctorCheck {
+                        native_pool: None,
                         id: "hack gitignore".into(),
                         status: "warn".into(),
                         detail:

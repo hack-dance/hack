@@ -391,7 +391,10 @@ pub(crate) fn run_seeded(
     )
 }
 
-fn run_with_wait(
+/// [`run`] with the wait between passes supplied by the caller: it is called with
+/// the remaining pass interval and may return early when something changed (see
+/// `provider::engine::changes`). Every pass observes afresh either way.
+pub(crate) fn run_with_wait(
     graph: &Graph,
     driver: &mut impl Driver,
     timeout: Duration,

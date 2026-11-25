@@ -8,18 +8,22 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_CONFIG_INVALID",
     message:
-      "Use a block-style Compose services mapping without includes or YAML merges before adding a catalog service.",
+      "Use block-style Compose mappings without includes or YAML merges before adding a catalog service.",
   });
 }
 
-function splicePlan(
+type Splice = {
+  readonly start: number;
+  readonly end: number;
+  readonly insert: string;
+};
+
+function diffHunk(
   text: string,
-  offset: number,
-  end: number,
-  insertion: string,
-  file: string
+  updated: string,
+  oldLines: number,
+  newLines: number
 ) {
-  const updated = text.slice(0, offset) + insertion + text.slice(end);
   const split = (input: string) => input.match(/[^\n]*\n|[^\n]+$/g) ?? [];
   const before = split(text);
   const after = split(updated);
@@ -41,7 +45,46 @@ function splicePlan(
           : `${prefix}${line}\n\\ No newline at end of file\n`
       )
       .join("");
-  const diff = `--- a/${file}\n+++ b/${file}\n@@ -${first + Number(removed.length > 0)},${removed.length} +${first + 1},${added.length} @@\n${lines("-", removed)}${lines("+", added)}`;
+  return `@@ -${oldLines + first + Number(removed.length > 0)},${removed.length} +${newLines + first + 1},${added.length} @@\n${lines("-", removed)}${lines("+", added)}`;
+}
+
+function splicePlan(text: string, edits: readonly Splice[], file: string) {
+  const ordered = [...edits].sort((a, b) => a.start - b.start);
+  let updated = "";
+  let diff = `--- a/${file}\n+++ b/${file}\n`;
+  let segment = "";
+  let offset = 0;
+  let oldStart = 0;
+  let oldLines = 0;
+  let newLines = 0;
+  let previousStart = 0;
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const finishSegment = (end: number) => {
+    const before = text.slice(oldStart, end);
+    const after = segment + text.slice(offset, end);
+    diff += diffHunk(before, after, oldLines, newLines);
+    updated += after;
+    oldLines += before.split("\n").length - 1;
+    newLines += after.split("\n").length - 1;
+    oldStart = offset = end;
+    segment = "";
+  };
+  for (const edit of ordered) {
+    const lineStart = text.lastIndexOf("\n", edit.start - 1) + 1;
+    // Separate distant changes so untouched lines stay out of the preview.
+    if (segment && offset <= lineStart && previousStart < lineStart) {
+      finishSegment(lineStart);
+    }
+    const newline =
+      edit.start === edit.end &&
+      !(text.slice(0, edit.start).endsWith("\n") || segment.endsWith("\n"))
+        ? eol
+        : "";
+    segment += text.slice(offset, edit.start) + newline + edit.insert;
+    offset = edit.end;
+    previousStart = edit.start;
+  }
+  finishSegment(text.length);
   const revision = createHash("sha256")
     .update(JSON.stringify([file, text, updated]))
     .digest("hex");
@@ -52,9 +95,10 @@ function indentation(text: string, offset: number): number {
   return offset - (text.lastIndexOf("\n", offset - 1) + 1);
 }
 
-function serviceInsertion(opts: {
+function mappingInsertion(opts: {
   readonly root: YAMLMap;
-  readonly services: Node | undefined;
+  readonly key: "services" | "volumes";
+  readonly node: Node | undefined;
   readonly text: string;
   readonly eol: string;
 }): {
@@ -63,36 +107,32 @@ function serviceInsertion(opts: {
   readonly prefix: string;
   readonly indent: number;
 } {
-  const { root, services, text, eol } = opts;
+  const { root, key, node, text, eol } = opts;
   const [rootStart = 0, , rootEnd = text.length] = root.range ?? [];
   const rootIndent = indentation(text, rootStart);
-  if (services === undefined) {
+  if (node === undefined) {
     return {
       start: rootEnd,
       end: rootEnd,
-      prefix: `${" ".repeat(rootIndent)}services:${eol}`,
+      prefix: `${" ".repeat(rootIndent)}${key}:${eol}`,
       indent: rootIndent + 2,
     };
   }
   if (
-    isScalar(services) &&
-    services.value === null &&
-    services.source === "" &&
-    services.range
+    isScalar(node) &&
+    node.value === null &&
+    node.source === "" &&
+    node.range
   ) {
-    const lineEnd = text.indexOf("\n", services.range[0]);
+    const lineEnd = text.indexOf("\n", node.range[0]);
     const end = lineEnd < 0 ? text.length : lineEnd + 1;
     return { start: end, end, prefix: "", indent: rootIndent + 2 };
   }
-  if (
-    !(isMap(services) && services.range) ||
-    services.has("<<") ||
-    services.anchor
-  ) {
+  if (!(isMap(node) && node.range) || node.has("<<") || node.anchor) {
     unsupported();
   }
-  const [start, end, lineEnd] = services.range;
-  if (!services.flow) {
+  const [start, end, lineEnd] = node.range;
+  if (!node.flow) {
     return {
       start: lineEnd,
       end: lineEnd,
@@ -100,7 +140,7 @@ function serviceInsertion(opts: {
       indent: indentation(text, start),
     };
   }
-  if (services.items.length > 0) {
+  if (node.items.length > 0) {
     unsupported();
   }
   const suffix = text.slice(end, lineEnd);
@@ -158,12 +198,21 @@ export function planCatalogEdit(opts: {
   }
 
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
-  const { start, end, prefix, indent } = serviceInsertion({
-    root,
-    services,
-    text,
-    eol,
-  });
+  const insertMapping = (
+    key: "services" | "volumes",
+    node: Node | undefined,
+    lines: readonly string[]
+  ): Splice => {
+    const { start, end, prefix, indent } = mappingInsertion({
+      root,
+      key,
+      node,
+      text,
+      eol,
+    });
+    const rendered = lines.map((line) => " ".repeat(indent) + line).join(eol);
+    return { start, end, insert: prefix + rendered + eol };
+  };
   const key = name === recipe.name ? name : JSON.stringify(name);
   const body = [`${key}:`, `  image: ${recipe.image}`];
   if (recipe.command) {
@@ -175,10 +224,36 @@ export function planCatalogEdit(opts: {
       ...recipe.env_names.map((env) => `    ${env}: null`)
     );
   }
-  const snippet = body.map((line) => " ".repeat(indent) + line).join(eol) + eol;
-  const newline =
-    start === end && !text.slice(0, start).endsWith("\n") ? eol : "";
-  const edit = splicePlan(text, start, end, newline + prefix + snippet, file);
+  const mounts = Object.entries(recipe.volumes).map(([suffix, path]) => ({
+    name: `${name}-${suffix}`,
+    path,
+  }));
+  const volumes = root.get("volumes", true);
+  const edits: Splice[] = [];
+  if (mounts.length > 0) {
+    body.push(
+      "  volumes:",
+      ...mounts.map((mount) => `    - ${mount.name}:${mount.path}`)
+    );
+  }
+  edits.push(insertMapping("services", services, body));
+  if (mounts.length > 0) {
+    if (isMap(volumes) && mounts.some((mount) => volumes.has(mount.name))) {
+      throw new HackCliError({
+        code: "E_PATH_CONFLICT",
+        message:
+          "A catalog volume name already exists. Choose a different service name.",
+      });
+    }
+    edits.push(
+      insertMapping(
+        "volumes",
+        volumes,
+        mounts.map((mount) => `${mount.name}: {}`)
+      )
+    );
+  }
+  const edit = splicePlan(text, edits, file);
   const revised = parseDocument(edit.updated);
   const revisedServices = revised.get("services", true);
   if (

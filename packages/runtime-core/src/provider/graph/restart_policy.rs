@@ -293,6 +293,7 @@ mod tests {
             key: "worker".into(),
             name: "hkg-run-container-0".into(),
             id: Some("a".repeat(64)),
+            cleanup_observed_create: false,
             image: Some(format!("sha256:{}", "b".repeat(64))),
             phase: "started".into(),
             amd64_emulation: None,

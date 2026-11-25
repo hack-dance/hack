@@ -1,4 +1,6 @@
 import { childEnvironment } from "../lib/child-environment.ts";
+import { HackCliError } from "../lib/cli-result.ts";
+import { projectDockerTransportCommand } from "../lib/docker-helper-environment.ts";
 import { dockerLogsTime } from "../lib/duration.ts";
 import { pathExists } from "../lib/fs.ts";
 import {
@@ -47,6 +49,7 @@ export interface DockerComposeLogsParams {
   readonly projectName?: string;
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
   /** `docker compose logs --since/--until` (a duration such as 10m, or a time). */
   readonly since?: string;
   readonly until?: string;
@@ -57,7 +60,7 @@ export interface DockerComposeLogsParams {
 export async function dockerComposeLogsPlain(
   opts: DockerComposeLogsParams
 ): Promise<number> {
-  const composeProc = spawnComposeLogs({
+  const composeProc = await spawnComposeLogs({
     composeFile: opts.composeFile,
     cwd: opts.cwd,
     follow: opts.follow,
@@ -65,6 +68,7 @@ export async function dockerComposeLogsPlain(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    env: opts.env,
     since: opts.since,
     until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -146,7 +150,7 @@ export async function dockerComposeLogsPlain(
 export async function dockerComposeLogsPretty(
   opts: DockerComposeLogsParams
 ): Promise<number> {
-  const composeProc = spawnComposeLogs({
+  const composeProc = await spawnComposeLogs({
     composeFile: opts.composeFile,
     cwd: opts.cwd,
     follow: opts.follow,
@@ -154,6 +158,7 @@ export async function dockerComposeLogsPretty(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    env: opts.env,
     since: opts.since,
     until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -268,7 +273,7 @@ export async function dockerComposeLogsPretty(
 export async function dockerComposeLogsJson(
   opts: DockerComposeLogsParams
 ): Promise<number> {
-  const composeProc = spawnComposeLogs({
+  const composeProc = await spawnComposeLogs({
     composeFile: opts.composeFile,
     cwd: opts.cwd,
     follow: opts.follow,
@@ -276,6 +281,7 @@ export async function dockerComposeLogsJson(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    env: opts.env,
     since: opts.since,
     until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -415,7 +421,7 @@ function createJsonLogWriter(opts: {
   };
 }
 
-function spawnComposeLogs(opts: {
+async function spawnComposeLogs(opts: {
   readonly composeFile: string;
   readonly cwd: string;
   readonly follow: boolean;
@@ -424,23 +430,47 @@ function spawnComposeLogs(opts: {
   readonly services?: readonly string[];
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
   readonly since?: string;
   readonly until?: string;
   readonly composeDisabled: boolean;
-}): ReturnType<typeof Bun.spawn> | null {
+}): Promise<Pick<
+  ReturnType<typeof Bun.spawn>,
+  "stdout" | "stderr" | "exited"
+> | null> {
   if (opts.composeDisabled) {
     return null;
   }
-  return Bun.spawn(buildComposeLogsCommand(opts), {
-    env: childEnvironment(),
-    cwd: opts.cwd,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const command = await projectDockerTransportCommand(
+    buildComposeLogsArgs(opts),
+    { cwd: opts.cwd, overrides: opts.env }
+  );
+  if (!command) {
+    throw new HackCliError({
+      code: "E_DOCKER_UNAVAILABLE",
+      message: "Docker was not found on the launcher's absolute PATH.",
+    });
+  }
+  try {
+    const proc = Bun.spawn(command.argv, {
+      env: command.env,
+      cwd: opts.cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      stdout: proc.stdout,
+      stderr: proc.stderr,
+      exited: proc.exited.finally(command.release),
+    };
+  } catch (error) {
+    await command.release?.();
+    throw error;
+  }
 }
 
-function buildComposeLogsCommand(opts: {
+function buildComposeLogsArgs(opts: {
   readonly composeFile: string;
   readonly follow: boolean;
   readonly tail: number;
@@ -452,11 +482,11 @@ function buildComposeLogsCommand(opts: {
   readonly until?: string;
 }): string[] {
   return [
-    "docker",
     "compose",
-    ...(opts.composeProject ? ["-p", opts.composeProject] : []),
-    "-f",
-    opts.composeFile,
+    // With a resolved name, read container labels without loading the model.
+    ...(opts.composeProject
+      ? ["-p", opts.composeProject]
+      : ["-f", opts.composeFile]),
     ...(opts.profiles
       ? opts.profiles.flatMap((profile) => ["--profile", profile] as const)
       : []),

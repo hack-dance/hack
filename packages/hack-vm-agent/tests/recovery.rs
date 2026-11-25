@@ -394,7 +394,6 @@ fn supervisor_drains_without_clients_and_release_refuses_running() {
 
 #[test]
 fn peer_limit_and_partial_frame_deadline() {
-    use std::io::Read;
     let agent = Agent::boot("peers");
     let mut peers = Vec::new();
     for _ in 0..16 {
@@ -409,7 +408,10 @@ fn peer_limit_and_partial_frame_deadline() {
     stalled
         .set_read_timeout(Some(Duration::from_secs(13)))
         .unwrap();
-    assert_eq!(stalled.read(&mut [0]).unwrap(), 0);
+    assert!(matches!(
+        read_frame::<Response>(&stalled),
+        Err(hack_vm_protocol::Error::Closed)
+    ));
     assert!(matches!(
         agent.request(Request::Facts {}),
         Response::Facts { .. }

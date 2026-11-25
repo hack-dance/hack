@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
+const RECEIPT_PENDING: &str = "shutdown-receipt.pending";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Prepared {
     pub(super) id: String,
@@ -47,23 +49,11 @@ pub(super) struct Evidence {
 /// new observation replaces it; readers must match immutable IDs.
 pub(super) fn stop_owned(
     engine: &Engine<'_>,
-    receipt: &Receipt,
+    receipt: &mut Receipt,
     root: &Path,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
-    super::journal::retain_file(root, "shutdown.pending", "shutdown-recovery", 64 * 1024)?;
-    let path = root.join("shutdown.json");
-    let mut evidence: Evidence = if path.exists() || path.is_symlink() {
-        state::read(&path)?
-    } else {
-        Evidence {
-            version: 1,
-            run: receipt.run.clone(),
-            owner: receipt.owner.clone(),
-            plan: receipt.plan_id.clone(),
-            containers: BTreeMap::new(),
-        }
-    };
-    validate_current(&evidence, receipt)?;
+    let evidence = begin_stop(root, receipt)?;
     // Stop wins against engine restarts: disarm every admitted policy and
     // confirm it with a fresh observation before the first stop request. A
     // restart already pending in the engine is cancelled by the stop itself.
@@ -95,19 +85,76 @@ pub(super) fn stop_owned(
         })?;
     // No container deletion is authorized until every selected instance has a
     // fresh matching terminal observation and that evidence is durable.
+    let mut observed = BTreeMap::new();
     for (resource, prepared) in selected {
         let value = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
         let terminal = terminal(resource, &value, prepared.running)?;
         if terminal.id != prepared.id {
             return Err(refused());
         }
-        record(
-            &mut evidence,
-            format!("container:{}", resource.key),
-            terminal,
-        );
+        observed.insert(format!("container:{}", resource.key), terminal);
     }
-    state::write(&path, &evidence)
+    publish_stop(root, receipt, evidence, observed, fence)
+}
+
+fn begin_stop(root: &Path, receipt: &Receipt) -> Result<Evidence, CandidateError> {
+    super::journal::retain_file(
+        root,
+        RECEIPT_PENDING,
+        "shutdown-receipt-recovery",
+        1024 * 1024,
+    )?;
+    super::journal::retain_file(root, "shutdown.pending", "shutdown-recovery", 64 * 1024)?;
+    let path = root.join("shutdown.json");
+    let evidence = if path.exists() || path.is_symlink() {
+        state::read(&path)?
+    } else {
+        Evidence {
+            version: 1,
+            run: receipt.run.clone(),
+            owner: receipt.owner.clone(),
+            plan: receipt.plan_id.clone(),
+            containers: BTreeMap::new(),
+        }
+    };
+    validate_current(&evidence, receipt)?;
+    Ok(evidence)
+}
+
+/// Publish the exact ID from fresh terminal inspection before shutdown evidence
+/// and before any deletion. If interrupted, the next cleanup re-inspects using
+/// the committed receipt. Pending bytes from either write are evidence only.
+fn publish_stop(
+    root: &Path,
+    receipt: &mut Receipt,
+    mut evidence: Evidence,
+    observed: BTreeMap<String, Terminal>,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    let mut changed = false;
+    for (key, terminal) in observed {
+        let resource = receipt.resources.get_mut(&key).ok_or_else(refused)?;
+        match resource.id.as_deref() {
+            Some(id) if id == terminal.id => {}
+            None if receipt.phase == "cleanup-intent" && resource.has_unacknowledged_create() => {
+                resource.id = Some(terminal.id.clone());
+                resource.cleanup_observed_create = true;
+                changed = true;
+            }
+            _ => return Err(refused()),
+        }
+        record(&mut evidence, key, terminal);
+    }
+    if changed {
+        state::write_with_pending(
+            &root.join("state.json"),
+            &root.join(RECEIPT_PENDING),
+            receipt,
+            fence,
+        )?;
+        fence()?;
+    }
+    state::write_before_rename(&root.join("shutdown.json"), &evidence, fence)
 }
 
 fn validate(evidence: &Evidence, receipt: &Receipt) -> Result<(), CandidateError> {
@@ -805,6 +852,7 @@ mod tests {
             key: "service".into(),
             name: "owned-service".into(),
             id: Some("a".repeat(64)),
+            cleanup_observed_create: false,
             image: Some(format!("sha256:{}", "b".repeat(64))),
             phase: "started".into(),
             amd64_emulation: None,

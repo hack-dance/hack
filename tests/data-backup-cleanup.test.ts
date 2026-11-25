@@ -5,7 +5,7 @@ import {
 } from "../src/commands/data.ts";
 import {
   cleanupDataHelpers,
-  cleanupWithSettle,
+  resolveDataCleanup,
 } from "../src/lib/data-backup-cleanup.ts";
 import { FakeEngine } from "./helpers/data-backup-fake-engine.ts";
 
@@ -130,71 +130,54 @@ test("a listed container Hack cannot read back (inspect timed out or failed) is 
   }
 });
 
-describe("cleanup applies the settle rule to a record with an unresolved create", () => {
-  const settle = (
-    fake: FakeEngine,
-    unresolvedCreates: readonly string[],
-    docker = fake.docker()
-  ) =>
-    cleanupWithSettle({
-      docker,
+describe("cleanup resolves a recorded create only by finding and removing it", () => {
+  const resolve = (fake: FakeEngine, unresolvedCreates: readonly string[]) =>
+    resolveDataCleanup({
+      docker: fake.docker(),
       nonce: NONCE,
       deadlines: DEADLINES,
       unresolvedCreates,
-      settleMs: 60,
     });
 
-  test("without one, an empty listing settles at once, with no watch", async () => {
+  test("without one, an empty listing settles, with no watch", async () => {
     const fake = new FakeEngine();
-    const { result, settled } = await settle(fake, []);
+    const { result, unresolved, settled } = await resolve(fake, []);
     expect(result.listed).toEqual([]);
-    expect(settled).toBeTrue();
+    expect({ unresolved, settled }).toEqual({ unresolved: [], settled: true });
     expect(fake.events.watches).toBe(0);
   });
 
-  test("with one, a quiet watch and an empty final listing settle; the listing ran twice", async () => {
+  test("with one and an empty listing, it stays unresolved however long cleanup waits", async () => {
     const fake = new FakeEngine();
-    const { settled } = await settle(fake, ["hack-data-export-x"]);
-    expect(settled).toBeTrue();
-    expect(fake.events.watches).toBe(1);
-    expect(
-      fake.calls.filter((argv) => argv[1] === "ps" && argv.includes("--all"))
-    ).toHaveLength(2);
+    const { unresolved, settled } = await resolve(fake, ["hack-data-export-x"]);
+    expect({ unresolved, settled }).toEqual({
+      unresolved: ["hack-data-export-x"],
+      settled: false,
+    });
+    // No time-window evidence: cleanup never watches for it.
+    expect(fake.events.watches).toBe(0);
   });
 
-  test("a container that lands during the watch is removed", async () => {
+  test("a container of that name that appears later is removed, and only then it settles", async () => {
     const fake = new FakeEngine();
-    const real = fake.docker();
-    const docker = {
-      ...real,
-      watch: (argv: readonly string[], onLine: (line: string) => void) => {
-        const watch = real.watch(argv, onLine);
-        // It lands while the window is open.
-        setTimeout(() => {
-          labeled(fake, "late", NONCE);
-        }, 10);
-        return watch;
-      },
-    };
-    const { result, settled } = await settle(fake, ["late"], docker);
+    expect((await resolve(fake, ["late"])).settled).toBeFalse();
+    labeled(fake, "late", NONCE);
+    const { result, unresolved, settled } = await resolve(fake, ["late"]);
     expect(result.removed).toHaveLength(1);
-    expect(settled).toBeTrue();
+    expect({ unresolved, settled }).toEqual({ unresolved: [], settled: true });
     expect(fake.leftovers()).toEqual([]);
   });
 
-  test("a watch that ends early proves nothing: unknown, the record stays", async () => {
+  test("a removed container of another name, or that name under another nonce, does not resolve it", async () => {
     const fake = new FakeEngine();
-    const real = fake.docker();
-    const docker = {
-      ...real,
-      watch: (argv: readonly string[], onLine: (line: string) => void) => {
-        const watch = real.watch(argv, onLine);
-        setTimeout(() => fake.events.end(), 5);
-        return watch;
-      },
-    };
-    const { result, settled } = await settle(fake, ["gone"], docker);
-    expect(result.listed).toEqual([]);
-    expect(settled).toBeFalse();
+    labeled(fake, "other", NONCE);
+    const foreign = labeled(fake, "late", OTHER);
+    const { result, unresolved, settled } = await resolve(fake, ["late"]);
+    expect(result.removed).toHaveLength(1);
+    expect({ unresolved, settled }).toEqual({
+      unresolved: ["late"],
+      settled: false,
+    });
+    expect(fake.leftovers()).toEqual([foreign]);
   });
 });

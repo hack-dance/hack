@@ -235,7 +235,6 @@ export async function startMountMonitor(opts: {
   void closed.then(() => {
     if (!stopped) {
       ended = true;
-      opts.helpers.watching = false;
     }
     for (const wake of waiting.values()) {
       wake();
@@ -251,7 +250,6 @@ export async function startMountMonitor(opts: {
   };
   const stop = async (): Promise<void> => {
     stopped = true;
-    opts.helpers.watching = false;
     dispose();
     await watch.stop();
   };
@@ -368,8 +366,6 @@ export async function startMountMonitor(opts: {
 
   try {
     await marker("start");
-    // Proven live: from here on it reports this run's creates.
-    opts.helpers.watching = true;
   } catch (error: unknown) {
     await stop();
     throw error;

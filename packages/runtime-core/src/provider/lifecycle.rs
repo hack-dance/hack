@@ -443,6 +443,25 @@ fn operating_observation(
 }
 
 impl<'a> OwnedGuest<'a> {
+    /// A receipt-only test guest. Any attempt to inspect or mutate the engine
+    /// fails verification because the fixture carries no provider process.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn receipt_only_fixture(candidate: &'a Candidate) -> Result<Self, CandidateError> {
+        let root = root(candidate);
+        let lock = state::Lock::acquire_existing(&root)?;
+        let mut owner = Owner::load(candidate)?;
+        owner.process = None;
+        let directory = fs::symlink_metadata(&root).map_err(io)?;
+        Ok(Self {
+            candidate,
+            owner,
+            _lock: lock,
+            lease_root: (directory.dev(), directory.ino()),
+            allocation_allowed: false,
+            guard: None,
+        })
+    }
+
     pub(super) fn candidate(&self) -> &'a Candidate {
         self.candidate
     }

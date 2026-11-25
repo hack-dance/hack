@@ -559,6 +559,8 @@ pub struct NativePsItem {
     pub service: String,
     #[serde(deserialize_with = "null_default")]
     pub state: String,
+    #[serde(rename = "container")]
+    pub container_id: Option<String>,
     pub health: Option<String>,
     #[serde(rename = "exitCode")]
     pub exit_code: Option<i32>,
@@ -619,6 +621,8 @@ pub struct RuntimeService {
 pub struct Container {
     pub id: Option<String>,
     pub name: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub networks: Vec<ContainerNetwork>,
     pub image: Option<String>,
     #[serde(deserialize_with = "port_text")]
     pub ports: Option<String>,
@@ -647,6 +651,10 @@ fn port_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ContainerNetwork {
+    pub name: String,
+}
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ContainerMount {
@@ -843,6 +851,8 @@ pub struct DoctorCheck {
     /// `ok | warn | error`.
     #[serde(deserialize_with = "null_default")]
     pub status: String,
+    #[serde(rename = "nativePool", skip_serializing_if = "Option::is_none")]
+    pub native_pool: Option<NativePoolReport>,
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<DoctorCheckFix>,
@@ -853,6 +863,26 @@ pub struct DoctorCheck {
 pub struct DoctorCheckFix {
     pub kind: String,
     pub args: Vec<String>,
+}
+
+/// The machine Doctor check for this CLI's selected native home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePoolReport {
+    pub state: NativePoolState,
+    pub graph_runs: Option<u64>,
+    pub memory_bytes: Option<u64>,
+    pub guest_memory_mib: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePoolState {
+    Idle,
+    InUse,
+    Stopped,
+    #[serde(other)]
+    Unknown,
 }
 
 impl DoctorReport {

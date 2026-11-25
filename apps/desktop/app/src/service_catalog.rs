@@ -2,8 +2,15 @@ use gpui_kit::component::{
     Sizable as _,
     input::{Input, InputState},
 };
+use std::path::PathBuf;
+
 use gpui_kit::{ClipboardItem, Context, Entity, div, prelude::*};
-use hack_desktop_core::{state::Action, viewmodel::DetailView};
+use hack_desktop_core::{
+    models::NATIVE_PROJECT_CODE,
+    service_catalog::{CatalogEdit, Recipe, recipes},
+    state::Action,
+    viewmodel::DetailView,
+};
 use hack_desktop_ui::{
     components::{StyledExt as _, Ui, action_button, pill_tab},
     icons::Glyph,
@@ -12,71 +19,8 @@ use hack_desktop_ui::{
 
 use crate::view::HackApp;
 
-struct Recipe {
-    name: &'static str,
-    image: &'static str,
-    command: Option<&'static str>,
-    env_names: &'static [&'static str],
-}
-
-impl Recipe {
-    fn snippet(&self) -> String {
-        let mut yaml = format!("  {}:\n    image: {}", self.name, self.image);
-        if let Some(command) = self.command {
-            yaml.push_str(&format!("\n    command: {command}"));
-        }
-        if !self.env_names.is_empty() {
-            yaml.push_str("\n    environment:");
-            for name in self.env_names {
-                // Hack supplies service-scoped values in its generated override.
-                yaml.push_str(&format!("\n      {name}: null"));
-            }
-        }
-        yaml
-    }
-}
-
-const RECIPES: &[Recipe] = &[
-    Recipe {
-        name: "redis",
-        image: "redis:7-alpine",
-        command: None,
-        env_names: &[],
-    },
-    Recipe {
-        name: "postgres",
-        image: "postgres:17-alpine",
-        command: None,
-        env_names: &["POSTGRES_PASSWORD"],
-    },
-    Recipe {
-        name: "mysql",
-        image: "mysql:8.4",
-        command: None,
-        env_names: &["MYSQL_ROOT_PASSWORD"],
-    },
-    Recipe {
-        name: "mongodb",
-        image: "mongo:8",
-        command: None,
-        env_names: &[],
-    },
-    Recipe {
-        name: "minio",
-        image: "minio/minio",
-        command: Some("server /data"),
-        env_names: &["MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"],
-    },
-    Recipe {
-        name: "mailpit",
-        image: "axllent/mailpit",
-        command: None,
-        env_names: &[],
-    },
-];
-
 fn search(query: &str) -> impl Iterator<Item = (usize, &'static Recipe)> + '_ {
-    RECIPES
+    recipes()
         .iter()
         .enumerate()
         .filter(move |(_, recipe)| recipe.name.contains(query) || recipe.image.contains(query))
@@ -85,9 +29,108 @@ fn search(query: &str) -> impl Iterator<Item = (usize, &'static Recipe)> + '_ {
 pub(crate) struct ServiceCatalog {
     pub(crate) input: Entity<InputState>,
     pub(crate) selected: usize,
+    pub(crate) edit: Option<(EditTarget, EditState)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EditTarget {
+    root: PathBuf,
+    cli_epoch: u64,
+    recipe: &'static str,
+}
+
+pub(crate) enum EditState {
+    Pending { saving: bool },
+    Preview(CatalogEdit),
+    Saved(CatalogEdit),
+    Failed(String),
+}
+
+impl EditState {
+    fn finished(saving: bool, result: Result<CatalogEdit, String>) -> Self {
+        match result {
+            Ok(report) if saving && report.saved => Self::Saved(report),
+            Ok(report) if !saving && !report.saved => Self::Preview(report),
+            Ok(_) => Self::Failed("The CLI returned an unexpected save state.".into()),
+            Err(error) => Self::Failed(error),
+        }
+    }
 }
 
 impl HackApp {
+    pub(crate) fn show_catalog_edit_fixture(&mut self, fixture: &str) {
+        let saved = match fixture {
+            "catalog-diff" => false,
+            "catalog-saved" | "catalog-native-saved" => true,
+            _ => return,
+        };
+        let Some((_, recipe)) = search("redis").next() else {
+            return;
+        };
+        let Some(target) = self.catalog_target(recipe) else {
+            return;
+        };
+        let report = CatalogEdit {
+            file: ".hack/docker-compose.yml".into(),
+            diff: "--- a/.hack/docker-compose.yml\n+++ b/.hack/docker-compose.yml\n@@ -4,0 +5,6 @@\n+  redis:\n+    image: redis:7-alpine\n+    volumes:\n+      - redis-data:/data\n+volumes:\n+  redis-data: {}\n".into(),
+            revision: "fixture".into(),
+            saved,
+        };
+        self.catalog.edit = Some((target, EditState::finished(saved, Ok(report))));
+    }
+
+    fn catalog_target(&self, recipe: &'static Recipe) -> Option<EditTarget> {
+        let (root, _) = self.selected_root()?;
+        Some(EditTarget {
+            root,
+            cli_epoch: self.model.source_epoch(),
+            recipe: &recipe.name,
+        })
+    }
+
+    fn run_catalog_edit(
+        &mut self,
+        target: EditTarget,
+        revision: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.machine.busy()
+            || !self
+                .selected_root()
+                .is_some_and(|(root, _)| root == target.root)
+            || self.model.source_epoch() != target.cli_epoch
+            || matches!(self.catalog.edit, Some((_, EditState::Pending { .. })))
+        {
+            return;
+        }
+        let saving = revision.is_some();
+        self.catalog.edit = Some((target.clone(), EditState::Pending { saving }));
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        cx.spawn(async move |this, cx| {
+            let root = target.root.clone();
+            let recipe = target.recipe;
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.catalog_edit(&root, recipe, revision.as_deref()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let state = EditState::finished(saving, result);
+                if matches!(state, EditState::Saved(_))
+                    && this
+                        .selected_root()
+                        .is_some_and(|(root, _)| root == target.root)
+                {
+                    this.reset_changes(cx);
+                    this.refresh_now_async(cx);
+                }
+                this.catalog.edit = Some((target, state));
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(crate) fn service_catalog(
         &self,
         detail: &DetailView,
@@ -95,11 +138,15 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = ui.p;
-        if detail.backend != "compose" {
-            return div().text_color(p.text_secondary).child(
-                "This catalog previews Compose services. Add native services in the project’s authored configuration.",
-            );
+        if self.model.selected_row().is_some_and(|row| {
+            row.input_diagnostic
+                .is_some_and(|diagnostic| diagnostic.code == NATIVE_PROJECT_CODE)
+        }) {
+            return div()
+                .text_color(p.text_secondary)
+                .child("Add workloads to .hack/hack.project.json for this project.");
         }
+        let native = detail.backend == "native";
         let query = self
             .catalog
             .input
@@ -131,56 +178,156 @@ impl HackApp {
             .flex_wrap()
             .gap(space::S3)
             .children(available.into_iter().map(|(index, item)| {
-                pill_tab(("service-image", index), item.name, index == selected, ui).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.catalog.selected = index;
-                        cx.notify();
-                    }),
+                pill_tab(
+                    ("service-image", index),
+                    item.name.as_str(),
+                    index == selected,
+                    ui,
                 )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.catalog.selected = index;
+                    cx.notify();
+                }))
             }));
-        let snippet = recipe.snippet();
-        let preview = snippet.clone();
-        let can_start = !self.machine.busy()
-            && self.selected_root().is_some()
-            && self.model.can_start(&detail.key)
-            && self
-                .model
-                .snapshot()
-                .is_some_and(|s| !s.projects.engine_down());
-        let mut start = action_button(
-            "start-catalog-project",
-            Glyph::Play,
-            "Start project",
-            can_start,
-            ui,
-        );
-        if can_start {
-            start =
-                start.on_click(cx.listener(|this, _, _, cx| this.run_action(Action::Start, cx)));
-        }
+        let snippet = recipe.compose_snippet();
+        let target = self.catalog_target(recipe);
+        let edit = self
+            .catalog
+            .edit
+            .as_ref()
+            .and_then(|(saved_target, state)| {
+                (Some(saved_target) == target.as_ref()).then_some(state)
+            });
+        let pending = matches!(self.catalog.edit, Some((_, EditState::Pending { .. })));
+        let editable = target.is_some()
+            && !pending
+            && !self.machine.busy()
+            && self.model.can_start(&detail.key);
+        let (preview, status, action) = match edit {
+            Some(EditState::Preview(report)) => {
+                let mut save = action_button(
+                    "save-catalog-service",
+                    Glyph::Check,
+                    "Save to project",
+                    editable,
+                    ui,
+                );
+                if let Some(target) = target.clone().filter(|_| editable) {
+                    let revision = report.revision.clone();
+                    save = save.on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_catalog_edit(target.clone(), Some(revision.clone()), cx);
+                    }));
+                }
+                (
+                    report.diff.clone(),
+                    Some("Review the Compose change before saving.".into()),
+                    save,
+                )
+            }
+            Some(EditState::Saved(report)) => {
+                let can_start = !native
+                    && editable
+                    && self
+                        .model
+                        .snapshot()
+                        .is_some_and(|s| !s.projects.engine_down());
+                let mut start = action_button(
+                    "start-catalog-service",
+                    Glyph::Play,
+                    format!("Start {}", recipe.name),
+                    can_start,
+                    ui,
+                );
+                if can_start {
+                    let key = detail.key.clone();
+                    start = start.on_click(cx.listener(move |this, _, _, cx| {
+                        if this.model.selected_key().as_ref() == Some(&key)
+                            && !this.machine.busy()
+                            && let Some((root, false)) = this.selected_root()
+                        {
+                            this.dispatch_service_action(
+                                key.clone(),
+                                root,
+                                &recipe.name,
+                                Action::Start,
+                                cx,
+                            );
+                        }
+                    }));
+                }
+                (
+                    snippet.clone(),
+                    Some(format!("Saved locally — not committed · {}", report.file)),
+                    start,
+                )
+            }
+            _ => {
+                let status = match edit {
+                    Some(EditState::Pending { saving: true }) => {
+                        Some("Saving Compose change…".into())
+                    }
+                    Some(EditState::Pending { saving: false }) => {
+                        Some("Preparing Compose diff…".into())
+                    }
+                    Some(EditState::Failed(error)) => Some(error.clone()),
+                    _ => None,
+                };
+                let mut add = action_button(
+                    "add-catalog-service",
+                    Glyph::Plus,
+                    "Add to project",
+                    editable,
+                    ui,
+                );
+                if let Some(target) = target.filter(|_| editable) {
+                    add = add.on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_catalog_edit(target.clone(), None, cx);
+                    }));
+                }
+                (snippet.clone(), status, add)
+            }
+        };
         body.child(options)
-            .child(
-                div().text_color(p.text_secondary)
-                    .child("Add this entry under services: in your Compose file, then start the project. The Hack CLI does not edit services yet."),
-            )
+            .children(status.map(|text| div().text_color(p.text_secondary).child(text)))
+            .when(native && matches!(edit, Some(EditState::Saved(_))), |body| {
+                body.child(div().text_color(p.text_secondary).child(
+                    "Native starts the whole project. Use hack up in a terminal. If the project is already running, stop it first to load the change.",
+                ))
+            })
             .when(!recipe.env_names.is_empty(), |body| {
                 body.child(div().text_color(p.text_secondary).child(format!(
-                    "Set the listed variables in Env under the {} service scope before starting.",
+                    "Set {} in Env under the {} service scope before starting.",
+                    recipe.env_names.join(", "),
                     recipe.name
                 )))
             })
             .child(
-                div().px(space::S5).py(space::S4).bg(p.surface_1)
-                    .font_family(ui.mono.clone()).type_step(text::MONO)
+                div()
+                    .px(space::S5)
+                    .py(space::S4)
+                    .bg(p.surface_1)
+                    .font_family(ui.mono.clone())
+                    .type_step(text::MONO)
                     .children(preview.lines().map(|line| div().child(line.to_owned()))),
             )
             .child(
-                div().flex().gap(space::S4).items_center()
-                    .child(action_button("copy-service-snippet", Glyph::Copy, "Copy snippet", true, ui)
+                div()
+                    .flex()
+                    .gap(space::S4)
+                    .items_center()
+                    .child(action)
+                    .child(
+                        action_button(
+                            "copy-service-snippet",
+                            Glyph::Copy,
+                            "Copy snippet",
+                            true,
+                            ui,
+                        )
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(snippet.clone()));
-                        })))
-                    .child(start),
+                        })),
+                    ),
             )
     }
 }
@@ -199,10 +346,50 @@ mod tests {
     #[test]
     fn credential_snippets_match_the_compose_fixture() {
         let mut yaml = String::from("services:\n");
-        for recipe in RECIPES.iter().filter(|recipe| !recipe.env_names.is_empty()) {
+        for recipe in recipes()
+            .iter()
+            .filter(|recipe| !recipe.env_names.is_empty())
+        {
             yaml.push_str(&recipe.snippet());
             yaml.push('\n');
         }
+        yaml.push_str("volumes:\n");
+        for recipe in recipes()
+            .iter()
+            .filter(|recipe| !recipe.env_names.is_empty())
+        {
+            for suffix in recipe.volumes.keys() {
+                yaml.push_str(&format!("  {}-{suffix}: {{}}\n", recipe.name));
+            }
+        }
         assert_eq!(yaml, include_str!("../fixtures/catalog-credentials.yaml"));
+    }
+    #[test]
+    fn only_a_confirmed_save_unlocks_start() {
+        let mut preview = CatalogEdit {
+            file: ".hack/docker-compose.yml".into(),
+            diff: "+  redis:".into(),
+            revision: "preview-revision".into(),
+            saved: false,
+        };
+        assert!(
+            matches!(EditState::finished(false, Ok(preview.clone())), EditState::Preview(report) if report.revision == "preview-revision")
+        );
+        assert!(matches!(
+            EditState::finished(true, Ok(preview.clone())),
+            EditState::Failed(_)
+        ));
+        preview.saved = true;
+        assert!(matches!(
+            EditState::finished(false, Ok(preview.clone())),
+            EditState::Failed(_)
+        ));
+        assert!(
+            matches!(EditState::finished(true, Ok(preview)), EditState::Saved(report) if report.file == ".hack/docker-compose.yml")
+        );
+        assert!(matches!(
+            EditState::finished(true, Err("Compose file changed".into())),
+            EditState::Failed(_)
+        ));
     }
 }

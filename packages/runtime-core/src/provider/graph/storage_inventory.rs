@@ -220,6 +220,7 @@ mod tests {
             key: "deps".into(),
             name: cache.name(),
             id: None,
+            cleanup_observed_create: false,
             image: None,
             phase: "created".into(),
             amd64_emulation: None,

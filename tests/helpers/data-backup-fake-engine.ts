@@ -282,6 +282,38 @@ export class FakeEngine {
   }
 
   /** The full ID a reference (ID, 12+ character prefix or name) names. */
+  /**
+   * `docker ps --quiet`: running containers (every one with --all), by full
+   * ID, narrowed by any `--filter label=<key>=<value>` and any
+   * `--filter name=<pattern>` (a regular expression, as Docker matches it,
+   * against the name with or without its leading slash).
+   */
+  private listQuiet(args: readonly string[]): string {
+    const filters = (prefix: string): string[] =>
+      args.flatMap((value, index) =>
+        value === "--filter" && (args[index + 1] ?? "").startsWith(prefix)
+          ? [(args[index + 1] ?? "").slice(prefix.length)]
+          : []
+      );
+    const labels = filters("label=");
+    const names = filters("name=").map((pattern) => new RegExp(pattern));
+    return [...this.containers]
+      .filter(([, container]) => args.includes("--all") || container.running)
+      .filter(([, container]) =>
+        labels.every((filter) => {
+          const [key, ...rest] = filter.split("=");
+          return container.labels[key ?? ""] === rest.join("=");
+        })
+      )
+      .filter(([, container]) =>
+        names.every(
+          (name) => name.test(container.name) || name.test(`/${container.name}`)
+        )
+      )
+      .map(([id]) => `${id}\n`)
+      .join("");
+  }
+
   resolve(ref: string): string | null {
     if (this.containers.has(ref)) {
       return ref;
@@ -461,27 +493,7 @@ export class FakeEngine {
       return ok(`${name}\n`);
     }
     if (args[0] === "ps" && args.includes("--quiet")) {
-      // Running containers (every one with --all), by full ID, narrowed by
-      // any `--filter label=<key>=<value>`.
-      const labels = args.flatMap((value, index) =>
-        value === "--filter" && (args[index + 1] ?? "").startsWith("label=")
-          ? [(args[index + 1] ?? "").slice("label=".length)]
-          : []
-      );
-      return ok(
-        [...this.containers]
-          .filter(
-            ([, container]) => args.includes("--all") || container.running
-          )
-          .filter(([, container]) =>
-            labels.every((filter) => {
-              const [key, ...rest] = filter.split("=");
-              return container.labels[key ?? ""] === rest.join("=");
-            })
-          )
-          .map(([id]) => `${id}\n`)
-          .join("")
-      );
+      return ok(this.listQuiet(args));
     }
     if (args[0] === "ps") {
       this.onPs?.();
@@ -660,7 +672,8 @@ export class FakeEngine {
       const format = argv[argv.indexOf("--format") + 1] ?? "";
       const nonce = /index \.Config\.Labels "([^"]+)"/.exec(format)?.[1];
       if (nonce !== undefined && !format.includes("{{.Id}}")) {
-        return ok(`${held.labels[nonce] ?? "<no value>"}\n`);
+        const named = format.includes("{{.Name}}") ? ` /${held.name}` : "";
+        return ok(`${held.labels[nonce] ?? "<no value>"}${named}\n`);
       }
       return ok(
         nonce === undefined

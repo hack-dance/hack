@@ -161,6 +161,7 @@ success behavior stays covered by command-specific suites.
 | `hack pull --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack restart --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack run --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
+| `hack service add --json` | Envelope; versioned `data.schema`: `hack.service-add.v1` |
 | `hack session capture --json` | NDJSON events / terminal event, not a single envelope |
 | `hack session panes --json` | NDJSON events / terminal event, not a single envelope |
 | `hack session tail --json` | NDJSON events / terminal event, not a single envelope |

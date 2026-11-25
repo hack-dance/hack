@@ -544,6 +544,7 @@ pub struct DoctorView {
     pub groups: Vec<(Area, Vec<Card>)>,
     /// Distinct checks that reported an explicit `ok` and no failure elsewhere.
     pub passed: usize,
+    pub native_pool: Option<crate::models::NativePoolReport>,
     pub passed_checks: Vec<(String, Option<String>)>,
     /// Runs that produced no report: (project or "machine", reason).
     pub failed_runs: Vec<(String, String)>,
@@ -693,6 +694,7 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
     let projects_total = runs.iter().filter(|r| r.project.is_some()).count();
     let mut projects_checked = 0;
     let mut machine_checked = false;
+    let mut native_pool = None;
 
     for run in runs {
         let report = match &run.result {
@@ -723,9 +725,19 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
             machine_checked |= run.probe_started;
         }
         for DoctorCheck {
-            id, status, detail, ..
+            id,
+            status,
+            detail,
+            native_pool: pool,
+            ..
         } in &report.checks
         {
+            if id == "native pool idle"
+                && (native_pool.is_none() || run.project.is_none())
+                && let Some(pool) = pool
+            {
+                native_pool = Some(*pool);
+            }
             let (area, scope) = classify(id).unwrap_or((
                 Area::Other,
                 if run.project.is_some() {
@@ -853,6 +865,7 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
         .collect();
     DoctorView {
         groups,
+        native_pool,
         passed: passed_checks.len(),
         passed_checks,
         failed_runs,
@@ -1138,8 +1151,23 @@ pub fn neutral_dir(candidates: &[PathBuf]) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_passing_pool_check_is_available_as_machine_status() {
+        let report = serde_json::from_str::<DoctorReport>(r#"{
+            "checks":[{"id":"native pool idle","status":"ok","detail":"fixture",
+              "nativePool":{"state":"in_use","graphRuns":1,"memoryBytes":null,"guestMemoryMib":4096}}]
+        }"#).unwrap();
+        let view = aggregate(&[DoctorRun::machine(Ok(report))]);
+        let pool = view.native_pool.unwrap();
+        assert_eq!(pool.state, crate::models::NativePoolState::InUse);
+        assert_eq!(pool.graph_runs, Some(1));
+        assert_eq!(pool.memory_bytes, None);
+        assert_eq!(view.attention_count(), 0);
+    }
+
     fn check(id: &str, status: &str, detail: &str) -> DoctorCheck {
         DoctorCheck {
+            native_pool: None,
             id: id.into(),
             status: status.into(),
             detail: detail.into(),

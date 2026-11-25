@@ -232,6 +232,7 @@ impl HackApp {
             catalog: crate::service_catalog::ServiceCatalog {
                 input: catalog_input,
                 selected: 0,
+                edit: None,
             },
             service_pane: Default::default(),
             service_focus: cx.focus_handle(),
@@ -576,11 +577,13 @@ impl HackApp {
         let query = match name {
             "catalog-empty" => "unlisted",
             "catalog-all" => "",
+            "catalog-search" | "catalog-diff" | "catalog-saved" | "catalog-native-saved" => "redis",
             _ => "postgres",
         };
         self.catalog
             .input
             .update(cx, |input, cx| input.set_value(query, window, cx));
+        self.show_catalog_edit_fixture(name);
     }
 
     /// Fixtures: mark an action as in flight without running it.
@@ -777,6 +780,17 @@ impl HackApp {
         if !valid_service {
             return;
         }
+        self.dispatch_service_action(key, root, service, action, cx);
+    }
+
+    pub(crate) fn dispatch_service_action(
+        &mut self,
+        key: InstanceKey,
+        root: PathBuf,
+        service: &str,
+        action: Action,
+        cx: &mut Context<Self>,
+    ) {
         if !self.live || !self.model.start_service_action(&key, service) {
             return;
         }
@@ -1349,6 +1363,11 @@ impl HackApp {
                 .on_click(cx.listener(|this, _, _, cx| this.open_upgrade(cx))),
             )
             .child(
+                machine_row("resources", Glyph::Container, "Resources", div(), ui)
+                    .when(self.pane == Pane::Resources, |d| d.bg(p.surface_1))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_resources(cx))),
+            )
+            .child(
                 machine_row(
                     "doctor",
                     Glyph::Stethoscope,
@@ -1371,6 +1390,22 @@ impl HackApp {
             })
             .child(projects)
             .child(machine)
+    }
+
+    pub(crate) fn observed_pool(&self) -> Option<hack_desktop_core::models::NativePoolReport> {
+        if self.doctor.stale {
+            return None;
+        }
+        match &self.doctor.result {
+            DoctorStateView::Loaded(view) => view.native_pool,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn show_resources(&mut self, cx: &mut Context<Self>) {
+        self.pane = Pane::Resources;
+        self.user_navigated();
+        cx.notify();
     }
 
     /// Routing and DNS: from the last completed Doctor run when there is
@@ -2087,6 +2122,7 @@ impl Render for HackApp {
             }
             // Setup applies whatever the project list shows, a missing CLI
             // included.
+            _ if self.pane == Pane::Resources => crate::resources_view::render(self, &ui, cx),
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),
             _ if self.pane == Pane::Setup => crate::setup_view::render(self, &ui, cx),

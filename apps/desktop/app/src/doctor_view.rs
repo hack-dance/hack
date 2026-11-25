@@ -32,6 +32,7 @@ pub enum Pane {
     Project,
     Doctor,
     Resources,
+    Configuration,
     /// Setup checks (`setup_view`).
     Setup,
     Hackd,

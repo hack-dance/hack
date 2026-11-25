@@ -1200,12 +1200,13 @@ fn interactive_handoff_failures_keep_only_the_attempted_session() {
                 .then_some(attached);
                 interactive_handoff::send(&stream, descriptor, deadline).unwrap();
                 if case == "malformed-reply" {
-                    transport::write(
-                        &mut stream,
-                        &json!({"unexpected": true}),
-                        Duration::from_secs(1),
-                    )
-                    .unwrap();
+                    // The client can reject this frame and close before the
+                    // sender half-closes. Assert the frame write and let drop
+                    // end the stream below.
+                    let body = br#"{"unexpected":true}"#;
+                    let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+                    frame.extend_from_slice(body);
+                    stream.write_all(&frame).unwrap();
                 } else if case != "disconnect-after-descriptor" {
                     let result = match case {
                         "wrong-session" => Outcome::InteractiveRefused {
@@ -1235,6 +1236,9 @@ fn interactive_handoff_failures_keep_only_the_attempted_session() {
             }
             drop(stream);
             let error = caller.join().unwrap().err().unwrap();
+            if case == "malformed-reply" {
+                assert_eq!(error.code, "graph_owner_recovery");
+            }
             assert_eq!(
                 error.session(),
                 if case == "pre-intent-refusal" {

@@ -197,6 +197,45 @@ test("a handler's usage refusal prints its message and one hint line, not the he
   expect(stderrOutput).toBe(output);
 });
 
+test("restart renders an explicit start blocker but not the code-based up guidance (HACK-2541)", async () => {
+  const blocked = new HackCliError({
+    code: "E_STARTUP_INCOMPLETE",
+    message: "Closed startup refusal.",
+    startBlocker: {
+      thing: "project",
+      problem: "startup incomplete · pending start retained",
+      needs: "this start needs the pending start stopped first",
+      command: "hack down --recover",
+    },
+  });
+  expect(
+    await handleRunCliError({
+      error: blocked,
+      jsonRequested: false,
+      handlerPath: ["restart"],
+    })
+  ).toBe(1);
+  expect(stderrOutput).toBe(
+    "! project  startup incomplete · pending start retained\n  this start needs the pending start stopped first. run:\n  hack down --recover\n"
+  );
+  output = "";
+  stderrOutput = "";
+  // E_LIFECYCLE_FAILED has up guidance that prints `hack up`; restart keeps
+  // the closed sentence instead.
+  const coded = new HackCliError({
+    code: "E_LIFECYCLE_FAILED",
+    message: "Closed lifecycle refusal.",
+  });
+  expect(
+    await handleRunCliError({
+      error: coded,
+      jsonRequested: false,
+      handlerPath: ["restart"],
+    })
+  ).toBe(1);
+  expect(output).toBe("ERROR: E_LIFECYCLE_FAILED: Closed lifecycle refusal.\n");
+});
+
 test("a handler's usage refusal stays on stderr when the logger backend is clack", async () => {
   // Hosted CI has no gum, so the default backend is clack, which writes to
   // stdout. Usage refusals must still put their specific message on stderr

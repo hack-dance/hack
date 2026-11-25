@@ -95,6 +95,10 @@ export const REVIEWED_PREDECESSORS: readonly string[] = [
   "8467fe1b4ff48074ab1fd8d1ad96dcbc9f72639de9432dae59b1817fa9f97748",
   "03a03c78db05cfe0e60504e6cdbc27816398fdd310a984fa09058f037c966179",
   "3a4c3eca6e3c6df615342a3e4b39ac2dae2dd74d6b74e001595d87f7d244e4d9",
+  // 5.0.0-next.27: darwin-arm64, then linux-x86_64 and linux-arm64
+  "a6d93f87e701383de9341fa08aa9df1cce029f8dd44d03cac0e5b68ee6d93152",
+  "22d201e99bb4d31aead14b0685c8853f38fce6167a2f5ea8940da5d44fbbe946",
+  "61ec352c6dd8c09830f29bbf53e8acec262e0e0d001d2664fa64ca14cfdcc849",
 ];
 export const launcherBytes = () =>
   Buffer.from(

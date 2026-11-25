@@ -78,6 +78,13 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
    * when the start fails.
    */
   readonly clientOutputFd?: number;
+  /**
+   * Detached only: receives each line Hack itself prints to stderr while a
+   * Compose phase runs (dependency cache progress, startup notices), so a
+   * caller that shows a transient wait can clear it first. Absent: the line
+   * goes straight to stderr.
+   */
+  readonly onStartupNotice?: (line: string) => void;
   /** Detached `start` phase budget (container start and dependency wait). */
   readonly startupTimeoutMs?: number;
   /** Detached `images` phase budget (image build/pull and container creation). */
@@ -338,8 +345,9 @@ async function runComposeStartPhase(input: {
       startupCeilingMs: options.startupCeilingMs,
       env: input.budgetEnv,
     });
-    process.stderr.write(
-      `Some Compose extends chains could not be resolved, so one-shot progress is unknown; this start may run up to its ${ceilingMs} ms ceiling.\n`
+    startupNotice(
+      options,
+      `Some Compose extends chains could not be resolved, so one-shot progress is unknown; this start may run up to its ${ceilingMs} ms ceiling.`
     );
     const code = await input.runPhase(input.cmd, ceilingMs);
     if (code === 124) {
@@ -649,12 +657,13 @@ export const composeRuntimeBackend: RuntimeBackend = {
         cwd: opts.cwd,
         env: opts.env,
         onPhase: (service, phase) => {
-          process.stderr.write(`Dependency cache ${service}: ${phase}\n`);
+          startupNotice(opts, `Dependency cache ${service}: ${phase}`);
           reportLifecycleProgress({ service, phase });
         },
         onUnavailable: () => {
-          process.stderr.write(
-            "Dependency progress unavailable; Compose startup continues. Inspect hack ps and hack logs for status.\n"
+          startupNotice(
+            opts,
+            "Dependency progress unavailable; Compose startup continues. Inspect hack ps and hack logs for status."
           );
         },
         run: launch,
@@ -807,6 +816,15 @@ function mergeSpawnEnv(
   override: Record<string, string> | undefined
 ): Record<string, string> {
   return childEnvironment(process.env, override);
+}
+
+/** One line of Hack's own during a detached phase; see `onStartupNotice`. */
+function startupNotice(opts: RuntimeUpOptions, line: string): void {
+  if (opts.onStartupNotice) {
+    opts.onStartupNotice(line);
+    return;
+  }
+  process.stderr.write(`${line}\n`);
 }
 
 /** Where a detached Compose phase's client stdio goes. */

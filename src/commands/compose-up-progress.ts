@@ -59,11 +59,22 @@ export function createComposeUpProgress(opts: {
   // The Compose client's own lines are captured (HACK-2542), so its two
   // detached phases show a transient wait here and the images phase closes
   // with one row when the start phase begins.
+  // Invariant: while `phaseLabel` is set the wait is shown, except during a
+  // `notice` or `quiet` call, which clears it first and shows it again after,
+  // so Hack's own stderr lines never land on the wait's unterminated line.
   let clearPhase: (() => void) | undefined;
+  let phaseLabel: string | undefined;
   let imagesStartedAt: number | undefined;
-  const settle = () => {
+  const hide = () => {
     clearPhase?.();
     clearPhase = undefined;
+  };
+  const show = () => {
+    clearPhase = phaseLabel === undefined ? undefined : pending(phaseLabel);
+  };
+  const settle = () => {
+    hide();
+    phaseLabel = undefined;
   };
   const hook =
     (name: "before" | "after"): HookCompletion =>
@@ -84,7 +95,8 @@ export function createComposeUpProgress(opts: {
       settle();
       if (phase === "images") {
         imagesStartedAt = performance.now();
-        clearPhase = pending("images");
+        phaseLabel = "images";
+        show();
         return;
       }
       if (imagesStartedAt !== undefined) {
@@ -95,7 +107,27 @@ export function createComposeUpProgress(opts: {
         });
         imagesStartedAt = undefined;
       }
-      clearPhase = pending("services");
+      phaseLabel = "services";
+      show();
+    },
+    /**
+     * One line of Hack's own on stderr during a detached phase (dependency
+     * cache progress, a startup notice): the wait is cleared first and shown
+     * again after it.
+     */
+    notice(line: string): void {
+      hide();
+      process.stderr.write(line.endsWith("\n") ? line : `${line}\n`);
+      show();
+    },
+    /** Run work that may log (for example `beforeCreate`) with the wait hidden. */
+    async quiet<T>(work: () => Promise<T>): Promise<T> {
+      hide();
+      try {
+        return await work();
+      } finally {
+        show();
+      }
     },
     /** Compose returned or threw: drop any transient phase wait. */
     settle,

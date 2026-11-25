@@ -8,9 +8,22 @@ import {
   redactComposeOutputLine,
   sensitiveInheritedValues,
 } from "./compose-ps-result.ts";
+import type { ComposeStartupPhase } from "./compose-startup-budget.ts";
 
 /** How many of the Compose client's last lines a failed start shows. */
 export const COMPOSE_CLIENT_TAIL_LINES = 20;
+/**
+ * The same for a failure in the images phase: a BuildKit failure ends with
+ * its `Dockerfile:N` context block and `failed to solve` line, and the
+ * failing step's own output sits above them.
+ */
+export const COMPOSE_CLIENT_IMAGES_TAIL_LINES = 40;
+/** Printed after a quoted tail: where the whole client output can be seen. */
+export const COMPOSE_CLIENT_FULL_OUTPUT_HINT =
+  "For Compose's full output, run `hack up` in the foreground or `hack up --detach --json`.";
+/** Printed instead when the tail shows Compose asking a question. */
+export const COMPOSE_CLIENT_PROMPT_HINT =
+  "Compose asked a question, and a detached `hack up` cannot answer it. Run `hack up` in the foreground to answer it.";
 /** How many distinct Compose warnings a successful start repeats. */
 export const COMPOSE_CLIENT_WARNING_LINES = 5;
 /** Bytes read from each end of the capture; the rest is never loaded. */
@@ -20,6 +33,8 @@ const LINE_BREAKS = /[\r\n\u0085\u2028\u2029]+/;
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
 const LOGRUS_MESSAGE = /\bmsg="((?:[^"\\]|\\.)*)"/;
 const WARNING_PREFIX = /^(?:warn(?:ing)?\[\d+\]|warn(?:ing)?:?)\s*/i;
+/** A yes/no question such as Compose's `Recreate (data will be lost)? [y/N]`. */
+const PROMPT_LINE = /[[(]\s*y\s*\/\s*n\s*[\])]/i;
 
 /**
  * The detached Compose client's own stdout and stderr for one `hack up`.
@@ -192,6 +207,38 @@ export function writeComposeClientTail(
   for (const line of lines) {
     output.line(`  ${line}`);
   }
+}
+
+/**
+ * A failed start's report from the capture: the client's last lines (more
+ * for an images-phase failure), then one hint naming how to see the whole
+ * output, or how to answer a question Compose asked. Nothing when the client
+ * printed nothing.
+ */
+export function writeComposeClientFailure(opts: {
+  readonly capture: Pick<ComposeClientCapture, "tail">;
+  readonly phase: ComposeStartupPhase;
+  readonly redactValues?: Iterable<string>;
+  readonly write?: (text: string) => void;
+}): void {
+  const write = opts.write ?? ((text: string) => process.stderr.write(text));
+  const lines = opts.capture.tail({
+    lines:
+      opts.phase === "images"
+        ? COMPOSE_CLIENT_IMAGES_TAIL_LINES
+        : COMPOSE_CLIENT_TAIL_LINES,
+    redactValues: opts.redactValues,
+  });
+  if (lines.length === 0) {
+    return;
+  }
+  writeComposeClientTail(lines, write);
+  createTextOutput({ write }).line(
+    lines.some((line) => PROMPT_LINE.test(line))
+      ? COMPOSE_CLIENT_PROMPT_HINT
+      : COMPOSE_CLIENT_FULL_OUTPUT_HINT,
+    "faint"
+  );
 }
 
 /** Compose warnings from a successful start, one `!` line each, on stderr. */

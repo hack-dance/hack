@@ -4,13 +4,20 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  COMPOSE_CLIENT_FULL_OUTPUT_HINT,
+  COMPOSE_CLIENT_PROMPT_HINT,
   composeClientWarnings,
   openComposeClientCapture,
   sanitizeComposeClientLines,
   tryOpenComposeClientCapture,
+  writeComposeClientFailure,
   writeComposeClientTail,
   writeComposeClientWarnings,
 } from "../src/lib/compose-client-output.ts";
+import {
+  composeEnvPlainValues,
+  composeQuoteRedactValues,
+} from "../src/lib/compose-ps-result.ts";
 
 let dir = "";
 
@@ -127,4 +134,114 @@ test("the tail and warnings render as plain lines", () => {
     warnings += text;
   });
   expect(warnings).toBe("! compose  unset variable\n");
+});
+
+function failureReport(opts: {
+  readonly text: string;
+  readonly phase: "images" | "start";
+}): string[] {
+  const capture = openComposeClientCapture(dir);
+  try {
+    writeSync(capture.fd, opts.text);
+    let out = "";
+    writeComposeClientFailure({
+      capture,
+      phase: opts.phase,
+      write: (text) => {
+        out += text;
+      },
+    });
+    return out.split("\n").filter((line) => line.length > 0);
+  } finally {
+    capture.close();
+  }
+}
+
+const numbered = (count: number) =>
+  Array.from({ length: count }, (_, i) => `step ${i + 1}`).join("\n");
+
+test("a failed start ends its quoted tail with where to see the full output", () => {
+  const out = failureReport({ text: numbered(50), phase: "start" });
+  expect(out[0]).toBe("docker compose output (last 20 lines):");
+  expect(out[1]).toBe("  step 31");
+  expect(out[20]).toBe("  step 50");
+  expect(out[21]).toBe(COMPOSE_CLIENT_FULL_OUTPUT_HINT);
+  expect(out).toHaveLength(22);
+});
+
+test("an images-phase failure quotes more lines, so a build step's output survives its context block", () => {
+  const out = failureReport({ text: numbered(50), phase: "images" });
+  expect(out[0]).toBe("docker compose output (last 40 lines):");
+  expect(out[1]).toBe("  step 11");
+  expect(out.at(-1)).toBe(COMPOSE_CLIENT_FULL_OUTPUT_HINT);
+});
+
+test("a Compose question in the tail names the foreground start as the way to answer it", () => {
+  const out = failureReport({
+    text: 'Volume "shop_db" exists but doesn\'t match configuration in compose file. Recreate (data will be lost)? [y/N]\nEOF\n',
+    phase: "start",
+  });
+  expect(out.at(-1)).toBe(COMPOSE_CLIENT_PROMPT_HINT);
+  expect(out).not.toContain(COMPOSE_CLIENT_FULL_OUTPUT_HINT);
+});
+
+test("a failed start with no client output prints no tail and no hint", () => {
+  expect(failureReport({ text: "", phase: "start" })).toEqual([]);
+});
+
+test("values the env layers mark non-secret stay quotable; secret, secret-named and unknown ones do not", () => {
+  const plain = composeEnvPlainValues({
+    scopes: [
+      {
+        env: {
+          PORT: "3000",
+          POSTGRES_USER: "postgres",
+          DB_PASSWORD: "layer-secret",
+          API_KEY: "named-secret",
+          NO_METADATA: "unknown-value",
+          SHARED_PLAIN: "shared-value",
+        },
+        metadata: {
+          PORT: { secret: false },
+          POSTGRES_USER: { secret: false },
+          DB_PASSWORD: { secret: true },
+          API_KEY: { secret: false },
+          SHARED_PLAIN: { secret: false },
+        },
+      },
+      // The same value under a secret entry elsewhere keeps it redacted.
+      {
+        env: { WORKER_TOKEN_SEED: "shared-value" },
+        metadata: { WORKER_TOKEN_SEED: { secret: true } },
+      },
+    ],
+  });
+  expect(plain.sort()).toEqual(["3000", "postgres"]);
+  expect(
+    composeQuoteRedactValues({
+      redactValues: [
+        "3000",
+        "postgres",
+        "layer-secret",
+        "named-secret",
+        "unknown-value",
+        "shared-value",
+        "remote-added",
+      ],
+      plainValues: plain,
+    })
+  ).toEqual([
+    "layer-secret",
+    "named-secret",
+    "unknown-value",
+    "shared-value",
+    "remote-added",
+  ]);
+  // No metadata (the legacy env path): everything stays redacted.
+  expect(
+    composeQuoteRedactValues({
+      redactValues: ["3000"],
+      plainValues: undefined,
+    })
+  ).toEqual(["3000"]);
 });

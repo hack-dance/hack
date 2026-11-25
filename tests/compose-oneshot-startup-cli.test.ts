@@ -9,6 +9,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { runPrivateTtyCli } from "./helpers/private-cli-tty.ts";
 
@@ -51,6 +53,9 @@ case " $* " in
         i=$((i + 1))
       done
       printf '\\033[31mpull access denied for https://someone:hunter2@registry.invalid/app, token fixture-secret-value\\033[0m\\n' >&2
+      if [ -n "\${APP_PORT:-}" ]; then
+        printf 'Bind for 0.0.0.0:%s failed: port is already allocated (user %s, password %s)\\n' "$APP_PORT" "$APP_DB_USER" "$APP_DB_PASSWORD" >&2
+      fi
       exit 1
     fi
     sleep "\${STUB_UP_SECONDS:-1}"
@@ -799,11 +804,15 @@ test("a failed detached Compose start quotes the client's last lines, redacted, 
     "  pull access denied for https://[REDACTED]@registry.invalid/app, token [REDACTED]"
   );
   expect(lines).not.toContain("  client line 6");
+  // One hint names where the whole output is.
+  expect(lines[heading + 21]).toBe(
+    "For Compose's full output, run `hack up` in the foreground or `hack up --detach --json`."
+  );
   expect(result.stderr).not.toContain("hunter2");
   expect(result.stderr).not.toContain("fixture-secret-value");
   expect(result.stderr).not.toContain("\x1b[31m");
   // Hack's own reason is still reported after the quoted lines.
-  expect(result.stdout + lines.slice(heading + 21).join("\n")).toContain(
+  expect(result.stdout + lines.slice(heading + 22).join("\n")).toContain(
     "docker compose up"
   );
 }, 60_000);
@@ -823,3 +832,68 @@ test("a successful detached Compose start repeats each client warning once", asy
   expect(result.stderr).not.toContain("WARN[0000]");
   expect(result.stderr).not.toContain("level=warning");
 }, 60_000);
+
+test("a failed start's quoted lines keep non-secret env-layer values and redact secret ones", async () => {
+  const hackDir = join(project, ".hack");
+  await writeFile(join(project, PROJECT_ENV_KEY_FILENAME), "synthetic-key");
+  for (const [key, value, secret] of [
+    ["APP_PORT", "43210", false],
+    ["APP_DB_USER", "shopuser", false],
+    ["APP_DB_PASSWORD", "layer-secret-value", true],
+  ] as const) {
+    await setProjectEnvValue({
+      projectRoot: project,
+      projectDir: hackDir,
+      envName: null,
+      scope: "global",
+      key,
+      value,
+      secret,
+    });
+  }
+  const result = await cli(["up", "--detach"], {
+    STUB_UP_SECONDS: "0",
+    STUB_UP_FAIL: "1",
+  });
+  expect(result.exitCode, result.stderr).toBe(1);
+  expect(result.stderr).toContain(
+    "  Bind for 0.0.0.0:43210 failed: port is already allocated (user shopuser, password [REDACTED])"
+  );
+  expect(result.stderr).not.toContain("layer-secret-value");
+}, 60_000);
+
+test("a startup notice during a detached phase does not land on the transient wait", async () => {
+  const lines = [
+    "services:",
+    "  migrate:",
+    "    image: alpine:3.22",
+    "  level0:",
+    "    image: alpine:3.22",
+    "    depends_on:",
+    "      migrate:",
+    "        condition: service_completed_successfully",
+  ];
+  for (let level = 1; level <= 40; level += 1) {
+    lines.push(`  level${level}:`, `    extends: level${level - 1}`);
+  }
+  lines.push("  api:", "    extends: level40", "");
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    lines.join("\n")
+  );
+  const result = await runPrivateTtyCli({
+    cwd: project,
+    args: ["up", "--detach"],
+    env: fixtureEnv({ TERM: "xterm", STUB_UP_SECONDS: "0" }),
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const output = result.stdout.replace(/\x1b\[[\d;]*m/g, "");
+  const erase = "\r\x1b[2K";
+  expect(output).toContain(`services ...${erase}Some Compose extends chains`);
+  expect(output).not.toContain("services ...Some Compose");
+  // The wait comes back after the notice.
+  const notice = output.indexOf("Some Compose extends chains");
+  expect(output.indexOf(`${erase}services ...`, notice)).toBeGreaterThan(
+    notice
+  );
+}, 20_000);

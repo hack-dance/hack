@@ -201,6 +201,49 @@ export function composeEnvValuesToRedact(opts: {
 }
 
 /**
+ * Values the project's env layers declare non-secret, under names that do not
+ * look secret (see {@link sensitiveInheritedValues}). An entry without
+ * metadata counts as secret, and a value that any secret entry also holds is
+ * left out, so the set errs toward redaction.
+ *
+ * Quoting callers subtract these from {@link composeEnvValuesToRedact} for a
+ * multi-line diagnostic tail, where redacting a port or a service-like user
+ * name (`Bind for 0.0.0.0:3000`, `shop-postgres-1`) hides what the tail is
+ * there to show.
+ */
+export function composeEnvPlainValues(opts: {
+  readonly scopes: Iterable<{
+    readonly env: Readonly<Record<string, string>> | undefined;
+    readonly metadata:
+      | Readonly<Record<string, { readonly secret: boolean } | undefined>>
+      | undefined;
+  }>;
+}): string[] {
+  const plain = new Set<string>();
+  const secret = new Set<string>();
+  for (const scope of opts.scopes) {
+    for (const [key, value] of Object.entries(scope.env ?? {})) {
+      const entry = scope.metadata?.[key];
+      if (entry?.secret === false && !SENSITIVE_ENV_NAME.test(key)) {
+        plain.add(value);
+      } else {
+        secret.add(value);
+      }
+    }
+  }
+  return [...plain].filter((value) => !secret.has(value));
+}
+
+/** `redactValues` without the `plainValues` of {@link composeEnvPlainValues}. */
+export function composeQuoteRedactValues(opts: {
+  readonly redactValues: readonly string[];
+  readonly plainValues: readonly string[] | undefined;
+}): string[] {
+  const plain = new Set(opts.plainValues ?? []);
+  return opts.redactValues.filter((value) => !plain.has(value));
+}
+
+/**
  * Parse Compose ps JSON strictly. Compose v2.21+ prints one object per line;
  * older v2 releases print one JSON array. Returns null when any non-empty
  * line is not an object or an array of objects.

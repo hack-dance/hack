@@ -53,6 +53,23 @@ test("nonzero after hook preserves exit 17, skips later hooks and retains an exp
   expect(await state(root)).toMatchObject({ pending: false, stopped: true });
 }, 20_000);
 
+test("text output shows one scoped blocker for a failed authored after hook and its recovery stop", async () => {
+  const root = await fixture("process.exit(17)");
+  const result = await invoke(root, ["up", "--detach"]);
+  expect(result.code, result.stderr).toBe(17);
+  expect(result.stdout).toBe("");
+  // HACK-2541: the shared start blocker replaces the closed sentence.
+  expect(result.stderr).toEndWith(
+    `! lifecycle  hook failed (after, exit 17)\n  stop the retained services, then fix the failing hook and retry this start. run:\n  hack down --path=${root} --recover\n`
+  );
+  expect(result.stderr).not.toContain("Native host after hook failed");
+  expect(await state(root)).toMatchObject({ pending: true });
+  // The printed command is the one that stops the retained pending engine.
+  const down = await invoke(root, ["down", "--recover", "--json"]);
+  expect(down.code).toBe(0);
+  expect(await state(root)).toMatchObject({ pending: false, stopped: true });
+}, 20_000);
+
 test("failed engine startup never runs after hooks", async () => {
   const root = await fixture('await Bun.write("after-ran","unexpected")', true);
   const result = await invoke(root);
@@ -63,6 +80,22 @@ test("failed engine startup never runs after hooks", async () => {
   });
   expect(await Bun.file(join(root, "after-ran")).exists()).toBe(false);
   expect(await Bun.file(join(root, "order")).text()).toBe("before\n");
+}, 20_000);
+
+test("text output shows one scoped blocker for incomplete engine startup and its recovery stop", async () => {
+  const root = await fixture('await Bun.write("after-ran","unexpected")', true);
+  const result = await invoke(root, ["up", "--detach"]);
+  expect(result.code, result.stderr).toBe(1);
+  expect(result.stdout).toBe("");
+  // HACK-2541: no closed E_STARTUP_INCOMPLETE sentence in text output.
+  expect(result.stderr).toEndWith(
+    `! project  startup incomplete · services retained\n  this start needs the retained services stopped first. run:\n  hack down --path=${root} --recover\n`
+  );
+  expect(result.stderr).not.toContain("E_STARTUP_INCOMPLETE");
+  expect(await Bun.file(join(root, "after-ran")).exists()).toBe(false);
+  const down = await invoke(root, ["down", "--recover", "--json"]);
+  expect(down.code, down.stdout).toBe(0);
+  expect(await state(root)).toMatchObject({ pending: false });
 }, 20_000);
 
 test("after hook that stops an owned workload cannot commit or report ready", async () => {

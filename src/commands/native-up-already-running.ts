@@ -146,14 +146,32 @@ export function classifyNativeAlreadyRunning(
 
 /**
  * A running service with an unmet goal cannot be resumed in place.
+ *
+ * The JSON message keeps its inline restart command. Text output shows the
+ * shared start blocker instead, with the single-line scoped restart only when
+ * the selection can be printed safely.
  */
 export function nativePartiallyRunningRefusal(
   down: readonly string[],
-  restartCommand: string
+  selection: NativeUpSelection
 ): HackCliError {
+  const restartCommand = nativeScopedCommand({ action: "restart", selection });
   return new HackCliError({
     code: "E_STARTUP_INCOMPLETE",
     message: `Native project is already running, but these services have not reached their required state: ${down.join(", ")}. To start them again, run ${restartCommand}. Nothing was started or stopped.`,
+    startBlocker: {
+      thing: "project",
+      problem: "already running with services not at their required state",
+      which: down.join(", "),
+      needs: "this start needs the running instance restarted",
+      command: canPrintStartSelection(selection)
+        ? nativeScopedCommand({
+            action: "restart",
+            selection,
+            singleLine: true,
+          })
+        : undefined,
+    },
   });
 }
 
@@ -417,7 +435,7 @@ export async function answerNativeAlreadyRunning(opts: {
     if (observed.state.resumable) {
       return null;
     }
-    throw nativePartiallyRunningRefusal(observed.state.down, restartCommand);
+    throw nativePartiallyRunningRefusal(observed.state.down, selection);
   }
   if (observed.state.kind === "running") {
     await opts.notifyRunning?.(observed.saved, observed.project);

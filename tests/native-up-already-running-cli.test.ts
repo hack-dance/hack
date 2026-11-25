@@ -321,16 +321,21 @@ test(
     const human = await up(f, ["-d"]);
     expect(human.code).toBe(1);
     expect(human.stdout).toBe("");
-    expect(human.stderr).toContain(
-      "ERROR: E_STARTUP_INCOMPLETE: Native project is already running, but these services have not reached their required state: db, worker."
+    // HACK-2541: the shared start blocker, with the scoped restart on its own line.
+    expect(human.stderr).toEndWith(
+      `! project  already running with services not at their required state (db, worker)\n  this start needs the running instance restarted. run:\n  hack restart --path=${f.project}\n`
     );
-    expect(human.stderr).toContain(`run hack restart --path ${f.project}.`);
+    expect(human.stderr).not.toContain("E_STARTUP_INCOMPLETE");
     expect(human.stderr).not.toContain("was not confirmed");
     const json = await up(f, ["-d", "--json"]);
     expect(json.code).toBe(1);
+    // JSON keeps the closed code and the original message.
     expect(JSON.parse(json.stdout)).toMatchObject({
       ok: false,
-      error: { code: "E_STARTUP_INCOMPLETE" },
+      error: {
+        code: "E_STARTUP_INCOMPLETE",
+        message: `Native project is already running, but these services have not reached their required state: db, worker. To start them again, run hack restart --path ${f.project}. Nothing was started or stopped.`,
+      },
     });
     for (const call of await f.calls()) {
       expect(["graph status", "graph owner-status"]).toContain(call);
@@ -609,14 +614,40 @@ test("project and branch selection are preserved in the one working recovery com
     scopeArgs: ["--project", "running-fixture"],
   });
   expect(result.code).toBe(1);
-  expect(result.output).toContain(
-    "run hack restart --project running-fixture --branch preview."
+  expect(result.stderr).toEndWith(
+    "  hack restart --project=running-fixture --branch=preview\n"
   );
   const same = await up(f, ["-d", "--branch", "preview"]);
   expect(same.code).toBe(1);
-  expect(same.output).toContain(
-    `run hack restart --path ${f.project} --branch preview.`
+  expect(same.stderr).toEndWith(
+    `  hack restart --path=${f.project} --branch=preview\n`
   );
+  const json = await up(f, ["-d", "--json", "--branch", "preview"], {
+    scopeArgs: ["--project", "running-fixture"],
+  });
+  expect(JSON.parse(json.stdout).error.message).toContain(
+    "run hack restart --project running-fixture --branch preview."
+  );
+});
+
+test("a partial-run refusal omits the restart command when the selection cannot be printed", async () => {
+  const f = await fixture({
+    phase: "ready-observed",
+    services: {
+      web: { state: "running" },
+      db: { state: "running", health: "unhealthy" },
+    },
+    owner: LIVE_OWNER,
+  });
+  // A path that looks like a pasted environment assignment is never printed.
+  const assigned = join(f.root, "A=1");
+  expect(Bun.spawnSync(["ln", "-s", f.project, assigned]).exitCode).toBe(0);
+  const result = await up(f, ["-d"], { scopeArgs: ["--path", "A=1"] });
+  expect(result.code).toBe(1);
+  expect(result.stderr).toEndWith(
+    "! project  already running with services not at their required state (db)\n"
+  );
+  expect(result.stderr).not.toContain("hack restart");
 });
 
 test("single-line recovery command keeps a line break in the path argument", () => {

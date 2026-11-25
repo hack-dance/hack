@@ -43,6 +43,11 @@ These are advisory examples for the surface being changed, not additional gates.
   builds write into the checkout or share output, isolate them before attributing
   a failure to the patch. Set fixture permissions explicitly for ownership tests
   while retaining cases that check refusal of unsafe permissions.
+- For missing-project fixtures, choose a temporary root whose ancestors contain no
+  `.hack` directory. Project discovery walks upward, so an unrelated ancestor can
+  turn a refusal test into real project activity; see
+  [discovery tests](tests/discovery.test.ts). For process fixtures, observe the
+  owned child's exit separately from launcher completion before removing its state.
 
 Useful commands:
 

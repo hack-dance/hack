@@ -14,6 +14,7 @@ import {
   pathWithoutHack,
   renderStepTable,
 } from "../scripts/linux-first-run-check.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 test("the no-Compose docker wrapper rejects only compose and runs the real CLI otherwise (HACK-2673)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "first-run-no-compose-"));
@@ -24,7 +25,7 @@ test("the no-Compose docker wrapper rejects only compose and runs the real CLI o
     const wrapper = join(dir, "docker");
     await writeFile(wrapper, noComposeDockerScript(real), { mode: 0o700 });
     const run = (args: string[]) =>
-      Bun.spawnSync([wrapper, ...args], { stdout: "pipe", stderr: "pipe" });
+      spawnSyncBounded([wrapper, ...args], { timeout: 10_000 });
     const compose = run(["compose", "version"]);
     expect(compose.exitCode).toBe(1);
     expect(compose.stderr.toString()).toContain(

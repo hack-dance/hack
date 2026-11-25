@@ -42,7 +42,7 @@
           },
           {
             "path": "scripts/mise-install-retry.sh",
-            "sha256": "d400f7d205b3adf5c8901c03eafab791230e659d108f69d8885364161458917e"
+            "sha256": "c0e9f6deb3ce50f1af3aa4dbfbc75db2deae7d7d0b8462d2a857f222c6336324"
           },
           {
             "path": "mise.toml",
@@ -109,7 +109,7 @@
           },
           {
             "path": "scripts/mise-install-retry.sh",
-            "sha256": "d400f7d205b3adf5c8901c03eafab791230e659d108f69d8885364161458917e"
+            "sha256": "c0e9f6deb3ce50f1af3aa4dbfbc75db2deae7d7d0b8462d2a857f222c6336324"
           },
           {
             "path": "mise.toml",
@@ -170,7 +170,7 @@
           },
           {
             "path": "scripts/mise-install-retry.sh",
-            "sha256": "d400f7d205b3adf5c8901c03eafab791230e659d108f69d8885364161458917e"
+            "sha256": "c0e9f6deb3ce50f1af3aa4dbfbc75db2deae7d7d0b8462d2a857f222c6336324"
           },
           {
             "path": "mise.toml",

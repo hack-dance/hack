@@ -122,6 +122,25 @@ calls=$(wc -l < "${log}")
     ]);
     expect(result.stderr).toContain("failed 3 times");
   });
+
+  test("refuses a non-numeric attempt limit instead of retrying forever", async () => {
+    const dir = await workDir();
+    const log = await fakeMise(dir);
+    for (const attempts of ["abc", "0", ""]) {
+      const result = run({
+        cmd: ["sh", script, "zig"],
+        dir,
+        env: {
+          FAKE_MISE_FAILURES: "99",
+          MISE_INSTALL_ATTEMPTS: attempts,
+          MISE_INSTALL_RETRY_DELAY: "0",
+        },
+      });
+      // An empty value means the default (4 attempts), which still fails.
+      expect(result.exitCode).toBe(attempts === "" ? 1 : 2);
+    }
+    expect((await lines(log)).length).toBe(4);
+  });
 });
 
 describe("scripts/fetch-zig.sh", () => {

@@ -3574,6 +3574,14 @@ const contracts: readonly ModelContract[] = [
         ],
       },
       {
+        // HACK-2534. Restores the separate digest pass a cached archive took
+        // before import; import's validation already hashes every byte.
+        name: "early-digest",
+        negative: true,
+        invariant: "CachedSingleRead",
+        fields: ['source = "cached"', "reads = 2"],
+      },
+      {
         name: "eviction",
         negative: true,
         invariant: "NeverEvictionRefusal",

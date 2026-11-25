@@ -520,7 +520,11 @@ model as `hack up`, the same managed env and the same deadlines as export,
 the same refusal without `--env` when the selection is no longer recorded and
 the project has overlays, the same redaction of quoted engine lines, and
 refuses the native backend the same way. It never overwrites, deletes or
-relabels data it does not own.
+relabels data it does not own. Its container creates (the write hold, the
+start and end markers, the target references and the helpers) follow the
+same timed-out-create rule as export (see Deadlines): one not found by its
+nonce and removed stays unknown, and its cleanup record stays until
+`hack data cleanup` finds and removes it.
 
 Before any write it checks, in order:
 

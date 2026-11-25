@@ -12,11 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderDataImportText } from "../src/commands/data.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { cleanupRecordedRun } from "../src/lib/data-backup-cleanup.ts";
 import {
   DATA_IMPORT_SOURCE_LABEL,
   type DataImportInput,
   importProjectData,
 } from "../src/lib/data-backup-import.ts";
+import { readDataCleanupRecord } from "../src/lib/data-cleanup-record.ts";
 import {
   dataImportJournalPath,
   readDataImportJournal,
@@ -1351,17 +1353,27 @@ describe("Docker references hold the targets", () => {
 });
 
 describe("a timed-out create during the import", () => {
-  /** The write-hold create times out; it lands during lookup `landAt`. */
+  /**
+   * One create times out: the write hold (default), a start marker or a
+   * target reference. It lands during lookup `landAt`, or only when the
+   * test calls `land()`.
+   */
   function timedOutHold(
     fake: FakeEngine,
     landAt: number | null,
-    which: "hold" | "marker" = "hold"
+    which: "hold" | "marker" | "reference" = "hold"
   ) {
     const real = fake.docker();
     let pending: readonly string[] | null = null;
     let lookups = 0;
     return {
       ...real,
+      /** The daemon registers the timed-out create now (after the run). */
+      land: async () => {
+        if (pending !== null) {
+          await real.capture(pending);
+        }
+      },
       engine: { host: "tcp://10.0.0.5:2376", context: null },
       hackCleanupCommand: (nonce: string) =>
         `hack data cleanup --branch=feature-x --nonce=${nonce}`,
@@ -1369,10 +1381,11 @@ describe("a timed-out create during the import", () => {
         argv: readonly string[],
         opts?: { readonly timeoutMs?: number }
       ) => {
+        const prefix = which === "reference" ? "type=volume," : "type=bind,";
         const isTarget =
           which === "marker"
             ? !argv.includes("--mount")
-            : argv.some((arg) => arg.startsWith("type=bind,"));
+            : argv.some((arg) => arg.startsWith(prefix));
         if (pending === null && argv[1] === "create" && isTarget) {
           pending = argv;
           return { exitCode: FAKE_TIMEOUT_EXIT, stdout: "", stderr: "" };
@@ -1391,8 +1404,7 @@ describe("a timed-out create during the import", () => {
     };
   }
 
-  test("an unanswered timeout before the event watch is proven stays unknown, with hack data cleanup and no endpoint", async () => {
-    // The start marker's create: no settle window can prove it will not land.
+  test("an unanswered start-marker timeout stays unknown, with hack data cleanup and no endpoint", async () => {
     const dir = await writeBackup({ keys: ["db"] });
     const fake = engine();
     const error = await caught(
@@ -1415,20 +1427,60 @@ describe("a timed-out create during the import", () => {
     expect(fake.calls.some((argv) => argv.includes("-xpf"))).toBeFalse();
   });
 
-  test("an unanswered write-hold timeout settles in the window: the record is deleted", async () => {
-    const dir = await writeBackup({ keys: ["db"] });
-    const fake = engine();
-    const error = await caught(
-      importProjectData({
-        ...input(fake, dir),
-        docker: timedOutHold(fake, null),
-      })
-    );
-    expect(JSON.stringify(error.detail ?? {})).not.toContain("unknown");
-    expect(
-      await readdir(join(root, "home", "data-cleanup")).catch(() => [])
-    ).toEqual([]);
-  });
+  for (const which of ["hold", "marker", "reference"] as const) {
+    test(`a ${which} that appears after the window: the run keeps the record as unknown, and a later cleanup removes it`, async () => {
+      // "No such container" through every lookup, the whole window and the
+      // final listing; the daemon registers it only after the run.
+      const dir = await writeBackup({ keys: ["db"] });
+      const fake = engine();
+      const docker = timedOutHold(fake, null, which);
+      const error = await caught(
+        importProjectData({ ...input(fake, dir), docker })
+      );
+      const cleanup = (error.detail as { cleanup: Record<string, unknown> })
+        .cleanup;
+      const nonce = String(cleanup.label).split("=")[1] ?? "";
+      expect(cleanup).toEqual({
+        container: null,
+        removed: false,
+        outcome: "unknown",
+        label: `io.hack.data-backup.nonce=${nonce}`,
+        hackCommand: `hack data cleanup --branch=feature-x --nonce=${nonce}`,
+      });
+      const rendered = `${error.message}${JSON.stringify(error.detail)}`;
+      expect(rendered).not.toContain("10.0.0.5");
+      const hackHome = join(root, "home");
+      const record = await readDataCleanupRecord({ hackHome, nonce });
+      expect(record.unresolvedCreates).toHaveLength(1);
+      const [name = ""] = record.unresolvedCreates ?? [];
+
+      // A cleanup before it appears keeps the record and names the create.
+      const early = await caught(
+        cleanupRecordedRun({ hackHome, record, docker, deadlines: DEADLINES })
+      );
+      expect(early.code).toBe("E_UNEXPECTED");
+      expect(early.detail).toMatchObject({
+        outcome: "unknown",
+        unresolvedCreates: [name],
+      });
+      expect(early.message).toContain(name);
+      expect(await readdir(join(hackHome, "data-cleanup"))).toEqual([
+        `${nonce}.json`,
+      ]);
+
+      await docker.land();
+      expect(fake.leftovers()).toHaveLength(1);
+      const result = await cleanupRecordedRun({
+        hackHome,
+        record: await readDataCleanupRecord({ hackHome, nonce }),
+        docker,
+        deadlines: DEADLINES,
+      });
+      expect(result.removed).toHaveLength(1);
+      expect(fake.leftovers()).toEqual([]);
+      expect(await readdir(join(hackHome, "data-cleanup"))).toEqual([]);
+    });
+  }
 
   test("a timeout that a later lookup finds is removed; not unknown", async () => {
     const dir = await writeBackup({ keys: ["db"] });

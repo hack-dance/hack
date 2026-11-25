@@ -273,3 +273,7 @@ Native `hack up --json` includes the same `hack.timings/1` records
 in `data.timings`. Add `--timings-file <file>` to save those records as JSONL
 in a new file. Times overlap when steps run together, so use `command.total`
 for elapsed startup time.
+
+Native `hack down` and `hack ps` accept the same two flags. `--timings` prints
+the command's timeline to stderr, so a `--json` result on stdout is unchanged.
+`--timings-file <file>` saves the joined `hack.timings/1` records as JSONL.

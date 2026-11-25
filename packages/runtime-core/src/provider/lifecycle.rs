@@ -491,7 +491,20 @@ impl<'a> OwnedGuest<'a> {
                 "Provider mutation root changed.",
             ));
         }
+        #[cfg(all(test, target_os = "macos"))]
+        if self.allocation_allowed
+            && self.owner.process.is_none()
+            && super::engine::fixture::active(self.candidate)
+        {
+            return Ok(());
+        }
         verify_live(self.candidate, &self.owner)
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn enable_fixture_allocation(&mut self) {
+        assert!(self.owner.process.is_none());
+        self.allocation_allowed = true;
     }
 
     #[cfg(feature = "native-config-plan")]
@@ -717,6 +730,10 @@ impl<'a> OwnedGuest<'a> {
         self.verify()?;
         if allocation {
             self.before_effect()?;
+        }
+        #[cfg(all(test, target_os = "macos"))]
+        if super::engine::fixture::active(self.candidate) {
+            return Ok(super::engine::fixture::execute(script, arguments, input));
         }
         let script = format!(
             "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\ntest \"$(findmnt -n -o FSTYPE --mountpoint /storage)\" = ext4\nshift 2\n{script}"

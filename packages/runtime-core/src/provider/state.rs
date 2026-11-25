@@ -460,6 +460,8 @@ pub(crate) fn write_with_pending(
         .map_err(io)?
         .sync_all()
         .map_err(io)?;
+    #[cfg(all(test, target_os = "macos"))]
+    super::engine::fixture::record_write(path, bytes);
     Ok(())
 }
 

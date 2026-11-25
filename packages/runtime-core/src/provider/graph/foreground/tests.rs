@@ -1,5 +1,6 @@
 use super::transport::{Pin, Publication};
 use super::*;
+mod extend_commit;
 use crate::owned_tmp_root::OwnedTmpRoot;
 use std::{
     fs,

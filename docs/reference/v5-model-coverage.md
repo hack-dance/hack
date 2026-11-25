@@ -299,6 +299,31 @@ An unchanged injected failure followed by a real removal/restore regression
 covers successful retry without `--overwrite`; it does not qualify OS permission
 failures or arbitrary concurrent writers.
 
+### Upgrade rollback interruption (HACK-2188)
+
+![Upgrade rollback interruption](upgrade-restore.svg) ([source](upgrade-restore.mmd))
+
+[`upgrade-restore/Restore.tla`](../../tests/models/tla/upgrade-restore/COVERAGE.md)
+follows one restored target through check, stage, displacement, publication
+and settling, with a crash after every step, one concurrent user write, one
+user deletion and an optional overwrite. It exhausts 613 states. Its negative
+control, the code before this fix, fails `InterruptedRestoreResumes`: a
+rollback killed after it moved the step's output aside left the path empty and
+every plain rerun refused it. Displaced files now carry a key of their target
+path, and a rerun that finds an empty path whose newest keyed displaced file
+is the recorded after state finishes the restore; any other displaced file is
+reported, never adopted. Once the path holds the snapshot's state, every keyed
+file of that target loses its key, so a user who later deletes the restored
+file is refused rather than overridden; the `kept-keys` control, without that
+step, fails `DeletionKept`. Real SIGKILL regressions cover every restore
+boundary of a three-target snapshot and of a real `ignore-rules` apply, and a
+rollback straight after each of the seven apply boundaries (unrecorded targets
+need `--overwrite`, as documented). Both test files run in CI on macOS and
+Linux. Uncovered: power loss, fsync durability, cross-filesystem and
+no-hard-link refusals under interruption, a deletion that lands between a
+killed restore's publication and its key drop, and displaced files from
+versions before this fix (never adopted; those need `--overwrite`).
+
 Permission-only key repair freezes its write-set paths in the journal, verifies
 snapshot bytes and owner identity, then uses an open descriptor to tighten mode
 by removing group/other access while preserving owner bits. Four real SIGKILL

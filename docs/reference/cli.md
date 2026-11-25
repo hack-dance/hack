@@ -404,6 +404,8 @@ hack down [options]
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--recover` | Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data |
+| `--timings` | Native backend: print the command timeline to stderr |
+| `--timings-file <file>` | Native backend: write command timing records to a new JSONL file |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -468,6 +470,8 @@ hack ps [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--json` | Output JSON (machine-readable) |
+| `--timings` | Native backend: print the command timeline to stderr |
+| `--timings-file <file>` | Native backend: write command timing records to a new JSONL file |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

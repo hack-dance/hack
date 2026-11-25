@@ -5,4 +5,5 @@
 !.hack/toolchain/Dockerfile
 !.hack/toolchain/run.sh
 !scripts
+scripts/**
 !scripts/mise-install-retry.sh

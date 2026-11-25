@@ -47,6 +47,12 @@ import {
   refuseRemoteStart,
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
+import {
+  type CheckoutWitness,
+  readComposeContainerIds,
+  recordComposeResourceReceipts,
+  recordResourceCheckout,
+} from "../lib/resource-receipts.ts";
 import { printUpTimings } from "../lib/up-timings-output.ts";
 import {
   selectLifecycleAddress,
@@ -8206,6 +8212,21 @@ async function handleUpUnlocked({
   }
 }
 
+function abortableReceiptDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 const UP_RETRY_VALUE_OPTIONS = new Set([
   "--path",
   "-p",
@@ -9052,6 +9073,58 @@ async function runResolvedComposeUp({
   // Set right before Compose may start containers. A signal from then on
   // keeps the shared helpers: a start still in flight can start services
   // after any snapshot, so no probe could prove them absent.
+  let priorResourceContainers:
+    | { daemon: string; ids: readonly string[] }
+    | undefined;
+  let cleanupCheckouts: readonly CheckoutWitness[] | undefined;
+  let foregroundReceipts: Promise<void> | undefined;
+  const foregroundReceiptStop = new AbortController();
+  const recordLaunchCheckout = async () => {
+    if (cleanupCheckouts) {
+      return;
+    }
+    try {
+      cleanupCheckouts = await recordResourceCheckout(
+        lifecycleComposeProject,
+        project.projectRoot
+      );
+      const captured = await engine.capture();
+      if (captured.daemon.kind === "verified") {
+        const ids = await readComposeContainerIds({
+          projectDir: project.projectDir,
+          composeProject: lifecycleComposeProject,
+          env: envOverrides.env,
+        });
+        if (ids) {
+          priorResourceContainers = { daemon: captured.daemon.id, ids };
+        }
+      }
+    } catch {
+      // Receipt capture is optional and must not block Compose startup.
+    }
+  };
+  const recordResourceReceipts = async () => {
+    try {
+      const captured = await engine.capture();
+      if (cleanupCheckouts && captured.daemon.kind === "verified") {
+        await recordComposeResourceReceipts({
+          projectDir: project.projectDir,
+          composeFile: project.composeFile,
+          checkout: project.projectRoot,
+          project: projectName,
+          composeProject: lifecycleComposeProject,
+          branch,
+          launch: captured.launchId,
+          daemon: captured.daemon.id,
+          checkouts: cleanupCheckouts,
+          priorContainers: priorResourceContainers,
+          env: envOverrides.env,
+        });
+      }
+    } catch {
+      // Receipts are optional evidence. Startup success does not depend on them.
+    }
+  };
   let containerStartBegun = false;
   const foregroundTermination: {
     guard: ReturnType<typeof installForegroundTerminationGuard> | null;
@@ -9237,6 +9310,7 @@ async function runResolvedComposeUp({
               await verifyOwnership();
               await scopedMutation?.stage();
               await publishRuntimeSelection();
+              await recordLaunchCheckout();
               await engine.verify();
             },
             onCreateDispatched: () => {
@@ -9251,6 +9325,18 @@ async function runResolvedComposeUp({
                 // Compose still owns the terminal. Observe release errors
                 // after it exits, without an unhandled promise in the interim.
                 foregroundRelease?.catch(() => undefined);
+                foregroundReceipts = (async () => {
+                  for (const delay of [250, 750, 2000, 5000, 10_000]) {
+                    await abortableReceiptDelay(
+                      delay,
+                      foregroundReceiptStop.signal
+                    );
+                    if (foregroundReceiptStop.signal.aborted) {
+                      return;
+                    }
+                    await recordResourceReceipts();
+                  }
+                })();
               }
             },
             beforeStart: async () => {
@@ -9262,6 +9348,7 @@ async function runResolvedComposeUp({
               } else {
                 await scopedMutation?.stage();
                 await publishRuntimeSelection();
+                await recordLaunchCheckout();
                 await engine.verify();
               }
             },
@@ -9314,7 +9401,17 @@ async function runResolvedComposeUp({
         run: (path) => launch([...composeFilesWithMetadata, path]),
       });
     };
-    const guarded = await launchWithEnv().finally(settlePublication);
+    const guarded = await launchWithEnv().finally(async () => {
+      foregroundReceiptStop.abort();
+      try {
+        await settlePublication();
+      } finally {
+        await foregroundReceipts;
+      }
+      if (!detach && composeDispatched) {
+        await recordResourceReceipts();
+      }
+    });
     cancellation.signal.throwIfAborted();
     if ("bootstrapCode" in guarded) {
       const { bootstrapCode } = guarded;
@@ -9402,6 +9499,7 @@ async function runResolvedComposeUp({
       detachedComposeSucceeded = true;
       // The containers now run: a later failure keeps their helpers.
       keepSharedHelpers?.();
+      await recordResourceReceipts();
     }
     const observationBudgetMs = detach
       ? Math.max(

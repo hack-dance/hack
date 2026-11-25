@@ -429,6 +429,18 @@ impl From<RunError> for CopiesError {
 }
 
 pub trait Source: Send + Sync {
+    fn resource_inventory(&self) -> Result<crate::resource_inventory::InventoryReport, String> {
+        Err("Resource inventory is unavailable for this source.".into())
+    }
+
+    fn resource_removal(
+        &self,
+        _id: &str,
+        _confirmation: Option<&str>,
+    ) -> Result<crate::resource_inventory::RemovalPlan, String> {
+        Err("Resource removal is unavailable for this source.".into())
+    }
+
     /// Preview a catalog edit, or save the exact revision previously previewed.
     ///
     /// # Errors
@@ -1958,6 +1970,36 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn resource_inventory(&self) -> Result<crate::resource_inventory::InventoryReport, String> {
+        self.runner
+            .run_schema_json(&["resources", "list", "--json"], None, Duration::from_secs(60), "hack.resources.v1")
+            .map_err(|_| "Resource inventory unavailable. Check that the selected CLI supports hack resources.".into())
+    }
+
+    fn resource_removal(
+        &self,
+        id: &str,
+        confirmation: Option<&str>,
+    ) -> Result<crate::resource_inventory::RemovalPlan, String> {
+        let mut args = vec!["resources", "remove", id, "--json"];
+        if let Some(token) = confirmation {
+            args.extend(["--confirm", token]);
+        } else {
+            args.push("--dry-run");
+        }
+        self.runner
+            .run_schema_json(
+                &args,
+                None,
+                Duration::from_secs(30),
+                "hack.resource-remove.v1",
+            )
+            .map_err(|error| match error {
+                RunError::Cli(error) => error.message,
+                _ => "Resource removal could not be confirmed. Refresh the inventory.".into(),
+            })
+    }
+
     fn config_read(
         &self,
         root: Option<&Path>,

@@ -163,6 +163,7 @@ export async function readRuntimeProjects(opts: {
   readonly inspectCache?: RuntimeInspectCache;
   readonly forceInspect?: boolean;
   readonly inventoryOnly?: boolean;
+  readonly readOnlyLifecycle?: boolean;
   readonly profiler?: OperationTimings;
 }): Promise<RuntimeProjectsResult> {
   const profiler = opts.profiler ?? createOperationTimings();
@@ -345,6 +346,7 @@ export async function readRuntimeProjects(opts: {
     : await profiler.measure("lifecycle_ms", () =>
         addLifecycleProcessServices({
           runtime: out,
+          readOnly: opts.readOnlyLifecycle,
         })
       );
 
@@ -410,6 +412,7 @@ type LifecycleActivity = {
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Lifecycle pseudo-services are derived from several runtime sources in one normalization step.
 export async function addLifecycleProcessServices(opts: {
   readonly runtime: readonly RuntimeProject[];
+  readonly readOnly?: boolean;
 }): Promise<RuntimeProject[]> {
   if (opts.runtime.length === 0) {
     return [];
@@ -426,7 +429,10 @@ export async function addLifecycleProcessServices(opts: {
       continue;
     }
     try {
-      const state = await readLifecycleState({ projectDir: workingDir });
+      const state = await readLifecycleState({
+        projectDir: workingDir,
+        readOnly: opts.readOnly,
+      });
       stateByWorkingDir.set(workingDir, state);
     } catch {
       unreadable.add(workingDir);

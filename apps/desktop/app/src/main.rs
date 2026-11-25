@@ -36,6 +36,7 @@ mod health_fixtures;
 mod health_model;
 mod logs_view;
 mod machine_view;
+mod resource_inventory_view;
 mod resources_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
@@ -311,6 +312,11 @@ fn main() {
                                 app.simulate_daemon_unavailable(false);
                             }
                             app.show_resources(cx);
+                            if matches!(f.name(), "resources-inventory" | "resources-confirm") {
+                                app.show_resource_inventory_fixture(
+                                    f.name() == "resources-confirm",
+                                );
+                            }
                         }
                         if f.name().starts_with("catalog-") {
                             app.show_catalog_fixture(f.name(), window, cx);

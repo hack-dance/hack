@@ -65,6 +65,7 @@ jobs:
       selection_mode: ${{ steps.scope.outputs.selection_mode }}
       ci_evidence: ${{ steps.scope.outputs.ci_evidence }}
       docker_suite: ${{ steps.scope.outputs.docker_suite }}
+      resource_e2e: ${{ steps.scope.outputs.resource_e2e }}
       guest_hosts: ${{ steps.scope.outputs.defer_macos == 'true' && '[{"os":"ubuntu-latest"}]' || '[{"os":"ubuntu-latest"},{"os":"macos-latest"}]' }}
       defer_macos: ${{ steps.scope.outputs.defer_macos }}
       build_smoke: ${{ steps.scope.outputs.build_smoke }}
@@ -101,6 +102,7 @@ jobs:
           docker_exempt=false
           linux_rust=false
           relocated_cli=false
+          resource_e2e=false
           base=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             parents=$(git rev-list --parents -n 1 HEAD) || parents=""
@@ -132,6 +134,10 @@ jobs:
                 case "$path" in
                   scripts/lib/tla-runtime-models.ts|tests/models/*|packages/runtime-core/*|docs/*) ;;
                   *) docker_exempt=false ;;
+                esac
+                case "$path" in
+                  src/lib/resource*|src/commands/resources.ts|apps/desktop/*/src/resource*|apps/desktop/core/tests/resource_inventory_cli.rs|apps/desktop/screenshots/resources-inventory-*|tests/e2e/resource-inventory.test.ts)
+                    resource_e2e=true ;;
                 esac
                 case "$path" in
                   src/*|index.ts|packages/cli/*|scripts/check-*-cli.ts|scripts/check-native-plan-clis.ts)
@@ -215,6 +221,8 @@ jobs:
             bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base"
             echo 'ci_evidence=scoped' >> "$GITHUB_OUTPUT"
           fi
+          if [ "$full" = "true" ]; then resource_e2e=true; fi
+          echo "resource_e2e=$resource_e2e" >> "$GITHUB_OUTPUT"
           # Protected inputs retain full Linux/Docker/build coverage. Ready PRs
           # defer macOS unless targeting main or explicitly labeled. Drafts stay light.
           if [ "$EVENT_NAME" = "pull_request" ]; then
@@ -751,6 +759,33 @@ jobs:
       - run: bun run build:config-compiler
       - run: bash scripts/check-compose-upgrade-sweep.sh --trial
 
+  resource-e2e:
+    name: Docker resource cleanup and desktop contract
+    needs: changes
+    if: ${{ needs.changes.outputs.resource_e2e == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Verify Docker resource cleanup and desktop contract
+        shell: bash
+        run: |
+          docker info --format '{{.ID}}' >/dev/null
+          docker pull redis:7-alpine
+          export HACK_RESOURCE_CLI_OUTPUT="$RUNNER_TEMP/hack-resource-inventory.json"
+          export HACK_E2E_CLI_BIN="$PWD/dist/hack"
+          bun test tests/e2e/resource-inventory.test.ts
+          test -s "$HACK_RESOURCE_CLI_OUTPUT"
+          cargo +1.98.1 test --locked --manifest-path apps/desktop/Cargo.toml -p hack-desktop-core --test resource_inventory_cli
+
   docker-e2e-shard:
     # One deterministic slice of the default e2e set per runner (tests/e2e/shard.ts).
     name: docker-e2e shard ${{ matrix.shard }}/4
@@ -1114,7 +1149,7 @@ jobs:
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler, guest-protocol]
+    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler, guest-protocol, resource-e2e]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1135,6 +1170,8 @@ jobs:
           COMPILER_RESULT: ${{ needs.config-compiler.result }}
           LIFETIME_ENABLED: ${{ needs.changes.outputs.docker_suite }}
           LIFETIME_RESULT: ${{ needs.linux-process-lifetime.result }}
+          RESOURCE_ENABLED: ${{ needs.changes.outputs.resource_e2e }}
+          RESOURCE_RESULT: ${{ needs.resource-e2e.result }}
         run: |
           if [ "$PR_DRAFT" = "true" ]; then
             echo "skipped: draft — full pull-request evidence is required before merge"
@@ -1160,6 +1197,10 @@ jobs:
             echo "test focus did not succeed (result: $FOCUS_RESULT)"
             exit 1
           fi
+          case "$RESOURCE_ENABLED:$RESOURCE_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Resource cleanup evidence did not match its plan"; exit 1 ;;
+          esac
           case "$LIFETIME_ENABLED:$LIFETIME_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Linux process lifetime evidence did not match its plan (enabled: $LIFETIME_ENABLED, result: $LIFETIME_RESULT)" >&2; exit 1 ;;

@@ -258,6 +258,17 @@ test("two-bridge v5 topology binds exact policies, selected attachments and alia
   );
 });
 
+test("compact share paths bind to the same approved project identity", () => {
+  const raw = sourceReceipt();
+  const digest = createHash("sha256")
+    .update(raw.source.share.project)
+    .digest("hex");
+  raw.source.share.guest_path = `/mnt/hp/${digest.slice(0, 16)}`;
+  expect(parseNativeAuthoredReceipt(raw).version).toBe(3);
+  raw.source.share.guest_path += "0";
+  expect(() => parseNativeAuthoredReceipt(raw)).toThrow("invalid or changed");
+});
+
 test("source-bearing native receipts bind host-mounted intent while retaining image-only v2", () => {
   const old = parseNativeAuthoredReceipt(receipt());
   expect(old.version).toBe(2);

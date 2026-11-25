@@ -394,6 +394,7 @@ impl<'a> ObservedGuest<'a> {
             || current.guest_boot_id.is_none()
             || current.token != self.owner.token
             || current.guest_boot_id != self.owner.guest_boot_id
+            || current.socket_layout != self.owner.socket_layout
             || current.network != self.owner.network
             || current.project_share != self.owner.project_share
             || current.additional_project_shares != self.owner.additional_project_shares
@@ -637,6 +638,10 @@ impl<'a> OwnedGuest<'a> {
 
     pub(super) fn profile(&self) -> super::Profile {
         self.owner.profile
+    }
+
+    pub(super) fn socket_layout(&self) -> super::PoolLayout {
+        self.owner.socket_layout
     }
 
     pub(super) fn bridge_intent(&self) -> Option<super::BridgeIntent> {
@@ -908,9 +913,9 @@ fn audit_with(
     if let Some(bridge) = owner.application_bridge {
         let directory = owner.real_data_dir(candidate)?;
         if repair == Repair::Allowed {
-            super::bridge::verify_sockets(&directory, bridge, repaired)?;
+            super::bridge::verify_sockets(owner.socket_layout, &directory, bridge, repaired)?;
         } else {
-            super::bridge::observe_sockets(&directory, bridge)?;
+            super::bridge::observe_sockets(owner.socket_layout, &directory, bridge)?;
         }
     }
     // The pinned SmolVM consumes and removes boot-config.json. Its retained running config plus
@@ -1004,7 +1009,11 @@ pub fn check_project_share(
         .map_err(io)?;
     if initialized {
         let owner = Owner::load(candidate)?;
-        super::project_share::check_request(&owner.project_shares(), Some(requested))?;
+        super::project_share::check_request(
+            owner.socket_layout,
+            &owner.project_shares(),
+            Some(requested),
+        )?;
     } else {
         require_fresh_source_pool(candidate)?;
     }
@@ -1406,6 +1415,30 @@ fn start_pool_observed(
     // A mistyped setting is refused before any effect.
     let hot_reload = super::hot_reload::Setting::from_environment()?;
     let admission_reuse = admission::opening::Reuse::from_environment()?;
+    let requested = bridge_request.initial();
+    let dependencies = dependency_request.initial();
+    super::dependency_socket::check_capacity(requested, dependencies)?;
+    // Reject an oversized selection before restoring aliases or retaining a start.
+    let pool = root(candidate);
+    if pool.join("owner.json").try_exists().map_err(io)? {
+        let owner = Owner::load_for_alias_restore(candidate)?;
+        if owner.phase != "running" {
+            super::boot_budget::check_owner(&owner)?;
+            super::boot_budget::check(
+                owner.socket_layout,
+                owner.project_shares().len(),
+                requested,
+                dependencies,
+            )?;
+        }
+    } else {
+        super::boot_budget::check(
+            super::PoolLayout::CompactV1,
+            usize::from(project_share.is_some()),
+            requested,
+            dependencies,
+        )?;
+    }
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
     // any strict owner read below refuses it.
     restore_released_short_home_before_use(candidate)?;
@@ -1426,8 +1459,6 @@ fn start_pool_observed(
             "Retained foreground startup requires macOS.",
         ));
     }
-    let requested = bridge_request.initial();
-    let dependencies = dependency_request.initial();
     let request = running_start::StartRequest {
         bridges: bridge_request,
         network: network.as_ref(),
@@ -1443,20 +1474,13 @@ fn start_pool_observed(
     if let Some(intent) = &network {
         intent.validate()?;
     }
-    if let Some(intent) = dependencies {
-        super::DependencySocketIntent::new(intent.slots)?;
-    }
-    super::dependency_socket::check_capacity(requested, dependencies)?;
-    if let Some(intent) = requested {
-        super::BridgeIntent::new(intent.slots)?;
-    }
     reject_aliased_state(&root(candidate))?;
+    let owner_present = root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?;
     let (existing, existing_network, existing_dependencies, existing_share, existing_additional) =
-        if root(candidate)
-            .join("owner.json")
-            .try_exists()
-            .map_err(io)?
-        {
+        if owner_present {
             let owner = Owner::load(candidate)?;
             request.check(
                 &owner,
@@ -1470,8 +1494,15 @@ fn start_pool_observed(
                 owner.additional_project_shares.clone(),
             )
         } else {
+            let (bridges, dependencies) = if profile == super::Profile::Development
+                && project_share.is_some()
+            {
+                super::socket_requests::fresh_project_capacity(bridge_request, dependency_request)?
+            } else {
+                (requested, dependencies)
+            };
             (
-                requested,
+                bridges,
                 network.clone().unwrap_or_default(),
                 dependencies,
                 project_share.clone(),
@@ -1593,6 +1624,23 @@ fn start_pool_observed(
     // not on a qualified filesystem, nothing is proven here and `prepare_rootfs` decides.
     // The recheck writes nothing; an alias repaired before admission stays repaired.
     let leased_rootfs = rootfs_proof::recheck(candidate, &lock, early_rootfs)?;
+    if root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        let owner = Owner::load_for_alias_restore(candidate)?;
+        if owner.phase != "running" {
+            super::boot_budget::check_owner(&owner)?;
+        }
+    } else {
+        super::boot_budget::check(
+            super::PoolLayout::CompactV1,
+            usize::from(existing_share.is_some()),
+            existing,
+            existing_dependencies,
+        )?;
+    }
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;
@@ -1622,13 +1670,19 @@ fn start_pool_observed(
     };
     // Hooks and admission can outlive the read-only frontend check. Never adopt
     // unrelated state that appeared before this operation acquired its lock.
-    if fresh_owner && project_share.is_some() {
+    if owner_present && fresh_owner {
+        return Err(CandidateError::new(
+            "project_share",
+            "Pool ownership changed before the operation lock.",
+        ));
+    }
+    if !owner_present && project_share.is_some() {
         require_fresh_source_pool(candidate)?;
     }
     let mut owner = Owner::create_with_project_share(
         candidate,
         profile,
-        requested,
+        existing,
         existing_network.clone(),
         existing_dependencies,
         existing_share.clone(),
@@ -1643,9 +1697,16 @@ fn start_pool_observed(
     }
     // These leased checks must stay a superset of `running_start::StartRequest::check`, which
     // the fast path runs under its lease; network is bound to the pre-lease receipt here.
-    super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
-    if owner.project_share != existing_share
-        || owner.additional_project_shares != existing_additional
+    super::project_share::check_request(
+        owner.socket_layout,
+        &owner.project_shares(),
+        project_share.as_ref(),
+    )?;
+    // Fresh creation converts the approved path once, in Owner::create_with_project_share.
+    // check_request above compares the fresh share with the exact recorded identity.
+    if !fresh_owner
+        && (owner.project_share != existing_share
+            || owner.additional_project_shares != existing_additional)
     {
         return Err(CandidateError::new(
             "project_share",
@@ -1877,13 +1938,13 @@ fn pool_spec(candidate: &Candidate, owner: &Owner, profile: super::Profile) -> M
         network: owner.network.clone(),
         exposed_sockets: owner
             .application_bridge
-            .map(|bridge| bridge.guest_paths())
+            .map(|bridge| bridge.guest_paths(owner.socket_layout))
             .unwrap_or_default(),
         mounted_sockets: owner
             .dependency_sockets
             .map(|intent| {
                 intent
-                    .paths(&owner.short_home)
+                    .paths(owner.socket_layout, &owner.short_home)
                     .into_iter()
                     .map(|path| (path.host_path, path.guest_path))
                     .collect()
@@ -2032,6 +2093,7 @@ fn finish_boot(
     lock: &state::Lock,
 ) -> Result<RuntimeStatus, CandidateError> {
     finish_boot_with(
+        owner.socket_layout,
         owner,
         |owner| {
             verify_templates(
@@ -2059,6 +2121,7 @@ fn finish_boot(
 /// Fresh boot's ordering boundary. Only effectful host/guest operations are
 /// injected: the real complete-set socket wait always precedes audit/adoption.
 fn finish_boot_with<S, T>(
+    layout: super::PoolLayout,
     owner: &mut S,
     prepare: impl FnOnce(
         &S,
@@ -2078,8 +2141,13 @@ fn finish_boot_with<S, T>(
     // running-pool commands. Failure keeps the existing verified-stop path.
     let mut repaired = Vec::new();
     if let Some((directory, bridge)) = bridge {
-        repaired =
-            super::bridge::wait_for_sockets(&directory, bridge, || verify_provider(owner), clock)?;
+        repaired = super::bridge::wait_for_sockets(
+            layout,
+            &directory,
+            bridge,
+            || verify_provider(owner),
+            clock,
+        )?;
     }
     audit(owner, repaired)?;
     adopt(owner)
@@ -2130,6 +2198,11 @@ fn adopt_boot(
             &artifact::digest(
                 &artifact::root(candidate).join("agent-rootfs/usr/local/bin/smolvm-agent"),
             )?,
+            if owner.socket_layout.is_legacy() {
+                "legacy"
+            } else {
+                "compact"
+            },
         ],
         false,
     )?;
@@ -2161,7 +2234,7 @@ fn adopt_boot(
         ));
     }
     if let Some(intent) = owner.dependency_sockets {
-        let paths = intent.paths(&owner.short_home);
+        let paths = intent.paths(owner.socket_layout, &owner.short_home);
         let mut args = vec![owner.token.as_str(), boot];
         args.extend(paths.iter().map(|path| path.guest_path.as_str()));
         let observed = guest(
@@ -3167,13 +3240,18 @@ fn restore_released_short_home_before_use(candidate: &Candidate) -> Result<(), C
 fn owned_socket_names(owner: &Owner) -> Vec<String> {
     let mut sockets = vec!["agent.sock".to_owned(), "docker.sock".to_owned()];
     if let Some(bridge) = owner.application_bridge {
-        sockets.extend(bridge.guest_paths().into_iter().map(|path| {
-            Path::new(&path)
-                .file_name()
-                .expect("fixed socket name")
-                .to_string_lossy()
-                .into_owned()
-        }));
+        sockets.extend(
+            bridge
+                .guest_paths(owner.socket_layout)
+                .into_iter()
+                .map(|path| {
+                    Path::new(&path)
+                        .file_name()
+                        .expect("fixed socket name")
+                        .to_string_lossy()
+                        .into_owned()
+                }),
+        );
     }
     sockets
 }
@@ -3654,9 +3732,15 @@ mod tests {
                 None,
                 super::super::NetworkIntent::Internet,
                 None,
-                Some(share.clone()),
+                Some(
+                    share
+                        .clone()
+                        .with_layout(super::super::PoolLayout::CompactV1)
+                        .unwrap(),
+                ),
             )
             .unwrap();
+            super::super::project_share::check_boot(&owner.project_shares()).unwrap();
             let before = fs::read(root(&candidate).join("owner.json")).unwrap();
             assert_eq!(
                 check_project_share(&candidate, &share).unwrap(),
@@ -3731,7 +3815,9 @@ mod tests {
             }
         }
         let _unlink = Unlink(owner.short_home.clone());
-        owner.additional_project_shares.push(second.clone());
+        let stored_primary = owner.project_share.clone();
+        let stored_second = second.clone().with_layout(owner.socket_layout).unwrap();
+        owner.additional_project_shares.push(stored_second.clone());
         owner.phase = "running".into();
         owner.save(&candidate).unwrap();
         let before = fs::read(root(&candidate).join("owner.json")).unwrap();
@@ -3739,8 +3825,8 @@ mod tests {
         // The primary root disappears while the pool runs.
         fs::remove_dir_all(&primary.project).unwrap();
         let reused = create(&candidate, &primary).unwrap();
-        assert_eq!(reused.project_share.as_ref(), Some(&primary));
-        assert_eq!(reused.additional_project_shares, vec![second.clone()]);
+        assert_eq!(reused.project_share, stored_primary);
+        assert_eq!(reused.additional_project_shares, vec![stored_second]);
         assert_eq!(reused.phase, "running");
         assert_eq!(
             fs::read(root(&candidate).join("owner.json")).unwrap(),
@@ -3749,8 +3835,12 @@ mod tests {
         // The second root is still admitted against the reused owner; its own project is
         // not blocked by the stale neighbor.
         assert!(
-            super::super::project_share::check_request(&reused.project_shares(), Some(&second))
-                .is_ok()
+            super::super::project_share::check_request(
+                reused.socket_layout,
+                &reused.project_shares(),
+                Some(&second)
+            )
+            .is_ok()
         );
         // Booting with the whole set still checks every root live.
         assert_eq!(

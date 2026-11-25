@@ -1,0 +1,16 @@
+stateDiagram-v2
+    [*] --> Uninitialized
+    Uninitialized --> CreationLease: acquire operation lease
+    CreationLease --> Uninitialized: crash before owner write
+    CreationLease --> Legacy: old owner commit
+    CreationLease --> Compact: new owner commit
+    Compact --> Compact: older executor refuses
+    Legacy --> Journal: plan add [lease held]
+    Compact --> Journal: plan add [lease held]
+    Journal --> ProviderRow: commit provider mounts
+    ProviderRow --> OwnerRow: commit owner share
+    OwnerRow --> Legacy: clear legacy journal
+    OwnerRow --> Compact: clear compact journal
+    Journal --> Journal: crash and reacquire lease
+    ProviderRow --> ProviderRow: crash and reacquire lease
+    OwnerRow --> OwnerRow: crash and reacquire lease

@@ -1448,6 +1448,7 @@ impl Driver for Session<'_, '_> {
         if let Some(startup) = &self.receipt.relay_startup {
             if let Some(selected) = startup.services.get(service) {
                 startup::attach(
+                    self.engine.guest().socket_layout(),
                     self.configs.get_mut(service).expect("service"),
                     selected,
                     &startup::guest_directory(&self.receipt.run, &selected.generation),

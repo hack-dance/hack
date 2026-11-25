@@ -224,6 +224,7 @@ fn plan(
     database_identity: (u64, u64),
 ) -> Result<Journal, CandidateError> {
     let network = merged(&owner.network, &requested, &addresses)?;
+    super::boot_budget::check_owner(owner)?;
     let mut owner_after = owner_value(owner)?;
     owner_after["network"] = serde_json::to_value(&network).map_err(|_| refused())?;
     let NetworkIntent::ApprovedHosts { hosts, cidrs } = &network else {
@@ -247,6 +248,7 @@ fn internet_plan(
     record: Value,
     database_identity: (u64, u64),
 ) -> Result<Journal, CandidateError> {
+    super::boot_budget::check_owner(owner)?;
     let mut owner_after = owner_value(owner)?;
     owner_after["network"] = json!(NetworkIntent::Internet);
     let mut record_after = record.clone();
@@ -420,6 +422,8 @@ fn update_network(
     let _lock = state::Lock::acquire(&root(candidate))?;
     // Stopped-pool updates never interleave: one journal owns the provider record at a time.
     super::share_update::require_complete(candidate)?;
+    // Check the conservative network boot budget before restoring a released alias.
+    super::boot_budget::check_owner(&Owner::load_for_alias_restore(candidate)?)?;
     // The update stages owner writes, which need the alias a clean stop released.
     lifecycle::restore_released_short_home(candidate)?;
     let owner = Owner::load(candidate)?;

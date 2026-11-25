@@ -317,6 +317,7 @@ jobs:
           name: compiler-rust-results-${{ matrix.os }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/compiler-rust-results
           if-no-files-found: error
+          retention-days: 7
       - run: bun run build:config-compiler
       # Intentionally permanent: the owner test emits closed stage tokens only, never values.
       - name: Test private file sources and owner with the matching compiler
@@ -558,6 +559,7 @@ jobs:
           name: candidate-rust-results-${{ matrix.os }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/candidate-rust-results/
           if-no-files-found: ignore
+          retention-days: 7
       - name: Build and inspect local candidate
         id: release-build
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' }}
@@ -900,7 +902,7 @@ jobs:
           name: process-policy-capsules-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/process-policy-capsules
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
       - name: Smoke container resource metadata without optional fields
         if: matrix.shard == 4
         run: |
@@ -1049,7 +1051,7 @@ jobs:
           name: test-shard-durations-${{ matrix.shard }}
           path: ${{ runner.temp }}/test-shard-durations.json
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
       - name: Build CLI
         if: matrix.shard == 8 && needs.changes.outputs.build_smoke == 'true'
         run: bun run build

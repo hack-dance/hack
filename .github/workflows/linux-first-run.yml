@@ -80,3 +80,4 @@ jobs:
           name: linux-first-run-report
           path: ${{ runner.temp }}/first-run/report.md
           if-no-files-found: ignore
+          retention-days: 7

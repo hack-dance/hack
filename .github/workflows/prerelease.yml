@@ -132,7 +132,7 @@ jobs:
           name: v5-prerelease-linux-${{ matrix.platform }}-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/prerelease-linux/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
   build:
     needs: [plan, build-linux]
@@ -196,7 +196,7 @@ jobs:
           name: v5-prerelease-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/prerelease-assets/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
   publish:
     if: ${{ inputs.publish }}

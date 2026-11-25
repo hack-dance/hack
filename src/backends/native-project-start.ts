@@ -255,6 +255,7 @@ import {
 } from "./native-service-exit-monitor.ts";
 import {
   NATIVE_START_POOL_GRACE_MS,
+  nativeForegroundPoolEndMessage,
   watchNativeStartPool,
 } from "./native-start-pool-watch.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
@@ -2744,7 +2745,7 @@ type NativeProjectStartOptions = {
    */
   readonly verifiedBuildImages?: ReadonlyMap<string, NativeVerifiedBuild>;
   readonly runtime: NativeRuntimeSelection;
-  /** Test seams for the pool watch: whether it runs, and how the start ends. */
+  /** Test seams for the pool watch: whether it runs (default on), and how the start ends. */
   readonly watchPool?: boolean;
   readonly exitOnPoolEnd?: () => void;
   readonly scope: NativeProjectRunScope;
@@ -4778,18 +4779,29 @@ export async function startNativeProject(
   let stopPoolWatch: (() => void) | undefined;
   // Ready and not stopping: the start has nothing left to finish on its own.
   let serving = false;
-  // A detached start whose pool boot has ended releases its marker and exits,
+  // A start whose pool boot has ended releases its marker and exits non-zero,
   // as a crash would, so the next up or down --recover need not wait for it
   // (HACK-2550). A ready one exits at once, a start still in progress after the
-  // grace. A foreground start stays with the user's terminal.
+  // grace. A foreground start does the same (HACK-2096): its graph owner cannot
+  // stop services in a lost VM, so waiting with the terminal never ended. It
+  // first names the lost VM and the one recovery command; a detached owner has
+  // no terminal, and its launcher has already returned.
+  const detached = isNativeDetachedOwnerProcess();
+  const warn = opts.dependencies?.warn ?? DEFAULTS.warn;
   const watchAdmittedBoot =
-    (opts.watchPool ?? isNativeDetachedOwnerProcess())
+    (opts.watchPool ?? true)
       ? (bootId: string) => {
           stopPoolWatch = (opts.dependencies?.watchPool ?? DEFAULTS.watchPool)({
             home: opts.runtime.home,
             bootId,
             graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
-            onEnded: async () => {
+            onEnded: async (end) => {
+              if (settled) {
+                return;
+              }
+              if (!detached) {
+                warn(nativeForegroundPoolEndMessage(end));
+              }
               await finish?.();
               if (!settled) {
                 (opts.exitOnPoolEnd ?? (() => process.exit(1)))();

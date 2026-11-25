@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { watchNativeStartPool } from "../src/backends/native-start-pool-watch.ts";
+import {
+  type NativeStartPoolEnd,
+  nativeForegroundPoolEndMessage,
+  watchNativeStartPool,
+} from "../src/backends/native-start-pool-watch.ts";
 
 const owner = "a".repeat(32);
 const boot = "12345678-1234-1234-1234-123456789abc";
@@ -150,7 +154,7 @@ test("a successor boot retires the attempt without probing the successor's PID",
       pids.push(pid);
       return true;
     },
-    onEnded: retired.resolve,
+    onEnded: () => retired.resolve(),
   });
   try {
     expect(
@@ -198,5 +202,56 @@ test("a ready start ends at the first check that sees its boot ended; one still 
     expect(ended).toBe(expected);
     // The grace is chosen when the ended boot is seen, not when the watch starts.
     expect(readAt).toBeGreaterThan(1);
+  }
+});
+
+test("the end carries its evidence: the gone provider pid, or none for an ended boot", async () => {
+  // HACK-2096: a foreground start names the lost VM from this evidence.
+  for (const [records, gone, expected] of [
+    [
+      [record({ process: { pid: 4242 } })],
+      true,
+      { bootId: boot, providerPid: 4242 },
+    ],
+    [[record({}), record({ phase: "stopped" })], false, { bootId: boot }],
+  ] as const) {
+    const ends: NativeStartPoolEnd[] = [];
+    let index = 0;
+    const stop = watchNativeStartPool({
+      home: "/fixture",
+      bootId: boot,
+      checkMs: 5,
+      graceMs: 0,
+      read: () => {
+        const value = records[Math.min(index, records.length - 1)];
+        index += 1;
+        return Promise.resolve(value);
+      },
+      gone: () => gone,
+      onEnded: (end) => {
+        ends.push(end);
+      },
+    });
+    await Bun.sleep(60);
+    stop();
+    expect(ends).toEqual([expected]);
+  }
+});
+
+test("the foreground message names the lost VM and the one recovery command", () => {
+  const exited = nativeForegroundPoolEndMessage({
+    bootId: boot,
+    providerPid: 4242,
+  });
+  expect(exited).toContain("pid 4242");
+  expect(exited).toContain(boot);
+  expect(exited).toContain("exit code 1");
+  const stopped = nativeForegroundPoolEndMessage({ bootId: boot });
+  expect(stopped).toContain(boot);
+  expect(stopped).not.toContain("pid");
+  for (const message of [exited, stopped]) {
+    // One retire command, named once; no fresh-home detour.
+    expect(message.match(/hack down --recover/g)).toHaveLength(1);
+    expect(message).not.toContain("fresh");
   }
 });

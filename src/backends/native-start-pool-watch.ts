@@ -1,5 +1,5 @@
 /**
- * A detached native start notices that its pool is gone and ends (HACK-2550).
+ * A native start notices that its pool is gone and ends (HACK-2550, HACK-2096).
  *
  * Seen on a real VM: after `runtime down` (or a crash) stopped the pool under a
  * running project, the start's detached owner outlived it by two minutes and,
@@ -29,6 +29,9 @@
  * Ending is the same as a crash of the start process, which the run's records
  * already tolerate: the receipt, finalization and recovery evidence stay as
  * they are, and the next `hack up` or `hack down --recover` recovers the run.
+ * A foreground start ends the same way (HACK-2096): without the watch it waited
+ * on a graph owner whose VM was gone and never exited. `onEnded` receives the
+ * evidence, so a foreground start can name the lost VM before it exits.
  */
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -39,10 +42,42 @@ import {
 export const NATIVE_START_POOL_CHECK_MS = 1000;
 export const NATIVE_START_POOL_GRACE_MS = 10_000;
 
+/**
+ * What proved the watched boot ended: the provider pid the running record named
+ * is gone, or the record shows the boot stopped or replaced (no pid).
+ */
+export type NativeStartPoolEnd = {
+  readonly bootId: string;
+  readonly providerPid?: number;
+};
+
+/** How long a foreground start may outlive its lost VM: one check, the grace, margin. */
+export const NATIVE_FOREGROUND_POOL_END_BOUND_MS = 15_000;
+
+/**
+ * What a foreground start prints when its VM is lost (HACK-2096): which VM, that
+ * this start exits non-zero with data kept, and the one command that retires the
+ * run. `hack down --recover` first runs `runtime recover` for an exited provider
+ * (HACK-2579), so it needs nothing else; `hack up` afterwards starts it again.
+ */
+export function nativeForegroundPoolEndMessage(
+  end: NativeStartPoolEnd
+): string {
+  const lost =
+    end.providerPid === undefined
+      ? `The native runtime VM under this start stopped: guest boot ${end.bootId} ended (the pool was stopped or booted again).`
+      : `The native runtime VM under this start exited: its provider process (pid ${end.providerPid}) is gone, and guest boot ${end.bootId} with it.`;
+  return [
+    lost,
+    "This foreground start ends now with exit code 1; the run's data is kept.",
+    "Run hack down --recover to retire this run with its data kept, then hack up to start it again.",
+  ].join("\n");
+}
+
 export function watchNativeStartPool(opts: {
   readonly home: string;
   readonly bootId: string;
-  readonly onEnded: () => void | Promise<void>;
+  readonly onEnded: (end: NativeStartPoolEnd) => void | Promise<void>;
   readonly checkMs?: number;
   /** Read when the ended boot is seen; a ready start passes 0. */
   readonly graceMs?: number | (() => number);
@@ -72,17 +107,21 @@ export function watchNativeStartPool(opts: {
         provider = providerPid(record);
       }
     }
+    const providerGone = provider !== undefined && gone(provider);
     if (
-      (provider !== undefined && gone(provider)) ||
+      providerGone ||
       nativeHttpsPoolBootEnded(record, { bootId: opts.bootId, owner })
     ) {
+      const end: NativeStartPoolEnd = providerGone
+        ? { bootId: opts.bootId, providerPid: provider }
+        : { bootId: opts.bootId };
       const graceMs =
         typeof opts.graceMs === "function"
           ? opts.graceMs()
           : (opts.graceMs ?? NATIVE_START_POOL_GRACE_MS);
       grace = setTimeout(() => {
         if (!stopped) {
-          void Promise.resolve(opts.onEnded()).catch(() => undefined);
+          void Promise.resolve(opts.onEnded(end)).catch(() => undefined);
         }
       }, graceMs);
       grace.unref?.();

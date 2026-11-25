@@ -739,6 +739,37 @@ are outside the model. The TypeScript lifecycle regression exercises both
 routed and unrouted recovery and a second provider exit. The macOS-only Rust
 regression exercises the stale boot refusal with an owned development VM.
 
+## Foreground native start after a lost VM
+
+[`ForegroundPoolWatch.tla`](foreground-pool-watch/ForegroundPoolWatch.tla)
+checks whether a foreground start whose provider VM is lost (SIGKILL, a crash
+or a pool stop) exits within a bound (HACK-2096). Time is discrete ticks that
+pass only while the VM is lost under a running start; the pool check and the
+exit are urgent, so a tick cannot pass a due one. The grace is chosen when the
+loss is seen: 0 once ready, `Grace` while still starting.
+
+![Foreground pool watch state chart](../../../docs/diagrams/foreground-pool-watch.png)
+[SVG](../../../docs/diagrams/foreground-pool-watch.svg) ·
+[Source](../../../docs/diagrams/foreground-pool-watch.mmd)
+
+| Control | Result |
+| --- | --- |
+| `positive` | `BoundedExit`, `ExitReported` and `NoExitOnLiveVm` hold across 39 reachable states with `Check = 1`, `Grace = 2`. |
+| `negative` | The old code: only a detached owner watched its pool. The foreground start outlives its lost VM past `Check + Grace` and violates `BoundedExit`. |
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `Admit` | `startNativeProjectAttempt` binds the watch to the successful `runtime up` reply's boot, for a foreground start as for a detached one. |
+| `Observe` | `watchNativeStartPool` polls the pool record every second and sees the gone provider pid or the ended boot; the grace comes from `serving`. |
+| `ExitOnLoss` | The `onEnded` callback in `startNativeProject` prints `nativeForegroundPoolEndMessage` (lost VM, exit 1, `hack down --recover`), finishes the startup observation and exits 1. |
+| `SettleFailed`, `UserStop` | The start settles on its own; its finalizer cancels the watch, so it never exits a second time. |
+
+The bound in code is about 1 s once ready and about 11 s while starting
+(`NATIVE_FOREGROUND_POOL_END_BOUND_MS` allows 15 s). The model does not cover
+the Rust graph owner's parent-exit cleanup (see the detached model) or the
+later `hack down --recover`, which runs `runtime recover` first for an exited
+provider (HACK-2579).
+
 ## Native pool stop under a live run
 
 `native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down`)

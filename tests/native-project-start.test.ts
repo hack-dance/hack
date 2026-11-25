@@ -74,7 +74,10 @@ import {
 } from "../src/backends/native-runtime-client.ts";
 import { NATIVE_EXITED_RUNTIME_NOTICE } from "../src/backends/native-runtime-preflight.ts";
 import { selectNativeServices } from "../src/backends/native-service-selection.ts";
-import { watchNativeStartPool } from "../src/backends/native-start-pool-watch.ts";
+import {
+  NATIVE_FOREGROUND_POOL_END_BOUND_MS,
+  watchNativeStartPool,
+} from "../src/backends/native-start-pool-watch.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -7710,6 +7713,112 @@ test.each([
     stopped.resolve();
     await attempt;
   }
+});
+
+/**
+ * HACK-2096: a foreground start whose provider VM is killed under it. Before,
+ * only a detached owner watched its pool, so the foreground waited on a graph
+ * owner in a lost VM and never exited. Now it names the lost VM and the one
+ * recovery command, then exits non-zero: at once when ready, after the grace
+ * while it is still starting.
+ */
+test.each([
+  { readyFirst: true },
+  { readyFirst: false },
+])("a foreground start exits non-zero when its provider VM dies (ready: $readyFirst)", async ({
+  readyFirst,
+}) => {
+  const { opts } = await fixture(false);
+  const boot = "87654321-4321-4321-4321-cba987654321";
+  const pid = 2345;
+  const graceMs = 40;
+  let providerGone = false;
+  let watched: string | undefined;
+  const warnings: string[] = [];
+  const exits: number[] = [];
+  const reached = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
+  const exited = Promise.withResolvers<void>();
+  opts.dependencies.warn = (line) => void warnings.push(line);
+  opts.dependencies.watchPool = (options) => {
+    watched = options.bootId;
+    return watchNativeStartPool({
+      ...options,
+      checkMs: 5,
+      // Keep the production choice (0 once ready), with a short in-progress grace.
+      graceMs: () =>
+        typeof options.graceMs === "function" && options.graceMs() === 0
+          ? 0
+          : graceMs,
+      read: async () => ({
+        phase: "running",
+        token: "c".repeat(32),
+        guest_boot_id: boot,
+        process: { pid },
+      }),
+      gone: (candidate) => candidate === pid && providerGone,
+    });
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[0] === "runtime" && request.args[1] === "up"
+      ? { phase: "running", process_alive: true, guest_boot_id: boot }
+      : await invoke(request);
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    if (!readyFirst) {
+      // The VM is lost while the owner is still starting its services.
+      reached.resolve();
+      await released.promise;
+      return 1;
+    }
+    return await serve({
+      ...request,
+      onReady: async () => {
+        await request.onReady();
+        reached.resolve();
+        await released.promise;
+      },
+    });
+  };
+  const started = performance.now();
+  // No watchPool option: a foreground start watches by default.
+  const attempt = startNativeProject({
+    ...opts,
+    exitOnPoolEnd: () => {
+      exits.push(performance.now() - started);
+      exited.resolve();
+    },
+  });
+  try {
+    await Promise.race([reached.promise, attempt]);
+    expect(watched).toBe(boot);
+    await Bun.sleep(30);
+    expect(exits).toEqual([]);
+    expect(warnings.join("\n")).not.toContain("native runtime VM");
+    const killedAt = performance.now();
+    providerGone = true;
+    await Promise.race([
+      exited.promise,
+      Bun.sleep(NATIVE_FOREGROUND_POOL_END_BOUND_MS),
+    ]);
+    expect(exits).toHaveLength(1);
+    const elapsed = performance.now() - killedAt;
+    expect(elapsed).toBeLessThan(NATIVE_FOREGROUND_POOL_END_BOUND_MS);
+    if (!readyFirst) {
+      // Still starting: the start keeps its grace to finish or unwind first.
+      expect(elapsed).toBeGreaterThanOrEqual(graceMs - 5);
+    }
+    const message = warnings.find((line) => line.includes("native runtime VM"));
+    expect(message).toContain(`pid ${pid}`);
+    expect(message).toContain(boot);
+    expect(message).toContain("hack down --recover");
+  } finally {
+    released.resolve();
+    await attempt.catch(() => undefined);
+  }
+  // The start settling afterwards never exits a second time.
+  expect(exits).toHaveLength(1);
 });
 
 test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {

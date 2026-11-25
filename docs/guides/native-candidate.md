@@ -2639,6 +2639,15 @@ notices that its provider's process is gone and ends as for an ended boot, and
 with the recorded provider proven gone by its identity), say so in one line, and
 continue as after any pool stop (HACK-2579).
 
+A foreground `hack up` (or `hack restart`) watches its pool the same way
+(HACK-2096). When its provider VM dies or the pool stops under it, it prints which
+VM was lost (the provider's pid, or the boot that ended), that it ends with exit
+code 1 and the run's data kept, and the one command to run next: `hack down
+--recover`, which retires the run with its data kept (running `runtime recover`
+first when the provider exited). `hack up` then starts it again. The start exits
+within about a second once it is ready, or about 11 seconds later while it is
+still starting; earlier versions waited on the lost VM and never exited.
+
 Each such recovery moves the run's earlier completed recovery record aside as history
 (`dead-owner-cleanup-retired-<digest>.json`; failed-start recoveries keep
 `interrupted-start-cleanup-retired-<selection>.json` the same way). A run keeps the

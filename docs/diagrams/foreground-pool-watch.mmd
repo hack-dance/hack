@@ -1,0 +1,39 @@
+---
+title: ForegroundPoolWatch · lost VM
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Selecting
+  Selecting --> Starting : Admit [runtime up]
+  Starting --> Serving : Ready
+  Starting --> Lost : LoseVm
+  Serving --> Lost : LoseVm
+  Lost --> Armed : Observe [pid gone]
+  Armed --> Exited : ExitOnLoss [grace over]
+  Starting --> Settled : SettleFailed
+  Serving --> Settled : UserStop
+  Armed --> Settled : SettleFailed
+  Exited --> [*]
+  Settled --> [*]
+
+  note right of Armed
+    Grace 0 once ready,
+    10 s while starting.
+  end note
+  note right of Exited
+    INV BoundedExit
+    Names the lost VM and
+    hack down --recover.
+    Exit code 1.
+  end note
+
+  classDef live stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef ok stroke-width:1.6px
+  classDef fail stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class Selecting idle
+  class Starting,Armed wait
+  class Serving live
+  class Lost,Exited fail
+  class Settled ok

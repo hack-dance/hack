@@ -12,7 +12,10 @@ test("an owner fallback from the offered full review is surfaced", () => {
   expect(notices).toHaveLength(2);
   expect(notices[0]).toStartWith("Service web is running with its previous");
   expect(notices[1]).toMatch(FALLBACK);
-  expect(notices[1]).toContain("dependency cache scope");
+  expect(notices[1]).toContain(
+    "refuses for live source, a carried source cache scope or a pending initializer cache release"
+  );
+  expect(notices[1]).not.toContain("during the add");
 });
 
 test("no notice when the owner used the CLI review or an earlier runtime replied", () => {

@@ -123,6 +123,20 @@ impl CombinedReview {
     }
 }
 
+/// The review a committed append reports. `offered` is whether the CLI sent a
+/// full-file review; `kept` is whether it survived the authored-digest filter
+/// (a running service's changed definition, or no recorded owner input, drops
+/// it before it is tried, which is the same fallback as a review the owner
+/// rejects); `tried` is what [`review_combined`] returned.
+#[cfg(any(target_os = "macos", test))]
+fn committed_review(offered: bool, kept: bool, tried: CombinedReview) -> CombinedReview {
+    match (offered, kept) {
+        (false, _) => CombinedReview::Cli,
+        (true, false) => CombinedReview::OwnerFallback,
+        (true, true) => tried,
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn review_combined(
     candidate: &Candidate,
@@ -387,17 +401,7 @@ pub(super) fn run(
         full_identity.as_ref().and_then(|full| full.review()),
         &combined_services,
     )?;
-    // Missing or changed authored digests drop the full review before it is
-    // tried; that is the same fallback as a review the owner rejects.
-    let combined_review = if offered {
-        if review == CombinedReview::Cli && full_identity.is_none() {
-            CombinedReview::OwnerFallback
-        } else {
-            review
-        }
-    } else {
-        CombinedReview::Cli
-    };
+    let combined_review = committed_review(offered, full_identity.is_some(), review);
     let combined_covers_owned = reviews_services(&reviewed.plan, &combined_services);
     let combined_identity = NormalizedInputIdentity {
         namespace: receipt.namespace.clone(),
@@ -629,7 +633,10 @@ pub(super) fn run(
 /// The containers one rollback stop batch covers: every container this append
 /// added, and every previously stopped service it selected to resume. A resumed
 /// service can have accepted the start before its reply was lost; it is stopped
-/// here without deleting its pre-existing resources.
+/// here without deleting its pre-existing resources. Today every added
+/// container belongs to a selected service (so it is also in `extending`); the
+/// "not in `before`" arm keeps any added container covered even if that stops
+/// holding, matching the removal loop, which deletes every added resource.
 #[cfg(any(target_os = "macos", test))]
 fn rollback_stops(current: &Receipt, before: &Receipt) -> Receipt {
     let mut stops = current.clone();
@@ -848,12 +855,15 @@ mod tests {
             json!([]),
         );
         // `worker` was stopped and is resumed; `redis` and its volume are new.
+        // `helper` is an added container outside `extending`: only the
+        // "not in `before`" arm covers it.
         let current = receipt(
             json!({
                 "container:web": resource("container", "web"),
                 "container:worker": resource("container", "worker"),
                 "container:idle": resource("container", "idle"),
                 "container:redis": resource("container", "redis"),
+                "container:helper": resource("container", "helper"),
                 "network:default": resource("network", "default"),
                 "volume:redis-data": resource("volume", "redis-data"),
             }),
@@ -866,8 +876,25 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["container:redis", "container:worker"]
+            ["container:helper", "container:redis", "container:worker"]
         );
+    }
+
+    #[test]
+    fn committed_review_reports_fallback_only_for_an_offered_review() {
+        use CombinedReview::{Cli, OwnerFallback};
+        // No full review offered: nothing to fall back from.
+        for kept in [false, true] {
+            for tried in [Cli, OwnerFallback] {
+                assert_eq!(committed_review(false, kept, tried), Cli);
+            }
+        }
+        // Offered but dropped by the authored-digest filter: `review_combined`
+        // saw no review and returned `Cli`, yet the owner used its own review.
+        assert_eq!(committed_review(true, false, Cli), OwnerFallback);
+        // Offered and kept: whatever `review_combined` decided.
+        assert_eq!(committed_review(true, true, Cli), Cli);
+        assert_eq!(committed_review(true, true, OwnerFallback), OwnerFallback);
     }
 
     #[test]

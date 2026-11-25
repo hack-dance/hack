@@ -1268,12 +1268,14 @@ function removalRequiresStop(): Error {
 }
 
 /**
- * The append committed between the confirmation and the guarded stop, so the
- * project is running with the added services. Nothing was stopped or removed.
+ * The owner had no active append when the guarded stop arrived. That covers a
+ * commit during the confirmation, an append that failed and rolled back, an
+ * append whose own CLI was canceled, and a refused rollback, so the wording
+ * names none of them. Nothing was stopped or removed.
  */
-function removalAppendFinished(): Error {
+function removalAppendNotActive(): Error {
   return new ClosedCliError(
-    "The service add finished before the stop reached it, so the project is running with the added services. Nothing was removed. Run `hack down`, then `hack down --remove-data`."
+    "The service add is no longer in progress (it finished or was rolled back), so the project is still running. Nothing was removed. Run `hack down`, then `hack down --remove-data`."
   );
 }
 
@@ -1356,12 +1358,13 @@ async function stopAppendingNativeGraph(opts: {
       signal,
     });
   } catch (error) {
-    // The owner refuses if the append committed during confirmation.
+    // The owner refuses when no append is active any more: it committed,
+    // rolled back or failed while the confirmation was open.
     if (
       error instanceof NativeRuntimeRequestError &&
       error.nativeCauseCode === "graph_append_not_active"
     ) {
-      throw removalAppendFinished();
+      throw removalAppendNotActive();
     }
     throw removalRefused(error);
   }

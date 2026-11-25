@@ -25,3 +25,10 @@ or cleanup is requested. The model abstracts Docker retries, private
 environment and volume cleanup, probe sampling, signal delivery, filesystem
 durability and live VM routing. The [Pele state chart](../../../../docs/reference/state-charts/targeted-start.svg)
 shows the same transitions.
+
+The CLI regression simulates a held provider lease and checks that requests
+reach the owner for a second start or a stop. The owner transport fixture checks that EOF on an
+open extension request signals cancellation. The macOS recovery fixtures
+exercise a pending receipt before and after enrollment, then restore the
+original selection and its named data. These checks cover the socket lifecycle,
+the interrupted first write and the retained restore layout outside the model.

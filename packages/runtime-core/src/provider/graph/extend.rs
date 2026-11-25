@@ -372,15 +372,9 @@ pub(super) fn run(
     let (wrapped, file_owners) = private_services(&environments);
     // Image inspection only applies to new containers, even though the graph
     // used to compile their dependency edges includes existing ones.
-    let new_containers = receipt
-        .resources
-        .iter()
-        .filter(|(_, r)| r.kind == Kind::Container && prepared.configs.contains_key(&r.key))
-        .map(|(key, r)| (key.clone(), r.clone()))
-        .collect();
     let expected_environment = verify_images(
         &engine,
-        &new_containers,
+        &receipt.resources,
         &mut prepared.configs,
         &wrapped,
         &file_owners,
@@ -650,7 +644,7 @@ mod tests {
         let web_name = web.name.clone();
         let net_name = receipt.resources["network:default"].name.clone();
         let next = compile(
-            json!({"services":{"redis":{"image":image,"depends_on":["web"]},"web":{"image":image}},"networks":{"default":{"internal":true}}}),
+            json!({"services":{"redis":{"image":image,"depends_on":["web"],"volumes":["redis-data:/data"]},"web":{"image":image}},"networks":{"default":{"internal":true}},"volumes":{"redis-data":{}}}),
         );
         assert_ne!(next.review.plan_id, old_plan);
         let goals = BTreeMap::from([
@@ -680,6 +674,12 @@ mod tests {
             prepared.configs["redis"]["HostConfig"]["NetworkMode"],
             net_name
         );
+        image_volumes::admit(
+            &json!({"/data":{}}),
+            &prepared.configs["redis"],
+            &prepared.resources,
+        )
+        .unwrap();
         let mut lost = redis.clone();
         lost.phase = "create-intent".into();
         receipt.resources.insert("container:redis".into(), lost);

@@ -123,8 +123,9 @@ A later plain `hack up` starts the other active services. An already-owned
 stopped service starts again. Running services keep the settings they started
 with. Hack reports a warning if a selected running service's Compose declaration
 changed. On native, use `hack restart` to apply those changes. If the owner is
-still warming or starting another selection, the command can return
-`E_NATIVE_STILL_STARTING`. Use `hack ps` to check its progress and retry.
+still warming or starting another selection, a second targeted start returns
+`E_NATIVE_STILL_STARTING` through the owner. Use `hack ps` to check its progress
+and retry.
 
 Adding routes or loopback ports requires enough free bridge sockets in the
 running pool. Hack checks capacity before recording or creating the selected
@@ -137,10 +138,10 @@ rollback, `hack ps` reports a degraded run and shows the service states it can
 verify. Restart supervision continues for services outside the failed start. Ctrl-C
 cancels the targeted start. `hack down` cancels the start and stops the whole
 run, including any service created midway. If the owner exited, use
-`hack down --recover`. The committed receipt records the resource names
-needed for cleanup, including when a create reply was lost. After ordinary
-`down`, `ps` shows `stopped-data-retained`. A later `up` reattaches the named
-data that the reviewed configuration still uses.
+`hack down --recover`. Recovery uses the last committed receipt for cleanup
+and keeps interrupted writes as evidence. After a retaining `down`, `ps` shows
+`stopped-data-retained`. A later `up` selects services from the current Compose
+review and reattaches the named data that those services still use.
 
 After this version, older prereleases cannot read run receipts. Run `hack down`
 before downgrading.

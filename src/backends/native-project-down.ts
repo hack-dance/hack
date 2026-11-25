@@ -92,9 +92,8 @@ function verify(
         recovering &&
         !stopped &&
         value.journal_incomplete === true &&
-        value.receipt.phase === "ready-observed" &&
-        Array.isArray(value.receipt.extending) &&
-        value.receipt.extending.length > 0
+        (value.receipt.phase === "ready-observed" ||
+          value.receipt.phase === "reconciled-cleanup-only")
       ))
   ) {
     throw refused();
@@ -843,10 +842,8 @@ async function nativeProjectDownOnce(opts: {
       invoke,
       busyWaitMs,
     });
-  // A start that returned at started holds the provider lease until its ready
-  // line. Seen lease-free as `started-observed`, the run is checked from that
-  // snapshot and stopped through its owner (`graph cleanup` reaches the owner's
-  // socket without the lease); any other busy lease is waited out as before.
+  // A warming start or append holds the lease while its owner can answer a
+  // stop. A lease-free snapshot pins the same run before we ask that owner.
   const inspect = async () => {
     try {
       return await leased(0);
@@ -866,6 +863,35 @@ async function nativeProjectDownOnce(opts: {
         observed.receipt.phase === "started-observed"
       ) {
         return observed;
+      }
+      if (
+        isRecord(observed) &&
+        isRecord(observed.receipt) &&
+        observed.receipt.phase === "ready-observed" &&
+        observed.receipt.run === run.run &&
+        observed.receipt.plan_id === run.planId
+      ) {
+        const extending = observed.receipt.extending;
+        if (Array.isArray(extending) && extending.length > 0) {
+          return observed;
+        }
+        // Before its first receipt commit, an extension only shows up on
+        // the startup socket. Ordinary ready owners have no such marker.
+        const owner = await invoke({
+          runtime: opts.runtime,
+          cwd: opts.scope.projectRoot,
+          args: ["graph", "owner-status", "--run-id", run.run, "--json"],
+          timeoutMs: 2000,
+        }).catch(() => undefined);
+        if (
+          isRecord(owner) &&
+          owner.ok === true &&
+          owner.run === run.run &&
+          owner.plan === run.planId &&
+          owner.runtime_error === "graph_starting"
+        ) {
+          return observed;
+        }
       }
       return await leased();
     }
@@ -1069,7 +1095,7 @@ async function nativeProjectDownOnce(opts: {
     );
   }
   // Recheck after hooks, which may run arbitrary user-authorized commands.
-  verify(await inspect(), run, false);
+  verify(await inspect(), run, false, opts.recover === true);
   if (finalization !== undefined) {
     const current = await captureFinalization({ scope: opts.scope, run });
     if (nativeFinalizationLeaseAdded(finalization, current)) {

@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     net::Shutdown,
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, RawFd},
         unix::{
             fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
@@ -44,6 +44,10 @@ pub(super) struct DependencyRefreshRequest {
     pub boot: String,
 }
 impl WireRequest {
+    fn keeps_write_open(&self) -> bool {
+        self.version == 2 && self.extend.is_some()
+    }
+
     pub fn exclusive(&self) -> bool {
         [
             self.remove_data.is_some(),
@@ -1158,6 +1162,39 @@ pub(in crate::provider::graph) fn read<T: DeserializeOwned>(
     limit: usize,
 ) -> Result<T, CandidateError> {
     let deadline = Instant::now() + budget;
+    let value = read_frame(stream, deadline, limit)?;
+    if receive(stream, &mut [0], deadline)? != 0 {
+        return Err(refused());
+    }
+    Ok(value)
+}
+
+/// An extension keeps its request stream open after the frame so a peer close
+/// unambiguously cancels that attempt. Other requests still end in EOF.
+pub(super) fn read_request(
+    stream: &UnixStream,
+    budget: Duration,
+) -> Result<WireRequest, CandidateError> {
+    let deadline = Instant::now() + budget;
+    let request: WireRequest = read_frame(stream, deadline, REQUEST_LIMIT)?;
+    if !request.exclusive() {
+        return Err(refused());
+    }
+    if request.keeps_write_open() {
+        return Ok(request);
+    }
+    if request.version != 1 || request.extend.is_some() || receive(stream, &mut [0], deadline)? != 0
+    {
+        return Err(refused());
+    }
+    Ok(request)
+}
+
+fn read_frame<T: DeserializeOwned>(
+    stream: &UnixStream,
+    deadline: Instant,
+    limit: usize,
+) -> Result<T, CandidateError> {
     let mut prefix = [0; 4];
     read_exact(stream, &mut prefix, deadline)?;
     let length = u32::from_be_bytes(prefix) as usize;
@@ -1166,9 +1203,6 @@ pub(in crate::provider::graph) fn read<T: DeserializeOwned>(
     }
     let mut bytes = Zeroizing::new(vec![0; length]);
     read_exact(stream, &mut bytes, deadline)?;
-    if receive(stream, &mut [0], deadline)? != 0 {
-        return Err(refused());
-    }
     serde_json::from_slice(&bytes).map_err(|_| refused())
 }
 fn read_exact(
@@ -1190,17 +1224,30 @@ pub(in crate::provider::graph) fn write<T: Serialize>(
     value: &T,
     budget: Duration,
 ) -> Result<(), CandidateError> {
-    write_bounded(stream, value, budget, REQUEST_LIMIT)
+    write_bounded(stream, value, budget, REQUEST_LIMIT)?;
+    stream.shutdown(Shutdown::Write).map_err(|_| refused())
+}
+
+pub(super) fn write_extension(
+    stream: &UnixStream,
+    request: &WireRequest,
+    budget: Duration,
+) -> Result<(), CandidateError> {
+    if !request.keeps_write_open() || !request.exclusive() {
+        return Err(refused());
+    }
+    write_bounded(stream, request, budget, REQUEST_LIMIT)
 }
 pub(super) fn write_job<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,
     budget: Duration,
 ) -> Result<(), CandidateError> {
-    write_bounded(stream, value, budget, 4 * 1024 * 1024)
+    write_bounded(stream, value, budget, 4 * 1024 * 1024)?;
+    stream.shutdown(Shutdown::Write).map_err(|_| refused())
 }
 fn write_bounded<T: Serialize>(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     value: &T,
     budget: Duration,
     limit: usize,
@@ -1247,7 +1294,7 @@ fn write_bounded<T: Serialize>(
         remaining(deadline)?;
         offset += n as usize;
     }
-    stream.shutdown(Shutdown::Write).map_err(|_| refused())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1532,59 +1579,32 @@ pub(in crate::provider::graph) fn resume_recovered_publisher(
     )
 }
 
-/// The framed client shuts down only its write side. A read-side EOF therefore
-/// cannot prove abandonment; EVFILT_WRITE reports EV_EOF when its read side closes.
+/// An open extension stream carries exactly one request. EOF or unexpected
+/// additional bytes cancel the effect without touching the rest of the run.
 pub(in crate::provider::graph) struct ClientWatch {
-    queue: OwnedFd,
+    stream: UnixStream,
 }
 impl ClientWatch {
     pub fn new(stream: &UnixStream) -> Result<Self, CandidateError> {
-        // SAFETY: kqueue creates a new owned descriptor or reports failure.
-        let fd = unsafe { libc::kqueue() };
-        if fd < 0 {
-            return Err(refused());
-        }
-        // SAFETY: the successful kqueue call transfers this descriptor to OwnedFd.
-        let queue = unsafe { OwnedFd::from_raw_fd(fd) };
-        // SAFETY: fd remains owned by queue for this fcntl operation.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            return Err(refused());
-        }
-        let change = libc::kevent {
-            ident: stream.as_raw_fd() as usize,
-            filter: libc::EVFILT_WRITE,
-            flags: libc::EV_ADD | libc::EV_ENABLE,
-            fflags: 0,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        // SAFETY: changelist is initialized; the kernel copies it before return.
-        if unsafe { libc::kevent(fd, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
-            return Err(refused());
-        }
-        Ok(Self { queue })
+        Ok(Self {
+            stream: stream.try_clone().map_err(|_| refused())?,
+        })
     }
     pub fn disconnected(&self) -> bool {
-        // SAFETY: kevent writes at most one initialized event to this local storage.
-        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-        let timeout = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: queue is owned; event and timeout remain live for this call.
+        let mut byte = 0u8;
+        // SAFETY: the descriptor is owned and byte is writable for one byte.
         let count = unsafe {
-            libc::kevent(
-                self.queue.as_raw_fd(),
-                std::ptr::null(),
-                0,
-                &mut event,
+            libc::recv(
+                self.stream.as_raw_fd(),
+                (&mut byte as *mut u8).cast(),
                 1,
-                &timeout,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
             )
         };
-        count < 0
-            || (count == 1
-                && (event.filter != libc::EVFILT_WRITE
-                    || event.flags & (libc::EV_EOF | libc::EV_ERROR) != 0))
+        count >= 0
+            || !matches!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            )
     }
 }

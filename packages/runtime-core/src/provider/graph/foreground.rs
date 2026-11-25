@@ -60,14 +60,10 @@ impl startup::StartupRequests for StartupServer {
             if transport::peer(&stream).is_err() || stream.set_nonblocking(false).is_err() {
                 continue;
             }
-            let Ok(request) = transport::read::<WireRequest>(
-                &mut stream,
-                Duration::from_secs(1),
-                transport::REQUEST_LIMIT,
-            ) else {
+            let Ok(request) = transport::read_request(&stream, Duration::from_secs(1)) else {
                 continue;
             };
-            if request.version != 1 || request.run != self.run || !request.exclusive() {
+            if request.run != self.run {
                 continue;
             }
             let plain = request.restore.is_none()
@@ -564,20 +560,16 @@ fn serve_input<'a>(
             let (mut stream, request) = if let Some(pending) = queued.take() {
                 pending
             } else {
-                let Some(mut stream) = publication.accept()? else {
+                let Some(stream) = publication.accept()? else {
                     continue;
                 };
-                let request: WireRequest = match transport::read(
-                    &mut stream,
-                    Duration::from_secs(5),
-                    transport::REQUEST_LIMIT,
-                ) {
+                let request = match transport::read_request(&stream, Duration::from_secs(5)) {
                     Ok(value) => value,
                     Err(_) => continue,
                 };
                 (stream, request)
             };
-            if request.version != 1 || request.run != receipt.run || !request.exclusive() {
+            if request.run != receipt.run {
                 continue;
             }
             publication.verify()?;

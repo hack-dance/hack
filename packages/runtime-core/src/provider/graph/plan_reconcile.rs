@@ -82,6 +82,21 @@ fn eligible(receipt: &Receipt) -> bool {
 /// writes. Such graphs always take this path, which keeps the cache only when its
 /// freshly resolved instance-scoped identity equals the recorded binding exactly.
 fn ordinary_layout(receipt: &Receipt, plan: &project::PlanData) -> bool {
+    // A stopped receipt may include compute that had been enrolled for an
+    // interrupted append. Its input identity still describes the prior graph.
+    if !plan
+        .services
+        .iter()
+        .filter(|(_, service)| service.active)
+        .map(|(name, _)| name)
+        .eq(receipt
+            .resources
+            .values()
+            .filter(|resource| resource.kind == Kind::Container)
+            .map(|resource| &resource.key))
+    {
+        return false;
+    }
     let scoped = dependency_cache::instance_scoped_volumes(plan);
     if receipt.resources.values().any(|resource| {
         resource.kind == Kind::Volume && resource.cache.is_some() && scoped.contains(&resource.key)
@@ -672,6 +687,42 @@ mod tests {
             false
         ));
         (receipt, prepared)
+    }
+
+    #[test]
+    fn stopped_compute_from_an_interrupted_append_does_not_select_exact_replay() {
+        let project = Project::new();
+        let (report, identity, prepared) = project.prepared(compose(
+            json!({"db": service("serve", 'a', &["data"])}),
+            &["data"],
+        ));
+        let mut receipt = stopped(&prepared, &identity);
+        let mut extra = receipt.resources["container:db"].clone();
+        extra.key = "slow".into();
+        extra.name = format!("hkg-{RUN}-container-1");
+        extra.id = None;
+        receipt.resources.insert("container:slow".into(), extra);
+        receipt.readiness.insert("slow".into(), Condition::Healthy);
+        assert!(applies(
+            &receipt,
+            &report.plan_id,
+            &report.plan,
+            &identity,
+            false
+        ));
+        let (_, _, mut same_review) = project.prepared(compose(
+            json!({"db": service("serve", 'a', &["data"])}),
+            &["data"],
+        ));
+        let projection = prepare(&report.plan, &receipt, &identity)
+            .unwrap()
+            .project(&mut same_review, &receipt)
+            .unwrap();
+        assert!(!projection.resources.contains_key("container:slow"));
+        assert_eq!(
+            projection.resources["volume:data"].name,
+            receipt.resources["volume:data"].name
+        );
     }
 
     #[test]

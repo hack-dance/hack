@@ -3,6 +3,30 @@ use crate::owned_tmp_root::OwnedTmpRoot;
 use serde_json::json;
 
 #[test]
+fn extension_frame_leaves_the_socket_live_until_the_client_disconnects() {
+    let (client, server) = UnixStream::pair().unwrap();
+    let request: WireRequest = serde_json::from_value(json!({
+        "version":2, "run":"a".repeat(32),
+        "extend":{"generation":"b".repeat(64),"project":"project","file":"compose.yaml",
+            "profiles":[],"namespace":"c".repeat(64),"original_hash":"d".repeat(64),
+            "plan":"e".repeat(64),"compose":"{}","shared_source":false,"readiness":{},
+            "routes":[],"timeout_seconds":30}
+    }))
+    .unwrap();
+    write_extension(&client, &request, Duration::from_secs(1)).unwrap();
+    assert!(
+        read_request(&server, Duration::from_secs(1))
+            .unwrap()
+            .extend
+            .is_some()
+    );
+    let watch = ClientWatch::new(&server).unwrap();
+    assert!(!watch.disconnected());
+    drop(client);
+    assert!(watch.disconnected());
+}
+
+#[test]
 fn publication_refuses_a_replaced_operation_lock_and_preserves_it() {
     let fixture = super::super::super::tests::Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();

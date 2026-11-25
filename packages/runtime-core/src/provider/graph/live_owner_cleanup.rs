@@ -361,14 +361,20 @@ pub fn recover_live_owner(
     let (mut receipt, root) = load(candidate, &engine, run)?;
     let mut dead = None;
     let reconciled;
-    let expected = if !receipt.extending.is_empty() && exists(&root.join("state.pending"))? {
+    let expected = if matches!(
+        receipt.phase.as_str(),
+        "ready-observed" | "reconciled-cleanup-only"
+    ) && exists(&root.join("state.pending"))?
+    {
         if digest(&receipt)? != expected {
             return Err(refused());
         }
         let foreground = foreground::DeadOwner::acquire(candidate, run)?;
         foreground.verify_retirement_ready()?;
-        // Pending bytes are retained as evidence only. Every dispatched append
-        // effect is already enrolled in the committed receipt.
+        settled_startup(&receipt)?;
+        // A crash can leave the *first* admission write pending. In that case
+        // the committed receipt has no extending marker and the new names
+        // were never authorized. In all cases pending bytes are evidence only.
         receipt = reconcile_receipt(&engine, receipt, &root)?;
         reconciled = digest(&receipt)?;
         dead = Some(foreground);
@@ -570,7 +576,7 @@ fn finish_retirement(
     for resource in receipt.resources.values() {
         let observed = inspect_resource(engine, receipt, resource)?;
         if resource.kind == Kind::Volume {
-            if observed.is_none() {
+            if observed.is_some() != plan_reconcile::retained_volume(resource) {
                 return Err(refused());
             }
         } else {

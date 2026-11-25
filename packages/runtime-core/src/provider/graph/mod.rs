@@ -2671,6 +2671,21 @@ fn cleanup_owned_fenced(
     shutdown::stop_owned(engine, &mut receipt, root, &fence)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
         if kind == Kind::Volume && !remove_data {
+            // A lost append create reply leaves a volume at create-intent.
+            // Settle the retained layout from exact ownership, not the pending
+            // receipt: confirmed data stays retained and an absent allocation
+            // remains eligible for a later create.
+            for key in receipt.resources.keys().cloned().collect::<Vec<_>>() {
+                let resource = &receipt.resources[&key];
+                if resource.kind == Kind::Volume
+                    && matches!(resource.phase.as_str(), "create-intent" | "uncertain")
+                {
+                    fence()?;
+                    let present = inspect_resource(engine, &receipt, resource)?.is_some();
+                    receipt.resources.get_mut(&key).expect("resource").phase =
+                        if present { "created" } else { "reserved" }.into();
+                }
+            }
             continue;
         }
         let keys: Vec<_> = receipt
@@ -3294,7 +3309,13 @@ fn verify_images(
 ) -> Result<BTreeMap<String, image_environment::Expected>, CandidateError> {
     let mut expected = BTreeMap::new();
     let mut refusals = process_refusals::Collector::default();
-    for resource in resources.values().filter(|r| r.kind == Kind::Container) {
+    // The selected configs determine which images to inspect. Volume
+    // admission still needs the full set of owned and newly enrolled storage.
+    for service in configs.keys().cloned().collect::<Vec<_>>() {
+        let resource = resources
+            .get(&format!("container:{service}"))
+            .filter(|resource| resource.kind == Kind::Container)
+            .ok_or_else(|| error("graph_image", "Selected service has no container resource."))?;
         let image = engine.request(
             Method::GET,
             &format!(

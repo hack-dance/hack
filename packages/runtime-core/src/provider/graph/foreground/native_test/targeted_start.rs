@@ -455,8 +455,93 @@ fn routed_append_rolls_back_route_and_port_and_releases_hostname_for_retry() {
 }
 
 #[test]
+#[ignore = "Isolated macOS development VM with a pinned Redis image declaring VOLUME /data"]
+fn appended_redis_image_uses_its_owned_named_volume() {
+    let fixture = Fixture {
+        candidate: Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))
+            .unwrap(),
+        binary: PathBuf::from(std::env::var("HACK_LOCAL_TEST_BINARY").unwrap()),
+        project: graph::tests::Fixture::new(),
+        inputs: graph::tests::Fixture::new(),
+        run: graph::probes::token().unwrap(),
+        deadline: Instant::now() + Duration::from_secs(120),
+    };
+    let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
+    let redis = std::env::var("HACK_TARGETED_TEST_VOLUME_IMAGE").unwrap();
+    {
+        let engine = graph::Engine::connect_cleanup(&fixture.candidate).unwrap();
+        let inspected = engine
+            .request(
+                graph::Method::GET,
+                &format!("/v1.53/images/{redis}/json"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(inspected["Config"]["Volumes"]["/data"], json!({}));
+    }
+    let web = json!({"image":image,"network_mode":"none","user":"0:0",
+        "entrypoint":["/bin/sleep","300"],"command":[],"stop_grace_period":"1s"});
+    let redis = json!({"image":redis,"network_mode":"none","volumes":["redis-data:/data"],
+        "healthcheck":{"test":["CMD","redis-cli","ping"],"interval":"1s","timeout":"1s","retries":10}});
+    fs::write(
+        fixture.project.0.join("compose.yaml"),
+        json!({"services":{"web":web,"redis":redis},"volumes":{"redis-data":{}}}).to_string(),
+    )
+    .unwrap();
+    let before_review = fixture.review(&json!({"services":{"web":web}}));
+    let mut owner = fixture.start("serve", &before_review, &["web=started"], None);
+    let mut cleanup = Cleanup {
+        binary: &fixture.binary,
+        candidate: &fixture.candidate,
+        run: &fixture.run,
+        done: false,
+    };
+    let before = fixture.receipt();
+    let review = fixture.review(&json!({"services":{"redis":redis},"volumes":{"redis-data":{}}}));
+    let mut append = fixture.start(
+        "extend",
+        &review,
+        &["redis=healthy"],
+        Some(&graph::service_exec_generation(&before).unwrap()),
+    );
+    assert_eq!(
+        result(&mut append, fixture.deadline, true)["started"],
+        json!(["redis"])
+    );
+    let after = fixture.receipt();
+    assert_eq!(after.resources["volume:redis-data"].phase, "created");
+    assert_eq!(
+        after.resources["container:web"].id,
+        before.resources["container:web"].id
+    );
+    fixture.cli(
+        "remove fixture data",
+        &[
+            "graph",
+            "cleanup",
+            "--run-id",
+            &fixture.run,
+            "--remove-data",
+            "--json",
+        ],
+    );
+    assert!(owner.wait(fixture.deadline).success());
+    cleanup.done = true;
+}
+
+#[test]
 #[ignore = "Isolated macOS development VM, fixture image and matching CLI required"]
 fn owner_killed_with_pending_append_reconciles_into_a_loadable_receipt() {
+    recover_pending_append(true);
+}
+
+#[test]
+#[ignore = "Isolated macOS development VM, fixture image and matching CLI required"]
+fn owner_killed_during_first_pending_append_write_restores_the_old_graph() {
+    recover_pending_append(false);
+}
+
+fn recover_pending_append(enrolled: bool) {
     let fixture = Fixture {
         candidate: Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))
             .unwrap(),
@@ -469,25 +554,32 @@ fn owner_killed_with_pending_append_reconciles_into_a_loadable_receipt() {
     let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
     let app = json!({"image":image,"network_mode":"none","user":"0:0",
         "entrypoint":["/bin/sleep","120"],"command":[],"stop_grace_period":"1s"});
-    let old = json!({"services":{"web":app}});
+    let mut web = app.clone();
+    web["volumes"] = json!(["web-data:/data"]);
+    let old = json!({"services":{"web":web},"volumes":{"web-data":{}}});
     let slow = json!({"services":{"slow":app}});
     fs::write(
         fixture.project.0.join("compose.yaml"),
-        json!({"services":{"web":app,"slow":app}}).to_string(),
+        json!({"services":{"web":web,"slow":app},"volumes":{"web-data":{}}}).to_string(),
     )
     .unwrap();
     let mut owner = fixture.start("serve", &fixture.review(&old), &["web=started"], None);
     let before = fixture.receipt();
-    let mut client = fixture.start(
-        "extend",
-        &fixture.review(&slow),
-        &["slow=completed"],
-        Some(&graph::service_exec_generation(&before).unwrap()),
-    );
-    fixture.wait_started_append("slow");
+    let mut client = enrolled.then(|| {
+        let client = fixture.start(
+            "extend",
+            &fixture.review(&slow),
+            &["slow=completed"],
+            Some(&graph::service_exec_generation(&before).unwrap()),
+        );
+        fixture.wait_started_append("slow");
+        client
+    });
     owner.child.kill().unwrap();
     assert!(!owner.wait(fixture.deadline).success());
-    assert!(!client.wait(fixture.deadline).success());
+    if let Some(client) = &mut client {
+        assert!(!client.wait(fixture.deadline).success());
+    }
 
     let root = graph::directory(&fixture.candidate, &fixture.run).unwrap();
     let pending = root.join("state.pending");
@@ -518,4 +610,29 @@ fn owner_killed_with_pending_append_reconciles_into_a_loadable_receipt() {
         fixture.graph("inspect")["receipt"]["phase"],
         "stopped-data-retained"
     );
+    let retained = fixture.graph("restore-selection");
+    let mut restored = fixture.start(
+        "serve-restore",
+        &fixture.review(&old),
+        &["web=started"],
+        retained["generation"].as_str(),
+    );
+    let after = fixture.receipt();
+    assert!(!after.resources.contains_key("container:slow"));
+    assert_eq!(
+        after.resources["volume:web-data"].name,
+        before.resources["volume:web-data"].name
+    );
+    fixture.cli(
+        "remove fixture data",
+        &[
+            "graph",
+            "cleanup",
+            "--run-id",
+            &fixture.run,
+            "--remove-data",
+            "--json",
+        ],
+    );
+    assert!(restored.wait(fixture.deadline).success());
 }

@@ -186,16 +186,11 @@ pub(super) fn pending_cleanup(
     mut stream: std::os::unix::net::UnixStream,
     run: &str,
 ) -> Option<(std::os::unix::net::UnixStream, super::WireRequest)> {
-    let request: super::WireRequest = transport::read(
-        &mut stream,
-        Duration::from_secs(5),
-        transport::REQUEST_LIMIT,
-    )
-    .ok()?;
-    if request.version != 1 || request.run != run {
+    let request = transport::read_request(&stream, Duration::from_secs(5)).ok()?;
+    if request.run != run {
         return None;
     }
-    if request.exclusive() && request.remove_data.is_some() {
+    if request.remove_data.is_some() {
         return Some((stream, request));
     }
     let _ = transport::write(

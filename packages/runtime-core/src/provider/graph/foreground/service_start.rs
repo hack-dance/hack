@@ -94,10 +94,10 @@ pub fn request(
     if let Some(managed) = managed {
         managed.remaining()?;
     }
-    transport::write(
-        &mut stream,
+    transport::write_extension(
+        &stream,
         &WireRequest {
-            version: 1,
+            version: 2,
             run: run.into(),
             remove_data: None,
             restore: None,

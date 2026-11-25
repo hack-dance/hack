@@ -147,6 +147,7 @@ import {
 } from "./native-project-input.ts";
 import {
   inspectNativeProjectGraph,
+  isNativeProviderBusy,
   observeStartingNativeProjectGraph,
 } from "./native-project-inspect.ts";
 import {
@@ -2187,14 +2188,43 @@ async function selectNativeGraphExtension(opts: {
   readonly invoke: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
 }) {
-  const snapshot = await inspectNativeProjectGraph({
-    runtime: opts.runtime,
-    projectRoot: opts.scope.projectRoot,
-    run: opts.run.run,
-    invoke: opts.invoke,
-    signal: opts.signal,
-  });
   const { run, planId, namespace } = opts.run;
+  const askOwner = (timeoutMs: number) =>
+    opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.scope.projectRoot,
+      args: ["graph", "owner-status", "--run-id", run, "--json"],
+      timeoutMs,
+      signal: opts.signal,
+    });
+  const rejectStarting = (owner: unknown) => {
+    if (
+      isRecord(owner) &&
+      owner.ok === true &&
+      owner.run === run &&
+      owner.plan === planId &&
+      owner.runtime_error === "graph_starting"
+    ) {
+      throw nativeGraphStillStarting();
+    }
+  };
+  const inspect = (busyWaitMs?: number) =>
+    inspectNativeProjectGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run,
+      invoke: opts.invoke,
+      signal: opts.signal,
+      busyWaitMs,
+    });
+  const snapshot = await inspect(0).catch(async (error: unknown) => {
+    if (!isNativeProviderBusy(error)) {
+      throw error;
+    }
+    // The append holds the mutation lease while its owner answers controls.
+    rejectStarting(await askOwner(2000).catch(() => undefined));
+    return await inspect();
+  });
   const owned = authoritative(snapshot, run, namespace, planId);
   if (
     owned.owner !== opts.run.owner ||
@@ -2217,20 +2247,8 @@ async function selectNativeGraphExtension(opts: {
   if (snapshot.receipt.phase !== "ready-observed") {
     return undefined;
   }
-  const owner = await opts.invoke({
-    runtime: opts.runtime,
-    cwd: opts.scope.projectRoot,
-    args: ["graph", "owner-status", "--run-id", run, "--json"],
-    timeoutMs: 15_000,
-    signal: opts.signal,
-  });
-  if (
-    isRecord(owner) &&
-    owner.run === run &&
-    owner.runtime_error === "graph_starting"
-  ) {
-    throw nativeGraphStillStarting();
-  }
+  const owner = await askOwner(15_000);
+  rejectStarting(owner);
   if (
     isRecord(owner) &&
     owner.run === run &&
@@ -3259,6 +3277,14 @@ async function extendNativeProjectGraph({
     );
     progress({ phase: "ready", services, run, endpoints: [] });
     return 0;
+  } catch (error) {
+    if (
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCauseCode === "graph_starting"
+    ) {
+      throw nativeGraphStillStarting();
+    }
+    throw error;
   } finally {
     delivery.payload?.fill(0);
   }
@@ -4526,6 +4552,9 @@ async function startNativeProjectAttempt(
     });
   } catch (error) {
     failed = true;
+    if (extension && controller.signal.aborted) {
+      throw new NativeStartupCanceledError(stopSignals.interruptedExit());
+    }
     throw foregroundStartFailure({
       error,
       stopRequested: controller.signal.aborted,

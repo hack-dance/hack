@@ -256,6 +256,105 @@ async function scriptUpThroughReview(
 
 const SHARED = { HACK_NATIVE_SHARED_SOURCE: "1" };
 
+test(
+  "a second targeted up asks the busy graph's owner before waiting for the provider",
+  async () => {
+    const f = await fixture();
+    await saveNativeProjectRun({ ...f.scope, run });
+    await f.fail("graph inspect", { code: "provider_busy" });
+    await f.reply("graph owner-status", {
+      ok: true,
+      run: run.run,
+      plan: run.planId,
+      phase: "ready-observed",
+      foreground_alive: true,
+      runtime_verified: false,
+      runtime_error: "graph_starting",
+    });
+    const result = await cli({
+      fixture: f,
+      args: ["up", "web", "--detach", "--json"],
+      env: SHARED,
+    });
+    expect(result.code, result.output).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      error: { code: "E_NATIVE_STILL_STARTING" },
+    });
+    expect(await f.calls()).toEqual(["graph inspect", "graph owner-status"]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "Ctrl-C disconnects the targeted runtime client and leaves the project mapping",
+  async () => {
+    const image = `sha256:${"e".repeat(64)}`;
+    const f = await fixture(
+      JSON.stringify({ services: { web: { image }, slow: { image } } })
+    );
+    await saveNativeProjectRun({ ...f.scope, run });
+    await f.reply("graph inspect", {
+      journal_incomplete: false,
+      receipt: {
+        run: run.run,
+        owner: run.owner,
+        namespace: run.namespace,
+        plan_id: run.planId,
+        phase: "ready-observed",
+        readiness: { web: "started" },
+      },
+    });
+    await f.reply("graph owner-status", {
+      ok: true,
+      run: run.run,
+      plan: run.planId,
+      phase: "ready-observed",
+      foreground_alive: true,
+      runtime_verified: true,
+      generation: "1".repeat(64),
+      service_images: { web: image },
+    });
+    await f.reply("runtime status", { phase: "running", process_alive: true });
+    await scriptUpThroughReview(f, { services: { slow: { active: true } } });
+    await f.hold("graph extend");
+    const child = Bun.spawn(
+      [process.execPath, entrypoint, "--path", f.project, "up", "slow"],
+      {
+        cwd: f.project,
+        env: f.env(SHARED),
+        detached: true,
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: SPAWN_TIMEOUT_MS - 5000,
+      }
+    );
+    const stderr = new Response(child.stderr).text();
+    const stdout = new Response(child.stdout).text();
+    try {
+      await waitForFileContent({
+        path: join(f.project, "interrupt-ready"),
+        complete: (value) => (value === "ready" ? value : undefined),
+        what: "targeted owner request",
+        budgetMs: 10_000,
+      });
+      child.kill("SIGINT");
+      const code = await child.exited;
+      expect(code, await stderr).toBe(130);
+      expect(await stderr).toContain("Native project startup interrupted.");
+      expect(await stdout).toBe("");
+      expect(await loadNativeProjectRun(f.scope)).toEqual(run);
+      expect(await f.calls()).not.toContain("graph cleanup");
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+      }
+      await child.exited;
+    }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
 test.each(["missing", "exited"] as const)(
   "plain native up reaches the owner extension for %s services",
   async (state) => {

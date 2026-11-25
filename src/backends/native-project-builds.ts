@@ -29,7 +29,8 @@ import {
 } from "./native-runtime-client.ts";
 
 /**
- * Native Compose `build:` services (feature-gated by `HACK_NATIVE_BUILDS=1`).
+ * Native Compose `build:` services. On by default (HACK-2532); `HACK_NATIVE_BUILDS=0`
+ * is the only off switch.
  *
  * Admission is pure and runs before any hook or VM effect: it accepts the Compose
  * forms the native runtime builds (`build: <context>` or a mapping of `context`,
@@ -119,11 +120,15 @@ const CANCEL_GRACE_MS = 20_000;
 const MAX_STDOUT = 64 * 1024;
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
-/** Whether native `up` may build Compose `build:` services. */
+/**
+ * Whether native `up` may build Compose `build:` services. Builds are on by
+ * default; only `HACK_NATIVE_BUILDS=0` turns them off, so an unset, empty or
+ * other value (including the earlier opt-in `1`) keeps them on.
+ */
 export function nativeBuildsEnabled(
   env: Readonly<Record<string, string | undefined>> = process.env
 ): boolean {
-  return env.HACK_NATIVE_BUILDS === "1";
+  return env.HACK_NATIVE_BUILDS !== "0";
 }
 
 /** Whether `HACK_NATIVE_REBUILD=1` asks every build to run again. */
@@ -142,9 +147,9 @@ export interface NativeBuildRequest {
   readonly args: Readonly<Record<string, string>>;
 }
 
-/** The refusal for the first `build:` service while native builds are not enabled. */
+/** The refusal for the first `build:` service while `HACK_NATIVE_BUILDS=0` turns builds off. */
 export function nativeBuildsDisabledRefusal(service: string): string {
-  return `Native foreground up cannot build service ${service}: it builds Compose build services only with HACK_NATIVE_BUILDS=1; set it to build them in the native runtime. No hook, VM or build was started.`;
+  return `Native foreground up cannot build service ${service}: HACK_NATIVE_BUILDS=0 turns native builds off; unset HACK_NATIVE_BUILDS to build it in the native runtime. No hook, VM or build was started.`;
 }
 
 /** "service a", or "services a and b", for build refusals. */
@@ -308,7 +313,7 @@ export function admitNativeProjectBuild(opts: {
 
 /**
  * Admit every build service of a normalized Compose document. Throws the closed
- * refusal for any unsupported form, and when builds are not enabled.
+ * refusal for any unsupported form, and when `HACK_NATIVE_BUILDS=0` turns builds off.
  */
 export function admitNativeProjectBuilds(opts: {
   readonly services: Readonly<

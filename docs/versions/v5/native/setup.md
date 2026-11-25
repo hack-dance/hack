@@ -63,8 +63,8 @@ Until the image builder is there, everything except image builds works. A
 project that builds an image is refused with "the image builder is not installed
 in this native home" and the command above. `hack doctor` on the native backend
 reports the same thing first, as a `native image builder` warning, for a project
-with a `build:` service. Doctor only reports it: `doctor --fix` downloads
-nothing.
+with a `build:` service, unless `HACK_NATIVE_BUILDS=0` turns native builds off.
+Doctor only reports it: `doctor --fix` downloads nothing.
 
 If the image builder in a home no longer matches the pinned release, setup still
 succeeds and reports `builder: "changed"`. It prints one warning and leaves the

@@ -4681,6 +4681,26 @@ alone never proves that services stopped.
 is still running, including when its frontend was lost. It does not treat a live
 owner as dead or bypass its cleanup checks.
 
+After a lost foreground `up`, the owner's own stop races the `down --recover`
+that follows (HACK-2097). When the authenticated stop finds the owner it selected
+as running already gone (`graph_owner_recovery`), `down --recover` (and plain
+`down`) selects the owner once more and acts on what it finds. An owner that
+retired its publication after its own stop leaves a stopped receipt, which the
+command confirms (receipt `stopped-data-retained`, containers absent) without
+replaying cleanup or hooks. An owner that died part-way is recovered with the
+same-boot `graph recover-live-owner` for the newly selected receipt. An owner
+still running keeps the refusal. In each case the lost frontend's shutdown is
+then recovered as below, so `hack up` starts the run again with its data.
+The sequence is checked as the TLA+ model `tests/models/tla/native-down-lost-frontend`.
+
+![down --recover after a lost foreground](../reference/native-down-lost-frontend.svg)
+
+If the runtime still cannot prove a same-boot recovery
+(`graph_live_owner_recovery`), the refusal keeps data and evidence and names the
+next step: wait for an owner that is still running or stopping, then run
+`hack down --recover` again; a start that never settled uses the explicit
+`graph recover-cleanup` across a pool stop described below.
+
 `hack up` and `hack restart` refuse a run whose foreground publication is still
 present and name the next step: a running owner must be stopped with Ctrl-C or
 `hack down`; an owner that exited while its services were running is stopped by

@@ -3033,6 +3033,29 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2097: `down --recover` after a lost foreground whose graph owner
+    // still runs and then stops itself, dies part-way or loses its publication.
+    // `negative` is the code before: a running selection whose stop found the
+    // owner gone refused. `unconfirmed-absent` accepts a retired publication
+    // without the stopped-receipt check and reports a false success.
+    name: "native-down-lost-frontend",
+    module: "DownLostFrontend",
+    states: 27,
+    invariant: "NoDeadEnd",
+    fields: ['pc = "refused"', "vanished = FALSE", 'owner = "absent"'],
+    alternativeWitnesses: [
+      ['pc = "refused"', "vanished = FALSE", 'owner = "exited"'],
+    ],
+    additionalControls: [
+      {
+        name: "unconfirmed-absent",
+        negative: true,
+        invariant: "DoneIsStopped",
+        fields: ['pc = "done"', 'graph = "ready"', "vanished = TRUE"],
+      },
+    ],
+  },
+  {
     // HACK-2456: a pool that stops or dies under a live run. Positive: the
     // stopped-pool recovery plus recovery from any earlier boot of the pool,
     // with every fault (other boots, a stop between a recovery's boot and its

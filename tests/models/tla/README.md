@@ -1735,6 +1735,25 @@ The reachability control reaches
 `Restore` after both IDs match and compute is absent. See the
 [source mapping and state chart](../../../docs/reference/v5-model-coverage.md#cleanup-identity-after-an-unacknowledged-create-hack-2628).
 
+## Down after a lost foreground
+
+`native-down-lost-frontend/DownLostFrontend.tla` (HACK-2097) starts after a
+foreground `up` was lost while its graph owner runs a ready graph. The owner may
+stop on its own (`SelfStop`: its retaining cleanup and publication retirement as
+one step), die part-way (`Die`, publication left) or lose its publication
+without a stop (`Vanish`, a torn retirement). The down inspects and selects
+(`Select`), asks the live owner to stop (`Stop`, `graph cleanup`), selects once
+more when that stop found a running selection gone (`ReselectOwner`), recovers an
+exited owner (`Recover`, `graph recover-live-owner`, which rechecks death) and
+confirms a stopped receipt (`ConfirmStop`, `verify(inspect, stopped)` and
+frontend finalization recovery). The positive configuration explores 27 states
+and checks `TypeOK`, `DoneIsStopped`, `NoDeadEnd` and `Ends` under weak fairness
+of the down's own steps only. `negative` (`Reselect = FALSE`, the code before)
+must violate `NoDeadEnd` with the owner absent or exited and no torn retirement.
+`unconfirmed-absent` (`Confirm = FALSE`) must violate `DoneIsStopped` with a
+ready graph. Owner internals, the runtime's proofs and the real VM are outside
+the model; see `native-publisher-stop` and `native-frontend-recovery`.
+
 ## Foreground port publisher shutdown
 
 `native-publisher-stop/PublisherStop.tla` bounds one graph and publisher, one

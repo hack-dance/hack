@@ -273,22 +273,16 @@ async function requestOwnedStop(opts: {
       });
     } catch (error) {
       if (
-        selection === undefined &&
+        // No selection yet (plain down), or a live owner that was gone by the
+        // time its stop arrived. A lost frontend's owner requests its own
+        // retaining cleanup and exits (HACK-2087), so `down --recover` right
+        // after the loss can select it running and then find it exited or
+        // retired (HACK-2097). Select again, once; the runtime rechecks.
+        (selection === undefined || selection.foreground === "running") &&
         error instanceof NativeRuntimeRequestError &&
         error.nativeCode === "graph_owner_recovery"
       ) {
-        const observed = await selectForegroundOwner(opts);
-        requireRecoverableOwner(observed);
-        if (await resumeSelectedOwner({ ...opts, selection: observed })) {
-          return;
-        }
-        if (observed.foreground !== "exited") {
-          throw ownerRecoveryRefused();
-        }
-        await recoverLiveOwner({
-          ...opts,
-          expectReceipt: observed.receiptSha256,
-        });
+        await stopAfterOwnerGone(opts);
         return;
       }
       throw error;
@@ -296,6 +290,34 @@ async function requestOwnedStop(opts: {
     return;
   }
   await recoverLiveOwner({ ...opts, expectReceipt: selection.receiptSha256 });
+}
+
+/**
+ * The authenticated stop found no owner to answer it: select once more and act
+ * on what the owner left. Nothing here is a success by itself; the caller
+ * confirms the stopped receipt and absent containers, or refuses without
+ * replaying cleanup or hooks.
+ */
+async function stopAfterOwnerGone(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly scope: NativeProjectRunScope;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  const observed = await selectForegroundOwner(opts);
+  requireRecoverableOwner(observed);
+  if (await resumeSelectedOwner({ ...opts, selection: observed })) {
+    return;
+  }
+  if (observed.foreground === "absent") {
+    // The owner retired its publication after its own retaining stop.
+    return;
+  }
+  if (observed.foreground !== "exited") {
+    throw ownerRecoveryRefused();
+  }
+  await recoverLiveOwner({ ...opts, expectReceipt: observed.receiptSha256 });
 }
 
 /** Recovery refusals must not suggest signaling an owner already proved dead. */

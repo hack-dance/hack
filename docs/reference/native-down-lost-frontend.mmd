@@ -1,0 +1,44 @@
+---
+title: DownLostFrontend · lost up
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> select : lost up, owner runs
+    select --> confirm : [stopped]
+    select --> recover : [exited]
+    select --> stop : [running]
+    stop --> confirm : owner stops
+    stop --> reselect : owner gone, once
+    reselect --> confirm : [absent]
+    reselect --> recover : [exited]
+    reselect --> refused : [running]
+    recover --> confirm : death proved
+    confirm --> done : [stopped]
+    confirm --> refused : [not stopped]
+    done --> [*]
+
+    note right of reselect
+        HACK-2097: the owner stopped
+        itself or died after the first
+        selection. Before this fix the
+        down refused here.
+    end note
+    note right of done
+        Data retained, frontend
+        shutdown recovered; hack up
+        starts the run again.
+    end note
+    note left of refused
+        INV NoDeadEnd: only a torn
+        publication retirement ends
+        here, with nothing replayed.
+    end note
+
+    class done ok
+    class reselect wait
+    class recover wait
+    class refused fail

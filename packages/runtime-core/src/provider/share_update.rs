@@ -135,6 +135,9 @@ fn plan(
         after.project_share.as_ref(),
         &after.additional_project_shares,
     )?;
+    if operation == Operation::Add {
+        super::boot_budget::check_owner(&after)?;
+    }
     let mut record_after = record.clone();
     record_after["mounts"] = record_mounts(&record, &after)?;
     Ok(Journal {

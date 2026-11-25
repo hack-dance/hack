@@ -1389,6 +1389,24 @@ fn start_pool_observed(
     // A mistyped setting is refused before any effect.
     let hot_reload = super::hot_reload::Setting::from_environment()?;
     let admission_reuse = admission::opening::Reuse::from_environment()?;
+    let requested = bridge_request.initial();
+    let dependencies = dependency_request.initial();
+    super::dependency_socket::check_capacity(requested, dependencies)?;
+    // Reject an oversized selection before restoring aliases or retaining a start.
+    let pool = root(candidate);
+    if pool.join("owner.json").try_exists().map_err(io)? {
+        let owner = Owner::load_for_alias_restore(candidate)?;
+        if owner.phase != "running" {
+            super::boot_budget::check_owner(&owner)?;
+            super::boot_budget::check(owner.project_shares().len(), requested, dependencies)?;
+        }
+    } else {
+        super::boot_budget::check(
+            usize::from(project_share.is_some()),
+            requested,
+            dependencies,
+        )?;
+    }
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
     // any strict owner read below refuses it.
     restore_released_short_home_before_use(candidate)?;
@@ -1409,8 +1427,6 @@ fn start_pool_observed(
             "Retained foreground startup requires macOS.",
         ));
     }
-    let requested = bridge_request.initial();
-    let dependencies = dependency_request.initial();
     let request = running_start::StartRequest {
         bridges: bridge_request,
         network: network.as_ref(),
@@ -1425,13 +1441,6 @@ fn start_pool_observed(
     }
     if let Some(intent) = &network {
         intent.validate()?;
-    }
-    if let Some(intent) = dependencies {
-        super::DependencySocketIntent::new(intent.slots)?;
-    }
-    super::dependency_socket::check_capacity(requested, dependencies)?;
-    if let Some(intent) = requested {
-        super::BridgeIntent::new(intent.slots)?;
     }
     reject_aliased_state(&root(candidate))?;
     let (existing, existing_network, existing_dependencies, existing_share, existing_additional) =
@@ -1453,8 +1462,15 @@ fn start_pool_observed(
                 owner.additional_project_shares.clone(),
             )
         } else {
+            let (bridges, dependencies) = if profile == super::Profile::Development
+                && project_share.is_some()
+            {
+                super::socket_requests::fresh_project_capacity(bridge_request, dependency_request)?
+            } else {
+                (requested, dependencies)
+            };
             (
-                requested,
+                bridges,
                 network.clone().unwrap_or_default(),
                 dependencies,
                 project_share.clone(),
@@ -1576,6 +1592,22 @@ fn start_pool_observed(
     // not on a qualified filesystem, nothing is proven here and `prepare_rootfs` decides.
     // The recheck writes nothing; an alias repaired before admission stays repaired.
     let leased_rootfs = rootfs_proof::recheck(candidate, &lock, early_rootfs)?;
+    if root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        let owner = Owner::load_for_alias_restore(candidate)?;
+        if owner.phase != "running" {
+            super::boot_budget::check_owner(&owner)?;
+        }
+    } else {
+        super::boot_budget::check(
+            usize::from(existing_share.is_some()),
+            existing,
+            existing_dependencies,
+        )?;
+    }
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;
@@ -1611,7 +1643,7 @@ fn start_pool_observed(
     let mut owner = Owner::create_with_project_share(
         candidate,
         profile,
-        requested,
+        existing,
         existing_network.clone(),
         existing_dependencies,
         existing_share.clone(),

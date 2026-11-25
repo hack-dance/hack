@@ -12,6 +12,8 @@ use std::{
 pub mod quiescent_recovery;
 pub mod recovery;
 
+pub(super) const MAX_POOL_SOCKETS: u8 = 32;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencySocketIntent {
@@ -81,7 +83,7 @@ pub(super) fn check_capacity(
         super::BridgeIntent::new(intent.slots)?;
     }
     if u16::from(bridge.map_or(0, |v| v.slots)) + u16::from(dependencies.map_or(0, |v| v.slots))
-        > 32
+        > u16::from(MAX_POOL_SOCKETS)
     {
         return Err(refused(
             "Combined application and dependency socket capacity exceeds 32.",

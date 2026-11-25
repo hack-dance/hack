@@ -313,7 +313,11 @@ pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 /// holds. A ready foreground owner takes the lease briefly and often, for example
 /// once a second to supervise restarts of a routed service, so a nonblocking
 /// acquisition refused such a command at random with `provider_busy` (HACK-2669).
-/// Acquisition admits nothing; on expiry the refusal still names the holder.
+/// Acquisition admits nothing; on expiry the refusal still names the holder. The
+/// authored owner-side commands (`exec`, interactive `exec`, one-off `run`) also
+/// wait, inside their fixed 30 s budget. Every waiter passes its caller's check
+/// (owner signals, client disconnect, frontend liveness), which runs before each
+/// attempt, so an owner loop that waits still sees a shutdown signal.
 pub(super) const COMMAND_LEASE_WAIT: Duration = Duration::from_secs(15);
 
 /// Startup's provider lease. Everything `start_pool` does before taking it is read-only
@@ -566,16 +570,6 @@ impl<'a> OwnedGuest<'a> {
 
     pub(super) fn connect(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(candidate, true, None)
-    }
-
-    /// [`Self::connect`] that waits, until `deadline`, only while another operation
-    /// holds the mutation lease. Waiting admits nothing: the pool identity, liveness
-    /// and boot audit all run after acquisition, exactly as without the wait.
-    pub(super) fn connect_until(
-        candidate: &'a Candidate,
-        deadline: Instant,
-    ) -> Result<Self, CandidateError> {
-        Self::connect_mode(candidate, true, Some(deadline))
     }
 
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {

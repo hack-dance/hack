@@ -81,7 +81,9 @@ pub(super) fn interactive(
     validate(options)?;
     live()?;
     let deadline = Instant::now() + options.timeout;
-    let engine = Engine::connect_command_until(candidate, deadline)?;
+    // The lease wait (HACK-2669) counts against this deadline and checks the
+    // frontend's liveness before every attempt.
+    let engine = Engine::connect_command_until(candidate, deadline, live)?;
     let (receipt, root) = load(candidate, &engine, options.run)?;
     super::startup::require_dependency_rebind_complete(&root, &receipt)?;
     let pending = root
@@ -214,8 +216,22 @@ fn service_exec_inner(
 ) -> Result<ServiceExecResult, CandidateError> {
     validate(&options)?;
     // Waits out a brief holder, such as the ready owner's restart supervision,
-    // instead of refusing `provider_busy` at random (HACK-2669).
-    let engine = Engine::connect_command(candidate)?;
+    // instead of refusing `provider_busy` at random (HACK-2669). The exec's own
+    // timeout starts after acquisition. Fresh per-command values have their own
+    // delivery lifetime, which started when the CLI received them: the wait stops
+    // once it has passed, before admission, rather than admit a command whose
+    // values can no longer be delivered.
+    let check = || match managed {
+        Some(managed) => {
+            super::super::managed_environment::remaining_until(managed.deadline()).map(|_| ())
+        }
+        None => Ok(()),
+    };
+    let engine = Engine::connect_command(
+        candidate,
+        std::time::Instant::now() + super::super::lifecycle::COMMAND_LEASE_WAIT,
+        &check,
+    )?;
     let (receipt, root) = load(candidate, &engine, options.run)?;
     super::startup::require_dependency_rebind_complete(&root, &receipt)?;
     let pending = root.join("state.pending");

@@ -1968,10 +1968,31 @@ const contracts: readonly ModelContract[] = [
     // acquisition.
     name: "native-command-lease",
     module: "CommandLease",
-    states: 40,
+    states: 74,
     invariant: "BriefHolderNeverRefuses",
     fields: ['cmd = "refused"', 'lease = "owner"', "elapsed = 0"],
     additionalControls: [
+      {
+        // Review finding: a waiter on an owner's loop thread that passed no
+        // check held a pending signal across the wait.
+        name: "unchecked-signal",
+        negative: true,
+        invariant: "SignalNotHeld",
+        fields: [
+          'cmd = "waiting"',
+          "signal = TRUE",
+          "sigAt = 0",
+          "elapsed = 1",
+        ],
+      },
+      {
+        // Without the check, a signal that arrived during the wait could
+        // still be followed by admission.
+        name: "unchecked-admission",
+        negative: true,
+        invariant: "NoAdmissionAfterSignal",
+        fields: ['cmd = "admitted"', "signal = TRUE", 'lease = "command"'],
+      },
       {
         // The wait stays bounded: a holder that keeps the lease past it is
         // still refused, with the holder named.

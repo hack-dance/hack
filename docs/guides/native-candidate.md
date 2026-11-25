@@ -3536,8 +3536,10 @@ A component acknowledgement is not application readiness, and this recovery does
 not diagnose or fix an upstream engine panic. Changed or incomplete evidence
 remains available for inspection; do not remove journals or ownership pins to retry.
 
-Native `hack exec` and `hack run` make this request once with a 180-second frontend
-budget before selecting their command or reading managed environment values.
+Native `hack exec` and `hack run` make this request once with a 200-second frontend
+budget before selecting their command or reading managed environment values. Both
+the request and the owner's answer first wait up to 15 seconds for a briefly held
+provider lease instead of refusing `provider_busy` at once.
 If refresh refuses, the frontend preserves only reviewed native error identifiers
 such as `provider_busy` or `graph_owner_recovery: graph_dependency_rebind_incomplete`.
 Subprocess text and unknown codes remain omitted. These diagnostics do not confirm
@@ -5032,7 +5034,12 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. When fresh values are delivered through private stdin, output that is still arriving
+retried. A ready foreground owner holds the provider lease briefly and often, so exec,
+and the dependency refresh it sends first, wait up to 15 seconds for another holder
+to release that lease before refusing with `provider_busy` naming the holder. For
+compose-backed exec the 30-second budget starts after that wait; an authored project's
+exec and one-off `run` count the wait inside their own 30-second budget. A pending
+Ctrl-C or `hack down` ends the wait at once without starting the command. When fresh values are delivered through private stdin, output that is still arriving
 or already queued when that budget ends is read to the end, so a command that finished on a
 busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For

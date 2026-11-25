@@ -6,9 +6,17 @@ use transport::DependencyRefreshRequest;
 
 /// Both the requesting command and the owner read the selection under the
 /// mutation lease. Either waits out a brief holder (the owner itself supervises
-/// restarts under it each second) instead of refusing `provider_busy` (HACK-2669).
-fn selection(candidate: &Candidate, run: &str) -> Result<DependencyRefreshRequest, CandidateError> {
-    let engine = Engine::connect_command(candidate)?;
+/// restarts under it each second) instead of refusing `provider_busy` (HACK-2669),
+/// until `deadline` and for at most `COMMAND_LEASE_WAIT`. `check` runs before every
+/// attempt: the owner passes its signal and disconnect checks, so a shutdown
+/// signal is not held behind another command's lease.
+fn selection(
+    candidate: &Candidate,
+    run: &str,
+    deadline: Instant,
+    check: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<DependencyRefreshRequest, CandidateError> {
+    let engine = Engine::connect_command(candidate, deadline, check)?;
     let (receipt, _) = super::super::load(candidate, &engine, run)?;
     if receipt.phase != "ready-observed" {
         return Err(refused());
@@ -20,8 +28,27 @@ fn selection(candidate: &Candidate, run: &str) -> Result<DependencyRefreshReques
     })
 }
 
+/// The owner's lease-wait check: refuse, with nothing admitted, once the owner's
+/// own cancellation (a pending signal, a disconnected client, its deadline) holds.
+fn owner_lease_check(cancelled: &dyn Fn() -> bool) -> impl Fn() -> Result<(), CandidateError> + '_ {
+    move || {
+        if cancelled() {
+            Err(crate::provider::engine::acquisition_cancelled())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 pub fn request(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
-    let selected = selection(candidate, run)?;
+    // The requesting CLI process has no owner loop to keep responsive; an interrupt
+    // ends the process, and the frontend bounds the whole request.
+    let selected = selection(
+        candidate,
+        run,
+        Instant::now() + crate::provider::lifecycle::COMMAND_LEASE_WAIT,
+        &|| Ok(()),
+    )?;
     let expected_plan = selected.plan.clone();
     let pin = transport::Pin::load(candidate, run)?;
     let mut stream = pin.connect()?;
@@ -65,17 +92,19 @@ pub(super) fn handle(
     // requester reads for: a requester that gives up first disconnects, and a
     // disconnect cancels the rebind.
     let deadline = Instant::now() + Duration::from_secs(170);
-    let current = selection(candidate, run)?;
+    // This runs on the owner's only loop thread. Its lease wait (HACK-2669) checks the
+    // same signals and client disconnect as the rebind, so Ctrl-C or `hack down` is
+    // handled within one backoff step instead of after the wait.
+    let watch = transport::ClientWatch::half_closed(stream)?;
+    let cancelled = || signals.pending() || watch.disconnected() || Instant::now() >= deadline;
+    let current = selection(candidate, run, deadline, &owner_lease_check(&cancelled))?;
     if selected.plan != current.plan
         || selected.generation != current.generation
         || selected.boot != current.boot
     {
         return Err(refused());
     }
-    let watch = transport::ClientWatch::half_closed(stream)?;
-    runtime.refresh_dependencies(candidate, run, &selected.generation, || {
-        signals.pending() || watch.disconnected() || Instant::now() >= deadline
-    })
+    runtime.refresh_dependencies(candidate, run, &selected.generation, cancelled)
 }
 
 pub(super) fn automatic(
@@ -324,5 +353,46 @@ mod automatic_tests {
         schedule.stale(now);
         assert_eq!(schedule.deadline(), None);
         assert!(!schedule.take_due(now + Duration::from_secs(3600)));
+    }
+}
+
+/// HACK-2669 review: the owner's refresh answer waits on another command's lease on
+/// its only loop thread, so the wait must end once the owner's cancellation holds
+/// (a pending signal, a disconnected client) instead of after `COMMAND_LEASE_WAIT`.
+#[cfg(test)]
+mod owner_lease_tests {
+    use super::*;
+    use crate::provider::engine::command_lease_tests::{hold_lease, running_pool};
+    use std::cell::Cell;
+
+    #[test]
+    fn a_pending_owner_signal_ends_the_selection_lease_wait() {
+        let (_home, candidate) = running_pool();
+        let (release, holder) = hold_lease(&candidate, Duration::from_secs(30));
+        let started = Instant::now();
+        let polls = Cell::new(0_u32);
+        // Stands in for `signals.pending()`: a signal arrives 200 ms into the wait.
+        let pending = || {
+            polls.set(polls.get() + 1);
+            started.elapsed() >= Duration::from_millis(200)
+        };
+        let refused = selection(
+            &candidate,
+            &"a".repeat(32),
+            started + Duration::from_secs(170),
+            &owner_lease_check(&pending),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, "provider_acquisition_cancelled");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the signal was held behind the lease wait: {:?}",
+            started.elapsed()
+        );
+        // Checked on every attempt, not once before the wait.
+        assert!(polls.get() > 1, "{}", polls.get());
+        release.send(()).unwrap();
+        holder.join().unwrap();
     }
 }

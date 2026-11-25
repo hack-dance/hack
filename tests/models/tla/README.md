@@ -2031,3 +2031,10 @@ protected-ID scan and keeper removal. The negative
 control removes the fence guard and can remove the base while pinning. The model
 abstracts failed requests, multiple IDs, graph and build receipts, and Docker's
 last-tag deletion behavior.
+
+## Targeted native Compose start
+
+[TargetedStart](targeted-start/COVERAGE.md) checks appending services and their
+dependencies under the existing owner. TLC checks 1,229 distinct states and
+three negative controls. They drop create ownership, replace a running service,
+and report confirmed cancellation without an owner reply.

@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { nativeSetupShellReply } from "../helpers/native-setup-inspection.ts";
 import { releaseLaunchctlGuard, runCli } from "./harness.ts";
 
 test("service add previews and updates a Compose file on the native backend", async () => {
@@ -67,21 +68,40 @@ test("service add previews and updates a Compose file on the native backend", as
     const saved = `${source}  "cache":\n    image: redis:7-alpine\n    volumes:\n      - cache-data:/data\nvolumes:\n  cache-data: {}\n`;
     expect(await readFile(file, "utf8")).toBe(saved);
 
-    const start = await runCli({
-      invocation: {
-        args: ["up", "--detach", "--json", "cache"],
-        cwd: checkout,
-        env: {
-          HACK_RUNTIME_BACKEND: "native",
-          HACK_NATIVE_BINARY: join(root, "must-not-run"),
+    const runtime = join(root, "native-runtime");
+    await writeFile(
+      runtime,
+      `#!/bin/sh
+case "$1" in --internal-timings=*) shift;; esac
+${nativeSetupShellReply()}
+exit 99
+`,
+      { mode: 0o700 }
+    );
+    const start = (service: string) =>
+      runCli({
+        invocation: {
+          args: ["up", "--detach", "--json", "--no-interactive", service],
+          cwd: checkout,
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: runtime,
+          },
         },
-      },
-      hackHome,
+        hackHome,
+      });
+    const missing = await start("missing");
+    expect(missing.exitCode).toBe(1);
+    expect(JSON.parse(missing.stdout).error).toMatchObject({
+      code: "E_SERVICE_NOT_FOUND",
+      message: "Unknown Compose service: missing.",
     });
-    expect(start.exitCode).not.toBe(0);
-    expect(JSON.parse(start.stdout).error).toMatchObject({
-      code: "E_USAGE",
-      message: expect.stringContaining("service selection is not supported"),
+    // The newly saved name passes selection and reaches source share admission.
+    const savedTarget = await start("cache");
+    expect(savedTarget.exitCode).toBe(1);
+    expect(JSON.parse(savedTarget.stdout).error).toMatchObject({
+      code: "E_PERMISSION",
+      message: expect.stringContaining("requires HACK_NATIVE_SHARED_SOURCE=1"),
     });
 
     const duplicate = await cli([]);

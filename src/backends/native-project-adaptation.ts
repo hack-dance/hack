@@ -183,10 +183,31 @@ export function adaptNativeProject(opts: {
   if (!(isRecord(compose) && isRecord(compose.services))) {
     throw refused();
   }
+  const services = compose.services;
+  const perService = (value: unknown, includeWitnesses = false) => {
+    const omitted = opts.input.omittedServiceSpecs;
+    return omitted && isRecord(value)
+      ? Object.fromEntries(
+          Object.entries(value).filter(
+            ([name]) =>
+              !omitted.has(name) ||
+              (includeWitnesses && Object.hasOwn(services, name))
+          )
+        )
+      : value;
+  };
   replaceNetworks(compose, selection.isolatedNetworks);
-  applyNativeWorkspaceCache({ compose, selection: selection.workspaceCache });
+  const cache = selection.workspaceCache;
+  if (
+    !(opts.input.omittedServiceSpecs && isRecord(cache)) ||
+    workspaceCacheTargets(selection, compose).size > 0
+  ) {
+    applyNativeWorkspaceCache({ compose, selection: cache });
+  }
   for (const [name, value] of Object.entries(
-    selectedMap(selection.httpProbes)
+    // Existing dependency witnesses need their health condition for review.
+    // The owner inspects their current probe and creates effects only for new services.
+    selectedMap(perService(selection.httpProbes, true))
   )) {
     const spec = service(compose.services, name);
     if (spec.healthcheck !== undefined) {
@@ -194,14 +215,14 @@ export function adaptNativeProject(opts: {
     }
     spec.healthcheck = { "x-hack-http": probe(value) };
   }
-  addHostnames(compose.services, selection.additionalHostnames);
+  addHostnames(compose.services, perService(selection.additionalHostnames));
   addNativeHostAliases({
     services: compose.services,
-    selection: selection.additionalHostAliases,
+    selection: perService(selection.additionalHostAliases),
   });
   const amd64Emulation = applyNativeAmd64Emulation({
     services: compose.services,
-    selection: selection.amd64Emulation,
+    selection: perService(selection.amd64Emulation),
   });
   const normalizedComposeJson = JSON.stringify(compose);
   if (Buffer.byteLength(normalizedComposeJson) > 256 * 1024) {

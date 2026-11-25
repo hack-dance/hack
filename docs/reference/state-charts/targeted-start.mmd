@@ -1,0 +1,47 @@
+---
+title: TargetedStart · Same graph owner
+---
+stateDiagram-v2
+    direction TB
+    [*] --> Ready
+    Ready --> Ready : CapacityRefuse
+    Ready --> Extending : Reserve [space]
+    Extending --> Ready : Commit [probes seeded]
+    Extending --> Degraded : Fail or time out
+    Extending --> Cancelling : ObserveCancel [request EOF]
+    Cancelling --> Ready : Rollback [verified]
+    Cancelling --> Degraded : RollbackRefused
+    Degraded --> Ready : Rollback [verified]
+    Extending --> Interrupted : Crash
+    Cancelling --> Interrupted : Crash
+    Degraded --> Interrupted : Crash
+    Interrupted --> Reconciled : Reconcile
+    Ready --> Cleaning : Down
+    Extending --> Cleaning : Down cancels start
+    Cancelling --> Cleaning : Down
+    Degraded --> Cleaning : Down
+    Reconciled --> Cleaning : Down
+    Cleaning --> Stopped : FinishDown
+    note right of Extending
+      Create, Start, Publish
+      INV Existing IDs stay
+    end note
+    note right of Degraded
+      RefuseConcurrent
+      Keep cleanup intent
+      Reply if cancellation pending
+    end note
+    note right of Cancelling
+      Wait to stop grace + margin
+      Rollback reply confirms
+      Commit, timeout or force
+      leave the outcome unknown
+    end note
+    classDef live stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+    classDef ok stroke-width:1.6px
+    class Extending,Cleaning live
+    class Interrupted,Degraded fail
+    class Cancelling,Reconciled wait
+    class Stopped ok

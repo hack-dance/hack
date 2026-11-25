@@ -54,6 +54,18 @@ neither stream.
 A `--json` that belongs to a child command, as in `hack run web tool --json`,
 is the child's: Hack passes its output through unchanged.
 
+For Compose-file projects, `hack up <service> --json` uses `data.action`,
+`project`, `branch`, `composeProject`, `services`, and `durationMs` on both
+backends. `services` contains the `started`, `completed`, `stopped`, and
+`failed` arrays. Native returns this result after its selected services meet
+their startup goals.
+
+If Ctrl-C interrupts an append to a running native project, the launcher waits
+for the owner's rollback reply within the selected services' stop budget.
+Confirmed cancellation exits 130 with `E_CANCELLED` in JSON. If the append
+committed, the wait expires, or a second Ctrl-C ends the wait, the command exits
+1 with `E_NATIVE_START_OUTCOME_UNKNOWN`.
+
 ## Command inventory
 
 This inventory includes every canonical command exposing `--json`, including

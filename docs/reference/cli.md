@@ -335,7 +335,7 @@ Runs the command array in .hack/dev.json from its repository root. The runner ow
 
 ## `hack up [services...]`
 
-Start project services (docker compose up)
+Start the project or selected services
 
 ### Usage
 
@@ -399,7 +399,7 @@ hack down [options]
 | `--service <name>` | Stop only this local Compose service, keeping its containers and project resources |
 | `--timeout <seconds>` | Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
-| `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
+| `--remove-data` | Native backend: delete owned data volumes after confirmed stop (can cancel a service append, asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |

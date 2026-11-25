@@ -195,6 +195,8 @@ pub(super) trait Driver {
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         Ok(())
     }
+    #[cfg(target_os = "macos")]
+    fn resume_publications(&mut self, _: &Receipt, _: &std::collections::BTreeSet<String>) {}
     /// Services whose process this driver wraps behind its release barrier.
     /// Their inherited image process is materialized before admission, exactly
     /// as for private environment delivery, so the wrapper runs what Docker would.

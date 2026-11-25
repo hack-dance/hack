@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 pub(in crate::provider) mod changes;
 #[cfg(any(target_os = "macos", test))]
 mod exec_io;
+#[cfg(all(test, target_os = "macos"))]
+pub(super) mod fixture;
 pub(in crate::provider) mod inspection;
 #[cfg(any(target_os = "macos", test))]
 pub(in crate::provider) mod interactive_exec;
@@ -590,6 +592,14 @@ impl<'a> Engine<'a> {
     }
 
     fn connect_mode(candidate: &'a Candidate, cleanup_only: bool) -> Result<Self, CandidateError> {
+        #[cfg(all(test, target_os = "macos"))]
+        if fixture::active(candidate) {
+            let mut engine = Self::receipt_only_fixture(candidate)?;
+            engine.guest.enable_fixture_allocation();
+            engine.cleanup_only = cleanup_only;
+            engine.info()?;
+            return Ok(engine);
+        }
         let guest = if cleanup_only {
             OwnedGuest::connect_cleanup(candidate)?
         } else {
@@ -638,6 +648,10 @@ impl<'a> Engine<'a> {
         // Cleanup must remain possible when a capacity check blocks new allocations.
         if method != Method::GET && method != Method::HEAD && method != Method::DELETE {
             self.guest.before_effect()?;
+        }
+        #[cfg(all(test, target_os = "macos"))]
+        if fixture::active(self.guest.candidate()) {
+            return fixture::request(method, path, body);
         }
         let value = self.transport.request(method, path, body)?;
         self.guest.verify()?;

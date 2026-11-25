@@ -50,6 +50,11 @@ import {
 } from "./command-timings.ts";
 import { isRecord } from "./guards.ts";
 import {
+  type NativeAppendRollback,
+  nativeAppendRollbackMessage,
+  readNativeAppendRollback,
+} from "./native-append-cancellation.ts";
+import {
   isNativeDetachedStartPhase,
   NATIVE_DETACHED_HEARTBEAT_MS,
   NativeDetachedStartDeadline,
@@ -65,6 +70,7 @@ import {
 import {
   NATIVE_AUTHORED_ATTEMPT_LIMIT,
   NativeAuthoredAttemptLimitError,
+  nativeStartOutcomeUnknown,
 } from "./native-up-refusals.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
@@ -77,6 +83,7 @@ type Ready = {
   readonly composeProject: string;
   readonly address?: string;
   readonly started: readonly string[];
+  readonly warnings?: readonly string[];
   readonly completed?: readonly string[];
   /** Absent from an older owner: `ready`. */
   readonly readiness?: "warming" | "ready";
@@ -98,6 +105,7 @@ let publishShellVariables:
   | undefined;
 type StartupFailure = {
   readonly code: string;
+  readonly causeCode?: string;
   readonly message?: string;
   readonly service?: string;
   /** Names only: services whose process failed during startup. Never their output. */
@@ -105,8 +113,12 @@ type StartupFailure = {
   readonly startupPhase?: "static-preflight";
 };
 let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
+let publishAppendCancelled: (() => Promise<void>) | undefined;
 let publishProgress:
-  | ((phase: Exclude<NativeDetachedStartPhase, "launching">) => void)
+  | ((
+      phase: Exclude<NativeDetachedStartPhase, "launching">,
+      appendRollback?: NativeAppendRollback
+    ) => void)
   | undefined;
 type BuildProgress = NativeBuildSettlement & {
   readonly kind: "build-settled";
@@ -135,12 +147,15 @@ function stopProgressHeartbeat(): void {
  * report as a heartbeat, so the launcher does not count image work against its
  * budget. A foreground start has no launcher and reports nothing.
  */
-export function nativeDetachedUpProgress(phase: string): void {
+export function nativeDetachedUpProgress(
+  phase: string,
+  appendRollback?: NativeAppendRollback
+): void {
   if (!(publishProgress && isNativeDetachedStartPhase(phase))) {
     return;
   }
   stopProgressHeartbeat();
-  publishProgress(phase);
+  publishProgress(phase, appendRollback);
   if (phase === "images") {
     const report = publishProgress;
     progressHeartbeat = setInterval(
@@ -149,6 +164,11 @@ export function nativeDetachedUpProgress(phase: string): void {
     );
     progressHeartbeat.unref?.();
   }
+}
+
+/** The exact append owner confirmed no effect or completed scoped rollback. */
+export async function nativeDetachedUpAppendCancelled(): Promise<void> {
+  await publishAppendCancelled?.();
 }
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const FAILURE_MESSAGE = /^[\x20-\x7e]{1,400}$/;
@@ -461,12 +481,20 @@ function isStartupFailure(value: unknown): value is StartupFailure {
   return (
     isRecord(value) &&
     Object.keys(value).every((key) =>
-      ["code", "message", "service", "failedServices", "startupPhase"].includes(
-        key
-      )
+      [
+        "code",
+        "causeCode",
+        "message",
+        "service",
+        "failedServices",
+        "startupPhase",
+      ].includes(key)
     ) &&
     typeof value.code === "string" &&
     FAILURE_CODE.test(value.code) &&
+    (value.causeCode === undefined ||
+      (typeof value.causeCode === "string" &&
+        FAILURE_CODE.test(value.causeCode))) &&
     (value.message === undefined ||
       (typeof value.message === "string" &&
         FAILURE_MESSAGE.test(value.message))) &&
@@ -552,9 +580,22 @@ function startupFailureError(failure: StartupFailure): HackCliError {
   const failed = failure.failedServices?.length
     ? ` Failed during startup: ${failure.failedServices.join(", ")}. A detached start does not keep service output; run hack up without -d in a terminal to see each failed service's last lines (managed values redacted, not saved).`
     : "";
+  const code = failure.causeCode ?? failure.code;
   return new HackCliError({
-    code: "E_STARTUP_INCOMPLETE",
-    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed} ${NATIVE_IDLE_POOL_NOTE}`,
+    ...(failure.causeCode
+      ? {
+          detail: {
+            nativeCode: failure.code,
+            causeCode: failure.causeCode,
+            ...(failure.message ? { message: failure.message } : {}),
+          },
+        }
+      : {}),
+    code:
+      code === "graph_starting"
+        ? "E_NATIVE_STILL_STARTING"
+        : "E_STARTUP_INCOMPLETE",
+    message: `Native detached startup failed (${code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed} ${NATIVE_IDLE_POOL_NOTE}`,
   });
 }
 
@@ -785,6 +826,7 @@ export async function runNativeDetachedOwner(opts: {
   let ready = false;
   let accepted = false;
   let stopping = false;
+  const handoff = Promise.withResolvers<void>();
   const requestStop = () => {
     if (!stopping) {
       stopping = true;
@@ -792,6 +834,7 @@ export async function runNativeDetachedOwner(opts: {
     }
   };
   const disconnected = () => {
+    handoff.resolve();
     if (!accepted) {
       requestStop();
     }
@@ -832,6 +875,7 @@ export async function runNativeDetachedOwner(opts: {
       | {
           readonly kind: "progress";
           readonly images?: readonly string[];
+          readonly appendRollback?: NativeAppendRollback;
           readonly phase: Exclude<NativeDetachedStartPhase, "launching">;
         }
   ): Promise<void> =>
@@ -855,14 +899,19 @@ export async function runNativeDetachedOwner(opts: {
     });
   const message = (value: unknown) => {
     if (value === "cancel") {
+      handoff.resolve();
       requestStop();
+      return;
+    }
+    if (value === "force-append-cancel" && stopping) {
+      process.kill(process.pid, "SIGINT");
       return;
     }
     if (value !== "accept" || !ready || accepted || stopping) {
       return;
     }
     accepted = true;
-    send("accepted");
+    void send("accepted").then(handoff.resolve);
   };
   process.on("disconnect", disconnected);
   process.on("message", message);
@@ -873,6 +922,7 @@ export async function runNativeDetachedOwner(opts: {
     ready = true;
     send({ kind: "ready", data });
   };
+  publishAppendCancelled = () => send("append-cancelled");
   publishShellVariables = (names, ignoredRootDotenv) => {
     if (!stopping) {
       send({
@@ -931,7 +981,7 @@ export async function runNativeDetachedOwner(opts: {
       send(event);
     }
   };
-  publishProgress = (phase) => {
+  publishProgress = (phase, appendRollback) => {
     if (ready || stopping) {
       stopProgressHeartbeat();
       return;
@@ -939,18 +989,26 @@ export async function runNativeDetachedOwner(opts: {
     send({
       kind: "progress",
       phase,
+      ...(appendRollback ? { appendRollback } : {}),
       ...(phase === "images" && workingImages.length
         ? { images: workingImages }
         : {}),
     });
   };
   try {
-    return await opts.run(await acceptUpTimingOwnerRelay(opts.args));
+    const code = await opts.run(await acceptUpTimingOwnerRelay(opts.args));
+    // A targeted append returns while the original graph owner stays alive.
+    // Keep this IPC channel until the launcher acknowledges its ready frame.
+    if (ready) {
+      await handoff.promise;
+    }
+    return code;
   } finally {
     stopping = true;
     closeUpTimingOwnerRelay();
     workingImages = [];
     publishReady = undefined;
+    publishAppendCancelled = undefined;
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
     publishImageNotice = undefined;
@@ -987,6 +1045,13 @@ function isReady(value: unknown): value is Ready {
       (Array.isArray(value.completed) &&
         value.completed.length <= 256 &&
         value.completed.every((name: unknown) => typeof name === "string"))) &&
+    (value.warnings === undefined ||
+      (Array.isArray(value.warnings) &&
+        value.warnings.length <= 256 &&
+        value.warnings.every(
+          (line: unknown) =>
+            typeof line === "string" && FAILURE_MESSAGE.test(line)
+        ))) &&
     (value.readiness === undefined ||
       value.readiness === "warming" ||
       value.readiness === "ready") &&
@@ -1071,6 +1136,8 @@ function watchStartDeadline(opts: {
     if (
       isRecord(value) &&
       (Object.keys(value).length === 2 ||
+        (value.phase === "services" &&
+          readNativeAppendRollback(value.appendRollback)) ||
         (value.phase === "images" && Array.isArray(value.images))) &&
       value.kind === "progress" &&
       isNativeDetachedStartPhase(value.phase)
@@ -1120,7 +1187,7 @@ async function settleWithin(
 }
 
 /**
- * Launch only parsed, whole-project native `up` or `restart` arguments; no
+ * Launch only parsed native `up` or `restart` arguments; no
  * shell or secret argv. The child becomes the detached owner; this launcher
  * returns once the child reports durable readiness. With `json`, it prints
  * one result envelope with the same fields as Compose (`data.action`,
@@ -1130,6 +1197,7 @@ export async function startNativeDetachedUp(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly json: boolean;
+  readonly targeted?: boolean;
   /** The command the child runs, reported as `data.action`. Defaults to `up`. */
   readonly action?: "up" | "restart";
   /** Synthetic process fixtures may replace the CLI invocation. */
@@ -1178,14 +1246,27 @@ export async function startNativeDetachedUp(opts: {
   const result = Promise.withResolvers<Ready>();
   let failed = false;
   let cancellationCode: number | undefined;
+  let pendingAppendCancel: number | undefined;
+  let appendCancelDeadline: ReturnType<typeof setTimeout> | undefined;
+  let appendRollback: NativeAppendRollback | undefined;
+  let forceSent: Promise<void> | undefined;
   let shellVariablesReported = false;
   let exitGrace: ReturnType<typeof setTimeout> | undefined;
   const exited = new Promise<void>((resolve) => {
     child.once("exit", () => resolve());
   });
   let timedOut = false;
+  const rejectCancellation = (code: number, error: HackCliError) => {
+    failed = true;
+    cancellationCode = code;
+    result.reject(error);
+  };
   const fail = () => {
     if (committed || failed) {
+      return;
+    }
+    if (pendingAppendCancel !== undefined) {
+      rejectCancellation(1, nativeStartOutcomeUnknown());
       return;
     }
     failed = true;
@@ -1201,9 +1282,29 @@ export async function startNativeDetachedUp(opts: {
     if (committed || failed) {
       return;
     }
-    failed = true;
-    cancellationCode = code;
-    result.reject(
+    if (pendingAppendCancel !== undefined) {
+      forceSent = new Promise((resolve) => {
+        child.send("force-append-cancel", () => resolve());
+      });
+      fail();
+      return;
+    }
+    if (appendRollback) {
+      pendingAppendCancel = code;
+      process.stderr.write(
+        `${nativeAppendRollbackMessage(appendRollback.services)}\n`
+      );
+      // Leave IPC open for the frontend's bounded wait on the native owner.
+      appendCancelDeadline = setTimeout(fail, appendRollback.waitMs + 1000);
+      child.send("cancel", (error) => {
+        if (error) {
+          fail();
+        }
+      });
+      return;
+    }
+    rejectCancellation(
+      code,
       new HackCliError({
         code: "E_CANCELLED",
         message:
@@ -1230,6 +1331,27 @@ export async function startNativeDetachedUp(opts: {
   child.on("message", (value: unknown) => {
     if (failed) {
       return;
+    }
+    if (pendingAppendCancel !== undefined) {
+      if (value === "append-cancelled") {
+        rejectCancellation(
+          pendingAppendCancel,
+          new HackCliError({
+            code: "E_CANCELLED",
+            message: "Native project startup interrupted.",
+          })
+        );
+      } else if (value === "accepted" && ready) {
+        fail();
+      }
+      return;
+    }
+    if (
+      isRecord(value) &&
+      value.kind === "progress" &&
+      value.phase === "services"
+    ) {
+      appendRollback = readNativeAppendRollback(value.appendRollback);
     }
     let imageBlocked: NativeImageBatchError | NativeImageBlocker | undefined;
     if (!ready && isRecord(value) && value.kind === "image-blocker") {
@@ -1299,7 +1421,7 @@ export async function startNativeDetachedUp(opts: {
     heartbeatStaleMs: opts.heartbeatStaleMs,
     now: opts.deadlineNow ?? (() => performance.now()),
     expire: (error) => {
-      if (!(committed || failed)) {
+      if (!(committed || failed) && pendingAppendCancel === undefined) {
         failed = true;
         timedOut = true;
         result.reject(error);
@@ -1314,11 +1436,12 @@ export async function startNativeDetachedUp(opts: {
       const services = {
         started: [...data.started].sort(),
         completed: [...(data.completed ?? [])].sort(),
-        warming: [...(data.warming ?? [])].sort(),
+        ...(opts.targeted ? {} : { warming: [...(data.warming ?? [])].sort() }),
         stopped: [],
         failed: [],
       };
       resultTiming?.();
+      const timings = completeUpTimings();
       emitCliResult({
         result: okResult({
           data: {
@@ -1327,13 +1450,18 @@ export async function startNativeDetachedUp(opts: {
             branch: data.branch,
             composeProject: data.composeProject,
             services,
-            readiness: data.readiness ?? "ready",
+            ...(data.warnings?.length ? { warnings: data.warnings } : {}),
+            ...(opts.targeted ? {} : { readiness: data.readiness ?? "ready" }),
             durationMs,
-            timings: completeUpTimings(),
+            ...(opts.targeted ? {} : { timings }),
           },
         }),
       });
     } else if (action === "up") {
+      for (const warning of data.warnings ?? []) {
+        process.stderr.write(`${warning}
+`);
+      }
       const url = nativeReadyAddress(data.address);
       resultTiming?.();
       completeUpTimings();
@@ -1366,12 +1494,16 @@ export async function startNativeDetachedUp(opts: {
   } finally {
     clearInterval(timer);
     clearTimeout(exitGrace);
+    clearTimeout(appendCancelDeadline);
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", terminate);
-    // Before commit this disconnect triggers graceful shutdown in the exact
-    // child. Never kill a retained owner, infer cleanup, or replay startup.
+    if (forceSent) {
+      await settleWithin(Promise.race([forceSent, exited]), 1000);
+    }
+    // A cancelling append already sent its stop request. Other uncommitted
+    // launches request graceful shutdown before disconnecting.
     if (child.connected) {
-      if (committed) {
+      if (committed || pendingAppendCancel !== undefined) {
         child.disconnect();
       } else {
         // Acceptance may already be queued when the caller cancels. Explicit

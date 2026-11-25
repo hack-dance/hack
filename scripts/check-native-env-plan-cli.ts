@@ -258,19 +258,19 @@ try {
       (name) => name === ".internal" || name === ".branch"
     ), "metadata planning creates no HOME, registry or runtime state");
   const beforeStartup = await snapshotNativePlanHome(home);
-  const unsupported = await invoke(
-    ["up", "web", "--detach", "--json"],
-    checkout,
-    {
-      HACK_RUNTIME_BACKEND: "native",
-      HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
-      HACK_NATIVE_HOME: join(home, "native"),
-    }
-  );
-  require(unsupported.exit !== 0 &&
-    (unsupported.stdout + unsupported.stderr).includes(
-      "E_USAGE"
-    ), "native detached service selection refuses before input or runtime work");
+  const selected = await invoke(["up", "web", "--detach", "--json"], checkout, {
+    HACK_RUNTIME_BACKEND: "native",
+    HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
+    HACK_NATIVE_HOME: join(home, "native"),
+  });
+  const selectedResult = record(JSON.parse(selected.stdout));
+  const selectedError = record(selectedResult.error);
+  require(selected.exit === 1 &&
+    selected.stderr === "" &&
+    selectedResult.ok === false &&
+    selectedError.code === "E_STARTUP_INCOMPLETE" &&
+    record(selectedError.detail).runtime_setup ===
+      "unavailable", "native detached service selection reaches runtime setup");
   // A missing executor refuses at setup inspection, before detached admission
   // or reading the deliberately invalid authored input.
   await Bun.write(join(checkout, ".hack/hack.project.json"), "{");

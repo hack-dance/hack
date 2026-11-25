@@ -796,13 +796,14 @@ impl HackApp {
         if !valid_service {
             return;
         }
-        self.dispatch_service_action(key, root, service, action, cx);
+        self.dispatch_service_action(key, root, false, service, action, cx);
     }
 
     pub(crate) fn dispatch_service_action(
         &mut self,
         key: InstanceKey,
         root: PathBuf,
+        native: bool,
         service: &str,
         action: Action,
         cx: &mut Context<Self>,
@@ -825,6 +826,7 @@ impl HackApp {
                 .spawn(async move {
                     source.act_on_service(
                         &root,
+                        native,
                         branch.as_deref(),
                         compose_project.as_deref(),
                         &service,
